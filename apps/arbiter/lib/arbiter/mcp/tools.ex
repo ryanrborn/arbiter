@@ -325,18 +325,27 @@ defmodule Arbiter.MCP.Tools do
 
   # ---- installation_config_get --------------------------------------------
 
-  @install_settings_keys ~w(conductor_system_max_concurrent)
+  @install_settings_keys ~w(
+    conductor_system_max_concurrent
+    credential_watchdog_adapters
+    credential_watchdog_interval_ms
+    credential_watchdog_recovery_interval_ms
+  )
 
   @doc """
-  Read an install-wide runtime setting (bd-2ogep0) — currently just
-  `conductor_system_max_concurrent`, the Conductor's system-wide concurrency
-  ceiling. Returns the full settings map when `key` is omitted. Available to
+  Read an install-wide runtime setting (bd-2ogep0) — the Conductor's system-wide
+  concurrency ceiling and the `Arbiter.Agents.CredentialWatchdog` knobs
+  (bd-ajgve2). Returns the full settings map when `key` is omitted. Available to
   both tiers (read-only, no workspace scoping — this is installation-wide).
   """
   @spec installation_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def installation_config_get(%Scope{} = _scope, args) do
     settings = %{
-      conductor_system_max_concurrent: Arbiter.Settings.conductor_system_max_concurrent()
+      conductor_system_max_concurrent: Arbiter.Settings.conductor_system_max_concurrent(),
+      credential_watchdog_adapters: Arbiter.Settings.credential_watchdog_adapters(),
+      credential_watchdog_interval_ms: Arbiter.Settings.credential_watchdog_interval_ms(),
+      credential_watchdog_recovery_interval_ms:
+        Arbiter.Settings.credential_watchdog_recovery_interval_ms()
     }
 
     case fetch_string(args, "key") do
@@ -356,33 +365,84 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   Set an install-wide runtime setting (bd-2ogep0). Coordinator only (enforced
-  in `Arbiter.MCP.Catalog`). Currently only `conductor_system_max_concurrent`
-  is settable — a positive integer, or `null` to clear the override and fall
-  back to the `:arbiter, :conductor_system_max_concurrent` application env /
-  hardcoded default. Takes effect on the next Conductor drain cycle across
-  every running graph — no restart required.
+  in `Arbiter.MCP.Catalog`). `null` always clears an override, falling back to
+  the application env / hardcoded default. Settable keys:
+
+    * `conductor_system_max_concurrent` — positive integer. Takes effect on the
+      next Conductor drain cycle across every running graph.
+    * `credential_watchdog_adapters` — list of agent-type names
+      (`Arbiter.Agents.valid_agent_types/0`) the Watchdog should probe; `[]`
+      probes nothing.
+    * `credential_watchdog_interval_ms` / `credential_watchdog_recovery_interval_ms`
+      — positive integers.
+
+  The Watchdog keys take effect on its next poll cycle (bd-ajgve2). No restart
+  is required for any of them.
   """
   @spec installation_config_set(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def installation_config_set(%Scope{} = _scope, args) do
     with {:ok, key} <- require_string(args, "key"),
          :ok <- validate_install_key(key),
-         {:ok, value} <- require_install_value(args) do
-      case Arbiter.Settings.set_conductor_system_max_concurrent(value) do
-        {:ok, updated} -> {:ok, %{key: key, value: updated}}
-        {:error, reason} -> {:error, {:invalid, inspect(reason)}}
-      end
+         {:ok, value} <- require_install_value(key, args),
+         {:ok, updated} <- put_install_setting(key, value) do
+      {:ok, %{key: key, value: updated}}
     end
   end
 
   defp validate_install_key(key) when key in @install_settings_keys, do: :ok
   defp validate_install_key(key), do: {:error, {:invalid, "unknown installation setting: #{key}"}}
 
-  defp require_install_value(args) do
+  defp require_install_value("credential_watchdog_adapters", args) do
+    valid = Arbiter.Agents.valid_agent_types()
+
+    case Map.fetch(args, "value") do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, names} when is_list(names) ->
+        if Enum.all?(names, &(is_binary(&1) and &1 in valid)) do
+          {:ok, names}
+        else
+          {:error,
+           {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
+        end
+
+      {:ok, _other} ->
+        {:error, {:invalid, "value must be a list of agent type strings or null"}}
+
+      :error ->
+        {:error, {:invalid, "value is required"}}
+    end
+  end
+
+  defp require_install_value(_key, args) do
     case Map.fetch(args, "value") do
       {:ok, nil} -> {:ok, nil}
       {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
       {:ok, _other} -> {:error, {:invalid, "value must be a positive integer or null"}}
       :error -> {:error, {:invalid, "value is required"}}
+    end
+  end
+
+  defp put_install_setting(key, value) do
+    result =
+      case key do
+        "conductor_system_max_concurrent" ->
+          Arbiter.Settings.set_conductor_system_max_concurrent(value)
+
+        "credential_watchdog_adapters" ->
+          Arbiter.Settings.set_credential_watchdog_adapters(value)
+
+        "credential_watchdog_interval_ms" ->
+          Arbiter.Settings.set_credential_watchdog_interval_ms(value)
+
+        "credential_watchdog_recovery_interval_ms" ->
+          Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(value)
+      end
+
+    case result do
+      {:ok, updated} -> {:ok, updated}
+      {:error, reason} -> {:error, {:invalid, inspect(reason)}}
     end
   end
 

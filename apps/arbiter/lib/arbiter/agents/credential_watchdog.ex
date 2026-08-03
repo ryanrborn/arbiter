@@ -26,15 +26,43 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   ## Configuration
 
-  Via `config :arbiter, :credential_watchdog`:
+  Resolution order for `:adapters`, `:interval_ms` and `:recovery_interval_ms`
+  (highest wins):
+
+    1. explicit `start_link/1` opts (used by tests and embedded callers),
+    2. `Arbiter.Settings` — the runtime-settable install-wide singleton
+       (`credential_watchdog_adapters`, `credential_watchdog_interval_ms`,
+       `credential_watchdog_recovery_interval_ms`), writable over MCP via
+       `installation_config_set`,
+    3. `config :arbiter, :credential_watchdog`,
+    4. the hardcoded defaults below.
+
+  These three are **re-resolved at the top of every poll cycle**, not frozen
+  into GenServer state at `init/1` — mirroring how `Arbiter.Workflows.Conductor`
+  consults `Arbiter.Settings.conductor_system_max_concurrent/0` inline. So
+  dropping an adapter from the probe list (e.g. `codex`, whose probe is a real
+  billed round-trip against the ChatGPT backend) takes effect on the next tick
+  with no restart. The per-adapter *expiry* map is ordinary GenServer state and
+  keeps persisting across polls as before.
+
+  One consequence worth knowing: an adapter that is already marked expired and
+  is then removed from the probe list keeps that mark (nothing probes it, so
+  nothing can clear it) and stays refused by the dispatch guard. `mark_expired/3`
+  likewise still records adapters outside the probe list. Use `reset/1` to clear.
+
+  Settings:
 
     * `:interval_ms`          — normal probe interval (default 5 minutes).
     * `:recovery_interval_ms` — re-probe interval while expired (default 1 min).
-    * `:adapters`             — list of adapter modules to probe. Defaults to
-                                all adapters in `Arbiter.Agents.adapters/0`.
+    * `:adapters`             — adapters to probe. Adapter modules (opts / app
+                                env) or agent-type name strings (`Arbiter.Settings`).
+                                Unset probes all of `Arbiter.Agents.adapters/0`;
+                                `[]` probes nothing.
     * `:enabled`              — set to `false` to disable all probing (default
                                 `true`; set to `false` in the test config so the
-                                suite never calls the real agent CLI).
+                                suite never calls the real agent CLI). Read once
+                                at `init/1` — unlike the three above, changing it
+                                does require a restart.
   """
 
   use GenServer
@@ -101,19 +129,46 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     GenServer.call(server, :reset)
   end
 
+  @doc """
+  The adapter modules that the next poll cycle will probe, resolved live
+  (opts › `Arbiter.Settings` › app env › all of `Arbiter.Agents.adapters/0`).
+
+  Pure — safe to call from anywhere, including to preview the effect of a
+  settings change. Unknown names are dropped rather than raising, so a stale
+  entry in the persisted list can never take the Watchdog down.
+  """
+  @spec probe_adapters(keyword()) :: [module()]
+  def probe_adapters(opts \\ []) do
+    case watchdog_config(:adapters, opts, nil) do
+      nil -> default_adapters()
+      list when is_list(list) -> list |> Enum.map(&to_adapter_module/1) |> Enum.reject(&is_nil/1)
+      _ -> default_adapters()
+    end
+  end
+
+  @doc "The normal poll interval (ms), resolved live. See `probe_adapters/1`."
+  @spec poll_interval_ms(keyword()) :: pos_integer()
+  def poll_interval_ms(opts \\ []),
+    do: watchdog_config(:interval_ms, opts, @default_interval_ms)
+
+  @doc "The while-expired re-probe interval (ms), resolved live."
+  @spec recovery_interval_ms(keyword()) :: pos_integer()
+  def recovery_interval_ms(opts \\ []),
+    do: watchdog_config(:recovery_interval_ms, opts, @default_recovery_interval_ms)
+
   # ---- GenServer -----------------------------------------------------------
 
   @impl true
   def init(opts) do
-    interval_ms = watchdog_config(:interval_ms, opts, @default_interval_ms)
-    recovery_ms = watchdog_config(:recovery_interval_ms, opts, @default_recovery_interval_ms)
-    adapters = watchdog_config(:adapters, opts, nil) || default_adapters()
     enabled = watchdog_config(:enabled, opts, true)
 
+    # `opts` is kept so each poll can re-resolve the adapter list and intervals
+    # (explicit opts still outrank Settings/app env). The `adapters` map is the
+    # per-adapter *expiry* state and persists across polls as before; seeding it
+    # here is just an initial all-healthy snapshot.
     state = %{
-      adapters: Map.new(adapters, &{&1, :ok}),
-      interval_ms: interval_ms,
-      recovery_interval_ms: recovery_ms,
+      adapters: Map.new(probe_adapters(opts), &{&1, :ok}),
+      opts: opts,
       enabled: enabled
     }
 
@@ -146,13 +201,16 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   @impl true
   def handle_info(:check, %{enabled: false} = state) do
-    schedule(self(), state.interval_ms)
+    schedule(self(), poll_interval_ms(state.opts))
     {:noreply, state}
   end
 
   def handle_info(:check, state) do
-    new_state = run_checks(state)
-    schedule(self(), next_interval(new_state))
+    # Re-resolve the probe list on every tick so a runtime settings change
+    # applies now rather than on the next restart.
+    adapters = probe_adapters(state.opts)
+    new_state = run_checks(state, adapters)
+    schedule(self(), next_interval(new_state, adapters))
     {:noreply, new_state}
   end
 
@@ -160,9 +218,9 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   # ---- internals ----------------------------------------------------------
 
-  defp run_checks(state) do
-    Enum.reduce(state.adapters, state, fn {adapter, current}, acc ->
-      probe_one(acc, adapter, current)
+  defp run_checks(state, adapters) do
+    Enum.reduce(adapters, state, fn adapter, acc ->
+      probe_one(acc, adapter, Map.get(acc.adapters, adapter, :ok))
     end)
   end
 
@@ -230,8 +288,17 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     end)
   end
 
-  defp next_interval(%{adapters: adapters, interval_ms: interval, recovery_interval_ms: recovery}) do
-    if Enum.any?(adapters, fn {_, v} -> v != :ok end), do: recovery, else: interval
+  # Scoped to the adapters we actually probe: an adapter that was marked expired
+  # by a worker report but is no longer in the probe list can never recover via
+  # a probe, so it must not pin the whole fleet to the fast recovery interval.
+  # With no override configured the probe list is every adapter, so this is
+  # identical to the previous whole-map check.
+  defp next_interval(state, adapters) do
+    if Enum.any?(adapters, &(Map.get(state.adapters, &1, :ok) != :ok)) do
+      recovery_interval_ms(state.opts)
+    else
+      poll_interval_ms(state.opts)
+    end
   end
 
   defp schedule(pid, ms) do
@@ -268,20 +335,53 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   defp default_adapters, do: Map.values(Arbiter.Agents.adapters())
 
+  # Accepts either an adapter module (opts / app env) or an agent-type name
+  # (`Arbiter.Settings`, which persists strings). Anything unrecognized maps to
+  # nil and is dropped by the caller.
+  defp to_adapter_module(name) when is_binary(name) do
+    case safe_existing_atom(name) do
+      nil -> nil
+      type -> Map.get(Arbiter.Agents.adapters(), type)
+    end
+  end
+
+  defp to_adapter_module(mod) when is_atom(mod) and not is_nil(mod) do
+    Map.get(Arbiter.Agents.adapters(), mod, mod)
+  end
+
+  defp to_adapter_module(_), do: nil
+
+  defp safe_existing_atom(name) do
+    String.to_existing_atom(name)
+  rescue
+    ArgumentError -> nil
+  end
+
   defp adapter_name(adapter) when is_atom(adapter) do
     adapter |> Module.split() |> List.last()
   end
 
+  # opts › Arbiter.Settings › app env › hardcoded default. `nil` at any layer
+  # means "not set here, keep looking" — a literal `false` (`:enabled`) is a
+  # real value and stops the search.
   defp watchdog_config(key, opts, default) do
     case Keyword.fetch(opts, key) do
-      {:ok, val} ->
-        val
-
-      :error ->
-        case get_in(Application.get_env(:arbiter, :credential_watchdog, []), [key]) do
-          nil -> default
-          val -> val
-        end
+      {:ok, val} -> val
+      :error -> resolve_override(settings_override(key), app_env(key), default)
     end
   end
+
+  defp resolve_override(nil, nil, default), do: default
+  defp resolve_override(nil, app_value, _default), do: app_value
+  defp resolve_override(settings_value, _app_value, _default), do: settings_value
+
+  defp settings_override(:adapters), do: Arbiter.Settings.credential_watchdog_adapters()
+  defp settings_override(:interval_ms), do: Arbiter.Settings.credential_watchdog_interval_ms()
+
+  defp settings_override(:recovery_interval_ms),
+    do: Arbiter.Settings.credential_watchdog_recovery_interval_ms()
+
+  defp settings_override(_key), do: nil
+
+  defp app_env(key), do: get_in(Application.get_env(:arbiter, :credential_watchdog, []), [key])
 end
