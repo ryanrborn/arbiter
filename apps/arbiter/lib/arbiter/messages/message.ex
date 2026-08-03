@@ -6,7 +6,9 @@ defmodule Arbiter.Messages.Message do
 
     * `:notification` — broadcast event, no specific recipient (`to_ref` nil).
       Worker completion, progress milestones, system events. Feeds the
-      coordinator's live dashboard. Never "consumed" — `read_at` stays nil.
+      coordinator's live dashboard. Never "consumed" — `read_at`/`cleared_at`
+      stay nil (the `cleared_at` scoping validation asserts this, rather than
+      leaving it to convention).
     * `:mailbox` — targeted at a specific task (`to_ref`). Requires read
       acknowledgement (`mark_read`).
     * `:direction` — user-authored instruction sent from the LiveView to a
@@ -30,6 +32,21 @@ defmodule Arbiter.Messages.Message do
   messages that show up in an inbox and are read-acknowledged. The
   `:directive_ref` they may carry links the message to the task it concerns
   (shown in brackets in `arb inbox`). See `mailbox_kinds/0`.
+
+  ## Mailbox lifecycle (three durable states)
+
+  A mailbox-family row carries two independent timestamps — `read_at` (seen)
+  and `cleared_at` (addressed) — so "seen" and "still owes action" stop sharing
+  one bit:
+
+    * **unread** — `read_at IS NULL AND cleared_at IS NULL`: not yet seen. The
+      pending queue (`inbox/2`); auto → read on any fetch that returns bodies.
+    * **outstanding** — `read_at NOT NULL AND cleared_at IS NULL`: seen but
+      still owes an action. *The triage queue* (`outstanding/2`). Reading no
+      longer empties it, so reading escalations every morning is safe.
+    * **cleared** — `cleared_at NOT NULL`: addressed. Set explicitly and
+      *softly* (`clear_read/2`, `clear_all/2`, `mark_cleared/1`); the row is
+      retained as the durable escalation record. Only `hard_purge/2` destroys.
 
   ## PubSub
 
@@ -63,8 +80,18 @@ defmodule Arbiter.Messages.Message do
     repo Arbiter.Repo
 
     custom_indexes do
-      # Mailbox queries: "unread messages addressed to task X in workspace W".
+      # Pending query: "unread messages addressed to task X in workspace W"
+      # (`read_at IS NULL`). Every dashboard render and every inbox fetch hits it.
       index [:workspace_id, :to_ref, :read_at]
+
+      # Outstanding query: "read-but-uncleared messages addressed to X in W"
+      # (`read_at NOT NULL AND cleared_at IS NULL`) — the triage queue, and now
+      # the hot count on a table that grows without bound because clear is soft.
+      # A second composite (rather than replacing the read_at one) keeps *both*
+      # per-render figures index-covered; they share the (workspace_id, to_ref)
+      # prefix so the cost is one extra index on a write path that is already
+      # cheap relative to the read volume.
+      index [:workspace_id, :to_ref, :cleared_at]
     end
   end
 
@@ -97,6 +124,40 @@ defmodule Arbiter.Messages.Message do
                Arbiter.Messages.Message.broadcast_read(message)
                {:ok, message}
              end)
+    end
+
+    update :mark_cleared do
+      # Stamp cleared_at — the explicit, *soft* transition read → cleared. The
+      # row is retained (this is the durable escalation record); only the
+      # separately-named hard purge destroys. Idempotent, mirroring mark_read.
+      # The kind-scoping validation below rejects clearing a :notification, so
+      # this action can only ever move a mailbox-family row.
+      accept []
+      require_atomic? false
+      change set_attribute(:cleared_at, &DateTime.utc_now/0)
+
+      change after_action(fn _changeset, message, _context ->
+               Arbiter.Messages.Message.broadcast_cleared(message.workspace_id)
+               {:ok, message}
+             end)
+    end
+  end
+
+  validations do
+    # cleared_at is a mailbox-family concept only. Notifications are never
+    # consumed (their read_at stays nil forever); asserting it here — rather
+    # than trusting every caller to filter on @mailbox_kinds — is the whole
+    # point of this resource: one field must not silently pick up a second
+    # meaning for a kind it was never meant to describe.
+    validate fn changeset, _context ->
+      kind = Ash.Changeset.get_attribute(changeset, :kind)
+      cleared_at = Ash.Changeset.get_attribute(changeset, :cleared_at)
+
+      if kind == :notification and not is_nil(cleared_at) do
+        {:error, field: :cleared_at, message: "cannot be set on a :notification"}
+      else
+        :ok
+      end
     end
   end
 
@@ -150,7 +211,13 @@ defmodule Arbiter.Messages.Message do
 
     attribute :read_at, :utc_datetime_usec do
       public? true
-      description "When a mailbox message was acknowledged. nil = unread."
+      description "When a mailbox message was first seen (body read). nil = unread."
+    end
+
+    attribute :cleared_at, :utc_datetime_usec do
+      public? true
+
+      description "When a mailbox message was addressed (soft-cleared). nil = not cleared. Mailbox-family only."
     end
 
     create_timestamp :inserted_at
@@ -243,9 +310,10 @@ defmodule Arbiter.Messages.Message do
   @doc """
   Broadcast `{:mailbox_cleared, workspace_id}` on a workspace's message topic.
 
-  Called by `clear_read/2` and `clear_all/2` after destroying messages, so
-  every open LiveView session refreshes its inbox panel without a manual page
-  reload. Silent-on-failure, mirroring `broadcast_new/1`.
+  Called by `mark_cleared`, `clear_read/2`, `clear_all/2`, and `hard_purge/2`
+  after a state transition, so every open LiveView session refreshes its inbox
+  panel without a manual page reload. Silent-on-failure, mirroring
+  `broadcast_new/1`.
   """
   def broadcast_cleared(workspace_id) when is_binary(workspace_id) do
     Phoenix.PubSub.broadcast(
@@ -302,16 +370,34 @@ defmodule Arbiter.Messages.Message do
   def mark_read(message), do: Ash.update(message, %{}, action: :mark_read)
 
   @doc """
-  Unread mailbox-family messages addressed to `to_ref`, oldest first. Pure
-  read — does NOT mark them read (the caller decides, e.g. the REST layer).
-  Pass `workspace_id:` to scope.
+  Mark a message cleared (stamps `cleared_at` — the soft "addressed" transition).
+  Accepts a `%Message{}` or an id. Idempotent, mirroring `mark_read/1`. Rejected
+  for `:notification` rows by the resource validation.
+  """
+  def mark_cleared(id) when is_binary(id) do
+    with {:ok, message} <- Ash.get(__MODULE__, id) do
+      mark_cleared(message)
+    end
+  end
+
+  def mark_cleared(message), do: Ash.update(message, %{}, action: :mark_cleared)
+
+  @doc """
+  Pending (unread) mailbox-family messages addressed to `to_ref`, oldest first:
+  `read_at IS NULL AND cleared_at IS NULL`. Pure read — does NOT mark them read
+  (the caller decides, e.g. the REST layer). Pass `workspace_id:` to scope.
+
+  A message soft-cleared while still unread (via `clear_all/2`) drops out here —
+  it has been addressed, so it is neither pending nor outstanding.
   """
   def inbox(to_ref, opts \\ []) when is_binary(to_ref) do
     refs = ref_variants(to_ref)
 
     query =
       __MODULE__
-      |> Ash.Query.filter(to_ref in ^refs and is_nil(read_at) and kind in ^@mailbox_kinds)
+      |> Ash.Query.filter(
+        to_ref in ^refs and is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
+      )
       |> Ash.Query.sort(inserted_at: :asc)
 
     query =
@@ -324,61 +410,21 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
-  Drain the read tail of a mailbox: destroy every *already-read* message
-  addressed to `to_ref`. Unread mail is left untouched — you read it first,
-  then clear. Returns `{:ok, deleted_read, deleted_unread, remaining_unread}`
-  where remaining_unread is the count of unread messages that still exist after
-  the deletion. Pass `workspace_id:` to scope to one workspace.
+  Outstanding mailbox-family messages addressed to `to_ref`, oldest first:
+  `read_at NOT NULL AND cleared_at IS NULL`. This is *the queue* — items the
+  coordinator has seen but that still owe an action. Reading no longer empties
+  it (that only stamps `read_at`); an item leaves only when explicitly cleared.
+  Pure read. Pass `workspace_id:` to scope.
   """
-  def clear_read(to_ref, opts \\ []) when is_binary(to_ref) do
-    refs = ref_variants(to_ref)
-
-    read_query =
-      __MODULE__
-      |> Ash.Query.filter(to_ref in ^refs and not is_nil(read_at) and kind in ^@mailbox_kinds)
-
-    read_query =
-      case Keyword.get(opts, :workspace_id) do
-        ws when is_binary(ws) -> Ash.Query.filter(read_query, workspace_id == ^ws)
-        _ -> read_query
-      end
-
-    read = Ash.read!(read_query)
-    Enum.each(read, &Ash.destroy!/1)
-
-    read
-    |> Enum.map(& &1.workspace_id)
-    |> Enum.uniq()
-    |> Enum.each(&broadcast_cleared/1)
-
-    # Count unread that remain
-    unread_query =
-      __MODULE__
-      |> Ash.Query.filter(to_ref in ^refs and is_nil(read_at) and kind in ^@mailbox_kinds)
-
-    unread_query =
-      case Keyword.get(opts, :workspace_id) do
-        ws when is_binary(ws) -> Ash.Query.filter(unread_query, workspace_id == ^ws)
-        _ -> unread_query
-      end
-
-    unread_count = Ash.count!(unread_query)
-
-    {:ok, length(read), 0, unread_count}
-  end
-
-  @doc """
-  Clear all messages (read and unread) addressed to `to_ref`. Returns
-  `{:ok, deleted_read, deleted_unread, remaining_unread}` where remaining_unread
-  is always 0 since all messages are deleted. Pass `workspace_id:` to scope
-  to one workspace.
-  """
-  def clear_all(to_ref, opts \\ []) when is_binary(to_ref) do
+  def outstanding(to_ref, opts \\ []) when is_binary(to_ref) do
     refs = ref_variants(to_ref)
 
     query =
       __MODULE__
-      |> Ash.Query.filter(to_ref in ^refs and kind in ^@mailbox_kinds)
+      |> Ash.Query.filter(
+        to_ref in ^refs and not is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
+      )
+      |> Ash.Query.sort(inserted_at: :asc)
 
     query =
       case Keyword.get(opts, :workspace_id) do
@@ -386,18 +432,117 @@ defmodule Arbiter.Messages.Message do
         _ -> query
       end
 
-    all_messages = Ash.read!(query)
-    read_count = Enum.count(all_messages, &(not is_nil(&1.read_at)))
-    unread_count = Enum.count(all_messages, &is_nil(&1.read_at))
+    Ash.read!(query)
+  end
 
-    Enum.each(all_messages, &Ash.destroy!/1)
+  @doc """
+  Clear the outstanding tail of a mailbox: **soft-clear** (stamp `cleared_at`)
+  every *read-but-uncleared* message addressed to `to_ref`. Pending (unread)
+  mail is left untouched — you read it first, then clear. Rows are **retained**
+  (this is the durable escalation record); nothing is destroyed here — see
+  `hard_purge/2` for the only destructive path.
 
-    all_messages
+  Returns `{:ok, cleared, 0, remaining_unread}` where `cleared` is the number of
+  rows transitioned to cleared and `remaining_unread` is the count of pending
+  messages that still exist afterwards. (The 4-tuple shape and the middle
+  `0` — unread-cleared — are preserved for the CLI/HTTP callers.) Pass
+  `workspace_id:` to scope to one workspace.
+  """
+  def clear_read(to_ref, opts \\ []) when is_binary(to_ref) do
+    refs = ref_variants(to_ref)
+
+    outstanding_query =
+      __MODULE__
+      |> Ash.Query.filter(
+        to_ref in ^refs and not is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
+      )
+
+    outstanding_query = scope_workspace(outstanding_query, opts)
+
+    outstanding = Ash.read!(outstanding_query)
+    Enum.each(outstanding, &mark_cleared/1)
+
+    broadcast_workspaces(outstanding)
+
+    remaining_unread = count_pending(refs, opts)
+
+    {:ok, length(outstanding), 0, remaining_unread}
+  end
+
+  @doc """
+  Clear every message (pending *and* outstanding) addressed to `to_ref` by
+  **soft-clearing** (stamping `cleared_at`). Rows are retained — this is the
+  "clear the lot" button, not a delete. Returns
+  `{:ok, cleared_read, cleared_unread, 0}` split by prior read state
+  (`remaining_unread` is always 0 — everything is cleared). Pass `workspace_id:`
+  to scope to one workspace.
+  """
+  def clear_all(to_ref, opts \\ []) when is_binary(to_ref) do
+    refs = ref_variants(to_ref)
+
+    query =
+      __MODULE__
+      |> Ash.Query.filter(to_ref in ^refs and is_nil(cleared_at) and kind in ^@mailbox_kinds)
+
+    query = scope_workspace(query, opts)
+
+    to_clear = Ash.read!(query)
+    read_count = Enum.count(to_clear, &(not is_nil(&1.read_at)))
+    unread_count = Enum.count(to_clear, &is_nil(&1.read_at))
+
+    Enum.each(to_clear, &mark_cleared/1)
+
+    broadcast_workspaces(to_clear)
+
+    {:ok, read_count, unread_count, 0}
+  end
+
+  @doc """
+  Hard purge: the **only** path that destroys rows. Permanently deletes every
+  *already-cleared* (`cleared_at NOT NULL`) message addressed to `to_ref` — the
+  addressed history that soft-clear accumulates. Pending and outstanding mail
+  are never touched, so genuine housekeeping cannot silently drop an
+  unaddressed escalation. Deliberately not reachable from `arb inbox clear`.
+  Returns `{:ok, purged}`. Pass `workspace_id:` to scope to one workspace.
+  """
+  def hard_purge(to_ref, opts \\ []) when is_binary(to_ref) do
+    refs = ref_variants(to_ref)
+
+    query =
+      __MODULE__
+      |> Ash.Query.filter(to_ref in ^refs and not is_nil(cleared_at) and kind in ^@mailbox_kinds)
+
+    query = scope_workspace(query, opts)
+
+    purged = Ash.read!(query)
+    Enum.each(purged, &Ash.destroy!/1)
+
+    broadcast_workspaces(purged)
+
+    {:ok, length(purged)}
+  end
+
+  defp scope_workspace(query, opts) do
+    case Keyword.get(opts, :workspace_id) do
+      ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
+      _ -> query
+    end
+  end
+
+  defp count_pending(refs, opts) do
+    __MODULE__
+    |> Ash.Query.filter(
+      to_ref in ^refs and is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
+    )
+    |> scope_workspace(opts)
+    |> Ash.count!()
+  end
+
+  defp broadcast_workspaces(messages) do
+    messages
     |> Enum.map(& &1.workspace_id)
     |> Enum.uniq()
     |> Enum.each(&broadcast_cleared/1)
-
-    {:ok, read_count, unread_count, 0}
   end
 
   @doc """

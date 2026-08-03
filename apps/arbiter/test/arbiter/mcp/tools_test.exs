@@ -207,57 +207,25 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "coordinator_inbox_peek/2" do
-    test "lists unread Admiral messages without marking them read", ctx do
-      {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
+  describe "coordinator_inbox_peek/2 removed (bd-9kmq04)" do
+    test "the tool no longer exists in the catalog", ctx do
+      refute Enum.any?(Catalog.all(), &(&1.name == "coordinator_inbox_peek"))
 
-      assert {:ok, %{messages: [msg], count: 1}} =
-               Tools.coordinator_inbox_peek(ctx.coordinator, %{})
+      assert {:rpc_error, -32_602, message} =
+               Catalog.call(ctx.coordinator, "coordinator_inbox_peek", %{})
 
-      assert msg.body == "Escalation!"
-      assert msg.to_ref == "admiral"
-
-      # Second call still returns the message — it was not marked read.
-      assert {:ok, %{messages: [msg2], count: 1}} =
-               Tools.coordinator_inbox_peek(ctx.coordinator, %{})
-
-      assert msg2.body == "Escalation!"
+      assert message =~ "Unknown tool"
     end
+  end
 
-    test "does not mutate unread count across calls", ctx do
+  describe "coordinator_inbox/2 serialization (bd-9kmq04)" do
+    test "surfaces read_at and cleared_at so the three states are visible", ctx do
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "state check"})
 
-      {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
-
-      # First peek: both messages are there.
-      assert {:ok, %{count: 2}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
-
-      # Second peek: still both — they were never marked read.
-      assert {:ok, %{count: 2}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
-
-      # coordinator_inbox (mutating) marks them read; after that, peek is empty.
-      {:ok, _} = Tools.coordinator_inbox(ctx.coordinator, %{})
-
-      assert {:ok, %{count: 0}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
-    end
-
-    test "does not surface messages from another workspace", ctx do
-      {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-other", prefix: "cio"})
-
-      {:ok, _} =
-        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "admiral", body: "foreign"})
-
-      assert {:ok, %{count: 0}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
-    end
-
-    test "worker tier is denied (catalog-level gating)", ctx do
-      assert {:rpc_error, -32_003, message} =
-               Catalog.call(ctx.worker, "coordinator_inbox_peek", %{})
-
-      assert message =~ "not permitted"
+      assert {:ok, %{messages: [msg]}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+      assert Map.has_key?(msg, :read_at)
+      assert Map.has_key?(msg, :cleared_at)
     end
   end
 
@@ -976,7 +944,8 @@ defmodule Arbiter.MCP.ToolsTest do
       assert get_in(data.config, ["tracker", "config", "label"]) == "[urgent]"
     end
 
-    test "preserves JSON-scalar-shaped string values as strings, not numbers/booleans (regression: bd-7lmjc5)", ctx do
+    test "preserves JSON-scalar-shaped string values as strings, not numbers/booleans (regression: bd-7lmjc5)",
+         ctx do
       # workspace_config_set's schema explicitly allows string type. A client sending
       # "5", "true", "5.0" as legitimate string config values should NOT be decoded
       # to numbers/booleans. The unwrap helper only unwraps structural types (list/map)
@@ -1285,7 +1254,8 @@ defmodule Arbiter.MCP.ToolsTest do
       value_schema = tool.input_schema["properties"]["value"]
       assert value_schema != nil
       # The value property must have a "type" key or "oneOf"/"anyOf" for proper MCP type coercion
-      assert Map.has_key?(value_schema, "type") or Map.has_key?(value_schema, "oneOf") or Map.has_key?(value_schema, "anyOf"),
+      assert Map.has_key?(value_schema, "type") or Map.has_key?(value_schema, "oneOf") or
+               Map.has_key?(value_schema, "anyOf"),
              "value property must declare a type (via 'type', 'oneOf', or 'anyOf') so MCP clients send native types, not JSON strings"
     end
 
@@ -1391,7 +1361,6 @@ defmodule Arbiter.MCP.ToolsTest do
                  "value" => "not a number"
                })
     end
-
   end
 
   describe "workspace config tools — catalog visibility" do

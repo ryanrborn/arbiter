@@ -82,6 +82,40 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert id == m.id
     end
 
+    test "unread=true excludes a message that was soft-cleared while still unread",
+         %{conn: conn} do
+      {:ok, pending} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-c", body: "pending"})
+
+      {:ok, cleared_unread} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "bd-c", body: "cleared-unread"})
+
+      # Soft-clear only the second one *while it is still unread* (read_at nil,
+      # cleared_at set) — the state clear_all can produce for never-seen mail.
+      {:ok, _} = Message.mark_cleared(cleared_unread)
+
+      conn = get(conn, ~p"/api/messages", %{to_ref: "bd-c", unread: "true"})
+      data = json_response(conn, 200)["data"]
+      ids = Enum.map(data, & &1["id"]) |> MapSet.new()
+      # Only the never-cleared pending row shows; the cleared-unread one does not.
+      assert ids == MapSet.new([pending.id])
+    end
+
+    test "outstanding=true returns read-but-uncleared messages and exposes cleared_at",
+         %{conn: conn} do
+      {:ok, _pending} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-o", body: "pending"})
+      {:ok, out} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-o", body: "outstanding"})
+      {:ok, done} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-o", body: "cleared"})
+      {:ok, _} = Message.mark_read(out)
+      {:ok, _} = Message.mark_read(done)
+      {:ok, _} = Message.mark_cleared(done)
+
+      conn = get(conn, ~p"/api/messages", %{to_ref: "bd-o", outstanding: "true"})
+      data = json_response(conn, 200)["data"]
+      assert [%{"id" => id, "cleared_at" => nil} = row] = data
+      assert id == out.id
+      refute is_nil(row["read_at"])
+    end
+
     test "rejects a bad limit", %{conn: conn} do
       conn = get(conn, ~p"/api/messages", %{limit: "abc"})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
@@ -103,13 +137,24 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
     end
   end
 
-  describe "DELETE /api/messages (clear)" do
-    test "destroys only the read messages addressed to to_ref", %{conn: conn} do
+  describe "DELETE /api/messages (soft clear)" do
+    test "soft-clears only the outstanding messages addressed to to_ref; rows retained",
+         %{conn: conn} do
       {:ok, unread} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "keep me"})
+        Message.send_mail(%{
+          workspace_id: @ws,
+          to_ref: "coordinator",
+          kind: :info,
+          body: "keep me"
+        })
 
       {:ok, read} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "drain me"})
+        Message.send_mail(%{
+          workspace_id: @ws,
+          to_ref: "coordinator",
+          kind: :info,
+          body: "clear me"
+        })
 
       {:ok, _} = Message.mark_read(read)
 
@@ -128,16 +173,23 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert %{"data" => %{"deleted_read" => 1, "deleted_unread" => 0, "remaining_unread" => 1}} =
                json_response(conn, 200)
 
-      # The unread coordinator message and the other task's read message survive.
-      remaining = Ash.read!(Message) |> Enum.map(& &1.id) |> MapSet.new()
-      assert MapSet.member?(remaining, unread.id)
-      assert MapSet.member?(remaining, other.id)
-      refute MapSet.member?(remaining, read.id)
+      # NOTHING is destroyed — clear is soft. The read coordinator message is
+      # retained with cleared_at stamped; unread and the other task are untouched.
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, read.id)
+      assert cleared_at
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unread.id)
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, other.id)
     end
 
-    test "all=true destroys both read and unread messages addressed to to_ref", %{conn: conn} do
+    test "all=true soft-clears both read and unread messages addressed to to_ref",
+         %{conn: conn} do
       {:ok, unread} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "unread"})
+        Message.send_mail(%{
+          workspace_id: @ws,
+          to_ref: "coordinator",
+          kind: :info,
+          body: "unread"
+        })
 
       {:ok, read} =
         Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "read"})
@@ -149,8 +201,11 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert %{"data" => %{"deleted_read" => 1, "deleted_unread" => 1, "remaining_unread" => 0}} =
                json_response(conn, 200)
 
-      assert {:error, _} = Ash.get(Message, read.id)
-      assert {:error, _} = Ash.get(Message, unread.id)
+      # Both retained (soft), both cleared.
+      assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, read.id)
+      assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, unread.id)
+      assert c1
+      assert c2
     end
 
     test "requires to_ref so it can't wipe the table", %{conn: conn} do

@@ -129,8 +129,8 @@ defmodule Arbiter.MCP.Tools do
 
   Lists all unread messages where `to_ref == "coordinator"` in the workspace and
   marks each one read, so the dashboard unread count drops to 0. Optional
-  `clear: true` also destroys the already-read tail (`Message.clear_read/2`),
-  mirroring `arb inbox clear`.
+  `clear: true` also soft-clears the outstanding tail (`Message.clear_read/2`
+  stamps `cleared_at`; rows are retained), mirroring `arb inbox clear`.
   """
   @spec coordinator_inbox(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def coordinator_inbox(%Scope{} = scope, args) do
@@ -154,31 +154,6 @@ defmodule Arbiter.MCP.Tools do
          deleted_read: deleted_read,
          deleted_unread: deleted_unread,
          remaining_unread: remaining_unread
-       }}
-    end
-  end
-
-  # ---- coordinator_inbox_peek ------------------------------------------------
-
-  @doc """
-  The unread Admiral escalation mailbox for the bound workspace, read-only —
-  lists unread messages without marking them read, so the dashboard unread
-  count is unchanged. Coordinator only; the worker tier is denied at the
-  catalog level. This is the read-only counterpart to `coordinator_inbox`.
-
-  Lists all unread messages where `to_ref == "coordinator"` in the workspace
-  without mutating state. Use this for read-only consumers like briefing
-  tools that must not affect the coordinator's unread count.
-  """
-  @spec coordinator_inbox_peek(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def coordinator_inbox_peek(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      messages = Message.inbox(Message.coordinator_ref(), workspace_id: ws_id)
-
-      {:ok,
-       %{
-         messages: Enum.map(messages, &serialize_message/1),
-         count: length(messages)
        }}
     end
   end
@@ -410,6 +385,7 @@ defmodule Arbiter.MCP.Tools do
       {:ok, other} ->
         # Attempt to unwrap stringified JSON before failing validation
         unwrapped = unwrap_stringified_json(other, [:list])
+
         if is_list(unwrapped) and Enum.all?(unwrapped, &(is_binary(&1) and &1 in valid)) do
           {:ok, unwrapped}
         else
@@ -432,6 +408,7 @@ defmodule Arbiter.MCP.Tools do
       {:ok, other} ->
         # Attempt to unwrap stringified JSON before failing validation
         unwrapped = unwrap_stringified_json(other, [:integer])
+
         if is_integer(unwrapped) and unwrapped > 0 do
           {:ok, unwrapped}
         else
@@ -3400,6 +3377,8 @@ defmodule Arbiter.MCP.Tools do
       subject: m.subject,
       body: m.body,
       directive_ref: m.directive_ref,
+      read_at: iso(m.read_at),
+      cleared_at: iso(m.cleared_at),
       inserted_at: iso(m.inserted_at)
     }
   end

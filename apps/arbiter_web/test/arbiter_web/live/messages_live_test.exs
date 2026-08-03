@@ -209,9 +209,10 @@ defmodule ArbiterWeb.MessagesLiveTest do
       |> element(~s(button[phx-click="clear_coordinator"]))
       |> render_click()
 
-      # Read message destroyed; unread message untouched.
-      assert {:error, _} = Ash.get(Message, read_msg.id)
-      assert {:ok, %Message{}} = Ash.get(Message, unread_msg.id)
+      # Read message soft-cleared (retained, cleared_at stamped); unread untouched.
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, read_msg.id)
+      assert cleared_at
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unread_msg.id)
       assert render(view) =~ "still-unread"
     end
 
@@ -264,15 +265,62 @@ defmodule ArbiterWeb.MessagesLiveTest do
       # Only unread shows in the inbox panel.
       assert render(view) =~ "stays-unread"
 
-      # External clear_read: destroys the read message and broadcasts.
+      # External clear_read: soft-clears the read message and broadcasts.
       Message.clear_read("admiral", workspace_id: ws.id)
 
       # The unread message must still be present (clear_read doesn't touch unread).
       assert render(view) =~ "stays-unread"
-      # The read message is gone from the DB.
-      assert {:error, _} = Ash.get(Message, msg.id)
-      # And the unread one is still there.
-      assert {:ok, _} = Ash.get(Message, unread.id)
+      # The read message is retained (soft clear), now with cleared_at stamped.
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, msg.id)
+      assert cleared_at
+      # And the unread one is still there, still uncleared.
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unread.id)
+    end
+
+    test "shows pending (unread) and outstanding (read-but-uncleared) as distinct figures",
+         %{conn: conn, ws: ws} do
+      # One unread (pending) and one read-but-uncleared (outstanding).
+      {:ok, _pending} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          to_ref: "admiral",
+          body: "still-pending"
+        })
+
+      {:ok, seen} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          to_ref: "admiral",
+          body: "seen-not-cleared"
+        })
+
+      {:ok, _} = Message.mark_read(seen)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      # Two distinct figures, both rendered.
+      assert render(view) =~ "1 unread"
+      assert render(view) =~ "1 outstanding"
+
+      # Reading the pending item moves it from pending → outstanding: the two
+      # figures track independently (pending drops, outstanding rises).
+      pending_msg =
+        Message.inbox("admiral", workspace_id: ws.id) |> Enum.find(&(&1.body == "still-pending"))
+
+      {:ok, _} = Message.mark_read(pending_msg)
+      html = render(view)
+      assert html =~ "0 unread"
+      assert html =~ "2 outstanding"
+
+      # Clearing soft-clears the outstanding tail → outstanding drops to 0, rows retained.
+      view |> element(~s(button[phx-click="clear_coordinator"])) |> render_click()
+      html = render(view)
+      assert html =~ "0 unread"
+      assert html =~ "0 outstanding"
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, seen.id)
+      assert cleared_at
     end
   end
 end

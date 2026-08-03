@@ -8,16 +8,18 @@ defmodule ArbiterCli.Cmd.Inbox do
       arb inbox                 unread mail addressed to the coordinator
       arb inbox --all           the 20 most recent (read + unread)
       arb inbox read <id>       show one message in full, mark it read
-      arb inbox clear           destroy every already-read coordinator message
-      arb inbox clear --all     destroy all messages (read + unread)
+      arb inbox clear           soft-clear the outstanding (read) tail
+      arb inbox clear --all     soft-clear everything (read + unread)
       arb inbox <task-id>       (worker path) a task's unread mail; drained
                                 — marked read on fetch
 
   The coordinator view is read-only triage: listing does NOT mark mail read. You
-  drain it deliberately with `read <id>` (one) and `clear` (read only) or
-  `clear --all` (everything). The task path is the inverse — workers auto-drain
-  their queue on fetch, so `arb inbox <task-id>` at the top of each workflow
-  step shows new direction exactly once.
+  drain it deliberately with `read <id>` (one) and `clear` (the read tail) or
+  `clear --all` (everything). `clear` is a **soft** state transition — it stamps
+  `cleared_at` and the rows are retained (the durable escalation record), not
+  destroyed. The task path is the inverse — workers auto-drain their queue on
+  fetch, so `arb inbox <task-id>` at the top of each workflow step shows new
+  direction exactly once.
 
   Line format:
 
