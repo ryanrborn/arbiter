@@ -407,8 +407,14 @@ defmodule Arbiter.MCP.Tools do
            {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
         end
 
-      {:ok, _other} ->
-        {:error, {:invalid, "value must be a list of agent type strings or null"}}
+      {:ok, other} ->
+        # Attempt to unwrap stringified JSON before failing validation
+        unwrapped = unwrap_stringified_json(other, [:list])
+        if is_list(unwrapped) and Enum.all?(unwrapped, &(is_binary(&1) and &1 in valid)) do
+          {:ok, unwrapped}
+        else
+          {:error, {:invalid, "value must be a list of agent type strings or null"}}
+        end
 
       :error ->
         {:error, {:invalid, "value is required"}}
@@ -423,8 +429,14 @@ defmodule Arbiter.MCP.Tools do
       {:ok, n} when is_integer(n) and n > 0 ->
         {:ok, n}
 
-      {:ok, _other} ->
-        {:error, {:invalid, "value must be a positive integer or null"}}
+      {:ok, other} ->
+        # Attempt to unwrap stringified JSON before failing validation
+        unwrapped = unwrap_stringified_json(other, [:integer])
+        if is_integer(unwrapped) and unwrapped > 0 do
+          {:ok, unwrapped}
+        else
+          {:error, {:invalid, "value must be a positive integer or null"}}
+        end
 
       :error ->
         {:error, {:invalid, "value is required"}}

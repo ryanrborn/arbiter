@@ -1352,6 +1352,46 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Arbiter.Settings.credential_watchdog_adapters() == nil
     end
 
+    test "unwraps a stringified JSON array value for credential_watchdog_adapters", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "[\"claude\", \"gemini\"]"
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Arbiter.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+    end
+
+    test "unwraps a stringified integer value for conductor_system_max_concurrent", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => "5"
+               })
+
+      assert data.value == 5
+      assert Arbiter.Settings.conductor_system_max_concurrent() == 5
+    end
+
+    test "malformed string for credential_watchdog_adapters fails validation", ctx do
+      # A stringified object where a list was expected should still fail
+      assert {:error, {:invalid, "value must be a list of agent type strings or null"}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "{\"invalid\": \"object\"}"
+               })
+    end
+
+    test "malformed string for conductor_system_max_concurrent fails validation", ctx do
+      # A non-integer string should fail validation
+      assert {:error, {:invalid, "value must be a positive integer or null"}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => "not a number"
+               })
+    end
+
   end
 
   describe "workspace config tools — catalog visibility" do

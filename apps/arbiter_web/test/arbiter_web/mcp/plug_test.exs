@@ -289,6 +289,38 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert result["structuredContent"]["value"] == 5
     end
 
+    test "installation_config_set unwraps a client-stringified JSON array (bd-6twjcx)", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "installation_config_set",
+            "arguments" => %{"key" => "credential_watchdog_adapters", "value" => "[\"claude\", \"gemini\"]"}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      assert result["structuredContent"]["value"] == ["claude", "gemini"]
+    end
+
+    test "installation_config_set unwraps a client-stringified integer (bd-6twjcx)", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "installation_config_set",
+            "arguments" => %{"key" => "conductor_system_max_concurrent", "value" => "5"}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      assert result["structuredContent"]["value"] == 5
+    end
+
     test "worker_dispatch without can_dispatch is a JSON-RPC not-permitted error", ctx do
       no_dispatch = Scope.mint_coordinator(ctx.ws.id, can_dispatch: false)
 
