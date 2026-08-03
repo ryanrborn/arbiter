@@ -101,3 +101,12 @@ config :arbiter, :cloud_code_quota, enabled: false
 # and make no real network call. Tests exercising the live path inject
 # `credentials:`/`auth_path:` and enable the Req.Test stub explicitly.
 config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
+
+# Disable the fleet credential Watchdog in test — its probe is a real agent-CLI
+# round-trip per adapter (`codex exec` in particular bills against the ChatGPT
+# session quota), and the suite has no CLIs to hit. Both
+# `Arbiter.Agents.CredentialWatchdog`'s moduledoc and its test file already
+# assumed this was set; it wasn't, so every `mix test` run was firing live
+# probes from the app-started singleton (bd-ajgve2). Tests that need a polling
+# Watchdog start their own unnamed instance with `enabled: true`.
+config :arbiter, :credential_watchdog, enabled: false

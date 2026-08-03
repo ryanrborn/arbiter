@@ -14,6 +14,19 @@ defmodule Arbiter.Settings.Installation do
       ceiling (`Arbiter.Workflows.Conductor`). `nil` means "fall back to the
       `:arbiter, :conductor_system_max_concurrent` application env, else the
       hardcoded default".
+    * `:credential_watchdog_adapters` — agent-type names
+      (`Arbiter.Agents.valid_agent_types/0`) the
+      `Arbiter.Agents.CredentialWatchdog` should probe. `nil` means "probe
+      every adapter in `Arbiter.Agents.adapters/0`"; `[]` means "probe
+      nothing".
+    * `:credential_watchdog_interval_ms` / `:credential_watchdog_recovery_interval_ms`
+      — Watchdog poll intervals. `nil` falls back to the
+      `:arbiter, :credential_watchdog` application env, else the Watchdog's
+      hardcoded defaults (5 minutes / 1 minute).
+
+  Every field is nullable and `nil` always means "no override" — a fresh
+  install that never writes here behaves exactly as it did before the setting
+  existed.
   """
 
   use Ash.Resource,
@@ -26,18 +39,25 @@ defmodule Arbiter.Settings.Installation do
     repo Arbiter.Repo
   end
 
+  @settable [
+    :conductor_system_max_concurrent,
+    :credential_watchdog_adapters,
+    :credential_watchdog_interval_ms,
+    :credential_watchdog_recovery_interval_ms
+  ]
+
   actions do
     defaults [:read]
 
     create :create do
       primary? true
-      accept [:conductor_system_max_concurrent]
+      accept @settable
     end
 
     update :update do
       primary? true
       require_atomic? false
-      accept [:conductor_system_max_concurrent]
+      accept @settable
     end
   end
 
@@ -50,6 +70,29 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 1
 
       description "Install-wide Conductor concurrency ceiling; nil falls back to app env / default."
+    end
+
+    attribute :credential_watchdog_adapters, {:array, :string} do
+      public? true
+      allow_nil? true
+
+      description "Agent-type names the CredentialWatchdog probes; nil probes every adapter, [] probes none."
+    end
+
+    attribute :credential_watchdog_interval_ms, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 1
+
+      description "CredentialWatchdog normal poll interval (ms); nil falls back to app env / default."
+    end
+
+    attribute :credential_watchdog_recovery_interval_ms, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 1
+
+      description "CredentialWatchdog re-probe interval while an adapter is expired (ms); nil falls back to app env / default."
     end
 
     create_timestamp :created_at
