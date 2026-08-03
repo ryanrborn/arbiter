@@ -26,6 +26,7 @@ defmodule ArbiterWeb.Api.MessageJSON do
       directive_ref: m.directive_ref,
       body: m.body,
       read_at: iso(m.read_at),
+      cleared_at: iso(m.cleared_at),
       inserted_at: iso(m.inserted_at),
       updated_at: iso(m.updated_at)
     }

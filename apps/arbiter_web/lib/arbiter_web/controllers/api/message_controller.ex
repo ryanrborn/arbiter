@@ -5,13 +5,17 @@ defmodule ArbiterWeb.Api.MessageController do
   Routes:
 
     * `GET  /api/messages`           — :index (filters: kind, to_ref, from_ref,
-                                       unread=true, limit [default 50])
+                                       unread=true [pending: read_at & cleared_at
+                                       both nil], outstanding=true [read, not
+                                       cleared], limit [default 50])
     * `POST /api/messages`           — :create (body: kind, from_ref, to_ref,
                                        subject, body, directive_ref, workspace_id)
     * `POST /api/messages/:id/read`  — :read (stamp read_at = now)
-    * `DELETE /api/messages`         — :clear (destroy messages addressed to
-                                       `to_ref`; filters: all=true destroys
-                                       read+unread; absent/false destroys read only)
+    * `DELETE /api/messages`         — :clear (soft-clear messages addressed to
+                                       `to_ref` by stamping cleared_at; rows are
+                                       retained, not destroyed. filters: all=true
+                                       clears read+unread; absent/false clears the
+                                       outstanding tail only)
 
   Newest first. `arb inbox` / `arb notify` / `arb msg` / `arb message` drive
   these.
@@ -35,6 +39,7 @@ defmodule ArbiterWeb.Api.MessageController do
         |> filter_eq(:to_ref, params["to_ref"])
         |> filter_eq(:from_ref, params["from_ref"])
         |> maybe_unread(params["unread"])
+        |> maybe_outstanding(params["outstanding"])
         |> Ash.Query.sort(inserted_at: :desc)
         |> Ash.Query.limit(limit)
         |> Ash.read!()
@@ -67,10 +72,11 @@ defmodule ArbiterWeb.Api.MessageController do
     end
   end
 
-  # Drain the read tail of a mailbox: destroy every *already-read* message
-  # addressed to `to_ref`. Unread mail is left untouched — you read it first,
-  # then clear. Pass `all=true` to destroy both read and unread.
-  # `to_ref` is required so a stray call can't wipe the table.
+  # Soft-clear a mailbox: stamp `cleared_at` on the outstanding (read, uncleared)
+  # tail addressed to `to_ref`. Pending mail is left untouched — you read it
+  # first, then clear. Pass `all=true` to clear both read and unread. Rows are
+  # retained (soft), never destroyed; the durable escalation record survives.
+  # `to_ref` is required so a stray call can't sweep the table.
   def clear(conn, %{"to_ref" => to_ref} = params) when is_binary(to_ref) and to_ref != "" do
     {:ok, deleted_read, deleted_unread, remaining_unread} =
       if params["all"] in ["true", true] do
@@ -103,10 +109,18 @@ defmodule ArbiterWeb.Api.MessageController do
   defp filter_eq(query, :from_ref, value),
     do: Ash.Query.filter(query, from_ref in ^Message.ref_variants(value))
 
+  # `unread` = pending: never seen and not cleared. cleared_at must also be nil
+  # so a message soft-cleared while still unread does not resurface as pending.
   defp maybe_unread(query, flag) when flag in ["true", true],
-    do: Ash.Query.filter(query, is_nil(read_at))
+    do: Ash.Query.filter(query, is_nil(read_at) and is_nil(cleared_at))
 
   defp maybe_unread(query, _), do: query
+
+  # `outstanding` = the triage queue: seen (read_at set) but not yet cleared.
+  defp maybe_outstanding(query, flag) when flag in ["true", true],
+    do: Ash.Query.filter(query, not is_nil(read_at) and is_nil(cleared_at))
+
+  defp maybe_outstanding(query, _), do: query
 
   # ---- param coercion ----
 
