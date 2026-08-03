@@ -150,15 +150,23 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "state: \"outstanding\" returns read-but-uncleared messages without mutating", ctx do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ctx.ws.id))
+
       # Create and read a message
       {:ok, msg1} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "first"})
 
       {:ok, _} = Tools.inbox_check(ctx.worker, %{})
+      assert_receive {:message_read, _}
 
       # Create another unread message
       {:ok, _msg2} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "second"})
+
+      assert_receive {:new_message, _}
+
+      # Get the pre-call state for comparison
+      {:ok, pre_call_msg1} = Ash.get(Message, msg1.id)
 
       # Get the outstanding message (the first one, which is now read but uncleared)
       assert {:ok, %{messages: [returned_msg], count: 1}} =
@@ -171,6 +179,11 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert returned_msg.read_at == DateTime.to_iso8601(refreshed_msg1.read_at)
       assert returned_msg.cleared_at == refreshed_msg1.cleared_at
+      assert refreshed_msg1.updated_at == pre_call_msg1.updated_at
+
+      # Verify no PubSub broadcasts fired
+      refute_receive {:message_read, _}, 100
+      refute_receive {:mailbox_cleared, _}, 100
 
       # Verify the second (unread) message is still there
       assert {:ok, %{messages: [unread_msg]}} =
@@ -262,15 +275,23 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "state: \"outstanding\" returns read-but-uncleared messages without mutating", ctx do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ctx.ws.id))
+
       # Create and read a message
       {:ok, msg1} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
 
       {:ok, _} = Tools.coordinator_inbox(ctx.coordinator, %{})
+      assert_receive {:message_read, _}
 
       # Create another unread message
       {:ok, _msg2} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
+
+      assert_receive {:new_message, _}
+
+      # Get the pre-call state for comparison
+      {:ok, pre_call_msg1} = Ash.get(Message, msg1.id)
 
       # Get the outstanding message (the first one, which is now read but uncleared)
       assert {:ok, %{messages: [returned_msg], count: 1}} =
@@ -283,6 +304,11 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert returned_msg.read_at == DateTime.to_iso8601(refreshed_msg1.read_at)
       assert returned_msg.cleared_at == refreshed_msg1.cleared_at
+      assert refreshed_msg1.updated_at == pre_call_msg1.updated_at
+
+      # Verify no PubSub broadcasts fired
+      refute_receive {:message_read, _}, 100
+      refute_receive {:mailbox_cleared, _}, 100
 
       # Verify the second (unread) message is not included
       assert {:ok, %{messages: [unread_msg]}} =
@@ -319,7 +345,8 @@ defmodule Arbiter.MCP.ToolsTest do
       assert message =~ "state"
     end
 
-    test "default (omitted state) reproduces today's behaviour: returns unread, marks them read", ctx do
+    test "default (omitted state) reproduces today's behaviour: returns unread, marks them read",
+         ctx do
       {:ok, _} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "test"})
 
