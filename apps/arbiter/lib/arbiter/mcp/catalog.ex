@@ -54,8 +54,8 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_overview` | worker, coordinator | `Ash.get(Workspace, id)` → grouped config summary |
   | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
-  | `installation_config_get` | worker, coordinator | `Arbiter.Settings.conductor_system_max_concurrent/0` |
-  | `installation_config_set` | coordinator | `Arbiter.Settings.set_conductor_system_max_concurrent/1` |
+  | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (conductor + credential watchdog) |
+  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (conductor + credential watchdog) |
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
   | `skill_update` | coordinator | `Arbiter.Skills.update_skill/2` |
   | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
@@ -1176,14 +1176,22 @@ defmodule Arbiter.MCP.Catalog do
       name: "installation_config_get",
       tiers: @both,
       description:
-        "Read an install-wide runtime setting (not workspace-scoped) — currently just " <>
-          "`conductor_system_max_concurrent`, the Conductor's system-wide concurrency ceiling. " <>
+        "Read an install-wide runtime setting (not workspace-scoped): " <>
+          "`conductor_system_max_concurrent` (the Conductor's system-wide concurrency ceiling), " <>
+          "`credential_watchdog_adapters`, `credential_watchdog_interval_ms`, " <>
+          "`credential_watchdog_recovery_interval_ms`. " <>
           "Omit `key` to get the full settings map. Returns `{key, value, settings}`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "key" => %{
             "type" => "string",
+            "enum" => [
+              "conductor_system_max_concurrent",
+              "credential_watchdog_adapters",
+              "credential_watchdog_interval_ms",
+              "credential_watchdog_recovery_interval_ms"
+            ],
             "description" =>
               "Setting name (e.g. \"conductor_system_max_concurrent\"). Omit for all settings."
           }
@@ -1196,19 +1204,30 @@ defmodule Arbiter.MCP.Catalog do
       name: "installation_config_set",
       tiers: @coordinator,
       description:
-        "Set an install-wide runtime setting. Currently only `conductor_system_max_concurrent` " <>
-          "is settable — a positive integer, or `null` to clear the override and fall back to " <>
-          "the app-env/hardcoded default. Takes effect on the next Conductor drain cycle across " <>
-          "every running graph, no restart required. Returns `{key, value}`.",
+        "Set an install-wide runtime setting; `null` always clears the override and falls back " <>
+          "to the app-env/hardcoded default. `conductor_system_max_concurrent` (positive " <>
+          "integer) takes effect on the next Conductor drain cycle across every running graph. " <>
+          "`credential_watchdog_adapters` (list of agent types — \"claude\", \"gemini\", " <>
+          "\"codex\"; `[]` probes nothing), `credential_watchdog_interval_ms` and " <>
+          "`credential_watchdog_recovery_interval_ms` (positive integers) take effect on the " <>
+          "CredentialWatchdog's next poll cycle. No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "key" => %{
             "type" => "string",
+            "enum" => [
+              "conductor_system_max_concurrent",
+              "credential_watchdog_adapters",
+              "credential_watchdog_interval_ms",
+              "credential_watchdog_recovery_interval_ms"
+            ],
             "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
           },
           "value" => %{
-            "description" => "Positive integer, or null to clear the override."
+            "description" =>
+              "Positive integer (or, for credential_watchdog_adapters, a list of agent-type " <>
+                "strings), or null to clear the override."
           }
         },
         "required" => ["key", "value"],
