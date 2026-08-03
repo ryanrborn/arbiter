@@ -273,22 +273,6 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert result["structuredContent"]["value"] == ["claude", "gemini"]
     end
 
-    test "installation_config_set unwraps a client-stringified JSON array", ctx do
-      conn =
-        rpc(
-          ctx.conn,
-          ctx.coordinator_token,
-          req("tools/call", %{
-            "name" => "installation_config_set",
-            "arguments" => %{"key" => "credential_watchdog_adapters", "value" => "[\"claude\", \"gemini\"]"}
-          })
-        )
-
-      result = json_response(conn, 200)["result"]
-      assert result["isError"] == false
-      assert result["structuredContent"]["value"] == ["claude", "gemini"]
-    end
-
     test "installation_config_set accepts a real integer value end-to-end", ctx do
       conn =
         rpc(
@@ -297,22 +281,6 @@ defmodule ArbiterWeb.MCP.PlugTest do
           req("tools/call", %{
             "name" => "installation_config_set",
             "arguments" => %{"key" => "conductor_system_max_concurrent", "value" => 5}
-          })
-        )
-
-      result = json_response(conn, 200)["result"]
-      assert result["isError"] == false
-      assert result["structuredContent"]["value"] == 5
-    end
-
-    test "installation_config_set unwraps a client-stringified integer", ctx do
-      conn =
-        rpc(
-          ctx.conn,
-          ctx.coordinator_token,
-          req("tools/call", %{
-            "name" => "installation_config_set",
-            "arguments" => %{"key" => "conductor_system_max_concurrent", "value" => "5"}
           })
         )
 

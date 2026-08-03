@@ -407,21 +407,8 @@ defmodule Arbiter.MCP.Tools do
            {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
         end
 
-      {:ok, raw_value} ->
-        # Some MCP clients stringify array arguments even with proper schema (bd-1dtufq).
-        # Try unwrapping before rejecting, to handle malformed client submissions.
-        case unwrap_stringified_json(raw_value, [:list]) do
-          unwrapped when is_list(unwrapped) ->
-            if Enum.all?(unwrapped, &(is_binary(&1) and &1 in valid)) do
-              {:ok, unwrapped}
-            else
-              {:error,
-               {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
-            end
-
-          _other ->
-            {:error, {:invalid, "value must be a list of agent type strings or null"}}
-        end
+      {:ok, _other} ->
+        {:error, {:invalid, "value must be a list of agent type strings or null"}}
 
       :error ->
         {:error, {:invalid, "value is required"}}
@@ -436,16 +423,8 @@ defmodule Arbiter.MCP.Tools do
       {:ok, n} when is_integer(n) and n > 0 ->
         {:ok, n}
 
-      {:ok, raw_value} ->
-        # Some MCP clients stringify numeric arguments even with proper schema (bd-1dtufq).
-        # Try unwrapping before rejecting, to handle malformed client submissions.
-        case unwrap_stringified_json(raw_value, [:integer]) do
-          unwrapped when is_integer(unwrapped) and unwrapped > 0 ->
-            {:ok, unwrapped}
-
-          _other ->
-            {:error, {:invalid, "value must be a positive integer or null"}}
-        end
+      {:ok, _other} ->
+        {:error, {:invalid, "value must be a positive integer or null"}}
 
       :error ->
         {:error, {:invalid, "value is required"}}
@@ -3158,7 +3137,7 @@ defmodule Arbiter.MCP.Tools do
   # as-is to preserve legitimate string values. workspace_config_set's schema
   # explicitly allows strings, so a client sending "5" as a config value should
   # not have it reinterpreted as the integer 5.
-  defp unwrap_stringified_json(v, allowed_types \\ [:list, :map, :integer, :boolean, :null]) when is_binary(v) do
+  defp unwrap_stringified_json(v, allowed_types) when is_binary(v) do
     trimmed = String.trim(v)
 
     # Only attempt JSON decode if this looks like a JSON value (starts with
