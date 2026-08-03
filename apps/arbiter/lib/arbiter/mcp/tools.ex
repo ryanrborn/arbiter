@@ -100,62 +100,118 @@ defmodule Arbiter.MCP.Tools do
   # ---- inbox_check --------------------------------------------------------
 
   @doc """
-  The unread mailbox for a task, marked read on read (the structured replacement
-  for `arb inbox <task>`). Worker: its own task. Coordinator: the `task_id`
-  argument, within its workspace.
+  The mailbox for a task — the structured replacement for `arb inbox <task>`.
+  Worker: its own task. Coordinator: the `task_id` argument, within its workspace.
+
+  Two states:
+  - `state: "unread"` (default): unread messages, marked read on return.
+  - `state: "outstanding"`: read-but-uncleared messages; pure read, no mutations.
   """
   @spec inbox_check(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def inbox_check(%Scope{} = scope, args) do
-    with {:ok, to_ref} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, task} <- fetch_task(scope, args, to_ref) do
-      messages = Message.inbox(to_ref, workspace_id: task.workspace_id)
-      _ = Enum.each(messages, &Message.mark_read/1)
+    state = fetch_string(args, "state") || "unread"
 
-      {:ok,
-       %{
-         task_id: to_ref,
-         messages: Enum.map(messages, &serialize_message/1),
-         count: length(messages)
-       }}
+    with :ok <- validate_state(state),
+         {:ok, to_ref} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, task} <- fetch_task(scope, args, to_ref) do
+      case state do
+        "unread" ->
+          messages = Message.inbox(to_ref, workspace_id: task.workspace_id)
+          _ = Enum.each(messages, &Message.mark_read/1)
+
+          {:ok,
+           %{
+             task_id: to_ref,
+             messages: Enum.map(messages, &serialize_message/1),
+             count: length(messages)
+           }}
+
+        "outstanding" ->
+          messages = Message.outstanding(to_ref, workspace_id: task.workspace_id)
+
+          {:ok,
+           %{
+             task_id: to_ref,
+             messages: Enum.map(messages, &serialize_message/1),
+             count: length(messages)
+           }}
+      end
     end
   end
 
   # ---- coordinator_inbox --------------------------------------------------
 
   @doc """
-  The unread Admiral escalation mailbox for the bound workspace, marked read on
-  return — the structured replacement for `arb message inbox` / `arb inbox`.
-  Coordinator only; the worker tier is denied at the catalog level.
+  The Admiral escalation mailbox for the bound workspace — the structured
+  replacement for `arb message inbox` / `arb inbox`. Coordinator only; the
+  worker tier is denied at the catalog level.
 
-  Lists all unread messages where `to_ref == "coordinator"` in the workspace and
-  marks each one read, so the dashboard unread count drops to 0. Optional
-  `clear: true` also soft-clears the outstanding tail (`Message.clear_read/2`
-  stamps `cleared_at`; rows are retained), mirroring `arb inbox clear`.
+  Lists messages where `to_ref == "coordinator"` in the workspace. Two states:
+  - `state: "unread"` (default): unread messages, marks them read on return,
+    and optionally soft-clears the outstanding tail (mirrors `arb inbox clear`).
+  - `state: "outstanding"`: read-but-uncleared messages; pure read, no mutations.
+
+  `state: "outstanding"` and `clear: true` are mutually exclusive and will
+  return an error.
   """
   @spec coordinator_inbox(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def coordinator_inbox(%Scope{} = scope, args) do
-    with {:ok, clear} <- fetch_bool(args, "clear", false),
+    state = fetch_string(args, "state") || "unread"
+
+    with :ok <- validate_state(state),
+         {:ok, clear} <- fetch_bool(args, "clear", false),
+         :ok <- validate_state_and_clear_combo(state, clear),
          {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      messages = Message.inbox(Message.coordinator_ref(), workspace_id: ws_id)
-      _ = Enum.each(messages, &Message.mark_read/1)
+      ref = Message.coordinator_ref()
 
-      {deleted_read, deleted_unread, remaining_unread} =
-        if clear do
-          {:ok, dr, du, ru} = Message.clear_read(Message.coordinator_ref(), workspace_id: ws_id)
-          {dr, du, ru}
-        else
-          {0, 0, 0}
-        end
+      case state do
+        "unread" ->
+          messages = Message.inbox(ref, workspace_id: ws_id)
+          _ = Enum.each(messages, &Message.mark_read/1)
 
-      {:ok,
-       %{
-         messages: Enum.map(messages, &serialize_message/1),
-         count: length(messages),
-         deleted_read: deleted_read,
-         deleted_unread: deleted_unread,
-         remaining_unread: remaining_unread
-       }}
+          {deleted_read, deleted_unread, remaining_unread} =
+            if clear do
+              {:ok, dr, du, ru} = Message.clear_read(ref, workspace_id: ws_id)
+              {dr, du, ru}
+            else
+              {0, 0, 0}
+            end
+
+          {:ok,
+           %{
+             messages: Enum.map(messages, &serialize_message/1),
+             count: length(messages),
+             deleted_read: deleted_read,
+             deleted_unread: deleted_unread,
+             remaining_unread: remaining_unread
+           }}
+
+        "outstanding" ->
+          messages = Message.outstanding(ref, workspace_id: ws_id)
+
+          {:ok,
+           %{
+             messages: Enum.map(messages, &serialize_message/1),
+             count: length(messages)
+           }}
+      end
     end
+  end
+
+  defp validate_state(state) when state in ["unread", "outstanding"] do
+    :ok
+  end
+
+  defp validate_state(state) do
+    {:error, {:invalid_args, "state must be \"unread\" or \"outstanding\", got \"#{state}\""}}
+  end
+
+  defp validate_state_and_clear_combo("outstanding", true) do
+    {:error, {:invalid_args, "clear: true cannot be combined with state: \"outstanding\""}}
+  end
+
+  defp validate_state_and_clear_combo(_state, _clear) do
+    :ok
   end
 
   # ---- workspace_show -----------------------------------------------------

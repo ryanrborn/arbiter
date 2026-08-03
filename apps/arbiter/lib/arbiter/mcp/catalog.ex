@@ -148,8 +148,10 @@ defmodule Arbiter.MCP.Catalog do
       name: "inbox_check",
       tiers: @both,
       description:
-        "Read (and mark read) the unread mailbox for a task — the structured replacement for " <>
-          "`arb inbox`. A worker checks its own task; a coordinator passes `task_id`.",
+        "Read the mailbox for a task — the structured replacement for `arb inbox`. " <>
+          "A worker checks its own task; a coordinator passes `task_id`. " <>
+          "Two states: `state: \"unread\"` (default) lists unread messages and marks them read; " <>
+          "`state: \"outstanding\"` lists read-but-uncleared messages as a pure read — no mutations.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -157,6 +159,13 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "Recipient task id. Optional for a worker (defaults to its own task)."
+          },
+          "state" => %{
+            "type" => "string",
+            "enum" => ["unread", "outstanding"],
+            "description" =>
+              "Mailbox state to return. \"unread\" (default): unread messages, marked read on return. " <>
+                "\"outstanding\": read-but-uncleared messages, no mutations."
           }
         },
         "additionalProperties" => false
@@ -167,18 +176,28 @@ defmodule Arbiter.MCP.Catalog do
       name: "coordinator_inbox",
       tiers: @coordinator,
       description:
-        "Read (and mark read) the Admiral escalation mailbox for the workspace — the structured " <>
-          "replacement for `arb message inbox` / `arb inbox`. Lists all unread messages where " <>
-          "`to_ref == \"coordinator\"` and marks them read, so the dashboard unread count drops to 0. " <>
-          "Optional `clear: true` also destroys the already-read tail (mirrors `arb inbox clear`). " <>
-          "Coordinator only.",
+        "Read the Admiral escalation mailbox for the workspace — the structured " <>
+          "replacement for `arb message inbox` / `arb inbox`. Lists messages where " <>
+          "`to_ref == \"coordinator\"`. Two states: `state: \"unread\"` (default) lists unread " <>
+          "messages and marks them read on return; optionally `clear: true` also soft-clears the " <>
+          "outstanding tail (mirrors `arb inbox clear`). `state: \"outstanding\"` lists read-but-uncleared " <>
+          "messages (the triage queue) as a pure read — no mutations. `state: \"outstanding\"` and " <>
+          "`clear: true` are mutually exclusive. Coordinator only.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
+          "state" => %{
+            "type" => "string",
+            "enum" => ["unread", "outstanding"],
+            "description" =>
+              "Mailbox state to return. \"unread\" (default): unread messages, marked read on return. " <>
+                "\"outstanding\": read-but-uncleared messages, no mutations."
+          },
           "clear" => %{
             "type" => "boolean",
             "description" =>
-              "Also destroy the already-read tail after listing (mirrors `arb inbox clear`). Default false."
+              "Also soft-clear the outstanding tail after listing (mirrors `arb inbox clear`). " <>
+                "Only valid with state: \"unread\". Default false."
           }
         },
         "additionalProperties" => false
