@@ -1319,25 +1319,37 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Arbiter.Settings.credential_watchdog_adapters() == nil
     end
 
-    test "stringified values are still rejected (validation not loosened)", ctx do
-      # This ensures the validation remains strict and rejects JSON-stringified input
-      # (which is what broken MCP clients used to send before the schema fix)
+    test "stringified values are defensively unwrapped (matching workspace_config_set precedent)", ctx do
+      # Even with proper schema, some MCP clients stringify arguments (bd-1dtufq).
+      # The unwrap layer handles this transparently. Validation remains strict on the
+      # decoded result — invalid values (wrong types, out-of-range) are still rejected.
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => "5"  # Stringified integer
+               })
+
+      assert data.value == 5
+      assert Arbiter.Settings.conductor_system_max_concurrent() == 5
+
+      # Stringified array is also unwrapped and validated
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "[\"claude\", \"gemini\"]"  # Stringified array
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Arbiter.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+
+      # But actual invalid values (after unwrapping) are still rejected
       assert {:error, {:invalid, msg}} =
                Tools.installation_config_set(ctx.coordinator, %{
                  "key" => "conductor_system_max_concurrent",
-                 "value" => "5"  # JSON string, not native integer
+                 "value" => "\"invalid\""  # Stringified string (not valid JSON for the field)
                })
 
       assert msg =~ "value must be a positive integer or null"
-
-      # Stringified array should also be rejected
-      assert {:error, {:invalid, msg}} =
-               Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "credential_watchdog_adapters",
-                 "value" => "[\"claude\", \"gemini\"]"  # JSON string, not native array
-               })
-
-      assert msg =~ "value must be a list of agent type strings or null"
     end
   end
 

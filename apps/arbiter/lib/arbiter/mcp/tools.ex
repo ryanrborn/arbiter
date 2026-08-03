@@ -407,8 +407,21 @@ defmodule Arbiter.MCP.Tools do
            {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
         end
 
-      {:ok, _other} ->
-        {:error, {:invalid, "value must be a list of agent type strings or null"}}
+      {:ok, raw_value} ->
+        # Some MCP clients stringify array arguments even with proper schema (bd-1dtufq).
+        # Try unwrapping before rejecting, to handle malformed client submissions.
+        case unwrap_stringified_json(raw_value) do
+          unwrapped when is_list(unwrapped) ->
+            if Enum.all?(unwrapped, &(is_binary(&1) and &1 in valid)) do
+              {:ok, unwrapped}
+            else
+              {:error,
+               {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
+            end
+
+          _other ->
+            {:error, {:invalid, "value must be a list of agent type strings or null"}}
+        end
 
       :error ->
         {:error, {:invalid, "value is required"}}
@@ -417,10 +430,25 @@ defmodule Arbiter.MCP.Tools do
 
   defp require_install_value(_key, args) do
     case Map.fetch(args, "value") do
-      {:ok, nil} -> {:ok, nil}
-      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
-      {:ok, _other} -> {:error, {:invalid, "value must be a positive integer or null"}}
-      :error -> {:error, {:invalid, "value is required"}}
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, n} when is_integer(n) and n > 0 ->
+        {:ok, n}
+
+      {:ok, raw_value} ->
+        # Some MCP clients stringify numeric arguments even with proper schema (bd-1dtufq).
+        # Try unwrapping before rejecting, to handle malformed client submissions.
+        case unwrap_stringified_json(raw_value) do
+          unwrapped when is_integer(unwrapped) and unwrapped > 0 ->
+            {:ok, unwrapped}
+
+          _other ->
+            {:error, {:invalid, "value must be a positive integer or null"}}
+        end
+
+      :error ->
+        {:error, {:invalid, "value is required"}}
     end
   end
 
@@ -3122,20 +3150,22 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Some MCP tool-calling clients serialize an array/object argument into a
-  # JSON-encoded string before sending it (bd-1dtufq) rather than an actual
-  # JSON array/object value, even though the tool's input_schema advertises
-  # array/object as valid. Detect that shape and decode it, so
-  # `agent.type: "[\"claude\", \"gemini\"]"` is treated the same as a real
-  # `["claude", "gemini"]`. A string that merely starts with `[`/`{` but
-  # isn't valid JSON, or decodes to a scalar, is left untouched — only
-  # unambiguous list/map decodes are unwrapped.
+  # Some MCP tool-calling clients serialize arguments into JSON-encoded strings
+  # before sending them (bd-1dtufq) rather than native JSON values, even though
+  # the tool's input_schema advertises the correct types. Detect that shape and
+  # decode it, so `"[\"claude\", \"gemini\"]"` is treated as a real list and
+  # `"5"` as a real integer. This handles arrays/objects and scalars (int/bool/null).
+  # A string that isn't valid JSON is left untouched.
   defp unwrap_stringified_json(v) when is_binary(v) do
     trimmed = String.trim(v)
 
-    if String.starts_with?(trimmed, "[") or String.starts_with?(trimmed, "{") do
+    # Only attempt JSON decode if this looks like a JSON value (starts with
+    # structural char, digit, true/false/null, or quote).
+    starts_with_json = String.match?(trimmed, ~r/^[\[\{0-9"tfn]/)
+
+    if starts_with_json do
       case Jason.decode(trimmed) do
-        {:ok, decoded} when is_list(decoded) or is_map(decoded) -> decoded
+        {:ok, decoded} -> decoded
         _ -> v
       end
     else
