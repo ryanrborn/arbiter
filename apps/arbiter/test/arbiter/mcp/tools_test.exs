@@ -976,6 +976,39 @@ defmodule Arbiter.MCP.ToolsTest do
       assert get_in(data.config, ["tracker", "config", "label"]) == "[urgent]"
     end
 
+    test "preserves JSON-scalar-shaped string values as strings, not numbers/booleans (regression: bd-7lmjc5)", ctx do
+      # workspace_config_set's schema explicitly allows string type. A client sending
+      # "5", "true", "5.0" as legitimate string config values should NOT be decoded
+      # to numbers/booleans. The unwrap helper only unwraps structural types (list/map)
+      # for workspace_config_set, not scalars.
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "version.constraint",
+                 "value" => "5.0"
+               })
+
+      # Should be stored as string "5.0", not float 5.0
+      assert get_in(data.config, ["version", "constraint"]) == "5.0"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "feature.flag",
+                 "value" => "true"
+               })
+
+      # Should be stored as string "true", not boolean true
+      assert get_in(data.config, ["feature", "flag"]) == "true"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "count.value",
+                 "value" => "5"
+               })
+
+      # Should be stored as string "5", not integer 5
+      assert get_in(data.config, ["count", "value"]) == "5"
+    end
+
     test "requires a key argument", ctx do
       assert {:error, {:invalid, msg}} =
                Tools.workspace_config_set(ctx.coordinator, %{"value" => "x"})
@@ -1242,6 +1275,83 @@ defmodule Arbiter.MCP.ToolsTest do
       assert "installation_config_set" in coord_names
       refute "installation_config_set" in worker_names
     end
+  end
+
+  describe "installation_config_set — schema validation" do
+    test "value property must have an explicit type (not bare/untyped)", ctx do
+      tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
+      assert tool != nil
+
+      value_schema = tool.input_schema["properties"]["value"]
+      assert value_schema != nil
+      # The value property must have a "type" key or "oneOf"/"anyOf" for proper MCP type coercion
+      assert Map.has_key?(value_schema, "type") or Map.has_key?(value_schema, "oneOf") or Map.has_key?(value_schema, "anyOf"),
+             "value property must declare a type (via 'type', 'oneOf', or 'anyOf') so MCP clients send native types, not JSON strings"
+    end
+
+    test "schema permits native integer, array, and null types for value", ctx do
+      tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
+      value_schema = tool.input_schema["properties"]["value"]
+
+      # Verify oneOf contains the three expected type schemas
+      one_of = value_schema["oneOf"]
+      assert one_of != nil
+      assert length(one_of) == 3
+
+      types = Enum.map(one_of, & &1["type"])
+      assert "null" in types
+      assert "integer" in types
+      assert "array" in types
+
+      # Verify integer has minimum constraint
+      integer_schema = Enum.find(one_of, &(&1["type"] == "integer"))
+      assert integer_schema["minimum"] == 1
+
+      # Verify array items are constrained to known agent types
+      array_schema = Enum.find(one_of, &(&1["type"] == "array"))
+      items_enum = array_schema["items"]["enum"]
+      assert items_enum == ["claude", "gemini", "codex"]
+    end
+
+    test "native integer value round-trips successfully (coordinator)", ctx do
+      # This verifies the backend validation accepts native integers (what well-formed MCP clients send)
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => 5
+               })
+
+      assert data.value == 5
+      assert Arbiter.Settings.conductor_system_max_concurrent() == 5
+    end
+
+    test "native list value round-trips successfully for adapter key (coordinator)", ctx do
+      # This verifies the backend validation accepts native lists (what well-formed MCP clients send)
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["claude", "gemini"]
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Arbiter.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+    end
+
+    test "native null value round-trips successfully (coordinator)", ctx do
+      # Set a value first
+      {:ok, _} = Arbiter.Settings.set_credential_watchdog_adapters(["claude"])
+
+      # Clear with native null
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => nil
+               })
+
+      assert data.value == nil
+      assert Arbiter.Settings.credential_watchdog_adapters() == nil
+    end
+
   end
 
   describe "workspace config tools — catalog visibility" do

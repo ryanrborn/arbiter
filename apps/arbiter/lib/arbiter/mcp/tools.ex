@@ -417,10 +417,17 @@ defmodule Arbiter.MCP.Tools do
 
   defp require_install_value(_key, args) do
     case Map.fetch(args, "value") do
-      {:ok, nil} -> {:ok, nil}
-      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
-      {:ok, _other} -> {:error, {:invalid, "value must be a positive integer or null"}}
-      :error -> {:error, {:invalid, "value is required"}}
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, n} when is_integer(n) and n > 0 ->
+        {:ok, n}
+
+      {:ok, _other} ->
+        {:error, {:invalid, "value must be a positive integer or null"}}
+
+      :error ->
+        {:error, {:invalid, "value is required"}}
     end
   end
 
@@ -3118,32 +3125,49 @@ defmodule Arbiter.MCP.Tools do
   defp require_config_value(args) do
     case Map.fetch(args, "value") do
       :error -> {:error, {:invalid, "`value` is required"}}
-      {:ok, v} -> {:ok, unwrap_stringified_json(v)}
+      {:ok, v} -> {:ok, unwrap_stringified_json(v, [:list, :map])}
     end
   end
 
-  # Some MCP tool-calling clients serialize an array/object argument into a
-  # JSON-encoded string before sending it (bd-1dtufq) rather than an actual
-  # JSON array/object value, even though the tool's input_schema advertises
-  # array/object as valid. Detect that shape and decode it, so
-  # `agent.type: "[\"claude\", \"gemini\"]"` is treated the same as a real
-  # `["claude", "gemini"]`. A string that merely starts with `[`/`{` but
-  # isn't valid JSON, or decodes to a scalar, is left untouched — only
-  # unambiguous list/map decodes are unwrapped.
-  defp unwrap_stringified_json(v) when is_binary(v) do
+  # Some MCP tool-calling clients serialize arguments into JSON-encoded strings
+  # before sending them (bd-1dtufq) rather than native JSON values, even though
+  # the tool's input_schema advertises the correct types. Detect that shape and
+  # decode it, so `"[\"claude\", \"gemini\"]"` is treated as a real list.
+  # Only unambiguous structural types (list/map) are unwrapped — scalars are left
+  # as-is to preserve legitimate string values. workspace_config_set's schema
+  # explicitly allows strings, so a client sending "5" as a config value should
+  # not have it reinterpreted as the integer 5.
+  defp unwrap_stringified_json(v, allowed_types) when is_binary(v) do
     trimmed = String.trim(v)
 
-    if String.starts_with?(trimmed, "[") or String.starts_with?(trimmed, "{") do
+    # Only attempt JSON decode if this looks like a JSON value (starts with
+    # structural char, digit, true/false/null, or quote).
+    starts_with_json = String.match?(trimmed, ~r/^[\[\{0-9"tfn]/)
+
+    if starts_with_json do
       case Jason.decode(trimmed) do
-        {:ok, decoded} when is_list(decoded) or is_map(decoded) -> decoded
-        _ -> v
+        {:ok, decoded} ->
+          decoded_type =
+            cond do
+              is_list(decoded) -> :list
+              is_map(decoded) -> :map
+              is_integer(decoded) -> :integer
+              is_boolean(decoded) -> :boolean
+              decoded === nil -> :null
+              true -> :other
+            end
+
+          if decoded_type in allowed_types, do: decoded, else: v
+
+        _ ->
+          v
       end
     else
       v
     end
   end
 
-  defp unwrap_stringified_json(v), do: v
+  defp unwrap_stringified_json(v, _allowed_types), do: v
 
   # Build a nested map from a dotted-path segment list and a leaf value.
   defp config_put_in_path(map, [k], value) when is_map(map), do: Map.put(map, k, value)
