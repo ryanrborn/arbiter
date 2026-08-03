@@ -1244,6 +1244,103 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "installation_config_set — schema validation" do
+    test "value property must have an explicit type (not bare/untyped)", ctx do
+      tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
+      assert tool != nil
+
+      value_schema = tool.input_schema["properties"]["value"]
+      assert value_schema != nil
+      # The value property must have a "type" key or "oneOf"/"anyOf" for proper MCP type coercion
+      assert Map.has_key?(value_schema, "type") or Map.has_key?(value_schema, "oneOf") or Map.has_key?(value_schema, "anyOf"),
+             "value property must declare a type (via 'type', 'oneOf', or 'anyOf') so MCP clients send native types, not JSON strings"
+    end
+
+    test "schema permits native integer, array, and null types for value", ctx do
+      tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
+      value_schema = tool.input_schema["properties"]["value"]
+
+      # Verify oneOf contains the three expected type schemas
+      one_of = value_schema["oneOf"]
+      assert one_of != nil
+      assert length(one_of) == 3
+
+      types = Enum.map(one_of, & &1["type"])
+      assert "null" in types
+      assert "integer" in types
+      assert "array" in types
+
+      # Verify integer has minimum constraint
+      integer_schema = Enum.find(one_of, &(&1["type"] == "integer"))
+      assert integer_schema["minimum"] == 1
+
+      # Verify array items are constrained to known agent types
+      array_schema = Enum.find(one_of, &(&1["type"] == "array"))
+      items_enum = array_schema["items"]["enum"]
+      assert items_enum == ["claude", "gemini", "codex"]
+    end
+
+    test "native integer value round-trips successfully (coordinator)", ctx do
+      # This verifies the backend validation accepts native integers (what well-formed MCP clients send)
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => 5
+               })
+
+      assert data.value == 5
+      assert Arbiter.Settings.conductor_system_max_concurrent() == 5
+    end
+
+    test "native list value round-trips successfully for adapter key (coordinator)", ctx do
+      # This verifies the backend validation accepts native lists (what well-formed MCP clients send)
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["claude", "gemini"]
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Arbiter.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+    end
+
+    test "native null value round-trips successfully (coordinator)", ctx do
+      # Set a value first
+      {:ok, _} = Arbiter.Settings.set_credential_watchdog_adapters(["claude"])
+
+      # Clear with native null
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => nil
+               })
+
+      assert data.value == nil
+      assert Arbiter.Settings.credential_watchdog_adapters() == nil
+    end
+
+    test "stringified values are still rejected (validation not loosened)", ctx do
+      # This ensures the validation remains strict and rejects JSON-stringified input
+      # (which is what broken MCP clients used to send before the schema fix)
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => "5"  # JSON string, not native integer
+               })
+
+      assert msg =~ "value must be a positive integer or null"
+
+      # Stringified array should also be rejected
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "[\"claude\", \"gemini\"]"  # JSON string, not native array
+               })
+
+      assert msg =~ "value must be a list of agent type strings or null"
+    end
+  end
+
   describe "workspace config tools — catalog visibility" do
     test "workspace_config_get and workspace_config_overview are visible to workers", ctx do
       visible_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
