@@ -976,6 +976,39 @@ defmodule Arbiter.MCP.ToolsTest do
       assert get_in(data.config, ["tracker", "config", "label"]) == "[urgent]"
     end
 
+    test "preserves JSON-scalar-shaped string values as strings, not numbers/booleans (regression: bd-7lmjc5)", ctx do
+      # workspace_config_set's schema explicitly allows string type. A client sending
+      # "5", "true", "5.0" as legitimate string config values should NOT be decoded
+      # to numbers/booleans. The unwrap helper only unwraps structural types (list/map)
+      # for workspace_config_set, not scalars.
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "version.constraint",
+                 "value" => "5.0"
+               })
+
+      # Should be stored as string "5.0", not float 5.0
+      assert get_in(data.config, ["version", "constraint"]) == "5.0"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "feature.flag",
+                 "value" => "true"
+               })
+
+      # Should be stored as string "true", not boolean true
+      assert get_in(data.config, ["feature", "flag"]) == "true"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "count.value",
+                 "value" => "5"
+               })
+
+      # Should be stored as string "5", not integer 5
+      assert get_in(data.config, ["count", "value"]) == "5"
+    end
+
     test "requires a key argument", ctx do
       assert {:error, {:invalid, msg}} =
                Tools.workspace_config_set(ctx.coordinator, %{"value" => "x"})
