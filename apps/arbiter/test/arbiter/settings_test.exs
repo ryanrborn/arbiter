@@ -39,4 +39,68 @@ defmodule Arbiter.SettingsTest do
       assert {:error, :invalid_value} = Settings.set_conductor_system_max_concurrent(-1)
     end
   end
+
+  describe "credential_watchdog_adapters/0 + setter" do
+    test "returns nil when no override has been set" do
+      assert Settings.credential_watchdog_adapters() == nil
+    end
+
+    test "round-trips a list of adapter names" do
+      assert {:ok, ["claude", "gemini"]} =
+               Settings.set_credential_watchdog_adapters(["claude", "gemini"])
+
+      assert Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+    end
+
+    test "an empty list is a real value (probe nothing), distinct from nil" do
+      assert {:ok, []} = Settings.set_credential_watchdog_adapters([])
+      assert Settings.credential_watchdog_adapters() == []
+    end
+
+    test "nil clears the override" do
+      {:ok, _} = Settings.set_credential_watchdog_adapters(["claude"])
+      assert {:ok, nil} = Settings.set_credential_watchdog_adapters(nil)
+      assert Settings.credential_watchdog_adapters() == nil
+    end
+
+    test "rejects unknown adapter names and non-list values" do
+      assert {:error, :invalid_value} = Settings.set_credential_watchdog_adapters(["nope"])
+      assert {:error, :invalid_value} = Settings.set_credential_watchdog_adapters("claude")
+      assert {:error, :invalid_value} = Settings.set_credential_watchdog_adapters([:claude])
+    end
+
+    test "does not disturb the sibling conductor setting" do
+      {:ok, 6} = Settings.set_conductor_system_max_concurrent(6)
+      {:ok, _} = Settings.set_credential_watchdog_adapters(["claude"])
+
+      assert Settings.conductor_system_max_concurrent() == 6
+      assert {:ok, [_single_row]} = Ash.read(Arbiter.Settings.Installation)
+    end
+  end
+
+  describe "credential_watchdog_interval_ms/0 + setter" do
+    test "returns nil when no override has been set" do
+      assert Settings.credential_watchdog_interval_ms() == nil
+      assert Settings.credential_watchdog_recovery_interval_ms() == nil
+    end
+
+    test "round-trips a positive integer" do
+      assert {:ok, 900_000} = Settings.set_credential_watchdog_interval_ms(900_000)
+      assert Settings.credential_watchdog_interval_ms() == 900_000
+
+      assert {:ok, 30_000} = Settings.set_credential_watchdog_recovery_interval_ms(30_000)
+      assert Settings.credential_watchdog_recovery_interval_ms() == 30_000
+    end
+
+    test "nil clears the override" do
+      {:ok, _} = Settings.set_credential_watchdog_interval_ms(900_000)
+      assert {:ok, nil} = Settings.set_credential_watchdog_interval_ms(nil)
+      assert Settings.credential_watchdog_interval_ms() == nil
+    end
+
+    test "rejects zero/negative integers" do
+      assert {:error, :invalid_value} = Settings.set_credential_watchdog_interval_ms(0)
+      assert {:error, :invalid_value} = Settings.set_credential_watchdog_recovery_interval_ms(-1)
+    end
+  end
 end

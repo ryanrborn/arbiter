@@ -1048,15 +1048,28 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "installation_config_get/2 + installation_config_set/2" do
     setup do
-      on_exit(fn -> Arbiter.Settings.set_conductor_system_max_concurrent(nil) end)
+      on_exit(fn ->
+        Arbiter.Settings.set_conductor_system_max_concurrent(nil)
+        Arbiter.Settings.set_credential_watchdog_adapters(nil)
+        Arbiter.Settings.set_credential_watchdog_interval_ms(nil)
+        Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(nil)
+      end)
+
       :ok
     end
+
+    @empty_settings %{
+      conductor_system_max_concurrent: nil,
+      credential_watchdog_adapters: nil,
+      credential_watchdog_interval_ms: nil,
+      credential_watchdog_recovery_interval_ms: nil
+    }
 
     test "returns the full settings map when no key is given (worker tier)", ctx do
       assert {:ok, data} = Tools.installation_config_get(ctx.worker, %{})
       assert is_nil(data.key)
-      assert data.value == %{conductor_system_max_concurrent: nil}
-      assert data.settings == %{conductor_system_max_concurrent: nil}
+      assert data.value == @empty_settings
+      assert data.settings == @empty_settings
     end
 
     test "returns a leaf value for a known key", ctx do
@@ -1134,6 +1147,81 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, msg}} =
                Tools.installation_config_set(ctx.coordinator, %{
                  "key" => "conductor_system_max_concurrent"
+               })
+
+      assert msg =~ "value"
+    end
+
+    test "coordinator can set the credential watchdog adapter list", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["claude", "gemini"]
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Arbiter.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+
+      assert {:ok, read} =
+               Tools.installation_config_get(ctx.worker, %{
+                 "key" => "credential_watchdog_adapters"
+               })
+
+      assert read.value == ["claude", "gemini"]
+    end
+
+    test "coordinator can clear the credential watchdog adapter list", ctx do
+      {:ok, _} = Arbiter.Settings.set_credential_watchdog_adapters(["claude"])
+
+      assert {:ok, %{value: nil}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => nil
+               })
+
+      assert Arbiter.Settings.credential_watchdog_adapters() == nil
+    end
+
+    test "rejects an unknown adapter name", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["claude", "not-an-agent"]
+               })
+
+      assert msg =~ "value"
+    end
+
+    test "rejects a non-list value for the adapter list", ctx do
+      assert {:error, {:invalid, _msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "claude"
+               })
+    end
+
+    test "coordinator can set the credential watchdog intervals", ctx do
+      assert {:ok, %{value: 900_000}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => 900_000
+               })
+
+      assert {:ok, %{value: 120_000}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_recovery_interval_ms",
+                 "value" => 120_000
+               })
+
+      assert Arbiter.Settings.credential_watchdog_interval_ms() == 900_000
+      assert Arbiter.Settings.credential_watchdog_recovery_interval_ms() == 120_000
+    end
+
+    test "rejects a non-positive interval", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => 0
                })
 
       assert msg =~ "value"
