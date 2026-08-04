@@ -582,6 +582,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp describe_reason(reason) when is_binary(reason), do: reason
   defp describe_reason(reason), do: inspect(reason)
 
+  defp format_elapsed_seconds(ms) when is_integer(ms), do: "#{Float.round(ms / 1000, 1)}s"
+
   # A required tracker field had no produced value on the bead — name the
   # specific field(s) rather than the generic status_map hint, which would
   # send the operator down the wrong path (this is a missing-value problem, not
@@ -608,6 +610,24 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp sync_hint(%{kind: :forbidden}) do
     "The tracker rejected the request as forbidden — verify that the API token " <>
       "has the necessary permissions/scopes for this project and operation."
+  end
+
+  # A rate-limited sync already retried with backoff (see
+  # `Arbiter.Trackers.Sync.do_transition/3`) before reaching escalation — say
+  # how many attempts and over what window, so the reader can tell "we tried
+  # and the tracker kept refusing" from "we gave up instantly". No config hint:
+  # this is transient load (often GitHub's secondary/burst limit, which fires
+  # even with primary quota untouched), not a config mismatch.
+  defp sync_hint(%{kind: :rate_limited, retry_attempts: attempts, retry_elapsed_ms: elapsed_ms})
+       when is_integer(attempts) and is_integer(elapsed_ms) do
+    "Retried #{attempts} time(s) over #{format_elapsed_seconds(elapsed_ms)} honoring the " <>
+      "tracker's Retry-After/backoff, but the rate limit never cleared. This is very likely " <>
+      "transient load (e.g. concurrent workers tripping GitHub's secondary/burst limit) — " <>
+      "no action is typically needed unless this recurs."
+  end
+
+  defp sync_hint(%{kind: :rate_limited}) do
+    "The tracker's rate limit did not clear — this is likely transient load; retry the sync."
   end
 
   # Transient failures — no config change indicated.
