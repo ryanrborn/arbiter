@@ -413,6 +413,61 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         |> Ash.read!()
         |> Enum.filter(&(&1.workspace_id == ws.id and &1.kind == :escalation))
 
+      assert [escalation] = escalations
+
+      # The escalation body must distinguish "we tried and GitHub kept
+      # refusing" from "we gave up instantly" — it should name the number of
+      # attempts made (1 initial + the 3-retry budget = 4) and the elapsed
+      # window.
+      assert escalation.body =~ "Retried 4 time(s)"
+      assert escalation.body =~ ~r/over \d+(\.\d+)?s/
+    end
+
+    test "a validation_failed sync (not a rate limit) does NOT retry — escalates on the first attempt" do
+      # Use the :in_progress transition rather than :close so the follow-up
+      # verify-then-close path (a second, independent write outside Sync's
+      # retry loop) doesn't confound the attempt count being asserted here.
+      test_pid = self()
+      {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "open", "labels" => []})
+
+          "PATCH" ->
+            Agent.update(agent, &(&1 + 1))
+            send(test_pid, {:patch_attempted, Agent.get(agent, & &1)})
+
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed"})
+        end
+      end)
+
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "validation-failed-in-progress",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      assert {:ok, updated} = Ash.update(issue, %{status: :in_progress}, action: :update)
+      assert updated.status == :in_progress
+
+      assert_receive {:patch_attempted, 1}
+      refute_receive {:patch_attempted, 2}, 50
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.read!()
+        |> Enum.filter(&(&1.workspace_id == ws.id and &1.kind == :escalation))
+
       assert length(escalations) == 1
     end
   end
