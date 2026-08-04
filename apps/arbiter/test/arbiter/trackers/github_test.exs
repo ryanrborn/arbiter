@@ -66,6 +66,27 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:error, %Error{kind: :unauthenticated, status: 401}} = GitHub.fetch(@ref)
     end
 
+    test "403 secondary/abuse rate limit classifies as :rate_limited even with a full x-ratelimit-remaining (bd-1wplms)" do
+      # GitHub's SECONDARY (burst/concurrency) limit returns the same "API rate
+      # limit exceeded" 403 wording as the primary quota limit, but does NOT
+      # touch the primary quota — x-ratelimit-remaining stays full. A
+      # remaining-gated check would never classify this as retryable; the
+      # classification must key off the response body, not a quota gauge.
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("x-ratelimit-remaining", "4999")
+        |> Plug.Conn.put_resp_header("x-ratelimit-limit", "5000")
+        |> Plug.Conn.put_status(403)
+        |> Req.Test.json(%{
+          "message" =>
+            "API rate limit exceeded for user ID 238055253. If you reach out to GitHub " <>
+              "Support for help, please include the request ID and timestamp."
+        })
+      end)
+
+      assert {:error, %Error{kind: :rate_limited, status: 403}} = GitHub.fetch(@ref)
+    end
+
     test "503: returns {:error, %Error{kind: :server_error}}" do
       stub(fn conn ->
         conn

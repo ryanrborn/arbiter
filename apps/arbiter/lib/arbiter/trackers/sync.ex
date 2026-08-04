@@ -31,6 +31,31 @@ defmodule Arbiter.Trackers.Sync do
   `do_transition/2` re-fetches the upstream item after a `validation_failed` and
   suppresses the escalation if the item is already at the desired state — the
   transition was a no-op, not a real failure.
+
+  ## Idempotency of the retried call (bd-1wplms)
+
+  Only `:rate_limited` failures are retried (see `do_transition/3`), and only
+  the status-transition call itself — `Trackers.transition/2`. That call is
+  safe to repeat for every adapter: each one reads the upstream item's current
+  state first and only issues a write if it isn't already there (GitHub/GitLab
+  compare `state` + label; Jira walks the live workflow graph from the item's
+  actual current status; Shortcut checks `completed`). A rate-limited response
+  means GitHub/GitLab/Jira rejected the request before applying it, so retrying
+  a request that never took effect cannot double-apply — and if a prior
+  attempt's write *did* land despite our client not observing the response,
+  the next attempt's read sees the target state and no-ops rather than
+  re-issuing the write.
+
+  `Trackers.update_fields/2` (the gated-field push in
+  `ensure_gated_fields_pushed/2`) is a plain "set these fields to these
+  values" PUT/PATCH — repeating it with the same values is a no-op, so it
+  would also be safe to retry, though it currently is not (see below).
+
+  The one non-idempotent write in this module, `add_comment/2` (posting the
+  `:pr_opened` PR-link comment), is deliberately **outside** the retry loop:
+  `comment_pr/2` calls it directly, not through `do_transition/3`, so a
+  rate-limited comment post fails (or escalates) once rather than risking a
+  duplicate comment on retry.
   """
 
   require Logger
@@ -117,9 +142,9 @@ defmodule Arbiter.Trackers.Sync do
   @base_rate_limit_backoff_ms 1_000
   @max_rate_limit_backoff_ms 30_000
 
-  defp do_transition(issue, event), do: do_transition(issue, event, 0)
+  defp do_transition(issue, event), do: do_transition(issue, event, 0, monotonic_ms())
 
-  defp do_transition(issue, event, attempt) do
+  defp do_transition(issue, event, attempt, start_ms) do
     case Trackers.transition(issue, event) do
       :ok ->
         :ok
@@ -134,7 +159,7 @@ defmodule Arbiter.Trackers.Sync do
         )
 
         sleep(wait_ms)
-        do_transition(issue, event, attempt + 1)
+        do_transition(issue, event, attempt + 1, start_ms)
 
       {:error, %{kind: :validation_failed} = reason} ->
         # A validation_failed can be a race: e.g. GitHub auto-closed the issue via a
@@ -159,6 +184,10 @@ defmodule Arbiter.Trackers.Sync do
           # Reaches here for a `:rate_limited` error once retries are exhausted
           # too — `loud?/1` treats it like any other non-benign kind, so it
           # still escalates (deduplicated) rather than dropping silently.
+          # Annotate with how many attempts were made and over what window so
+          # the escalation body can say "we tried and GitHub kept refusing"
+          # rather than "we gave up instantly" (acceptance criterion).
+          reason = annotate_retry_exhausted(reason, attempt, start_ms)
           notify_failure(issue, event, reason)
           {:error, reason}
         else
@@ -187,6 +216,23 @@ defmodule Arbiter.Trackers.Sync do
     jitter = :rand.uniform(div(base, 4) + 1)
     min(base + jitter, @max_rate_limit_backoff_ms)
   end
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  # Only a rate_limited reason carries retry history (every other kind fails
+  # on the first attempt, so "1 attempt over ~0ms" would be noise). `attempt`
+  # is the 0-indexed retry count reached, so the total tries made is
+  # `attempt + 1`.
+  defp annotate_retry_exhausted(%{kind: :rate_limited} = reason, attempt, start_ms) do
+    base = if is_struct(reason), do: Map.from_struct(reason), else: reason
+
+    Map.merge(base, %{
+      retry_attempts: attempt + 1,
+      retry_elapsed_ms: monotonic_ms() - start_ms
+    })
+  end
+
+  defp annotate_retry_exhausted(reason, _attempt, _start_ms), do: reason
 
   # Overridable in tests (`Application.put_env(:arbiter, :tracker_sync_retry_sleep_fun, fun)`)
   # so rate-limit backoff never actually blocks the test suite.
@@ -451,7 +497,16 @@ defmodule Arbiter.Trackers.Sync do
 
   # This escalates only after `@max_rate_limit_retries` retries with backoff
   # were already exhausted (see `do_transition/3`) — a status_map hint would
-  # be actively misleading here.
+  # be actively misleading here. `retry_attempts`/`retry_elapsed_ms` are set
+  # by `annotate_retry_exhausted/3` so the log line (like the escalation body)
+  # distinguishes "we tried and GitHub kept refusing" from "we gave up
+  # instantly".
+  defp log_hint(%{kind: :rate_limited, retry_attempts: attempts, retry_elapsed_ms: elapsed_ms})
+       when is_integer(attempts) and is_integer(elapsed_ms) do
+    "Retried #{attempts} time(s) over #{format_elapsed(elapsed_ms)} honoring the tracker's " <>
+      "Retry-After/backoff, but the rate limit never cleared — check the workspace's remaining quota."
+  end
+
   defp log_hint(%{kind: :rate_limited}),
     do:
       "The tracker's rate limit did not clear within the retry budget — check the workspace's remaining quota."
@@ -462,6 +517,8 @@ defmodule Arbiter.Trackers.Sync do
 
   defp log_hint(_reason),
     do: "Reconcile the workspace status_map / transition_graph with the tracker workflow."
+
+  defp format_elapsed(ms) when is_integer(ms), do: "#{Float.round(ms / 1000, 1)}s"
 
   defp load_workspace(nil), do: nil
 
