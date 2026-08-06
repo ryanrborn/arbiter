@@ -73,6 +73,18 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
 
+  # bd-bvxdy9: a workflow failure carrying a rate-limit retry hint
+  # (`kind: :rate_limited`, `retry_after_ms`) used to fall straight to a
+  # terminal `:failed` record — `complete_failed_review/1`'s only special case
+  # was the `:file_findings` post-failure salvage path. Bounded retry mirrors
+  # the precedent in `Arbiter.Trackers.Sync` and `ReviewPatrol`'s circuit
+  # breaker, which both honor the same field. Capped at
+  # `@max_rate_limit_wait_ms` per attempt (same cap `ReviewPatrol` uses) so a
+  # very long hint (e.g. a primary-quota reset an hour out) doesn't strand the
+  # task's supervised process for the full window.
+  @max_rate_limit_retries 2
+  @max_rate_limit_wait_ms 30 * 60_000
+
   @type opts :: [
           pr: String.t(),
           repo: String.t() | nil,
@@ -183,7 +195,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
 
-      case run_workflow(prepared, opts, record) do
+      case run_workflow_with_retries(prepared, opts, record) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
           resolve_pr_state_on_complete(record, prepared.workspace)
@@ -672,6 +684,60 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
+  # Bounded retry for a `run_workflow/3` failure that carries a rate-limit
+  # retry hint (bd-bvxdy9). Every other failure (including a rate_limited one
+  # with no `retry_after_ms`) returns immediately on the first attempt, same
+  # as before this change.
+  defp run_workflow_with_retries(prepared, opts, record) do
+    run_workflow_with_retries(prepared, opts, record, 0)
+  end
+
+  defp run_workflow_with_retries(prepared, opts, record, attempt) do
+    case run_workflow(prepared, opts, record) do
+      {:ok, _result} = ok ->
+        ok
+
+      {:error, reason} = err ->
+        case rate_limited_retry_after_ms(reason) do
+          ms when is_integer(ms) and attempt < @max_rate_limit_retries ->
+            wait_ms = min(ms, @max_rate_limit_wait_ms)
+
+            Logger.warning(
+              "ExternalReview: #{prepared.mr_ref} rate-limited " <>
+                "(attempt #{attempt + 1}/#{@max_rate_limit_retries}) — " <>
+                "retrying in #{wait_ms}ms: #{inspect(reason)}"
+            )
+
+            sleep(wait_ms)
+            run_workflow_with_retries(prepared, opts, record, attempt + 1)
+
+          _ ->
+            err
+        end
+    end
+  end
+
+  # A rate-limited error can surface at any workflow step, always wrapped as
+  # `{step, adapter_error}` (mirrors `extract_failure_stage/1` below). Only a
+  # positive `retry_after_ms` triggers a retry — a rate_limited error with no
+  # hint falls through to the existing terminal-failure behavior.
+  defp rate_limited_retry_after_ms({_step, reason}), do: rate_limited_retry_after_ms(reason)
+
+  defp rate_limited_retry_after_ms(%{kind: :rate_limited, retry_after_ms: ms})
+       when is_integer(ms) and ms > 0,
+       do: ms
+
+  defp rate_limited_retry_after_ms(_reason), do: nil
+
+  # Overridable in tests (`Application.put_env(:arbiter, :external_review_retry_sleep_fun, fun)`)
+  # so rate-limit retry backoff never actually blocks the test suite.
+  defp sleep(ms) do
+    case Application.get_env(:arbiter, :external_review_retry_sleep_fun) do
+      fun when is_function(fun, 1) -> fun.(ms)
+      _ -> Process.sleep(ms)
+    end
+  end
+
   # Best-effort: resolve the PR's head SHA (+ base branch) via the adapter,
   # then hand the SHA to `Checkout.provision/2`. Returns `{path, base_ref}` on
   # success, `{nil, nil}` on any failure (missing repo_path, adapter can't
@@ -876,7 +942,7 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp start_async(prepared, opts, record) do
     Task.Supervisor.start_child(@task_supervisor, fn ->
-      case run_workflow(prepared, opts, record) do
+      case run_workflow_with_retries(prepared, opts, record) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
           resolve_pr_state_on_complete(record, prepared.workspace)

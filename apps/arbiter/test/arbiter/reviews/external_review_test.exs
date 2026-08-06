@@ -1084,6 +1084,114 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  describe "review/1 — rate-limited failures honor retry_after_ms (bd-bvxdy9)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      Application.put_env(:arbiter, :external_review_retry_sleep_fun, fn _ms -> :ok end)
+
+      on_exit(fn ->
+        System.delete_env(@env_var)
+        Application.delete_env(:arbiter, :external_review_retry_sleep_fun)
+      end)
+
+      :ok
+    end
+
+    # Uses `x-ratelimit-reset` (the *primary*-quota header), not `Retry-After`
+    # (the *secondary*/abuse header) — the latter also triggers
+    # `Arbiter.Mergers.Github`'s own internal secondary-limit retry loop
+    # before the error ever reaches `ExternalReview`, which would confound
+    # the call counts these tests assert on.
+    defp rate_limited_diff_response(conn) do
+      reset_epoch = System.os_time(:second) + 1
+
+      conn
+      |> Plug.Conn.put_resp_header("x-ratelimit-reset", Integer.to_string(reset_epoch))
+      |> Plug.Conn.put_resp_header("content-type", "application/json")
+      |> Plug.Conn.resp(403, Jason.encode!(%{"message" => "API rate limit exceeded"}))
+    end
+
+    test "retries a rate-limited read_diff and succeeds once the forge recovers" do
+      ws = github_ws("er-ratelimit-1")
+      counter = :counters.new(1, [])
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+        cond do
+          conn.method == "GET" and diff? ->
+            :counters.add(counter, 1, 1)
+
+            if :counters.get(counter, 1) == 1 do
+              rate_limited_diff_response(conn)
+            else
+              conn
+              |> Plug.Conn.put_resp_header("content-type", "text/plain")
+              |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+ok\n")
+            end
+
+          conn.method == "POST" and conn.request_path =~ ~r{/reviews$} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{"id" => 1}))
+
+          true ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{}))
+        end
+      end)
+
+      runner = fn _diff, _state -> {:ok, []} end
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{verdict: :approve}} =
+                   ExternalReview.review(
+                     pr: "octo/widget#42",
+                     workspace: ws.name,
+                     follow_up: false,
+                     check_runner: runner
+                   )
+        end)
+
+      assert log =~ "rate-limited"
+      assert :counters.get(counter, 1) == 2
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.status == :completed
+    end
+
+    test "exhausts bounded retries and still fails terminally when the forge never recovers" do
+      ws = github_ws("er-ratelimit-2")
+      counter = :counters.new(1, [])
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+        if conn.method == "GET" and diff? do
+          :counters.add(counter, 1, 1)
+          rate_limited_diff_response(conn)
+        else
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(200, Jason.encode!(%{}))
+        end
+      end)
+
+      assert {:error, _reason} =
+               ExternalReview.review(pr: "octo/widget#42", workspace: ws.name, follow_up: false)
+
+      # 1 initial attempt + 2 retries (the module's bounded max) = 3 calls total.
+      assert :counters.get(counter, 1) == 3
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.status == :failed
+      assert rec.failure_stage == "read_diff"
+      assert String.contains?(rec.failure_reason, "rate limit")
+    end
+  end
+
   describe "review/1 — external_review event broadcast (bd-6f9u6z)" do
     setup do
       System.put_env(@env_var, "test-token")

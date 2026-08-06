@@ -254,7 +254,8 @@ defmodule Arbiter.Workflows.MergeQueue do
           resolver_spawned_at: DateTime.t() | nil,
           prior_status: status() | nil,
           base_updated_at: DateTime.t() | nil,
-          last_handled_review_id: term() | nil
+          last_handled_review_id: term() | nil,
+          retry_not_before: DateTime.t() | nil
         }
 
   defmodule State do
@@ -712,6 +713,20 @@ defmodule Arbiter.Workflows.MergeQueue do
     {item, state}
   end
 
+  # bd-bvxdy9: a rate-limited poll used to be re-attempted on the very next
+  # fixed 30s tick regardless of how long the forge asked us to wait
+  # (`retry_after_ms`) — wasting calls against a still-active limit (e.g. 8
+  # calls in 4 minutes against a 231s hint). Skip the adapter call entirely
+  # until `retry_not_before` has passed; once it has, fall through to a real
+  # poll below (which clears the field on both success and a fresh error).
+  defp poll_item(state, %{retry_not_before: %DateTime{} = not_before} = item) do
+    if DateTime.compare(now(), not_before) == :lt do
+      {item, state}
+    else
+      poll_item(state, %{item | retry_not_before: nil})
+    end
+  end
+
   defp poll_item(state, item) do
     # Multi-GitLab-project workspaces (bd-c9vb0r): the queue's process dict
     # holds one active merger config at a time, but a single poll cycle walks
@@ -746,14 +761,43 @@ defmodule Arbiter.Workflows.MergeQueue do
         # status alone so the next tick gets a real chance to retry — a
         # genuinely permanent error just keeps logging every tick instead of
         # vanishing.
+        #
+        # bd-bvxdy9: when the error carries a rate-limit retry hint, don't
+        # just retry on the next fixed tick — that used to burn a call every
+        # 30s against a limit the forge told us wouldn't clear for minutes.
+        # Park the item until `retry_not_before` instead.
+        retry_after_ms = rate_limited_retry_after_ms(reason)
+        retry_not_before = retry_after_ms && DateTime.add(now(), retry_after_ms, :millisecond)
+
         Logger.warning(
           "MergeQueue: poll failed for task=#{item.task_id} mr_ref=#{item.mr_ref}: " <>
-            "#{inspect(reason)} — will retry next tick"
+            "#{inspect(reason)} — " <>
+            if(retry_not_before,
+              do: "rate-limited, will retry in #{retry_after_ms}ms",
+              else: "will retry next tick"
+            )
         )
 
-        {%{item | last_error: reason, last_polled_at: DateTime.utc_now()}, state}
+        {
+          %{
+            item
+            | last_error: reason,
+              last_polled_at: DateTime.utc_now(),
+              retry_not_before: retry_not_before
+          },
+          state
+        }
     end
   end
+
+  # Only a rate-limited error with a positive retry hint changes scheduling —
+  # every other kind (including a rate-limited error with no hint) keeps the
+  # existing fixed-tick retry behavior.
+  defp rate_limited_retry_after_ms(%{kind: :rate_limited, retry_after_ms: ms})
+       when is_integer(ms) and ms > 0,
+       do: ms
+
+  defp rate_limited_retry_after_ms(_reason), do: nil
 
   # Walk the MR state through the status machine. We re-evaluate the
   # *current* status against the adapter response on every tick so a long-lived
@@ -1278,10 +1322,21 @@ defmodule Arbiter.Workflows.MergeQueue do
       resolver_spawned_at: nil,
       prior_status: nil,
       base_updated_at: nil,
-      last_handled_review_id: nil
+      last_handled_review_id: nil,
+      retry_not_before: nil
     }
 
     Map.merge(base, Map.new(overrides))
+  end
+
+  # Overridable in tests (`Application.put_env(:arbiter, :merge_queue_clock_fun, fun)`)
+  # so a rate-limit `retry_not_before` window can be fast-forwarded without an
+  # actual sleep — mirrors `Arbiter.Workflows.ReviewPatrol`'s clock override.
+  defp now do
+    case Application.get_env(:arbiter, :merge_queue_clock_fun) do
+      fun when is_function(fun, 0) -> fun.()
+      _ -> DateTime.utc_now()
+    end
   end
 
   defp already_queued?(%State{items: items}, task_id) do
