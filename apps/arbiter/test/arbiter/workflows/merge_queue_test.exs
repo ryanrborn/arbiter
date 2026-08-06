@@ -159,6 +159,18 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   defp stub(fun), do: Req.Test.stub(Arbiter.Mergers.Github.HTTP, fun)
 
+  # Drains every {:priority_seen, method, path, priority} message currently
+  # in the mailbox, so a test can assert on the full set of observed calls
+  # instead of a single assert_received match (bd-b88l3l finding 2).
+  defp drain_priority_seen do
+    receive do
+      {:priority_seen, method, path, priority} ->
+        [{method, path, priority} | drain_priority_seen()]
+    after
+      0 -> []
+    end
+  end
+
   defp gitlab_stub(fun), do: Req.Test.stub(Arbiter.Mergers.Gitlab.HTTP, fun)
 
   # Raw GitHub PR payload for the GET /pulls/{N} endpoint.
@@ -659,11 +671,14 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     # Limiter can pause it under quota pressure instead of it silently
     # running at the un-throttled :foreground default.
     @tag workspace_config: @ws_github
-    test "tags its forge calls with :background priority", %{workspace: ws, task: task} do
+    test "tags its polling calls with :background priority, not just any call", %{
+      workspace: ws,
+      task: task
+    } do
       test_pid = self()
 
       stub(fn conn ->
-        send(test_pid, {:priority_seen, Limiter.current_priority()})
+        send(test_pid, {:priority_seen, conn.method, conn.request_path, Limiter.current_priority()})
 
         cond do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
@@ -686,7 +701,81 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
-      assert_received {:priority_seen, :background}
+      # Drain every observed call rather than asserting on a single message —
+      # assert_received only needs one match anywhere in the mailbox, so it
+      # can't distinguish "the poll was tagged" from "some unrelated call
+      # happened to be tagged" (bd-b88l3l finding 2).
+      calls = drain_priority_seen()
+
+      # enqueue runs entirely before tick, outside with_priority — ambient
+      # :foreground. This includes the POST /pulls that opens the PR and the
+      # bare GET /pulls existence check open_with_retry does first.
+      assert {"POST", _path, :foreground} =
+               Enum.find(calls, fn {method, _, _} -> method == "POST" end)
+
+      assert {"GET", "/repos/octo/widget/pulls", :foreground} in calls
+
+      # tick's polling of the enqueued item (GET pulls/70, GET
+      # pulls/70/reviews) is the pass-1 work this bead tags :background.
+      get_priorities =
+        calls
+        |> Enum.filter(fn {method, path, _} ->
+          method == "GET" and String.contains?(path, "/pulls/70")
+        end)
+        |> Enum.map(fn {_, _, priority} -> priority end)
+
+      assert length(get_priorities) > 0
+      assert Enum.all?(get_priorities, &(&1 == :background))
+    end
+
+    @tag workspace_config: @ws_github_squash
+    test "tags its merge call with :foreground priority, never :background", %{
+      workspace: ws,
+      task: task
+    } do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:priority_seen, conn.method, conn.request_path, Limiter.current_priority()})
+
+        cond do
+          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{
+              "number" => 50,
+              "html_url" => "https://github.com/octo/widget/pull/50"
+            })
+
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews_payload("APPROVED"))
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/50") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload(%{"number" => 50}))
+
+          conn.method == "PUT" and String.ends_with?(conn.request_path, "/merge") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"merged" => true, "sha" => "deadbeef"})
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      :ok = MergeQueue.tick(name)
+
+      calls = drain_priority_seen()
+
+      # The merge (PUT .../merge, pass 2) must stay :foreground: Limiter
+      # classifies PR merges as never-throttled foreground work, and a merge
+      # withheld under :background would strand the item (bd-b88l3l finding 1).
+      assert {"PUT", path, :foreground} =
+               Enum.find(calls, fn {method, _, _} -> method == "PUT" end)
+
+      assert String.ends_with?(path, "/merge")
     end
 
     @tag workspace_config: @ws_github_squash

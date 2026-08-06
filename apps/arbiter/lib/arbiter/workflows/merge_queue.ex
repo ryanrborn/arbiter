@@ -633,26 +633,30 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  # All GitHub/GitLab traffic this cycle issues is background (bd-b88l3l): this
-  # queue polls on a 30s timer and must yield to — and never starve —
-  # foreground work like a deploy or a human-triggered merge. `with_priority/2`
-  # tags the current process for the duration of the poll; the forge clients
-  # read that ambient class at their request seam. Runs synchronously in the
-  # queue's process, so the tag applies.
-  defp poll_all(state) do
-    Limiter.with_priority(:background, fn -> poll_all_body(state) end)
-  end
-
-  defp poll_all_body(%State{items: items} = state) do
-    # Pass 1: poll + advance each item up to (but not through) the merge. Items
-    # that are approved, CI-clean, and up-to-date park at :ready_to_merge;
-    # behind-base items are rebased forward and park at :updating_base.
+  # Pass 1 (polling) is background (bd-b88l3l): this queue polls on a 30s
+  # timer and must yield to — and never starve — foreground work like a
+  # deploy or a human-triggered merge. `with_priority/2` tags the current
+  # process for the duration of the poll; the forge clients read that ambient
+  # class at their request seam. Runs synchronously in the queue's process,
+  # so the tag applies.
+  #
+  # Pass 2 (merge admission) deliberately stays at the ambient :foreground
+  # priority: `Limiter` classifies PR merges as never-throttled foreground
+  # work, and `try_merge/2` has no retry path — a merge withheld by a
+  # background pause would strand the item at :failed permanently.
+  defp poll_all(%State{items: items} = state) do
     {advanced, state} =
-      Enum.map_reduce(items, state, fn item, acc -> poll_item(acc, item) end)
+      Limiter.with_priority(:background, fn ->
+        # Pass 1: poll + advance each item up to (but not through) the merge.
+        # Items that are approved, CI-clean, and up-to-date park at
+        # :ready_to_merge; behind-base items are rebased forward and park at
+        # :updating_base.
+        Enum.map_reduce(items, state, fn item, acc -> poll_item(acc, item) end)
+      end)
 
     # Pass 2: serialized merge admission — merge at most one front-of-queue item
     # per cycle so the queue integrates one PR at a time against a frozen base
-    # (Phase 3, base-aware serialized merge).
+    # (Phase 3, base-aware serialized merge). Runs at :foreground (see above).
     {advanced, state} = admit_one_merge(state, advanced)
 
     # Drop items that have reached :done — they've been closed already.
@@ -1137,6 +1141,21 @@ defmodule Arbiter.Workflows.MergeQueue do
         item = %{item | status: :done}
         state = close_task_and_finalize(state, item)
         {item, state}
+
+      {:error, %{raw: %Limiter.Paused{}} = reason} ->
+        # Defense in depth: a merge withheld by the limiter (e.g. any future
+        # pause path reaching here) is transient, not a genuine merge
+        # failure. The forge client wraps `%Limiter.Paused{}` in its own
+        # error struct (`raw:` preserves the original), so match on that
+        # rather than the outer shape. Leave status untouched — same
+        # rationale as poll_item/2's :error clause — so the next tick
+        # retries instead of parking the item at :failed with no way back in.
+        Logger.warning(
+          "MergeQueue: merge withheld by limiter for task=#{item.task_id} " <>
+            "mr_ref=#{item.mr_ref}: #{inspect(reason)} — will retry next tick"
+        )
+
+        {%{item | last_error: reason}, state}
 
       {:error, reason} ->
         {%{item | status: :failed, last_error: reason}, state}
