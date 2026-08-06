@@ -1232,6 +1232,35 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       %{items: [item]} = MergeQueue.state(name)
       assert item.retry_not_before == nil
     end
+
+    # Reviewer finding #2 (round 1): an uncapped `retry_after_ms` (e.g. from a
+    # skewed client clock or a malformed `x-ratelimit-reset`) must not park an
+    # item for hours — cap at `@max_rate_limit_park_ms` (30 min), mirroring
+    # the precedent in `ExternalReview`/`ReviewPatrol`.
+    @tag workspace_config: @ws_github
+    test "an uncapped retry hint is clamped to the 30-minute park cap", %{
+      workspace: ws,
+      task: task
+    } do
+      pr_number = 403
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      # A 2-hour hint — far past the 30-minute cap.
+      stub(fn conn -> rate_limited_get_response(conn, 2 * 60 * 60) end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
+      assert log =~ "will retry in 1800000ms"
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert %DateTime{} = item.retry_not_before
+
+      seconds_until_retry = DateTime.diff(item.retry_not_before, DateTime.utc_now(), :second)
+      assert seconds_until_retry <= 1800
+      assert seconds_until_retry > 1700
+    end
   end
 
   describe ":merged tracker lifecycle (bd-blwx2u)" do

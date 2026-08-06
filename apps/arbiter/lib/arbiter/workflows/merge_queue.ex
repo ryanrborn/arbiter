@@ -226,6 +226,15 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   @default_poll_interval_ms 30_000
 
+  # bd-bvxdy9: cap how long a rate-limited poll parks an item, mirroring the
+  # precedent in `Arbiter.Reviews.ExternalReview` (`@max_rate_limit_wait_ms`)
+  # and `ReviewPatrol` (`@rate_limit_max_backoff_ms`). `retry_after_ms` for
+  # the primary quota is derived from `x-ratelimit-reset` minus the local
+  # clock (`mergers/github.ex`) — an uncapped value from a skewed client
+  # clock or a malformed header could park an item for hours with no further
+  # log trace, the exact silent-stranding mode bd-6w7j8h exists to prevent.
+  @max_rate_limit_park_ms 30 * 60_000
+
   @typedoc "Status atom for an in-flight item."
   @type status ::
           :opening
@@ -767,13 +776,16 @@ defmodule Arbiter.Workflows.MergeQueue do
         # 30s against a limit the forge told us wouldn't clear for minutes.
         # Park the item until `retry_not_before` instead.
         retry_after_ms = rate_limited_retry_after_ms(reason)
-        retry_not_before = retry_after_ms && DateTime.add(now(), retry_after_ms, :millisecond)
+        capped_retry_after_ms = retry_after_ms && min(retry_after_ms, @max_rate_limit_park_ms)
+
+        retry_not_before =
+          capped_retry_after_ms && DateTime.add(now(), capped_retry_after_ms, :millisecond)
 
         Logger.warning(
           "MergeQueue: poll failed for task=#{item.task_id} mr_ref=#{item.mr_ref}: " <>
             "#{inspect(reason)} — " <>
             if(retry_not_before,
-              do: "rate-limited, will retry in #{retry_after_ms}ms",
+              do: "rate-limited, will retry in #{capped_retry_after_ms}ms",
               else: "will retry next tick"
             )
         )

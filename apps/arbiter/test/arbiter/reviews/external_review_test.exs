@@ -1103,7 +1103,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     # before the error ever reaches `ExternalReview`, which would confound
     # the call counts these tests assert on.
     defp rate_limited_diff_response(conn) do
-      reset_epoch = System.os_time(:second) + 1
+      # +5s margin, not +1s: the sleep is stubbed out so a bigger hint costs
+      # nothing, and a 1s margin can tick to `ms <= 0` between building this
+      # header and `reset_retry_after_ms/1` parsing it, silently dropping the
+      # retry these tests assert on.
+      reset_epoch = System.os_time(:second) + 5
 
       conn
       |> Plug.Conn.put_resp_header("x-ratelimit-reset", Integer.to_string(reset_epoch))
@@ -1189,6 +1193,84 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert rec.status == :failed
       assert rec.failure_stage == "read_diff"
       assert String.contains?(rec.failure_reason, "rate limit")
+    end
+
+    # Reviewer finding #1 (round 1): a rate-limited failure past `:read_diff`
+    # must NOT retry — `Arbiter.Workflow.run/2` restarts from `:load_pr` with
+    # fresh state, so retrying here would re-post every inline comment
+    # `:file_findings` already landed (no dedupe on `post_inline_comment`).
+    test "does not retry a rate-limited failure at :verdict (post-:file_findings) — no double-post" do
+      ws = github_ws("er-ratelimit-3")
+      comment_counter = :counters.new(1, [])
+      review_counter = :counters.new(1, [])
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        path = conn.request_path
+        diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+        cond do
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(
+              200,
+              "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
+            )
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+            json(conn, %{
+              "number" => 42,
+              "state" => "open",
+              "head" => %{"sha" => "sha-rl3"},
+              "user" => %{"login" => "coworker"},
+              "html_url" => "https://github.com/octo/widget/pull/42",
+              "title" => "Fix widget overflow",
+              "body" => "Closes #42"
+            })
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
+            json(conn, [])
+
+          conn.method == "GET" and path =~ ~r{/commits/.+/check-runs$} ->
+            json(conn, %{"check_runs" => []})
+
+          conn.method == "POST" and path =~ ~r{/comments$} ->
+            :counters.add(comment_counter, 1, 1)
+            json(conn, %{"id" => 1})
+
+          conn.method == "POST" and path =~ ~r{/reviews$} ->
+            :counters.add(review_counter, 1, 1)
+            rate_limited_diff_response(conn)
+
+          true ->
+            json(conn, %{})
+        end
+      end)
+
+      runner = fn _diff, _state ->
+        {:ok, [%{severity: :error, file: "x.ex", line: 1, message: "boom"}]}
+      end
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, _reason} =
+                   ExternalReview.review(
+                     pr: "octo/widget#42",
+                     workspace: ws.name,
+                     follow_up: false,
+                     check_runner: runner
+                   )
+        end)
+
+      refute log =~ "rate-limited"
+      # One inline comment posted, one verdict-submission attempt — neither
+      # retried/duplicated.
+      assert :counters.get(comment_counter, 1) == 1
+      assert :counters.get(review_counter, 1) == 1
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.status == :failed
+      assert rec.failure_stage == "verdict"
     end
   end
 

@@ -184,6 +184,12 @@ defmodule Arbiter.Reviews.ExternalReview do
   (`:approve | :request_changes`), the number of `:findings`, and the resolved
   `:mr_ref` / `:link`. Returns `{:error, reason}` on a validation or workflow
   failure.
+
+  A `:load_pr`/`:read_diff` failure carrying a rate-limit `retry_after_ms`
+  hint (bd-bvxdy9) is retried in-process (`Process.sleep/1`) up to
+  `#{@max_rate_limit_retries}` times, each capped at `#{@max_rate_limit_wait_ms}`ms —
+  worst case this call blocks the caller for up to
+  `#{@max_rate_limit_retries * @max_rate_limit_wait_ms}`ms before returning.
   """
   @spec review(opts() | map()) :: {:ok, map()} | {:error, term()}
   def review(opts) do
@@ -721,7 +727,20 @@ defmodule Arbiter.Reviews.ExternalReview do
   # `{step, adapter_error}` (mirrors `extract_failure_stage/1` below). Only a
   # positive `retry_after_ms` triggers a retry — a rate_limited error with no
   # hint falls through to the existing terminal-failure behavior.
-  defp rate_limited_retry_after_ms({_step, reason}), do: rate_limited_retry_after_ms(reason)
+  #
+  # Gated to `:load_pr`/`:read_diff` only (reviewer finding #1, round 1):
+  # `Arbiter.Workflow.run/2` always restarts from the first step with fresh
+  # state, so retrying a failure from `:run_checks`/`:file_findings`/`:verdict`
+  # would re-run every step before it — re-shelling a billable `claude --print`
+  # review and, worse, re-posting every inline comment via `post_inline_comment`
+  # (no dedupe there). `:load_pr` and `:read_diff` are read-only against the
+  # forge, so restarting from scratch after either is side-effect-free. A
+  # failure from any later step falls through to the existing terminal/salvage
+  # path unchanged.
+  defp rate_limited_retry_after_ms({step, reason}) when step in [:load_pr, :read_diff],
+    do: rate_limited_retry_after_ms(reason)
+
+  defp rate_limited_retry_after_ms({_step, _reason}), do: nil
 
   defp rate_limited_retry_after_ms(%{kind: :rate_limited, retry_after_ms: ms})
        when is_integer(ms) and ms > 0,
