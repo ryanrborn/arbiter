@@ -5,6 +5,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   import ExUnit.CaptureLog
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.TargetBranch
@@ -654,6 +655,40 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   end
 
   describe ":tick polling" do
+    # bd-b88l3l: MergeQueue's forge traffic must be tagged :background so the
+    # Limiter can pause it under quota pressure instead of it silently
+    # running at the un-throttled :foreground default.
+    @tag workspace_config: @ws_github
+    test "tags its forge calls with :background priority", %{workspace: ws, task: task} do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:priority_seen, Limiter.current_priority()})
+
+        cond do
+          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 70})
+
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/70") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => 70, "mergeStateStatus" => "blocked"}))
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      :ok = MergeQueue.tick(name)
+
+      assert_received {:priority_seen, :background}
+    end
+
     @tag workspace_config: @ws_github_squash
     test "approved + ci_clean → merges with squash and closes the task", %{
       workspace: ws,

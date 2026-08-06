@@ -212,6 +212,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   require Logger
   require Ash.Query
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers
@@ -632,7 +633,17 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  defp poll_all(%State{items: items} = state) do
+  # All GitHub/GitLab traffic this cycle issues is background (bd-b88l3l): this
+  # queue polls on a 30s timer and must yield to — and never starve —
+  # foreground work like a deploy or a human-triggered merge. `with_priority/2`
+  # tags the current process for the duration of the poll; the forge clients
+  # read that ambient class at their request seam. Runs synchronously in the
+  # queue's process, so the tag applies.
+  defp poll_all(state) do
+    Limiter.with_priority(:background, fn -> poll_all_body(state) end)
+  end
+
+  defp poll_all_body(%State{items: items} = state) do
     # Pass 1: poll + advance each item up to (but not through) the merge. Items
     # that are approved, CI-clean, and up-to-date park at :ready_to_merge;
     # behind-base items are rebased forward and park at :updating_base.
