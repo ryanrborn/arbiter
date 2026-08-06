@@ -1989,6 +1989,63 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  describe "dispatch/1 — dispatched_by caller attribution (bd-974ozf)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "stores dispatched_by when provided in dispatch options" do
+      ws = github_ws("er-dispatched-by")
+
+      assert {:ok, _ack} =
+               ExternalReview.dispatch(
+                 pr: "octo/widget#123",
+                 workspace: ws.name,
+                 dispatched_by: "mcp"
+               )
+
+      [record] = records_for(ws.id, "octo/widget#123")
+      assert record.dispatched_by == "mcp"
+    end
+
+    test "accepts various dispatched_by values" do
+      ws = github_ws("er-dispatched-by-various")
+
+      callers = ["mcp", "http_api", "bd-abc123", "webhook"]
+
+      for {caller, index} <- Enum.with_index(callers) do
+        assert {:ok, _ack} =
+                 ExternalReview.dispatch(
+                   pr: "octo/widget##{100 + index}",
+                   workspace: ws.name,
+                   dispatched_by: caller
+                 )
+      end
+
+      # Verify all records have their respective dispatched_by values
+      assert {:ok, records} =
+               Ash.read(Record |> Ash.Query.filter(workspace_id == ^ws.id))
+
+      dispatchers = records |> Enum.map(& &1.dispatched_by) |> Enum.sort()
+      assert dispatchers == ["bd-abc123", "http_api", "mcp", "webhook"]
+    end
+
+    test "allows nil dispatched_by for backwards compatibility" do
+      ws = github_ws("er-dispatched-by-nil")
+
+      assert {:ok, _ack} =
+               ExternalReview.dispatch(
+                 pr: "octo/widget#456",
+                 workspace: ws.name
+               )
+
+      [record] = records_for(ws.id, "octo/widget#456")
+      assert is_nil(record.dispatched_by)
+    end
+  end
+
   describe "automation :off guard (bd-7opdaf Part 2)" do
     setup do
       System.put_env(@env_var, "test-token")
