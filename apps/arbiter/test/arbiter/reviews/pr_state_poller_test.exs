@@ -9,6 +9,7 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
   # registry and the per-process active-config dictionary.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Reviews.{PrStatePoller, Record}
   alias Arbiter.Tasks.Workspace
 
@@ -136,5 +137,32 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
     assert :ok = PrStatePoller.poll(poller)
 
     assert Ash.get!(Record, rec.id).pr_state == "n/a"
+  end
+
+  # bd-b88l3l: the poller's forge traffic must be tagged :background so the
+  # Limiter can pause it under quota pressure instead of it silently running
+  # at the un-throttled :foreground default.
+  test "tags its forge calls with :background priority" do
+    ws = github_ws()
+    record(ws, %{pr_state: nil})
+
+    test_pid = self()
+
+    stub_pr(fn conn ->
+      send(test_pid, {:priority_seen, Limiter.current_priority()})
+
+      case conn.request_path do
+        "/repos/octo/widget/pulls/42" ->
+          Req.Test.json(conn, %{"state" => "open", "merged" => false, "html_url" => "u"})
+
+        _ ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end
+    end)
+
+    poller = start_poller()
+    assert :ok = PrStatePoller.poll(poller)
+
+    assert_received {:priority_seen, :background}
   end
 end

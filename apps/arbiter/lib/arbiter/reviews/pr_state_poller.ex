@@ -31,6 +31,7 @@ defmodule Arbiter.Reviews.PrStatePoller do
   require Logger
   require Ash.Query
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Reviews.{PrState, Record}
   alias Arbiter.Tasks.Workspace
 
@@ -87,10 +88,20 @@ defmodule Arbiter.Reviews.PrStatePoller do
 
   # ---- internals -----------------------------------------------------------
 
+  # All GitHub traffic this cycle issues is background (bd-b88l3l): this poller
+  # runs unattended on a timer and must yield to — and never starve —
+  # foreground work like a deploy or a PR merge. `with_priority/2` tags the
+  # current process for the duration of the cycle; the GitHub clients read
+  # that ambient class at their request seam. Runs synchronously in the
+  # poller process, so the tag applies.
+  defp run_cycle(state) do
+    Limiter.with_priority(:background, fn -> run_cycle_body(state) end)
+  end
+
   # Resolve pr_state for every non-terminal record. Best-effort throughout: a DB
   # read failure yields an empty set, and each record is resolved under its own
   # rescue so one bad row never aborts the cycle.
-  defp run_cycle(state) do
+  defp run_cycle_body(state) do
     records = stale_records(state.fetch_limit)
 
     if records != [] do
