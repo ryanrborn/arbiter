@@ -170,7 +170,8 @@ defmodule ArbiterWeb.Api.WorkerController do
         workspace: params["workspace"],
         # report_only (propose) / automation flow through to ExternalReview, which
         # resolves whether the review posts to the PR or only reports (bd-36qzgx).
-        automation: params["automation"]
+        automation: params["automation"],
+        dispatched_by: "http_api"
       ]
       |> maybe_put_report_only(params["report_only"])
 

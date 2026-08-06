@@ -1301,7 +1301,8 @@ defmodule Arbiter.MCP.Tools do
           workspace: ws_ref,
           automation: fetch_string(args, "automation"),
           tracker_context_ref: fetch_string(args, "tracker_context_ref"),
-          tracker_context_type: fetch_string(args, "tracker_context_type")
+          tracker_context_type: fetch_string(args, "tracker_context_type"),
+          dispatched_by: "mcp"
         ]
         |> maybe_put_kw(:follow_up, follow_up)
         |> maybe_put_kw(:force, force)
