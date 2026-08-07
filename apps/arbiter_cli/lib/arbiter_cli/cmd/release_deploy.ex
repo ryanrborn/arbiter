@@ -122,8 +122,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     if not force and current_target_basename(current_link) == tag do
       emit_already_current(mode, tag)
     else
-      # Snapshot doctor state before touching anything, so a fatal check
-      # that's already red (pre-existing condition) is distinguishable from
+      # Snapshot doctor state before touching anything, so a readiness-blocking
+      # check that's already red (pre-existing condition) is distinguishable from
       # one caused by the release being deployed. Without this, a timed-out
       # green-wait reads identically whether the new release is unhealthy or
       # the stack was already broken before this deploy started. Deferred
@@ -727,7 +727,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
         ok: false,
         timed_out_after_s: div(timeout_ms, 1000),
-        pre_existing_fatal_failures: pre_deploy_fails
+        pre_existing_blocking_failures: pre_deploy_fails
       })
     )
 

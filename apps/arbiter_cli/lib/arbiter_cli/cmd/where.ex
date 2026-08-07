@@ -34,7 +34,10 @@ defmodule ArbiterCli.Cmd.Where do
           workspace = "workspace"
 
           IO.puts("api host:        #{base}")
-          IO.puts("ARB_WORKSPACE:   #{bd2_ws_env || "(unset, defaulting to \"default\")"}")
+
+          IO.puts(
+            "ARB_WORKSPACE:   #{bd2_ws_env || "(unset — using \"default\", else the sole workspace)"}"
+          )
 
           case resolved do
             nil ->
