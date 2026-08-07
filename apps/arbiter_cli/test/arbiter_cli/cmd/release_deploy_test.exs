@@ -174,6 +174,30 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
     end
 
+    test "deploys cleanly (no rollback) when the only workspace isn't named \"default\"" do
+      # Regression for bd-8ix2tw: Workspace.resolve/0 used to require a
+      # workspace literally named "default", so an install whose sole
+      # workspace was named anything else made the (then-fatal) "active
+      # workspace resolves" doctor check permanently red — timing out the
+      # green-wait and auto-rolling-back every deploy regardless of whether
+      # the new release was healthy.
+      only_workspace = %{
+        "data" => [%{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}]
+      }
+
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, sha, workspaces: only_workspace)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 0
+      assert out =~ "Deployed release #{@vsn}"
+      refute out =~ "Rolled back"
+      assert out =~ "[ ok ] active workspace resolves"
+    end
+
     test "--json emits a single object describing the deploy" do
       tarball = release_tarball(@vsn)
       sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
@@ -280,6 +304,39 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # The (failed) new release is still what current points at.
       assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
       assert Path.basename(link_target) == @vsn
+    end
+
+    test "rollback report flags a fatal check that was already red before the deploy started",
+         %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag)
+      point_current(home, prior)
+
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      # Zero workspaces → "at least one workspace exists" (fatal) is already
+      # red before this deploy touches anything, and stays red throughout —
+      # the green-wait times out on that pre-existing condition, not on
+      # anything caused by @vsn.
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      assert out =~ "Rolled back to #{prior_tag}"
+      assert out =~ "note:"
+      assert out =~ "at least one workspace exists"
+      assert out =~ "already failing before this deploy started"
+
+      # The pre-flight warning itself routes through `log/1` → `Start.log_text/1`,
+      # a no-op in tests (bd2_sleep is stubbed in setup/0) — assert its exact
+      # content directly rather than relying on it reaching stdout/stderr.
+      assert ReleaseDeploy.preflight_warning(["at least one workspace exists"], @vsn) =~
+               "warning: 1 readiness-blocking health check(s) already failing before this " <>
+                 "deploy started (at least one workspace exists). Run `arb doctor` to " <>
+                 "investigate — if this deploy times out waiting for green, that " <>
+                 "pre-existing condition, not release #{@vsn}, may be why."
     end
 
     test "restart reports success but /api/version still shows the prior release (failed swap): rolls back, exits 1",

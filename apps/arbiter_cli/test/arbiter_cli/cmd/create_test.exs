@@ -80,14 +80,14 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert {:ok, %{"id" => "bd-001"}} = Jason.decode(String.trim(out))
   end
 
-  test "no workspace named default → friendly error" do
+  test "zero workspaces → friendly create-one error" do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => []}, 200}}
     ])
 
     {_out, err, exit_code} = capture(fn -> Create.run(["X"]) end)
     assert exit_code == 1
-    assert err =~ "no workspace named"
+    assert err =~ "no workspaces found"
   end
 
   test "validation error from server surfaces message" do

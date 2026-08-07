@@ -122,6 +122,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     if not force and current_target_basename(current_link) == tag do
       emit_already_current(mode, tag)
     else
+      # Snapshot doctor state before touching anything, so a readiness-blocking
+      # check that's already red (pre-existing condition) is distinguishable from
+      # one caused by the release being deployed. Without this, a timed-out
+      # green-wait reads identically whether the new release is unhealthy or
+      # the stack was already broken before this deploy started. Deferred
+      # until after the idempotency check so a no-op `arb server deploy`
+      # doesn't pay for it or warn about a deploy that never happens.
+      pre_deploy_fails = preflight_blocking_fails()
+
+      if pre_deploy_fails != [] do
+        log(preflight_warning(pre_deploy_fails, tag))
+      end
+
       {tarball_url, sha_url} = release_assets(release, tag)
 
       log("Downloading #{asset_name(tag)} from #{repo}@#{tag}…")
@@ -168,7 +181,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
         {:timeout, _actions, _was_running} ->
           rolled_back = auto_rollback(current_link, prior_target, timeout_ms)
-          emit_rollback(mode, tag, rolled_back, timeout_ms)
+          emit_rollback(mode, tag, rolled_back, timeout_ms, pre_deploy_fails)
       end
     end
   end
@@ -471,6 +484,33 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   defp prior_basename(nil), do: nil
   defp prior_basename(path), do: Path.basename(path)
 
+  # ---- pre-flight -----------------------------------------------------------
+
+  # Names of every currently-red readiness-blocking doctor check, queried
+  # against whatever is running *before* this deploy touches anything. Uses
+  # `blocks_readiness`, not `fatal` — `fatal` also drives `arb doctor`'s exit
+  # code and includes checks (like workspace resolution) that are
+  # operator-actionable but have no bearing on whether the green-wait below
+  # will time out. Flagging those here would reintroduce a milder version of
+  # bd-8ix2tw: a misleading "pre-existing condition" note on a deploy that
+  # was never at risk of it.
+  defp preflight_blocking_fails do
+    Doctor.checks()
+    |> Enum.filter(&(&1.status == :fail and &1.blocks_readiness))
+    |> Enum.map(& &1.name)
+  end
+
+  @doc false
+  # Extracted (rather than inlined at the call site) and left public so its
+  # content is directly assertable in tests — the `log/1` call it feeds is a
+  # no-op whenever `:bd2_sleep` is stubbed, which every deploy test does.
+  def preflight_warning(pre_deploy_fails, tag) do
+    "warning: #{length(pre_deploy_fails)} readiness-blocking health check(s) already " <>
+      "failing before this deploy started (#{Enum.join(pre_deploy_fails, ", ")}). Run " <>
+      "`arb doctor` to investigate — if this deploy times out waiting for green, " <>
+      "that pre-existing condition, not release #{tag}, may be why."
+  end
+
   # ---- rollback -----------------------------------------------------------
 
   # Re-point `current` at the prior release and restart. Returns the prior tag
@@ -676,7 +716,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     Doctor.report()
   end
 
-  defp emit_rollback(:json, tag, rolled_back, timeout_ms) do
+  defp emit_rollback(:json, tag, rolled_back, timeout_ms, pre_deploy_fails) do
     IO.puts(
       Jason.encode!(%{
         version: tag,
@@ -686,14 +726,15 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         base_url: Client.base_url(),
         checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
         ok: false,
-        timed_out_after_s: div(timeout_ms, 1000)
+        timed_out_after_s: div(timeout_ms, 1000),
+        pre_existing_blocking_failures: pre_deploy_fails
       })
     )
 
     Output.halt(1)
   end
 
-  defp emit_rollback(:text, tag, rolled_back, timeout_ms) do
+  defp emit_rollback(:text, tag, rolled_back, timeout_ms, pre_deploy_fails) do
     IO.puts("")
     IO.puts("Release #{tag} did not come back green within #{div(timeout_ms, 1000)}s.")
 
@@ -701,6 +742,15 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       IO.puts("Rolled back to #{rolled_back} and restarted.")
     else
       IO.puts("No prior release to roll back to — the stack is down.")
+    end
+
+    if pre_deploy_fails != [] do
+      IO.puts("")
+
+      IO.puts(
+        "note: #{Enum.join(pre_deploy_fails, ", ")} was already failing before this deploy " <>
+          "started — this rollback may be due to that pre-existing condition, not release #{tag}."
+      )
     end
 
     IO.puts("")
