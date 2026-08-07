@@ -22,12 +22,19 @@ defmodule Arbiter.Reviews.PrState do
     * `"open"`    — live PR, still open (retry: it may still merge/close).
     * `"merged"`  — terminal.
     * `"closed"`  — terminal.
-    * `"gone"`    — terminal; the adapter reported a hard 404 (PR or repo
-                    deleted). No point polling a PR that no longer exists.
+    * `"gone"`    — soft-terminal; the adapter reported 404 on
+                    `@not_found_confirm_threshold` consecutive checks. Not
+                    re-polled by the normal cadence, but re-opened for one
+                    more verification pass once its confirmation (`gone_at`)
+                    goes stale (bd-7qzqfs) — a GitHub token can transiently
+                    lack read access and 404 (not 403) to avoid leaking a
+                    private resource's existence, so a single 404 is never
+                    proof of deletion.
     * `"n/a"`     — terminal; there is no forge PR to poll (a `direct`-strategy
                     review, or a blank strategy / ref).
     * `"unknown"` — a *transient* failure (network, 5xx, rate-limit, token/config
-                    not resolvable). Retryable — the next tick re-resolves it.
+                    not resolvable, or an unconfirmed 404). Retryable — the
+                    next tick re-resolves it.
 
   `nil` means "never resolved yet" and is also retryable.
   """
@@ -35,8 +42,20 @@ defmodule Arbiter.Reviews.PrState do
   alias Arbiter.Mergers
 
   # States that never change once reached — the poller / dashboard stop
-  # re-resolving them.
+  # re-resolving them. "gone" is a *soft* terminal: see needs_refresh?/1.
   @terminal_states ~w(merged closed gone n/a)
+
+  # Consecutive "not_found" signals required before a record is allowed to
+  # commit the terminal "gone" state (bd-7qzqfs). GitHub returns a bare 404 —
+  # not 403 — when a token transiently lacks read access to a resource (by
+  # design, to avoid leaking the existence of private resources), so a single
+  # 404 is not proof the PR was deleted.
+  @not_found_confirm_threshold 2
+
+  # How long a "gone" confirmation is trusted before the record is re-opened
+  # for one more verification pass, so a wrong "gone" is never a permanent
+  # dead end.
+  @gone_recheck_after_seconds 86_400
 
   @doc "The set of terminal pr_state strings (never re-polled)."
   @spec terminal_states() :: [String.t()]
@@ -57,12 +76,27 @@ defmodule Arbiter.Reviews.PrState do
   intervention.
   """
   @spec needs_refresh?(map()) :: boolean()
+  def needs_refresh?(%{pr_state: "gone"} = record), do: gone_stale?(record)
   def needs_refresh?(%{pr_state: state}) when state in @terminal_states, do: false
   def needs_refresh?(%{pr_state: nil}), do: true
   def needs_refresh?(%{pr_state: "open"}), do: true
   def needs_refresh?(%{pr_state: "unknown"}), do: true
   def needs_refresh?(%{status: :running}), do: true
   def needs_refresh?(_), do: false
+
+  # A "gone" record is re-opened for one more verification pass once its
+  # confirmation is older than the recheck TTL — or immediately if it has no
+  # `gone_at` at all, which self-heals rows written before this field existed
+  # (exactly the bd-7qzqfs scenario: a single stale 404 froze a live PR).
+  defp gone_stale?(record) do
+    case Map.get(record, :gone_at) do
+      %DateTime{} = at ->
+        DateTime.diff(DateTime.utc_now(), at, :second) >= @gone_recheck_after_seconds
+
+      _ ->
+        true
+    end
+  end
 
   @doc """
   Resolve the live PR state for a single review record by calling the
@@ -103,13 +137,22 @@ defmodule Arbiter.Reviews.PrState do
   This is the single *writer* used by both the background poller and the
   review-complete path. Best-effort: returns `{:ok, record}` on success and
   `:error` on any failure (never raises).
+
+  Owns the not-found confirmation logic (bd-7qzqfs): `resolve/2` only ever
+  reports the raw per-call signal, so it's this function — the one with
+  access to the record's persisted `not_found_count` — that decides whether a
+  `"not_found"` signal is committed as terminal `"gone"` or held at retryable
+  `"unknown"` pending another confirmation. Any other outcome resets the
+  counter, so an intermittent 404 streak doesn't carry over into an unrelated
+  future failure.
   """
   @spec resolve_and_persist(Ash.Resource.record(), map() | nil) ::
           {:ok, Ash.Resource.record()} | :error
   def resolve_and_persist(record, workspace) do
-    state = resolve(record, workspace)
+    candidate = resolve(record, workspace)
+    attrs = reconcile(record, candidate)
 
-    case Ash.update(record, %{pr_state: state}, action: :update_pr_state) do
+    case Ash.update(record, attrs, action: :update_pr_state) do
       {:ok, updated} -> {:ok, updated}
       {:error, _} -> :error
     end
@@ -117,14 +160,30 @@ defmodule Arbiter.Reviews.PrState do
     _ -> :error
   end
 
+  defp reconcile(record, "not_found") do
+    count = Map.get(record, :not_found_count, 0) + 1
+
+    if count >= @not_found_confirm_threshold do
+      %{pr_state: "gone", not_found_count: count, gone_at: DateTime.utc_now()}
+    else
+      %{pr_state: "unknown", not_found_count: count}
+    end
+  end
+
+  defp reconcile(_record, candidate), do: %{pr_state: candidate, not_found_count: 0}
+
   @doc """
-  Map an adapter `get/1` result onto a pr_state string.
+  Map an adapter `get/1` result onto a raw pr_state signal.
 
   Separated from `resolve/2` so the outcome mapping is unit-testable without the
   HTTP plumbing:
 
     * `{:ok, %{status: :open | :merged | :closed}}` → the matching live state.
-    * a hard 404 / not-found error → terminal `"gone"` (PR or repo deleted).
+    * a hard 404 / not-found error → `"not_found"`, an *intermediate* signal.
+      This is never persisted directly — GitHub returns a bare 404 (not 403)
+      when a token transiently lacks read access, so a single 404 is not
+      proof of deletion. `resolve_and_persist/2` requires several consecutive
+      `"not_found"` signals before committing terminal `"gone"` (bd-7qzqfs).
     * anything else (network, 5xx, rate-limit, config) → transient `"unknown"`.
   """
   @spec classify(term()) :: String.t()
@@ -133,8 +192,8 @@ defmodule Arbiter.Reviews.PrState do
   def classify({:ok, %{status: :closed}}), do: "closed"
   # Both adapters surface a deleted PR/repo as an %Error{} with kind :not_found
   # (status 404). Match structurally so we don't couple to either Error struct.
-  def classify({:error, %{kind: :not_found}}), do: "gone"
-  def classify({:error, %{status: 404}}), do: "gone"
+  def classify({:error, %{kind: :not_found}}), do: "not_found"
+  def classify({:error, %{status: 404}}), do: "not_found"
   def classify(_), do: "unknown"
 
   # Only github/gitlab reviews reach here (direct/blank short-circuit to "n/a"

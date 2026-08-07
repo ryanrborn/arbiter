@@ -44,8 +44,10 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
   end
 
   defp record(ws, attrs) do
-    # pr_state is not accepted by :create — it is set only via :update_pr_state.
-    {pr_state, create_attrs} = Map.pop(attrs, :pr_state)
+    # pr_state / not_found_count / gone_at are not accepted by :create — they
+    # are set only via :update_pr_state.
+    {pr_state_attrs, create_attrs} =
+      Map.split(attrs, [:pr_state, :not_found_count, :gone_at])
 
     {:ok, rec} =
       Ash.create(
@@ -62,9 +64,9 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
         )
       )
 
-    case pr_state do
-      nil -> rec
-      state -> Ash.update!(rec, %{pr_state: state}, action: :update_pr_state)
+    case pr_state_attrs do
+      empty when map_size(empty) == 0 -> rec
+      _ -> Ash.update!(rec, pr_state_attrs, action: :update_pr_state)
     end
   end
 
@@ -137,6 +139,101 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
     assert :ok = PrStatePoller.poll(poller)
 
     assert Ash.get!(Record, rec.id).pr_state == "n/a"
+  end
+
+  # bd-7qzqfs: a single 404 (e.g. a transient token/installation access blip —
+  # GitHub returns 404, not 403, so as not to leak private-resource existence)
+  # must not permanently drop a live PR out of tracking.
+  describe "not-found confirmation (bd-7qzqfs)" do
+    defp stub_not_found do
+      stub_pr(fn conn ->
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+    end
+
+    test "a single 404 leaves the row \"unknown\" (retryable), not terminal \"gone\"" do
+      ws = github_ws()
+      rec = record(ws, %{pr_state: "open"})
+      stub_not_found()
+
+      poller = start_poller()
+      assert :ok = PrStatePoller.poll(poller)
+
+      updated = Ash.get!(Record, rec.id)
+      assert updated.pr_state == "unknown"
+      assert updated.not_found_count == 1
+      assert is_nil(updated.gone_at)
+    end
+
+    test "only commits terminal \"gone\" after consecutive 404s across polls" do
+      ws = github_ws()
+      rec = record(ws, %{pr_state: "open"})
+      stub_not_found()
+      poller = start_poller()
+
+      assert :ok = PrStatePoller.poll(poller)
+      assert Ash.get!(Record, rec.id).pr_state == "unknown"
+
+      assert :ok = PrStatePoller.poll(poller)
+      updated = Ash.get!(Record, rec.id)
+      assert updated.pr_state == "gone"
+      assert updated.not_found_count == 2
+      refute is_nil(updated.gone_at)
+    end
+
+    test "a 404 followed by a real 200 heals the row instead of freezing it" do
+      ws = github_ws()
+      rec = record(ws, %{pr_state: "open"})
+      stub_not_found()
+      poller = start_poller()
+
+      assert :ok = PrStatePoller.poll(poller)
+      assert Ash.get!(Record, rec.id).pr_state == "unknown"
+
+      stub_open()
+      assert :ok = PrStatePoller.poll(poller)
+
+      updated = Ash.get!(Record, rec.id)
+      assert updated.pr_state == "open"
+      assert updated.not_found_count == 0
+    end
+
+    test "a \"gone\" row with a stale confirmation is re-verified and recovers if the PR is actually live" do
+      ws = github_ws()
+
+      rec =
+        record(ws, %{
+          pr_state: "gone",
+          not_found_count: 2,
+          gone_at: DateTime.add(DateTime.utc_now(), -8, :day)
+        })
+
+      stub_open()
+      poller = start_poller()
+      assert :ok = PrStatePoller.poll(poller)
+
+      updated = Ash.get!(Record, rec.id)
+      assert updated.pr_state == "open"
+      assert updated.not_found_count == 0
+    end
+
+    test "a fresh \"gone\" row is frozen — not re-polled" do
+      ws = github_ws()
+
+      rec =
+        record(ws, %{
+          pr_state: "gone",
+          not_found_count: 2,
+          gone_at: DateTime.utc_now()
+        })
+
+      # If the poller re-resolved this row despite it being frozen, this stub
+      # would raise (unstubbed request), proving it was skipped.
+      poller = start_poller()
+      assert :ok = PrStatePoller.poll(poller)
+
+      assert Ash.get!(Record, rec.id).pr_state == "gone"
+    end
   end
 
   # bd-b88l3l: the poller's forge traffic must be tagged :background so the
