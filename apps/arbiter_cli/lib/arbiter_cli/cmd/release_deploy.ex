@@ -129,7 +129,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       # the stack was already broken before this deploy started. Deferred
       # until after the idempotency check so a no-op `arb server deploy`
       # doesn't pay for it or warn about a deploy that never happens.
-      pre_deploy_fails = preflight_fatal_fails()
+      pre_deploy_fails = preflight_blocking_fails()
 
       if pre_deploy_fails != [] do
         log(preflight_warning(pre_deploy_fails, tag))
@@ -494,7 +494,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # will time out. Flagging those here would reintroduce a milder version of
   # bd-8ix2tw: a misleading "pre-existing condition" note on a deploy that
   # was never at risk of it.
-  defp preflight_fatal_fails do
+  defp preflight_blocking_fails do
     Doctor.checks()
     |> Enum.filter(&(&1.status == :fail and &1.blocks_readiness))
     |> Enum.map(& &1.name)
@@ -505,8 +505,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # content is directly assertable in tests — the `log/1` call it feeds is a
   # no-op whenever `:bd2_sleep` is stubbed, which every deploy test does.
   def preflight_warning(pre_deploy_fails, tag) do
-    "warning: #{length(pre_deploy_fails)} fatal health check(s) already failing " <>
-      "before this deploy started (#{Enum.join(pre_deploy_fails, ", ")}). Run " <>
+    "warning: #{length(pre_deploy_fails)} readiness-blocking health check(s) already " <>
+      "failing before this deploy started (#{Enum.join(pre_deploy_fails, ", ")}). Run " <>
       "`arb doctor` to investigate — if this deploy times out waiting for green, " <>
       "that pre-existing condition, not release #{tag}, may be why."
   end
