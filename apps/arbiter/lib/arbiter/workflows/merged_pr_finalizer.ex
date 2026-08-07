@@ -26,6 +26,21 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   multi-repo workspace) are silently skipped — the finalizer for the correct
   repo picks them up.
 
+  ## Cost (bd-8y1i58)
+
+  Every call this sweep makes is unattended periodic polling, so it runs under
+  the limiter's `:background` class (`Arbiter.GitHub.Limiter.with_priority/2`)
+  and is shed before it can starve foreground work or the operator's own `gh`.
+
+  It is also **budgeted**: at most `:max_checks_per_tick` tasks are checked per
+  sweep (default 25, app env `:merged_pr_finalizer_max_checks_per_tick`; a
+  non-positive value disables the cap). Without it the sweep cost scaled with
+  the whole open backlog on every tick — one GitHub call per open task every
+  120s — which by itself exhausted the account's hourly quota on an idle fleet.
+  The window rolls: `cursor` remembers the last task swept and the next tick
+  resumes after it, wrapping at the end, so the tail of a backlog larger than
+  one budget is still reached (just later).
+
   ## Relationship to PRPatrol
 
   PRPatrol queries `list_open()` (open PRs only, never merged) and deliberately
@@ -65,6 +80,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   use GenServer
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Trackers.Sync
@@ -73,6 +89,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   require Logger
 
   @default_interval_ms 120_000
+  @default_max_checks_per_tick 25
 
   defstruct [
     :repo,
@@ -80,6 +97,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     :workspace,
     :interval_ms,
     :timer_ref,
+    :cursor,
+    max_checks_per_tick: @default_max_checks_per_tick,
     ticks: 0,
     last_tick_at: nil
   ]
@@ -105,6 +124,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     workspace_id = Keyword.fetch!(opts, :workspace_id)
     interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)
 
+    max_checks_per_tick =
+      Keyword.get(
+        opts,
+        :max_checks_per_tick,
+        Application.get_env(
+          :arbiter,
+          :merged_pr_finalizer_max_checks_per_tick,
+          @default_max_checks_per_tick
+        )
+      )
+
     workspace =
       case Ash.get(Workspace, workspace_id) do
         {:ok, ws} -> ws
@@ -115,7 +145,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
       repo: repo,
       workspace_id: workspace_id,
       workspace: workspace,
-      interval_ms: interval_ms
+      interval_ms: interval_ms,
+      max_checks_per_tick: max_checks_per_tick
     }
 
     {:ok, schedule_next(state)}
@@ -133,6 +164,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
        repo: state.repo,
        workspace_id: state.workspace_id,
        interval_ms: state.interval_ms,
+       max_checks_per_tick: state.max_checks_per_tick,
+       cursor: state.cursor,
        ticks: state.ticks,
        last_tick_at: state.last_tick_at
      }, state}
@@ -146,8 +179,19 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   # ---- sweep logic ----
 
+  # bd-8y1i58: every GitHub call this sweep issues is unattended periodic
+  # polling — the limiter's `:background` class by definition. Untagged, the
+  # ambient class defaults to `:foreground`, so the sweep was both counted as
+  # and treated as foreground: unshuttable even at zero headroom, and on an
+  # install with a large open backlog it was thousands of calls per hour with
+  # zero work in flight. The tag is process-scoped and `do_tick_body/1` runs
+  # synchronously in this process, so it applies to every call below.
   defp do_tick(state) do
-    result =
+    Limiter.with_priority(:background, fn -> do_tick_body(state) end)
+  end
+
+  defp do_tick_body(state) do
+    {result, cursor} =
       with %Workspace{} <- state.workspace,
            adapter when not is_nil(adapter) <- resolve_adapter(state.workspace),
            true <- function_exported?(adapter, :get, 1),
@@ -155,16 +199,61 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
            {:ok, pr_ref_tasks} <- open_tasks_with_pr_ref(state.workspace_id),
            {:ok, follow_up_tasks} <- open_follow_up_tasks(state.workspace_id),
            {:ok, legacy_tasks} <- open_legacy_pr_tracker_tasks(state.workspace_id) do
-        Enum.each(pr_ref_tasks, &maybe_finalize(&1, adapter))
-        Enum.each(follow_up_tasks, &maybe_finalize_follow_up(&1, adapter))
-        Enum.each(legacy_tasks, &maybe_finalize_follow_up(&1, adapter))
-        :ok
+        candidates =
+          Enum.sort_by(
+            Enum.map(pr_ref_tasks, &{&1, :pr_ref}) ++
+              Enum.map(follow_up_tasks, &{&1, :follow_up}) ++
+              Enum.map(legacy_tasks, &{&1, :follow_up}),
+            fn {task, _kind} -> task.id end
+          )
+
+        {window, next_cursor} = window(candidates, state.cursor, state.max_checks_per_tick)
+
+        Enum.each(window, fn
+          {task, :pr_ref} -> maybe_finalize(task, adapter)
+          {task, :follow_up} -> maybe_finalize_follow_up(task, adapter)
+        end)
+
+        {:ok, next_cursor}
       else
-        _ -> :noop
+        _ -> {:noop, state.cursor}
       end
 
     _ = result
-    %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now()}
+
+    %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now(), cursor: cursor}
+  end
+
+  # bd-8y1i58: bound the per-tick fan-out. The sweep used to issue one GitHub
+  # call per open task *every* tick, so its cost scaled with the backlog and
+  # never fell to zero on an idle fleet. A flat cap alone would re-check the
+  # same head of the list forever and never reach the tail, so the window rolls:
+  # `cursor` holds the id of the last task swept, and the next tick resumes
+  # after it, wrapping around at the end. Candidates are sorted by id, which is
+  # stable across ticks even as tasks open and close.
+  #
+  # A non-positive budget disables the cap (sweep everything, the old
+  # behaviour) — useful for a small install or a one-off catch-up.
+  defp window(candidates, _cursor, budget) when not is_integer(budget) or budget <= 0,
+    do: {candidates, nil}
+
+  defp window([], _cursor, _budget), do: {[], nil}
+
+  defp window(candidates, cursor, budget) do
+    {before_cursor, after_cursor} =
+      case cursor do
+        nil -> {[], candidates}
+        id -> Enum.split_while(candidates, fn {task, _} -> task.id <= id end)
+      end
+
+    window =
+      (after_cursor ++ before_cursor)
+      |> Enum.take(min(budget, length(candidates)))
+
+    case List.last(window) do
+      {task, _kind} -> {window, task.id}
+      nil -> {window, nil}
+    end
   end
 
   defp resolve_adapter(workspace) do

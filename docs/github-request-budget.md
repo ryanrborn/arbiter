@@ -56,24 +56,70 @@ numbers stay fresh even when the fleet is idle — at zero quota cost.
 
 The ambient class for a process is set with `Limiter.with_priority/2` and read
 with `Limiter.current_priority/0`. The default is `:foreground` — an un-tagged
-caller is never starved. The two patrols (`PRPatrol`, `ReviewPatrol`) wrap their
-poll body in `with_priority(:background, ...)`; everything else (merge queue,
-dispatch, tracker transitions) runs foreground by default.
+caller is never starved. The patrols and the record sweeps (`PRPatrol`,
+`ReviewPatrol`, `MergeQueue`, `PrStatePoller`, `MergedPRFinalizer`) wrap their
+poll body in `with_priority(:background, ...)`; everything else (dispatch,
+tracker transitions, PR open/merge/finalize) runs foreground by default.
+
+> **The class lives in the process dictionary and does not cross a process
+> boundary.** Handing GitHub work to a spawned `Task` reverts it to the
+> `:foreground` default, so a background sweep that fans out over
+> `Task.start/1` silently reclassifies itself as foreground. Use
+> `Limiter.start_task/2` for that (bd-8y1i58 — this is exactly how the
+> dashboard's Review History refresh became a foreground firehose).
+
+## The idle floor
+
+With no work in flight — zero workers, zero ready tasks, empty mailbox — the
+fleet's GitHub traffic should be **near zero**, and in particular must not scale
+with the size of the open backlog. Two sweeps walk stored records rather than
+work in flight and so are the ones that can violate this:
+
+- `PrStatePoller` — bounded by `:fetch_limit` (500) per cycle, and its set
+  shrinks as records reach a terminal state.
+- `MergedPRFinalizer` — bounded by `:merged_pr_finalizer_max_checks_per_tick`
+  (25) with a rolling cursor, so a large backlog is swept over successive ticks
+  instead of all at once. Note one `adapter.get/1` costs *two* GitHub calls (the
+  PR, then its reviews).
+
+`Arbiter.GitHub.IdleFloorTest` locks both invariants down: nothing in flight
+issues zero traffic, and a backlog is swept entirely as background.
 
 ## Observability
 
-`Limiter.stats/0` returns per-pool counters (`foreground`, `background`,
-`background_paused`, `secondary_trips`) and the last-seen numbers. The limiter
-also logs a summary line periodically, so the next incident is diagnosable from
-the server rather than by sampling GitHub from a laptop.
+`Limiter.stats/0` returns per-pool counters (`foreground`, `foreground_paused`,
+`background`, `background_paused`, `secondary_trips`) and the last-seen numbers.
+The limiter also logs a summary line periodically, so the next incident is
+diagnosable from the server rather than by sampling GitHub from a laptop.
+
+Every real HTTP request is gated exactly once — including each attempt of the
+merger's bounded secondary-limit retry — so the counters reflect calls actually
+issued rather than call *sites* entered.
 
 ## Configuration (application env, `:arbiter`)
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `:github_limiter_background_headroom` | `1000` | Remaining primary quota at/below which background traffic pauses. |
+| `:github_limiter_foreground_reserve` | `0` (off) | Remaining primary quota at/below which **all** arbiter traffic stops, foreground included. See below. |
 | `:github_limiter_secondary_cooldown_ms` | `120_000` | How long background stays fully paused after a secondary-limit hit (re-armed on each hit). |
 | `:github_limiter_probe` | `true` (`false` in test) | Whether to resolve owning accounts (`GET /user`) and poll the exempt `/rate_limit` endpoint. |
+| `:merged_pr_finalizer_max_checks_per_tick` | `25` | Tasks the merged-PR sweep checks per tick (non-positive disables the cap). |
+
+### The foreground reserve
+
+Foreground being un-throttleable protects arbiter's own work, but GitHub meters
+per *user* across every token: an arbiter that spends the pool to zero starves
+the operator's interactive `gh`, unrelated CI, and every other tool on the
+account — a separate PAT buys no relief. The reserve puts a hard floor under
+that: at or below `remaining`, arbiter stops issuing entirely, leaving the band
+for a human.
+
+It is **off by default**. Below a nearly-exhausted pool a foreground call would
+very likely 403 anyway, but the limiter should not be the thing that fails a
+deploy unless the operator has asked for that trade. Enable with:
+
+    config :arbiter, :github_limiter_foreground_reserve, 500
 
 The limiter **fails open**: if it is not running, the request seam lets traffic
 through untouched — it is a protection layer, not a correctness gate.

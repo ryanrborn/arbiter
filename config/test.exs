@@ -30,6 +30,17 @@ config :arbiter, :github_http_stub, true
 # fully exercised (LimiterTest starts isolated instances; the integration tests
 # drive it via Req.Test stubs).
 config :arbiter, :github_limiter_probe, false
+
+# bd-8y1i58: the app-wide limiter singleton outlives every individual test, and
+# a secondary-limit trip parks background traffic for a *wall-clock* cooldown.
+# One test stubbing a 403-with-headroom therefore poisoned every later test that
+# polls under `:background` — MergeQueue, PRPatrol, PrStatePoller, ReviewPatrol,
+# MergedPRFinalizer — with an order-dependent "background request paused
+# (secondary_backoff)". A zero cooldown keeps the trip observable (the
+# `secondary_trips` counter still increments) without leaking a pause across
+# test boundaries; the tests that actually exercise the cooldown start their own
+# limiter with an explicit `secondary_cooldown_ms`.
+config :arbiter, :github_limiter_secondary_cooldown_ms, 0
 config :arbiter, :jira_http_stub, true
 config :arbiter, :shortcut_http_stub, true
 config :arbiter, :gitlab_http_stub, true
