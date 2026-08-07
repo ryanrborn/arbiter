@@ -69,7 +69,13 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 
 ## Coordinating via MCP
 
-The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `task_show`, `task_create`, `task_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `skill_list`/`skill_get`, `usage_summarize`, and more. See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
+The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `task_show`, `task_create`, `task_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off issue dispatch:
+
+- **Skills** — `skill_list`/`skill_get`/`skill_create`/`skill_update`/`skill_delete` for managing reusable skill content.
+- **Graph/Conductor** — `graph_create`, `graph_add_directive`, `graph_add_edge`, `graph_start`, `graph_status`, `graph_pause`, `graph_resume` for auto-dispatch chains of issues wired together by dependency edges, distinct from dispatching a single issue.
+- **ExternalReview** — `external_review_list`, `external_review_show`, `review_greenlight` for inspecting and unblocking worktree-backed external code review.
+
+See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
 
 To mint a token for a coordinator to use:
 
@@ -91,7 +97,9 @@ The dashboard is at **http://127.0.0.1:4848**.
 
 Visit the dashboard's **Workspace** page and configure:
 - **Repos** (projects to work in)
-- Worker settings (Claude model, timeout, etc.)
+- Worker/agent settings — model tier map, per-thinking-level args, provider overrides, and credentials (`agent.config.*`)
+- Security policy (`agent.security.*`)
+- Rate-limit throttling (`quota.*`) and Conductor concurrency (`conductor.max_concurrent`)
 - Optionally a **tracker** (Jira, GitHub, Linear) and merge strategy
 
 Or edit `config/dev.exs` directly and restart the server, or use `arb config set`.
