@@ -135,7 +135,7 @@ defmodule Arbiter.Reviews.Record do
     end
 
     update :update_pr_state do
-      accept [:pr_state]
+      accept [:pr_state, :not_found_count, :gone_at]
     end
 
     # Record the outcome of a coordinator greenlight: which proposed comments
@@ -281,9 +281,37 @@ defmodule Arbiter.Reviews.Record do
       description """
       Resolved PR state (bd-3jjk0e). Live/retryable: nil (never resolved),
       "open" (may still merge/close), "unknown" (transient failure, retried).
-      Terminal/frozen: "merged", "closed", "gone" (404/deleted PR), "n/a" (no
+      Terminal/frozen: "merged", "closed", "gone" (404/deleted PR, confirmed
+      over `not_found_count` consecutive checks — bd-7qzqfs), "n/a" (no
       forge PR — direct-strategy or blank ref). Resolved by the background
       poller and on review completion; the dashboard is a reader.
+      """
+    end
+
+    attribute :not_found_count, :integer do
+      public? true
+      default 0
+      allow_nil? false
+
+      description """
+      Consecutive 404 ("not found") signals seen for this record (bd-7qzqfs).
+      A GitHub token lacking read access also 404s (to avoid leaking private
+      resources), so a single 404 is not proof of deletion — `PrState` only
+      commits terminal "gone" once this reaches its confirmation threshold.
+      Reset to 0 whenever a check comes back as anything other than 404.
+      """
+    end
+
+    attribute :gone_at, :utc_datetime do
+      public? true
+
+      description """
+      When `pr_state` last transitioned to terminal "gone" (bd-7qzqfs). Nil
+      for records never marked gone, or marked gone before this field existed
+      — either case is treated as stale so the record gets one confirmation
+      re-check rather than staying frozen forever. `PrState.needs_refresh?/1`
+      re-opens a "gone" record for re-verification once this is older than
+      the recheck TTL.
       """
     end
 

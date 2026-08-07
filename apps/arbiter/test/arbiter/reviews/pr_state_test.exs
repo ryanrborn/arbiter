@@ -66,8 +66,22 @@ defmodule Arbiter.Reviews.PrStateTest do
       refute PrState.needs_refresh?(%{pr_state: "closed", status: :completed})
     end
 
-    test "\"gone\" (404/deleted) is terminal (frozen)" do
-      refute PrState.needs_refresh?(%{pr_state: "gone", status: :completed})
+    test "\"gone\" is frozen while its confirmation is still fresh (within the recheck TTL)" do
+      refute PrState.needs_refresh?(%{
+               pr_state: "gone",
+               status: :completed,
+               gone_at: DateTime.utc_now()
+             })
+    end
+
+    test "\"gone\" becomes retryable again once its confirmation goes stale (TTL re-verification, bd-7qzqfs)" do
+      stale_at = DateTime.add(DateTime.utc_now(), -8, :day)
+
+      assert PrState.needs_refresh?(%{pr_state: "gone", status: :completed, gone_at: stale_at})
+    end
+
+    test "\"gone\" with no gone_at (legacy row, or one written before this fix) is retryable — self-heals" do
+      assert PrState.needs_refresh?(%{pr_state: "gone", status: :completed})
     end
 
     test "\"n/a\" (no forge PR) is terminal (frozen)" do
@@ -88,12 +102,12 @@ defmodule Arbiter.Reviews.PrStateTest do
       assert PrState.classify({:ok, %{status: :closed}}) == "closed"
     end
 
-    test "404 not-found → terminal \"gone\"" do
-      assert PrState.classify({:error, %Error{kind: :not_found, status: 404}}) == "gone"
+    test "404 not-found → intermediate \"not_found\" signal (not directly terminal — bd-7qzqfs)" do
+      assert PrState.classify({:error, %Error{kind: :not_found, status: 404}}) == "not_found"
     end
 
-    test "any struct-shaped not_found error → terminal \"gone\"" do
-      assert PrState.classify({:error, %{kind: :not_found, status: 404}}) == "gone"
+    test "any struct-shaped not_found error → intermediate \"not_found\" signal" do
+      assert PrState.classify({:error, %{kind: :not_found, status: 404}}) == "not_found"
     end
 
     test "transient server error → \"unknown\" (retry)" do
@@ -150,13 +164,13 @@ defmodule Arbiter.Reviews.PrStateTest do
                "merged"
     end
 
-    test "a deleted PR (404) resolves to terminal \"gone\"" do
+    test "a 404 resolves to the intermediate \"not_found\" signal, not directly \"gone\" (bd-7qzqfs)" do
       stub(fn conn ->
         conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
       end)
 
       assert PrState.resolve(%{strategy: "github", pr_ref: "octo/widget#42"}, github_ws()) ==
-               "gone"
+               "not_found"
     end
 
     test "a strategy-prefixed pr_ref still resolves (adapter tolerates the prefix)" do
