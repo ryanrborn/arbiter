@@ -35,6 +35,81 @@ defmodule ArbiterCli.WorkspaceTest do
     end
   end
 
+  describe "resolve/0" do
+    setup do
+      prev = System.get_env("ARB_WORKSPACE")
+      System.delete_env("ARB_WORKSPACE")
+
+      on_exit(fn ->
+        if prev,
+          do: System.put_env("ARB_WORKSPACE", prev),
+          else: System.delete_env("ARB_WORKSPACE")
+      end)
+
+      :ok
+    end
+
+    test "falls back to the sole workspace when none is named \"default\"" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}]}, 200}}
+      ])
+
+      assert {:ok, %{"name" => "leotech"}} = Workspace.resolve()
+    end
+
+    test "still prefers a workspace literally named \"default\" when multiple exist" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-default", "name" => "default", "prefix" => "bd"},
+              %{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}
+            ]
+          }, 200}}
+      ])
+
+      assert {:ok, %{"name" => "default"}} = Workspace.resolve()
+    end
+
+    test "on a fresh install (zero workspaces), the error points at creating one, not ARB_WORKSPACE" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {%{"data" => []}, 200}}
+      ])
+
+      assert {:error, msg} = Workspace.resolve()
+      refute msg =~ "ARB_WORKSPACE"
+      assert msg =~ "no workspaces found"
+    end
+
+    test "errors when ambiguous: multiple workspaces, none named \"default\"" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-a", "name" => "alpha", "prefix" => "al"},
+              %{"id" => "ws-b", "name" => "beta", "prefix" => "be"}
+            ]
+          }, 200}}
+      ])
+
+      assert {:error, msg} = Workspace.resolve()
+      assert msg =~ "ARB_WORKSPACE"
+    end
+
+    test "an explicit ARB_WORKSPACE that doesn't match is still an error, even with one workspace" do
+      System.put_env("ARB_WORKSPACE", "nonexistent")
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-leo", "name" => "leotech", "prefix" => "vr"}]}, 200}}
+      ])
+
+      assert {:error, msg} = Workspace.resolve()
+      assert msg =~ "nonexistent"
+    end
+  end
+
   describe "arb issue list --workspace <name> routing" do
     setup do
       prev = System.get_env("ARB_WORKSPACE")

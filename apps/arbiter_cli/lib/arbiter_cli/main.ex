@@ -101,7 +101,7 @@ defmodule ArbiterCli.Main do
   ## Env
 
       ARB_HOST       Phoenix base URL (default http://127.0.0.1:4848)
-      ARB_WORKSPACE  Workspace name to use (default "default"); overridden by -w / --workspace
+      ARB_WORKSPACE  Workspace name or id (unset: "default", else the sole workspace); overridden by -w / --workspace
   """
 
   # Pre-`arb <resource> <verb>` flat commands, mapped to their new canonical
