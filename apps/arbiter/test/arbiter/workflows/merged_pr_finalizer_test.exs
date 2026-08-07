@@ -639,4 +639,95 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert refreshed.status != :closed
     end
   end
+
+  # bd-8y1i58: this sweep is unattended periodic polling — the textbook
+  # definition of the limiter's `:background` class — but it ran untagged, so
+  # every `adapter.get/1` it issued was counted (and treated) as foreground and
+  # could never be shed. On an install with a large open backlog that alone was
+  # thousands of GitHub calls per hour with zero work in flight.
+  describe "GitHub budget classification (bd-8y1i58)" do
+    test "the sweep runs under the :background priority class", %{ws: ws} do
+      test = self()
+      create_task(ws, "700")
+
+      stub(fn conn ->
+        send(test, {:priority, Arbiter.GitHub.Limiter.current_priority()})
+        pr_get_stub(700, :open).(conn)
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert_received {:priority, :background}
+    end
+  end
+
+  # bd-8y1i58: an unbounded fan-out is the other half of the idle floor — the
+  # sweep issued one call per open task *every* tick. The per-tick budget caps
+  # that, and the rotating cursor guarantees the tail of the backlog is still
+  # reached (a plain cap would re-check the same head forever).
+  describe "per-tick budget (bd-8y1i58)" do
+    # Records which PRs the sweep looked up. Only the PR fetch itself is
+    # counted: one `adapter.get/1` costs *two* GitHub calls (the PR, then its
+    # reviews), which is exactly why the per-tick budget matters.
+    defp record_paths(ws, opts) do
+      test = self()
+
+      stub(fn conn ->
+        if Regex.match?(~r"^/repos/owner/repo/pulls/\d+$", conn.request_path) do
+          send(test, {:path, conn.request_path})
+        end
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"number" => 1, "merged" => false, "state" => "open"})
+      end)
+
+      {_pid, name} = start_finalizer(ws, opts)
+      name
+    end
+
+    defp drain_paths(acc \\ []) do
+      receive do
+        {:path, path} -> drain_paths([path | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    test "checks at most max_checks_per_tick tasks per sweep", %{ws: ws} do
+      for n <- 800..809, do: create_task(ws, to_string(n))
+
+      name = record_paths(ws, max_checks_per_tick: 3)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert length(drain_paths()) == 3
+    end
+
+    test "the cursor advances so a backlog larger than the budget is fully swept",
+         %{ws: ws} do
+      for n <- 810..814, do: create_task(ws, to_string(n))
+
+      name = record_paths(ws, max_checks_per_tick: 2)
+
+      seen =
+        Enum.flat_map(1..3, fn _ ->
+          :ok = MergedPRFinalizer.tick(name)
+          drain_paths()
+        end)
+
+      assert length(seen) == 6
+      # Three ticks of 2 cover all five tasks (and wrap onto the first again).
+      assert length(Enum.uniq(seen)) == 5
+    end
+
+    test "a budget of zero or less disables the cap (sweep everything)", %{ws: ws} do
+      for n <- 820..823, do: create_task(ws, to_string(n))
+
+      name = record_paths(ws, max_checks_per_tick: 0)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert length(drain_paths()) == 4
+    end
+  end
 end

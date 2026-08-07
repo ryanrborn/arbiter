@@ -36,6 +36,25 @@ defmodule Arbiter.GitHub.Limiter do
   caller is never starved). Patrols wrap their poll body in
   `with_priority(:background, fn -> ... end)`.
 
+  **The class lives in the process dictionary and does not cross a process
+  boundary.** Work handed to a spawned `Task` reverts to the `:foreground`
+  default, so a background sweep that fans out over `Task.start/1` silently
+  reclassifies itself as foreground (bd-8y1i58). Use `start_task/2` for that.
+
+  ## The reserve — a floor under the whole account
+
+  Foreground being un-throttleable protects arbiter's own work, but GitHub
+  meters per *user* across every token: an arbiter that spends the pool to zero
+  starves the operator's interactive `gh`, unrelated CI, and every other tool on
+  the account. `:github_limiter_foreground_reserve` puts a hard floor under
+  that — at or below `remaining`, **all** arbiter traffic stops, foreground
+  included, so the reserved band survives for a human. It is **off by default**
+  (`0`): below a nearly-exhausted pool a foreground call would very likely 403
+  anyway, but the limiter should not be the thing that fails a deploy unless the
+  operator has asked for that trade. Enable with, e.g.:
+
+      config :arbiter, :github_limiter_foreground_reserve, 500
+
   ## Pool identity — key on the POOL, not the credential
 
   A separate token does **not** buy a separate pool. The budget is keyed on a
@@ -100,6 +119,7 @@ defmodule Arbiter.GitHub.Limiter do
   require Logger
 
   @default_background_headroom 1_000
+  @default_foreground_reserve 0
   @default_secondary_cooldown_ms 120_000
   @default_report_interval_ms 300_000
   @default_poll_interval_ms 60_000
@@ -141,7 +161,8 @@ defmodule Arbiter.GitHub.Limiter do
   synchronously within `fun` (same process) inherit `class`.
   """
   @spec with_priority(priority(), (-> result)) :: result when result: var
-  def with_priority(class, fun) when class in [:foreground, :background] and is_function(fun, 0) do
+  def with_priority(class, fun)
+      when class in [:foreground, :background] and is_function(fun, 0) do
     previous = Process.get(@priority_key, :foreground)
     Process.put(@priority_key, class)
 
@@ -150,6 +171,20 @@ defmodule Arbiter.GitHub.Limiter do
     after
       Process.put(@priority_key, previous)
     end
+  end
+
+  @doc """
+  Spawn an unlinked `Task` that runs `fun` with the ambient priority set to
+  `class`.
+
+  `with_priority/2` only tags the *calling* process, so a fire-and-forget
+  `Task.start(fn -> github_call() end)` inside a background sweep issues
+  **foreground** traffic (bd-8y1i58). Use this whenever GitHub work is handed
+  to another process.
+  """
+  @spec start_task(priority(), (-> term())) :: {:ok, pid()} | {:error, term()}
+  def start_task(class, fun) when class in [:foreground, :background] and is_function(fun, 0) do
+    Task.start(fn -> with_priority(class, fun) end)
   end
 
   # ---- Client: the request seam -------------------------------------------
@@ -220,7 +255,7 @@ defmodule Arbiter.GitHub.Limiter do
   withheld background call. Counts the decision for observability.
   """
   @spec acquire(String.t(), priority(), GenServer.server()) ::
-          :ok | {:paused, :low_headroom | :secondary_backoff}
+          :ok | {:paused, :low_headroom | :secondary_backoff | :foreground_reserve}
   def acquire(token, priority, server \\ __MODULE__) do
     GenServer.call(server, {:acquire, token, priority})
   end
@@ -274,6 +309,16 @@ defmodule Arbiter.GitHub.Limiter do
             @default_background_headroom
           )
         ),
+      foreground_reserve:
+        Keyword.get(
+          opts,
+          :foreground_reserve,
+          Application.get_env(
+            :arbiter,
+            :github_limiter_foreground_reserve,
+            @default_foreground_reserve
+          )
+        ),
       secondary_cooldown_ms:
         Keyword.get(
           opts,
@@ -310,7 +355,7 @@ defmodule Arbiter.GitHub.Limiter do
     now = state.clock_fun.()
     pool = get_pool(state, pool_id)
 
-    decision = decide(priority, pool, state.background_headroom, now)
+    decision = decide(priority, pool, state, now)
     pool = bump_count(pool, priority, decision)
     state = put_pool(state, pool_id, pool)
 
@@ -393,16 +438,30 @@ defmodule Arbiter.GitHub.Limiter do
 
   # ---- Decisions ----------------------------------------------------------
 
-  # Foreground is never throttled.
-  defp decide(:foreground, _pool, _headroom, _now), do: :ok
+  # Foreground is never throttled — except by the account-wide reserve, which is
+  # opt-in and exists to leave a band for the operator's own `gh` (bd-8y1i58).
+  defp decide(:foreground, pool, state, _now) do
+    if below_reserve?(pool, state.foreground_reserve) do
+      {:paused, :foreground_reserve}
+    else
+      :ok
+    end
+  end
 
-  defp decide(:background, pool, headroom, now) do
+  defp decide(:background, pool, state, now) do
     cond do
+      below_reserve?(pool, state.foreground_reserve) -> {:paused, :foreground_reserve}
       secondary_active?(pool, now) -> {:paused, :secondary_backoff}
-      low_headroom?(pool, headroom) -> {:paused, :low_headroom}
+      low_headroom?(pool, state.background_headroom) -> {:paused, :low_headroom}
       true -> :ok
     end
   end
+
+  defp below_reserve?(%{remaining: remaining}, reserve)
+       when is_integer(remaining) and is_integer(reserve) and reserve > 0,
+       do: remaining <= reserve
+
+  defp below_reserve?(_pool, _reserve), do: false
 
   defp secondary_active?(%{secondary_until: nil}, _now), do: false
 
@@ -424,6 +483,9 @@ defmodule Arbiter.GitHub.Limiter do
   defp bump_count(pool, :background, {:paused, _reason}),
     do: update_in(pool.counts.background_paused, &(&1 + 1))
 
+  defp bump_count(pool, :foreground, {:paused, _reason}),
+    do: update_in(pool.counts.foreground_paused, &(&1 + 1))
+
   defp bump_count(pool, _priority, _decision), do: pool
 
   # ---- Pool state ---------------------------------------------------------
@@ -435,7 +497,13 @@ defmodule Arbiter.GitHub.Limiter do
       reset_at: nil,
       secondary_until: nil,
       token: nil,
-      counts: %{foreground: 0, background: 0, background_paused: 0, secondary_trips: 0}
+      counts: %{
+        foreground: 0,
+        foreground_paused: 0,
+        background: 0,
+        background_paused: 0,
+        secondary_trips: 0
+      }
     }
   end
 
@@ -634,7 +702,8 @@ defmodule Arbiter.GitHub.Limiter do
         c = pool.counts
 
         "#{inspect(pool_id)} remaining=#{inspect(pool.remaining)} " <>
-          "fg=#{c.foreground} bg=#{c.background} bg_paused=#{c.background_paused} " <>
+          "fg=#{c.foreground} fg_paused=#{c.foreground_paused} " <>
+          "bg=#{c.background} bg_paused=#{c.background_paused} " <>
           "secondary_trips=#{c.secondary_trips}"
       end)
       |> Enum.join(" | ")

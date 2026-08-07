@@ -812,19 +812,23 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
 
     test "returns nil for unparseable GitHub link" do
-      assert ArbiterWeb.DashboardLive.extract_repo_name("https://github.com/invalid", "github") == nil
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://github.com/invalid", "github") ==
+               nil
     end
 
     test "returns nil for unparseable GitLab link" do
-      assert ArbiterWeb.DashboardLive.extract_repo_name("https://gitlab.com/invalid", "gitlab") == nil
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://gitlab.com/invalid", "gitlab") ==
+               nil
     end
 
     test "returns nil for direct strategy" do
-      assert ArbiterWeb.DashboardLive.extract_repo_name("https://example.com/pr/123", "direct") == nil
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://example.com/pr/123", "direct") ==
+               nil
     end
 
     test "returns nil for unknown strategy" do
-      assert ArbiterWeb.DashboardLive.extract_repo_name("https://example.com/pr/123", "unknown") == nil
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://example.com/pr/123", "unknown") ==
+               nil
     end
   end
 
@@ -977,6 +981,51 @@ defmodule ArbiterWeb.DashboardLiveTest do
       }
 
       assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "221"
+    end
+  end
+
+  # bd-8y1i58: the Review History panel fetched up to 200 records and, on its
+  # 60s tick, spawned one fire-and-forget GitHub lookup per record that needed
+  # refreshing — per open dashboard tab. `Task.start/1` does not carry the
+  # limiter's ambient priority, so every one of those was classified
+  # :foreground and could never be shed: an idle installation burned its whole
+  # hourly GitHub quota this way. The panel now resolves only the rows it
+  # actually renders, and `Arbiter.Reviews.PrStatePoller` (which is background
+  # -classified) keeps the rest advancing.
+  describe "pr_state_refresh_candidates/4 (bd-8y1i58)" do
+    defp record(id, pr_state), do: %{id: id, pr_state: pr_state, status: :completed}
+
+    test "is bounded by the rendered page, not the fetched set" do
+      records = Enum.map(1..200, &record(&1, "open"))
+
+      candidates = ArbiterWeb.DashboardLive.pr_state_refresh_candidates(records, 0, 6, true)
+
+      assert length(candidates) == 6
+      assert Enum.map(candidates, & &1.id) == Enum.to_list(1..6)
+    end
+
+    test "resolves the window the requested page renders" do
+      records = Enum.map(1..200, &record(&1, "open"))
+
+      candidates = ArbiterWeb.DashboardLive.pr_state_refresh_candidates(records, 2, 6, true)
+
+      assert Enum.map(candidates, & &1.id) == Enum.to_list(13..18)
+    end
+
+    test "a forced refresh skips rows in a terminal state" do
+      records = [record(1, "open"), record(2, "merged"), record(3, "closed"), record(4, nil)]
+
+      candidates = ArbiterWeb.DashboardLive.pr_state_refresh_candidates(records, 0, 6, true)
+
+      assert Enum.map(candidates, & &1.id) == [1, 4]
+    end
+
+    test "an unforced refresh only resolves rows that have no pr_state yet" do
+      records = [record(1, "open"), record(2, nil), record(3, "unknown")]
+
+      candidates = ArbiterWeb.DashboardLive.pr_state_refresh_candidates(records, 0, 6, false)
+
+      assert Enum.map(candidates, & &1.id) == [2]
     end
   end
 end

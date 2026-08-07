@@ -27,16 +27,14 @@ defmodule Arbiter.GitHub.LimiterTest do
   defp start_limiter(opts) do
     name = :"limiter_#{System.unique_integer([:positive])}"
 
-    start_supervised!(
-      {Limiter, Keyword.merge([name: name, probe: false], opts)}
-    )
+    start_supervised!({Limiter, Keyword.merge([name: name, probe: false], opts)})
 
     name
   end
 
   describe "acquire/3 priority classes" do
     test "foreground is always allowed, even with zero headroom and an active secondary backoff" do
-      srv = start_limiter(background_headroom: 1000)
+      srv = start_limiter(background_headroom: 1000, secondary_cooldown_ms: 120_000)
       # Drive remaining to 0 and arm a secondary backoff.
       Limiter.observe(@token, %{remaining: 0, limit: 5000, reset_at: nil}, srv)
       Limiter.note_secondary(@token, srv)
@@ -139,7 +137,8 @@ defmodule Arbiter.GitHub.LimiterTest do
     end
 
     test "two tokens owned by the same account share one budget; a different account does not" do
-      srv = start_limiter(probe: true, resolver_fun: account_resolver(), background_headroom: 1000)
+      srv =
+        start_limiter(probe: true, resolver_fun: account_resolver(), background_headroom: 1000)
 
       assert await_pool(srv, "pat_a", {:account, "acct-1"}) == {:account, "acct-1"}
       assert await_pool(srv, "pat_b", {:account, "acct-1"}) == {:account, "acct-1"}
@@ -212,6 +211,78 @@ defmodule Arbiter.GitHub.LimiterTest do
       assert result == :background
       # Restored afterwards.
       assert Limiter.current_priority() == :foreground
+    end
+
+    # bd-8y1i58: the ambient class lives in the *process dictionary*, so it does
+    # NOT cross a process boundary. Work handed to a spawned Task silently
+    # reverts to the `:foreground` default — which is how a dashboard's
+    # fire-and-forget pr_state refresh ended up classified as foreground and
+    # burning the account's quota at idle. This documents the hazard.
+    test "a plain spawned task does NOT inherit the ambient priority" do
+      test = self()
+
+      Limiter.with_priority(:background, fn ->
+        Task.start(fn -> send(test, {:priority, Limiter.current_priority()}) end)
+      end)
+
+      assert_receive {:priority, :foreground}, 1_000
+    end
+
+    test "start_task/2 carries the priority into the spawned process" do
+      test = self()
+
+      Limiter.start_task(:background, fn ->
+        send(test, {:priority, Limiter.current_priority()})
+      end)
+
+      assert_receive {:priority, :background}, 1_000
+    end
+
+    test "start_task/2 does not leak the priority back into the caller" do
+      Limiter.start_task(:background, fn -> :ok end)
+      assert Limiter.current_priority() == :foreground
+    end
+  end
+
+  # bd-8y1i58: a hard floor under the whole account. GitHub meters per *user*
+  # across every token, so an exhausted pool starves the operator's own `gh`
+  # too. Below the reserve, arbiter stops issuing traffic entirely — foreground
+  # included — so the remaining band survives for a human.
+  describe "foreground reserve" do
+    test "is disabled by default: foreground still runs at zero remaining" do
+      srv = start_limiter(background_headroom: 1000)
+      Limiter.observe(@token, %{remaining: 0, limit: 5000}, srv)
+
+      assert Limiter.acquire(@token, :foreground, srv) == :ok
+    end
+
+    test "pauses foreground once remaining falls to/below the reserve" do
+      srv = start_limiter(background_headroom: 1000, foreground_reserve: 500)
+
+      Limiter.observe(@token, %{remaining: 501, limit: 5000}, srv)
+      assert Limiter.acquire(@token, :foreground, srv) == :ok
+
+      Limiter.observe(@token, %{remaining: 500, limit: 5000}, srv)
+      assert Limiter.acquire(@token, :foreground, srv) == {:paused, :foreground_reserve}
+
+      Limiter.observe(@token, %{remaining: 12, limit: 5000}, srv)
+      assert Limiter.acquire(@token, :foreground, srv) == {:paused, :foreground_reserve}
+    end
+
+    test "counts a reserve-withheld foreground call separately from allowed ones" do
+      srv = start_limiter(background_headroom: 1000, foreground_reserve: 500)
+      Limiter.observe(@token, %{remaining: 100, limit: 5000}, srv)
+
+      assert Limiter.acquire(@token, :foreground, srv) == {:paused, :foreground_reserve}
+
+      pool = Limiter.stats(srv)[:shared]
+      assert pool.counts.foreground == 0
+      assert pool.counts.foreground_paused == 1
+    end
+
+    test "with no observation yet, foreground is allowed (nothing says we are low)" do
+      srv = start_limiter(background_headroom: 1000, foreground_reserve: 500)
+      assert Limiter.acquire(@token, :foreground, srv) == :ok
     end
   end
 end
