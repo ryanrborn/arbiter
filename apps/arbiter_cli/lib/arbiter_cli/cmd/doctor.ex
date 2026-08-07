@@ -240,6 +240,12 @@ defmodule ArbiterCli.Cmd.Doctor do
     end
   end
 
+  # Non-fatal: this says which workspace CLI commands like `arb issue` will
+  # operate against, not whether the server itself is healthy. `green?/0`
+  # backs `arb server deploy`'s auto-rollback wait — an ambiguous or
+  # unresolvable workspace selector must never roll back an otherwise-healthy
+  # deploy (see bd-8ix2tw: every deploy auto-rolled-back on an install whose
+  # only workspace wasn't named "default").
   defp check_active_workspace do
     case Workspace.resolve() do
       {:ok, ws} ->
@@ -247,7 +253,7 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "active workspace resolves",
           status: :ok,
           detail: "#{ws["name"]} (#{ws["id"]})",
-          fatal: true
+          fatal: false
         }
 
       {:error, msg} ->
@@ -256,7 +262,7 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :fail,
           detail: msg,
           hint: "Set ARB_WORKSPACE or create a workspace named \"default\".",
-          fatal: true
+          fatal: false
         }
     end
   end

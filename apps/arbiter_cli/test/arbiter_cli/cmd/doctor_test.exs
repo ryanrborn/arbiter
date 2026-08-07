@@ -169,6 +169,31 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert Doctor.green?() == true
   end
 
+  test "workspace resolution failure is non-fatal (exit 0 but shows [fail])" do
+    prev = System.get_env("ARB_WORKSPACE")
+    System.delete_env("ARB_WORKSPACE")
+    on_exit(fn -> if prev, do: System.put_env("ARB_WORKSPACE", prev) end)
+
+    ambiguous_workspaces = %{
+      "data" => [
+        %{"id" => "ws-a", "name" => "alpha", "prefix" => "al"},
+        %{"id" => "ws-b", "name" => "beta", "prefix" => "be"}
+      ]
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {ambiguous_workspaces, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 0
+    assert out =~ "[ ok ] phoenix reachable"
+    assert out =~ "[ ok ] at least one workspace exists"
+    assert out =~ "[fail] active workspace resolves"
+    assert Doctor.green?() == true
+  end
+
   test "server on the same SHA the CLI's own build carries, but a different version, is a real mismatch" do
     # Guards the exact bug: `cli_sha == server_sha` (e.g. both literally
     # "unknown") must never by itself imply the versions match.
