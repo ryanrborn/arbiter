@@ -80,6 +80,12 @@ defmodule ArbiterCli.Workspace do
   # there isn't one but exactly one workspace exists, resolve to it — there's
   # no ambiguity to warn about. Only error when the choice is genuinely
   # ambiguous (multiple workspaces, none named "default").
+  defp resolve_from_list([], nil) do
+    {:error,
+     "no workspaces found. Create one with `arb` (workspace creation is not yet a arb " <>
+       "command — use the API)."}
+  end
+
   defp resolve_from_list(list, nil) do
     case Enum.find(list, &(&1["name"] == "default")) do
       nil ->

@@ -169,7 +169,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert Doctor.green?() == true
   end
 
-  test "workspace resolution failure is non-fatal (exit 0 but shows [fail])" do
+  test "workspace resolution failure is an operator-actionable exit 1, but must not block deploy readiness" do
     prev = System.get_env("ARB_WORKSPACE")
     System.delete_env("ARB_WORKSPACE")
     on_exit(fn -> if prev, do: System.put_env("ARB_WORKSPACE", prev) end)
@@ -187,10 +187,15 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-    assert exit_code == 0
+    # `arb doctor` still exits non-zero — this is an operator-actionable
+    # misconfiguration, same as any other broken `Workspace.resolve/0` caller.
+    assert exit_code == 1
     assert out =~ "[ ok ] phoenix reachable"
     assert out =~ "[ ok ] at least one workspace exists"
     assert out =~ "[fail] active workspace resolves"
+    # ...but it must never gate `arb server deploy`'s auto-rollback wait
+    # (bd-8ix2tw): an unresolvable workspace selector says nothing about
+    # whether the deployed server itself is healthy.
     assert Doctor.green?() == true
   end
 

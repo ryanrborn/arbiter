@@ -72,6 +72,16 @@ defmodule ArbiterCli.WorkspaceTest do
       assert {:ok, %{"name" => "default"}} = Workspace.resolve()
     end
 
+    test "on a fresh install (zero workspaces), the error points at creating one, not ARB_WORKSPACE" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {%{"data" => []}, 200}}
+      ])
+
+      assert {:error, msg} = Workspace.resolve()
+      refute msg =~ "ARB_WORKSPACE"
+      assert msg =~ "no workspaces found"
+    end
+
     test "errors when ambiguous: multiple workspaces, none named \"default\"" do
       stub_routes([
         {{"get", "/api/workspaces"},

@@ -328,6 +328,15 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert out =~ "note:"
       assert out =~ "at least one workspace exists"
       assert out =~ "already failing before this deploy started"
+
+      # The pre-flight warning itself routes through `log/1` → `Start.log_text/1`,
+      # a no-op in tests (bd2_sleep is stubbed in setup/0) — assert its exact
+      # content directly rather than relying on it reaching stdout/stderr.
+      assert ReleaseDeploy.preflight_warning(["at least one workspace exists"], @vsn) =~
+               "warning: 1 fatal health check(s) already failing before this deploy started " <>
+                 "(at least one workspace exists). Run `arb doctor` to investigate — if this " <>
+                 "deploy times out waiting for green, that pre-existing condition, not release " <>
+                 "#{@vsn}, may be why."
     end
 
     test "restart reports success but /api/version still shows the prior release (failed swap): rolls back, exits 1",

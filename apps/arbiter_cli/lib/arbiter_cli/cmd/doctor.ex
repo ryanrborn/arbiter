@@ -6,7 +6,8 @@ defmodule ArbiterCli.Cmd.Doctor do
 
     1. Can we reach `GET /api/workspaces`? (Phoenix reachable)
     2. Does at least one workspace exist? (DB reachable + reasonable state)
-    3. Can we resolve the configured workspace? (ARB_WORKSPACE / "default")
+    3. Can we resolve the configured workspace? (ARB_WORKSPACE, else the
+       workspace named "default", else the sole workspace if there's only one)
 
   Exit code 0 on all green, 1 on any failure.
   """
@@ -53,11 +54,18 @@ defmodule ArbiterCli.Cmd.Doctor do
   @spec reachable?() :: boolean()
   def reachable?, do: check_phoenix().status == :ok
 
-  @doc "True when every fatal health check passes. Non-fatal checks (like version mismatch) don't block readiness."
+  @doc """
+  True when every readiness-blocking health check passes. `fatal` alone can't
+  gate this: it also drives `arb doctor`'s exit code, and some checks (like
+  workspace resolution) are operator-actionable failures worth a non-zero
+  exit without saying anything about whether the deployed server is healthy.
+  `blocks_readiness` is the narrower signal `arb server deploy`'s
+  auto-rollback wait actually needs.
+  """
   @spec green?() :: boolean()
   def green? do
     Enum.all?(checks(), fn r ->
-      r.status == :ok or (r.status == :fail and not r.fatal)
+      r.status == :ok or (r.status == :fail and not r.blocks_readiness)
     end)
   end
 
@@ -99,21 +107,28 @@ defmodule ArbiterCli.Cmd.Doctor do
 
   defmodule Result do
     @moduledoc false
-    defstruct [:name, :status, :detail, :hint, :fatal]
+    defstruct [:name, :status, :detail, :hint, :fatal, :blocks_readiness]
 
     @type t :: %__MODULE__{
             name: String.t(),
             status: :ok | :fail,
             detail: nil | String.t(),
             hint: nil | String.t(),
-            fatal: boolean()
+            fatal: boolean(),
+            blocks_readiness: boolean()
           }
   end
 
   defp check_phoenix do
     case Client.get("/api/workspaces") do
       {:ok, _} ->
-        %Result{name: "phoenix reachable", status: :ok, detail: Client.base_url(), fatal: true}
+        %Result{
+          name: "phoenix reachable",
+          status: :ok,
+          detail: Client.base_url(),
+          fatal: true,
+          blocks_readiness: true
+        }
 
       {:error, %Client.Error{kind: :connection_refused} = err} ->
         %Result{
@@ -121,7 +136,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :fail,
           detail: err.message,
           hint: err.hint,
-          fatal: true
+          fatal: true,
+          blocks_readiness: true
         }
 
       {:error, %Client.Error{} = err} ->
@@ -130,7 +146,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :fail,
           detail: err.message,
           hint: err.hint,
-          fatal: true
+          fatal: true,
+          blocks_readiness: true
         }
     end
   end
@@ -142,7 +159,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "at least one workspace exists",
           status: :ok,
           detail: "#{length(list)} workspace(s)",
-          fatal: true
+          fatal: true,
+          blocks_readiness: true
         }
 
       {:ok, _} ->
@@ -151,7 +169,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :fail,
           detail: "no workspaces found",
           hint: "Run `mix run priv/repo/seeds.exs` or create one via the API.",
-          fatal: true
+          fatal: true,
+          blocks_readiness: true
         }
 
       {:error, %Client.Error{} = err} ->
@@ -160,7 +179,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :fail,
           detail: err.message,
           hint: err.hint,
-          fatal: true
+          fatal: true,
+          blocks_readiness: true
         }
     end
   end
@@ -179,7 +199,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "version",
           status: :ok,
           detail: "CLI #{cli_vsn} @ #{cli_sha} (server unreachable)",
-          fatal: true
+          fatal: true,
+          blocks_readiness: true
         }
 
       {:error, %Client.Error{} = err} ->
@@ -187,7 +208,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "version",
           status: :ok,
           detail: "CLI #{cli_vsn} @ #{cli_sha} (server error: #{err.message})",
-          fatal: true
+          fatal: true,
+          blocks_readiness: true
         }
     end
   end
@@ -208,7 +230,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "version",
           status: :ok,
           detail: "server #{server_vsn}, CLI #{cli_vsn} (CLI and server match)",
-          fatal: false
+          fatal: false,
+          blocks_readiness: false
         }
 
       major_version(cli_vsn) != major_version(server_vsn) ->
@@ -217,7 +240,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :fail,
           detail: "server #{server_vsn} @ #{server_sha}, CLI #{cli_vsn} @ #{cli_sha}",
           hint: "Major version mismatch — upgrade both CLI and server to the same major.",
-          fatal: false
+          fatal: false,
+          blocks_readiness: false
         }
 
       true ->
@@ -228,7 +252,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           hint:
             "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
               "the #{server_vsn} release asset to match the server.",
-          fatal: false
+          fatal: false,
+          blocks_readiness: false
         }
     end
   end
@@ -240,10 +265,14 @@ defmodule ArbiterCli.Cmd.Doctor do
     end
   end
 
-  # Non-fatal: this says which workspace CLI commands like `arb issue` will
-  # operate against, not whether the server itself is healthy. `green?/0`
-  # backs `arb server deploy`'s auto-rollback wait — an ambiguous or
-  # unresolvable workspace selector must never roll back an otherwise-healthy
+  # `fatal: true` — this is still an operator-actionable misconfiguration
+  # (ambiguous or unresolvable workspace selector) and `arb doctor` should
+  # exit non-zero on it, same as any other broken CLI command depending on
+  # `Workspace.resolve/0` (`arb issue`, `arb ready`, `arb where`, `arb
+  # config`). But `blocks_readiness: false` — it says which workspace CLI
+  # commands will operate against, not whether the deployed server is
+  # healthy, so `green?/0` (which backs `arb server deploy`'s auto-rollback
+  # wait) must not treat it as a reason to roll back an otherwise-healthy
   # deploy (see bd-8ix2tw: every deploy auto-rolled-back on an install whose
   # only workspace wasn't named "default").
   defp check_active_workspace do
@@ -253,7 +282,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "active workspace resolves",
           status: :ok,
           detail: "#{ws["name"]} (#{ws["id"]})",
-          fatal: false
+          fatal: true,
+          blocks_readiness: false
         }
 
       {:error, msg} ->
@@ -261,8 +291,9 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "active workspace resolves",
           status: :fail,
           detail: msg,
-          hint: "Set ARB_WORKSPACE or create a workspace named \"default\".",
-          fatal: false
+          hint: "Set ARB_WORKSPACE to pick one of the existing workspaces.",
+          fatal: true,
+          blocks_readiness: false
         }
     end
   end

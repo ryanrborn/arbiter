@@ -110,22 +110,6 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     repo = release_repo()
     Restart.guard_active_workers!(force)
 
-    # Snapshot doctor state before touching anything, so a fatal check that's
-    # already red (pre-existing condition) is distinguishable from one caused
-    # by the release being deployed. Without this, a timed-out green-wait
-    # reads identically whether the new release is unhealthy or the stack was
-    # already broken before this deploy started.
-    pre_deploy_fails = preflight_fatal_fails()
-
-    if pre_deploy_fails != [] do
-      log(
-        "warning: #{length(pre_deploy_fails)} fatal health check(s) already failing " <>
-          "before this deploy started (#{Enum.join(pre_deploy_fails, ", ")}). Run " <>
-          "`arb doctor` to investigate — if this deploy times out waiting for green, " <>
-          "that pre-existing condition, not release #{opts[:version] || "latest"}, may be why."
-      )
-    end
-
     release = fetch_release(repo, opts[:version])
     tag = release_tag(release)
 
@@ -138,6 +122,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     if not force and current_target_basename(current_link) == tag do
       emit_already_current(mode, tag)
     else
+      # Snapshot doctor state before touching anything, so a fatal check
+      # that's already red (pre-existing condition) is distinguishable from
+      # one caused by the release being deployed. Without this, a timed-out
+      # green-wait reads identically whether the new release is unhealthy or
+      # the stack was already broken before this deploy started. Deferred
+      # until after the idempotency check so a no-op `arb server deploy`
+      # doesn't pay for it or warn about a deploy that never happens.
+      pre_deploy_fails = preflight_fatal_fails()
+
+      if pre_deploy_fails != [] do
+        log(preflight_warning(pre_deploy_fails, tag))
+      end
+
       {tarball_url, sha_url} = release_assets(release, tag)
 
       log("Downloading #{asset_name(tag)} from #{repo}@#{tag}…")
@@ -489,12 +486,29 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
   # ---- pre-flight -----------------------------------------------------------
 
-  # Names of every currently-red fatal doctor check, queried against whatever
-  # is running *before* this deploy touches anything.
+  # Names of every currently-red readiness-blocking doctor check, queried
+  # against whatever is running *before* this deploy touches anything. Uses
+  # `blocks_readiness`, not `fatal` — `fatal` also drives `arb doctor`'s exit
+  # code and includes checks (like workspace resolution) that are
+  # operator-actionable but have no bearing on whether the green-wait below
+  # will time out. Flagging those here would reintroduce a milder version of
+  # bd-8ix2tw: a misleading "pre-existing condition" note on a deploy that
+  # was never at risk of it.
   defp preflight_fatal_fails do
     Doctor.checks()
-    |> Enum.filter(&(&1.status == :fail and &1.fatal))
+    |> Enum.filter(&(&1.status == :fail and &1.blocks_readiness))
     |> Enum.map(& &1.name)
+  end
+
+  @doc false
+  # Extracted (rather than inlined at the call site) and left public so its
+  # content is directly assertable in tests — the `log/1` call it feeds is a
+  # no-op whenever `:bd2_sleep` is stubbed, which every deploy test does.
+  def preflight_warning(pre_deploy_fails, tag) do
+    "warning: #{length(pre_deploy_fails)} fatal health check(s) already failing " <>
+      "before this deploy started (#{Enum.join(pre_deploy_fails, ", ")}). Run " <>
+      "`arb doctor` to investigate — if this deploy times out waiting for green, " <>
+      "that pre-existing condition, not release #{tag}, may be why."
   end
 
   # ---- rollback -----------------------------------------------------------
