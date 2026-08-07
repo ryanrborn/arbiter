@@ -41,6 +41,7 @@ defmodule ArbiterWeb.DashboardLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Reviews.PrState
   alias Arbiter.Reviews.Record, as: ExternalReviewRecord
   alias Arbiter.Tasks.Issue
@@ -353,18 +354,6 @@ defmodule ArbiterWeb.DashboardLive do
         _ -> []
       end
 
-    # Lazily resolve pr_state for records that need it (fire-and-forget).
-    records_needing_resolve =
-      if force_pr_state do
-        Enum.filter(all_records, &needs_pr_state_refresh?/1)
-      else
-        Enum.filter(all_records, &is_nil(&1.pr_state))
-      end
-
-    unless records_needing_resolve == [] do
-      spawn_pr_state_resolvers(records_needing_resolve, workspaces_by_id)
-    end
-
     # Sort: open-PR reviews first, then merged/closed; newest started_at first
     # within each group.
     sorted =
@@ -383,6 +372,13 @@ defmodule ArbiterWeb.DashboardLive do
       |> Enum.drop(safe_page * @review_history_page_size)
       |> Enum.take(@review_history_page_size)
 
+    # Lazily resolve pr_state for the rendered rows (fire-and-forget). Scoped to
+    # the page and issued as background traffic — see
+    # `pr_state_refresh_candidates/4`.
+    sorted
+    |> pr_state_refresh_candidates(safe_page, @review_history_page_size, force_pr_state)
+    |> spawn_pr_state_resolvers(workspaces_by_id)
+
     socket
     |> assign(:external_reviews, page_records)
     |> assign(:review_history_page, safe_page)
@@ -396,15 +392,46 @@ defmodule ArbiterWeb.DashboardLive do
   # crucially, `"unknown"` is now retryable (it was a dead-end here before).
   defp needs_pr_state_refresh?(record), do: PrState.needs_refresh?(record)
 
+  @doc """
+  Which Review History rows this refresh should re-resolve `pr_state` for.
+
+  Bounded to the page actually being rendered (bd-8y1i58). Before, the panel
+  filtered the whole fetched set — up to `@review_history_fetch_limit` rows —
+  and spawned one GitHub lookup per row on every 60s tick, per open dashboard
+  tab. That was the single largest source of idle GitHub traffic on a busy
+  install; keeping non-terminal rows fresh is
+  `Arbiter.Reviews.PrStatePoller`'s job (bd-3jjk0e), and it runs as background
+  traffic so it can be shed when the account is low.
+
+  `force?` distinguishes the periodic tick (re-resolve anything non-terminal)
+  from an event-driven re-render (only fill in rows that have no value yet).
+  """
+  @spec pr_state_refresh_candidates([map()], non_neg_integer(), pos_integer(), boolean()) ::
+          [map()]
+  def pr_state_refresh_candidates(sorted_records, page, page_size, force?) do
+    predicate =
+      if force?, do: &needs_pr_state_refresh?/1, else: &is_nil(&1.pr_state)
+
+    sorted_records
+    |> Enum.drop(page * page_size)
+    |> Enum.take(page_size)
+    |> Enum.filter(predicate)
+  end
+
   # Spawn one fire-and-forget task per record to resolve and persist pr_state.
   # Each task is independent — a crash in one never affects the panel. The
   # dashboard is only a *reader* of pr_state now; the background poller keeps it
   # advancing when no one is watching. This opportunistic resolve just gives a
   # freshly-opened dashboard an immediate update.
+  #
+  # bd-8y1i58: spawned via `Limiter.start_task/2`, not `Task.start/1`. The
+  # limiter's ambient priority lives in the process dictionary and does NOT
+  # cross a process boundary, so a plain `Task.start` here silently issued
+  # *foreground* GitHub traffic — unshuttable even at zero headroom.
   defp spawn_pr_state_resolvers(records, workspaces_by_id) do
     Enum.each(records, fn record ->
       workspace = Map.get(workspaces_by_id, record.workspace_id)
-      Task.start(fn -> PrState.resolve_and_persist(record, workspace) end)
+      Limiter.start_task(:background, fn -> PrState.resolve_and_persist(record, workspace) end)
     end)
   end
 

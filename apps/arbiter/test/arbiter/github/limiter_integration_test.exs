@@ -7,13 +7,21 @@ defmodule Arbiter.GitHub.LimiterIntegrationTest do
   alias Arbiter.GitHub
   alias Arbiter.GitHub.Error
   alias Arbiter.GitHub.Limiter
+  alias Arbiter.Mergers
+  alias Arbiter.Mergers.Github.Config
 
   @repo "octo/widget"
   @token "pat_integration"
 
   setup do
     name = :"limiter_int_#{System.unique_integer([:positive])}"
-    start_supervised!({Limiter, name: name, probe: false, background_headroom: 1000})
+    # An explicit cooldown: the suite-wide default is 0 so a trip can't leak a
+    # pause across tests (see config/test.exs), but the retry-shedding test
+    # below needs the backoff to actually be armed.
+    start_supervised!(
+      {Limiter,
+       name: name, probe: false, background_headroom: 1000, secondary_cooldown_ms: 120_000}
+    )
 
     previous = Application.get_env(:arbiter, :github_limiter_server)
     Application.put_env(:arbiter, :github_limiter_server, name)
@@ -109,6 +117,80 @@ defmodule Arbiter.GitHub.LimiterIntegrationTest do
       assert stats = Limiter.stats(srv)
       assert stats[:shared].remaining == 800
       assert {:paused, :low_headroom} = Limiter.acquire(@token, :background, srv)
+    end
+  end
+
+  # bd-8y1i58: the merger's bounded secondary-limit retry loop (bd-1yva53) ran
+  # *inside* a single `gate/2` call, so one acquire could issue up to three real
+  # GitHub requests. The limiter's own numbers — the thing an operator reads
+  # when diagnosing an exhausted account — undercounted by up to 3x, and a
+  # background retry storm could not be shed once it had started.
+  describe "every real request is gated, including secondary-limit retries" do
+    setup do
+      System.put_env("LIMITER_MERGER_TOKEN", @token)
+
+      Config.put_active(%{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "env:LIMITER_MERGER_TOKEN"
+      })
+
+      Application.put_env(:arbiter, :github_retry_sleep_fun, fn _ms -> :ok end)
+
+      on_exit(fn ->
+        Config.clear()
+        System.delete_env("LIMITER_MERGER_TOKEN")
+        Application.delete_env(:arbiter, :github_retry_sleep_fun)
+      end)
+
+      :ok
+    end
+
+    defp secondary_limit_conn(conn) do
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "1")
+      |> Plug.Conn.put_resp_header("x-ratelimit-remaining", "4000")
+      |> Plug.Conn.put_status(403)
+      |> Req.Test.json(%{"message" => "You have exceeded a secondary rate limit"})
+    end
+
+    test "a retried foreground request is counted once per real HTTP call",
+         %{limiter: srv} do
+      {:ok, hits} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(Mergers.Github.HTTP, fn conn ->
+        Agent.update(hits, &(&1 + 1))
+        secondary_limit_conn(conn)
+      end)
+
+      assert {:error, _} = Mergers.Github.get("#42")
+
+      # 1 initial + 2 bounded retries = 3 real requests…
+      assert Agent.get(hits, & &1) == 3
+      # …and the limiter's counter agrees.
+      assert Limiter.stats(srv)[:shared].counts.foreground == 3
+    end
+
+    test "a background retry is shed once the secondary limit is recorded",
+         %{limiter: srv} do
+      {:ok, hits} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(Mergers.Github.HTTP, fn conn ->
+        Agent.update(hits, &(&1 + 1))
+        secondary_limit_conn(conn)
+      end)
+
+      assert {:error, _} =
+               Limiter.with_priority(:background, fn -> Mergers.Github.get("#42") end)
+
+      # The first 403 arms the secondary backoff, so the retry is withheld
+      # rather than sustaining the limit with more traffic.
+      assert Agent.get(hits, & &1) == 1
+
+      counts = Limiter.stats(srv)[:shared].counts
+      assert counts.background == 1
+      assert counts.background_paused == 1
+      assert counts.secondary_trips == 1
     end
   end
 end

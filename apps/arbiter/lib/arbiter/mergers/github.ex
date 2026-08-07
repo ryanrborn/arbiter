@@ -1361,7 +1361,8 @@ defmodule Arbiter.Mergers.Github do
     # `rateLimit { cost }` is itself free of points and makes GitHub return the
     # exact points this query billed, so a sweep's cost is observable in the logs
     # (bd-3byp1n's "measure the points cost") rather than merely estimated.
-    query = "query(#{Enum.join(var_decls, ", ")}) {\n#{repo_blocks}\n    rateLimit { cost nodeCount }\n}\n"
+    query =
+      "query(#{Enum.join(var_decls, ", ")}) {\n#{repo_blocks}\n    rateLimit { cost nodeCount }\n}\n"
 
     {query, variables}
   end
@@ -1748,7 +1749,7 @@ defmodule Arbiter.Mergers.Github do
       ]
       |> Keyword.merge(stub_opts())
 
-    case Limiter.gate(cfg.token, fn -> perform_request(full_opts, 0) end) do
+    case perform_request(cfg.token, full_opts, 0) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, to_string(body)}
 
@@ -1786,16 +1787,24 @@ defmodule Arbiter.Mergers.Github do
       |> Keyword.merge(req_opts)
       |> Keyword.merge(stub_opts())
 
-    # Gate through the shared priority-aware GitHub budget (bd-3p5vqc). Background
-    # patrol traffic may be withheld here so it can never starve foreground work
-    # (PR open/merge/finalize, deploys). The local secondary-retry loop in
-    # perform_request/2 runs *inside* the gate; the limiter observes the final
-    # result to drive its headroom + secondary-limit accounting.
-    Limiter.gate(cfg.token, fn -> perform_request(full_opts, 0) end)
+    perform_request(cfg.token, full_opts, 0)
   end
 
-  defp perform_request(full_opts, attempt) do
-    case Req.request(full_opts) do
+  # Every real HTTP request passes through the shared priority-aware GitHub
+  # budget (bd-3p5vqc): background patrol traffic may be withheld here so it can
+  # never starve foreground work (PR open/merge/finalize, deploys), and the
+  # limiter observes each response to drive its headroom + secondary-limit
+  # accounting.
+  #
+  # bd-8y1i58: the gate is *inside* the retry loop, not around it. With the loop
+  # inside a single gate, one acquire could issue up to three real requests —
+  # the limiter's counters (what an operator reads when the account is
+  # exhausted) undercounted by up to 3x, and a background retry storm could not
+  # be shed once it had started. Gating per attempt also means the first 403
+  # arms the secondary backoff before the retry is decided, so background retry
+  # traffic — the thing that *sustains* a secondary limit — is withheld.
+  defp perform_request(token, full_opts, attempt) do
+    case Limiter.gate(token, fn -> Req.request(full_opts) end) do
       {:ok, %Req.Response{status: status} = resp} = result when status in [403, 429] ->
         if attempt < @max_secondary_retries and secondary_rate_limited?(resp) do
           Logger.info(
@@ -1803,7 +1812,7 @@ defmodule Arbiter.Mergers.Github do
           )
 
           wait_before_retry(resp, attempt)
-          perform_request(full_opts, attempt + 1)
+          perform_request(token, full_opts, attempt + 1)
         else
           result
         end
