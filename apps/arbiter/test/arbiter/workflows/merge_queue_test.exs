@@ -1128,6 +1128,141 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
   end
 
+  # bd-bvxdy9: MergeQueue used to re-poll on the fixed 30s tick no matter what
+  # the forge's rate-limit error said — 8 wasted calls in 4 minutes against a
+  # single 231s retry hint. A poll error carrying `retry_after_ms` now parks
+  # the item until that window elapses instead of retrying every tick.
+  describe "poll honors a rate-limit retry_after_ms hint (bd-bvxdy9)" do
+    setup do
+      on_exit(fn -> Application.delete_env(:arbiter, :merge_queue_clock_fun) end)
+      :ok
+    end
+
+    # Uses `x-ratelimit-reset` (the primary-quota header) rather than
+    # `Retry-After` (the secondary/abuse header) — the latter also triggers
+    # `Arbiter.Mergers.Github`'s own internal secondary-limit retry loop
+    # before the error ever reaches `MergeQueue`, confounding the call counts
+    # these tests assert on.
+    defp rate_limited_get_response(conn, reset_in_seconds) do
+      reset_epoch = System.os_time(:second) + reset_in_seconds
+
+      conn
+      |> Plug.Conn.put_resp_header("x-ratelimit-reset", Integer.to_string(reset_epoch))
+      |> Plug.Conn.put_resp_header("content-type", "application/json")
+      |> Plug.Conn.resp(403, Jason.encode!(%{"message" => "API rate limit exceeded"}))
+    end
+
+    @tag workspace_config: @ws_github
+    test "a rate-limited poll is not retried again before retry_after_ms elapses", %{
+      workspace: ws,
+      task: task
+    } do
+      pr_number = 401
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      counter = :counters.new(1, [])
+
+      stub(fn conn ->
+        :counters.add(counter, 1, 1)
+        rate_limited_get_response(conn, 300)
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
+      assert log =~ "rate-limited"
+      assert :counters.get(counter, 1) == 1
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert %DateTime{} = item.retry_not_before
+      refute item.status == :failed
+
+      # A tick well before the 300s window elapses must make ZERO further
+      # adapter calls.
+      :ok = MergeQueue.tick(name)
+      :ok = MergeQueue.tick(name)
+      assert :counters.get(counter, 1) == 1
+    end
+
+    @tag workspace_config: @ws_github
+    test "polling resumes once retry_not_before has passed", %{workspace: ws, task: task} do
+      pr_number = 402
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      counter = :counters.new(1, [])
+
+      stub(fn conn ->
+        :counters.add(counter, 1, 1)
+
+        # get/1 fetches the PR, then (only once that succeeds) its reviews —
+        # rate-limit the very first call and let everything after succeed.
+        if :counters.get(counter, 1) == 1 do
+          rate_limited_get_response(conn, 60)
+        else
+          if String.ends_with?(conn.request_path, "/reviews") do
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+          else
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => pr_number}))
+          end
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # First tick: rate-limited on the very first call — the `with` chain in
+      # `get/1` short-circuits, so only 1 call fires this cycle.
+      :ok = MergeQueue.tick(name)
+      assert :counters.get(counter, 1) == 1
+
+      # Fast-forward the virtual clock past the ~60s retry window.
+      Application.put_env(
+        :arbiter,
+        :merge_queue_clock_fun,
+        fn -> DateTime.add(DateTime.utc_now(), 61, :second) end
+      )
+
+      # Second tick: a full successful `get/1` makes 2 calls (PR + reviews).
+      :ok = MergeQueue.tick(name)
+      assert :counters.get(counter, 1) == 3
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert item.retry_not_before == nil
+    end
+
+    # Reviewer finding #2 (round 1): an uncapped `retry_after_ms` (e.g. from a
+    # skewed client clock or a malformed `x-ratelimit-reset`) must not park an
+    # item for hours — cap at `@max_rate_limit_park_ms` (30 min), mirroring
+    # the precedent in `ExternalReview`/`ReviewPatrol`.
+    @tag workspace_config: @ws_github
+    test "an uncapped retry hint is clamped to the 30-minute park cap", %{
+      workspace: ws,
+      task: task
+    } do
+      pr_number = 403
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      # A 2-hour hint — far past the 30-minute cap.
+      stub(fn conn -> rate_limited_get_response(conn, 2 * 60 * 60) end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
+      assert log =~ "will retry in 1800000ms"
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert %DateTime{} = item.retry_not_before
+
+      seconds_until_retry = DateTime.diff(item.retry_not_before, DateTime.utc_now(), :second)
+      assert seconds_until_retry <= 1800
+      assert seconds_until_retry > 1700
+    end
+  end
+
   describe ":merged tracker lifecycle (bd-blwx2u)" do
     @jira_env_mq "GTE_MQ_MERGED_JIRA_TOKEN"
     @ws_github_jira_merged %{
