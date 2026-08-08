@@ -16,11 +16,13 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   defmodule FakeWorktree do
     def worktree_path(branch), do: "/fake/worktrees/#{branch}"
     def push(_path, _opts), do: {:ok, ""}
+    def rebase_onto_origin(_path, _branch), do: {:ok, :up_to_date}
   end
 
   defmodule FailingWorktree do
     def worktree_path(branch), do: "/fake/worktrees/#{branch}"
     def push(_path, _opts), do: {:error, {:git_failed, "fatal: repository not found"}}
+    def rebase_onto_origin(_path, _branch), do: {:ok, :up_to_date}
   end
 
   # Conflict resolver that records each `resolve/1` to the pid stashed in
