@@ -33,7 +33,7 @@ defmodule ArbiterWeb.Endpoint do
     socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
-    plug Phoenix.Ecto.CheckRepoStatus, otp_app: :arbiter_web
+    plug ArbiterWeb.Plugs.CheckRepoStatusExceptMachineRoutes, otp_app: :arbiter_web
   end
 
   plug Phoenix.LiveDashboard.RequestLogger,
