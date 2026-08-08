@@ -570,16 +570,15 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp ensure_migrations_up_to_date do
-    case Arbiter.Migrations.count_pending() do
+    migrations_module = Application.get_env(:arbiter, :migrations_module, Arbiter.Migrations)
+
+    case migrations_module.count_pending() do
       0 ->
         :ok
 
       count ->
         {:error, {:pending_migrations, count}}
     end
-  rescue
-    # Fresh install or database not set up — allow dispatch
-    _ -> :ok
   end
 
   # Quota-aware dispatch gate (bd-7cd38f). The single choke point where the fleet

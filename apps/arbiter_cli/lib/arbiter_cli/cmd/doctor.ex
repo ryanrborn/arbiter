@@ -320,11 +320,29 @@ defmodule ArbiterCli.Cmd.Doctor do
           blocks_readiness: false
         }
 
+      {:ok, _other} ->
+        %Result{
+          name: "migrations up to date",
+          status: :ok,
+          detail: "unexpected response — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+
       {:error, %Client.Error{kind: :connection_refused}} ->
         %Result{
           name: "migrations up to date",
           status: :ok,
           detail: "server unreachable",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :http, status: 404}} ->
+        %Result{
+          name: "migrations up to date",
+          status: :ok,
+          detail: "server does not expose migration status",
           fatal: false,
           blocks_readiness: false
         }

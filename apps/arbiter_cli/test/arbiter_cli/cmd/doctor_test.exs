@@ -31,6 +31,46 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert out =~ "[ ok ] migrations up to date"
   end
 
+  test "pending migrations shows [fail] with count in detail" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{"pending_count" => 3}, 200}}
+    ])
+
+    {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+    assert out =~ "[fail] migrations up to date"
+    assert out =~ "3 pending"
+  end
+
+  # bd-337f2i round 1 regression: a server predating the migrations endpoint
+  # returns 404, landing exactly in the mid-deploy version-skew window this
+  # check exists for — that must not be a hard [fail], consistent with how
+  # check_versions/0 treats server errors.
+  test "server without the migrations endpoint (404) does not fail doctor" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{}, 404}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 0
+    assert out =~ "[ ok ] migrations up to date"
+  end
+
+  test "unexpected migrations response shape does not crash doctor" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{"unexpected" => "shape"}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 0
+    assert out =~ "[ ok ] migrations up to date"
+  end
+
   test "connection refused → all fail with actionable hint" do
     stub_transport_error(:get, "/api/workspaces", :econnrefused)
 

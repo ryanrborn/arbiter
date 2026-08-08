@@ -4,6 +4,13 @@ defmodule Arbiter.Migrations do
 
   Used by the doctor health check and dispatch pre-flight to surface and gate
   work when the schema is about to change.
+
+  `arb server doctor` reads pending state through the running server's HTTP
+  API. In the documented `systemctl --user restart arbiter` deploy flow, boot
+  applies migrations before the server accepts traffic, so that check will
+  rarely observe a non-zero count in that flow. It still has real value in
+  dev (`mix phx.server` does not auto-migrate). The dispatch-side gate here is
+  in-process and unaffected by this limitation.
   """
 
   @doc """
@@ -32,6 +39,9 @@ defmodule Arbiter.Migrations do
   rescue
     # Catch any errors during migration check (e.g., database not running)
     _ -> 0
+  catch
+    # A dead/unstarted repo pool surfaces as an :exit signal, not a raise.
+    :exit, _ -> 0
   end
 
   @doc false
@@ -44,7 +54,7 @@ defmodule Arbiter.Migrations do
   # database connection.
   @spec extract_pending_count(term()) :: non_neg_integer()
   def extract_pending_count({:ok, {:ok, migrations}, _started_apps}) do
-    Enum.count(migrations, fn {_version, _name, status} -> status == :down end)
+    Enum.count(migrations, fn {status, _version, _name} -> status == :down end)
   end
 
   def extract_pending_count(_other), do: 0

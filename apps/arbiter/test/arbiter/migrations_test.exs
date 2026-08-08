@@ -3,22 +3,25 @@ defmodule Arbiter.MigrationsTest do
 
   alias Arbiter.Migrations
 
+  # Fixture tuples follow Ecto.Migrator.migrations/1,3's documented @spec:
+  # `[{:up | :down, id :: integer(), name :: String.t()}]` — status is the
+  # FIRST element, not the third. See deps/ecto_sql/lib/ecto/migrator.ex:479.
   describe "extract_pending_count/1 (the with_repo 3-tuple shape)" do
     test "counts :down migrations out of a mixed up/down list" do
       raw =
         {:ok,
          {:ok,
           [
-            {20_240_101_000_000, "AddUsers", :up},
-            {20_240_102_000_000, "AddPosts", :down},
-            {20_240_103_000_000, "AddComments", :down}
+            {:up, 20_240_101_000_000, "AddUsers"},
+            {:down, 20_240_102_000_000, "AddPosts"},
+            {:down, 20_240_103_000_000, "AddComments"}
           ]}, []}
 
       assert Migrations.extract_pending_count(raw) == 2
     end
 
     test "returns 0 when every migration is :up" do
-      raw = {:ok, {:ok, [{20_240_101_000_000, "AddUsers", :up}]}, []}
+      raw = {:ok, {:ok, [{:up, 20_240_101_000_000, "AddUsers"}]}, []}
 
       assert Migrations.extract_pending_count(raw) == 0
     end
@@ -36,7 +39,7 @@ defmodule Arbiter.MigrationsTest do
     # returns a 3-tuple. Feeding that exact wrong shape in must fall through to
     # the catch-all clause (0), not raise.
     test "falls through to 0 on the wrong (2-tuple) shape rather than raising" do
-      assert Migrations.extract_pending_count({:ok, [{1, "x", :down}]}) == 0
+      assert Migrations.extract_pending_count({:ok, [{:down, 1, "x"}]}) == 0
     end
   end
 
