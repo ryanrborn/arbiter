@@ -141,6 +141,7 @@ defmodule Arbiter.Loop.AnalysisTest do
       assert m
       assert m.cell == {1, "arbiter"}
       assert m.dispatched_difficulty == 1
+      assert m.reason == :rework
       # Real cost is the sum across both attempts, not just the failed one.
       assert_in_delta m.cost_usd, 10.62, 0.001
     end
@@ -194,6 +195,129 @@ defmodule Arbiter.Loop.AnalysisTest do
       refute Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-dyfaq3"))
 
       assert Enum.any?(report.finding_categories, &(&1.category =~ "context exhaustion"))
+    end
+  end
+
+  describe "round-1 convergence with failed attempts is a distinct finding, not a rounds misestimate (vs-8i7rod)" do
+    # vs-8i7rod: rounds: 1, 3 attempts, $5.59 total — reviewer approved on the
+    # first round, but two of the three attempts failed for an agent-quality
+    # reason before the third converged. The old predicate fired on
+    # quality_failure? alone and reused the rounds-based "under-provisioned"
+    # note/baseline even though rounds == 1. A cheap sibling task in the same
+    # (difficulty, repo) cell gives it a cohort to be an outlier against.
+    defp vs8i_rows do
+      [
+        row(%{
+          run_id: "vs8i-1",
+          task_id: "vs-8i7rod",
+          repo: "arbiter",
+          difficulty: 2,
+          status: :failed,
+          failure_reason: ":review_gate_rejected",
+          cost_usd: 1.86,
+          max_round: 1,
+          rejected?: true,
+          converged?: false,
+          terminal_lines: ["VERDICT: request_changes"]
+        }),
+        row(%{
+          run_id: "vs8i-2",
+          task_id: "vs-8i7rod",
+          repo: "arbiter",
+          difficulty: 2,
+          status: :failed,
+          failure_reason: ":review_gate_rejected",
+          cost_usd: 1.86,
+          max_round: 1,
+          rejected?: true,
+          converged?: false,
+          terminal_lines: ["VERDICT: request_changes"]
+        }),
+        row(%{
+          run_id: "vs8i-3",
+          task_id: "vs-8i7rod",
+          repo: "arbiter",
+          difficulty: 2,
+          status: :completed,
+          cost_usd: 1.87,
+          max_round: 1,
+          converged?: true
+        })
+      ]
+    end
+
+    defp cheap_cohort_row do
+      row(%{
+        run_id: "cheap-1",
+        task_id: "vs-cheap",
+        repo: "arbiter",
+        difficulty: 2,
+        status: :completed,
+        cost_usd: 1.0,
+        max_round: 1,
+        converged?: true
+      })
+    end
+
+    test "is not reported on the rounds-based path" do
+      report = Analysis.build_report(vs8i_rows() ++ [cheap_cohort_row()], label: "test")
+      m = Enum.find(report.difficulty_misestimates, &(&1.task_id == "vs-8i7rod"))
+      assert m
+      assert m.reason == :quality_failure
+      assert m.rounds == 1
+    end
+
+    test "renders wording for the actual cause, not a fabricated rounds-based claim" do
+      report = Analysis.build_report(vs8i_rows() ++ [cheap_cohort_row()], label: "test")
+      m = Enum.find(report.difficulty_misestimates, &(&1.task_id == "vs-8i7rod"))
+
+      refute m.note =~ "under-provisioned the actual work"
+      refute m.note =~ ~r/needed 1 round/
+
+      # No fabricated "0%" baseline — the reviewer approved on round 1, so a
+      # round-1-approval-rate baseline of 0% would be false for this task.
+      refute m.recommendation.baseline =~ "0%"
+      assert_in_delta m.cost_usd, 5.59, 0.001
+    end
+
+    test "a task with no cohort in its cell to compare against is still flagged, with no fabricated baseline" do
+      report = Analysis.build_report(vs8i_rows(), label: "test")
+      m = Enum.find(report.difficulty_misestimates, &(&1.task_id == "vs-8i7rod"))
+      assert m
+      assert m.reason == :quality_failure
+      refute m.recommendation.baseline =~ "0%"
+    end
+  end
+
+  describe "cohort comparison: a task at or below its cell median is not flagged" do
+    test "a reworked task that is no worse than its (difficulty, repo) cell peers is dropped" do
+      rows = [
+        # Target: rounds 2, cost 2.0 — reworked, but cheaper and faster than
+        # its cohort peer below.
+        row(%{
+          run_id: "cohort-target",
+          task_id: "bd-cohort-target",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 2.0,
+          max_round: 2
+        }),
+        # Cohort peer in the same (difficulty, repo) cell, strictly worse.
+        row(%{
+          run_id: "cohort-peer",
+          task_id: "bd-cohort-peer",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 5.0,
+          max_round: 3
+        })
+      ]
+
+      report = Analysis.build_report(rows, label: "test")
+      refute Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-cohort-target"))
+      assert Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-cohort-peer"))
     end
   end
 

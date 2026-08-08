@@ -915,7 +915,13 @@ defmodule Arbiter.Worker.Watchdog do
       # killing the only process still watching the MR (bd-krg7ci).
       state.auto_resolve_attempts >= state.max_auto_resolve_attempts ->
         state = maybe_escalate_unresolved(state, reason)
-        reschedule(%{state | last_block_reason: reason, max_polls: :infinity, park_reason: reason})
+
+        reschedule(%{
+          state
+          | last_block_reason: reason,
+            max_polls: :infinity,
+            park_reason: reason
+        })
 
       true ->
         auto_resolve(reason, result, state)
