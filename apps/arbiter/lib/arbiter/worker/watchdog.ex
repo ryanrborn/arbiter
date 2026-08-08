@@ -502,6 +502,26 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
+  defp apply_outcome(:approved, result, %{auto_merge: false} = state) do
+    # Approved but auto_merge is off: the review passed yet the fleet will not
+    # merge — a human decides. Two once-latched side effects, then keep polling
+    # for the human merge (the next poll that sees :merged completes):
+    #
+    #   * `sync_tracker_pending_merge` moves the external tracker to its parked-
+    #     but-approved status (Jira VR -> Pending Merge). (bd-c4cfuv)
+    #   * `notify_awaiting_manual_merge` pages the coordinator INBOX that the PR
+    #     is ready for a manual merge decision. Without this, an approved+done
+    #     PR on an auto_merge:false lane parked *silently* — nothing was ever
+    #     written to the coordinator inbox, so a ready-to-merge PR could sit
+    #     indefinitely until someone happened to poll `arb worker list`.
+    #     auto_merge:false must mean "ask a human", not "say nothing". (bd-b4pwxa)
+    state = maybe_sync_pending_merge(state)
+    state = maybe_notify_awaiting_manual_merge(state, result)
+    reschedule(state)
+  end
+
+  defp apply_outcome(:pending, _result, state), do: reschedule(state)
+
   # CI still running/queued for the approved MR's head commit — attempting the
   # merge right now would just fail against the forge's own not-yet-mergeable
   # check (bd-cnytw3). `block_reason/1` deliberately collapses this in-progress
@@ -581,26 +601,6 @@ defmodule Arbiter.Worker.Watchdog do
         reschedule(state)
     end
   end
-
-  defp apply_outcome(:approved, result, %{auto_merge: false} = state) do
-    # Approved but auto_merge is off: the review passed yet the fleet will not
-    # merge — a human decides. Two once-latched side effects, then keep polling
-    # for the human merge (the next poll that sees :merged completes):
-    #
-    #   * `sync_tracker_pending_merge` moves the external tracker to its parked-
-    #     but-approved status (Jira VR -> Pending Merge). (bd-c4cfuv)
-    #   * `notify_awaiting_manual_merge` pages the coordinator INBOX that the PR
-    #     is ready for a manual merge decision. Without this, an approved+done
-    #     PR on an auto_merge:false lane parked *silently* — nothing was ever
-    #     written to the coordinator inbox, so a ready-to-merge PR could sit
-    #     indefinitely until someone happened to poll `arb worker list`.
-    #     auto_merge:false must mean "ask a human", not "say nothing". (bd-b4pwxa)
-    state = maybe_sync_pending_merge(state)
-    state = maybe_notify_awaiting_manual_merge(state, result)
-    reschedule(state)
-  end
-
-  defp apply_outcome(:pending, _result, state), do: reschedule(state)
 
   # Sync the external tracker to its parked-but-approved status exactly once per
   # Watchdog episode (bd-c4cfuv).
