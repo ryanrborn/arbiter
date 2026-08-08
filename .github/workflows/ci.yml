@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Required check. Fast (~2-3 min warm-cache) and, as of this writing,
+  # reliably green on main — this is the gate the merge queue blocks on.
+  # It is also exactly what would have caught both incidents that motivated
+  # this workflow: a repo-wide format drift (PR #1135) and a warnings-as-error
+  # violation on main (#1131).
+  lint:
+    name: mix precommit (compile, deps, format)
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.19.4"
+
+      - name: Restore deps/build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      # `mix precommit`'s `format` step rewrites files in place, which is the
+      # right thing for a worker about to commit but the wrong thing here: CI
+      # must fail on a violation, not silently fix it. Run the same checks the
+      # alias runs (mix.exs `precommit`), swapping in `format --check-formatted`.
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Check for unused dependencies
+        run: |
+          mix deps.unlock --unused
+          git diff --exit-code mix.lock
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+  # Not a required check yet: as of this writing `mix test` has a handful of
+  # pre-existing, order-dependent failures on main (global Req.Test HTTP
+  # stubs / singleton GenServers bleeding across `async: false` LiveView
+  # tests) unrelated to any given PR's diff — gating on it today would block
+  # merges on failures no PR caused. It still runs on every PR so the signal
+  # is visible; flip `continue-on-error` off (and add this job to the merge
+  # queue's required checks) once that pre-existing flakiness is fixed.
+  test:
+    name: mix test
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      MIX_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.19.4"
+
+      - name: Restore deps/build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Run tests
+        run: mix test
