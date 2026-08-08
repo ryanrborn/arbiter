@@ -114,6 +114,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_awaiting_review(task_id),
          :ok <- maybe_quota_gate(task, opts),
+         :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
          :ok <- maybe_preflight(task, opts),
          {:ok, task} <- transition_to_in_progress(task, opts),
@@ -565,6 +566,18 @@ defmodule Arbiter.Worker.Dispatch do
           :awaiting_review -> {:error, {:task_awaiting_review, task_id}}
           _ -> :ok
         end
+    end
+  end
+
+  defp ensure_migrations_up_to_date do
+    migrations_module = Application.get_env(:arbiter, :migrations_module, Arbiter.Migrations)
+
+    case migrations_module.count_pending() do
+      0 ->
+        :ok
+
+      count ->
+        {:error, {:pending_migrations, count}}
     end
   end
 
