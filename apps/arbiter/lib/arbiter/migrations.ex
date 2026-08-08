@@ -26,14 +26,15 @@ defmodule Arbiter.Migrations do
   end
 
   defp count_pending_for_repo(repo) do
-    # Ecto.Migrator.migrations/1 returns a list of {version, name, status}
-    # where status is :up or :down
-    with {:ok, migrations} <- safe_get_migrations(repo) do
+    # Ecto.Migrator.with_repo/2 returns {ok, result, started_apps}, where result
+    # is what the callback returns. The callback returns {:ok, migrations}, so we
+    # match the full 3-tuple structure.
+    with {:ok, {:ok, migrations}, _apps} <- safe_get_migrations(repo) do
       migrations
       |> Enum.count(fn {_version, _name, status} -> status == :down end)
     else
       # Database not reachable or not set up — count as 0 pending
-      :error -> 0
+      _ -> 0
     end
   rescue
     # Catch any errors during migration check (e.g., database not running)
@@ -45,6 +46,6 @@ defmodule Arbiter.Migrations do
       {:ok, Ecto.Migrator.migrations(repo)}
     end)
   rescue
-    _ -> :error
+    _ -> {:error, :unreachable}
   end
 end
