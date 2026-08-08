@@ -849,7 +849,7 @@ defmodule Arbiter.Worker.Worktree do
   # paths (while the index still holds them), abort back to the pre-rebase
   # HEAD, and report the conflict — mirrors abort_merge/2.
   defp rebase_onto(path, ref) do
-    case run_git(["rebase", ref], cd: path) do
+    case run_git(["rebase", "--autostash", ref], cd: path) do
       {:ok, _} ->
         {:ok, :rebased}
 

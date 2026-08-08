@@ -3396,8 +3396,15 @@ defmodule Arbiter.Worker do
   # conflict) is neither a merge conflict on `main` nor a PR-open failure —
   # it needs a distinct operator response (resolve the rebase by hand), not
   # the generic "could not be opened/merged" text that reads as a broken PR.
-  defp diverged_push_error?({:push_failed, {:diverged, _detail}}), do: true
+  defp diverged_push_error?({:push_failed, inner}), do: diverged_push_error?(inner)
+  defp diverged_push_error?({:diverged, _detail}), do: true
   defp diverged_push_error?(_), do: false
+
+  # Same nesting as diverged_push_error?/1 (push_for_hosted_pr's {:push_failed,
+  # reason} gets re-wrapped by do_open_mr's {:push_failed, push_reason}) — walk
+  # it to reach the {:diverged, detail} payload regardless of wrap depth.
+  defp diverged_detail({:push_failed, inner}), do: diverged_detail(inner)
+  defp diverged_detail({:diverged, detail}), do: detail
 
   defp merge_failure_body(%State{mr_ref: mr_ref}, branch, reason) do
     ref_line = if is_binary(mr_ref) and mr_ref != "", do: "PR/MR ref: #{mr_ref}\n", else: ""
@@ -3415,7 +3422,7 @@ defmodule Arbiter.Worker do
         """
 
       diverged_push_error?(reason) ->
-        {:push_failed, {:diverged, detail}} = reason
+        detail = diverged_detail(reason)
         files = Map.get(detail, :files, [])
 
         file_list =
