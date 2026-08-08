@@ -7,10 +7,12 @@ defmodule Arbiter.Skills.InvocationParser do
   1. **Skill tool invocations** (the primary signal). A `claude --print`
      worker invokes a skill via the Skill *tool*, not by typing `/name`.
      `Arbiter.Worker.ClaudeSession.assistant_block_lines/1` renders that
-     tool_use block as `⏵ Skill({"skill":"tdd"})` (falls through
-     `summarize_tool_input/1` to `Jason.encode!/1`, since the Skill tool's
-     input has no `command`/`file_path`/`path`/`pattern`/`description` key).
-     This detector matches that rendering directly.
+     tool_use block as `⏵ Skill(tdd)` (`summarize_tool_input/1` special-cases
+     the `"skill"` input key so the name is never lost to truncation of a
+     long `args` value). Older transcripts recorded before that special-case
+     was added may still contain the raw `⏵ Skill({"skill":"tdd"})` JSON
+     rendering (the Skill tool's input fell through to `Jason.encode!/1`),
+     so both forms are matched.
   2. **Bare `/name` slash-command mentions** in prose (fallback, weaker
      signal). Anchored to line-start or backtick/paren-wrapped tokens only,
      to avoid crediting a skill for every unrelated filesystem path or URL
@@ -83,10 +85,13 @@ defmodule Arbiter.Skills.InvocationParser do
 
   @kebab_name ~r/^[a-z0-9]+(-[a-z0-9]+)*$/
 
-  # Matches the transcript rendering of a Skill tool_use block, e.g.
-  # `⏵ Skill({"skill":"tdd"})` — see moduledoc detector 1. Anchored to a line
-  # starting with the tool-call marker so an unrelated `"skill":"..."` key
-  # elsewhere in a JSON blob isn't picked up.
+  # Matches the transcript rendering of a Skill tool_use block. Current
+  # rendering is the bare name, e.g. `⏵ Skill(tdd)`; older transcripts may
+  # still contain the raw JSON form `⏵ Skill({"skill":"tdd"})` — see
+  # moduledoc detector 1. Anchored to a line starting with the tool-call
+  # marker so an unrelated `"skill":"..."` key elsewhere in a JSON blob isn't
+  # picked up.
+  @skill_tool_name ~r/^⏵\s*Skill\(([a-z0-9]+(?:-[a-z0-9]+)*)\)/
   @skill_tool_call ~r/^⏵\s*Skill\(/
   @skill_tool_arg ~r/"skill"\s*:\s*"([a-z0-9]+(?:-[a-z0-9]+)*)"/
 
@@ -100,12 +105,18 @@ defmodule Arbiter.Skills.InvocationParser do
   end
 
   defp extract_skill_tool_names(line) do
-    if Regex.match?(@skill_tool_call, line) do
-      @skill_tool_arg
-      |> Regex.scan(line, capture: :all_but_first)
-      |> Enum.map(&hd/1)
-    else
-      []
+    case Regex.run(@skill_tool_name, line, capture: :all_but_first) do
+      [name] ->
+        [name]
+
+      nil ->
+        if Regex.match?(@skill_tool_call, line) do
+          @skill_tool_arg
+          |> Regex.scan(line, capture: :all_but_first)
+          |> Enum.map(&hd/1)
+        else
+          []
+        end
     end
   end
 
@@ -131,12 +142,20 @@ defmodule Arbiter.Skills.InvocationParser do
   # Parse a single word to check if it's an (optionally wrapped) `/name`
   # slash-command reference. `at_line_start?` allows an unwrapped token only
   # when it's the first word on the line (a typed command); anywhere else it
-  # must be wrapped in backticks or parens to count.
-  @wrapper_punctuation ~r/^[`(),.:;"']+|[`(),.:;"']+$/
+  # must be genuinely wrapped in backticks or parens to count — `.` is never
+  # a leading-wrap marker (so `./deps` isn't mistaken for a wrapped `/deps`),
+  # and quotes don't count as wrapping either (so a quoted string literal
+  # like `"/api"` in source code isn't mistaken for a prose reference).
+  @lead_wrap ~r/^[`(]+/
+  @trail_wrap ~r/[`),.:;"']+$/
 
   defp parse_slash_command(word, at_line_start?) when is_binary(word) do
-    stripped = Regex.replace(@wrapper_punctuation, word, "")
-    wrapped? = stripped != word
+    wrapped? = Regex.match?(@lead_wrap, word)
+
+    stripped =
+      word
+      |> then(&Regex.replace(@lead_wrap, &1, ""))
+      |> then(&Regex.replace(@trail_wrap, &1, ""))
 
     with true <- at_line_start? or wrapped?,
          true <- String.starts_with?(stripped, "/"),

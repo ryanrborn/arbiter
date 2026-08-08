@@ -51,10 +51,33 @@ defmodule Arbiter.Skills.InvocationParserTest do
       usage && usage.invoke_count
     end
 
-    test "increments invoke_count from a Skill tool_use transcript line (real format)",
+    test "increments invoke_count from a Skill tool_use transcript line (current format)",
          %{skill1: skill1} do
-      # Matches Arbiter.Worker.ClaudeSession.assistant_block_lines/1's rendering
-      # of a Skill tool_use block via Jason.encode!/1.
+      # Matches Arbiter.Worker.ClaudeSession.assistant_block_lines/1's current
+      # rendering of a Skill tool_use block (summarize_tool_input/1 special-cases
+      # the "skill" input key).
+      lines = ["⏵ Skill(test-invoke-skill-1)"]
+      {found, _failed} = InvocationParser.parse_and_update(nil, lines)
+
+      assert found == 1
+      assert invoke_count(skill1) == 1
+    end
+
+    test "increments invoke_count from a Skill tool_use line even with a long args value",
+         %{skill1: skill1} do
+      # Regression: previously the transcript rendering fell through to
+      # Jason.encode!/1, and a long "args" value (which sorts before "skill"
+      # in Erlang key order) could push "skill":"..." past a length-based
+      # truncation cutoff, silently dropping the invocation.
+      lines = ["⏵ Skill(test-invoke-skill-1)"]
+      {found, _failed} = InvocationParser.parse_and_update(nil, lines)
+
+      assert found == 1
+      assert invoke_count(skill1) == 1
+    end
+
+    test "increments invoke_count from the legacy JSON Skill tool_use rendering (old transcripts)",
+         %{skill1: skill1} do
       lines = [~s|⏵ Skill({"skill":"test-invoke-skill-1"})|]
       {found, _failed} = InvocationParser.parse_and_update(nil, lines)
 
@@ -62,7 +85,7 @@ defmodule Arbiter.Skills.InvocationParserTest do
       assert invoke_count(skill1) == 1
     end
 
-    test "Skill tool_use detector is order-independent on the input map's other keys",
+    test "legacy JSON Skill tool_use detector is order-independent on the input map's other keys",
          %{skill1: skill1} do
       lines = [~s|⏵ Skill({"args":"do the thing","skill":"test-invoke-skill-1"})|]
       {found, _failed} = InvocationParser.parse_and_update(nil, lines)
@@ -111,6 +134,28 @@ defmodule Arbiter.Skills.InvocationParserTest do
 
       assert found == 0
       assert invoke_count(tmp_skill) == nil
+    end
+
+    test "relative path ./name is not credited to a same-named skill (leading dot is not a wrap)" do
+      {:ok, deps_skill} = Skills.create_skill(%{name: "deps", body: "test"})
+
+      lines = ["⏵ Bash(find . -path ./deps -prune -o -print)"]
+
+      {found, _failed} = InvocationParser.parse_and_update(nil, lines)
+
+      assert found == 0
+      assert invoke_count(deps_skill) == nil
+    end
+
+    test "quoted string literal /name in source code is not credited to a same-named skill" do
+      {:ok, api_skill} = Skills.create_skill(%{name: "api", body: "test"})
+
+      lines = ["scope \"/api\", ArbiterWeb.Api do"]
+
+      {found, _failed} = InvocationParser.parse_and_update(nil, lines)
+
+      assert found == 0
+      assert invoke_count(api_skill) == nil
     end
 
     test "increments for multiple different skills on separate lines",
