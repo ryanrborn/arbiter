@@ -7,7 +7,10 @@ defmodule Arbiter.Worker.WorkerEnvTest do
 
   defp workspace_with_env(worker_env) do
     {:ok, ws} =
-      Ash.create(Workspace, %{name: "we-#{System.unique_integer([:positive])}", worker_env: worker_env})
+      Ash.create(Workspace, %{
+        name: "we-#{System.unique_integer([:positive])}",
+        worker_env: worker_env
+      })
 
     ws
   end

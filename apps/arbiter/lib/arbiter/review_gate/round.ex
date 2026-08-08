@@ -181,12 +181,14 @@ defmodule Arbiter.ReviewGate.Round do
     attribute :criteria_total, :integer do
       public? true
       constraints min: 0
+
       description "Acceptance criteria addressed in the reviewer's CRITERIA breakdown. Nil when no breakdown."
     end
 
     attribute :criteria_unmet, :integer do
       public? true
       constraints min: 0
+
       description "How many addressed criteria the breakdown marked [NOT MET]. Nil when no breakdown."
     end
 

@@ -23,7 +23,10 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     refute html =~ "Codex"
   end
 
-  test "renders one labeled bar-pair per tracked provider (codex is filtered)", %{conn: conn, ws: ws} do
+  test "renders one labeled bar-pair per tracked provider (codex is filtered)", %{
+    conn: conn,
+    ws: ws
+  } do
     {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
 
     {:ok, _} =
@@ -52,7 +55,10 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     assert html =~ "width: 90%"
   end
 
-  test "the usage page shows one card group per tracked provider (codex is filtered)", %{conn: conn, ws: ws} do
+  test "the usage page shows one card group per tracked provider (codex is filtered)", %{
+    conn: conn,
+    ws: ws
+  } do
     {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
 
     {:ok, _} =

@@ -236,7 +236,8 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert result["structuredContent"]["config"]["agent"]["type"] == ["claude", "gemini"]
     end
 
-    test "workspace_config_set preserves legitimate string values (regression test: bd-7lmjc5)", ctx do
+    test "workspace_config_set preserves legitimate string values (regression test: bd-7lmjc5)",
+         ctx do
       # workspace_config_set's schema explicitly allows string values.
       # A client sending "5" or "true" as a legitimate string config value should NOT
       # have it decoded to a number/boolean. This verifies the unwrap helper only
@@ -264,7 +265,10 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.coordinator_token,
           req("tools/call", %{
             "name" => "installation_config_set",
-            "arguments" => %{"key" => "credential_watchdog_adapters", "value" => ["claude", "gemini"]}
+            "arguments" => %{
+              "key" => "credential_watchdog_adapters",
+              "value" => ["claude", "gemini"]
+            }
           })
         )
 
@@ -296,7 +300,10 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.coordinator_token,
           req("tools/call", %{
             "name" => "installation_config_set",
-            "arguments" => %{"key" => "credential_watchdog_adapters", "value" => "[\"claude\", \"gemini\"]"}
+            "arguments" => %{
+              "key" => "credential_watchdog_adapters",
+              "value" => "[\"claude\", \"gemini\"]"
+            }
           })
         )
 

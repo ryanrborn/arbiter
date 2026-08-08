@@ -124,22 +124,26 @@ defmodule Arbiter.Quota.AnthropicQuota do
     attribute :per_model_utilization, :map do
       public? true
       default %{}
+
       description "Per-model 7d utilization fraction (0-1) from /api/oauth/usage, e.g. %{\"sonnet\" => 0.42}."
     end
 
     attribute :extra_usage, :map do
       public? true
       default %{}
+
       description "Overage spend beyond the plan's included quota, as returned by /api/oauth/usage."
     end
 
     attribute :oauth_utilization_5h, :float do
       public? true
+
       description "5h utilization fraction from /api/oauth/usage — a cross-check against utilization_5h."
     end
 
     attribute :oauth_utilization_7d, :float do
       public? true
+
       description "7d utilization fraction from /api/oauth/usage — a cross-check against utilization_7d."
     end
 

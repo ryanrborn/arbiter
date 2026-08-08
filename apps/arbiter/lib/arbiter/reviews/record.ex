@@ -329,6 +329,7 @@ defmodule Arbiter.Reviews.Record do
     attribute :failure_stage, :string do
       public? true
       constraints max_length: 64, trim?: true
+
       description "Stage where the review failed: read_diff, file_findings, agent, tracker_context. Nil if not failed."
     end
 

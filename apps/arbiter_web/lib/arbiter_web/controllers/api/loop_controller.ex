@@ -78,8 +78,12 @@ defmodule ArbiterWeb.Api.LoopController do
 
   defp parse_iso(raw) when is_binary(raw) do
     case DateTime.from_iso8601(raw) do
-      {:ok, dt, _} -> {:ok, dt}
-      _ -> {:error, {:invalid_request, "expected ISO8601 or a 7d/24h/30m shortcut, got #{inspect(raw)}"}}
+      {:ok, dt, _} ->
+        {:ok, dt}
+
+      _ ->
+        {:error,
+         {:invalid_request, "expected ISO8601 or a 7d/24h/30m shortcut, got #{inspect(raw)}"}}
     end
   end
 

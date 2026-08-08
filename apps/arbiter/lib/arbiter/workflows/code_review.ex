@@ -275,7 +275,13 @@ defmodule Arbiter.Workflows.CodeReview do
     # submit_review already carries a body.
     case post_each_finding(adapter, mr_ref, in_diff, opts, state) do
       {:ok, state, demoted} ->
-        {:ok, Map.update(state, :out_of_diff_findings, out_of_scope ++ demoted, &(&1 ++ out_of_scope ++ demoted))}
+        {:ok,
+         Map.update(
+           state,
+           :out_of_diff_findings,
+           out_of_scope ++ demoted,
+           &(&1 ++ out_of_scope ++ demoted)
+         )}
 
       # bd-2o4b8f: a hard adapter error (e.g. a 403 secondary rate limit that
       # outlasted the adapter's own retries) must not discard the completed
@@ -372,7 +378,9 @@ defmodule Arbiter.Workflows.CodeReview do
   defp touches_sensitive_path?(diff, globs) do
     diff
     |> ConsumerTrace.changed_files()
-    |> Enum.any?(fn file -> Enum.any?(globs, &Arbiter.Worker.ReviewScope.glob_match?(&1, file)) end)
+    |> Enum.any?(fn file ->
+      Enum.any?(globs, &Arbiter.Worker.ReviewScope.glob_match?(&1, file))
+    end)
   end
 
   # ---- helpers -----------------------------------------------------------
@@ -486,7 +494,12 @@ defmodule Arbiter.Workflows.CodeReview do
       Enum.map(remaining_in_diff, &Map.put(proposed_comment(&1), :in_diff, true)) ++
         Enum.map(out_of_scope, &Map.put(proposed_comment(&1), :in_diff, false))
 
-    %{findings: findings, verdict: compute_verdict(findings), proposed_comments: proposed, check_usage: Map.get(state, :check_usage, %{})}
+    %{
+      findings: findings,
+      verdict: compute_verdict(findings),
+      proposed_comments: proposed,
+      check_usage: Map.get(state, :check_usage, %{})
+    }
   end
 
   # Which findings the diff itself touches, vs. ones the reviewer flagged

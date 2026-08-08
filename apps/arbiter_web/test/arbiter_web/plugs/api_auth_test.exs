@@ -16,7 +16,7 @@ defmodule ArbiterWeb.Plugs.ApiAuthTest do
 
   defp loopback_ipv4_mapped_ipv6_conn(conn) do
     # IPv4-mapped IPv6 loopback: ::ffff:127.0.0.1 = {0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001}
-    %{conn | remote_ip: {0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001}}
+    %{conn | remote_ip: {0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 0x0001}}
   end
 
   defp non_loopback_conn(conn) do

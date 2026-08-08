@@ -32,6 +32,7 @@ defmodule Arbiter.Tasks.WorkspaceWorkerEnvTest do
 
       # Re-reading from the DB decrypts the same values.
       assert {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
       assert Workspace.worker_env_map(reloaded) == %{
                "API_TOKEN" => "tok_plainsecret",
                "LOG_LEVEL" => "debug"
@@ -98,6 +99,7 @@ defmodule Arbiter.Tasks.WorkspaceWorkerEnvTest do
       assert {:ok, updated} = Ash.update(ws, %{worker_env: %{"C" => %{"value" => "3"}}})
 
       assert Workspace.worker_env_map(updated) == %{"A" => "1", "B" => "2", "C" => "3"}
+
       assert Workspace.worker_env_keys(updated) == [
                %{name: "A", secret?: true},
                %{name: "B", secret?: false},
@@ -114,6 +116,7 @@ defmodule Arbiter.Tasks.WorkspaceWorkerEnvTest do
       assert {:ok, updated} = Ash.update(ws, %{worker_env: %{"A" => %{"secret" => false}}})
 
       assert Workspace.worker_env_map(updated) == %{"A" => "1", "B" => "2"}
+
       assert Workspace.worker_env_keys(updated) == [
                %{name: "A", secret?: false},
                %{name: "B", secret?: false}

@@ -63,7 +63,9 @@ defmodule ArbiterCli.Cmd.MessageSendTest do
       on_exit(fn -> System.delete_env("ARB_FROM") end)
       echo_create()
 
-      {out, _err, code} = capture(fn -> Message.run(["send", "coordinator", "done", "--json"]) end)
+      {out, _err, code} =
+        capture(fn -> Message.run(["send", "coordinator", "done", "--json"]) end)
+
       assert code == 0
       assert Jason.decode!(out)["from_ref"] == "worker-019e"
     end

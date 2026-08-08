@@ -20,7 +20,12 @@ defmodule Arbiter.Workflows.CodeReview.ConsumerTrace do
   downstream call site a diff-only review would never see.
   """
 
-  @type ref :: %{identifier: String.t(), file: String.t(), line: pos_integer(), snippet: String.t()}
+  @type ref :: %{
+          identifier: String.t(),
+          file: String.t(),
+          line: pos_integer(),
+          snippet: String.t()
+        }
 
   @def_re ~r/\bdef\s+([a-zA-Z_][a-zA-Z0-9_?!]*)/
 
@@ -82,7 +87,14 @@ defmodule Arbiter.Workflows.CodeReview.ConsumerTrace do
         if MapSet.member?(changed_files, file) do
           []
         else
-          [%{identifier: identifier, file: file, line: String.to_integer(lineno), snippet: String.trim(snippet)}]
+          [
+            %{
+              identifier: identifier,
+              file: file,
+              line: String.to_integer(lineno),
+              snippet: String.trim(snippet)
+            }
+          ]
         end
 
       _ ->
