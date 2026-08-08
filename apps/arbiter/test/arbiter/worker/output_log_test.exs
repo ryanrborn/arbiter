@@ -83,6 +83,24 @@ defmodule Arbiter.Worker.OutputLogTest do
     assert {:error, :invalid_run_id} = OutputLog.open(nil)
   end
 
+  test "root/0 without config uses an expandable default, not a hardcoded home dir" do
+    prev = Application.get_env(:arbiter, :output_log_root)
+    Application.delete_env(:arbiter, :output_log_root)
+
+    on_exit(fn ->
+      if prev do
+        Application.put_env(:arbiter, :output_log_root, prev)
+      else
+        Application.delete_env(:arbiter, :output_log_root)
+      end
+    end)
+
+    root = OutputLog.root()
+    assert is_binary(root)
+    refute String.contains?(root, "/home/rborn")
+    assert String.contains?(root, "/arbiter-worker-logs")
+  end
+
   test "the durable store is uncapped — every line of a long run is retained", %{
     run_id: run_id
   } do
