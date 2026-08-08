@@ -777,6 +777,104 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  Reconcile the worktree's current branch with `origin/<branch>` before a
+  push, tolerating genuine divergence instead of failing closed like
+  `sync_from_origin/2` does.
+
+  A ReviewGate implementer round pushes its fix commit straight to
+  `origin/<branch>`; the main worker's worktree never sees it. If the main
+  worker later commits its own work (e.g. a merge-title amend) before
+  pushing, the two branches have genuinely diverged — not merely "local is
+  behind". A plain push is rejected non-fast-forward; a blind pull would
+  merge-commit; a force-push would destroy the implementer's work. Rebasing
+  the worktree's own commits onto the remote tip is the only move that keeps
+  both sides and leaves a plain (non-force) push valid afterward (bd-3doy0y).
+
+  Returns:
+
+    * `{:ok, :up_to_date}` — local HEAD already matches `origin/<branch>`.
+    * `{:ok, :synced}` — local was behind; fast-forwarded to the remote tip.
+    * `{:ok, :rebased}` — local and remote had diverged; local's own commits
+      were rebased onto the remote tip. HEAD is now strictly ahead of
+      `origin/<branch>` and a plain push will succeed.
+    * `{:error, {:diverged_conflict, %{files: [path], output: raw}}}` — the
+      rebase hit textual conflicts. The rebase was ABORTED so the worktree is
+      left clean on its own original HEAD (never half-rebased). The caller
+      must not force-push here — it should escalate for manual resolution.
+    * `{:error, reason}` — `origin` is missing or the fetch failed.
+  """
+  @spec rebase_onto_origin(path(), String.t()) ::
+          {:ok, :up_to_date | :synced | :rebased}
+          | {:error,
+             {:diverged_conflict, %{files: [String.t()], output: String.t()}} | error_reason()}
+  def rebase_onto_origin(path, branch)
+      when is_binary(path) and is_binary(branch) do
+    with :ok <- ensure_origin_remote(path),
+         :ok <- fetch_origin_branch(path, branch),
+         :ok <- ensure_origin_ref(path, branch) do
+      ref = "origin/" <> branch
+
+      case run_git(["merge-base", "--is-ancestor", "HEAD", ref], cd: path) do
+        {:ok, _} ->
+          # HEAD is an ancestor of origin/<branch> — local is at or behind
+          # remote. Same-tip check mirrors sync_from_origin/2.
+          case {run_git(["rev-parse", "HEAD"], cd: path), run_git(["rev-parse", ref], cd: path)} do
+            {{:ok, sha}, {:ok, sha}} ->
+              {:ok, :up_to_date}
+
+            {{:ok, _local_sha}, {:ok, _remote_sha}} ->
+              case run_git(["merge", "--ff-only", ref], cd: path) do
+                {:ok, _} -> {:ok, :synced}
+                {:error, _} = err -> err
+              end
+
+            {{:error, _} = err, _} ->
+              err
+
+            {_, {:error, _} = err} ->
+              err
+          end
+
+        {:error, _} ->
+          # HEAD is NOT an ancestor of origin/<branch> — genuine divergence.
+          # Rebase the worktree's own commits onto the remote tip instead of
+          # failing closed.
+          rebase_onto(path, ref)
+      end
+    end
+  end
+
+  # Rebase HEAD onto `ref`. On success the worktree's own commits sit on top
+  # of `ref`, strictly ahead of it. On conflict, capture the conflicting
+  # paths (while the index still holds them), abort back to the pre-rebase
+  # HEAD, and report the conflict — mirrors abort_merge/2.
+  defp rebase_onto(path, ref) do
+    case run_git(["rebase", ref], cd: path) do
+      {:ok, _} ->
+        {:ok, :rebased}
+
+      {:error, {:git_failed, output}} ->
+        abort_rebase(path, output)
+    end
+  end
+
+  defp abort_rebase(path, output) do
+    conflicts =
+      case run_git(["diff", "--name-only", "--diff-filter=U"], cd: path) do
+        {:ok, out} -> String.split(out, "\n", trim: true)
+        {:error, _} -> []
+      end
+
+    _ = run_git(["rebase", "--abort"], cd: path)
+
+    if conflicts == [] do
+      {:error, {:git_failed, output}}
+    else
+      {:error, {:diverged_conflict, %{files: conflicts, output: output}}}
+    end
+  end
+
+  @doc """
   Return the SHA of the merge-base (fork point) between the worktree's HEAD and
   `target_branch`, preferring the fetched `origin/<target>` ref and falling
   back to the local `<target>` ref.
