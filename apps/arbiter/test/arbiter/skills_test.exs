@@ -1,6 +1,8 @@
 defmodule Arbiter.SkillsTest do
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Skills
   alias Arbiter.Skills.Skill
 
@@ -167,5 +169,80 @@ defmodule Arbiter.SkillsTest do
 
     {:ok, skill} = Skills.create_skill(%{name: "global-by-default", body: "x"})
     assert skill.workspace_id == nil
+  end
+
+  describe "Skills.Usage resource" do
+    test "creates usage on first increment" do
+      {:ok, skill} = Skills.create_skill(%{name: "test-skill", body: "test body"})
+
+      # First increment should create the usage row
+      {:ok, usage} = Skills.increment_usage(skill.id, :materialize_count)
+
+      assert usage.skill_id == skill.id
+      assert usage.materialize_count == 1
+      assert usage.invoke_count == 0
+      assert usage.patch_count == 0
+    end
+
+    test "increments materialize_count" do
+      {:ok, skill} = Skills.create_skill(%{name: "material-skill", body: "test"})
+
+      {:ok, updated} = Skills.increment_usage(skill.id, :materialize_count)
+
+      assert updated.materialize_count == 1
+      assert updated.last_materialized_at != nil
+    end
+
+    test "increments invoke_count" do
+      {:ok, skill} = Skills.create_skill(%{name: "invoke-skill", body: "test"})
+
+      {:ok, updated} = Skills.increment_usage(skill.id, :invoke_count)
+
+      assert updated.invoke_count == 1
+      assert updated.last_invoked_at != nil
+    end
+
+    test "increments patch_count" do
+      {:ok, skill} = Skills.create_skill(%{name: "patch-skill", body: "test"})
+
+      {:ok, updated} = Skills.increment_usage(skill.id, :patch_count)
+
+      assert updated.patch_count == 1
+      assert updated.last_patched_at != nil
+    end
+
+    test "handles multiple increments" do
+      {:ok, skill} = Skills.create_skill(%{name: "multi-skill", body: "test"})
+
+      {:ok, _u1} = Skills.increment_usage(skill.id, :materialize_count)
+      {:ok, u2} = Skills.increment_usage(skill.id, :materialize_count)
+      {:ok, u3} = Skills.increment_usage(skill.id, :invoke_count)
+
+      assert u2.materialize_count == 2
+      assert u3.materialize_count == 2
+      assert u3.invoke_count == 1
+    end
+
+    test "concurrent increments don't lose updates (atomic upsert, not read-then-write)" do
+      {:ok, skill} = Skills.create_skill(%{name: "concurrent-skill", body: "test"})
+
+      parent = self()
+      Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, {:shared, self()})
+
+      tasks =
+        for _ <- 1..20 do
+          Task.async(fn ->
+            Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, parent, self())
+            Skills.increment_usage(skill.id, :materialize_count)
+          end)
+        end
+
+      Enum.each(tasks, &Task.await(&1, 5000))
+
+      {:ok, usage} = Ash.Query.filter(Skills.Usage, skill_id == ^skill.id) |> Ash.read_one()
+
+      assert usage.materialize_count == 20
+      assert usage.last_materialized_at != nil
+    end
   end
 end

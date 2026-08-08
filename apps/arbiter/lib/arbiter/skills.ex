@@ -27,6 +27,8 @@ defmodule Arbiter.Skills do
 
   use Ash.Domain
 
+  require Logger
+
   alias Arbiter.Skills.Skill
 
   require Ash.Query
@@ -36,6 +38,8 @@ defmodule Arbiter.Skills do
     # AshPaperTrail version rows for Skill (bd-9j6is7); queryable via
     # Arbiter.Skills.Skill.Version.
     resource Skill.Version
+    # Usage telemetry (bd-61hnbb).
+    resource Arbiter.Skills.Usage
   end
 
   # The built-in skills every `claude --print` worker sees regardless of what
@@ -117,7 +121,11 @@ defmodule Arbiter.Skills do
   def update_skill(skill_or_ref, attrs, opts \\ [])
 
   def update_skill(%Skill{} = skill, attrs, opts) when is_map(attrs) do
-    Ash.update(skill, put_actor(attrs, opts), actor: actor(opts))
+    with {:ok, updated} <- Ash.update(skill, put_actor(attrs, opts), actor: actor(opts)) do
+      # Increment patch_count (best-effort; don't let telemetry break the update).
+      _ = increment_usage(skill.id, :patch_count)
+      {:ok, updated}
+    end
   end
 
   def update_skill(id_or_name, attrs, opts) when is_binary(id_or_name) and is_map(attrs) do
@@ -324,4 +332,89 @@ defmodule Arbiter.Skills do
       s
     )
   end
+
+  # ---- Usage telemetry (bd-61hnbb) ----------------------------------------
+
+  @doc """
+  Increment a usage counter for a skill. `counter` is `:materialize_count`,
+  `:invoke_count`, or `:patch_count`. Also updates the corresponding
+  `last_*_at` timestamp.
+
+  Implemented as a single `INSERT ... ON CONFLICT DO UPDATE SET counter =
+  counter + 1` statement (SQLite upsert) rather than a read-then-write, so
+  concurrent dispatches incrementing the same skill's row (the common case
+  for `always_on` skills, which materialize on every dispatch) can't lose
+  updates to each other.
+
+  Wraps errors and logs them so a telemetry failure never crashes the dispatch.
+
+  Returns `{:ok, %Usage{}}` or `{:error, term()}`.
+  """
+  @spec increment_usage(String.t(), :materialize_count | :invoke_count | :patch_count) ::
+          {:ok, Arbiter.Skills.Usage.t()} | {:error, term()}
+  def increment_usage(skill_id, counter)
+      when is_binary(skill_id) and counter in [:materialize_count, :invoke_count, :patch_count] do
+    try do
+      atomic_increment!(skill_id, counter)
+    rescue
+      e ->
+        Logger.warning("Arbiter.Skills.increment_usage failed for #{skill_id}: #{inspect(e)}")
+        {:error, e}
+    end
+  end
+
+  # Catch-all: an unpersisted/synthetic skill (nil id, e.g. a test fixture
+  # never written to the DB) or an unexpected counter atom. No function-clause
+  # match means no exception — telemetry must never fail a dispatch.
+  def increment_usage(skill_id, counter) do
+    Logger.warning(
+      "Arbiter.Skills.increment_usage: skipped invalid args skill_id=#{inspect(skill_id)} counter=#{inspect(counter)}"
+    )
+
+    {:error, :invalid_args}
+  end
+
+  # Atomic upsert-increment: a single SQL statement, so two concurrent
+  # dispatches incrementing the same skill never race each other the way a
+  # separate read + write would.
+  defp atomic_increment!(skill_id, counter) do
+    id = Ash.UUIDv7.generate()
+    now = DateTime.utc_now()
+    ts_field = timestamp_for(counter)
+    counter_col = Atom.to_string(counter)
+    ts_col = Atom.to_string(ts_field)
+
+    sql = """
+    INSERT INTO skills_usage
+      (id, skill_id, materialize_count, invoke_count, patch_count, #{ts_col}, inserted_at, updated_at)
+    VALUES
+      (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+    ON CONFLICT(skill_id) DO UPDATE SET
+      #{counter_col} = #{counter_col} + 1,
+      #{ts_col} = ?6,
+      updated_at = ?7
+    """
+
+    counts = %{materialize_count: 0, invoke_count: 0, patch_count: 0} |> Map.put(counter, 1)
+
+    Arbiter.Repo.query!(sql, [
+      id,
+      skill_id,
+      counts.materialize_count,
+      counts.invoke_count,
+      counts.patch_count,
+      now,
+      now
+    ])
+
+    case Ash.Query.filter(Arbiter.Skills.Usage, skill_id == ^skill_id) |> Ash.read_one() do
+      {:ok, %Arbiter.Skills.Usage{} = usage} -> {:ok, usage}
+      {:ok, nil} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp timestamp_for(:materialize_count), do: :last_materialized_at
+  defp timestamp_for(:invoke_count), do: :last_invoked_at
+  defp timestamp_for(:patch_count), do: :last_patched_at
 end
