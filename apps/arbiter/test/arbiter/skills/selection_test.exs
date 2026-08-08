@@ -27,7 +27,10 @@ defmodule Arbiter.Skills.SelectionTest do
 
   defp task(ws, attrs \\ %{}) do
     {:ok, task} =
-      Ash.create(Issue, Map.merge(%{title: "t", workspace_id: ws.id, issue_type: :feature}, attrs))
+      Ash.create(
+        Issue,
+        Map.merge(%{title: "t", workspace_id: ws.id, issue_type: :feature}, attrs)
+      )
 
     task
   end
@@ -166,7 +169,9 @@ defmodule Arbiter.Skills.SelectionTest do
 
     test "workspace struct config is read", %{ws: ws} do
       {:ok, ws} =
-        Ash.update(ws, %{patch: %{"skills" => %{"workspace" => ["debug"]}}}, action: :patch_config)
+        Ash.update(ws, %{patch: %{"skills" => %{"workspace" => ["debug"]}}},
+          action: :patch_config
+        )
 
       resolved = Selection.resolve(task: task(ws), workspace: ws, repo: nil)
       assert names(resolved) == ["debug"]
@@ -185,7 +190,9 @@ defmodule Arbiter.Skills.SelectionTest do
 
     test "the dispatch workspace resolves its scoped skill body", %{ws: ws} do
       {:ok, ws} =
-        Ash.update(ws, %{patch: %{"skills" => %{"workspace" => ["debug"]}}}, action: :patch_config)
+        Ash.update(ws, %{patch: %{"skills" => %{"workspace" => ["debug"]}}},
+          action: :patch_config
+        )
 
       [%{skill: skill}] = Selection.resolve(task: task(ws), workspace: ws, repo: nil)
       assert skill.body == "# scoped debug"

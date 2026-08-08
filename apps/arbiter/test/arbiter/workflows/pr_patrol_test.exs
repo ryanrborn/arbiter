@@ -187,7 +187,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       stub(
         signals_stub(
           pulls: [pull(41, title: "ok")],
-          nodes: %{41 => pr_node(reviews: [%{"state" => "APPROVED", "author" => %{"login" => "a"}}])}
+          nodes: %{
+            41 => pr_node(reviews: [%{"state" => "APPROVED", "author" => %{"login" => "a"}}])
+          }
         )
       )
 
@@ -215,7 +217,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
                 "isResolved" => false,
                 "path" => "lib/x.ex",
                 "line" => 3,
-                "comments" => %{"nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]}
+                "comments" => %{
+                  "nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]
+                }
               }
             ]
           ),
@@ -349,7 +353,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       stub(
         signals_stub(
           pulls: [pull(42, title: "needs work", html_url: "https://gh/pr/42")],
-          nodes: %{42 => pr_node(reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}])}
+          nodes: %{
+            42 =>
+              pr_node(
+                reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]
+              )
+          }
         )
       )
 
@@ -433,12 +442,18 @@ defmodule Arbiter.Workflows.PRPatrolTest do
               "id" => "RT_1",
               "isResolved" => false,
               "path" => "openspec/changes/x.md",
-              "comments" => %{"nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]}
+              "comments" => %{
+                "nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]
+              }
             }
           ]
         )
 
-      base = signals_stub(pulls: [pull(3679, title: "openspec change", html_url: "https://gh/pr/3679")], nodes: %{3679 => node})
+      base =
+        signals_stub(
+          pulls: [pull(3679, title: "openspec change", html_url: "https://gh/pr/3679")],
+          nodes: %{3679 => node}
+        )
 
       stub(fn conn ->
         # A POST to /pulls is a NEW PR being opened — count it (must stay 0).
@@ -904,7 +919,10 @@ defmodule Arbiter.Workflows.PRPatrolTest do
           repo: "owner/explicit-repo",
           pulls: [pull(60, title: "multi-repo PR", html_url: "https://gh/pr/60")],
           nodes: %{
-            60 => pr_node(reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}])
+            60 =>
+              pr_node(
+                reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]
+              )
           }
         )
       )

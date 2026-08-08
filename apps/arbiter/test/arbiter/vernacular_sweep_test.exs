@@ -29,11 +29,11 @@ defmodule Arbiter.VernacularSweepTest do
 
       # Should NOT find the old function name
       refute content =~ "def acolyte_memory",
-        "Found 'def acolyte_memory' — should be renamed to 'def worker_memory'"
+             "Found 'def acolyte_memory' — should be renamed to 'def worker_memory'"
 
       # Should find the new function name
       assert content =~ "def worker_memory",
-        "Should find 'def worker_memory' after renaming"
+             "Should find 'def worker_memory' after renaming"
     end
 
     test "credential_watchdog.ex: Admiral in comments → coordinator" do
@@ -41,62 +41,62 @@ defmodule Arbiter.VernacularSweepTest do
 
       # Comments should mention "coordinator" not "Admiral"
       assert content =~ "Escalates to the coordinator",
-        "Should update 'Escalates to the Admiral' to 'Escalates to the coordinator'"
+             "Should update 'Escalates to the Admiral' to 'Escalates to the coordinator'"
 
       assert content =~ "coordinator escalations",
-        "Should update Admiral escalations to coordinator escalations"
+             "Should update Admiral escalations to coordinator escalations"
 
       refute content =~ ~r/Escalates to the Admiral(?![\w])/,
-        "Should not have unqualified 'Admiral' in escalation context"
+             "Should not have unqualified 'Admiral' in escalation context"
     end
 
     test "by_difficulty.ex: Admiral → coordinator in comments" do
       content = read_file("lib/arbiter/agents/routing/by_difficulty.ex")
 
       assert content =~ ~r/coordinator signed\s+off/,
-        "Should update 'Admiral signed off' to 'coordinator signed off'"
+             "Should update 'Admiral signed off' to 'coordinator signed off'"
     end
 
     test "trackers/sync.ex: Admiral → coordinator in mailbox comments" do
       content = read_file("lib/arbiter/trackers/sync.ex")
 
       assert content =~ "coordinator mailbox",
-        "Should update 'Admiral mailbox' to 'coordinator mailbox'"
+             "Should update 'Admiral mailbox' to 'coordinator mailbox'"
     end
 
     test "workspace.ex: Admiral → coordinator in comments" do
       content = read_file("lib/arbiter/tasks/workspace.ex")
 
       assert content =~ "escalates to the coordinator",
-        "Should update 'escalates to the Admiral' to 'escalates to the coordinator'"
+             "Should update 'escalates to the Admiral' to 'escalates to the coordinator'"
     end
 
     test "reconciler.ex: Admiral → coordinator" do
       content = read_file("lib/arbiter/workers/reconciler.ex")
 
       assert content =~ "coordinator's mailbox",
-        "Should update 'Admiral's mailbox' to 'coordinator's mailbox'"
+             "Should update 'Admiral's mailbox' to 'coordinator's mailbox'"
     end
 
     test "events.ex: Admiral → coordinator in event documentation" do
       content = read_file("lib/arbiter/events.ex")
 
       assert content =~ "coordinator ruling",
-        "Should update 'Admiral ruling' to 'coordinator ruling'"
+             "Should update 'Admiral ruling' to 'coordinator ruling'"
     end
 
     test "application.ex: Admiral → coordinator" do
       content = read_file("lib/arbiter/application.ex")
 
       assert content =~ "Escalates each to the coordinator",
-        "Should update Admiral reference to coordinator"
+             "Should update Admiral reference to coordinator"
     end
 
     test "github.ex: polecat → worker in comments" do
       content = read_file("lib/arbiter/github.ex")
 
       assert content =~ "worker-orchestrator",
-        "Should update 'polecat-orchestrator' to 'worker-orchestrator'"
+             "Should update 'polecat-orchestrator' to 'worker-orchestrator'"
     end
 
     test "decommission_sweep.ex: mayor → coordinator in comments (but preserve historical artifact matching)" do
@@ -104,11 +104,11 @@ defmodule Arbiter.VernacularSweepTest do
 
       # The comments about old artifacts should be updated
       assert content =~ ~r/coordinator\/witness\s+session-handoff/,
-        "Should update 'mayor/witness' in comments"
+             "Should update 'mayor/witness' in comments"
 
       # But the string matching for historical artifacts should be preserved
       assert content =~ ~r/"Mayor - global coordinator"/,
-        "Should preserve historical artifact title matching for string literals"
+             "Should preserve historical artifact title matching for string literals"
     end
 
     test "all target files compile without errors" do
@@ -116,11 +116,12 @@ defmodule Arbiter.VernacularSweepTest do
       # but we can at least verify the files exist and are readable
       for file <- @target_files do
         assert File.exists?(file),
-          "File #{file} should exist"
+               "File #{file} should exist"
 
         {:ok, content} = File.read(file)
+
         refute content == "",
-          "File #{file} should not be empty"
+               "File #{file} should not be empty"
       end
     end
   end

@@ -569,7 +569,11 @@ defmodule Arbiter.Worker.DriverTest do
       # is still alive. If teardown removes the worktree without stopping the
       # agent first, the agent keeps issuing commands in a deleted cwd.
       {:ok, port} =
-        ClaudeSession.start(owner: worker_pid, worktree_path: wt_path, command: ["sh", "-c", "sleep 60"])
+        ClaudeSession.start(
+          owner: worker_pid,
+          worktree_path: wt_path,
+          command: ["sh", "-c", "sleep 60"]
+        )
 
       {:os_pid, os_pid} = Port.info(port, :os_pid)
 

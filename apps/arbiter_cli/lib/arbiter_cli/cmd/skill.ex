@@ -294,7 +294,8 @@ defmodule ArbiterCli.Cmd.Skill do
   defp validate_activation!(mode) when mode in ["situational", "always_on"], do: mode
 
   defp validate_activation!(other),
-    do: Output.die("--activation-mode must be 'situational' or 'always_on', got #{inspect(other)}")
+    do:
+      Output.die("--activation-mode must be 'situational' or 'always_on', got #{inspect(other)}")
 
   defp parse_metadata!(nil), do: nil
 

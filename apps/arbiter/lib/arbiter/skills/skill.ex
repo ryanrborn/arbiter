@@ -86,11 +86,10 @@ defmodule Arbiter.Skills.Skill do
     # partial unique index over the globals only. (Application-level
     # `eager_check?` on the identity still gives a clean validation error.)
     custom_indexes do
-      index([:name],
+      index [:name],
         unique: true,
         where: "workspace_id IS NULL",
         name: "skills_unique_global_name_index"
-      )
     end
   end
 

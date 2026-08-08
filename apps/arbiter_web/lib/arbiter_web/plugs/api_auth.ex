@@ -37,7 +37,7 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   end
 
   # IPv4-mapped IPv6 loopback ::ffff:127.x.x.x
-  def call(%Plug.Conn{remote_ip: {0, 0, 0, 0, 0, 0xffff, hi, _lo}} = conn, _opts) do
+  def call(%Plug.Conn{remote_ip: {0, 0, 0, 0, 0, 0xFFFF, hi, _lo}} = conn, _opts) do
     case hi >>> 8 do
       127 -> conn
       _ -> require_bearer(conn)

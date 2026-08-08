@@ -96,7 +96,9 @@ defmodule Arbiter.Skills.ScopingVersioningTest do
       ws_b: ws_b
     } do
       {:ok, _global} = Skills.create_skill(%{name: "tdd", body: "# global v1"})
-      {:ok, scoped} = Skills.create_skill(%{name: "tdd", body: "# ws-a v1", workspace_id: ws_a.id})
+
+      {:ok, scoped} =
+        Skills.create_skill(%{name: "tdd", body: "# ws-a v1", workspace_id: ws_a.id})
 
       {:ok, _} = Skills.update_skill(scoped, %{body: "# ws-a v2"})
 
