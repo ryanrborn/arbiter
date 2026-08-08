@@ -1,6 +1,4 @@
 defmodule Arbiter.Worker.OutputLog do
-  @default_root Path.expand("~/dev/arbiter-worker-logs")
-
   @moduledoc """
   Durable, append-only, per-run transcript of an worker's output.
 
@@ -20,7 +18,7 @@ defmodule Arbiter.Worker.OutputLog do
 
       config :arbiter, :output_log_root, "/some/dir"
 
-  (default `#{@default_root}`). One file per `Arbiter.Workers.Run`. The path
+  (default `~/dev/arbiter-worker-logs`, expanded at runtime). One file per `Arbiter.Workers.Run`. The path
   is a pure function of the run id, so the writer (the live session) and any
   reader (`arb worker log`, the REST log endpoint) agree on location with no
   coordination. Runs whose `Run` row never persisted (the create write failed,
@@ -69,7 +67,9 @@ defmodule Arbiter.Worker.OutputLog do
 
   @doc "Root directory for per-run transcript files."
   @spec root() :: String.t()
-  def root, do: Application.get_env(:arbiter, :output_log_root, @default_root)
+  def root, do: Application.get_env(:arbiter, :output_log_root, default_root())
+
+  defp default_root, do: Path.expand("~/dev/arbiter-worker-logs")
 
   @doc "Absolute path of the transcript file for `run_id`."
   @spec path_for(String.t()) :: String.t()

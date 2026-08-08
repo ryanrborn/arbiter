@@ -101,6 +101,26 @@ defmodule Arbiter.Worker.OutputLogTest do
     assert String.contains?(root, "/arbiter-worker-logs")
   end
 
+  test "root/0 default is resolved at runtime, not baked at compile time" do
+    prev = Application.get_env(:arbiter, :output_log_root)
+    Application.delete_env(:arbiter, :output_log_root)
+
+    on_exit(fn ->
+      if prev do
+        Application.put_env(:arbiter, :output_log_root, prev)
+      else
+        Application.delete_env(:arbiter, :output_log_root)
+      end
+    end)
+
+    root = OutputLog.root()
+    current_home = System.user_home!()
+
+    # The resolved default should start with the current user's home dir, not a baked-in value
+    assert String.starts_with?(root, current_home)
+    assert String.contains?(root, "/arbiter-worker-logs")
+  end
+
   test "the durable store is uncapped — every line of a long run is retained", %{
     run_id: run_id
   } do
