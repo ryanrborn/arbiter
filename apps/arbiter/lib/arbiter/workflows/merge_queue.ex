@@ -637,10 +637,44 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp present(_), do: nil
 
+  # bd-3doy0y: same divergence hazard as Worker.reconcile_before_push/2 — a
+  # ReviewGate implementer round can push a commit straight to
+  # `origin/<branch>` while this queue's worktree still sits on an older
+  # local commit, so a plain push here is rejected non-fast-forward too.
+  # Rebase the worktree's own commits onto the remote tip first. A real
+  # rebase conflict is reported as `:diverged` so it doesn't masquerade as a
+  # generic push failure; any other reconcile error (missing origin, fetch
+  # failure) fails open and lets the push itself surface the real error.
   defp push_worktree_branch(worktree_module, worktree_path, branch) do
-    case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do
-      {:ok, _} = ok -> ok
-      {:error, reason} -> {:error, {:push_failed, reason}}
+    with :ok <- reconcile_worktree_before_push(worktree_module, worktree_path, branch) do
+      case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do
+        {:ok, _} = ok -> ok
+        {:error, reason} -> {:error, {:push_failed, reason}}
+      end
+    else
+      {:error, {:diverged, _detail} = reason} -> {:error, {:push_failed, reason}}
+    end
+  end
+
+  defp reconcile_worktree_before_push(worktree_module, worktree_path, branch) do
+    case worktree_module.rebase_onto_origin(worktree_path, branch) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:diverged_conflict, detail}} ->
+        Logger.warning(
+          "MergeQueue: branch `#{branch}` diverged from origin and could not be rebased " <>
+            "cleanly: #{inspect(detail)}"
+        )
+
+        {:error, {:diverged, detail}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "MergeQueue: reconcile-before-push failed open for branch `#{branch}`: #{inspect(reason)}"
+        )
+
+        :ok
     end
   end
 

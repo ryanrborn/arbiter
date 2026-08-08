@@ -149,6 +149,80 @@ defmodule Arbiter.Worker.PushBeforePRTest do
   # but the test-shortcut `adapter: StubMerger` always evaluates as hosted-forge,
   # so unit-testing the direct skip here would require a real DataCase workspace.
 
+  describe "diverged branch after a ReviewGate revision round (bd-3doy0y)" do
+    # Two-writer shape: base -> main-worker commit locally, implementer
+    # commit pushed straight to origin/<branch> (as the ReviewGate
+    # implementer round does), never seen by this worktree. A plain push at
+    # merge time used to be rejected non-fast-forward, stranding an approved
+    # task. The push path must now reconcile (rebase onto origin) instead of
+    # failing, preserving both commits and never force-pushing.
+    test "reconciles with origin instead of failing non-fast-forward; both commits survive",
+         %{pid: pid, rig: rig} do
+      # Put the feature branch on origin first, at the same point the
+      # worktree's "work" commit sits on top of — mirrors a branch that
+      # already had a pre-review PR open.
+      {_, 0} =
+        System.cmd("git", ["-C", rig.worktree, "push", "-q", "-u", "origin", "feature/abc"],
+          stderr_to_stdout: true
+        )
+
+      # ReviewGate implementer round: a separate clone pushes a fix commit
+      # straight to origin/feature/abc. This worktree never sees it.
+      other = Path.join(Path.dirname(rig.worktree), "implementer-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", rig.bare, other])
+      {_, 0} = System.cmd("git", ["-C", other, "checkout", "-q", "feature/abc"])
+      {_, 0} = System.cmd("git", ["-C", other, "config", "user.email", "impl@example.com"])
+      {_, 0} = System.cmd("git", ["-C", other, "config", "user.name", "Implementer"])
+      {_, 0} = System.cmd("git", ["-C", other, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(other, "implementer_fix.txt"), "implementer fix\n")
+      {_, 0} = System.cmd("git", ["-C", other, "add", "implementer_fix.txt"])
+      {_, 0} = System.cmd("git", ["-C", other, "commit", "-q", "-m", "implementer fix"])
+      {_, 0} = System.cmd("git", ["-C", other, "push", "-q", "origin", "feature/abc"])
+
+      # Meanwhile the main worker's own worktree makes its own local commit —
+      # genuinely diverged from origin now, not merely behind.
+      File.write!(Path.join(rig.worktree, "main_worker_fix.txt"), "main worker fix\n")
+
+      {_, 0} =
+        System.cmd("git", ["-C", rig.worktree, "add", "main_worker_fix.txt"],
+          stderr_to_stdout: true
+        )
+
+      {_, 0} =
+        System.cmd("git", ["-C", rig.worktree, "commit", "-q", "-m", "main worker fix"],
+          stderr_to_stdout: true
+        )
+
+      assert {:ok, _ref} =
+               Worker.open_mr(pid, "feature/abc", "Add abc", "body", %{
+                 adapter: StubMerger,
+                 workspace: nil,
+                 strategy: :github,
+                 interval_ms: 1_000_000,
+                 initial_delay_ms: 1_000_000
+               })
+
+      assert StubMerger.last_open() != nil
+
+      # Both commits' files must be present on origin — neither the
+      # implementer's work nor the main worker's own commit was dropped, and
+      # nothing was force-pushed over the other.
+      {out1, 0} =
+        System.cmd("git", ["-C", rig.bare, "show", "feature/abc:implementer_fix.txt"],
+          stderr_to_stdout: true
+        )
+
+      assert out1 == "implementer fix\n"
+
+      {out2, 0} =
+        System.cmd("git", ["-C", rig.bare, "show", "feature/abc:main_worker_fix.txt"],
+          stderr_to_stdout: true
+        )
+
+      assert out2 == "main worker fix\n"
+    end
+  end
+
   describe "no worktree on disk (coordinator / ad-hoc path)" do
     test "worker proceeds without push when worktree_path is absent", %{} do
       task_id = "test-#{System.unique_integer([:positive])}"
