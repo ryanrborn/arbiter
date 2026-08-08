@@ -3,62 +3,46 @@ defmodule Arbiter.MigrationsTest do
 
   alias Arbiter.Migrations
 
-  # Test module that can be injected into Application config for testing
-  defmodule MockRepoNoPending do
-    def __adapter__, do: Ecto.Adapters.Postgres
-    def config, do: []
-  end
+  describe "extract_pending_count/1 (the with_repo 3-tuple shape)" do
+    test "counts :down migrations out of a mixed up/down list" do
+      raw =
+        {:ok,
+         {:ok,
+          [
+            {20_240_101_000_000, "AddUsers", :up},
+            {20_240_102_000_000, "AddPosts", :down},
+            {20_240_103_000_000, "AddComments", :down}
+          ]}, []}
 
-  defmodule MockRepoPending do
-    def __adapter__, do: Ecto.Adapters.Postgres
-    def config, do: []
-  end
-
-  test "count_pending returns an integer in standard environment" do
-    # In a properly migrated test environment, count_pending should return 0.
-    # The test verifies the function returns an integer and handles both
-    # the no-database and migrations-current cases gracefully.
-    count = Migrations.count_pending()
-    assert is_integer(count)
-    assert count >= 0
-  end
-
-  test "count_pending handles database errors gracefully" do
-    # Even if the database is unreachable or misconfigured,
-    # count_pending should return 0, not raise an exception.
-    # This guards against fresh-install scenarios where the database
-    # hasn't been created yet.
-    count = Migrations.count_pending()
-    assert is_integer(count)
-  end
-
-  describe "pattern matching of Ecto.Migrator.with_repo return value" do
-    test "correctly handles the 3-tuple return from with_repo" do
-      # Ecto.Migrator.with_repo returns {:ok, result, started_apps} — a 3-tuple.
-      # The callback returns {:ok, migrations}, so the full return is:
-      # {:ok, {:ok, [migrations]}, started_apps}
-      #
-      # This test verifies that count_pending correctly pattern-matches this
-      # 3-tuple (not the 2-tuple the original buggy code expected).
-      # The test passes if count_pending runs without raising WithClauseError
-      # and returns an integer, confirming the fix works.
-
-      # Call count_pending which internally uses Ecto.Migrator.with_repo
-      count = Migrations.count_pending()
-
-      # Verify the function executed successfully and returned an integer
-      assert is_integer(count)
-      assert count >= 0
+      assert Migrations.extract_pending_count(raw) == 2
     end
 
-    test "handles error case from database unreachable" do
-      # If the database is unreachable, Ecto.Migrator.with_repo returns an error.
-      # count_pending_for_repo should catch this and return 0.
-      # This verifies the else clause handles all non-success cases.
+    test "returns 0 when every migration is :up" do
+      raw = {:ok, {:ok, [{20_240_101_000_000, "AddUsers", :up}]}, []}
 
+      assert Migrations.extract_pending_count(raw) == 0
+    end
+
+    test "returns 0 for an empty migrations list" do
+      assert Migrations.extract_pending_count({:ok, {:ok, []}, []}) == 0
+    end
+
+    test "returns 0 on an {:error, _} shape (database unreachable)" do
+      assert Migrations.extract_pending_count({:error, :unreachable}) == 0
+    end
+
+    # Regression guard for the round-1 bug: a naive `with {:ok, migrations} <-`
+    # pattern expects a 2-tuple, but `Ecto.Migrator.with_repo/2` actually
+    # returns a 3-tuple. Feeding that exact wrong shape in must fall through to
+    # the catch-all clause (0), not raise.
+    test "falls through to 0 on the wrong (2-tuple) shape rather than raising" do
+      assert Migrations.extract_pending_count({:ok, [{1, "x", :down}]}) == 0
+    end
+  end
+
+  describe "count_pending/0" do
+    test "returns a non-negative integer" do
       count = Migrations.count_pending()
-
-      # Even in error cases, should return 0, not raise
       assert is_integer(count)
       assert count >= 0
     end

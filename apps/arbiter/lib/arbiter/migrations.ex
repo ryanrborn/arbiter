@@ -26,20 +26,28 @@ defmodule Arbiter.Migrations do
   end
 
   defp count_pending_for_repo(repo) do
-    # Ecto.Migrator.with_repo/2 returns {ok, result, started_apps}, where result
-    # is what the callback returns. The callback returns {:ok, migrations}, so we
-    # match the full 3-tuple structure.
-    with {:ok, {:ok, migrations}, _apps} <- safe_get_migrations(repo) do
-      migrations
-      |> Enum.count(fn {_version, _name, status} -> status == :down end)
-    else
-      # Database not reachable or not set up — count as 0 pending
-      _ -> 0
-    end
+    repo
+    |> safe_get_migrations()
+    |> extract_pending_count()
   rescue
     # Catch any errors during migration check (e.g., database not running)
     _ -> 0
   end
+
+  @doc false
+  # Parses the raw return of `Ecto.Migrator.with_repo/2` and counts :down
+  # migrations. `with_repo/2` returns a 3-tuple, `{:ok, callback_result,
+  # started_apps}` — NOT a 2-tuple — and the callback here returns `{:ok,
+  # migrations}`, so a success looks like `{:ok, {:ok, migrations}, apps}`.
+  # Exposed (not private) so the pattern-matching itself — the exact shape
+  # that was previously wrong — can be tested directly without a live
+  # database connection.
+  @spec extract_pending_count(term()) :: non_neg_integer()
+  def extract_pending_count({:ok, {:ok, migrations}, _started_apps}) do
+    Enum.count(migrations, fn {_version, _name, status} -> status == :down end)
+  end
+
+  def extract_pending_count(_other), do: 0
 
   defp safe_get_migrations(repo) do
     Ecto.Migrator.with_repo(repo, fn _repo ->
