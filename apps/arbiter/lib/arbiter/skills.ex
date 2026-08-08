@@ -36,6 +36,8 @@ defmodule Arbiter.Skills do
     # AshPaperTrail version rows for Skill (bd-9j6is7); queryable via
     # Arbiter.Skills.Skill.Version.
     resource Skill.Version
+    # Usage telemetry (bd-61hnbb).
+    resource Arbiter.Skills.Usage
   end
 
   # The built-in skills every `claude --print` worker sees regardless of what
@@ -117,7 +119,11 @@ defmodule Arbiter.Skills do
   def update_skill(skill_or_ref, attrs, opts \\ [])
 
   def update_skill(%Skill{} = skill, attrs, opts) when is_map(attrs) do
-    Ash.update(skill, put_actor(attrs, opts), actor: actor(opts))
+    with {:ok, updated} <- Ash.update(skill, put_actor(attrs, opts), actor: actor(opts)) do
+      # Increment patch_count (best-effort; don't let telemetry break the update).
+      _ = increment_usage(skill.id, :patch_count)
+      {:ok, updated}
+    end
   end
 
   def update_skill(id_or_name, attrs, opts) when is_binary(id_or_name) and is_map(attrs) do
@@ -324,4 +330,54 @@ defmodule Arbiter.Skills do
       s
     )
   end
+
+  # ---- Usage telemetry (bd-61hnbb) ----------------------------------------
+
+  @doc """
+  Get or create a usage row for a skill. Returns `{:ok, %Usage{}}`.
+  """
+  @spec get_or_create_usage(String.t()) :: {:ok, Arbiter.Skills.Usage.t()} | {:error, term()}
+  def get_or_create_usage(skill_id) when is_binary(skill_id) do
+    case Arbiter.Skills.Usage
+         |> Ash.Query.filter(skill_id == ^skill_id)
+         |> Ash.read_one() do
+      {:ok, %Arbiter.Skills.Usage{} = usage} ->
+        {:ok, usage}
+
+      {:ok, nil} ->
+        # No existing usage row; create one
+        Ash.create(Arbiter.Skills.Usage, %{skill_id: skill_id})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Increment a usage counter for a skill. `counter` is `:materialize_count`,
+  `:invoke_count`, or `:patch_count`. Also updates the corresponding
+  `last_*_at` timestamp. Wraps errors and logs them so a telemetry failure
+  never crashes the dispatch.
+
+  Returns `{:ok, %Usage{}}` or `{:error, term()}`.
+  """
+  @spec increment_usage(String.t(), :materialize_count | :invoke_count | :patch_count) ::
+          {:ok, Arbiter.Skills.Usage.t()} | {:error, term()}
+  def increment_usage(skill_id, counter)
+      when is_binary(skill_id) and counter in [:materialize_count, :invoke_count, :patch_count] do
+    with {:ok, usage} <- get_or_create_usage(skill_id) do
+      current_value = Map.fetch!(usage, counter)
+
+      attrs = %{
+        counter => (current_value || 0) + 1,
+        timestamp_for(counter) => DateTime.utc_now()
+      }
+
+      Ash.update(usage, attrs)
+    end
+  end
+
+  defp timestamp_for(:materialize_count), do: :last_materialized_at
+  defp timestamp_for(:invoke_count), do: :last_invoked_at
+  defp timestamp_for(:patch_count), do: :last_patched_at
 end
