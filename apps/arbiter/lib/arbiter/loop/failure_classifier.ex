@@ -99,6 +99,7 @@ defmodule Arbiter.Loop.FailureClassifier do
 
     context? = context_exhaustion?(transcript_lines)
     api_error? = api_error_signal?(transcript_lines)
+    proxy_5xx? = proxy_5xx?(transcript_lines)
     have_transcript? = transcript_lines != []
 
     cond do
@@ -106,6 +107,11 @@ defmodule Arbiter.Loop.FailureClassifier do
       # is agent-quality no matter what the label claimed.
       context? and not api_error? ->
         final(:agent_quality, :context_exhaustion, label_class, have_transcript?)
+
+      # Transcript wins: a proxy 5xx (infrastructure failure) overrides any label
+      # and classifies as operational, even if labelled as unknown.
+      proxy_5xx? ->
+        final(:operational, :proxy_5xx, label_class, have_transcript?)
 
       true ->
         # No transcript override — trust the allowlist label.
@@ -152,6 +158,29 @@ defmodule Arbiter.Loop.FailureClassifier do
         (String.contains?(l, "api error") and
            (String.contains?(l, "429") or String.contains?(l, "529") or
               String.contains?(l, "overload")))
+    end)
+  end
+
+  @doc """
+  True when a line shows Arbiter's own infrastructure (proxy, database, etc.)
+  has failed. These are distinct from Anthropic API failures and must be
+  classified as operational, routed to ops, and excluded from
+  prompt-shaping. The two most common signals are:
+    * Phoenix/Ecto errors from the proxy (PendingMigrationError, etc)
+    * HTTP 5xx from Arbiter's proxy (503, 502, 500)
+  """
+  @spec proxy_5xx?([String.t()]) :: boolean()
+  def proxy_5xx?(transcript_lines) do
+    Enum.any?(transcript_lines, fn line ->
+      l = String.downcase(line)
+
+      # Phoenix/Ecto database errors from the proxy
+      # HTTP 5xx responses from Arbiter's proxy (not client 4xx errors)
+      String.contains?(l, "phoenix.ecto.pendingmigrationerror") or
+        String.contains?(l, "dbconnection.connectionerror") or
+        String.contains?(l, "http 500") or
+        String.contains?(l, "http 502") or
+        String.contains?(l, "http 503")
     end)
   end
 

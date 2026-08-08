@@ -136,7 +136,7 @@ defmodule Arbiter.Loop.Analysis do
     %{
       corroborated: n_corr,
       reclassified: length(reclassified),
-      rate: if(n_corr == 0, do: 0.0, else: length(reclassified) / n_corr),
+      rate: if(n_corr == 0, do: nil, else: length(reclassified) / n_corr),
       citations:
         Enum.map(reclassified, fn c ->
           %{
