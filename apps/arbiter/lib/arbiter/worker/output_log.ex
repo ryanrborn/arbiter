@@ -1,5 +1,5 @@
 defmodule Arbiter.Worker.OutputLog do
-  @default_root "/home/rborn/dev/arbiter-worker-logs"
+  @default_root Path.expand("~/dev/arbiter-worker-logs")
 
   @moduledoc """
   Durable, append-only, per-run transcript of an worker's output.
