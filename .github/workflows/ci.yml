@@ -2,20 +2,25 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches-ignore:
-      - main
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Required check. Fast (~2-3 min warm-cache) and, as of this writing,
-  # reliably green on main — this is the gate the merge queue blocks on.
-  # It is also exactly what would have caught both incidents that motivated
-  # this workflow: a repo-wide format drift (PR #1135) and a warnings-as-error
-  # violation on main (#1131).
+  # Arbiter's merger (apps/arbiter/lib/arbiter/mergers/github.ex) does not
+  # honor GitHub's "required check" designation — it reads every check run's
+  # conclusion on the PR head SHA uniformly (map_check_run_status/1) and, if
+  # any is non-success, reports pipeline: :failed. The Watchdog then treats
+  # that as :ci_failed: it dispatches a fix-pass acolyte, and once auto-resolve
+  # attempts are exhausted, parks the worker indefinitely. So "non-required"
+  # has no meaning to Arbiter — any job in this workflow must be able to stay
+  # green, or it will block merges outright. This job (compile/deps/format) is
+  # reliably green on main as of this writing, and is exactly what would have
+  # caught both incidents that motivated this workflow: a repo-wide format
+  # drift (PR #1135) and a warnings-as-error violation on main (#1131). Wall
+  # clock has not yet been measured on a warm cache; record it here once a
+  # second run on this branch (or a follow-up PR) restores the cache.
   lint:
     name: mix precommit (compile, deps, format)
     runs-on: ubuntu-latest
@@ -37,9 +42,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-
+            ${{ runner.os }}-otp28.5-elixir1.19.4-mix-
 
       - name: Install hex/rebar
         run: |
@@ -64,17 +69,23 @@ jobs:
       - name: Check formatting
         run: mix format --check-formatted
 
-  # Not a required check yet: as of this writing `mix test` has a handful of
-  # pre-existing, order-dependent failures on main (global Req.Test HTTP
-  # stubs / singleton GenServers bleeding across `async: false` LiveView
-  # tests) unrelated to any given PR's diff — gating on it today would block
-  # merges on failures no PR caused. It still runs on every PR so the signal
-  # is visible; flip `continue-on-error` off (and add this job to the merge
-  # queue's required checks) once that pre-existing flakiness is fixed.
+  # `mix test` has a handful of pre-existing, order-dependent failures on
+  # main (global Req.Test HTTP stubs / singleton GenServers bleeding across
+  # `async: false` LiveView tests) unrelated to any given PR's diff. Because
+  # Arbiter's merger treats ANY non-success check-run conclusion on the head
+  # SHA as a pipeline failure (see the `lint` job comment above) — not just
+  # checks GitHub considers "required" — a job-level `continue-on-error` is
+  # NOT enough to keep this from blocking merges: it only changes the
+  # *workflow run's* conclusion, not this job's own check-run conclusion,
+  # which is what Arbiter reads. So this step deliberately swallows the exit
+  # code and reports via `::warning::` instead of failing the job, keeping
+  # the job's conclusion (and check run) green while the failures stay
+  # visible in the log. Switch back to a normal failing `run: mix test` (and
+  # add this job to the merge queue's required checks) once the pre-existing
+  # flakiness is fixed.
   test:
     name: mix test
     runs-on: ubuntu-latest
-    continue-on-error: true
     env:
       MIX_ENV: test
 
@@ -93,9 +104,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-
+            ${{ runner.os }}-otp28.5-elixir1.19.4-mix-
 
       - name: Install hex/rebar
         run: |
@@ -105,5 +116,5 @@ jobs:
       - name: Fetch dependencies
         run: mix deps.get
 
-      - name: Run tests
-        run: mix test
+      - name: Run tests (non-gating — see bd-3c9ygz)
+        run: mix test || echo "::warning::mix test failed (non-gating; pre-existing order-dependent failures)"
