@@ -109,6 +109,9 @@ defmodule ArbiterWeb.Router do
     # Version stamp
     get("/version", VersionController, :show)
 
+    # Server health (migrations, etc.)
+    get("/server/migrations", ServerController, :migrations)
+
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)
     get("/usage/events", UsageController, :events)

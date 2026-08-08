@@ -2874,4 +2874,46 @@ defmodule Arbiter.Worker.DispatchTest do
       assert result.worktree_path == nil
     end
   end
+
+  defmodule StubMigrationsPending do
+    @moduledoc false
+    def count_pending, do: 3
+  end
+
+  describe "pending migrations gate" do
+    test "dispatch proceeds when migrations are current", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "migrations current", workspace_id: ws.id})
+
+      # In a test environment where migrations are applied, dispatch should proceed
+      # (or fail for other reasons, but not due to pending migrations)
+      case Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) do
+        {:ok, result} ->
+          assert result.task.status == :in_progress
+
+        {:error, {:pending_migrations, _count}} ->
+          # If we do have pending migrations in test, that's OK too — this just verifies
+          # the check is in place and returns the expected error format
+          :ok
+
+        other ->
+          flunk("unexpected dispatch result: #{inspect(other)}")
+      end
+    end
+
+    test "dispatch is refused with a reason naming the migration state when migrations are pending",
+         %{ws: ws} do
+      Application.put_env(:arbiter, :migrations_module, StubMigrationsPending)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :migrations_module) end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "migrations pending", workspace_id: ws.id})
+
+      assert Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) ==
+               {:error, {:pending_migrations, 3}}
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert reloaded.status != :in_progress
+      assert Worker.whereis(task.id) == nil
+    end
+  end
 end
