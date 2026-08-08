@@ -33,6 +33,14 @@ defmodule Arbiter.Loop.Analysis do
   @min_incidents 3
   @min_tasks 2
 
+  # For cohort-based comparisons (rework and quality_failure signals), require
+  # a minimum sample size. With fewer peers, the computed median is not a
+  # reliable ground truth for comparison. Below this threshold, treat it as
+  # insufficient evidence (flag with nil cohort stats), matching the empty-cohort
+  # behavior — this avoids the "silent divide-by-small-n" anti-pattern where a
+  # single peer task's value is treated as a cell-wide signal.
+  @min_cohort_size 2
+
   @doc """
   Run the pass over a window: fetch, analyse, record own cost, return the
   report + rendered markdown.
@@ -318,6 +326,13 @@ defmodule Arbiter.Loop.Analysis do
   # we can't demonstrate the task is (or isn't) an outlier — flag it rather
   # than silently drop it on an absence of evidence.
   defp cohort_verdict([], _t, _reason), do: {:flag, nil, nil}
+
+  # Cohort too small to have a meaningful median: treat as insufficient evidence
+  # (same path as empty cohort). This avoids computing a "median" from a single
+  # peer task and treating it as reliable ground truth.
+  defp cohort_verdict(cohort, _t, _reason) when length(cohort) < @min_cohort_size do
+    {:flag, nil, nil}
+  end
 
   # For rework cases (multiple review rounds), require the task to exceed its
   # cell median on BOTH rounds and cost. This filters out tasks that needed

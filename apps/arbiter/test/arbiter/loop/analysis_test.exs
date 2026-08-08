@@ -318,7 +318,7 @@ defmodule Arbiter.Loop.AnalysisTest do
     test "a reworked task that is no worse than its (difficulty, repo) cell peers is dropped" do
       rows = [
         # Target: rounds 2, cost 2.0 — reworked, but cheaper and faster than
-        # its cohort peer below.
+        # its cohort peers below. Should not be flagged as it's below median on both.
         row(%{
           run_id: "cohort-target",
           task_id: "bd-cohort-target",
@@ -328,10 +328,20 @@ defmodule Arbiter.Loop.AnalysisTest do
           cost_usd: 2.0,
           max_round: 2
         }),
-        # Cohort peer in the same (difficulty, repo) cell, strictly worse.
+        # Cohort peer 1: rounds 2, cost 3.0 (median)
         row(%{
-          run_id: "cohort-peer",
-          task_id: "bd-cohort-peer",
+          run_id: "cohort-peer-1",
+          task_id: "bd-cohort-peer-1",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 3.0,
+          max_round: 2
+        }),
+        # Cohort peer 2: rounds 3, cost 5.0 (above median on both)
+        row(%{
+          run_id: "cohort-peer-2",
+          task_id: "bd-cohort-peer-2",
           repo: "verus",
           difficulty: 1,
           status: :completed,
@@ -342,7 +352,7 @@ defmodule Arbiter.Loop.AnalysisTest do
 
       report = Analysis.build_report(rows, label: "test")
       refute Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-cohort-target"))
-      assert Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-cohort-peer"))
+      assert Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-cohort-peer-2"))
     end
 
     test "a reworked task above median on rounds but below median on cost is not flagged" do
