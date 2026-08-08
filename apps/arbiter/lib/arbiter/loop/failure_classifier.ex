@@ -165,22 +165,18 @@ defmodule Arbiter.Loop.FailureClassifier do
   True when a line shows Arbiter's own infrastructure (proxy, database, etc.)
   has failed. These are distinct from Anthropic API failures and must be
   classified as operational, routed to ops, and excluded from
-  prompt-shaping. The two most common signals are:
-    * Phoenix/Ecto errors from the proxy (PendingMigrationError, etc)
-    * HTTP 5xx from Arbiter's proxy (503, 502, 500)
+  prompt-shaping. Detects by specific error classes (Phoenix/Ecto, DBConnection)
+  that are unambiguous markers of Arbiter's own infrastructure failure.
   """
   @spec proxy_5xx?([String.t()]) :: boolean()
   def proxy_5xx?(transcript_lines) do
     Enum.any?(transcript_lines, fn line ->
       l = String.downcase(line)
 
-      # Phoenix/Ecto database errors from the proxy
-      # HTTP 5xx responses from Arbiter's proxy (not client 4xx errors)
+      # Phoenix/Ecto database errors and connection failures from the proxy
+      # are unambiguous: they can only come from Arbiter's infrastructure.
       String.contains?(l, "phoenix.ecto.pendingmigrationerror") or
-        String.contains?(l, "dbconnection.connectionerror") or
-        String.contains?(l, "http 500") or
-        String.contains?(l, "http 502") or
-        String.contains?(l, "http 503")
+        String.contains?(l, "dbconnection.connectionerror")
     end)
   end
 

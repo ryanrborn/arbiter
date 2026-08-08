@@ -251,12 +251,15 @@ defmodule Arbiter.Loop.FailureClassifierTest do
       refute FC.api_error_signal?(["apps/arbiter/lib/arbiter/quota/anthropic_quota.ex"])
     end
 
-    test "proxy_5xx?/1 detects Arbiter proxy infrastructure 5xx errors" do
+    test "proxy_5xx?/1 detects Arbiter proxy infrastructure errors (not bare HTTP codes)" do
+      # Specific error classes are unambiguous: they only come from Arbiter's infrastructure
       assert FC.proxy_5xx?(["** (Phoenix.Ecto.PendingMigrationError) tables missing"])
       assert FC.proxy_5xx?(["** (DBConnection.ConnectionError) connection failed"])
-      assert FC.proxy_5xx?(["HTTP 503"])
-      assert FC.proxy_5xx?(["HTTP 500"])
-      assert FC.proxy_5xx?(["HTTP 502"])
+      # Bare HTTP codes are too loose — would match unrelated transcripts discussing
+      # third-party services or debugging logs. Must require specific error fingerprints.
+      refute FC.proxy_5xx?(["HTTP 503"])
+      refute FC.proxy_5xx?(["HTTP 500"])
+      refute FC.proxy_5xx?(["HTTP 502"])
       refute FC.proxy_5xx?(["HTTP 404"])
       refute FC.proxy_5xx?(["HTTP 429"])
       refute FC.proxy_5xx?(["some random error"])

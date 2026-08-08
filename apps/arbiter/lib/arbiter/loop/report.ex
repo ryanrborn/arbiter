@@ -101,9 +101,17 @@ defmodule Arbiter.Loop.Report do
 
     aq = class_block("Agent-quality (eligible for prompt/skill changes)", grouped[:agent_quality])
 
+    # Unclassified runs are a corpus-integrity signal: they indicate the
+    # classifier is drifting from reality. Surface them distinctly with run_ids.
+    unknown =
+      class_block(
+        "**Unclassified (corpus-integrity signal — classifier drift detector)**",
+        grouped[:unknown]
+      )
+
     others =
       grouped
-      |> Map.drop([:operational, :agent_quality])
+      |> Map.drop([:operational, :agent_quality, :unknown])
       |> Enum.map(fn {class, rows} -> class_block("#{class}", rows) end)
       |> Enum.join("\n")
 
@@ -117,6 +125,7 @@ defmodule Arbiter.Loop.Report do
 
     #{op}
     #{aq}
+    #{unknown}
     #{others}
     """
   end
