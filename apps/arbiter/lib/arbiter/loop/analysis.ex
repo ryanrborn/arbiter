@@ -214,10 +214,43 @@ defmodule Arbiter.Loop.Analysis do
 
   # ---- difficulty misestimates -------------------------------------------
 
+  # Two distinct signals can indicate a difficulty misestimate, and they are
+  # NOT the same claim:
+  #
+  #   :rework — the task needed a second review round. This alone means the
+  #     dispatched difficulty under-provisioned the work; round-1 approval
+  #     genuinely failed, so a "0%" round-1-approval baseline is true.
+  #
+  #   :quality_failure — every review round converged on round 1, but one or
+  #     more *attempts* failed for an agent-quality reason before the task
+  #     converged (vs-8i7rod: rounds: 1, 3 attempts, $5.59). This is a cost
+  #     signal, not evidence the reviewer under-provisioned rounds — reusing
+  #     the rework wording/baseline here is what over-fired 16/133 tasks.
+  #
+  # Context-exhaustion is deliberately EXCLUDED from quality_failure?: per the
+  # worked example in the ticket, an agent burning its own context window is a
+  # read-discipline problem, not a difficulty misestimate. It is surfaced
+  # separately as its own finding category.
+  #
+  # Both signals are then filtered against the task's own (difficulty, repo)
+  # cohort: a task no worse than its cell peers on cost and rounds is dropped,
+  # per the ticket's "compare within a cell" discipline. A task with no cohort
+  # data this window (nothing else in its cell) can't be shown to be an
+  # outlier, so it is flagged by default rather than silently dropped.
   defp difficulty_misestimates(rows) do
+    tasks = task_level(rows)
+    cells = Enum.group_by(tasks, &{&1.difficulty, &1.repo})
+
+    tasks
+    |> Enum.filter(&(&1.has_difficulty? and (&1.reworked? or &1.quality_failure?)))
+    |> Enum.map(&build_misestimate(&1, cells))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort_by(& &1.task_id)
+  end
+
+  defp task_level(rows) do
     rows
     |> Enum.group_by(& &1.task_id)
-    |> Enum.filter(fn {_task, task_rows} -> misestimate?(task_rows) end)
     |> Enum.map(fn {task_id, task_rows} ->
       dispatched =
         task_rows |> Enum.map(& &1.difficulty) |> Enum.reject(&is_nil/1) |> min_or_nil()
@@ -225,51 +258,27 @@ defmodule Arbiter.Loop.Analysis do
       rounds = task_rows |> Enum.map(& &1.max_round) |> Enum.max()
       cost = task_rows |> Enum.map(&(&1.cost_usd || 0.0)) |> Enum.sum()
       repo = task_rows |> hd() |> Map.get(:repo)
-      next = if dispatched, do: dispatched + 1, else: nil
+
+      quality_failure? =
+        Enum.any?(task_rows, fn r ->
+          r.status == :failed and
+            quality_misestimate_signal?(
+              FailureClassifier.classify(r.failure_reason, r.terminal_lines)
+            )
+        end)
 
       %{
         task_id: task_id,
-        cell: {dispatched, repo},
-        dispatched_difficulty: dispatched,
+        difficulty: dispatched,
+        repo: repo,
+        cost: cost,
         rounds: rounds,
-        cost_usd: cost,
-        note:
-          "Dispatched difficulty #{inspect(dispatched)} under-provisioned the actual work: #{rounds} review round(s), $#{fmt(cost)} across #{length(task_rows)} attempt(s). Segmented within cell (#{inspect(dispatched)}, #{repo}).",
-        recommendation: %{
-          destination: :per_task_override,
-          action:
-            "paper-trailed per-task override (blast-radius 1): set Issue.difficulty=#{inspect(next)} on #{task_id} and log a tracked hypothesis — do NOT change fleet routing on this single case",
-          target_metric: "round-1 approval rate for #{task_id}",
-          baseline: "0% (first attempt needed #{rounds} rounds)"
-        }
+        attempts: length(task_rows),
+        reworked?: rounds >= 2,
+        quality_failure?: quality_failure?,
+        has_difficulty?: Enum.any?(task_rows, &(not is_nil(&1.difficulty)))
       }
     end)
-    |> Enum.sort_by(& &1.task_id)
-  end
-
-  # A task mispredicts difficulty when it needed rework (round >= 2) or was
-  # rejected/failed on *work quality* — the dispatched difficulty under-provisioned
-  # the cost/rounds actually incurred.
-  #
-  # Context-exhaustion is deliberately EXCLUDED: per the worked example in the
-  # ticket, an agent burning its own context window is a read-discipline
-  # problem, not a difficulty misestimate. It is surfaced separately as its own
-  # finding category. Conflating the two would (wrongly) recommend raising the
-  # difficulty of every context-death task.
-  defp misestimate?(task_rows) do
-    reworked? = Enum.any?(task_rows, &(&1.max_round >= 2))
-
-    quality_failure? =
-      Enum.any?(task_rows, fn r ->
-        r.status == :failed and
-          quality_misestimate_signal?(
-            FailureClassifier.classify(r.failure_reason, r.terminal_lines)
-          )
-      end)
-
-    has_difficulty? = Enum.any?(task_rows, &(not is_nil(&1.difficulty)))
-
-    (reworked? or quality_failure?) and has_difficulty?
   end
 
   # Agent-quality failures that point at *difficulty* (the work was harder than
@@ -278,6 +287,123 @@ defmodule Arbiter.Loop.Analysis do
     do: sub != :context_exhaustion
 
   defp quality_misestimate_signal?(_), do: false
+
+  defp build_misestimate(t, cells) do
+    cohort =
+      cells
+      |> Map.get({t.difficulty, t.repo}, [])
+      |> Enum.reject(&(&1.task_id == t.task_id))
+
+    case cohort_verdict(cohort, t) do
+      :drop ->
+        nil
+
+      {:flag, cohort_cost, cohort_rounds} ->
+        reason = if t.reworked?, do: :rework, else: :quality_failure
+
+        %{
+          task_id: t.task_id,
+          cell: {t.difficulty, t.repo},
+          dispatched_difficulty: t.difficulty,
+          rounds: t.rounds,
+          cost_usd: t.cost,
+          reason: reason,
+          note: misestimate_note(reason, t, cohort_cost, cohort_rounds),
+          recommendation: misestimate_recommendation(reason, t, cohort_cost, cohort_rounds)
+        }
+    end
+  end
+
+  # No cohort data this window means there is nothing to compare against, so
+  # we can't demonstrate the task is (or isn't) an outlier — flag it rather
+  # than silently drop it on an absence of evidence.
+  defp cohort_verdict([], _t), do: {:flag, nil, nil}
+
+  defp cohort_verdict(cohort, t) do
+    cohort_cost = cohort |> Enum.map(& &1.cost) |> median()
+    cohort_rounds = cohort |> Enum.map(& &1.rounds) |> median()
+
+    if t.cost > cohort_cost or t.rounds > cohort_rounds do
+      {:flag, cohort_cost, cohort_rounds}
+    else
+      :drop
+    end
+  end
+
+  defp misestimate_note(:rework, t, nil, nil) do
+    "Dispatched difficulty #{inspect(t.difficulty)} under-provisioned the actual work: " <>
+      "#{t.rounds} review round(s), $#{fmt(t.cost)} across #{t.attempts} attempt(s) " <>
+      "(no cohort data this window to compare against). Segmented within cell " <>
+      "(#{inspect(t.difficulty)}, #{t.repo})."
+  end
+
+  defp misestimate_note(:rework, t, cohort_cost, cohort_rounds) do
+    "Dispatched difficulty #{inspect(t.difficulty)} under-provisioned the actual work: " <>
+      "#{t.rounds} review round(s) (cell median #{cohort_rounds}), $#{fmt(t.cost)} across " <>
+      "#{t.attempts} attempt(s) (cell median $#{fmt(cohort_cost)}). Segmented within cell " <>
+      "(#{inspect(t.difficulty)}, #{t.repo})."
+  end
+
+  defp misestimate_note(:quality_failure, t, nil, nil) do
+    "Converged in round 1, but needed #{t.attempts} attempt(s) due to agent-quality " <>
+      "failures on the way there: $#{fmt(t.cost)} total (no cohort data this window to " <>
+      "compare against). This is a cost signal, not a rounds-based under-provisioning " <>
+      "claim. Segmented within cell (#{inspect(t.difficulty)}, #{t.repo})."
+  end
+
+  defp misestimate_note(:quality_failure, t, cohort_cost, _cohort_rounds) do
+    "Converged in round 1, but needed #{t.attempts} attempt(s) due to agent-quality " <>
+      "failures on the way there: $#{fmt(t.cost)} total vs. a $#{fmt(cohort_cost)} cell " <>
+      "median. This is a cost signal, not a rounds-based under-provisioning claim. " <>
+      "Segmented within cell (#{inspect(t.difficulty)}, #{t.repo})."
+  end
+
+  defp misestimate_recommendation(:rework, t, _cohort_cost, _cohort_rounds) do
+    next = if t.difficulty, do: t.difficulty + 1, else: nil
+
+    %{
+      destination: :per_task_override,
+      action:
+        "paper-trailed per-task override (blast-radius 1): set Issue.difficulty=#{inspect(next)} on #{t.task_id} and log a tracked hypothesis — do NOT change fleet routing on this single case",
+      target_metric: "round-1 approval rate for #{t.task_id}",
+      baseline: "0% (first attempt needed #{t.rounds} rounds)"
+    }
+  end
+
+  defp misestimate_recommendation(:quality_failure, t, nil, _cohort_rounds) do
+    %{
+      destination: :per_task_override,
+      action:
+        "paper-trailed per-task override (blast-radius 1): investigate the agent-quality failures on #{t.task_id}'s earlier attempts before recommending a difficulty change — the reviewer approved on round 1, so this is a cost anomaly, not a rounds signal",
+      target_metric: "cost to converge for #{t.task_id}",
+      baseline: "$#{fmt(t.cost)} across #{t.attempts} attempt(s) (no cohort baseline available)"
+    }
+  end
+
+  defp misestimate_recommendation(:quality_failure, t, cohort_cost, _cohort_rounds) do
+    %{
+      destination: :per_task_override,
+      action:
+        "paper-trailed per-task override (blast-radius 1): investigate the agent-quality failures on #{t.task_id}'s earlier attempts before recommending a difficulty change — the reviewer approved on round 1, so this is a cost anomaly, not a rounds signal",
+      target_metric: "cost to converge for #{t.task_id}",
+      baseline:
+        "$#{fmt(t.cost)} across #{t.attempts} attempt(s), vs. $#{fmt(cohort_cost)} cell median"
+    }
+  end
+
+  defp median([]), do: nil
+
+  defp median(list) do
+    sorted = Enum.sort(list)
+    n = length(sorted)
+    mid = div(n, 2)
+
+    if rem(n, 2) == 1 do
+      Enum.at(sorted, mid)
+    else
+      (Enum.at(sorted, mid - 1) + Enum.at(sorted, mid)) / 2
+    end
+  end
 
   # ---- (difficulty, repo) cells ------------------------------------------
 
