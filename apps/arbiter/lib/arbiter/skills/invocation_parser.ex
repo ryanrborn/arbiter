@@ -20,12 +20,15 @@ defmodule Arbiter.Skills.InvocationParser do
 
   Errors in updating the counter are logged but never block transcript
   processing — the parser proceeds to the next line.
+
+  `workspace_id` is used for skill resolution: workspace-scoped skills shadow
+  global skills of the same name within that workspace.
   """
   @spec parse_and_update(String.t() | nil, [String.t()]) :: {non_neg_integer(), non_neg_integer()}
-  def parse_and_update(_run_id, lines) when is_list(lines) do
+  def parse_and_update(workspace_id, lines) when is_list(lines) do
     lines
     |> Enum.reduce({0, 0}, fn line, {found, failed} ->
-      case update_for_line(line) do
+      case update_for_line(line, workspace_id) do
         {:ok, count} -> {found + count, failed}
         {:error, _reason} -> {found, failed + 1}
       end
@@ -34,12 +37,12 @@ defmodule Arbiter.Skills.InvocationParser do
 
   # Find all skill invocations in a single transcript line and update counters.
   # Returns `{:ok, count}` — the number of skills incremented for this line.
-  defp update_for_line(line) when is_binary(line) do
+  defp update_for_line(line, workspace_id) when is_binary(line) do
     skills = extract_skill_names(line)
 
     try do
       Enum.reduce(skills, 0, fn skill_name, count ->
-        case increment_skill_usage(skill_name) do
+        case increment_skill_usage(skill_name, workspace_id) do
           :ok -> count + 1
           # Log the error, but keep counting succeeding invocations
           :error -> count
@@ -56,7 +59,7 @@ defmodule Arbiter.Skills.InvocationParser do
     end
   end
 
-  defp update_for_line(_), do: {:ok, 0}
+  defp update_for_line(_, _workspace_id), do: {:ok, 0}
 
   # Extract all unique skill names from a line (slash-command invocations).
   # Pattern: `/name` where name is kebab-case (lowercase letters/digits/hyphens).
@@ -92,9 +95,11 @@ defmodule Arbiter.Skills.InvocationParser do
   end
 
   # Increment invoke_count for a skill by name. Logs errors but doesn't raise.
-  defp increment_skill_usage(skill_name) when is_binary(skill_name) do
+  # workspace_id is used for skill resolution: workspace-scoped skills shadow
+  # global skills of the same name within that workspace.
+  defp increment_skill_usage(skill_name, workspace_id) when is_binary(skill_name) do
     try do
-      with {:ok, skill} <- Arbiter.Skills.get_skill_by_name(skill_name),
+      with {:ok, skill} <- Arbiter.Skills.resolve_skill(skill_name, workspace_id),
            {:ok, _updated} <- Arbiter.Skills.increment_usage(skill.id, :invoke_count) do
         :ok
       else

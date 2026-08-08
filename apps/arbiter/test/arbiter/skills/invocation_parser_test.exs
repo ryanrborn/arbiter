@@ -1,6 +1,8 @@
 defmodule Arbiter.Skills.InvocationParserTest do
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Skills
   alias Arbiter.Skills.InvocationParser
 
@@ -73,8 +75,6 @@ defmodule Arbiter.Skills.InvocationParserTest do
     setup do
       {:ok, skill1} = Skills.create_skill(%{name: "test-invoke-skill-1", body: "test"})
       {:ok, skill2} = Skills.create_skill(%{name: "test-invoke-skill-2", body: "test"})
-      {:ok, _usage1} = Skills.get_or_create_usage(skill1.id)
-      {:ok, _usage2} = Skills.get_or_create_usage(skill2.id)
 
       {:ok, skill1: skill1, skill2: skill2}
     end
@@ -86,7 +86,12 @@ defmodule Arbiter.Skills.InvocationParserTest do
       # Should find and increment the skill
       assert found >= 1
 
-      {:ok, usage} = Skills.get_or_create_usage(skill1.id)
+      # Query the usage to verify it was incremented
+      usage_query = Ash.Query.filter(Skills.Usage, skill_id == ^skill1.id)
+
+      {:ok, usage} = Ash.read_one(usage_query)
+
+      assert usage != nil
       assert usage.invoke_count == 1
     end
 
@@ -100,8 +105,11 @@ defmodule Arbiter.Skills.InvocationParserTest do
 
       assert found >= 2
 
-      {:ok, u1} = Skills.get_or_create_usage(skill1.id)
-      {:ok, u2} = Skills.get_or_create_usage(skill2.id)
+      u1_query = Ash.Query.filter(Skills.Usage, skill_id == ^skill1.id)
+      u2_query = Ash.Query.filter(Skills.Usage, skill_id == ^skill2.id)
+
+      {:ok, u1} = Ash.read_one(u1_query)
+      {:ok, u2} = Ash.read_one(u2_query)
       assert u1.invoke_count == 1
       assert u2.invoke_count == 1
     end
@@ -117,7 +125,9 @@ defmodule Arbiter.Skills.InvocationParserTest do
       # code-review is not in our DB but should not cause an error
       assert found >= 1
 
-      {:ok, u1} = Skills.get_or_create_usage(skill1.id)
+      u1_query = Ash.Query.filter(Skills.Usage, skill_id == ^skill1.id)
+
+      {:ok, u1} = Ash.read_one(u1_query)
       assert u1.invoke_count == 1
     end
   end

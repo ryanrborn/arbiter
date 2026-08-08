@@ -106,8 +106,22 @@ defmodule ArbiterCli.Cmd.Skill do
       bytes = byte_size(s["body"] || "")
       desc = get_in(s, ["metadata", "description"])
       suffix = if desc in [nil, ""], do: "", else: "  — #{desc}"
-      IO.puts("#{s["name"]}  (#{bytes} bytes)#{activation_tag(s)}#{suffix}")
+      usage_tag = format_usage(s)
+      IO.puts("#{s["name"]}  (#{bytes} bytes)#{activation_tag(s)}#{usage_tag}#{suffix}")
     end)
+  end
+
+  # Format usage counters for the list view, e.g., "  ⬆ 5m, ⧗ 0"
+  defp format_usage(s) do
+    mat = s["materialize_count"] || 0
+    inv = s["invoke_count"] || 0
+
+    cond do
+      mat == 0 and inv == 0 -> "  [never used]"
+      mat > 0 and inv == 0 -> "  [↓ #{mat}]"
+      inv > 0 -> "  [↓ #{mat}, ⧗ #{inv}]"
+      true -> ""
+    end
   end
 
   # Compact activation/scope tag for the list view, e.g. " [always_on, code-only]".

@@ -7,6 +7,21 @@ defmodule Arbiter.Skills.Usage do
   - materialize_count: dispatch-time skill selection
   - invoke_count: slash invocation in worker transcript
   - patch_count: skill update (Skills.update_skill/2)
+
+  ## Backfill note
+
+  Historical materialization counts from `worker_runs.resolved_skills` are NOT
+  backfilled into this resource. This is an intentional design choice for two
+  reasons:
+  1. The initial three skills existed before this telemetry system was built,
+     so accurate backfill would require manual inspection.
+  2. The immediate value is forward-looking: observing which of the current
+     always-on skills earn their slot by dispatch, so the operator can decide
+     whether the always-on / situational split is right *going forward*.
+
+  Future work (#1011 Stage 2+) may add historical reconstruction if needed for
+  deeper analysis of past behavior, but it is not required for the initial
+  measurement goal (justifying skill materialization cost).
   """
 
   use Ash.Resource,

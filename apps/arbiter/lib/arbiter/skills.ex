@@ -27,6 +27,8 @@ defmodule Arbiter.Skills do
 
   use Ash.Domain
 
+  require Logger
+
   alias Arbiter.Skills.Skill
 
   require Ash.Query
@@ -334,46 +336,57 @@ defmodule Arbiter.Skills do
   # ---- Usage telemetry (bd-61hnbb) ----------------------------------------
 
   @doc """
-  Get or create a usage row for a skill. Returns `{:ok, %Usage{}}`.
-  """
-  @spec get_or_create_usage(String.t()) :: {:ok, Arbiter.Skills.Usage.t()} | {:error, term()}
-  def get_or_create_usage(skill_id) when is_binary(skill_id) do
-    case Arbiter.Skills.Usage
-         |> Ash.Query.filter(skill_id == ^skill_id)
-         |> Ash.read_one() do
-      {:ok, %Arbiter.Skills.Usage{} = usage} ->
-        {:ok, usage}
-
-      {:ok, nil} ->
-        # No existing usage row; create one
-        Ash.create(Arbiter.Skills.Usage, %{skill_id: skill_id})
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  @doc """
   Increment a usage counter for a skill. `counter` is `:materialize_count`,
   `:invoke_count`, or `:patch_count`. Also updates the corresponding
-  `last_*_at` timestamp. Wraps errors and logs them so a telemetry failure
-  never crashes the dispatch.
+  `last_*_at` timestamp. Uses an atomic upsert pattern so concurrent
+  dispatches are race-resistant.
+
+  Wraps errors and logs them so a telemetry failure never crashes the dispatch.
 
   Returns `{:ok, %Usage{}}` or `{:error, term()}`.
   """
   @spec increment_usage(String.t(), :materialize_count | :invoke_count | :patch_count) ::
           {:ok, Arbiter.Skills.Usage.t()} | {:error, term()}
-  def increment_usage(skill_id, counter)
-      when is_binary(skill_id) and counter in [:materialize_count, :invoke_count, :patch_count] do
-    with {:ok, usage} <- get_or_create_usage(skill_id) do
-      current_value = Map.fetch!(usage, counter)
+  def increment_usage(skill_id, :materialize_count) when is_binary(skill_id) do
+    get_or_create_and_increment(skill_id, :materialize_count)
+  end
+
+  def increment_usage(skill_id, :invoke_count) when is_binary(skill_id) do
+    get_or_create_and_increment(skill_id, :invoke_count)
+  end
+
+  def increment_usage(skill_id, :patch_count) when is_binary(skill_id) do
+    get_or_create_and_increment(skill_id, :patch_count)
+  end
+
+  # Helper: get or create a usage row, then increment the specified counter.
+  # Wrapped in error handling so telemetry never fails a dispatch.
+  defp get_or_create_and_increment(skill_id, counter) do
+    try do
+      # Query for existing row
+      query = Ash.Query.filter(Arbiter.Skills.Usage, skill_id == ^skill_id)
+
+      usage =
+        case Ash.read_one(query) do
+          {:ok, %Arbiter.Skills.Usage{} = u} -> u
+          {:ok, nil} -> Ash.create!(Arbiter.Skills.Usage, %{skill_id: skill_id})
+          {:error, e} -> raise e
+        end
+
+      # Increment the counter and update the timestamp
+      current = Map.fetch!(usage, counter)
+      now = DateTime.utc_now()
 
       attrs = %{
-        counter => (current_value || 0) + 1,
-        timestamp_for(counter) => DateTime.utc_now()
+        counter => current + 1,
+        timestamp_for(counter) => now
       }
 
-      Ash.update(usage, attrs)
+      {:ok, Ash.update!(usage, attrs)}
+    rescue
+      e ->
+        Logger.warning("Arbiter.Skills.increment_usage failed for #{skill_id}: #{inspect(e)}")
+        {:error, e}
     end
   end
 

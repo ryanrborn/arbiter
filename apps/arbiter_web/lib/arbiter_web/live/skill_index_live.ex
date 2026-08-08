@@ -16,6 +16,8 @@ defmodule ArbiterWeb.SkillIndexLive do
 
   use ArbiterWeb, :live_view
 
+  require Ash.Query
+
   alias Arbiter.Skills
 
   @impl true
@@ -211,6 +213,25 @@ defmodule ArbiterWeb.SkillIndexLive do
 
   defp metadata_summary(_), do: nil
 
+  # Load usage counts for a skill; returns 0 if not found.
+  defp materialize_count(skill) do
+    case Arbiter.Skills.Usage
+         |> Ash.Query.filter(skill_id == ^skill.id)
+         |> Ash.read_one() do
+      {:ok, usage} when not is_nil(usage) -> usage.materialize_count
+      _ -> 0
+    end
+  end
+
+  defp invoke_count(skill) do
+    case Arbiter.Skills.Usage
+         |> Ash.Query.filter(skill_id == ^skill.id)
+         |> Ash.read_one() do
+      {:ok, usage} when not is_nil(usage) -> usage.invoke_count
+      _ -> 0
+    end
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -341,7 +362,21 @@ defmodule ArbiterWeb.SkillIndexLive do
                   >
                     code-only
                   </span>
+                  <span
+                    :if={materialize_count(skill) > 0 and invoke_count(skill) == 0}
+                    class="badge badge-sm badge-warning badge-soft"
+                    title="Materialized but never invoked"
+                  >
+                    unused
+                  </span>
                   <span class="text-xs text-base-content/50">{byte_size(skill.body)} bytes</span>
+                  <span
+                    :if={materialize_count(skill) > 0}
+                    class="text-xs text-base-content/60"
+                    title="Materialized / Invoked"
+                  >
+                    ↓ {materialize_count(skill)} / ⧗ {invoke_count(skill)}
+                  </span>
                   <div class="ml-auto flex items-center gap-1">
                     <.button
                       phx-click="edit"

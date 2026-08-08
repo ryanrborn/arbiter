@@ -170,21 +170,20 @@ defmodule Arbiter.SkillsTest do
   end
 
   describe "Skills.Usage resource" do
-    test "tracks materialize_count for a skill" do
+    test "creates usage on first increment" do
       {:ok, skill} = Skills.create_skill(%{name: "test-skill", body: "test body"})
 
-      # Should be able to get or create usage for this skill
-      {:ok, usage} = Skills.get_or_create_usage(skill.id)
+      # First increment should create the usage row
+      {:ok, usage} = Skills.increment_usage(skill.id, :materialize_count)
 
       assert usage.skill_id == skill.id
-      assert usage.materialize_count == 0
+      assert usage.materialize_count == 1
       assert usage.invoke_count == 0
       assert usage.patch_count == 0
     end
 
     test "increments materialize_count" do
       {:ok, skill} = Skills.create_skill(%{name: "material-skill", body: "test"})
-      {:ok, _usage} = Skills.get_or_create_usage(skill.id)
 
       {:ok, updated} = Skills.increment_usage(skill.id, :materialize_count)
 
@@ -194,7 +193,6 @@ defmodule Arbiter.SkillsTest do
 
     test "increments invoke_count" do
       {:ok, skill} = Skills.create_skill(%{name: "invoke-skill", body: "test"})
-      {:ok, _usage} = Skills.get_or_create_usage(skill.id)
 
       {:ok, updated} = Skills.increment_usage(skill.id, :invoke_count)
 
@@ -204,7 +202,6 @@ defmodule Arbiter.SkillsTest do
 
     test "increments patch_count" do
       {:ok, skill} = Skills.create_skill(%{name: "patch-skill", body: "test"})
-      {:ok, _usage} = Skills.get_or_create_usage(skill.id)
 
       {:ok, updated} = Skills.increment_usage(skill.id, :patch_count)
 
@@ -214,7 +211,6 @@ defmodule Arbiter.SkillsTest do
 
     test "handles multiple increments" do
       {:ok, skill} = Skills.create_skill(%{name: "multi-skill", body: "test"})
-      {:ok, _usage} = Skills.get_or_create_usage(skill.id)
 
       {:ok, _u1} = Skills.increment_usage(skill.id, :materialize_count)
       {:ok, u2} = Skills.increment_usage(skill.id, :materialize_count)
