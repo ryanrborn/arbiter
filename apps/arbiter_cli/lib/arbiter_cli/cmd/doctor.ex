@@ -42,7 +42,8 @@ defmodule ArbiterCli.Cmd.Doctor do
       check_phoenix(),
       check_workspaces_exist(),
       check_active_workspace(),
-      check_versions()
+      check_versions(),
+      check_migrations()
     ]
   end
 
@@ -293,6 +294,47 @@ defmodule ArbiterCli.Cmd.Doctor do
           detail: msg,
           hint: "Set ARB_WORKSPACE to pick one of the existing workspaces.",
           fatal: true,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  defp check_migrations do
+    case Client.get("/api/server/migrations") do
+      {:ok, %{"pending_count" => 0}} ->
+        %Result{
+          name: "migrations up to date",
+          status: :ok,
+          detail: "all migrations applied",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"pending_count" => count}} when is_integer(count) and count > 0 ->
+        %Result{
+          name: "migrations up to date",
+          status: :fail,
+          detail: "#{count} pending",
+          hint: "The server has unapplied migrations. Wait for the deployment to complete.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :connection_refused}} ->
+        %Result{
+          name: "migrations up to date",
+          status: :ok,
+          detail: "server unreachable",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{}} ->
+        %Result{
+          name: "migrations up to date",
+          status: :fail,
+          detail: "could not check migration status",
+          fatal: false,
           blocks_readiness: false
         }
     end
