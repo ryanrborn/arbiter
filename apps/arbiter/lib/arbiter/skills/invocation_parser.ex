@@ -2,20 +2,37 @@ defmodule Arbiter.Skills.InvocationParser do
   @moduledoc """
   Parse worker transcripts for skill invocations and update usage counters.
 
-  Detects `/<skill-name>` slash invocations in transcript lines and increments
-  the corresponding skill's invoke_count. Designed to run after a worker run
-  completes (bd-61hnbb).
+  Two detectors, in priority order:
+
+  1. **Skill tool invocations** (the primary signal). A `claude --print`
+     worker invokes a skill via the Skill *tool*, not by typing `/name`.
+     `Arbiter.Worker.ClaudeSession.assistant_block_lines/1` renders that
+     tool_use block as `⏵ Skill({"skill":"tdd"})` (falls through
+     `summarize_tool_input/1` to `Jason.encode!/1`, since the Skill tool's
+     input has no `command`/`file_path`/`path`/`pattern`/`description` key).
+     This detector matches that rendering directly.
+  2. **Bare `/name` slash-command mentions** in prose (fallback, weaker
+     signal). Anchored to line-start or backtick/paren-wrapped tokens only,
+     to avoid crediting a skill for every unrelated filesystem path or URL
+     segment that happens to look like kebab-case (`/tmp`, `/proc`, `/api`,
+     `/tasks`, ...) — those are common enough in real transcripts that an
+     unanchored match would misattribute usage to any skill whose name
+     collides with one.
+
+  Designed to run after a worker run completes (bd-61hnbb).
   """
 
   require Logger
 
   @doc """
   Parse a transcript (list of lines) for skill invocations and increment
-  counters. Returns `{count, failed}` — the number of invocations found
-  and incremented, and the number of failures (best-effort).
+  counters. Returns `{found, failed}` — the number of invocations matched
+  against a registered skill and actually incremented, and the number of
+  line-level processing failures (best-effort). Names that don't resolve to a
+  registered skill (bundled skills, typos) are silently skipped and don't
+  count toward either total.
 
-  Invocations are detected as `/name` patterns at the start of a line or
-  after certain punctuation (space, newline, etc). Only counts each (line, name)
+  See the moduledoc for the two detectors used. Only counts each (line, name)
   pair once even if the name appears multiple times in the same line.
 
   Errors in updating the counter are logged but never block transcript
@@ -44,7 +61,10 @@ defmodule Arbiter.Skills.InvocationParser do
       Enum.reduce(skills, 0, fn skill_name, count ->
         case increment_skill_usage(skill_name, workspace_id) do
           :ok -> count + 1
-          # Log the error, but keep counting succeeding invocations
+          # Not a registered skill (bundled skill, typo, path collision) or a
+          # real failure — neither counts as a found invocation, but neither
+          # aborts processing of the remaining names on the line.
+          :skipped -> count
           :error -> count
         end
       end)
@@ -61,36 +81,70 @@ defmodule Arbiter.Skills.InvocationParser do
 
   defp update_for_line(_, _workspace_id), do: {:ok, 0}
 
-  # Extract all unique skill names from a line (slash-command invocations).
-  # Pattern: `/name` where name is kebab-case (lowercase letters/digits/hyphens).
-  # Matches: `/tdd` `/ tdd` `/` boundary, but NOT `/tdd-` (trailing dash invalid).
+  @kebab_name ~r/^[a-z0-9]+(-[a-z0-9]+)*$/
+
+  # Matches the transcript rendering of a Skill tool_use block, e.g.
+  # `⏵ Skill({"skill":"tdd"})` — see moduledoc detector 1. Anchored to a line
+  # starting with the tool-call marker so an unrelated `"skill":"..."` key
+  # elsewhere in a JSON blob isn't picked up.
+  @skill_tool_call ~r/^⏵\s*Skill\(/
+  @skill_tool_arg ~r/"skill"\s*:\s*"([a-z0-9]+(?:-[a-z0-9]+)*)"/
+
+  # Extract all unique skill names invoked on a line, trying the Skill
+  # tool-call detector first and falling back to bare slash-command mentions.
   defp extract_skill_names(line) when is_binary(line) do
+    tool_names = extract_skill_tool_names(line)
+    slash_names = extract_slash_command_names(line)
+
+    (tool_names ++ slash_names) |> Enum.uniq()
+  end
+
+  defp extract_skill_tool_names(line) do
+    if Regex.match?(@skill_tool_call, line) do
+      @skill_tool_arg
+      |> Regex.scan(line, capture: :all_but_first)
+      |> Enum.map(&hd/1)
+    else
+      []
+    end
+  end
+
+  # Bare `/name` mentions, kept as a weaker fallback signal. Only counted
+  # when the token sits at the very start of the line, or is wrapped in
+  # backticks/parens — the conventional ways a slash-command is referenced in
+  # prose/markdown — so an unrelated filesystem path or URL segment
+  # (`/tmp`, `/proc`, `/api`, ...) mid-sentence isn't credited to a
+  # same-named skill.
+  defp extract_slash_command_names(line) do
     line
     |> String.split(~r/\s+/)
-    |> Enum.reduce([], fn word, acc ->
-      case parse_slash_command(word) do
+    |> Enum.with_index()
+    |> Enum.reduce([], fn {word, index}, acc ->
+      case parse_slash_command(word, index == 0) do
         nil -> acc
         name -> [name | acc]
       end
     end)
-    |> Enum.uniq()
     |> Enum.reverse()
   end
 
-  # Parse a single word to check if it starts with / and contains a valid skill name.
-  defp parse_slash_command(word) when is_binary(word) do
-    case String.starts_with?(word, "/") do
-      true ->
-        name = String.slice(word, 1..-1//1)
+  # Parse a single word to check if it's an (optionally wrapped) `/name`
+  # slash-command reference. `at_line_start?` allows an unwrapped token only
+  # when it's the first word on the line (a typed command); anywhere else it
+  # must be wrapped in backticks or parens to count.
+  @wrapper_punctuation ~r/^[`(),.:;"']+|[`(),.:;"']+$/
 
-        # Validate kebab-case: ^[a-z0-9]+(-[a-z0-9]+)*$
-        case Regex.match?(~r/^[a-z0-9]+(-[a-z0-9]+)*$/, name) do
-          true -> name
-          false -> nil
-        end
+  defp parse_slash_command(word, at_line_start?) when is_binary(word) do
+    stripped = Regex.replace(@wrapper_punctuation, word, "")
+    wrapped? = stripped != word
 
-      false ->
-        nil
+    with true <- at_line_start? or wrapped?,
+         true <- String.starts_with?(stripped, "/"),
+         name = String.slice(stripped, 1..-1//1),
+         true <- Regex.match?(@kebab_name, name) do
+      name
+    else
+      _ -> nil
     end
   end
 
@@ -106,7 +160,7 @@ defmodule Arbiter.Skills.InvocationParser do
         {:error, :not_found} ->
           # Skill name not in registry — might be a bundled skill or a typo.
           # Don't log as error; this is expected for bundled skills.
-          :ok
+          :skipped
 
         {:error, reason} ->
           Logger.warning(

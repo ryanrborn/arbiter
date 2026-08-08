@@ -228,6 +228,7 @@ defmodule Arbiter.SkillsTest do
 
       parent = self()
       Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, {:shared, self()})
+      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual) end)
 
       tasks =
         for _ <- 1..20 do

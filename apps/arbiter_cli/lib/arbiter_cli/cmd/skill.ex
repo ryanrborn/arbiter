@@ -120,7 +120,6 @@ defmodule ArbiterCli.Cmd.Skill do
       mat == 0 and inv == 0 -> "  [never used]"
       mat > 0 and inv == 0 -> "  [↓ #{mat}]"
       inv > 0 -> "  [↓ #{mat}, ⧗ #{inv}]"
-      true -> ""
     end
   end
 

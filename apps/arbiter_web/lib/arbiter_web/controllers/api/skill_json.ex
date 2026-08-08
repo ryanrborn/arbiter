@@ -6,7 +6,14 @@ defmodule ArbiterWeb.Api.SkillJSON do
   alias Arbiter.Skills.Skill
 
   def index(%{skills: skills}) do
-    %{data: Enum.map(skills, &data/1)}
+    usage_by_skill_id = load_usage_by_skill_ids(Enum.map(skills, & &1.id))
+
+    %{
+      data:
+        Enum.map(skills, fn skill ->
+          data(skill, Map.get(usage_by_skill_id, skill.id) || empty_usage())
+        end)
+    }
   end
 
   # `show` optionally carries a non-fatal bundled-collision warning (create /
@@ -18,9 +25,9 @@ defmodule ArbiterWeb.Api.SkillJSON do
     end
   end
 
-  def data(%Skill{} = skill) do
-    usage = load_usage(skill.id)
+  def data(%Skill{} = skill), do: data(skill, load_usage(skill.id))
 
+  def data(%Skill{} = skill, %Arbiter.Skills.Usage{} = usage) do
     %{
       id: skill.id,
       name: skill.name,
@@ -48,6 +55,19 @@ defmodule ArbiterWeb.Api.SkillJSON do
       {:ok, usage} when not is_nil(usage) -> usage
       _ -> empty_usage()
     end
+  end
+
+  # Bulk-fetch usage rows for a list of skill ids in one query — GET
+  # /api/skills backs `arb skill list`, so per-row queries would be N+1.
+  defp load_usage_by_skill_ids([]), do: %{}
+
+  defp load_usage_by_skill_ids(skill_ids) do
+    Arbiter.Skills.Usage
+    |> Ash.Query.filter(skill_id in ^skill_ids)
+    |> Ash.read!()
+    |> Map.new(&{&1.skill_id, &1})
+  rescue
+    _ -> %{}
   end
 
   defp empty_usage do

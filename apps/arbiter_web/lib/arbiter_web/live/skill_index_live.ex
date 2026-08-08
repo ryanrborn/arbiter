@@ -180,7 +180,22 @@ defmodule ArbiterWeb.SkillIndexLive do
      )}
   end
 
-  defp refresh(socket), do: assign(socket, :skills, Skills.list_skills())
+  defp refresh(socket) do
+    socket
+    |> assign(:skills, Skills.list_skills())
+    |> assign(:usage_by_skill_id, load_usage_by_skill_id())
+  end
+
+  # Load every skill's usage row in one query, indexed by skill_id — avoids an
+  # N-query fan-out per row on every render (mount, and every LiveView
+  # event/PubSub update thereafter).
+  defp load_usage_by_skill_id do
+    Arbiter.Skills.Usage
+    |> Ash.read!()
+    |> Map.new(&{&1.skill_id, &1})
+  rescue
+    _ -> %{}
+  end
 
   # ---- helpers -----------------------------------------------------------
 
@@ -213,22 +228,19 @@ defmodule ArbiterWeb.SkillIndexLive do
 
   defp metadata_summary(_), do: nil
 
-  # Load usage counts for a skill; returns 0 if not found.
-  defp materialize_count(skill) do
-    case Arbiter.Skills.Usage
-         |> Ash.Query.filter(skill_id == ^skill.id)
-         |> Ash.read_one() do
-      {:ok, usage} when not is_nil(usage) -> usage.materialize_count
-      _ -> 0
+  # Read usage counts for a skill out of the preloaded @usage_by_skill_id map
+  # (see refresh/1); returns 0 if the skill has no usage row yet.
+  defp materialize_count(usage_by_skill_id, skill) do
+    case Map.get(usage_by_skill_id, skill.id) do
+      nil -> 0
+      usage -> usage.materialize_count
     end
   end
 
-  defp invoke_count(skill) do
-    case Arbiter.Skills.Usage
-         |> Ash.Query.filter(skill_id == ^skill.id)
-         |> Ash.read_one() do
-      {:ok, usage} when not is_nil(usage) -> usage.invoke_count
-      _ -> 0
+  defp invoke_count(usage_by_skill_id, skill) do
+    case Map.get(usage_by_skill_id, skill.id) do
+      nil -> 0
+      usage -> usage.invoke_count
     end
   end
 
@@ -363,7 +375,10 @@ defmodule ArbiterWeb.SkillIndexLive do
                     code-only
                   </span>
                   <span
-                    :if={materialize_count(skill) > 0 and invoke_count(skill) == 0}
+                    :if={
+                      materialize_count(@usage_by_skill_id, skill) > 0 and
+                        invoke_count(@usage_by_skill_id, skill) == 0
+                    }
                     class="badge badge-sm badge-warning badge-soft"
                     title="Materialized but never invoked"
                   >
@@ -371,11 +386,14 @@ defmodule ArbiterWeb.SkillIndexLive do
                   </span>
                   <span class="text-xs text-base-content/50">{byte_size(skill.body)} bytes</span>
                   <span
-                    :if={materialize_count(skill) > 0}
+                    :if={materialize_count(@usage_by_skill_id, skill) > 0}
                     class="text-xs text-base-content/60"
                     title="Materialized / Invoked"
                   >
-                    ↓ {materialize_count(skill)} / ⧗ {invoke_count(skill)}
+                    ↓ {materialize_count(@usage_by_skill_id, skill)} / ⧗ {invoke_count(
+                      @usage_by_skill_id,
+                      skill
+                    )}
                   </span>
                   <div class="ml-auto flex items-center gap-1">
                     <.button
