@@ -294,13 +294,13 @@ defmodule Arbiter.Loop.Analysis do
       |> Map.get({t.difficulty, t.repo}, [])
       |> Enum.reject(&(&1.task_id == t.task_id))
 
-    case cohort_verdict(cohort, t) do
+    reason = if t.reworked?, do: :rework, else: :quality_failure
+
+    case cohort_verdict(cohort, t, reason) do
       :drop ->
         nil
 
       {:flag, cohort_cost, cohort_rounds} ->
-        reason = if t.reworked?, do: :rework, else: :quality_failure
-
         %{
           task_id: t.task_id,
           cell: {t.difficulty, t.repo},
@@ -317,13 +317,31 @@ defmodule Arbiter.Loop.Analysis do
   # No cohort data this window means there is nothing to compare against, so
   # we can't demonstrate the task is (or isn't) an outlier — flag it rather
   # than silently drop it on an absence of evidence.
-  defp cohort_verdict([], _t), do: {:flag, nil, nil}
+  defp cohort_verdict([], _t, _reason), do: {:flag, nil, nil}
 
-  defp cohort_verdict(cohort, t) do
+  # For rework cases (multiple review rounds), require the task to exceed its
+  # cell median on BOTH rounds and cost. This filters out tasks that needed
+  # rework but didn't cost more (true rework, not under-provisioning).
+  defp cohort_verdict(cohort, t, :rework) do
     cohort_cost = cohort |> Enum.map(& &1.cost) |> median()
     cohort_rounds = cohort |> Enum.map(& &1.rounds) |> median()
 
-    if t.cost > cohort_cost or t.rounds > cohort_rounds do
+    if t.cost > cohort_cost and t.rounds > cohort_rounds do
+      {:flag, cohort_cost, cohort_rounds}
+    else
+      :drop
+    end
+  end
+
+  # For quality_failure cases (agent failures), require the task to exceed its
+  # cell median on cost only. Rounds are not the signal for quality failures
+  # (they converge in round 1 by definition), so we only care if the cost is
+  # anomalously high.
+  defp cohort_verdict(cohort, t, :quality_failure) do
+    cohort_cost = cohort |> Enum.map(& &1.cost) |> median()
+    cohort_rounds = cohort |> Enum.map(& &1.rounds) |> median()
+
+    if t.cost > cohort_cost do
       {:flag, cohort_cost, cohort_rounds}
     else
       :drop

@@ -344,6 +344,126 @@ defmodule Arbiter.Loop.AnalysisTest do
       refute Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-cohort-target"))
       assert Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-cohort-peer"))
     end
+
+    test "a reworked task above median on rounds but below median on cost is not flagged" do
+      rows = [
+        # Target: rounds 2 (above median), cost 2.0 (below median)
+        row(%{
+          run_id: "above-rounds-below-cost",
+          task_id: "bd-above-rounds-below-cost",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 2.0,
+          max_round: 2
+        }),
+        # Cohort peers: one at median, one above
+        row(%{
+          run_id: "at-median",
+          task_id: "bd-at-median",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 3.0,
+          max_round: 1
+        }),
+        row(%{
+          run_id: "above-both",
+          task_id: "bd-above-both",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 5.0,
+          max_round: 2
+        })
+      ]
+
+      report = Analysis.build_report(rows, label: "test")
+      # Target is above on rounds but below on cost → should NOT be flagged
+      refute Enum.any?(
+               report.difficulty_misestimates,
+               &(&1.task_id == "bd-above-rounds-below-cost")
+             )
+    end
+
+    test "a task above median on cost but at/below median on rounds is not flagged" do
+      rows = [
+        # Target: rounds 1 (below median), cost 5.0 (above median)
+        row(%{
+          run_id: "below-rounds-above-cost",
+          task_id: "bd-below-rounds-above-cost",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 5.0,
+          max_round: 1
+        }),
+        # Cohort peers to establish medians
+        row(%{
+          run_id: "cohort1",
+          task_id: "bd-cohort1",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 3.0,
+          max_round: 2
+        }),
+        row(%{
+          run_id: "cohort2",
+          task_id: "bd-cohort2",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 3.0,
+          max_round: 2
+        })
+      ]
+
+      report = Analysis.build_report(rows, label: "test")
+      # Target is above on cost but below on rounds → should NOT be flagged
+      refute Enum.any?(
+               report.difficulty_misestimates,
+               &(&1.task_id == "bd-below-rounds-above-cost")
+             )
+    end
+
+    test "a task above median on both rounds and cost is flagged" do
+      rows = [
+        # Target: rounds 3 (above median), cost 5.0 (above median)
+        row(%{
+          run_id: "above-both",
+          task_id: "bd-above-both",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 5.0,
+          max_round: 3
+        }),
+        # Cohort peers to establish medians
+        row(%{
+          run_id: "cohort1",
+          task_id: "bd-cohort1",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 3.0,
+          max_round: 1
+        }),
+        row(%{
+          run_id: "cohort2",
+          task_id: "bd-cohort2",
+          repo: "verus",
+          difficulty: 1,
+          status: :completed,
+          cost_usd: 3.0,
+          max_round: 1
+        })
+      ]
+
+      report = Analysis.build_report(rows, label: "test")
+      # Target is above on both rounds and cost → SHOULD be flagged
+      assert Enum.any?(report.difficulty_misestimates, &(&1.task_id == "bd-above-both"))
+    end
   end
 
   describe "reviewer-finding incidents are counted per-task, not per-run" do
