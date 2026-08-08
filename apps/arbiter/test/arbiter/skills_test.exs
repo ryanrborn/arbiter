@@ -1,6 +1,8 @@
 defmodule Arbiter.SkillsTest do
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Skills
   alias Arbiter.Skills.Skill
 
@@ -219,6 +221,28 @@ defmodule Arbiter.SkillsTest do
       assert u2.materialize_count == 2
       assert u3.materialize_count == 2
       assert u3.invoke_count == 1
+    end
+
+    test "concurrent increments don't lose updates (atomic upsert, not read-then-write)" do
+      {:ok, skill} = Skills.create_skill(%{name: "concurrent-skill", body: "test"})
+
+      parent = self()
+      Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, {:shared, self()})
+
+      tasks =
+        for _ <- 1..20 do
+          Task.async(fn ->
+            Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, parent, self())
+            Skills.increment_usage(skill.id, :materialize_count)
+          end)
+        end
+
+      Enum.each(tasks, &Task.await(&1, 5000))
+
+      {:ok, usage} = Ash.Query.filter(Skills.Usage, skill_id == ^skill.id) |> Ash.read_one()
+
+      assert usage.materialize_count == 20
+      assert usage.last_materialized_at != nil
     end
   end
 end

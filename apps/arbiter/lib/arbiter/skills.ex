@@ -338,8 +338,13 @@ defmodule Arbiter.Skills do
   @doc """
   Increment a usage counter for a skill. `counter` is `:materialize_count`,
   `:invoke_count`, or `:patch_count`. Also updates the corresponding
-  `last_*_at` timestamp. Uses an atomic upsert pattern so concurrent
-  dispatches are race-resistant.
+  `last_*_at` timestamp.
+
+  Implemented as a single `INSERT ... ON CONFLICT DO UPDATE SET counter =
+  counter + 1` statement (SQLite upsert) rather than a read-then-write, so
+  concurrent dispatches incrementing the same skill's row (the common case
+  for `always_on` skills, which materialize on every dispatch) can't lose
+  updates to each other.
 
   Wraps errors and logs them so a telemetry failure never crashes the dispatch.
 
@@ -347,46 +352,65 @@ defmodule Arbiter.Skills do
   """
   @spec increment_usage(String.t(), :materialize_count | :invoke_count | :patch_count) ::
           {:ok, Arbiter.Skills.Usage.t()} | {:error, term()}
-  def increment_usage(skill_id, :materialize_count) when is_binary(skill_id) do
-    get_or_create_and_increment(skill_id, :materialize_count)
-  end
-
-  def increment_usage(skill_id, :invoke_count) when is_binary(skill_id) do
-    get_or_create_and_increment(skill_id, :invoke_count)
-  end
-
-  def increment_usage(skill_id, :patch_count) when is_binary(skill_id) do
-    get_or_create_and_increment(skill_id, :patch_count)
-  end
-
-  # Helper: get or create a usage row, then increment the specified counter.
-  # Wrapped in error handling so telemetry never fails a dispatch.
-  defp get_or_create_and_increment(skill_id, counter) do
+  def increment_usage(skill_id, counter)
+      when is_binary(skill_id) and counter in [:materialize_count, :invoke_count, :patch_count] do
     try do
-      # Query for existing row
-      query = Ash.Query.filter(Arbiter.Skills.Usage, skill_id == ^skill_id)
-
-      usage =
-        case Ash.read_one(query) do
-          {:ok, %Arbiter.Skills.Usage{} = u} -> u
-          {:ok, nil} -> Ash.create!(Arbiter.Skills.Usage, %{skill_id: skill_id})
-          {:error, e} -> raise e
-        end
-
-      # Increment the counter and update the timestamp
-      current = Map.fetch!(usage, counter)
-      now = DateTime.utc_now()
-
-      attrs = %{
-        counter => current + 1,
-        timestamp_for(counter) => now
-      }
-
-      {:ok, Ash.update!(usage, attrs)}
+      atomic_increment!(skill_id, counter)
     rescue
       e ->
         Logger.warning("Arbiter.Skills.increment_usage failed for #{skill_id}: #{inspect(e)}")
         {:error, e}
+    end
+  end
+
+  # Catch-all: an unpersisted/synthetic skill (nil id, e.g. a test fixture
+  # never written to the DB) or an unexpected counter atom. No function-clause
+  # match means no exception — telemetry must never fail a dispatch.
+  def increment_usage(skill_id, counter) do
+    Logger.warning(
+      "Arbiter.Skills.increment_usage: skipped invalid args skill_id=#{inspect(skill_id)} counter=#{inspect(counter)}"
+    )
+
+    {:error, :invalid_args}
+  end
+
+  # Atomic upsert-increment: a single SQL statement, so two concurrent
+  # dispatches incrementing the same skill never race each other the way a
+  # separate read + write would.
+  defp atomic_increment!(skill_id, counter) do
+    id = Ash.UUIDv7.generate()
+    now = DateTime.utc_now()
+    ts_field = timestamp_for(counter)
+    counter_col = Atom.to_string(counter)
+    ts_col = Atom.to_string(ts_field)
+
+    sql = """
+    INSERT INTO skills_usage
+      (id, skill_id, materialize_count, invoke_count, patch_count, #{ts_col}, inserted_at, updated_at)
+    VALUES
+      (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+    ON CONFLICT(skill_id) DO UPDATE SET
+      #{counter_col} = #{counter_col} + 1,
+      #{ts_col} = ?6,
+      updated_at = ?7
+    """
+
+    counts = %{materialize_count: 0, invoke_count: 0, patch_count: 0} |> Map.put(counter, 1)
+
+    Arbiter.Repo.query!(sql, [
+      id,
+      skill_id,
+      counts.materialize_count,
+      counts.invoke_count,
+      counts.patch_count,
+      now,
+      now
+    ])
+
+    case Ash.Query.filter(Arbiter.Skills.Usage, skill_id == ^skill_id) |> Ash.read_one() do
+      {:ok, %Arbiter.Skills.Usage{} = usage} -> {:ok, usage}
+      {:ok, nil} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
