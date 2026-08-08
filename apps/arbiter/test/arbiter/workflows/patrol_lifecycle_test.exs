@@ -47,7 +47,7 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
   defp await(fun, tries \\ 50) do
     Enum.reduce_while(1..tries, nil, fn _, _ ->
       case fun.() do
-        nil -> {:cont, (Process.sleep(10) && nil)}
+        nil -> {:cont, Process.sleep(10) && nil}
         val -> {:halt, val}
       end
     end)

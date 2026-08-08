@@ -158,6 +158,85 @@ defmodule Arbiter.Loop.FailureClassifierTest do
     end
   end
 
+  describe "transcript corroboration overrides exit-code-1 to detect proxy 5xx" do
+    test "exit-code-1 + PendingMigrationError transcript => operational/proxy_5xx (the bd-44gk10 case)" do
+      # This is the exact case from bd-44gk10: the proxy had un-run migrations,
+      # every call returned 503.
+      transcript = [
+        "Agent exited with status 1",
+        "** (Phoenix.Ecto.PendingMigrationError) The following migrations have not run:",
+        "** (Phoenix.Ecto.PendingMigrationError) ...tables are missing. Run 'mix ecto.create' or 'mix ecto.migrate' to fix.",
+        "⚙ claude session error · 12.3s · $0.50"
+      ]
+
+      r = FC.classify("agent subprocess crashed (exit code 1)", transcript)
+      assert r.class == :operational
+      assert r.subcategory == :proxy_5xx
+      # The label alone would have said unknown — record the override.
+      assert r.label_class == :unknown
+      assert r.reclassified
+      assert r.corroborated
+    end
+
+    test "the two cited runs from bd-8mtb0q both classify as operational/proxy_5xx" do
+      # Run 1: bd-bvxdy9, 08-07 13:37
+      r1 =
+        FC.classify(
+          "agent subprocess crashed (exit code 1)",
+          [
+            "Calling Anthropic proxy...",
+            "** (Phoenix.Ecto.PendingMigrationError) you must run migrations",
+            "HTTP 503 response"
+          ]
+        )
+
+      assert r1.class == :operational
+      assert r1.subcategory == :proxy_5xx
+
+      # Run 2: bd-bvxdy9, 08-06 21:48
+      r2 =
+        FC.classify(
+          "agent subprocess crashed (exit code 1)",
+          [
+            "Proxy error occurred",
+            "** (DBConnection.ConnectionError) connection failed to database",
+            "Retrying connection..."
+          ]
+        )
+
+      assert r2.class == :operational
+      assert r2.subcategory == :proxy_5xx
+    end
+
+    test "exit-code-1 with no proxy error stays unknown (not a catch-all for all exit-1s)" do
+      # This is the critical guard: a bare exit-1 ends many runs for unrelated
+      # reasons. We must NOT make exit-1 an operational catch-all.
+      transcript = [
+        "Agent exited with status 1",
+        "SomeError: unexpected problem",
+        "⚙ claude session error · 5.2s · $0.30"
+      ]
+
+      r = FC.classify("agent subprocess crashed (exit code 1)", transcript)
+      assert r.class == :unknown
+      assert r.subcategory == :unclassified
+      refute r.reclassified
+    end
+
+    test "proxy 5xx error without exit-code-1 label is still operational/proxy_5xx" do
+      transcript = [
+        "Calling proxy...",
+        "** (Phoenix.Ecto.PendingMigrationError) you must run migrations",
+        "HTTP 503 response from service"
+      ]
+
+      r = FC.classify("some other label", transcript)
+      assert r.class == :operational
+      assert r.subcategory == :proxy_5xx
+      assert r.reclassified
+    end
+  end
+
   describe "helpers" do
     test "context_exhaustion?/1 keys on the autocompact fingerprint, not a bare session error" do
       assert FC.context_exhaustion?([@autocompact])
@@ -170,6 +249,20 @@ defmodule Arbiter.Loop.FailureClassifierTest do
     test "api_error_signal?/1 matches error payloads, not source paths" do
       assert FC.api_error_signal?(["API Error: 429 overloaded_error"])
       refute FC.api_error_signal?(["apps/arbiter/lib/arbiter/quota/anthropic_quota.ex"])
+    end
+
+    test "proxy_5xx?/1 detects Arbiter proxy infrastructure errors (not bare HTTP codes)" do
+      # Specific error classes are unambiguous: they only come from Arbiter's infrastructure
+      assert FC.proxy_5xx?(["** (Phoenix.Ecto.PendingMigrationError) tables missing"])
+      assert FC.proxy_5xx?(["** (DBConnection.ConnectionError) connection failed"])
+      # Bare HTTP codes are too loose — would match unrelated transcripts discussing
+      # third-party services or debugging logs. Must require specific error fingerprints.
+      refute FC.proxy_5xx?(["HTTP 503"])
+      refute FC.proxy_5xx?(["HTTP 500"])
+      refute FC.proxy_5xx?(["HTTP 502"])
+      refute FC.proxy_5xx?(["HTTP 404"])
+      refute FC.proxy_5xx?(["HTTP 429"])
+      refute FC.proxy_5xx?(["some random error"])
     end
   end
 end

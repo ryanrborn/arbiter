@@ -29,7 +29,9 @@ defmodule Arbiter.Skills.MaterializerTest do
       assert File.read!(Path.join(tmp, ".claude/skills/debug/SKILL.md")) == "# Debug body"
 
       # Nothing else leaked in.
-      assert Path.wildcard(Path.join(tmp, ".claude/skills/*")) |> Enum.map(&Path.basename/1) |> Enum.sort() ==
+      assert Path.wildcard(Path.join(tmp, ".claude/skills/*"))
+             |> Enum.map(&Path.basename/1)
+             |> Enum.sort() ==
                ["debug", "tdd"]
     end
 

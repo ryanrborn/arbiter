@@ -24,8 +24,15 @@ defmodule ArbiterWeb.LiveHooksTest do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
 
       # Capture a normal provider and a hidden provider (codex)
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}], provider: "codex")
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
+          provider: "claude"
+        )
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}],
+          provider: "codex"
+        )
 
       {:ok, _view, html} = live(conn, ~p"/")
 
@@ -34,9 +41,15 @@ defmodule ArbiterWeb.LiveHooksTest do
       refute html =~ "Codex"
     end
 
-    test "on_mount(:quota) handle_info returns :halt and does not crash for hidden providers", %{conn: conn} do
+    test "on_mount(:quota) handle_info returns :halt and does not crash for hidden providers", %{
+      conn: conn
+    } do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
+          provider: "claude"
+        )
 
       {:ok, view, html} = live(conn, ~p"/")
       assert html =~ "Claude"
@@ -46,7 +59,10 @@ defmodule ArbiterWeb.LiveHooksTest do
       # this would propagate to the parent LiveView and cause it to crash
       # (since it doesn't implement handle_info/2 for quota_updated).
       # Returning {:halt, socket} prevents the crash.
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}], provider: "codex")
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}],
+          provider: "codex"
+        )
 
       # Render the view to confirm it is still alive and has not crashed,
       # and that Codex is still not rendered.
@@ -58,8 +74,15 @@ defmodule ArbiterWeb.LiveHooksTest do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
 
       # Capture a normal provider and gemini_cli
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}], provider: "gemini_cli")
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
+          provider: "claude"
+        )
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}],
+          provider: "gemini_cli"
+        )
 
       {:ok, _view, html} = live(conn, ~p"/")
 
@@ -72,8 +95,15 @@ defmodule ArbiterWeb.LiveHooksTest do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
 
       # Capture a normal provider and antigravity
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}], provider: "antigravity")
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
+          provider: "claude"
+        )
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}],
+          provider: "antigravity"
+        )
 
       {:ok, _view, html} = live(conn, ~p"/")
 
@@ -84,14 +114,21 @@ defmodule ArbiterWeb.LiveHooksTest do
 
     test "on_mount(:quota) handle_info returns :halt for gemini_cli broadcasts", %{conn: conn} do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
+          provider: "claude"
+        )
 
       {:ok, view, html} = live(conn, ~p"/")
       assert html =~ "Claude"
       refute html =~ "Gemini CLI"
 
       # Broadcast a gemini_cli update
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}], provider: "gemini_cli")
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}],
+          provider: "gemini_cli"
+        )
 
       html2 = render(view)
       refute html2 =~ "Gemini CLI"
@@ -99,14 +136,21 @@ defmodule ArbiterWeb.LiveHooksTest do
 
     test "on_mount(:quota) handle_info returns :halt for antigravity broadcasts", %{conn: conn} do
       ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
+          provider: "claude"
+        )
 
       {:ok, view, html} = live(conn, ~p"/")
       assert html =~ "Claude"
       refute html =~ "Antigravity"
 
       # Broadcast an antigravity update
-      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}], provider: "antigravity")
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}],
+          provider: "antigravity"
+        )
 
       html2 = render(view)
       refute html2 =~ "Antigravity"

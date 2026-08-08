@@ -678,7 +678,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       test_pid = self()
 
       stub(fn conn ->
-        send(test_pid, {:priority_seen, conn.method, conn.request_path, Limiter.current_priority()})
+        send(
+          test_pid,
+          {:priority_seen, conn.method, conn.request_path, Limiter.current_priority()}
+        )
 
         cond do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
@@ -736,7 +739,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       test_pid = self()
 
       stub(fn conn ->
-        send(test_pid, {:priority_seen, conn.method, conn.request_path, Limiter.current_priority()})
+        send(
+          test_pid,
+          {:priority_seen, conn.method, conn.request_path, Limiter.current_priority()}
+        )
 
         cond do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->

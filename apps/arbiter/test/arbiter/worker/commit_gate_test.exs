@@ -339,13 +339,17 @@ defmodule Arbiter.Worker.CommitGateTest do
         )
 
       {:os_pid, os_pid} = Port.info(port, :os_pid)
-      assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+      assert {_, 0} =
+               System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
 
       wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
 
       # The instant the worker is observable as :failed, the agent is already
       # dead — no post-teardown commands can run.
-      {_, kill_status} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      {_, kill_status} =
+        System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
       assert kill_status != 0, "agent os_pid=#{os_pid} was still alive after the run failed"
 
       snap = Worker.state(pid)

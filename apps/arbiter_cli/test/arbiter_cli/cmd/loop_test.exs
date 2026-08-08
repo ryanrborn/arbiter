@@ -17,7 +17,12 @@ defmodule ArbiterCli.Cmd.LoopTest do
   end
 
   test "loop with no subcommand defaults to analyze" do
-    stub_get("/api/loop/analyze", %{"markdown" => "# report", "usage_event_id" => "e", "summary" => %{}})
+    stub_get("/api/loop/analyze", %{
+      "markdown" => "# report",
+      "usage_event_id" => "e",
+      "summary" => %{}
+    })
+
     {out, _err, exit_code} = capture(fn -> Loop.run([]) end)
     assert exit_code == 0
     assert out =~ "report"
@@ -42,7 +47,12 @@ defmodule ArbiterCli.Cmd.LoopTest do
        fn conn ->
          conn = Plug.Conn.fetch_query_params(conn)
          assert conn.query_params["since"] == "24h"
-         Req.Test.json(conn, %{"markdown" => "# report", "usage_event_id" => "x", "summary" => %{}})
+
+         Req.Test.json(conn, %{
+           "markdown" => "# report",
+           "usage_event_id" => "x",
+           "summary" => %{}
+         })
        end}
     ])
 

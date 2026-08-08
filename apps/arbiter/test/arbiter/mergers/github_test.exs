@@ -2138,9 +2138,7 @@ defmodule Arbiter.Mergers.GithubTest do
       by_number = %{
         # CHANGES_REQUESTED verdict → changes_requested: true
         42 =>
-          pr_node(
-            reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]
-          ),
+          pr_node(reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]),
         # COMMENTED only, but one unresolved inline thread → review_threads: [_]
         43 =>
           pr_node(
@@ -2152,7 +2150,9 @@ defmodule Arbiter.Mergers.GithubTest do
                 "path" => "lib/x.ex",
                 "line" => 9,
                 "comments" => %{
-                  "nodes" => [%{"databaseId" => 1, "body" => "nit", "author" => %{"login" => "copilot"}}]
+                  "nodes" => [
+                    %{"databaseId" => 1, "body" => "nit", "author" => %{"login" => "copilot"}}
+                  ]
                 }
               }
             ]
@@ -2200,13 +2200,17 @@ defmodule Arbiter.Mergers.GithubTest do
         refute query =~ "comments(first: 100)"
         assert query =~ "rateLimit { cost"
 
-        conn |> Plug.Conn.put_status(200) |> Req.Test.json(batch_data_from_query(query, by_number))
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(batch_data_from_query(query, by_number))
       end)
 
       refs = ["octo/widget#42", "octo/widget#43", "octo/other#7"]
 
       assert {:ok, signals} = Github.batch_pr_signals(refs)
-      assert :counters.get(counter, 1) == 1, "a batched sweep must issue exactly one GraphQL request"
+
+      assert :counters.get(counter, 1) == 1,
+             "a batched sweep must issue exactly one GraphQL request"
 
       assert %{changes_requested: true, review_threads: [], required_check_failures: []} =
                signals["octo/widget#42"]
@@ -2240,7 +2244,9 @@ defmodule Arbiter.Mergers.GithubTest do
               "path" => "lib/a.ex",
               "line" => 2,
               "comments" => %{
-                "nodes" => [%{"databaseId" => 10, "body" => "hmm", "author" => %{"login" => "alice"}}]
+                "nodes" => [
+                  %{"databaseId" => 10, "body" => "hmm", "author" => %{"login" => "alice"}}
+                ]
               }
             },
             %{"id" => "RT_2", "isResolved" => true, "comments" => %{"nodes" => []}}
@@ -2303,6 +2309,7 @@ defmodule Arbiter.Mergers.GithubTest do
       assert batched.changes_requested == legacy_cr
       assert length(batched.review_threads) == length(legacy_threads)
       assert Enum.map(batched.review_threads, & &1.id) == Enum.map(legacy_threads, & &1.id)
+
       assert Enum.map(batched.required_check_failures, & &1.name) ==
                Enum.map(legacy_checks, & &1.name)
     end
@@ -2347,7 +2354,11 @@ defmodule Arbiter.Mergers.GithubTest do
 
     test "empty ref list makes no request and returns {:ok, %{}}" do
       counter = :counters.new(1, [])
-      stub(fn conn -> :counters.add(counter, 1, 1); Req.Test.json(conn, %{}) end)
+
+      stub(fn conn ->
+        :counters.add(counter, 1, 1)
+        Req.Test.json(conn, %{})
+      end)
 
       assert {:ok, %{}} = Github.batch_pr_signals([])
       assert :counters.get(counter, 1) == 0

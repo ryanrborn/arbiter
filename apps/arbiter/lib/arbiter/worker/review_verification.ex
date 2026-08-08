@@ -20,7 +20,9 @@ defmodule Arbiter.Worker.ReviewVerification do
 
   @doc "Whether a verdict's findings text discloses `VERIFICATION: PARTIAL`."
   @spec partial?(String.t() | nil) :: boolean()
-  def partial?(findings) when is_binary(findings), do: Regex.match?(@verification_partial, findings)
+  def partial?(findings) when is_binary(findings),
+    do: Regex.match?(@verification_partial, findings)
+
   def partial?(_), do: false
 
   @doc """

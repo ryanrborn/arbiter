@@ -543,7 +543,11 @@ defmodule ArbiterWeb.TaskDetailLive do
               <span>{String.capitalize(@issue_label)}</span>
               <code class="text-base-content/80">{@task_id}</code>
             </div>
-            <h1 :if={@task} class="text-2xl font-bold tracking-tight mt-1 truncate" title={@task.title}>
+            <h1
+              :if={@task}
+              class="text-2xl font-bold tracking-tight mt-1 truncate"
+              title={@task.title}
+            >
               {@task.title}
             </h1>
             <h1 :if={!@task} class="text-2xl font-bold tracking-tight mt-1">

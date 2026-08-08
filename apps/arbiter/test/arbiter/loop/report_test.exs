@@ -142,13 +142,43 @@ defmodule Arbiter.Loop.ReportTest do
     end
   end
 
+  describe "unclassified runs are surfaced as corpus-integrity signals" do
+    test "unclassified (unknown) runs are shown with their run_ids in segmentation" do
+      report = %Report{
+        window: %{label: "test"},
+        totals: %{runs: 3, main_runs: 3, failed: 3, completed: 0, tasks: 3, dispatches: 3},
+        segmentation: [
+          %{class: :unknown, subcategory: :unclassified, count: 2, run_ids: ["unk-1", "unk-2"]},
+          %{
+            class: :agent_quality,
+            subcategory: :review_gate_rejected,
+            count: 1,
+            run_ids: ["aq-1"]
+          }
+        ],
+        misclassification: %{corroborated: 0, reclassified: 0, rate: nil, citations: []},
+        finding_categories: [],
+        difficulty_misestimates: [],
+        cells: [],
+        suggestions: [],
+        notes: []
+      }
+
+      md = Report.to_markdown(report)
+      # Unclassified runs must be visible with their IDs
+      assert md =~ "unclassified"
+      assert md =~ "unk-1"
+      assert md =~ "unk-2"
+    end
+  end
+
   describe "n=1 decline discipline (the bd-7rspia validation)" do
     test "a single-incident finding renders as a per-task override, not a fleet change" do
       report = %Report{
         window: %{label: "last 7d"},
         totals: %{runs: 1, main_runs: 1, failed: 1, completed: 0, tasks: 1, dispatches: 1},
         segmentation: [],
-        misclassification: %{corroborated: 0, reclassified: 0, rate: 0.0, citations: []},
+        misclassification: %{corroborated: 0, reclassified: 0, rate: nil, citations: []},
         finding_categories: [
           %{
             category: "plausible code, green tests, inert at runtime",

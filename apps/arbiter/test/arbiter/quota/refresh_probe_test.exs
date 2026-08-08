@@ -67,7 +67,10 @@ defmodule Arbiter.Quota.RefreshProbeTest do
     {:ok, task} =
       Ash.create(
         Issue,
-        Map.merge(%{title: "rp-task-#{System.unique_integer([:positive])}", workspace_id: ws.id}, attrs)
+        Map.merge(
+          %{title: "rp-task-#{System.unique_integer([:positive])}", workspace_id: ws.id},
+          attrs
+        )
       )
 
     task
@@ -370,7 +373,12 @@ defmodule Arbiter.Quota.RefreshProbeTest do
 
       # Enable proxy gate check (mirrors DispatchQueueTest setup).
       prev_proxy = Application.get_env(:arbiter, :anthropic_proxy)
-      Application.put_env(:arbiter, :anthropic_proxy, enabled: true, base_url: "http://127.0.0.1:4848")
+
+      Application.put_env(:arbiter, :anthropic_proxy,
+        enabled: true,
+        base_url: "http://127.0.0.1:4848"
+      )
+
       on_exit(fn -> Application.put_env(:arbiter, :anthropic_proxy, prev_proxy) end)
 
       ws = make_workspace()

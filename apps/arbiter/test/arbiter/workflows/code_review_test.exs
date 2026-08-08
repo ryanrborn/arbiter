@@ -981,7 +981,12 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
       try do
         findings = [
-          %{severity: :error, file: "reject.ex", line: 1, message: "GitHub rejects this position"},
+          %{
+            severity: :error,
+            file: "reject.ex",
+            line: 1,
+            message: "GitHub rejects this position"
+          },
           %{severity: :info, file: "ok.ex", line: 2, message: "posts fine"}
         ]
 
@@ -1065,7 +1070,10 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
     test "out-of-diff findings are appended to the review body as prose, not lost" do
       findings = [%{severity: :warning, file: "a.ex", line: 1, message: "in diff"}]
-      out_of_diff = [%{severity: :error, file: "neighbor.ex", line: 40, message: "flagged context"}]
+
+      out_of_diff = [
+        %{severity: :error, file: "neighbor.ex", line: 40, message: "flagged context"}
+      ]
 
       state = %{
         mode: :adapter,

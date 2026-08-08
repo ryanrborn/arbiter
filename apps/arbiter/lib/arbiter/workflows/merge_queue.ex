@@ -464,6 +464,7 @@ defmodule Arbiter.Workflows.MergeQueue do
                 repo: repo,
                 base: resolve_base(state, task)
               )
+
             state = %{state | items: [item | state.items]}
             state = close_task_and_finalize(state, item)
             {:ok, state}

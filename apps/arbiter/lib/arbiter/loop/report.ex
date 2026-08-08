@@ -101,9 +101,17 @@ defmodule Arbiter.Loop.Report do
 
     aq = class_block("Agent-quality (eligible for prompt/skill changes)", grouped[:agent_quality])
 
+    # Unclassified runs are a corpus-integrity signal: they indicate the
+    # classifier is drifting from reality. Surface them distinctly with run_ids.
+    unknown =
+      class_block(
+        "**Unclassified (corpus-integrity signal — classifier drift detector)**",
+        grouped[:unknown]
+      )
+
     others =
       grouped
-      |> Map.drop([:operational, :agent_quality])
+      |> Map.drop([:operational, :agent_quality, :unknown])
       |> Enum.map(fn {class, rows} -> class_block("#{class}", rows) end)
       |> Enum.join("\n")
 
@@ -117,6 +125,7 @@ defmodule Arbiter.Loop.Report do
 
     #{op}
     #{aq}
+    #{unknown}
     #{others}
     """
   end
@@ -150,13 +159,15 @@ defmodule Arbiter.Loop.Report do
       end)
       |> Enum.join("\n")
 
+    rate_text = misclassification_rate_text(Map.get(m, :rate), g(m, :corroborated))
+
     """
     ## Corpus integrity: misclassification rate (`failure_reason` vs transcript)
 
     `failure_reason` is a hint, not ground truth. Of **#{g(m, :corroborated)}**
     operational-labelled runs corroborated against their transcript,
     **#{g(m, :reclassified)}** disagreed — a misclassification rate of
-    **#{pct(Map.get(m, :rate, 0.0))}**. This is a **first-class corpus-integrity
+    **#{rate_text}**. This is a **first-class corpus-integrity
     finding**: a label that hides agent-quality failures behind ops noise is
     worth more than any prompt tweak. Surfaced with citations, not silently
     corrected.
@@ -164,6 +175,9 @@ defmodule Arbiter.Loop.Report do
     #{cites}
     """
   end
+
+  defp misclassification_rate_text(nil, 0), do: "n/a (0 corroborated)"
+  defp misclassification_rate_text(rate, _), do: pct(rate)
 
   defp finding_categories(%{finding_categories: []}), do: ""
 

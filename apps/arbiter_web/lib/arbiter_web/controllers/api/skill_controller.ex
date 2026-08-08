@@ -46,7 +46,14 @@ defmodule ArbiterWeb.Api.SkillController do
 
   def create(conn, params) do
     attrs =
-      Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only", "workspace_id"])
+      Map.take(params, [
+        "name",
+        "body",
+        "metadata",
+        "activation_mode",
+        "code_only",
+        "workspace_id"
+      ])
 
     with {:ok, skill} <- Skills.create_skill(attrs, actor: @actor) do
       conn

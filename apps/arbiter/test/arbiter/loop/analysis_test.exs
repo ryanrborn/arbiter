@@ -97,6 +97,31 @@ defmodule Arbiter.Loop.AnalysisTest do
       restart_seg = Enum.find(report.segmentation, &("restart-1" in &1.run_ids))
       assert restart_seg.class == :operational
     end
+
+    test "zero corroborated operational runs yield n/a rate, not 0.0%" do
+      rows = [
+        row(%{
+          run_id: "agent-only-1",
+          task_id: "bd-agent-only",
+          status: :failed,
+          failure_reason: ":review_gate_rejected",
+          terminal_lines: ["VERDICT: request_changes"]
+        })
+      ]
+
+      report = Analysis.build_report(rows, label: "test")
+      # No operational-labelled runs => zero-denominator.
+      assert report.misclassification.corroborated == 0
+      assert report.misclassification.reclassified == 0
+      # Rate should be nil to signal zero-denominator in rendering.
+      assert report.misclassification.rate == nil
+
+      # And the misclassification rate section renders as "n/a (0 corroborated)".
+      md = Report.to_markdown(report)
+      assert md =~ "n/a (0 corroborated)"
+      # Check that the specific section shows n/a, not 0.0%
+      assert md =~ "misclassification rate of\n**n/a (0 corroborated)**"
+    end
   end
 
   # ---- the bd-7rspia validation ------------------------------------------

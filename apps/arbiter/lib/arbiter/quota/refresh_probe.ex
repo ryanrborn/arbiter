@@ -216,9 +216,7 @@ defmodule Arbiter.Quota.RefreshProbe do
       )
   catch
     :exit, r ->
-      Logger.debug(
-        "Arbiter.Quota.RefreshProbe: probe for #{workspace_id} exited: #{inspect(r)}"
-      )
+      Logger.debug("Arbiter.Quota.RefreshProbe: probe for #{workspace_id} exited: #{inspect(r)}")
   end
 
   # ---- default probe (real claude CLI) -----------------------------------
@@ -232,9 +230,7 @@ defmodule Arbiter.Quota.RefreshProbe do
       run_port(sh, rest_args, env, workspace_id, timeout_ms)
     else
       {:error, {:not_found, what}} ->
-        Logger.debug(
-          "Arbiter.Quota.RefreshProbe: skipping #{workspace_id} — #{what} not on PATH"
-        )
+        Logger.debug("Arbiter.Quota.RefreshProbe: skipping #{workspace_id} — #{what} not on PATH")
 
         {:error, {:not_found, what}}
     end
@@ -283,9 +279,7 @@ defmodule Arbiter.Quota.RefreshProbe do
         :ok
 
       {^port, {:exit_status, code}} ->
-        Logger.debug(
-          "Arbiter.Quota.RefreshProbe: probe exited #{code} (#{workspace_id})"
-        )
+        Logger.debug("Arbiter.Quota.RefreshProbe: probe exited #{code} (#{workspace_id})")
 
         {:error, {:exit_code, code}}
     after
