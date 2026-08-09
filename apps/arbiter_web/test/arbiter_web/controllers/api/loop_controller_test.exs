@@ -143,6 +143,25 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       {:ok, reloaded} = Ash.get(Issue, issue.id)
       assert reloaded.difficulty == 1
     end
+
+    # `arb loop analyze --propose --limit N` parses `limit` with OptionParser as
+    # an integer and posts it in a JSON body, so it never arrives as the string
+    # the query-string routes see.
+    test "accepts an integer limit from the JSON body", %{conn: conn} do
+      _ = run!(%{task_id: "bd-ctrl-limit", status: :completed})
+
+      conn = post(conn, ~p"/api/loop/propose", %{since: "24h", limit: 50})
+      body = json_response(conn, 200)
+
+      assert is_binary(body["markdown"])
+      assert is_list(body["proposals"])
+    end
+
+    test "rejects a non-positive or non-numeric limit with a 400", %{conn: conn} do
+      assert json_response(post(conn, ~p"/api/loop/propose", %{limit: 0}), 400)
+      assert json_response(post(conn, ~p"/api/loop/propose", %{limit: "lots"}), 400)
+      assert json_response(get(conn, ~p"/api/loop/analyze", %{limit: "-3"}), 400)
+    end
   end
 
   describe "the pending queue" do

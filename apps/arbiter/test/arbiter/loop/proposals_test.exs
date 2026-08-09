@@ -96,6 +96,28 @@ defmodule Arbiter.Loop.ProposalsTest do
       assert candidate.diff =~ "+difficulty: 2"
     end
 
+    test "a misestimate on a task already at the difficulty ceiling is not a candidate" do
+      # `Issue.difficulty` is constrained to 0..4, so a D4 → D5 override could
+      # never apply — and being :task-scoped it would bypass the bar and land
+      # directly as :proposed, sticking in the queue forever.
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-ceiling",
+              dispatched_difficulty: 4,
+              rounds: 3,
+              cost_usd: 31.0,
+              reason: :rework,
+              cell: {4, "arbiter"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      assert Proposals.candidates(r) == []
+    end
+
     test "a quality_failure misestimate is deliberately not a candidate" do
       r =
         report(%{

@@ -352,49 +352,93 @@ defmodule Arbiter.Loop do
   # Exactly-once: `escalated_at` is the guard. A row promoted to :proposed (or
   # created there) posts one coordinator escalation; every later reinforcement
   # sees a non-nil `escalated_at` and stays silent.
+  #
+  # The stamp is only written when the post actually happened. `Message` needs a
+  # workspace (`workspace_id` is `allow_nil? false`) and most proposals are
+  # fleet-wide with none of their own, so the post can genuinely be skipped —
+  # stamping regardless would mark the row escalated forever and silently
+  # swallow a fleet-wide proposal nobody was ever told about.
   defp maybe_escalate(%PendingWrite{state: :proposed, escalated_at: nil} = row, actor) do
-    post_escalation(row)
+    posted = post_escalation(row)
     announce(row, :proposed)
 
-    case Ash.update(row, %{actor: actor}, action: :mark_escalated, actor: actor) do
-      {:ok, stamped} -> {:ok, stamped}
-      # The escalation is best-effort bookkeeping; never fail an accepted
-      # proposal because the stamp did not save.
-      {:error, _} -> {:ok, row}
+    case posted do
+      :ok -> stamp_escalated(row, actor)
+      :skipped -> {:ok, row}
     end
   end
 
   defp maybe_escalate(row, _actor), do: {:ok, row}
 
-  defp post_escalation(%PendingWrite{workspace_id: ws_id} = row) when is_binary(ws_id) do
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: "loop",
-      workspace_id: ws_id,
-      subject: "loop proposal ready for review: #{row.gist}",
-      body: """
-      A loop-analysis finding has crossed the evidence bar and is queued as a reviewable proposal.
+  defp stamp_escalated(row, actor) do
+    case Ash.update(row, %{actor: actor}, action: :mark_escalated, actor: actor) do
+      {:ok, stamped} -> {:ok, stamped}
+      # The stamp is bookkeeping; never fail an accepted proposal because it did
+      # not save. A retry next window is harmless (at worst one extra mail).
+      {:error, _} -> {:ok, row}
+    end
+  end
 
-      Kind:      #{row.kind} (#{row.scope}-scoped)
-      Evidence:  #{row.evidence_count} incident(s) across #{row.distinct_tasks} distinct task(s)
-      Metric:    #{row.target_metric || "—"} (baseline: #{row.baseline || "—"})
+  defp post_escalation(%PendingWrite{} = row) do
+    case notify_workspace_id(row) do
+      nil ->
+        Logger.debug("Arbiter.Loop escalation skipped: no workspace to post into")
+        :skipped
 
-      Nothing has been applied. Review it with:
+      ws_id ->
+        send_escalation(row, ws_id)
+    end
+  end
 
-          arb loop diff #{row.id}
-          arb loop apply #{row.id}      # or: arb loop reject #{row.id} --reason "..."
-      """
-    })
+  defp send_escalation(row, ws_id) do
+    case Message.send_mail(%{
+           kind: :escalation,
+           to_ref: Message.coordinator_ref(),
+           from_ref: "loop",
+           workspace_id: ws_id,
+           subject: "loop proposal ready for review: #{row.gist}",
+           body: """
+           A loop-analysis finding has crossed the evidence bar and is queued as a reviewable proposal.
 
-    :ok
+           Kind:      #{row.kind} (#{row.scope}-scoped)
+           Evidence:  #{row.evidence_count} incident(s) across #{row.distinct_tasks} distinct task(s)
+           Metric:    #{row.target_metric || "—"} (baseline: #{row.baseline || "—"})
+
+           Nothing has been applied. Review it with:
+
+               arb loop diff #{row.id}
+               arb loop apply #{row.id}      # or: arb loop reject #{row.id} --reason "..."
+           """
+         }) do
+      {:ok, _message} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Arbiter.Loop escalation failed: #{inspect(reason)}")
+        :skipped
+    end
   rescue
     e ->
       Logger.debug("Arbiter.Loop escalation swallowed: #{Exception.message(e)}")
-      :ok
+      :skipped
   end
 
-  defp post_escalation(_row), do: :ok
+  # A fleet-wide proposal has no workspace of its own, but the coordinator
+  # mailbox and the `/events` stream are both workspace-keyed. `arb loop analyze
+  # --propose` without `--workspace` is the primary path, so falling back to the
+  # installation default workspace is what makes the escalation fire at all.
+  # `default_workspace_id/0` deliberately errors when the install is ambiguous
+  # (several workspaces, none named "default"), and there we stay silent rather
+  # than pick one.
+  defp notify_workspace_id(%PendingWrite{workspace_id: ws_id}) when is_binary(ws_id),
+    do: ws_id
+
+  defp notify_workspace_id(_row) do
+    case Arbiter.Quota.default_workspace_id() do
+      {:ok, ws_id} -> ws_id
+      _ -> nil
+    end
+  end
 
   @doc """
   PubSub topic the queue publishes every state change on, for in-process
@@ -420,9 +464,12 @@ defmodule Arbiter.Loop do
 
     Phoenix.PubSub.broadcast(Arbiter.PubSub, @pubsub_topic, {:loop_proposal, event, row.id})
 
-    # `Arbiter.Events.broadcast/3` is workspace-keyed and no-ops on a nil id, so
-    # a fleet-wide proposal simply doesn't reach the `/events` stream.
-    Arbiter.Events.broadcast(row.workspace_id, "loop_proposal", payload)
+    # `Arbiter.Events.broadcast/3` is workspace-keyed and no-ops on a nil id, and
+    # a fleet-wide proposal carries no workspace of its own — so it is published
+    # onto the installation default workspace's stream, the same fallback the
+    # escalation uses. Ambiguous installs resolve to nil and simply don't reach
+    # `/events`.
+    Arbiter.Events.broadcast(notify_workspace_id(row), "loop_proposal", payload)
   rescue
     e ->
       Logger.debug("Arbiter.Loop announce swallowed: #{Exception.message(e)}")

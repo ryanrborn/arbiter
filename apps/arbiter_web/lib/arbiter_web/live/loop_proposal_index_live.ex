@@ -49,7 +49,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
   @impl true
   def handle_event("filter", %{"state" => filter}, socket) do
-    {:noreply, socket |> assign(:filter, filter) |> refresh()}
+    {:noreply, socket |> assign(:filter, normalize_filter(filter)) |> refresh()}
   end
 
   def handle_event("select", %{"id" => id}, socket) do
@@ -99,8 +99,25 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
     assign(socket, :rows, rows)
   end
 
+  # The `phx-change` payload is client-controlled, so a value outside the
+  # select's options is normalized back to "live" rather than reaching
+  # `String.to_existing_atom/1` and killing the LiveView with an ArgumentError.
+  @filter_values Enum.map(@filters, &elem(&1, 1))
+
+  defp normalize_filter(name) when is_binary(name) do
+    if name in @filter_values, do: name, else: "live"
+  end
+
+  defp normalize_filter(_name), do: "live"
+
   defp states("live"), do: Loop.live_states()
-  defp states(name), do: [String.to_existing_atom(name)]
+
+  defp states(name) do
+    case normalize_filter(name) do
+      "live" -> Loop.live_states()
+      valid -> [String.to_existing_atom(valid)]
+    end
+  end
 
   defp selected(rows, id), do: Enum.find(rows, &(&1.id == id))
 

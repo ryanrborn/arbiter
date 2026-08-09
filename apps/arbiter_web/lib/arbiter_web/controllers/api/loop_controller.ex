@@ -258,8 +258,13 @@ defmodule ArbiterWeb.Api.LoopController do
     {:error, {:invalid_request, "kind must be a string, got #{inspect(other)}"}}
   end
 
+  # `limit` arrives as a string on the GET query-string routes and as a real
+  # integer in the JSON body of `POST /api/loop/propose` (`arb loop analyze
+  # --propose --limit N` sends `%{"limit" => 50}`), so both shapes are accepted
+  # and anything else is a 400 rather than a FunctionClauseError 500.
   defp parse_limit(nil), do: {:ok, nil}
   defp parse_limit(""), do: {:ok, nil}
+  defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, n}
 
   defp parse_limit(raw) when is_binary(raw) do
     case Integer.parse(raw) do
@@ -267,6 +272,8 @@ defmodule ArbiterWeb.Api.LoopController do
       _ -> {:error, {:invalid_request, "limit must be a positive integer"}}
     end
   end
+
+  defp parse_limit(_other), do: {:error, {:invalid_request, "limit must be a positive integer"}}
 
   defp unit_seconds("d"), do: 24 * 3600
   defp unit_seconds("h"), do: 3600

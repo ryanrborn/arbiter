@@ -92,6 +92,19 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       assert html =~ rejected.gist
       refute html =~ hyp.gist
     end
+
+    test "a filter value outside the select's options falls back to live", %{conn: conn} do
+      hyp = hypothesis()
+      {:ok, view, _html} = live(conn, ~p"/loop")
+
+      # The phx-change payload is client-controlled; an unknown value must not
+      # reach String.to_existing_atom/1 and take the LiveView down with it.
+      html =
+        render_change(view, :filter, %{"state" => "no-such-state-#{System.unique_integer()}"})
+
+      assert html =~ hyp.gist
+      assert Process.alive?(view.pid)
+    end
   end
 
   describe "live refresh" do

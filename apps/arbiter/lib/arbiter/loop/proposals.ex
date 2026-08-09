@@ -39,9 +39,14 @@ defmodule Arbiter.Loop.Proposals do
 
   alias Arbiter.Loop
   alias Arbiter.Loop.Report
+  alias Arbiter.Tasks.Issue
 
   # `gist` is a one-liner in a table; long finding categories get elided.
   @gist_limit 160
+
+  # Fallback for the `Issue.difficulty` ceiling if the constraint ever stops
+  # declaring a max; `max_difficulty/0` prefers the resource's own value.
+  @difficulty_ceiling 4
 
   @doc """
   The candidate proposals implied by `report`. Pure: no writes, no I/O.
@@ -170,10 +175,28 @@ defmodule Arbiter.Loop.Proposals do
   # `:quality_failure` is a cost anomaly the report explicitly declines to turn
   # into a difficulty change. A misestimate with no dispatched difficulty has
   # nothing to increment.
+  #
+  # A task already at the difficulty ceiling is skipped: `Issue.difficulty` is
+  # constrained to 0..4, so a D4 → D5 override could never apply. Being
+  # `:task`-scoped it would bypass the evidence bar and land directly as
+  # `:proposed`, then fail its Ash validation on every `arb loop apply all`
+  # forever — a permanently stuck queue entry.
   defp proposable_misestimate?(%{reason: :rework, dispatched_difficulty: d}) when is_integer(d),
-    do: true
+    do: d < max_difficulty()
 
   defp proposable_misestimate?(_), do: false
+
+  # Read from the resource so the ceiling cannot drift away from the constraint
+  # the apply path is actually validated against.
+  defp max_difficulty do
+    case Ash.Resource.Info.attribute(Issue, :difficulty) do
+      %{constraints: constraints} when is_list(constraints) ->
+        constraints[:max] || @difficulty_ceiling
+
+      _ ->
+        @difficulty_ceiling
+    end
+  end
 
   defp misestimate_repo(%{cell: {_difficulty, repo}}) when is_binary(repo), do: repo
   defp misestimate_repo(_), do: nil
