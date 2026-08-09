@@ -642,6 +642,62 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  # bd-9j2g3x: the loop-engineering evidence bar is workspace-configurable, with
+  # the documented 3-incidents / 2-distinct-tasks bar as the default.
+  describe "config validation: loop.evidence_bar" do
+    test "accepts an override of either threshold" do
+      config = %{"loop" => %{"evidence_bar" => %{"min_incidents" => 4}}}
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-1", config: config})
+      assert Arbiter.Loop.evidence_bar(ws) == %{min_incidents: 4, min_distinct_tasks: 2}
+    end
+
+    test "falls back to the documented bar when the key is absent" do
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-2", config: %{}})
+      assert Arbiter.Loop.evidence_bar(ws) == Arbiter.Loop.default_evidence_bar()
+      assert Arbiter.Loop.default_evidence_bar() == %{min_incidents: 3, min_distinct_tasks: 2}
+    end
+
+    test "rejects a non-positive threshold" do
+      config = %{"loop" => %{"evidence_bar" => %{"min_distinct_tasks" => 0}}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-bar-3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?(
+               "loop.evidence_bar.min_distinct_tasks must be a positive integer"
+             )
+    end
+
+    test "rejects loop.evidence_bar when it is not a map" do
+      config = %{"loop" => %{"evidence_bar" => 3}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-bar-4", config: config})
+      assert err |> Exception.message() |> String.contains?("loop.evidence_bar must be a map")
+    end
+
+    test "rejects loop when it is not a map" do
+      assert {:error, err} =
+               Ash.create(Workspace, %{name: "loop-bar-5", config: %{"loop" => "on"}})
+
+      assert err |> Exception.message() |> String.contains?("loop must be a map")
+    end
+
+    test "the deep-merge patch_config surface honours the override" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-6", config: %{"merge" => %{}}})
+
+      {:ok, patched} =
+        Ash.update(ws, %{patch: %{"loop" => %{"evidence_bar" => %{"min_incidents" => 5}}}},
+          action: :patch_config
+        )
+
+      # Deep merge, not overwrite: the unrelated key survives.
+      assert Map.has_key?(patched.config, "merge")
+      assert Arbiter.Loop.evidence_bar(patched).min_incidents == 5
+    end
+  end
+
   describe "watch_pipeline?/1" do
     test "true when config[merge][watch_pipeline] is boolean true" do
       ws = %Workspace{config: %{"merge" => %{"watch_pipeline" => true}}}

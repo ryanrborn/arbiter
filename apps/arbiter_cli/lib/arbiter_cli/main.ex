@@ -68,7 +68,12 @@ defmodule ArbiterCli.Main do
                                   [--since ...] [--limit N]
 
       arb loop analyze    [--since 7d|24h|<iso>] [--until <iso>] [--limit N]
-                                  [--workspace <id>] [--json]
+                                  [--workspace <id>] [--propose] [--json]
+      arb loop pending    [--state proposed|hypothesis|...] [--kind ...]
+                                  [--workspace <id>] [--limit N] [--json]
+      arb loop diff       <id>
+      arb loop apply      <id> | all [--state proposed]
+      arb loop reject     <id> [--reason "..."]
 
       arb queue resume    <task-id>
 

@@ -43,6 +43,10 @@ defmodule ArbiterWeb.Router do
 
       live("/skills", SkillIndexLive)
 
+      # The loop-engineering proposal queue (bd-9j2g3x). Read + decide only —
+      # nothing here applies itself.
+      live("/loop", LoopProposalIndexLive)
+
       live("/workers", WorkerIndexLive)
       live("/workers/history", RunIndexLive)
       live("/workers/history/:id", RunDetailLive)
@@ -67,8 +71,17 @@ defmodule ArbiterWeb.Router do
     post("/dependencies", DependencyController, :create)
     delete("/dependencies/:from/:to", DependencyController, :delete)
 
-    # Loop-analysis pass (Stage 1, bd-dyfaq3) — operator-invoked, report-only
+    # Loop-analysis pass (Stage 1, bd-dyfaq3) — operator-invoked, report-only.
+    # Persisting the proposals it implies is a separate POST (Stage 2,
+    # bd-9j2g3x), so the GET's zero-writes guarantee is structural.
     get("/loop/analyze", LoopController, :analyze)
+    post("/loop/propose", LoopController, :propose)
+
+    # The reviewable-proposal queue. No auto-apply: an operator decides.
+    get("/loop/pending", LoopController, :pending_index)
+    get("/loop/pending/:id", LoopController, :pending_show)
+    post("/loop/pending/:id/apply", LoopController, :pending_apply)
+    post("/loop/pending/:id/reject", LoopController, :pending_reject)
 
     # Repos (repo/project checkouts workers operate on)
     get("/repos", RepoController, :index)

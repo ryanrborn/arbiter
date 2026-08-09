@@ -19,7 +19,8 @@ defmodule Arbiter.MCP.CatalogTest do
                        worker_log task_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox
                        workspace_config_set workspace_config_unset
-                       external_review_list external_review_show review_greenlight)
+                       external_review_list external_review_show review_greenlight
+                       loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject)
 
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
@@ -28,7 +29,9 @@ defmodule Arbiter.MCP.CatalogTest do
                                 tracker_claim tracker_sync worker_review graph_create workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
                                 external_review_list skill_create skill_update skill_list skill_get
-                                transcript_capture_stats)
+                                transcript_capture_stats
+                                loop_pending_list loop_pending_diff loop_pending_apply
+                                loop_pending_reject)
 
   describe "visible/1" do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do
@@ -89,6 +92,17 @@ defmodule Arbiter.MCP.CatalogTest do
     test "a worker calling a coordinator-only tool is a JSON-RPC not-permitted error" do
       assert {:rpc_error, -32_003, message} = Catalog.call(@worker, "task_ready", %{})
       assert message =~ "not permitted"
+    end
+
+    # A worker must never be able to apply a fleet-wide change to the very
+    # prompts and skills it runs under (bd-9j2g3x).
+    test "a worker cannot reach any loop_pending_* tool" do
+      for tool <- ~w(loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject) do
+        assert {:rpc_error, -32_003, message} =
+                 Catalog.call(@worker, tool, %{"id" => "whatever"})
+
+        assert message =~ "not permitted"
+      end
     end
   end
 end

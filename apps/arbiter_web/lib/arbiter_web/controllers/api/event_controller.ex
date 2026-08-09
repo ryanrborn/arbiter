@@ -14,6 +14,9 @@ defmodule ArbiterWeb.Api.EventController do
     * task_state     — any task FSM transition (noisier — opt-in only)
     * external_review — an ExternalReview lifecycle transition: running / completed /
                         failed (opt-in only — pass subscribe=...,external_review)
+    * loop_proposal  — a loop-engineering proposal was recorded, reinforced,
+                       promoted to `proposed`, applied or rejected (opt-in only —
+                       pass subscribe=...,loop_proposal)
 
   Wire format: one newline-terminated JSON object per event. A bare newline
   is sent every 30 seconds on idle connections as a keepalive.
