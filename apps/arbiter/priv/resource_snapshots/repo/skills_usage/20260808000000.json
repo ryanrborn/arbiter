@@ -136,20 +136,7 @@
   ],
   "repo": "Elixir.Arbiter.Repo",
   "strict?": false,
-  "custom_indexes": [
-    {
-      "message": null,
-      "name": null,
-      "table": null,
-      "include": null,
-      "where": null,
-      "fields": [
-        "skill_id"
-      ],
-      "unique": true,
-      "using": null
-    }
-  ],
+  "custom_indexes": [],
   "base_filter": null,
   "custom_statements": [],
   "has_create_action": true

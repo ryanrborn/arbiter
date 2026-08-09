@@ -36,6 +36,6 @@ defmodule Arbiter.Repo.Migrations.CreateSkillsUsage do
       timestamps(type: :utc_datetime_usec)
     end
 
-    create unique_index(:skills_usage, [:skill_id])
+    create unique_index(:skills_usage, [:skill_id], name: "skills_usage_unique_skill_index")
   end
 end

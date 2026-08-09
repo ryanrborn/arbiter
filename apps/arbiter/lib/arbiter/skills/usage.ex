@@ -36,10 +36,6 @@ defmodule Arbiter.Skills.Usage do
     references do
       reference :skill, on_delete: :delete
     end
-
-    custom_indexes do
-      index [:skill_id], unique: true
-    end
   end
 
   actions do

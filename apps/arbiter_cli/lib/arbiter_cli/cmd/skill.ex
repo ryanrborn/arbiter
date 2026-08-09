@@ -111,7 +111,8 @@ defmodule ArbiterCli.Cmd.Skill do
     end)
   end
 
-  # Format usage counters for the list view, e.g., "  ⬆ 5m, ⧗ 0"
+  # Format usage counters for the list view, e.g., "  [never used]", "  [↓ 5]",
+  # or "  [↓ 5, ⧗ 2]"
   defp format_usage(s) do
     mat = s["materialize_count"] || 0
     inv = s["invoke_count"] || 0

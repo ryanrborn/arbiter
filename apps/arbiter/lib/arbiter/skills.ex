@@ -380,6 +380,14 @@ defmodule Arbiter.Skills do
   defp atomic_increment!(skill_id, counter) do
     id = Ash.UUIDv7.generate()
     now = DateTime.utc_now()
+    # skills_usage's counter timestamp columns are :utc_datetime (second
+    # precision) while inserted_at/updated_at are :utc_datetime_usec — encode
+    # each to match Ecto's own dumper format (`2026-08-08T22:00:00Z`), not
+    # exqlite's raw NaiveDateTime.to_iso8601/1 fallback (no `Z`, always
+    # microseconds), so skills_usage timestamps stay lexically comparable
+    # with every other table's.
+    now_sec_iso = now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    now_usec_iso = DateTime.to_iso8601(now)
     ts_field = timestamp_for(counter)
     counter_col = Atom.to_string(counter)
     ts_col = Atom.to_string(ts_field)
@@ -403,8 +411,8 @@ defmodule Arbiter.Skills do
       counts.materialize_count,
       counts.invoke_count,
       counts.patch_count,
-      now,
-      now
+      now_sec_iso,
+      now_usec_iso
     ])
 
     case Ash.Query.filter(Arbiter.Skills.Usage, skill_id == ^skill_id) |> Ash.read_one() do

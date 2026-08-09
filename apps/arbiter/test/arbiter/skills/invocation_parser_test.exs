@@ -7,8 +7,8 @@ defmodule Arbiter.Skills.InvocationParserTest do
   alias Arbiter.Skills.InvocationParser
 
   describe "extract_skill_names without registered skills" do
-    test "unregistered slash invocation counts nothing (skill not in DB)" do
-      line = "/tdd is required for this task"
+    test "unregistered Skill tool invocation counts nothing (skill not in DB)" do
+      line = "⏵ Skill(tdd)"
       {found, failed} = InvocationParser.parse_and_update(nil, [line])
 
       assert found == 0
@@ -94,22 +94,22 @@ defmodule Arbiter.Skills.InvocationParserTest do
       assert invoke_count(skill1) == 1
     end
 
-    test "slash invocation at line start increments the matching skill",
+    test "slash mention at line start does NOT count (only a Skill tool call counts)",
          %{skill1: skill1} do
       lines = ["/test-invoke-skill-1 is required for this task"]
       {found, _failed} = InvocationParser.parse_and_update(nil, lines)
 
-      assert found == 1
-      assert invoke_count(skill1) == 1
+      assert found == 0
+      assert invoke_count(skill1) == nil
     end
 
-    test "backtick-wrapped mid-sentence slash mention increments the matching skill",
+    test "backtick-wrapped mid-sentence slash mention does NOT count (the prompt's own directive text uses this form)",
          %{skill1: skill1} do
-      lines = ["I will invoke `/test-invoke-skill-1` now"]
+      lines = ["I must use `/test-invoke-skill-1` for this task"]
       {found, _failed} = InvocationParser.parse_and_update(nil, lines)
 
-      assert found == 1
-      assert invoke_count(skill1) == 1
+      assert found == 0
+      assert invoke_count(skill1) == nil
     end
 
     test "unwrapped mid-sentence slash mention does NOT count (avoids path/URL collisions)",
@@ -136,7 +136,7 @@ defmodule Arbiter.Skills.InvocationParserTest do
       assert invoke_count(tmp_skill) == nil
     end
 
-    test "relative path ./name is not credited to a same-named skill (leading dot is not a wrap)" do
+    test "relative path ./name is not credited to a same-named skill" do
       {:ok, deps_skill} = Skills.create_skill(%{name: "deps", body: "test"})
 
       lines = ["⏵ Bash(find . -path ./deps -prune -o -print)"]
@@ -158,11 +158,11 @@ defmodule Arbiter.Skills.InvocationParserTest do
       assert invoke_count(api_skill) == nil
     end
 
-    test "increments for multiple different skills on separate lines",
+    test "increments for multiple different skills on separate lines via Skill tool calls",
          %{skill1: skill1, skill2: skill2} do
       lines = [
-        "/test-invoke-skill-1 for the first skill",
-        "/test-invoke-skill-2 for the second skill"
+        "⏵ Skill(test-invoke-skill-1)",
+        "⏵ Skill(test-invoke-skill-2)"
       ]
 
       {found, _failed} = InvocationParser.parse_and_update(nil, lines)
@@ -174,7 +174,7 @@ defmodule Arbiter.Skills.InvocationParserTest do
 
     test "deduplicates multiple invocations of same skill on same line", %{skill1: skill1} do
       line =
-        "/test-invoke-skill-1 then /test-invoke-skill-1 again then /test-invoke-skill-1 once more"
+        ~s|⏵ Skill({"skill":"test-invoke-skill-1","args":"a"}) ⏵ Skill({"skill":"test-invoke-skill-1","args":"b"})|
 
       {found, _failed} = InvocationParser.parse_and_update(nil, [line])
 
@@ -184,9 +184,9 @@ defmodule Arbiter.Skills.InvocationParserTest do
 
     test "handles mixed valid names and invalid (non-kebab-case) names", %{skill1: skill1} do
       lines = [
-        "/test-invoke-skill-1 is valid",
-        "/UPPERCASE is not",
-        "/double--dash is not"
+        "⏵ Skill(test-invoke-skill-1)",
+        ~s|⏵ Skill({"skill":"UPPERCASE"})|,
+        ~s|⏵ Skill({"skill":"double--dash"})|
       ]
 
       {found, _failed} = InvocationParser.parse_and_update(nil, lines)
@@ -198,8 +198,8 @@ defmodule Arbiter.Skills.InvocationParserTest do
     test "handles bundled/unregistered skills gracefully alongside a registered one",
          %{skill1: skill1} do
       lines = [
-        "/test-invoke-skill-1 is in our registry",
-        "/code-review is a bundled skill and should not fail parsing"
+        "⏵ Skill(test-invoke-skill-1)",
+        "⏵ Skill(code-review)"
       ]
 
       {found, _failed} = InvocationParser.parse_and_update(nil, lines)
