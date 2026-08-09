@@ -127,11 +127,26 @@ defmodule Arbiter.Agents.Gemini do
   # configured the CLI defaults to `gemini-2.5-pro` (`DEFAULT_GEMINI_MODEL` in
   # the gemini-cli), so recording that is accurate even though we pass no
   # `--model` flag in that case.
+  #
+  # `agy` is the exception (bd-2fzwlc round 3): its model catalogue does not
+  # overlap the Gemini price table at all (confirmed live — every model this
+  # module knows about, tier-mapped or the `@default_model` fallback, is
+  # rejected by agy v1.1.11 as an unrecognized `--model`), and its stream
+  # events never name which model actually ran. Stamping any of our model ids
+  # on an agy row is a guess the row can't back up, so the ledger records the
+  # model as unknown rather than a name the session provably didn't run.
   @impl true
   def resolved_model(opts \\ []) do
-    # resolve_model/1 already chains explicit → tier → workspace active_model;
-    # @default_model is the terminal fallback (the gemini-cli's own default).
-    resolve_model(opts) || @default_model
+    case resolve_executable() do
+      {:ok, {:agy, _}} ->
+        nil
+
+      _ ->
+        # resolve_model/1 already chains explicit → tier → workspace
+        # active_model; @default_model is the terminal fallback (the
+        # gemini-cli's own default).
+        resolve_model(opts) || @default_model
+    end
   end
 
   # ---- Internals ---------------------------------------------------------

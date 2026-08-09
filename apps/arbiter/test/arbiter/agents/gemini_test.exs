@@ -26,7 +26,32 @@ defmodule Arbiter.Agents.GeminiTest do
     setup do
       Arbiter.Agents.Gemini.Config.clear()
       on_exit(&Arbiter.Agents.Gemini.Config.clear/0)
-      :ok
+
+      # resolved_model/1 now branches on which executable would actually run
+      # (bd-2fzwlc round 3), so these tests must not depend on whether the
+      # host machine happens to have `agy` on PATH — pin PATH to a stub
+      # `gemini` binary so they exercise the resolve_model/1 fallback chain
+      # deterministically, the same way the default_argv/2 tests below do.
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-resolved-model-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
     end
 
     test "uses an explicit :model override verbatim" do
@@ -42,6 +67,21 @@ defmodule Arbiter.Agents.GeminiTest do
       # No explicit model, no tier, no workspace active_model → the gemini-cli's
       # own DEFAULT_GEMINI_MODEL, so the usage ledger still lands a concrete id.
       assert Gemini.resolved_model([]) == "gemini-2.5-pro"
+    end
+
+    test "returns nil when the resolved executable is agy, even with an explicit :model",
+         %{tmp: tmp} do
+      # agy's model catalogue doesn't overlap ours at all (confirmed live —
+      # bd-2fzwlc round 2/3), so an explicit override can't be trusted either:
+      # agy is preferred over gemini whenever both are on PATH, and stamping
+      # any of these ids on the row would be a guess the session can't back up.
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      assert Gemini.resolved_model([]) == nil
+      assert Gemini.resolved_model(model: "gemini-2.5-flash") == nil
+      assert Gemini.resolved_model(model_tier: "premium") == nil
     end
   end
 
