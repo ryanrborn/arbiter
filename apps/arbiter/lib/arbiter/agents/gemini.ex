@@ -172,11 +172,11 @@ defmodule Arbiter.Agents.Gemini do
   # equivalent) — see security_enforced?/0.
   defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
-      model_flag(opts) ++ thinking_flag(opts)
+      model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:agy, exec, prompt, opts, _policy) do
-    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts)
+    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
@@ -188,12 +188,14 @@ defmodule Arbiter.Agents.Gemini do
     [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
 
-  # Only the upstream `gemini` CLI supports `--output-format stream-json` (it
-  # emits init/message/tool_use/tool_result/result JSONL events the worker
-  # parses for token usage + derived cost — see `Arbiter.Agents.Gemini.Stream`).
-  # The `agy` fork has no such flag (it only does `--print` plain text), so the
-  # agy branches above omit it and fall back to raw-line streaming with no
-  # token/cost capture — graceful degradation, same as before bd-bbpm5e.
+  # Both the upstream `gemini` CLI and the `agy` fork support
+  # `--output-format stream-json` (confirmed live against installed agy
+  # v1.1.11 — bd-2fzwlc). Prior to bd-2fzwlc this flag was omitted on the
+  # `:agy` branches on the mistaken belief that agy had no stream-json
+  # support; in fact agy was being invoked in plain-text mode the whole time,
+  # so every agy session emitted nothing `Arbiter.Agents.Gemini.Stream` could
+  # parse — the root cause of every Gemini `usage_events` row carrying zero
+  # tokens/cost, since `resolve_executable/0` prefers `agy` over `gemini`.
   defp output_format_flag, do: ["--output-format", "stream-json"]
 
   defp model_flag(opts) do

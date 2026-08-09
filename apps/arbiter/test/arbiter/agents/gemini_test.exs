@@ -227,14 +227,17 @@ defmodule Arbiter.Agents.GeminiTest do
       assert chunk_after(rest, "--output-format") == "stream-json"
     end
 
-    test "agy CLI path does NOT add --output-format (unsupported by the fork)", %{tmp: tmp} do
+    test "agy CLI path also adds --output-format stream-json (bd-2fzwlc: agy supports it)", %{
+      tmp: tmp
+    } do
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
       assert {:ok, argv} = Gemini.default_argv("the prompt", [])
-      refute "--output-format" in argv
-      refute "stream-json" in argv
+      assert "--output-format" in argv
+      assert "stream-json" in argv
+      assert chunk_after(argv, "--output-format") == "stream-json"
     end
   end
 

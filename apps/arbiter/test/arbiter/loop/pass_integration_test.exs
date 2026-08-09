@@ -166,4 +166,34 @@ defmodule Arbiter.Loop.PassIntegrationTest do
     assert ev.step == :other
     assert ev.provider == "arbiter"
   end
+
+  test "surfaces a warning when a provider's usage rows are wholly zero-token over the window (bd-2fzwlc)",
+       %{ws: ws} do
+    issue = issue!(ws, %{title: "gemini task"})
+    run = run!(%{task_id: issue.id, status: :completed})
+
+    {:ok, _} =
+      Ash.create(Event, %{
+        task_id: run.task_id,
+        step: :work,
+        worker_run_id: run.id,
+        provider: "gemini",
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: nil,
+        occurred_at: DateTime.utc_now()
+      })
+
+    assert {:ok, %{report: report, markdown: md}} =
+             Analysis.analyze(
+               label: "zero-token window",
+               since: DateTime.add(DateTime.utc_now(), -3600, :second),
+               until: DateTime.add(DateTime.utc_now(), 120, :second),
+               record_cost?: false
+             )
+
+    assert Enum.any?(report.notes, &(&1 =~ "gemini" and &1 =~ "zero tokens"))
+    assert md =~ "gemini"
+    assert md =~ "zero tokens"
+  end
 end

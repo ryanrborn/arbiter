@@ -98,6 +98,39 @@ defmodule Arbiter.Usage do
     end
   end
 
+  @doc """
+  Providers whose `usage_events` rows are **wholly** zero-token over the
+  window — i.e. every row for that provider carries `tokens_in: 0/nil` and
+  `tokens_out: 0/nil`.
+
+  A provider whose stream parser silently drops usage (bd-2fzwlc: this is
+  exactly what happened to every Gemini/agy row before the fix) reads
+  identically to "that provider is just cheap" unless something calls this
+  out. A provider with even one non-zero row is not flagged — this is a
+  blindness detector, not a low-usage alert.
+
+  Accepts the same `:since` / `:workspace_id` options as `summarize/1`.
+  Returns `{:ok, [%{provider:, rows:}]}`, sorted by provider name.
+  """
+  @spec zero_token_providers(keyword()) :: {:ok, [%{provider: String.t(), rows: pos_integer()}]}
+  def zero_token_providers(opts \\ []) do
+    events =
+      Event
+      |> base_filter(opts)
+      |> Ash.read!()
+
+    flagged =
+      events
+      |> Enum.group_by(&(&1.provider || "(unknown)"))
+      |> Enum.filter(fn {_provider, evs} -> Enum.all?(evs, &zero_tokens?/1) end)
+      |> Enum.map(fn {provider, evs} -> %{provider: provider, rows: length(evs)} end)
+      |> Enum.sort_by(& &1.provider)
+
+    {:ok, flagged}
+  end
+
+  defp zero_tokens?(ev), do: (ev.tokens_in || 0) == 0 and (ev.tokens_out || 0) == 0
+
   @spec valid_groupings() :: [group_by()]
   def valid_groupings, do: @valid_by
 
