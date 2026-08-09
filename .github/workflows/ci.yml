@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Arbiter's merger (apps/arbiter/lib/arbiter/mergers/github.ex) does not
+  # honor GitHub's "required check" designation — it reads every check run's
+  # conclusion on the PR head SHA uniformly (map_check_run_status/1) and, if
+  # any is non-success, reports pipeline: :failed. The Watchdog then treats
+  # that as :ci_failed: it dispatches a fix-pass acolyte, and once auto-resolve
+  # attempts are exhausted, parks the worker indefinitely. So "non-required"
+  # has no meaning to Arbiter — any job in this workflow must be able to stay
+  # green, or it will block merges outright. This job (compile/deps/format) is
+  # reliably green on main as of this writing, and is exactly what would have
+  # caught both incidents that motivated this workflow: a repo-wide format
+  # drift (PR #1135) and a warnings-as-error violation on main (#1131). Wall
+  # clock has not yet been measured on a warm cache; record it here once a
+  # second run on this branch (or a follow-up PR) restores the cache.
+  lint:
+    name: mix precommit (compile, deps, format)
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.19.4"
+
+      - name: Restore deps/build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp28.5-elixir1.19.4-mix-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      # `mix precommit`'s `format` step rewrites files in place, which is the
+      # right thing for a worker about to commit but the wrong thing here: CI
+      # must fail on a violation, not silently fix it. Run the same checks the
+      # alias runs (mix.exs `precommit`), swapping in `format --check-formatted`.
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Check for unused dependencies
+        run: |
+          mix deps.unlock --unused
+          git diff --exit-code mix.lock
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+  # NOTE: there is deliberately NO `mix test` job here yet.
+  #
+  # A `mix test` job was added alongside this workflow and removed immediately
+  # (bd-3c9ygz -> follow-up). The reason is specific and worth preserving:
+  #
+  # Arbiter's merger (apps/arbiter/lib/arbiter/mergers/github.ex,
+  # map_check_run_status/1) reads EVERY check run's conclusion on the PR head
+  # SHA and reports `pipeline: :failed` if any is non-success. The Watchdog
+  # turns that into `:ci_failed`, dispatches a fix-pass, and eventually parks
+  # the worker. GitHub's "required check" designation is not consulted, so a
+  # merely-advisory job does not exist as far as Arbiter is concerned.
+  #
+  # The removed job tried to stay green with `mix test || echo "::warning::"`.
+  # That does NOT work: the step swallows the exit code, but the job's
+  # check-run conclusion still lands as `failure` (verified on run
+  # 31242939298 — run conclusion `success`, check run `mix test` `failure`),
+  # which is exactly what the merger reads. The result was a race: merges
+  # succeeded only when the merger looked before CI finished.
+  #
+  # Restore a real, gating `mix test` job only after the pre-existing
+  # order-dependent failures on main are fixed (Arbiter.Reviews.CheckoutTest,
+  # Arbiter.Worker.RunProvenanceTest, et al). Until then tests gate locally
+  # via `mix precommit`, not in CI.

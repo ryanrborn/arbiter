@@ -33,6 +33,14 @@ defmodule Arbiter.Loop.Analysis do
   @min_incidents 3
   @min_tasks 2
 
+  # For cohort-based comparisons (rework and quality_failure signals), require
+  # a minimum sample size. With fewer peers, the computed median is not a
+  # reliable ground truth for comparison. Below this threshold, treat it as
+  # insufficient evidence (flag with nil cohort stats), matching the empty-cohort
+  # behavior — this avoids the "silent divide-by-small-n" anti-pattern where a
+  # single peer task's value is treated as a cell-wide signal.
+  @min_cohort_size 2
+
   @doc """
   Run the pass over a window: fetch, analyse, record own cost, return the
   report + rendered markdown.
@@ -298,13 +306,13 @@ defmodule Arbiter.Loop.Analysis do
       |> Map.get({t.difficulty, t.repo}, [])
       |> Enum.reject(&(&1.task_id == t.task_id))
 
-    case cohort_verdict(cohort, t) do
+    reason = if t.reworked?, do: :rework, else: :quality_failure
+
+    case cohort_verdict(cohort, t, reason) do
       :drop ->
         nil
 
       {:flag, cohort_cost, cohort_rounds} ->
-        reason = if t.reworked?, do: :rework, else: :quality_failure
-
         %{
           task_id: t.task_id,
           cell: {t.difficulty, t.repo},
@@ -321,13 +329,38 @@ defmodule Arbiter.Loop.Analysis do
   # No cohort data this window means there is nothing to compare against, so
   # we can't demonstrate the task is (or isn't) an outlier — flag it rather
   # than silently drop it on an absence of evidence.
-  defp cohort_verdict([], _t), do: {:flag, nil, nil}
+  defp cohort_verdict([], _t, _reason), do: {:flag, nil, nil}
 
-  defp cohort_verdict(cohort, t) do
+  # Cohort too small to have a meaningful median: treat as insufficient evidence
+  # (same path as empty cohort). This avoids computing a "median" from a single
+  # peer task and treating it as reliable ground truth.
+  defp cohort_verdict(cohort, _t, _reason) when length(cohort) < @min_cohort_size do
+    {:flag, nil, nil}
+  end
+
+  # For rework cases (multiple review rounds), require the task to exceed its
+  # cell median on BOTH rounds and cost. This filters out tasks that needed
+  # rework but didn't cost more (true rework, not under-provisioning).
+  defp cohort_verdict(cohort, t, :rework) do
     cohort_cost = cohort |> Enum.map(& &1.cost) |> median()
     cohort_rounds = cohort |> Enum.map(& &1.rounds) |> median()
 
-    if t.cost > cohort_cost or t.rounds > cohort_rounds do
+    if t.cost > cohort_cost and t.rounds > cohort_rounds do
+      {:flag, cohort_cost, cohort_rounds}
+    else
+      :drop
+    end
+  end
+
+  # For quality_failure cases (agent failures), require the task to exceed its
+  # cell median on cost only. Rounds are not the signal for quality failures
+  # (they converge in round 1 by definition), so we only care if the cost is
+  # anomalously high.
+  defp cohort_verdict(cohort, t, :quality_failure) do
+    cohort_cost = cohort |> Enum.map(& &1.cost) |> median()
+    cohort_rounds = cohort |> Enum.map(& &1.rounds) |> median()
+
+    if t.cost > cohort_cost do
       {:flag, cohort_cost, cohort_rounds}
     else
       :drop

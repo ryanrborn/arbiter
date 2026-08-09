@@ -3379,34 +3379,79 @@ defmodule Arbiter.Worker do
   # operator doesn't read this as "the work is broken" and go looking at the
   # diff — the branch's PR is very likely open and mergeable already.
   defp merge_failure_subject(task_id, reason) do
-    if Arbiter.Mergers.already_open_error?(reason) do
-      "PR already exists: #{task_id} — could not auto-resolve its number"
-    else
-      "Merge failed: #{task_id} could not be opened/merged"
+    cond do
+      Arbiter.Mergers.already_open_error?(reason) ->
+        "PR already exists: #{task_id} — could not auto-resolve its number"
+
+      diverged_push_error?(reason) ->
+        "Push rejected: #{task_id} branch diverged from origin"
+
+      true ->
+        "Merge failed: #{task_id} could not be opened/merged"
     end
   end
+
+  # bd-3doy0y: a push rejected for genuine divergence (a ReviewGate
+  # implementer round pushed to origin/<branch> while this worktree's own
+  # commit diverged from it, and the rebase attempted before push hit a real
+  # conflict) is neither a merge conflict on `main` nor a PR-open failure —
+  # it needs a distinct operator response (resolve the rebase by hand), not
+  # the generic "could not be opened/merged" text that reads as a broken PR.
+  defp diverged_push_error?({:push_failed, inner}), do: diverged_push_error?(inner)
+  defp diverged_push_error?({:diverged, _detail}), do: true
+  defp diverged_push_error?(_), do: false
+
+  # Same nesting as diverged_push_error?/1 (push_for_hosted_pr's {:push_failed,
+  # reason} gets re-wrapped by do_open_mr's {:push_failed, push_reason}) — walk
+  # it to reach the {:diverged, detail} payload regardless of wrap depth.
+  defp diverged_detail({:push_failed, inner}), do: diverged_detail(inner)
+  defp diverged_detail({:diverged, detail}), do: detail
 
   defp merge_failure_body(%State{mr_ref: mr_ref}, branch, reason) do
     ref_line = if is_binary(mr_ref) and mr_ref != "", do: "PR/MR ref: #{mr_ref}\n", else: ""
 
-    if Arbiter.Mergers.already_open_error?(reason) do
-      """
-      The forge reports a pull request already exists for branch #{branch}, \
-      but arbiter could not resolve its number after retrying — this is \
-      NOT necessarily a work failure. The branch's PR is very likely open \
-      and mergeable already; find it on the forge and merge it by hand, \
-      then close this task.
-      #{ref_line}
-      Forge error: #{inspect(reason)}
-      """
-    else
-      """
-      Merge of branch #{branch} failed and was NOT completed. The task is parked \
-      failed (not closed) — any PR/MR already opened for this branch may be \
-      approved and mergeable but stranded, and needs manual attention.
-      #{ref_line}
-      Error: #{inspect(reason)}
-      """
+    cond do
+      Arbiter.Mergers.already_open_error?(reason) ->
+        """
+        The forge reports a pull request already exists for branch #{branch}, \
+        but arbiter could not resolve its number after retrying — this is \
+        NOT necessarily a work failure. The branch's PR is very likely open \
+        and mergeable already; find it on the forge and merge it by hand, \
+        then close this task.
+        #{ref_line}
+        Forge error: #{inspect(reason)}
+        """
+
+      diverged_push_error?(reason) ->
+        detail = diverged_detail(reason)
+        files = Map.get(detail, :files, [])
+
+        file_list =
+          if files == [],
+            do: "",
+            else: "\nConflicting files:\n" <> Enum.map_join(files, "\n", &("  - " <> &1))
+
+        """
+        Push of branch #{branch} to origin was rejected because it has \
+        genuinely diverged — NOT a conflict on the target branch. A \
+        ReviewGate implementer round likely pushed a commit to \
+        origin/#{branch} directly; this worker's own worktree also has a \
+        commit the remote doesn't have, and rebasing this worktree's commit \
+        onto the remote tip hit a real conflict. The work is very likely \
+        complete and approved but stranded — do NOT force-push (it would \
+        destroy the implementer round's commit). Resolve by hand: rebase \
+        this branch onto origin/#{branch}, resolve the conflict, and push.
+        #{ref_line}#{file_list}
+        """
+
+      true ->
+        """
+        Merge of branch #{branch} failed and was NOT completed. The task is parked \
+        failed (not closed) — any PR/MR already opened for this branch may be \
+        approved and mergeable but stranded, and needs manual attention.
+        #{ref_line}
+        Error: #{inspect(reason)}
+        """
     end
   end
 
@@ -4090,10 +4135,10 @@ defmodule Arbiter.Worker do
           "Worker: pushing worktree branch to origin before PR open for task=#{task_id}"
         )
 
-        case Arbiter.Worker.Worktree.push(worktree, set_upstream: true) do
-          {:ok, _} ->
-            :ok
-
+        with :ok <- reconcile_before_push(worktree, task_id),
+             {:ok, _} <- Arbiter.Worker.Worktree.push(worktree, set_upstream: true) do
+          :ok
+        else
           {:error, reason} ->
             Logger.warning(
               "Worker: git push to origin failed for task=#{task_id}: #{inspect(reason)}"
@@ -4101,6 +4146,42 @@ defmodule Arbiter.Worker do
 
             {:error, {:push_failed, reason}}
         end
+    end
+  end
+
+  # bd-3doy0y: a ReviewGate implementer round pushes its fix commit straight
+  # to `origin/<branch>`; this worktree's local ref never sees it. If this
+  # worker later committed its own work (e.g. amending the merge title)
+  # before this push, the branches have genuinely diverged — a plain push is
+  # rejected non-fast-forward. Reconcile by rebasing this worktree's own
+  # commits onto the remote tip so the implementer's work is never dropped
+  # and never force-pushed over. On a real rebase conflict, refuse to push
+  # (tagged :diverged so the escalation names divergence specifically rather
+  # than a generic "could not be opened/merged").
+  defp reconcile_before_push(worktree, task_id) do
+    with {:ok, branch} <- Arbiter.Worker.Worktree.current_branch(worktree) do
+      case Arbiter.Worker.Worktree.rebase_onto_origin(worktree, branch) do
+        {:ok, _} ->
+          :ok
+
+        {:error, {:diverged_conflict, detail}} ->
+          Logger.warning(
+            "Worker: branch `#{branch}` diverged from origin and could not be rebased " <>
+              "cleanly for task=#{task_id}: #{inspect(detail)}"
+          )
+
+          {:error, {:diverged, detail}}
+
+        {:error, reason} ->
+          # origin missing / fetch failed — fail open and let the push
+          # attempt itself surface the real error (mirrors sync_from_origin
+          # call sites' fail-open posture).
+          Logger.warning(
+            "Worker: reconcile-before-push failed open for task=#{task_id}: #{inspect(reason)}"
+          )
+
+          :ok
+      end
     end
   end
 
