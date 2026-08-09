@@ -19,17 +19,22 @@ defmodule Arbiter.Loop.Analysis do
       label↔transcript disagreement rate is a first-class finding.
     * The **evidence bar** for a fleet-wide suggestion is ≥ 3 incidents across
       ≥ 2 distinct tasks. Below it, a finding becomes a paper-trailed per-task
-      override and the report **declines** a fleet-wide change.
+      override and the report **declines** a fleet-wide change. The thresholds
+      default to those constants and are overridable per workspace under
+      `loop.evidence_bar.{min_incidents,min_distinct_tasks}` (bd-9j2g3x).
     * Comparisons are grouped into `(difficulty, repo)` cells so drift with the
       difficulty/repo mix does not read as improvement.
   """
 
-  alias Arbiter.Loop.{Corpus, FailureClassifier, Report}
+  alias Arbiter.Loop.{Corpus, FailureClassifier, Proposals, Report}
 
   @small_sample_caveat "At ~15 dispatches/day most single-window deltas are not statistically significant — treat single-window movements as hypotheses, not results."
 
   # A fleet-wide change requires this much independent evidence. Anything less
-  # is blast-radius-1: a per-task override, paper-trailed.
+  # is blast-radius-1: a per-task override, paper-trailed. These are the
+  # defaults; a workspace may raise or lower them under
+  # `loop.evidence_bar.{min_incidents,min_distinct_tasks}` (bd-9j2g3x), which is
+  # why the bar is threaded through as a value rather than read from here.
   @min_incidents 3
   @min_tasks 2
 
@@ -48,13 +53,31 @@ defmodule Arbiter.Loop.Analysis do
   Options are passed to `Arbiter.Loop.Corpus.fetch/1` (`:since`, `:until`,
   `:limit`, `:label`). Returns `{:ok, %{report: %Report{}, markdown: String,
   usage_event_id: id | nil}}`.
+
+  ## `propose?: true` (opt-in, bd-9j2g3x)
+
+  Off by default, and the default path is **byte-identical** to before Stage 2:
+  the pass still writes nothing but its own cost row. Opted in, each suggestion
+  is additionally persisted as an `Arbiter.Loop.PendingWrite` — inserted, or
+  reinforced onto the row with the same fingerprint from an earlier window — and
+  the returned map gains a `:proposals` key. Proposals are inert: queueing one
+  applies nothing, at any evidence level.
   """
   @spec analyze(keyword()) :: {:ok, map()} | {:error, term()}
   def analyze(opts \\ []) do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, rows, meta} <- Corpus.fetch(opts) do
-      report = build_report(rows, Keyword.put(opts, :meta, meta))
+      workspace_id = Keyword.get(opts, :workspace_id) || Map.get(meta, :workspace_id)
+
+      report =
+        build_report(
+          rows,
+          opts
+          |> Keyword.put(:meta, meta)
+          |> Keyword.put_new_lazy(:evidence_bar, fn -> Arbiter.Loop.evidence_bar(workspace_id) end)
+        )
+
       markdown = Report.to_markdown(report)
       duration_ms = System.monotonic_time(:millisecond) - started
 
@@ -63,12 +86,30 @@ defmodule Arbiter.Loop.Analysis do
           record_own_cost(duration_ms, length(rows), meta)
         end
 
-      {:ok, %{report: report, markdown: markdown, usage_event_id: usage_event_id}}
+      envelope = %{report: report, markdown: markdown, usage_event_id: usage_event_id}
+
+      # `:proposals` is only added when the caller opted in, so a non-proposing
+      # caller sees exactly the map shape it saw before Stage 2.
+      if Keyword.get(opts, :propose?, false) do
+        proposals =
+          Proposals.record_all(report,
+            workspace_id: workspace_id,
+            actor: Keyword.get(opts, :actor, "loop")
+          )
+
+        {:ok, Map.put(envelope, :proposals, proposals)}
+      else
+        {:ok, envelope}
+      end
     end
   end
 
   @doc """
   Build a `%Report{}` from already-fetched corpus rows. Pure — no I/O, no writes.
+
+  `:evidence_bar` overrides the fleet-wide bar (a
+  `%{min_incidents: _, min_distinct_tasks: _}` map); it defaults to the
+  documented `≥ #{@min_incidents}` incidents / `≥ #{@min_tasks}` tasks.
   """
   @spec build_report([map()], keyword()) :: Report.t()
   def build_report(rows, opts \\ []) do
@@ -92,7 +133,7 @@ defmodule Arbiter.Loop.Analysis do
       finding_categories: finding_categories,
       difficulty_misestimates: misestimates,
       cells: cells(main_rows),
-      suggestions: suggestions(finding_categories),
+      suggestions: suggestions(finding_categories, evidence_bar(opts)),
       notes: [@small_sample_caveat]
     }
   end
@@ -476,11 +517,23 @@ defmodule Arbiter.Loop.Analysis do
 
   # ---- suggestions + evidence bar ----------------------------------------
 
-  defp suggestions(finding_categories) do
+  # The effective bar for this pass: the caller's `:evidence_bar` (resolved from
+  # workspace config by `analyze/1`) or the documented defaults.
+  defp evidence_bar(opts) do
+    case Keyword.get(opts, :evidence_bar) do
+      %{min_incidents: i, min_distinct_tasks: t} when is_integer(i) and is_integer(t) ->
+        %{min_incidents: i, min_distinct_tasks: t}
+
+      _ ->
+        %{min_incidents: @min_incidents, min_distinct_tasks: @min_tasks}
+    end
+  end
+
+  defp suggestions(finding_categories, bar) do
     Enum.map(finding_categories, fn cat ->
       incidents = cat.incidents
       tasks = length(cat.tasks)
-      fleet? = incidents >= @min_incidents and tasks >= @min_tasks
+      fleet? = incidents >= bar.min_incidents and tasks >= bar.min_distinct_tasks
       {destination, target_metric, baseline} = suggestion_targets(cat, fleet?)
 
       %{
@@ -493,9 +546,9 @@ defmodule Arbiter.Loop.Analysis do
         rationale:
           if(fleet?,
             do:
-              "#{incidents} incidents across #{tasks} tasks clears the ≥ #{@min_incidents} incidents / ≥ #{@min_tasks} tasks evidence bar.",
+              "#{incidents} incidents across #{tasks} tasks clears the ≥ #{bar.min_incidents} incidents / ≥ #{bar.min_distinct_tasks} tasks evidence bar.",
             else:
-              "n=#{incidents} across #{tasks} task(s) is below the ≥ #{@min_incidents} incidents / ≥ #{@min_tasks} tasks bar — decline a fleet-wide change; take a per-task override + tracked hypothesis instead."
+              "n=#{incidents} across #{tasks} task(s) is below the ≥ #{bar.min_incidents} incidents / ≥ #{bar.min_distinct_tasks} tasks bar — decline a fleet-wide change; take a per-task override + tracked hypothesis instead."
           )
       }
     end)

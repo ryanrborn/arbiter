@@ -60,6 +60,10 @@ defmodule Arbiter.MCP.Catalog do
   | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
   | `skill_list` | worker, coordinator | `Arbiter.Skills.list_skills/0` |
   | `skill_get` | worker, coordinator | `Arbiter.Skills.get_skill/1` |
+  | `loop_pending_list` | coordinator | `Arbiter.Loop.list_pending/1` + `evidence_bar/1` |
+  | `loop_pending_diff` | coordinator | `Arbiter.Loop.get_pending/1` (full row incl. unified diff) |
+  | `loop_pending_apply` | coordinator | `Arbiter.Loop.apply_pending/2` (dispatches to the existing domain API) |
+  | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
@@ -89,6 +93,12 @@ defmodule Arbiter.MCP.Catalog do
 
   @both [:worker, :coordinator]
   @coordinator [:coordinator]
+
+  # Enum values for the loop-proposal queue tools. Kept as strings here because
+  # they go straight into a JSON Schema; `Arbiter.Loop.PendingWrite` holds the
+  # authoritative atom constraints.
+  @loop_states ~w(proposed hypothesis applied rejected superseded)
+  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set)
 
   # The optional `workspace` field every workspace-resolving tool advertises.
   # Coordinator tokens are workspace-agnostic (one token, any workspace); naming
@@ -1428,6 +1438,123 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.skill_get/2
+    },
+    # ---- the Stage 2 loop-proposal queue (bd-9j2g3x) -----------------------
+    #
+    # Coordinator-only, every one of them. A fleet-wide skill patch or config
+    # change is not a worker's call, and a worker bound to one task must never be
+    # able to apply a write whose blast radius is the whole fleet.
+    %{
+      name: "loop_pending_list",
+      tiers: @coordinator,
+      description:
+        "List queued loop-engineering proposals produced by `arb loop analyze --propose`. " <>
+          "Optional `state` (one name or a list; defaults to the live states `hypothesis` + " <>
+          "`proposed`), `kind`, `workspace`, `limit`. A `hypothesis` is a finding below the " <>
+          "evidence bar kept with its incident refs so later windows reinforce it in place; " <>
+          "crossing the bar promotes it to `proposed`. Returns summaries (no diffs) plus the " <>
+          "workspace's `evidence_bar`; use `loop_pending_diff` to read one in full.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "state" => %{
+            "oneOf" => [
+              %{"type" => "string", "enum" => @loop_states},
+              %{"type" => "array", "items" => %{"type" => "string", "enum" => @loop_states}}
+            ],
+            "description" =>
+              "Optional state filter: one name or a list. Defaults to hypothesis + proposed."
+          },
+          "kind" => %{
+            "type" => "string",
+            "enum" => @loop_kinds,
+            "description" => "Optional kind filter."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Optional workspace (id or name) to scope the list to."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "description" => "Optional cap on rows returned, newest first."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_pending_list/2
+    },
+    %{
+      name: "loop_pending_diff",
+      tiers: @coordinator,
+      description:
+        "Read one queued loop proposal in full by `id`: its unified `diff`, `payload`, " <>
+          "pre-registered `target_metric` / `baseline`, accumulated `incident_refs` / " <>
+          "`task_refs`, and — when it is not applicable yet — `inapplicable_reason` naming " <>
+          "the current evidence and what is still missing. Read this before applying.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Proposal id. Required."},
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Optional workspace (id or name) the proposal must belong to."
+          }
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_pending_diff/2
+    },
+    %{
+      name: "loop_pending_apply",
+      tiers: @coordinator,
+      description:
+        "Apply the queued loop proposal `id`. Coordinator only — a worker must never apply a " <>
+          "fleet-wide change. Dispatches on `kind` to the same public domain API a human " <>
+          "would call (`Arbiter.Skills.update_skill/2`, the workspace config deep-merge, an " <>
+          "Issue update), so the write lands with a normal paper-trail version attributed to " <>
+          "the proposal id. Refuses anything that is not `proposed`; a `hypothesis` reply " <>
+          "names its evidence count and the shortfall. Nothing is ever applied " <>
+          "automatically — this tool is the only apply path.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Proposal id to apply. Required."},
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Optional workspace (id or name) the proposal must belong to."
+          }
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_pending_apply/2
+    },
+    %{
+      name: "loop_pending_reject",
+      tiers: @coordinator,
+      description:
+        "Soft-reject the queued loop proposal `id` with an optional `reason`. The row " <>
+          "persists as `rejected` (never deleted), so later windows reinforce its evidence " <>
+          "in place rather than re-proposing the same finding from scratch — but it does not " <>
+          "re-open on its own.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Proposal id to reject. Required."},
+          "reason" => %{
+            "type" => "string",
+            "description" => "Optional reason, recorded on the row."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Optional workspace (id or name) the proposal must belong to."
+          }
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_pending_reject/2
     },
     %{
       name: "usage_summarize",

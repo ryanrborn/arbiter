@@ -33,6 +33,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"review_automation.auto_authors"` is present, it must be a list of strings.
     * If `"review_automation.repo_overrides"` is present, it must be a map where
       every value is one of the modes above.
+    * If `"loop"` is present, it must be a map; if `"loop.evidence_bar"` is
+      present, it must be a map whose `"min_incidents"` / `"min_distinct_tasks"`
+      are positive integers (the loop-proposal evidence bar, bd-9j2g3x).
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -62,6 +65,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_conductor(Map.get(config, "conductor"))
     |> validate_review_automation(Map.get(config, "review_automation"))
     |> validate_quota(Map.get(config, "quota"))
+    |> validate_loop(Map.get(config, "loop"))
   end
 
   defp validate_tracker(changeset, nil), do: changeset
@@ -264,8 +268,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   end
 
   # A config value that, when present, must be a positive integer (or its
-  # stringified JSON form). Absent → no-op. Used for review_gate.max_rounds and
-  # review_gate.timeout_ms.
+  # stringified JSON form). Absent → no-op. Used for review_gate.max_rounds,
+  # review_gate.timeout_ms and the loop.evidence_bar thresholds.
   defp validate_positive_int(changeset, map, key, label) do
     case Map.get(map, key) do
       nil ->
@@ -292,6 +296,37 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           message: "#{label} must be a positive integer; got: #{inspect(other)}"
         )
     end
+  end
+
+  # bd-9j2g3x: the loop-engineering evidence bar. Absent keys fall back to
+  # `Arbiter.Loop.default_evidence_bar/0` (3 incidents / 2 distinct tasks), which
+  # is the bar `docs/loop-review.md` documents.
+  defp validate_loop(changeset, nil), do: changeset
+
+  defp validate_loop(changeset, loop) when is_map(loop) do
+    case Map.get(loop, "evidence_bar") do
+      nil ->
+        changeset
+
+      bar when is_map(bar) ->
+        changeset
+        |> validate_positive_int(bar, "min_incidents", "loop.evidence_bar.min_incidents")
+        |> validate_positive_int(
+          bar,
+          "min_distinct_tasks",
+          "loop.evidence_bar.min_distinct_tasks"
+        )
+
+      _ ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "loop.evidence_bar must be a map"
+        )
+    end
+  end
+
+  defp validate_loop(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "loop must be a map")
   end
 
   defp validate_conductor(changeset, nil), do: changeset

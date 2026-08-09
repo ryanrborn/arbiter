@@ -164,6 +164,15 @@ defmodule Arbiter.Tasks.Issue do
 
       require_atomic? false
 
+      # Audit-only attribution (bd-9j2g3x). `Issue` has no `actor` column to
+      # snapshot the way `Skill` / `Workspace` do, but `store_action_inputs?` in
+      # the `paper_trail` block above records every present argument onto the
+      # version row — so a non-human write can name itself here (the loop's
+      # apply path passes `"loop:proposal:<id>"`) and the version history says
+      # which queued proposal moved the field. Changes nothing about the update
+      # itself; a caller that omits it is recorded exactly as before.
+      argument :change_origin, :string
+
       # `source_pr` is deliberately NOT in `accept` above: it's the PR-dedup
       # linkage PRPatrol/ExternalReview set at :create time (and :reopen clears
       # it), and no legitimate caller of :update ever needs to touch it. A

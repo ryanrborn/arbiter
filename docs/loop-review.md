@@ -35,7 +35,10 @@ mix arbiter.loop.analyze --since 7d [--out report.md] [--no-ledger]
 The pass **writes nothing** — no skill edits, no config changes, no task
 overrides. It emits a markdown report and a single `usage_events` cost row for
 its own compute (so the loop's cost lands in the ledger it is optimising). You
-read the report and decide. This mirrors the `report_only` + greenlight
+read the report and decide. (Stage 2's opt-in `--propose` adds rows to the
+reviewable queue below and *still* applies nothing; see
+[The proposal queue](#the-proposal-queue-stage-2-bd-9j2g3x).) This mirrors the
+`report_only` + greenlight
 precedent used for coworker-facing review automation, which exists *because*
 unreviewed automation once caused real damage. A self-modifying prompt loop
 warrants at least the same gate.
@@ -97,6 +100,117 @@ warrants at least the same gate.
   hypotheses.
 - **Two-sided.** A change that raises convergence but doubles cost per task is
   not a win.
+
+## The proposal queue (Stage 2, `bd-9j2g3x`)
+
+Stage 1 hands you a report and forgets it. Stage 2 gives the report a memory: run
+the pass with `--propose` and every suggestion it implies is persisted as a
+reviewable **`PendingWrite`** row — a queued write, never an applied one.
+
+```
+arb loop analyze --since 7d --propose    # analyze, then queue what it implies
+arb loop pending                         # the live queue (hypothesis + proposed)
+arb loop diff <id>                       # gist, evidence, and the full unified diff
+arb loop apply <id>                      # or: arb loop apply all --state proposed
+arb loop reject <id> --reason "handled in CLAUDE.md instead"
+```
+
+Without `--propose` the pass is **byte-identical to Stage 1** — the zero-writes
+guarantee above still holds, and it is structural: `--propose` is a different
+verb on a different route (`POST /api/loop/propose`), not a flag on the
+report-only `GET /api/loop/analyze`.
+
+The same queue is on the dashboard at `/loop` (gist + state + evidence in the
+list, the full diff in the detail pane) and over MCP as `loop_pending_list` /
+`loop_pending_diff` / `loop_pending_apply` / `loop_pending_reject` — all
+**coordinator-tier only**, so a worker can never apply a fleet-wide change.
+
+### Cross-window accumulation: a below-bar finding is kept, not dropped
+
+Stage 1's evidence bar (≥ 3 incidents / ≥ 2 distinct tasks) is still the gate on
+a fleet-wide change, but a finding that misses it is no longer thrown away and
+recounted from zero next week. It lands as a **`hypothesis`** carrying its
+incident refs, and a later window that produces the same finding **reinforces**
+that row in place:
+
+- Matching is by a deterministic **fingerprint** over
+  `{kind, target, category, difficulty, repo}` — a SHA-256 of a canonicalised
+  tuple, never an LLM comparison of two gists.
+- Reinforcing **unions** the incident and task refs and recomputes
+  `evidence_count` / `distinct_tasks` from the union, so re-running the pass over
+  the same window is idempotent: two consecutive `--propose` runs produce no
+  duplicate rows and no inflated counts.
+- Crossing the bar promotes `hypothesis → proposed` and posts **exactly one**
+  escalation to the coordinator mailbox (guarded by `escalated_at`).
+- A `task`-scoped proposal **bypasses** the bar entirely — blast radius 1 is the
+  per-task override the discipline above already prescribes.
+- Applying is never automatic, at any evidence level. `arb loop apply` on a
+  `hypothesis` refuses and names what the row still needs.
+
+The bar is configurable per workspace, through the deep-merge config surface:
+
+```
+arb config set loop.evidence_bar.min_incidents 4
+arb config set loop.evidence_bar.min_distinct_tasks 3
+```
+
+Absent keys fall back to the documented `3` / `2`.
+
+### Every proposal is priced before it is approved
+
+The goal is a system that learns from itself *without growing worker contexts too
+much with those learnings*. A lesson the loop persists is not paid once at apply
+time — it is paid again by every dispatch that carries it, forever. So each row
+records **`context_cost_tokens`**: the recurring per-dispatch context the
+proposal would add if applied.
+
+- A **`task`-scoped override is 0** — blast radius 1 is charged once, against the
+  one task that carries it, and never lands in another dispatch's prompt.
+- A **`difficulty_override` is 0** at any scope — it is a routing change (*which*
+  model runs), not prompt content. A **`config_set` is 0** for the same reason.
+- Anything else fleet-wide is **prose that every future dispatch carries**, and
+  is priced at the clause length in *tokens*, not bytes. Skill clauses skew
+  toward paths, flags and code fragments, which tokenize far worse than prose, so
+  a byte count under-reads exactly the content most likely to be added. The
+  estimate is a deliberate local approximation (~4 chars/token) rather than a
+  tokenizer call: it runs inside the analysis pass, which stays free of network
+  I/O and LLM calls.
+
+The figure is shown in `arb loop pending` (a `+120ctx` / `free` column), in
+`arb loop diff`, over MCP, and on the dashboard next to the evidence counts — so
+a fleet-wide prompt addition cannot be approved without its standing price in the
+same glance as the case for paying it. Reinforcement re-estimates it from the
+current gist rather than leaving it stale at the first window's figure.
+
+The unit of account behind this is worth stating plainly: on a subscription,
+dollars are imputed. **Quota headroom is the binding constraint**, and context is
+how the loop spends it. A clause that adds 200 tokens to every dispatch is a
+standing withdrawal from the same budget the work itself needs — which is why the
+price is surfaced at the approval point rather than measured afterwards.
+
+### Applying goes through the front door
+
+`apply` dispatches on `kind` to the *same public domain API a human would call*
+— `Arbiter.Skills.update_skill/2`, the workspace `:patch_config` deep-merge, an
+`Issue` update — so the queue never writes those tables directly and every
+application leaves a normal paper-trail version attributed to
+`loop:proposal:<id>`. Read a skill's or a task's history and you can see exactly
+which queued proposal moved it.
+
+Rejection is **soft**: the row persists as `rejected` (nothing is ever deleted)
+and keeps accumulating evidence for the record, but is deliberately not
+re-proposed from scratch — a decision you already made is not re-litigated
+every window. `applied` rows are also not re-matched: a recurrence after an apply
+is a *new* hypothesis, which is precisely the signal that the fix did not land.
+
+Every state change publishes on the opt-in `loop_proposal` event topic
+(`/events?subscribe=...,loop_proposal`).
+
+What Stage 2 deliberately does **not** do: measure whether an applied proposal
+moved its `target_metric` (the `baseline` is pre-registered at propose time
+against that later re-grading pass), and author skill-patch *content* — no
+finding-category → skill mapping exists yet, so a `skill_patch` row with no
+target skill refuses to apply and says so.
 
 ## Where lessons land (you choose, per finding)
 
