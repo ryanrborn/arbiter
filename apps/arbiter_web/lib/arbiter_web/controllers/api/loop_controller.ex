@@ -1,29 +1,49 @@
 defmodule ArbiterWeb.Api.LoopController do
   @moduledoc """
-  REST surface for the Stage 1 loop-analysis pass (bd-dyfaq3).
+  REST surface for the loop-analysis pass (Stage 1, bd-dyfaq3) and its
+  reviewable-proposal queue (Stage 2, bd-9j2g3x).
 
     * `GET /api/loop/analyze` — run the operator-invoked loop-analysis pass over
       a window and return its markdown report. Optional query params: `since`
       (`7d` / `24h` / `30m` shortcuts or ISO8601; default: last 7 days), `until`
       (ISO8601; default now), `limit` (cap on runs scanned, newest first),
       `workspace_id`, `label`.
+    * `POST /api/loop/propose` — the same pass, plus persistence of the
+      proposals it implies. Same params.
+    * `GET  /api/loop/pending` — list queued proposals. Optional `state` (one
+      name or a comma-separated list; default the two live states), `kind`,
+      `workspace_id`, `limit`.
+    * `GET  /api/loop/pending/:id` — one proposal, including its unified `diff`.
+    * `POST /api/loop/pending/:id/apply` — apply it through the same public
+      domain API a human would use.
+    * `POST /api/loop/pending/:id/reject` — soft-reject it (optional `reason`).
 
-  The pass is **report-only**: it writes nothing but its own `usage_events`
-  cost row (`Arbiter.Loop.Analysis`). Backs the `arb loop analyze` CLI.
+  `GET /api/loop/analyze` is **report-only**: it writes nothing but its own
+  `usage_events` cost row (`Arbiter.Loop.Analysis`). Persisting proposals is a
+  separate verb on a separate route, so the read-only guarantee is structural
+  rather than a flag on a GET. Backs the `arb loop` CLI.
   """
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Loop
   alias Arbiter.Loop.Analysis
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
-  def analyze(conn, params) do
+  # Attribution label for decisions arriving over the REST/CLI surface.
+  @actor "cli"
+
+  def analyze(conn, params), do: run_analysis(conn, params, propose?: false)
+
+  def propose(conn, params), do: run_analysis(conn, params, propose?: true)
+
+  defp run_analysis(conn, params, propose?: propose?) do
     with {:ok, since} <- parse_window(params["since"]),
          {:ok, until} <- parse_iso(params["until"]),
          {:ok, limit} <- parse_limit(params["limit"]) do
       opts =
-        []
+        [propose?: propose?]
         |> put(:since, since)
         |> put(:until, until)
         |> put(:limit, limit)
@@ -31,17 +51,116 @@ defmodule ArbiterWeb.Api.LoopController do
         |> put(:label, blank_to_nil(params["label"]))
 
       case Analysis.analyze(opts) do
-        {:ok, %{markdown: markdown, report: report, usage_event_id: uid}} ->
-          json(conn, %{
-            markdown: markdown,
-            usage_event_id: uid,
-            summary: summary(report)
-          })
+        {:ok, %{markdown: markdown, report: report, usage_event_id: uid} = envelope} ->
+          json(
+            conn,
+            maybe_put_proposals(
+              %{markdown: markdown, usage_event_id: uid, summary: summary(report)},
+              envelope
+            )
+          )
 
         {:error, reason} ->
           {:error, {:invalid_request, "loop analysis failed: #{inspect(reason)}"}}
       end
     end
+  end
+
+  # `:proposals` is only present when the caller opted in, so the analyze
+  # response body is byte-identical to what it was before Stage 2.
+  defp maybe_put_proposals(body, %{proposals: rows}),
+    do: Map.put(body, :proposals, Enum.map(rows, &render_pending/1))
+
+  defp maybe_put_proposals(body, _envelope), do: body
+
+  # ---- the proposal queue -------------------------------------------------
+
+  def pending_index(conn, params) do
+    with {:ok, states} <- parse_states(params["state"]),
+         {:ok, kind} <- parse_kind(params["kind"]),
+         {:ok, limit} <- parse_limit(params["limit"]) do
+      rows =
+        []
+        |> put(:state, states || Loop.live_states())
+        |> put(:kind, kind)
+        |> put(:workspace_id, blank_to_nil(params["workspace_id"]))
+        |> put(:limit, limit)
+        |> Loop.list_pending()
+
+      json(conn, %{
+        pending: Enum.map(rows, &render_pending/1),
+        evidence_bar: Loop.evidence_bar(blank_to_nil(params["workspace_id"]))
+      })
+    end
+  end
+
+  def pending_show(conn, %{"id" => id}) do
+    with {:ok, row} <- Loop.get_pending(id) do
+      json(conn, %{pending: render_pending(row, :full)})
+    end
+  end
+
+  def pending_apply(conn, %{"id" => id}) do
+    case Loop.apply_pending(id, actor: @actor) do
+      {:ok, row} -> json(conn, %{pending: render_pending(row, :full), applied: true})
+      {:error, reason} -> {:error, apply_error(reason)}
+    end
+  end
+
+  def pending_reject(conn, %{"id" => id} = params) do
+    opts = [actor: @actor] |> put(:reason, blank_to_nil(params["reason"]))
+
+    case Loop.reject_pending(id, opts) do
+      {:ok, row} -> json(conn, %{pending: render_pending(row, :full), rejected: true})
+      {:error, reason} -> {:error, apply_error(reason)}
+    end
+  end
+
+  defp apply_error(:not_found), do: :not_found
+
+  defp apply_error({code, message}) when is_atom(code) and is_binary(message),
+    do: {:invalid_request, message, %{code: to_string(code)}}
+
+  defp apply_error(other), do: {:invalid_request, "loop proposal failed: #{inspect(other)}"}
+
+  defp render_pending(row, detail \\ :summary)
+
+  defp render_pending(row, :summary) do
+    %{
+      id: row.id,
+      kind: row.kind,
+      state: row.state,
+      scope: row.scope,
+      gist: row.gist,
+      evidence_count: row.evidence_count,
+      distinct_tasks: row.distinct_tasks,
+      context_cost_tokens: row.context_cost_tokens,
+      target: row.target,
+      category: row.category,
+      applicable: Loop.applicable?(row),
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    }
+  end
+
+  defp render_pending(row, :full) do
+    row
+    |> render_pending(:summary)
+    |> Map.merge(%{
+      diff: row.diff,
+      payload: row.payload,
+      target_metric: row.target_metric,
+      baseline: row.baseline,
+      incident_refs: row.incident_refs,
+      task_refs: row.task_refs,
+      fingerprint: row.fingerprint,
+      origin: row.origin,
+      workspace_id: row.workspace_id,
+      applied_at: row.applied_at,
+      escalated_at: row.escalated_at,
+      rejection_reason: row.rejection_reason,
+      inapplicable_reason: Loop.inapplicable_reason(row)
+    })
   end
 
   # A compact structured summary alongside the markdown, for programmatic callers.
@@ -85,6 +204,58 @@ defmodule ArbiterWeb.Api.LoopController do
         {:error,
          {:invalid_request, "expected ISO8601 or a 7d/24h/30m shortcut, got #{inspect(raw)}"}}
     end
+  end
+
+  # `state=` accepts one name or a comma-separated list; absent means the two
+  # live states (an operator wants the queue, not the archive). Unknown names are
+  # rejected rather than silently dropped, so a typo can't look like an empty
+  # queue.
+  @states ~w(proposed hypothesis applied rejected superseded)
+  @kinds ~w(skill_patch skill_create difficulty_override config_set)
+
+  defp parse_states(nil), do: {:ok, nil}
+  defp parse_states(""), do: {:ok, nil}
+
+  defp parse_states(raw) when is_binary(raw) do
+    names =
+      raw
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    case Enum.reject(names, &(&1 in @states)) do
+      [] when names == [] ->
+        {:ok, nil}
+
+      [] ->
+        {:ok, Enum.map(names, &String.to_existing_atom/1)}
+
+      bad ->
+        {:error,
+         {:invalid_request,
+          "unknown state(s) #{inspect(bad)}; expected one of #{Enum.join(@states, ", ")}"}}
+    end
+  end
+
+  defp parse_states(other) do
+    {:error, {:invalid_request, "state must be a string, got #{inspect(other)}"}}
+  end
+
+  defp parse_kind(nil), do: {:ok, nil}
+  defp parse_kind(""), do: {:ok, nil}
+
+  defp parse_kind(raw) when is_binary(raw) do
+    if raw in @kinds do
+      {:ok, String.to_existing_atom(raw)}
+    else
+      {:error,
+       {:invalid_request,
+        "unknown kind #{inspect(raw)}; expected one of #{Enum.join(@kinds, ", ")}"}}
+    end
+  end
+
+  defp parse_kind(other) do
+    {:error, {:invalid_request, "kind must be a string, got #{inspect(other)}"}}
   end
 
   defp parse_limit(nil), do: {:ok, nil}
