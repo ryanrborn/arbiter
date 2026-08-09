@@ -847,6 +847,104 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  describe "agy wire schema parsing (bd-2fzwlc round 2)" do
+    test "arb done split across two agy text_delta chunks still completes" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-split")
+
+      # agy's step_update/text_delta chunking can split the sentinel
+      # mid-word; the per-line check in emit_line/3 never sees a whole
+      # "arb done" line, so only the rolling-buffer safety net catches it.
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "all good now arb do"
+          }
+        },
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "DONE",
+            "text_delta" => "ne\n"
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+    end
+
+    test "agy text_delta chunks split mid-word render as one buffered line" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-buffer")
+      topic = "worker:#{task_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "the function conve"
+          }
+        },
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "rts the key into an index\n"
+          }
+        },
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "DONE",
+            "text_delta" => "\n"
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert "the function converts the key into an index" in lines
+      # The DONE step's own trailing "\n" must not render as an extra blank line.
+      refute "" in lines
+    end
+  end
+
   describe "codex exec --json parsing" do
     test "codex events render display lines and summarize the run" do
       {pid, task_id} = start_worker()

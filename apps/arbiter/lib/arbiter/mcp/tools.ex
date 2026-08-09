@@ -1983,6 +1983,11 @@ defmodule Arbiter.MCP.Tools do
   deprecated `campaign` alias for `epic`); `since` (ISO-8601) and `limit` are
   optional. `workspace_id` is forced to the scope's workspace. Backs onto
   `Arbiter.Usage.summarize/1`.
+
+  Also surfaces a `warnings` list (bd-2fzwlc) when a provider's rows are
+  wholly zero-token over the same `since`/workspace window — the same
+  blindness `Arbiter.Loop.Analysis` flags in the loop report, so a
+  coordinator reading this tool directly gets the same signal.
   """
   @spec usage_summarize(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def usage_summarize(%Scope{} = scope, args) do
@@ -1995,15 +2000,27 @@ defmodule Arbiter.MCP.Tools do
         |> maybe_put_kw(:since, since)
         |> maybe_put_kw(:limit, limit)
 
-      case Usage.summarize(opts) do
-        {:ok, rollups} ->
-          {:ok,
-           %{by: Atom.to_string(Usage.normalize_by(by)), rollups: rollups, count: length(rollups)}}
+      zero_token_opts =
+        [workspace_id: ws_id] |> maybe_put_kw(:since, since)
 
-        {:error, reason} ->
-          {:error, {:invalid, "usage_summarize failed: #{inspect(reason)}"}}
+      with {:ok, rollups} <- Usage.summarize(opts),
+           {:ok, flagged} <- Usage.zero_token_providers(zero_token_opts) do
+        {:ok,
+         %{
+           by: Atom.to_string(Usage.normalize_by(by)),
+           rollups: rollups,
+           count: length(rollups),
+           warnings: Enum.map(flagged, &zero_token_warning/1)
+         }}
+      else
+        {:error, reason} -> {:error, {:invalid, "usage_summarize failed: #{inspect(reason)}"}}
       end
     end
+  end
+
+  defp zero_token_warning(%{provider: provider, rows: rows}) do
+    "⚠ #{provider}: all #{rows} usage_events row(s) in this window carry zero tokens — " <>
+      "likely a stream parser silently dropping usage rather than a genuinely free provider."
   end
 
   # ---- notify_list --------------------------------------------------------

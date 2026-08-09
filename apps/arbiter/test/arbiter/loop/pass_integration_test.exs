@@ -196,4 +196,36 @@ defmodule Arbiter.Loop.PassIntegrationTest do
     assert md =~ "gemini"
     assert md =~ "zero tokens"
   end
+
+  test "a zero-token row outside the analyzed :until window does not trigger the warning (bd-2fzwlc)",
+       %{ws: ws} do
+    issue = issue!(ws, %{title: "codex task"})
+    run = run!(%{task_id: issue.id, status: :completed})
+
+    # This row's occurred_at is AFTER the window's :until — a historical
+    # report analysing a past window must not be flagged (or cleared) by
+    # data outside the window it actually covers.
+    {:ok, _} =
+      Ash.create(Event, %{
+        task_id: run.task_id,
+        step: :work,
+        worker_run_id: run.id,
+        provider: "codex",
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: nil,
+        occurred_at: DateTime.add(DateTime.utc_now(), 3600, :second)
+      })
+
+    assert {:ok, %{report: report, markdown: md}} =
+             Analysis.analyze(
+               label: "past window",
+               since: DateTime.add(DateTime.utc_now(), -7200, :second),
+               until: DateTime.add(DateTime.utc_now(), -3600, :second),
+               record_cost?: false
+             )
+
+    refute Enum.any?(report.notes, &(&1 =~ "codex"))
+    refute md =~ "codex"
+  end
 end

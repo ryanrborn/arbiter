@@ -545,7 +545,11 @@ defmodule Arbiter.Loop.Analysis do
   # `build_report/2` so that function stays a pure, DB-free formatter.
   defp add_zero_token_notes(%Report{} = report, meta) do
     usage_opts =
-      [since: Map.get(meta, :since), workspace_id: Map.get(meta, :workspace_id)]
+      [
+        since: Map.get(meta, :since),
+        until: Map.get(meta, :until),
+        workspace_id: Map.get(meta, :workspace_id)
+      ]
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
     case Arbiter.Usage.zero_token_providers(usage_opts) do

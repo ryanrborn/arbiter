@@ -109,7 +109,9 @@ defmodule Arbiter.Usage do
   out. A provider with even one non-zero row is not flagged — this is a
   blindness detector, not a low-usage alert.
 
-  Accepts the same `:since` / `:workspace_id` options as `summarize/1`.
+  Accepts the same `:since` / `:workspace_id` options as `summarize/1`, plus
+  `:until` (`%DateTime{}`, filters `occurred_at <= until`) so a historical
+  window's flag reflects only the rows the window actually covers.
   Returns `{:ok, [%{provider:, rows:}]}`, sorted by provider name.
   """
   @spec zero_token_providers(keyword()) :: {:ok, [%{provider: String.t(), rows: pos_integer()}]}
@@ -168,6 +170,12 @@ defmodule Arbiter.Usage do
       case Keyword.get(opts, :since) do
         nil -> query
         %DateTime{} = dt -> Ash.Query.filter(query, occurred_at >= ^dt)
+      end
+
+    query =
+      case Keyword.get(opts, :until) do
+        nil -> query
+        %DateTime{} = dt -> Ash.Query.filter(query, occurred_at <= ^dt)
       end
 
     case Keyword.get(opts, :workspace_id) do
