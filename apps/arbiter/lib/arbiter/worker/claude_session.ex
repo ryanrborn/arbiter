@@ -1015,6 +1015,21 @@ defmodule Arbiter.Worker.ClaudeSession do
   @doc false
   @spec handle_exit(map(), integer()) :: map()
   def handle_exit(%{} = session, status) when is_integer(status) do
+    # Flush any buffered agy `text_delta` text (bd-2fzwlc round 2): agy emits
+    # its whole response with no interior newlines until the terminal event,
+    # so a session killed on timeout/cancel/crash before `DONE`/`result`
+    # would otherwise lose the entire partial response from the transcript.
+    session =
+      case Map.get(session, :gemini_text_buf, "") do
+        "" ->
+          session
+
+        buf ->
+          {lines, _remainder} = flush_display_buffer(buf)
+          session = Map.put(session, :gemini_text_buf, "")
+          Enum.reduce(lines, session, &emit_line(&2, &1, true))
+      end
+
     # Flush any buffered partial line the child left without a trailing newline.
     session =
       case Map.get(session, :line_buf, "") do

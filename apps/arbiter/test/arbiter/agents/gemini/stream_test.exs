@@ -150,7 +150,15 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
              }
     end
 
-    test "result maps the flat usage object, derives cost off the fallback model" do
+    # bd-2fzwlc round 2: agy names no model in any event, and its real
+    # catalogue (confirmed live) doesn't overlap the Gemini price table at
+    # all — pricing off the pre-resolved `fallback_model` (which defaults to
+    # the hardcoded gemini-2.5-pro) stamped a confident, wrong dollar figure
+    # on a model agy never ran. So agy rows never derive cost from
+    # `fallback_model`, and never stamp a guessed `:model` either — a nil
+    # cost with an explanatory note beats a fabricated number, regardless of
+    # what `fallback_model` is.
+    test "result maps the flat usage object; cost is always unavailable and unpriced, model is never guessed" do
       event = %{
         "event" => "result",
         "result" => %{
@@ -175,15 +183,15 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert fields.tokens_out == 118
       assert fields.cache_read_tokens == 0
       assert fields.duration_ms == 1103
-      assert fields.model == "gemini-2.5-pro"
+      refute Map.has_key?(fields, :model)
       assert fields.is_error == false
       assert fields.result_status == "SUCCESS"
       assert fields.raw == event
-      # pro: (17529-0)*1.25/1M + 0*0.31/1M + 118*10/1M = 0.0219 + 0 + 0.00118 = 0.02309
-      assert_in_delta fields.cost_usd, 0.02309, 1.0e-5
+      refute Map.has_key?(fields, :cost_usd)
+      assert fields.cost_note =~ "agy does not report which model it ran"
     end
 
-    test "result with no fallback model and no price match records why cost is nil" do
+    test "result with no fallback model still records why cost is nil" do
       event = %{
         "event" => "result",
         "result" => %{
@@ -194,7 +202,7 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
 
       fields = Stream.usage_fields(event, nil)
       refute Map.has_key?(fields, :cost_usd)
-      assert fields.cost_note =~ "no model"
+      assert fields.cost_note =~ "agy does not report which model it ran"
     end
 
     test "non-SUCCESS status flags is_error" do

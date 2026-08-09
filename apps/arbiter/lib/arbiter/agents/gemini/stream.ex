@@ -45,16 +45,29 @@ defmodule Arbiter.Agents.Gemini.Stream do
       {"event":"step_update","step_update":{"conversation_id":..,"step_index":..,"state":"DONE","step_type":"user_input"|"unknown"|"agent_response"|"checkpoint",..}}
       {"event":"result","result":{"conversation_id":..,"status":"SUCCESS"|..,"response":..,"duration_seconds":..,"num_turns":..,"usage":{"input_tokens":..,"output_tokens":..,"thinking_tokens":..,"cache_read_tokens":..,"total_tokens":..}}}
 
-  `agy`'s terminal `result.usage` has no per-model breakdown, so cost is
-  derived off the session's pre-resolved `fallback_model` via
-  `Arbiter.Agents.Gemini.Pricing.model_cost/2` directly (skipping
-  `Pricing.cost_usd/1`'s `stats["models"]` shape). When cost can't be derived
-  — no model resolved, or the model isn't in the price table — `:cost_note`
-  records *why*, so a null `cost_usd` reads as "known limitation" rather than
-  "parse failure".
+  `agy`'s terminal `result.usage` has no per-model breakdown, and — confirmed
+  live (bd-2fzwlc round 2) — no `result` or `init` event names which model
+  actually ran; agy's own catalogue doesn't overlap the Gemini price table at
+  all (Gemini 3.x tiers, Claude models, GPT-OSS, no 2.5 model). Pricing a row
+  against the session's pre-resolved `fallback_model` would therefore stamp a
+  confident, wrong dollar figure — worse than no figure — so agy rows always
+  carry `cost_usd: nil` and a `:cost_note` explaining why, and never stamp a
+  guessed `:model` onto the row (that would pollute `usage_summarize --by
+  model` with a model agy didn't run).
   """
 
   alias Arbiter.Agents.Gemini.Pricing
+
+  # agy reports no model in any event (confirmed live, bd-2fzwlc round 2 —
+  # `init` carries only cwd/tools/permission_mode, and `result` carries no
+  # model field either), and its v1.1.11 catalogue does not overlap the
+  # Gemini price table at all (Gemini 3.x tiers, Claude models, GPT-OSS —
+  # no 2.5 model). Pricing an agy row against the session's pre-resolved
+  # `fallback_model` — which defaults to the hardcoded `gemini-2.5-pro` when
+  # nothing is configured — would stamp a confident, wrong dollar figure on
+  # a model agy never ran. So agy cost is always unavailable; the row must
+  # say why rather than guess.
+  @agy_cost_unavailable_note "cost unavailable: agy does not report which model it ran and its model catalogue does not overlap the Gemini price table"
 
   @doc """
   Reduce one decoded stream-json event to a map of usage fields to merge onto
@@ -95,20 +108,18 @@ defmodule Arbiter.Agents.Gemini.Stream do
     drop_nil(%{session_id: session_id})
   end
 
-  def usage_fields(%{"event" => "result", "result" => result} = event, fallback_model)
+  def usage_fields(%{"event" => "result", "result" => result} = event, _fallback_model)
       when is_map(result) do
     usage = result["usage"] || %{}
     status = result["status"]
-    {cost, cost_note} = agy_cost(usage, fallback_model)
 
     drop_nil(%{
       tokens_in: number(usage["input_tokens"]),
       tokens_out: number(usage["output_tokens"]),
       cache_read_tokens: number(usage["cache_read_tokens"]),
       duration_ms: agy_duration_ms(result["duration_seconds"]),
-      cost_usd: cost,
-      cost_note: cost_note,
-      model: fallback_model,
+      cost_usd: nil,
+      cost_note: @agy_cost_unavailable_note,
       result_status: status,
       is_error: status not in [nil, "SUCCESS"],
       raw: event
@@ -321,30 +332,6 @@ defmodule Arbiter.Agents.Gemini.Stream do
       end
 
     Enum.join(parts, " · ")
-  end
-
-  # agy's `result.usage` has no per-model breakdown, so cost is derived off
-  # the session's spawn-time `fallback_model` directly via
-  # `Pricing.model_cost/2` rather than `Pricing.cost_usd/1`. When cost can't
-  # be derived, `cost_note` records why (no model resolved, or an unpriced
-  # model) so the row's null cost_usd is legible instead of looking like a
-  # parse failure.
-  defp agy_cost(_usage, nil) do
-    {nil, "cost unavailable: no model resolved for this session"}
-  end
-
-  defp agy_cost(usage, model) do
-    entry = %{
-      "cached" => usage["cache_read_tokens"],
-      "input_tokens" => usage["input_tokens"],
-      "output_tokens" => usage["output_tokens"],
-      "total_tokens" => usage["total_tokens"]
-    }
-
-    case Pricing.model_cost(model, entry) do
-      nil -> {nil, "cost unavailable: #{model} is not in the Gemini price table"}
-      cost -> {cost, nil}
-    end
   end
 
   defp agy_duration_ms(seconds) when is_number(seconds), do: round(seconds * 1000)

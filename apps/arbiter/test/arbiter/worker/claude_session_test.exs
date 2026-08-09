@@ -943,6 +943,41 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       # The DONE step's own trailing "\n" must not render as an extra blank line.
       refute "" in lines
     end
+
+    test "abnormal exit before DONE/result still flushes buffered agy text (bd-2fzwlc round 2)" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-exit-flush")
+
+      # agy emits its whole response with no interior newlines until the
+      # terminal event, so a session that ends (crash, timeout, cancel)
+      # before a DONE step or result event would otherwise lose the entire
+      # partial response — the child process here just exits cleanly after
+      # printing one IN_PROGRESS chunk, with no DONE/result event at all.
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "partial response with no trailing newline"
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert "partial response with no trailing newline" in lines
+    end
   end
 
   describe "codex exec --json parsing" do
