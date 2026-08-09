@@ -106,6 +106,13 @@ defmodule ArbiterWeb.Api.WorkerController do
           "multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
             "`arb issue dispatch #{task_id} <repo>`", %{task_id: task_id, available_repos: repos}}}
 
+      {:error, {:pending_migrations, count}} ->
+        {:error,
+         {:invalid_request,
+          "#{count} pending migration(s) — the server is currently applying schema changes. " <>
+            "Wait for the deployment to complete before dispatching work.",
+          %{task_id: task_id, pending_migrations: count}}}
+
       {:error, reason} ->
         {:error, {:server_error, "dispatch failed", %{reason: inspect(reason)}}}
     end

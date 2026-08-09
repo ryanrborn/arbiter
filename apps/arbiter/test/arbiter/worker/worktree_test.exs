@@ -626,6 +626,109 @@ defmodule Arbiter.Worker.WorktreeTest do
     end
   end
 
+  describe "rebase_onto_origin/2" do
+    test "rebases local-only commits onto a diverged remote tip, preserving both sides (bd-3doy0y)",
+         %{repo: repo, remote: remote, root: root} do
+      {:ok, path} = Worktree.create(repo, "feature/rebase-diverge", "main")
+
+      # ReviewGate implementer round: pushes a fix commit straight to
+      # origin/<branch> from a separate clone, without touching this
+      # worktree's local ref.
+      advance_origin_branch!(
+        root,
+        remote,
+        "feature/rebase-diverge",
+        "implementer.txt",
+        "implementer work\n"
+      )
+
+      # Meanwhile the main worker's own worktree makes its own local commit —
+      # now genuinely diverged from origin, not merely behind.
+      :ok = commit(path, "main-worker.txt", "main worker work\n", "main worker fix")
+
+      assert {:ok, :rebased} = Worktree.rebase_onto_origin(path, "feature/rebase-diverge")
+
+      assert File.exists?(Path.join(path, "implementer.txt"))
+      assert File.exists?(Path.join(path, "main-worker.txt"))
+
+      # Local is now strictly ahead of origin/<branch> — a normal (non-force)
+      # push must succeed.
+      assert {:ok, _} = Worktree.push(path, branch: "feature/rebase-diverge")
+
+      {out, 0} =
+        System.cmd("git", ["-C", remote, "show", "feature/rebase-diverge:implementer.txt"])
+
+      assert out == "implementer work\n"
+
+      {out2, 0} =
+        System.cmd("git", ["-C", remote, "show", "feature/rebase-diverge:main-worker.txt"])
+
+      assert out2 == "main worker work\n"
+    end
+
+    test "fast-forwards (no rebase needed) when local is merely behind", %{
+      repo: repo,
+      remote: remote,
+      root: root
+    } do
+      {:ok, path} = Worktree.create(repo, "feature/rebase-ff", "main")
+
+      advance_origin_branch!(
+        root,
+        remote,
+        "feature/rebase-ff",
+        "implementer.txt",
+        "implementer work\n"
+      )
+
+      assert {:ok, :synced} = Worktree.rebase_onto_origin(path, "feature/rebase-ff")
+      assert File.exists?(Path.join(path, "implementer.txt"))
+    end
+
+    test "is a no-op when local already matches origin", %{repo: repo} do
+      {:ok, path} = Worktree.create(repo, "feature/rebase-noop", "main")
+
+      {_, 0} =
+        System.cmd("git", ["-C", path, "push", "-q", "-u", "origin", "feature/rebase-noop"])
+
+      assert {:ok, :up_to_date} = Worktree.rebase_onto_origin(path, "feature/rebase-noop")
+    end
+
+    test "aborts and reports the conflict distinctly, leaving the worktree clean on its own commit",
+         %{repo: repo, remote: remote, root: root} do
+      {:ok, path} = Worktree.create(repo, "feature/rebase-conflict", "main")
+
+      advance_origin_branch!(
+        root,
+        remote,
+        "feature/rebase-conflict",
+        "README.md",
+        "implementer changed this line\n"
+      )
+
+      :ok =
+        commit(
+          path,
+          "README.md",
+          "main worker changed this line differently\n",
+          "main worker edits README"
+        )
+
+      assert {:error, {:diverged_conflict, %{files: files}}} =
+               Worktree.rebase_onto_origin(path, "feature/rebase-conflict")
+
+      assert "README.md" in files
+
+      # Left clean on the worker's own commit — never half-rebased.
+      assert {:ok, false} = Worktree.has_uncommitted?(path)
+
+      {out, 0} =
+        System.cmd("git", ["-C", path, "log", "-1", "--format=%s"], stderr_to_stdout: true)
+
+      assert String.trim(out) == "main worker edits README"
+    end
+  end
+
   describe "list/1" do
     test "returns linked worktrees with branch names, excluding the main",
          %{repo: repo} do
@@ -897,6 +1000,30 @@ defmodule Arbiter.Worker.WorktreeTest do
     {_, 0} = System.cmd("git", ["-C", clone, "add", file])
     {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "advance origin"])
     {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+    :ok
+  end
+
+  # Like advance_origin!/4 but for an arbitrary branch — pushes a commit to
+  # `origin/<branch>` from a throwaway clone (checking the branch out first
+  # if the clone doesn't already have it locally), simulating a second
+  # writer (e.g. the ReviewGate implementer round) pushing directly to the
+  # remote without the caller's worktree ever seeing it.
+  defp advance_origin_branch!(tmp, remote, branch, file, content) do
+    clone = Path.join(tmp, "advance-#{:erlang.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+    {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+    {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+    {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+
+    case System.cmd("git", ["-C", clone, "checkout", "-q", branch], stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {_, _} -> {_, 0} = System.cmd("git", ["-C", clone, "checkout", "-q", "-b", branch])
+    end
+
+    File.write!(Path.join(clone, file), content)
+    {_, 0} = System.cmd("git", ["-C", clone, "add", file])
+    {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "advance " <> branch])
+    {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", branch])
     :ok
   end
 
