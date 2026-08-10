@@ -1263,11 +1263,15 @@ defmodule Arbiter.Worker.DispatchTest do
       # The Gemini adapter ran — and Claude did not.
       refute File.exists?(claude_file)
 
-      # The worker's routing config records the gemini provider + a model id.
+      # The worker's routing config records the gemini provider. The model is
+      # nil (bd-2fzwlc round 3): `agy` is the resolved executable here (it's
+      # preferred over `gemini` whenever both are on PATH), and agy's model
+      # catalogue doesn't overlap ours at all, so `Gemini.resolved_model/1`
+      # intentionally reports "unknown" rather than a guessed model id.
       snap = Worker.state(result.worker_pid)
       routing = snap.meta[:routing_config]
       assert routing.provider == "gemini"
-      assert routing.model =~ "gemini"
+      assert routing.model == nil
     end
 
     test "agent_type: :codex dispatches the Codex adapter, not Claude (bd-dcvo3n)",
@@ -2758,7 +2762,12 @@ defmodule Arbiter.Worker.DispatchTest do
 
   defmodule StubMigrationsPending do
     @moduledoc false
-    def count_pending, do: 3
+    def count_pending, do: {:ok, 3}
+  end
+
+  defmodule StubMigrationsUnreachable do
+    @moduledoc false
+    def count_pending, do: {:error, :unreachable}
   end
 
   describe "pending migrations gate" do
@@ -2791,6 +2800,22 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) ==
                {:error, {:pending_migrations, 3}}
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert reloaded.status != :in_progress
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "dispatch is refused when the migration check fails (database unreachable)",
+         %{ws: ws} do
+      Application.put_env(:arbiter, :migrations_module, StubMigrationsUnreachable)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :migrations_module) end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "migrations check failed", workspace_id: ws.id})
+
+      assert Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) ==
+               {:error, {:migrations_check_failed, :unreachable}}
 
       reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status != :in_progress

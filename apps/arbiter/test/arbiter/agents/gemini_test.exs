@@ -26,7 +26,32 @@ defmodule Arbiter.Agents.GeminiTest do
     setup do
       Arbiter.Agents.Gemini.Config.clear()
       on_exit(&Arbiter.Agents.Gemini.Config.clear/0)
-      :ok
+
+      # resolved_model/1 now branches on which executable would actually run
+      # (bd-2fzwlc round 3), so these tests must not depend on whether the
+      # host machine happens to have `agy` on PATH — pin PATH to a stub
+      # `gemini` binary so they exercise the resolve_model/1 fallback chain
+      # deterministically, the same way the default_argv/2 tests below do.
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-resolved-model-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
     end
 
     test "uses an explicit :model override verbatim" do
@@ -42,6 +67,21 @@ defmodule Arbiter.Agents.GeminiTest do
       # No explicit model, no tier, no workspace active_model → the gemini-cli's
       # own DEFAULT_GEMINI_MODEL, so the usage ledger still lands a concrete id.
       assert Gemini.resolved_model([]) == "gemini-2.5-pro"
+    end
+
+    test "returns nil when the resolved executable is agy, even with an explicit :model",
+         %{tmp: tmp} do
+      # agy's model catalogue doesn't overlap ours at all (confirmed live —
+      # bd-2fzwlc round 2/3), so an explicit override can't be trusted either:
+      # agy is preferred over gemini whenever both are on PATH, and stamping
+      # any of these ids on the row would be a guess the session can't back up.
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      assert Gemini.resolved_model([]) == nil
+      assert Gemini.resolved_model(model: "gemini-2.5-flash") == nil
+      assert Gemini.resolved_model(model_tier: "premium") == nil
     end
   end
 
@@ -129,22 +169,48 @@ defmodule Arbiter.Agents.GeminiTest do
       assert "-y" in rest
     end
 
-    test "passes through `:model` opt as `--model <name>`", %{tmp: tmp} do
+    test "omits --model on the agy branch even with an explicit :model opt", %{tmp: tmp} do
+      # agy's model catalogue doesn't overlap ours at all (confirmed live —
+      # bd-2fzwlc round 3): every model id this module can produce is rejected
+      # by agy as an unrecognized `--model`, so the flag must never be passed
+      # on the agy branch regardless of what opts request.
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
       assert {:ok, argv} = Gemini.default_argv("the prompt", model: "gemini-flash")
       assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
+      refute "--model" in rest
+      refute "gemini-flash" in rest
+    end
+
+    test "omits --model on the agy branch for every :model_tier", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      for tier <- ["premium", "standard", "economy"] do
+        {:ok, argv} = Gemini.default_argv("the prompt", model_tier: tier)
+        refute "--model" in argv
+      end
+    end
+
+    test "passes through `:model` opt as `--model <name>` on the gemini branch", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      assert {:ok, argv} = Gemini.default_argv("the prompt", model: "gemini-flash")
+      assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "the prompt" | rest] = argv
       assert "--model" in rest
       assert "gemini-flash" in rest
     end
 
-    test "resolves :model_tier to a concrete Gemini model via the default tier map",
+    test "resolves :model_tier to a concrete Gemini model via the default tier map on the gemini branch",
          %{tmp: tmp} do
-      agy_stub = Path.join(tmp, "agy")
-      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
-      File.chmod!(agy_stub, 0o755)
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
 
       for {tier, model} <- [
             {"premium", "gemini-2.5-pro"},
@@ -158,9 +224,9 @@ defmodule Arbiter.Agents.GeminiTest do
     end
 
     test ":model wins over :model_tier when both are set", %{tmp: tmp} do
-      agy_stub = Path.join(tmp, "agy")
-      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
-      File.chmod!(agy_stub, 0o755)
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
 
       {:ok, argv} =
         Gemini.default_argv("the prompt", model: "custom-model", model_tier: "economy")
@@ -170,9 +236,9 @@ defmodule Arbiter.Agents.GeminiTest do
     end
 
     test ":model_tier can be overridden per-workspace via tier_models config", %{tmp: tmp} do
-      agy_stub = Path.join(tmp, "agy")
-      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
-      File.chmod!(agy_stub, 0o755)
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
 
       Gemini.Config.put_active(%{
         "tier_models" => %{"premium" => "gemini-ultra"}
@@ -227,14 +293,17 @@ defmodule Arbiter.Agents.GeminiTest do
       assert chunk_after(rest, "--output-format") == "stream-json"
     end
 
-    test "agy CLI path does NOT add --output-format (unsupported by the fork)", %{tmp: tmp} do
+    test "agy CLI path also adds --output-format stream-json (bd-2fzwlc: agy supports it)", %{
+      tmp: tmp
+    } do
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
       assert {:ok, argv} = Gemini.default_argv("the prompt", [])
-      refute "--output-format" in argv
-      refute "stream-json" in argv
+      assert "--output-format" in argv
+      assert "stream-json" in argv
+      assert chunk_after(argv, "--output-format") == "stream-json"
     end
   end
 

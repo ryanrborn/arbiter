@@ -301,7 +301,7 @@ defmodule ArbiterCli.Cmd.Doctor do
 
   defp check_migrations do
     case Client.get("/api/server/migrations") do
-      {:ok, %{"pending_count" => 0}} ->
+      {:ok, %{"status" => "ok", "pending_count" => 0}} ->
         %Result{
           name: "migrations up to date",
           status: :ok,
@@ -310,12 +310,23 @@ defmodule ArbiterCli.Cmd.Doctor do
           blocks_readiness: false
         }
 
-      {:ok, %{"pending_count" => count}} when is_integer(count) and count > 0 ->
+      {:ok, %{"status" => "warning", "pending_count" => count}}
+      when is_integer(count) and count > 0 ->
         %Result{
           name: "migrations up to date",
           status: :fail,
           detail: "#{count} pending",
           hint: "The server has unapplied migrations. Wait for the deployment to complete.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"status" => "unknown"}} ->
+        %Result{
+          name: "migrations up to date",
+          status: :fail,
+          detail: "could not check",
+          hint: "The server could not verify migration status. Check server logs for errors.",
           fatal: false,
           blocks_readiness: false
         }

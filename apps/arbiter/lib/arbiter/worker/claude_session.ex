@@ -384,6 +384,7 @@ defmodule Arbiter.Worker.ClaudeSession do
           session
           |> absorb_usage(event)
           |> scan_split_done(event)
+          |> buffer_gemini_display(event)
 
         event
         |> format_event(session)
@@ -413,6 +414,34 @@ defmodule Arbiter.Worker.ClaudeSession do
        )
        when is_binary(content) do
     buf = scan_tail(Map.get(session, :split_done_buf, "") <> content)
+    session = Map.put(session, :split_done_buf, buf)
+
+    if Regex.match?(session.done_regex, buf) do
+      send(self(), {:__claude_session_done__, buf})
+      Map.put(session, :split_done_fired, true)
+    else
+      session
+    end
+  end
+
+  # `agy` (the Gemini fork preferred by `resolve_executable/0`, bd-2fzwlc)
+  # speaks a completely different wire schema than upstream gemini — a
+  # top-level `"event"` discriminator with assistant text nested under
+  # `step_update.text_delta`. The clause above only matches upstream's
+  # `"type" => "message"` shape, so every agy event fell through to the
+  # catch-all below and this safety net never armed for agy sessions — the
+  # one Gemini executable that actually needs it, since it streams deltas
+  # that can split "arb done" mid-word. Mirrors the codex clause's rolling
+  # buffer.
+  defp scan_split_done(
+         %{provider: "gemini"} = session,
+         %{
+           "event" => "step_update",
+           "step_update" => %{"step_type" => "agent_response", "text_delta" => text}
+         }
+       )
+       when is_binary(text) do
+    buf = scan_tail(Map.get(session, :split_done_buf, "") <> text)
     session = Map.put(session, :split_done_buf, buf)
 
     if Regex.match?(session.done_regex, buf) do
@@ -472,6 +501,69 @@ defmodule Arbiter.Worker.ClaudeSession do
   # chunk boundary without growing unbounded on a long turn.
   defp scan_tail(text) when is_binary(text) do
     if String.length(text) > 256, do: String.slice(text, -256, 256), else: text
+  end
+
+  # `agy`'s `text_delta` chunks can split mid-word (bd-2fzwlc round 2: a live
+  # probe split "converts" across two deltas), so formatting each delta as its
+  # own complete line breaks both readability and line-anchored downstream
+  # parsing (e.g. ReviewGate's `VERDICT: APPROVE` regex). Buffer per-session
+  # and emit only through the last newline; flush the remainder when the step
+  # reports `state: "DONE"` (whose own trailing `text_delta` is often just
+  # `"\n"`, which this also stops from rendering as an extra blank line) or
+  # when the session's terminal `result` event arrives as a fallback. Sets
+  # `:gemini_pending_lines` for `format_event/2` to read.
+  defp buffer_gemini_display(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "agent_response", "text_delta" => text} = step
+       })
+       when is_binary(text) do
+    buf = Map.get(session, :gemini_text_buf, "")
+
+    {lines, remainder} =
+      if step["state"] == "DONE" do
+        flush_display_buffer(buf <> text)
+      else
+        split_display_lines(buf <> text)
+      end
+
+    session
+    |> Map.put(:gemini_text_buf, remainder)
+    |> Map.put(:gemini_pending_lines, lines)
+  end
+
+  defp buffer_gemini_display(%{provider: "gemini"} = session, %{"event" => "result"}) do
+    {lines, remainder} = flush_display_buffer(Map.get(session, :gemini_text_buf, ""))
+
+    session
+    |> Map.put(:gemini_text_buf, remainder)
+    |> Map.put(:gemini_pending_lines, lines)
+  end
+
+  defp buffer_gemini_display(%{provider: "gemini"} = session, _event),
+    do: Map.put(session, :gemini_pending_lines, [])
+
+  defp buffer_gemini_display(session, _event), do: session
+
+  # Split off every *complete* line (text up to and including a "\n"), keeping
+  # whatever trails the last newline as the new buffer.
+  defp split_display_lines(text) do
+    parts = String.split(text, "\n")
+    {complete, [last]} = Enum.split(parts, -1)
+    {complete, last}
+  end
+
+  # Flush everything buffered, e.g. at the step's `state: "DONE"` or the
+  # session's terminal `result` event. Strips exactly one trailing newline —
+  # agy's DONE step carries its own trailing `text_delta` (observed: `"\n"`),
+  # which is the message's closing newline, not an intentional blank line —
+  # so without this a fully-flushed buffer renders a spurious empty line.
+  defp flush_display_buffer(text) do
+    trimmed = if String.ends_with?(text, "\n"), do: String.slice(text, 0..-2//1), else: text
+
+    case trimmed do
+      "" -> {[], ""}
+      _ -> {String.split(trimmed, "\n"), ""}
+    end
   end
 
   # Capture structured usage off the two events that carry it. The `init` event
@@ -678,11 +770,36 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp normalize_event(%{"type" => "event_msg", "payload" => %{"type" => _} = p}), do: {:ok, p}
   defp normalize_event(%{"msg" => %{"type" => _} = msg}), do: {:ok, msg}
   defp normalize_event(%{"type" => _} = event), do: {:ok, event}
+  # agy (bd-2fzwlc) speaks a top-level `"event"` discriminator instead of
+  # `"type"` — without this clause every agy JSONL line fails to decode and
+  # falls through to the raw-text path, silently skipping absorb_usage/2,
+  # scan_split_done/2, and format_event/2 for every agy event. This is the
+  # root cause of the zero-token/zero-cost agy rows, not just the missing
+  # split-done safety net.
+  defp normalize_event(%{"event" => _} = event), do: {:ok, event}
   defp normalize_event(_), do: :error
 
   # Provider-aware dispatch: Gemini's stream-json events have a different shape,
   # so they're formatted by the Gemini parser. Claude (and the nil/default
   # provider) use the clauses below.
+  # agy's assistant text is buffered per-session by `buffer_gemini_display/2`
+  # (called earlier in `process_line/2`) so a delta split mid-word or
+  # mid-sentinel doesn't render as two broken lines. Read the lines it
+  # computed instead of re-deriving from this single event.
+  defp format_event(
+         %{"event" => "step_update", "step_update" => %{"step_type" => "agent_response"}},
+         %{provider: "gemini"} = session
+       ) do
+    session
+    |> Map.get(:gemini_pending_lines, [])
+    |> Enum.map(&{&1, true})
+  end
+
+  defp format_event(%{"event" => "result"} = event, %{provider: "gemini"} = session) do
+    flushed = session |> Map.get(:gemini_pending_lines, []) |> Enum.map(&{&1, true})
+    flushed ++ Arbiter.Agents.Gemini.Stream.format_event(event)
+  end
+
   defp format_event(event, %{provider: "gemini"}),
     do: Arbiter.Agents.Gemini.Stream.format_event(event)
 
@@ -851,6 +968,11 @@ defmodule Arbiter.Worker.ClaudeSession do
       is_binary(input["path"]) -> input["path"]
       is_binary(input["pattern"]) -> truncate(input["pattern"], 200)
       is_binary(input["description"]) -> truncate(input["description"], 200)
+      # Skill tool: render the skill name directly rather than falling through
+      # to Jason.encode!/1, whose key-sort order can push "skill" past a
+      # length-based truncation cutoff when "args" is long. Also gives a more
+      # readable transcript line (`⏵ Skill(tdd)` vs raw JSON).
+      is_binary(input["skill"]) -> input["skill"]
       true -> truncate(Jason.encode!(input), 200)
     end
   end
@@ -898,6 +1020,21 @@ defmodule Arbiter.Worker.ClaudeSession do
   @doc false
   @spec handle_exit(map(), integer()) :: map()
   def handle_exit(%{} = session, status) when is_integer(status) do
+    # Flush any buffered agy `text_delta` text (bd-2fzwlc round 2): agy emits
+    # its whole response with no interior newlines until the terminal event,
+    # so a session killed on timeout/cancel/crash before `DONE`/`result`
+    # would otherwise lose the entire partial response from the transcript.
+    session =
+      case Map.get(session, :gemini_text_buf, "") do
+        "" ->
+          session
+
+        buf ->
+          {lines, _remainder} = flush_display_buffer(buf)
+          session = Map.put(session, :gemini_text_buf, "")
+          Enum.reduce(lines, session, &emit_line(&2, &1, true))
+      end
+
     # Flush any buffered partial line the child left without a trailing newline.
     session =
       case Map.get(session, :line_buf, "") do

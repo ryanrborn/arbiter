@@ -177,7 +177,14 @@ defmodule Arbiter.Loop.PendingWrite do
     attribute :kind, :atom do
       allow_nil? false
       public? true
-      constraints one_of: [:skill_patch, :skill_create, :difficulty_override, :config_set]
+
+      constraints one_of: [
+                    :skill_patch,
+                    :skill_create,
+                    :difficulty_override,
+                    :config_set,
+                    :repo_doc_patch
+                  ]
 
       description "What applying this proposal does; dispatched on by Arbiter.Loop.apply_pending/2."
     end

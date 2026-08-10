@@ -576,6 +576,39 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assert "⏵ Bash(mix test)" in lines
     end
 
+    test "Skill tool_use renders the skill name directly, even with a long args value" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("cs-sj-skill-tool")
+
+      long_args = String.duplicate("a", 300)
+
+      events = [
+        %{
+          "type" => "assistant",
+          "message" => %{
+            "content" => [
+              %{
+                "type" => "tool_use",
+                "name" => "Skill",
+                "input" => %{"args" => long_args, "skill" => "test-driven-development"}
+              }
+            ]
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+      assert "⏵ Skill(test-driven-development)" in lines
+    end
+
     test "decoded events refresh the session's live activity (mirrored into meta)" do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-activity")
@@ -844,6 +877,139 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       refute Worker.state(pid).status == :completed
       lines = Worker.state(pid).meta.output_lines
       assert Enum.any?(lines, &String.contains?(&1, "match:"))
+    end
+  end
+
+  describe "agy wire schema parsing (bd-2fzwlc round 2)" do
+    test "arb done split across two agy text_delta chunks still completes" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-split")
+
+      # agy's step_update/text_delta chunking can split the sentinel
+      # mid-word; the per-line check in emit_line/3 never sees a whole
+      # "arb done" line, so only the rolling-buffer safety net catches it.
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "all good now arb do"
+          }
+        },
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "DONE",
+            "text_delta" => "ne\n"
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+    end
+
+    test "agy text_delta chunks split mid-word render as one buffered line" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-buffer")
+      topic = "worker:#{task_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "the function conve"
+          }
+        },
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "rts the key into an index\n"
+          }
+        },
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "DONE",
+            "text_delta" => "\n"
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert "the function converts the key into an index" in lines
+      # The DONE step's own trailing "\n" must not render as an extra blank line.
+      refute "" in lines
+    end
+
+    test "abnormal exit before DONE/result still flushes buffered agy text (bd-2fzwlc round 2)" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-exit-flush")
+
+      # agy emits its whole response with no interior newlines until the
+      # terminal event, so a session that ends (crash, timeout, cancel)
+      # before a DONE step or result event would otherwise lose the entire
+      # partial response — the child process here just exits cleanly after
+      # printing one IN_PROGRESS chunk, with no DONE/result event at all.
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_type" => "agent_response",
+            "state" => "IN_PROGRESS",
+            "text_delta" => "partial response with no trailing newline"
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert "partial response with no trailing newline" in lines
     end
   end
 

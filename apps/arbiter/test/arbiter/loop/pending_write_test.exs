@@ -205,6 +205,38 @@ defmodule Arbiter.Loop.PendingWriteTest do
     end
   end
 
+  describe "propose_repo_doc_patch/1" do
+    test "hand-authors a :repo_doc_patch proposal that lands :proposed at n=1", %{ws: ws} do
+      assert {:ok, row} =
+               Loop.propose_repo_doc_patch(%{
+                 repo: "myrepo",
+                 lesson: "this repo's tests need FLAG=1 set",
+                 workspace_id: ws.id
+               })
+
+      assert row.kind == :repo_doc_patch
+      assert row.scope == :task
+      assert row.state == :proposed
+      assert row.repo == "myrepo"
+      assert row.payload["lesson"] == "this repo's tests need FLAG=1 set"
+      assert Loop.applicable?(row)
+    end
+
+    test "requires a repo" do
+      assert {:error, {:invalid, reason}} =
+               Loop.propose_repo_doc_patch(%{lesson: "some lesson"})
+
+      assert reason =~ "repo"
+    end
+
+    test "requires a lesson", %{ws: ws} do
+      assert {:error, {:invalid, reason}} =
+               Loop.propose_repo_doc_patch(%{repo: "myrepo", workspace_id: ws.id})
+
+      assert reason =~ "lesson"
+    end
+  end
+
   describe "configurable evidence bar" do
     test "workspace config raises the bar", %{ws: ws} do
       {:ok, ws} =

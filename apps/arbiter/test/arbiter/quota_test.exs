@@ -301,10 +301,19 @@ defmodule Arbiter.QuotaTest do
       missing =
         Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.json")
 
+      missing_db =
+        Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.vscdb")
+
+      # Isolate from this machine's real state: without pinning
+      # antigravity_state_path/agy_probe, this would fall through to the
+      # real IDE state.vscdb and a real `agy` CLI shell-out (bd-4ku4ze),
+      # making "credentials absent" no longer true on a dev box with a live
+      # `agy` session.
       assert Quota.google_snapshots(
                enabled: true,
                creds_path: missing,
-               antigravity_state_path: missing
+               antigravity_state_path: missing_db,
+               agy_probe: fn -> :not_installed end
              ) ==
                %{gemini: nil, antigravity: nil}
     end

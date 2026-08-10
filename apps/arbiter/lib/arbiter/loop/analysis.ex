@@ -71,12 +71,13 @@ defmodule Arbiter.Loop.Analysis do
       workspace_id = Keyword.get(opts, :workspace_id) || Map.get(meta, :workspace_id)
 
       report =
-        build_report(
-          rows,
+        rows
+        |> build_report(
           opts
           |> Keyword.put(:meta, meta)
           |> Keyword.put_new_lazy(:evidence_bar, fn -> Arbiter.Loop.evidence_bar(workspace_id) end)
         )
+        |> add_zero_token_notes(meta)
 
       markdown = Report.to_markdown(report)
       duration_ms = System.monotonic_time(:millisecond) - started
@@ -586,6 +587,36 @@ defmodule Arbiter.Loop.Analysis do
   end
 
   # ---- misc ---------------------------------------------------------------
+
+  # bd-2fzwlc: a provider whose stream parser silently drops usage (exactly
+  # what happened to every Gemini/agy row before this fix) reads identically
+  # to "that provider is just cheap" unless the report calls it out. Impure
+  # (queries `Arbiter.Usage` directly) — deliberately kept out of
+  # `build_report/2` so that function stays a pure, DB-free formatter.
+  defp add_zero_token_notes(%Report{} = report, meta) do
+    usage_opts =
+      [
+        since: Map.get(meta, :since),
+        until: Map.get(meta, :until),
+        workspace_id: Map.get(meta, :workspace_id)
+      ]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+    case Arbiter.Usage.zero_token_providers(usage_opts) do
+      {:ok, []} ->
+        report
+
+      {:ok, flagged} ->
+        notes = Enum.map(flagged, &zero_token_note/1)
+        %{report | notes: report.notes ++ notes}
+    end
+  end
+
+  defp zero_token_note(%{provider: provider, rows: rows}) do
+    "⚠ **#{provider}**: all #{rows} usage_events row(s) this window carry zero tokens — " <>
+      "this reads as \"#{provider} is cheap\" but more likely means its stream parser is " <>
+      "silently dropping usage. Verify empirically before trusting this provider's spend numbers."
+  end
 
   defp window(opts) do
     meta = Keyword.get(opts, :meta, %{})

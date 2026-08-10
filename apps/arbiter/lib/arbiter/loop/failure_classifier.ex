@@ -161,6 +161,26 @@ defmodule Arbiter.Loop.FailureClassifier do
     end)
   end
 
+  # Narrow, unambiguous infra-fingerprint substrings (lowercased) — they can
+  # only come from Arbiter's own infrastructure, never from application code
+  # or prose the agent was reading, so a full-transcript scan for these
+  # carries no false-positive risk. Exposed via `infra_fingerprints/0` so
+  # `Arbiter.Loop.Corpus` can scan whole transcripts for them without
+  # duplicating the list.
+  @infra_fingerprints [
+    "phoenix.ecto.pendingmigrationerror",
+    "dbconnection.connectionerror"
+  ]
+
+  @doc """
+  The narrow infra-fingerprint substrings `proxy_5xx?/1` matches on. See the
+  module doc's "Read discipline" note on `Arbiter.Loop.Corpus` — these are
+  the only patterns Corpus scans a whole transcript for (versus the bounded
+  tail read used for everything else).
+  """
+  @spec infra_fingerprints() :: [String.t()]
+  def infra_fingerprints, do: @infra_fingerprints
+
   @doc """
   True when a line shows Arbiter's own infrastructure (proxy, database, etc.)
   has failed. These are distinct from Anthropic API failures and must be
@@ -172,11 +192,7 @@ defmodule Arbiter.Loop.FailureClassifier do
   def proxy_5xx?(transcript_lines) do
     Enum.any?(transcript_lines, fn line ->
       l = String.downcase(line)
-
-      # Phoenix/Ecto database errors and connection failures from the proxy
-      # are unambiguous: they can only come from Arbiter's infrastructure.
-      String.contains?(l, "phoenix.ecto.pendingmigrationerror") or
-        String.contains?(l, "dbconnection.connectionerror")
+      Enum.any?(@infra_fingerprints, &String.contains?(l, &1))
     end)
   end
 

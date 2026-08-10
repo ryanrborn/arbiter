@@ -19,7 +19,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
@@ -35,12 +35,27 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 3}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "warning", "pending_count" => 3}, 200}}
     ])
 
     {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
     assert out =~ "[fail] migrations up to date"
     assert out =~ "3 pending"
+  end
+
+  test "unreachable DB or DB error shows [fail] with 'could not check'" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"},
+       {%{"status" => "unknown", "pending_count" => nil, "error" => "unreachable"}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 0
+    assert out =~ "[fail] migrations up to date"
+    assert out =~ "could not check"
+    refute out =~ "[ ok ] migrations up to date"
   end
 
   # bd-337f2i round 1 regression: a server predating the migrations endpoint
@@ -84,7 +99,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
@@ -98,7 +113,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run(["--json"]) end)
@@ -119,7 +134,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {mismatched_version_resp, 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
@@ -144,7 +159,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {mismatched_version_resp, 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     assert Doctor.green?() == true
@@ -165,7 +180,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {release_version_resp, 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
@@ -185,7 +200,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {release_version_resp, 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     assert Doctor.green?() == true
@@ -206,7 +221,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {release_version_resp, 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
@@ -233,7 +248,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {ambiguous_workspaces, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
@@ -262,7 +277,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {same_sha_diff_version_resp, 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
@@ -287,7 +302,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
       {{"get", "/api/version"}, {stale_server_resp, 200}},
-      {{"get", "/api/server/migrations"}, {%{"pending_count" => 0}, 200}}
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
