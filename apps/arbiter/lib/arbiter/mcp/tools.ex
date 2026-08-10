@@ -751,7 +751,7 @@ defmodule Arbiter.MCP.Tools do
   # coordinator acting for one) can read the diff first.
 
   @loop_states ~w(proposed hypothesis applied rejected superseded)a
-  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set)a
+  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch)a
 
   @doc """
   List queued loop proposals. Coordinator only. Optional `state` (one name or a

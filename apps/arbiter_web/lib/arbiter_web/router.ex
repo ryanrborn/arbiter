@@ -76,6 +76,7 @@ defmodule ArbiterWeb.Router do
     # bd-9j2g3x), so the GET's zero-writes guarantee is structural.
     get("/loop/analyze", LoopController, :analyze)
     post("/loop/propose", LoopController, :propose)
+    post("/loop/propose/repo_doc_patch", LoopController, :propose_repo_doc_patch)
 
     # The reviewable-proposal queue. No auto-apply: an operator decides.
     get("/loop/pending", LoopController, :pending_index)
