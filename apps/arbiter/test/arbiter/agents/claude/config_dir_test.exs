@@ -57,14 +57,17 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       refute memory =~ "Always roleplay"
     end
 
-    test "symlinks auth from the source, but never CLAUDE.md or settings.json", %{
+    test "copies auth from the source, but never CLAUDE.md or settings.json", %{
       source: source,
       target: target
     } do
       assert {:ok, ^target} = ConfigDir.ensure()
 
-      assert {:ok, src_cred} = File.read_link(Path.join(target, ".credentials.json"))
-      assert src_cred == Path.join(source, ".credentials.json")
+      # .credentials.json is a real copy (never a symlink — a token refresh
+      # would otherwise write through the link and corrupt the operator's file).
+      cred_path = Path.join(target, ".credentials.json")
+      assert {:error, :einval} = File.read_link(cred_path)
+      assert File.read!(cred_path) == File.read!(Path.join(source, ".credentials.json"))
 
       # CLAUDE.md is ours (a real file), not a link to the operator's persona.
       assert {:error, :einval} = File.read_link(Path.join(target, "CLAUDE.md"))
@@ -104,11 +107,12 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert File.read!(target_settings) =~ "deny"
     end
 
-    test "is idempotent — a second call leaves the same links in place", %{target: target} do
+    test "is idempotent — a second call leaves the same files in place", %{target: target} do
       assert {:ok, ^target} = ConfigDir.ensure()
       assert {:ok, ^target} = ConfigDir.ensure()
 
-      assert {:ok, _} = File.read_link(Path.join(target, ".credentials.json"))
+      assert {:error, :einval} = File.read_link(Path.join(target, ".credentials.json"))
+      assert File.exists?(Path.join(target, ".credentials.json"))
       assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
     end
 

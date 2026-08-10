@@ -34,10 +34,13 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
       {:ok, a} = Ash.create(Issue, %{title: "A (gated)", workspace_id: ws.id})
       {:ok, b} = Ash.create(Issue, %{title: "B (blocker)", workspace_id: ws.id})
 
+      # `:blocks` — from_issue blocks to_issue (Dependency's module doc, and
+      # Issue.ready/0's blocks_gating: the candidate is `to_issue_id`, the
+      # blocker is `from_issue_id`). B blocks A, so B is `from`, A is `to`.
       {:ok, _dep} =
         Ash.create(Dependency, %{
-          from_issue_id: a.id,
-          to_issue_id: b.id,
+          from_issue_id: b.id,
+          to_issue_id: a.id,
           type: :blocks
         })
 

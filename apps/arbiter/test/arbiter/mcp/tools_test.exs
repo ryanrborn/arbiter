@@ -2830,22 +2830,11 @@ defmodule Arbiter.MCP.ToolsTest do
       {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
       {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"mcp/codex-repo" => repo})
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+      put_app_env(:arbiter, :repo_paths, %{"mcp/codex-repo" => repo})
 
       prior_mcp = Application.get_env(:arbiter, Arbiter.MCP)
-
-      Application.put_env(
-        :arbiter,
-        Arbiter.MCP,
-        Keyword.put(prior_mcp || [], :inject_config, true)
-      )
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-        Application.put_env(:arbiter, Arbiter.MCP, prior_mcp)
-      end)
+      put_app_env(:arbiter, Arbiter.MCP, Keyword.put(prior_mcp || [], :inject_config, true))
 
       %{tmp: tmp, codex_file: codex_file}
     end

@@ -74,7 +74,7 @@ defmodule Arbiter.Agents.Preflight do
   end
 
   defp adapter_argv(adapter, opts) do
-    if function_exported?(adapter, :auth_probe_argv, 1) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :auth_probe_argv, 1) do
       adapter.auth_probe_argv(opts)
     else
       :skipped
@@ -160,7 +160,7 @@ defmodule Arbiter.Agents.Preflight do
   end
 
   defp safe_spawn_env(adapter, opts) do
-    if function_exported?(adapter, :spawn_env, 1) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :spawn_env, 1) do
       adapter.spawn_env(opts)
     else
       []

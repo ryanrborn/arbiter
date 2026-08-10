@@ -51,8 +51,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     File.mkdir_p!(tmp)
     repo_path = seed_repo!(tmp, "repo")
 
-    Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
-    Application.put_env(:arbiter, :repo_paths, %{"owner/repo" => repo_path})
+    put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+    put_app_env(:arbiter, :repo_paths, %{"owner/repo" => repo_path})
 
     on_exit(fn ->
       # Real dispatches register real Worker GenServers under the app's
@@ -72,8 +72,6 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       end)
 
       File.rm_rf!(tmp)
-      Application.delete_env(:arbiter, :worktree_root)
-      Application.delete_env(:arbiter, :repo_paths)
     end)
 
     {:ok, ws: ws, tmp: tmp}

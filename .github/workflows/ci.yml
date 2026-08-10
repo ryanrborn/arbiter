@@ -69,7 +69,7 @@ jobs:
       - name: Check formatting
         run: mix format --check-formatted
 
-  # NOTE: there is deliberately NO `mix test` job here yet.
+  # NOTE: there was deliberately NO `mix test` job here for a while.
   #
   # A `mix test` job was added alongside this workflow and removed immediately
   # (bd-3c9ygz -> follow-up). The reason is specific and worth preserving:
@@ -92,3 +92,64 @@ jobs:
   # order-dependent failures on main are fixed (Arbiter.Reviews.CheckoutTest,
   # Arbiter.Worker.RunProvenanceTest, et al). Until then tests gate locally
   # via `mix precommit`, not in CI.
+  #
+  # bd-9j4znl: those failures were root-caused to `Arbiter.DataCase` only
+  # sweeping leaked `Arbiter.Worker.Supervisor` children for `async: false`
+  # tests. A whole family of VM-global `DynamicSupervisor`s hold long-lived,
+  # per-workspace worker/workflow GenServers (Worker, Watchdog, Machine,
+  # MergeQueue, PRPatrol, ReviewPatrol, MergedPRFinalizer, DispatchQueue,
+  # Conductor) — any test in that family that forgot to stop its process left
+  # it running past that test's `on_exit`, racing the sandbox connection
+  # teardown. With `pool_size: 1` (config/test.exs) there is only one physical
+  # SQLite connection for the whole suite, so a leaked process crashing that
+  # connection mid-write corrupted whichever *unrelated* test happened to be
+  # mid-write at that moment — which is why the failures looked order-
+  # dependent and moved around between runs instead of reproducing
+  # consistently. `test/support/data_case.ex` now sweeps every one of these
+  # supervisors' children (via `DynamicSupervisor.terminate_child/2`, not
+  # `GenServer.stop/3` — several of these workers default to `restart:
+  # :permanent` and a plain `GenServer.stop` would trigger an immediate
+  # supervisor-driven restart against a now-torn-down sandbox connection)
+  # before the sandbox owner is stopped, unconditionally for every test. A
+  # second, rarer slice of the same failure class survived that fix:
+  # `Arbiter.GitHub.Limiter.start_task/2` (used by the dashboard's PR-state
+  # resolver) spawned a bare, unsupervised `Task.start/1` with no name a test
+  # could find and wait on, so it could still be mid-write past a test's
+  # `on_exit`. It now runs under a named `Arbiter.TaskSupervisor`, which
+  # `data_case.ex` drains the same way as the other detached background
+  # writers.
+  test:
+    name: mix test
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.19.4"
+
+      - name: Restore deps/build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp28.5-elixir1.19.4-mix-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Run tests
+        run: mix test

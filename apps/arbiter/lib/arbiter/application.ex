@@ -53,6 +53,7 @@ defmodule Arbiter.Application do
       # dispatch, PR open/merge/finalize, or tracker transition. Started early
       # (no deps) so every GitHub-calling path can gate through it. See
       # Arbiter.GitHub.Limiter.
+      {Task.Supervisor, name: Arbiter.TaskSupervisor},
       Arbiter.GitHub.Limiter,
       Arbiter.Agents.ProviderPool,
       Arbiter.Agents.CredentialWatchdog,

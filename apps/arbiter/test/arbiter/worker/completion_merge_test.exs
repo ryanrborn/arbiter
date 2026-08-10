@@ -61,12 +61,10 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     File.mkdir_p!(tmp)
     repo = init_rig(tmp)
 
-    Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
-    Application.put_env(:arbiter, :repo_paths, %{"merge/repo" => repo})
+    put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
+    put_app_env(:arbiter, :repo_paths, %{"merge/repo" => repo})
 
     on_exit(fn ->
-      Application.delete_env(:arbiter, :worktree_root)
-      Application.delete_env(:arbiter, :rig_paths)
       File.rm_rf!(tmp)
     end)
 

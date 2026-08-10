@@ -497,13 +497,8 @@ defmodule Arbiter.Worker.DispatchTest do
       # a real git repo and let Dispatch provision the worktree itself.
       repo = seed_repo!(tmp, "repo")
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"claude/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+      put_app_env(:arbiter, :repo_paths, %{"claude/repo" => repo})
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
@@ -545,13 +540,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, _} = Arbiter.Skills.create_skill(%{name: "not-selected", body: "# Nope"})
 
       repo = seed_repo!(tmp, "canaryrepo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "canary-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"canary/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "canary-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"canary/repo" => repo})
 
       {:ok, task} =
         Ash.create(Issue, %{title: "canary work", workspace_id: ws.id, issue_type: :feature})
@@ -635,10 +625,8 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "reviewrig")
 
-      Application.put_env(:arbiter, :repo_paths, %{"rv/repo" => repo})
+      put_app_env(:arbiter, :repo_paths, %{"rv/repo" => repo})
       enable_mcp_injection!()
-
-      on_exit(fn -> Application.delete_env(:arbiter, :repo_paths) end)
 
       {:ok, task} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
@@ -678,8 +666,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # Upstream moves behind the local checkout's back.
       advance_origin!(tmp, repo, "UPSTREAM.md", "merged upstream\n")
 
-      Application.put_env(:arbiter, :repo_paths, %{"rv/stale" => repo})
-      on_exit(fn -> Application.delete_env(:arbiter, :repo_paths) end)
+      put_app_env(:arbiter, :repo_paths, %{"rv/stale" => repo})
 
       {:ok, task} = Ash.create(Issue, %{title: "review stale base", workspace_id: ws.id})
 
@@ -727,13 +714,8 @@ defmodule Arbiter.Worker.DispatchTest do
       # worktree, never in the shared checkout.
       enable_mcp_injection!()
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "taskrepo-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"task/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "taskrepo-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"task/repo" => repo})
 
       {:ok, task} =
         Ash.create(Issue, %{title: "audit: parity check", issue_type: :task, workspace_id: ws.id})
@@ -792,13 +774,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "no-origin-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"local/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "no-origin-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"local/repo" => repo})
 
       {:ok, task} =
         Ash.create(Issue, %{title: "audit: local only", issue_type: :task, workspace_id: ws.id})
@@ -827,13 +804,8 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "badbase")
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "badbase-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"bad/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "badbase-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"bad/repo" => repo})
 
       {:ok, task} =
         Ash.create(Issue, %{title: "audit: bad base", issue_type: :task, workspace_id: ws.id})
@@ -860,13 +832,8 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "collide")
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "collide-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"col/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "collide-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"col/repo" => repo})
 
       {:ok, task} = Ash.create(Issue, %{title: "was an audit first", workspace_id: ws.id})
       branch = BranchNamer.derive(task)
@@ -888,13 +855,8 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "coexist")
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "coexist-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"cx/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "coexist-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"cx/repo" => repo})
 
       {:ok, task} = Ash.create(Issue, %{title: "audited then built", workspace_id: ws.id})
       branch = BranchNamer.derive(task)
@@ -920,13 +882,8 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "followup")
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "followup-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"fu/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "followup-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"fu/repo" => repo})
 
       {:ok, task} =
         Ash.create(Issue, %{
@@ -961,14 +918,9 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "workrig")
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "work-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"work/repo" => repo})
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "work-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"work/repo" => repo})
       enable_mcp_injection!()
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
 
       {:ok, task} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
@@ -993,14 +945,9 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_named_on_path(tmp, "codex", codex_file)
 
       repo = seed_repo!(tmp, "codex-mcp-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "codex-mcp-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"codexmcp/repo" => repo})
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "codex-mcp-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"codexmcp/repo" => repo})
       enable_mcp_injection!()
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
 
       # Workspace's `agent.type` pool deliberately excludes codex — mirrors the
       # live `default` workspace so the explicit override must win.
@@ -1036,26 +983,15 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_named_on_path(tmp, "codex", codex_file)
 
       repo = seed_repo!(tmp, "codex-verify-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "codex-verify-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"codexverify/repo" => repo})
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "codex-verify-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"codexverify/repo" => repo})
       enable_mcp_injection!()
 
       # Point the MCP endpoint at a closed local port so the post-spawn connect
       # check fails fast with a connection-refused error, exercising the
       # verify_connection/1 wiring end to end.
       prior_url = Application.get_env(:arbiter, Arbiter.MCP)
-
-      Application.put_env(
-        :arbiter,
-        Arbiter.MCP,
-        Keyword.put(prior_url, :url, "http://127.0.0.1:1/mcp")
-      )
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-        Application.put_env(:arbiter, Arbiter.MCP, prior_url)
-      end)
+      put_app_env(:arbiter, Arbiter.MCP, Keyword.put(prior_url, :url, "http://127.0.0.1:1/mcp"))
 
       {:ok, task} = Ash.create(Issue, %{title: "codex verify task", workspace_id: ws.id})
 
@@ -1126,14 +1062,9 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(mcp_path),
              "After fix: .mcp.json file should be removed from working tree"
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "gic-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"gic/repo" => repo})
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gic-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gic/repo" => repo})
       enable_mcp_injection!()
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
 
       {:ok, task} = Ash.create(Issue, %{title: "check ignore", workspace_id: ws.id})
 
@@ -1184,13 +1115,8 @@ defmodule Arbiter.Worker.DispatchTest do
 
       repo = seed_repo!(tmp, "drvrepo")
 
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "drv-wt"))
-      Application.put_env(:arbiter, :repo_paths, %{"drvr/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "drv-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"drvr/repo" => repo})
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
@@ -1240,13 +1166,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_claude_on_path(tmp, argv_file)
 
       repo = seed_repo!(tmp, "model-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "mwt"))
-      Application.put_env(:arbiter, :repo_paths, %{"m/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "mwt"))
+      put_app_env(:arbiter, :repo_paths, %{"m/repo" => repo})
 
       {:ok, ws} =
         Ash.update(ws, %{
@@ -1279,13 +1200,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_claude_on_path(tmp, argv_file)
 
       repo = seed_repo!(tmp, "override-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "owt"))
-      Application.put_env(:arbiter, :repo_paths, %{"o/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "owt"))
+      put_app_env(:arbiter, :repo_paths, %{"o/repo" => repo})
 
       {:ok, ws} =
         Ash.update(ws, %{
@@ -1320,13 +1236,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_named_on_path(tmp, "agy", gemini_file)
 
       repo = seed_repo!(tmp, "gem-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "gwt"))
-      Application.put_env(:arbiter, :repo_paths, %{"g/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gwt"))
+      put_app_env(:arbiter, :repo_paths, %{"g/repo" => repo})
 
       # Workspace defaults to Claude — the forced provider must win over it.
       {:ok, ws} =
@@ -1371,13 +1282,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_named_on_path(tmp, "codex", codex_file)
 
       repo = seed_repo!(tmp, "codex-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "cwt"))
-      Application.put_env(:arbiter, :repo_paths, %{"c/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "cwt"))
+      put_app_env(:arbiter, :repo_paths, %{"c/repo" => repo})
 
       # Workspace's `agent.type` pool deliberately excludes codex — mirrors the
       # live `default` workspace (`["claude","gemini"]`) so the explicit override
@@ -1417,13 +1323,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_claude_on_path(tmp, argv_file)
 
       repo = seed_repo!(tmp, "prio-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "pwt"))
-      Application.put_env(:arbiter, :repo_paths, %{"p/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "pwt"))
+      put_app_env(:arbiter, :repo_paths, %{"p/repo" => repo})
 
       {:ok, ws} =
         Ash.update(ws, %{
@@ -1466,13 +1367,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_claude_on_path(tmp, argv_file)
 
       repo = seed_repo!(tmp, "prov-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "provwt"))
-      Application.put_env(:arbiter, :repo_paths, %{"prov/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "provwt"))
+      put_app_env(:arbiter, :repo_paths, %{"prov/repo" => repo})
 
       {:ok, _skill} =
         Arbiter.Skills.create_skill(%{
@@ -1537,13 +1433,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_claude_on_path(tmp, argv_file)
 
       repo = seed_repo!(tmp, "thrash-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "twt"))
-      Application.put_env(:arbiter, :repo_paths, %{"t/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "twt"))
+      put_app_env(:arbiter, :repo_paths, %{"t/repo" => repo})
 
       {:ok, task} = Ash.create(Issue, %{title: "large module fix", workspace_id: ws.id})
 
@@ -1584,13 +1475,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_claude_on_path(tmp, argv_file)
 
       repo = seed_repo!(tmp, "clean-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "cwt2"))
-      Application.put_env(:arbiter, :repo_paths, %{"c2/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "cwt2"))
+      put_app_env(:arbiter, :repo_paths, %{"c2/repo" => repo})
 
       {:ok, task} = Ash.create(Issue, %{title: "ordinary fix", workspace_id: ws.id})
 
@@ -1624,13 +1510,8 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok = stub_claude_on_path(tmp, argv_file)
 
       repo = seed_repo!(tmp, "override-repo")
-      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "owt"))
-      Application.put_env(:arbiter, :repo_paths, %{"o/repo" => repo})
-
-      on_exit(fn ->
-        Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :repo_paths)
-      end)
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "owt"))
+      put_app_env(:arbiter, :repo_paths, %{"o/repo" => repo})
 
       {:ok, task} = Ash.create(Issue, %{title: "large module fix 2", workspace_id: ws.id})
 

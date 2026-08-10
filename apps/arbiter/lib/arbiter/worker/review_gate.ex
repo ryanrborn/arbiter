@@ -2922,8 +2922,15 @@ defmodule Arbiter.Worker.ReviewGate do
       |> load_workspace()
       |> then(&Agents.reviewer_for_workspace/1)
 
+    # `function_exported?/3` does not autoload the target module — an adapter
+    # module that hasn't been referenced yet in this VM (e.g. Gemini, when no
+    # earlier test/code path has called it) reports `false` even though the
+    # callback is implemented, silently falling back to Claude's async block.
+    # Whether that's true depends on what else has run before this call, so
+    # without `Code.ensure_loaded?/1` first this was an order-dependent bug.
     block =
-      if function_exported?(adapter, :async_tool_instruction, 0) do
+      if Code.ensure_loaded?(adapter) and
+           function_exported?(adapter, :async_tool_instruction, 0) do
         adapter.async_tool_instruction()
       else
         Arbiter.Agents.Claude.async_tool_instruction()

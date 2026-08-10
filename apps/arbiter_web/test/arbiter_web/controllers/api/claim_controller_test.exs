@@ -206,6 +206,15 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
 
           {"GET", "/rest/api/3/issue/TEST-43"} ->
             Req.Test.json(conn, jira_issue_payload())
+
+          {"GET", "/rest/api/3/issue/TEST-43/comment"} ->
+            Req.Test.json(conn, %{"comments" => []})
+
+          {"POST", "/rest/api/3/issue/TEST-43/comment"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/rest/api/3/issue/TEST-43/assignee"} ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
         end
       end)
 

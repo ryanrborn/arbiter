@@ -97,9 +97,59 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
   # ---- setup --------------------------------------------------------------
 
+  # A real, empty git repo standing in for "octo/widget" (the @ws_github
+  # owner/repo). MergeQueue.enqueue/2 resolves the local checkout via
+  # RepoConfig.find_path, which reads the workspace's own
+  # config["repo_paths"] first, then falls back to the app-wide
+  # `:arbiter, :repo_paths`. Neither @ws_github nor this file's own setup
+  # used to provide either, so this describe block's "spawns the resolver
+  # and parks the item" tests only ever passed when some *other*, unrelated
+  # async: false test happened to run first in the sync phase and leave its
+  # own `:repo_paths`/`:worktree_root` `Application.put_env` unrestored on
+  # exit — the same order-dependency bug named in bd-9j4znl, just showing up
+  # as a missing checkout instead of a busted worktree root.
+  defp seed_conflict_repo!(tmp) do
+    repo = Path.join(tmp, "repo")
+    File.mkdir_p!(repo)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+    File.write!(Path.join(repo, "README.md"), "hello\n")
+    {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+    {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+    remote = Path.join(tmp, "repo-remote.git")
+    {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+    {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+    {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+    repo
+  end
+
+  # `MergeQueue.enqueue/2` (`open_mr_for/4`) pushes from a worktree it expects
+  # to already exist on disk at `Worktree.worktree_path(branch)` — the same
+  # worktree a real dispatch/ReviewGate run would have checked out before the
+  # task ever reaches the merge queue. Since `branch_prefix` is unset for
+  # `@ws_github`, that branch is exactly `task.id` — provision the real
+  # `git worktree add` here so `enqueue/2` has something to push from.
+  defp seed_conflict_worktree!(repo, worktree_root, branch) do
+    path = Path.join(worktree_root, branch)
+    File.mkdir_p!(worktree_root)
+    {_, 0} = System.cmd("git", ["-C", repo, "worktree", "add", "-b", branch, path, "main"])
+    path
+  end
+
   setup tags do
     workspace_config = Map.get(tags, :workspace_config, @ws_github)
     ws_name = "ws-#{System.unique_integer([:positive])}"
+
+    tmp = Path.join(System.tmp_dir!(), "mqconflict-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    repo = seed_conflict_repo!(tmp)
+
+    worktree_root = Path.join(tmp, "wt")
+    put_app_env(:arbiter, :repo_paths, %{"octo/widget" => repo})
+    put_app_env(:arbiter, :worktree_root, worktree_root)
 
     {:ok, workspace} =
       Ash.create(Workspace, %{
@@ -115,9 +165,14 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
         workspace_id: workspace.id
       })
 
-    on_exit(fn -> StubResolverWithCallback.unregister(task.id) end)
+    seed_conflict_worktree!(repo, worktree_root, task.id)
 
-    %{workspace: workspace, task: task}
+    on_exit(fn ->
+      StubResolverWithCallback.unregister(task.id)
+      File.rm_rf!(tmp)
+    end)
+
+    %{workspace: workspace, task: task, repo: repo, tmp: tmp}
   end
 
   defp start_merge_queue(workspace, opts \\ []) do

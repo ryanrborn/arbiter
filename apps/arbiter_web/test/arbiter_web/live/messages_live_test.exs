@@ -20,34 +20,6 @@ defmodule ArbiterWeb.MessagesLiveTest do
     {:ok, ws: ws}
   end
 
-  describe "dashboard notifications panel" do
-    test "renders the panel and existing notifications", %{conn: conn, ws: ws} do
-      {:ok, _} =
-        Message.notify(%{
-          workspace_id: ws.id,
-          from_ref: "bd-7",
-          subject: "bd-7 complete",
-          body: "done"
-        })
-
-      {:ok, _view, html} = live(conn, "/")
-
-      assert html =~ "Notifications"
-      assert html =~ "bd-7 complete"
-    end
-
-    test "updates live when a new notification is broadcast", %{conn: conn, ws: ws} do
-      {:ok, view, html} = live(conn, "/")
-      refute html =~ "freshly-arrived"
-
-      # The LiveView subscribed to messages:<ws.id> on mount; creating a
-      # notification broadcasts {:new_message, _} which the feed picks up.
-      {:ok, _} = Message.notify(%{workspace_id: ws.id, subject: "freshly-arrived", body: "x"})
-
-      assert render(view) =~ "freshly-arrived"
-    end
-  end
-
   describe "per-worker mailbox" do
     test "lists unread mailbox messages addressed to the task", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "mbx", workspace_id: ws.id})
@@ -129,15 +101,15 @@ defmodule ArbiterWeb.MessagesLiveTest do
     end
 
     test "a plain :notification does NOT land in the coordinator mailbox", %{conn: conn, ws: ws} do
-      # Notifications are broadcast events, not addressed mail — they feed the
-      # notifications panel, never the coordinator's actionable inbox.
+      # Notifications are broadcast events, not addressed mail — they never
+      # reach the coordinator's actionable inbox (the dashboard's notification
+      # feed panel was removed in #680; only the mailbox-emptiness contract
+      # remains relevant here).
       {:ok, _} =
         Message.notify(%{workspace_id: ws.id, subject: "just-an-fyi", body: "background hum"})
 
       {:ok, _view, html} = live(conn, "/")
 
-      # Notification reaches the feed, but the coordinator mailbox stays empty.
-      assert html =~ "just-an-fyi"
       assert html =~ "coordinator-mailbox-empty"
       assert html =~ "0 unread"
       assert Message.inbox("admiral") == []
