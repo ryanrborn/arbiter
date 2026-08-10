@@ -573,11 +573,18 @@ defmodule Arbiter.Worker.Dispatch do
     migrations_module = Application.get_env(:arbiter, :migrations_module, Arbiter.Migrations)
 
     case migrations_module.count_pending() do
-      0 ->
+      {:ok, 0} ->
         :ok
 
-      count ->
+      {:ok, count} ->
         {:error, {:pending_migrations, count}}
+
+      {:error, reason} ->
+        # Block on migration check failure (unreachable DB, invalid shape, etc).
+        # This prevents the same silent failure mode as bd-44gk10, where pending
+        # migrations were not detected and workers silently 503'd. Failing closed
+        # on unknown is a safer default than failing open.
+        {:error, {:migrations_check_failed, reason}}
     end
   end
 
