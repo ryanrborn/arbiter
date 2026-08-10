@@ -576,6 +576,39 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assert "⏵ Bash(mix test)" in lines
     end
 
+    test "Skill tool_use renders the skill name directly, even with a long args value" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("cs-sj-skill-tool")
+
+      long_args = String.duplicate("a", 300)
+
+      events = [
+        %{
+          "type" => "assistant",
+          "message" => %{
+            "content" => [
+              %{
+                "type" => "tool_use",
+                "name" => "Skill",
+                "input" => %{"args" => long_args, "skill" => "test-driven-development"}
+              }
+            ]
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+      assert "⏵ Skill(test-driven-development)" in lines
+    end
+
     test "decoded events refresh the session's live activity (mirrored into meta)" do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-activity")

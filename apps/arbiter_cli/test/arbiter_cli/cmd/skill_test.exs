@@ -13,8 +13,34 @@ defmodule ArbiterCli.Cmd.SkillTest do
 
     {out, _err, exit_code} = capture(fn -> Skill.run(["list"]) end)
     assert exit_code == 0
-    assert out =~ "tdd  (3 bytes)  — test first"
+    assert out =~ "tdd  (3 bytes)  [never used]  — test first"
     assert out =~ "plain  (1 bytes)"
+  end
+
+  test "skill list shows materialize/invoke counts when present" do
+    stub_get("/api/skills", %{
+      "data" => [
+        %{
+          "name" => "tdd",
+          "body" => "abc",
+          "metadata" => %{},
+          "materialize_count" => 5,
+          "invoke_count" => 2
+        },
+        %{
+          "name" => "unused-skill",
+          "body" => "x",
+          "metadata" => %{},
+          "materialize_count" => 3,
+          "invoke_count" => 0
+        }
+      ]
+    })
+
+    {out, _err, exit_code} = capture(fn -> Skill.run(["list"]) end)
+    assert exit_code == 0
+    assert out =~ "tdd  (3 bytes)  [↓ 5, ⧗ 2]"
+    assert out =~ "unused-skill  (1 bytes)  [↓ 3]"
   end
 
   test "skill create with --body posts and reports" do

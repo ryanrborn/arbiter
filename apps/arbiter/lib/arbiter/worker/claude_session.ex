@@ -851,6 +851,11 @@ defmodule Arbiter.Worker.ClaudeSession do
       is_binary(input["path"]) -> input["path"]
       is_binary(input["pattern"]) -> truncate(input["pattern"], 200)
       is_binary(input["description"]) -> truncate(input["description"], 200)
+      # Skill tool: render the skill name directly rather than falling through
+      # to Jason.encode!/1, whose key-sort order can push "skill" past a
+      # length-based truncation cutoff when "args" is long. Also gives a more
+      # readable transcript line (`⏵ Skill(tdd)` vs raw JSON).
+      is_binary(input["skill"]) -> input["skill"]
       true -> truncate(Jason.encode!(input), 200)
     end
   end

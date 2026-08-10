@@ -61,6 +61,8 @@ defmodule Arbiter.Skills.Materializer do
       |> Enum.flat_map(fn skill ->
         case write_skill(worktree, skill) do
           :ok ->
+            # Increment materialize_count (best-effort; don't let telemetry break the dispatch).
+            _ = Arbiter.Skills.increment_usage(skill.id, :materialize_count)
             [skill.name]
 
           {:error, reason} ->

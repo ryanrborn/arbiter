@@ -672,12 +672,30 @@ defmodule Arbiter.Worker do
 
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
+      # bd-61hnbb: Parse transcript for skill invocations and update usage counters.
+      _ = parse_skill_invocations(run_id, run.workspace_id)
       :ok
     else
       {:error, reason} -> log_run_warning("update", state.task_id, reason)
     end
   rescue
     e -> log_run_warning("update", state.task_id, e)
+  end
+
+  # Parse the full transcript for skill invocations and increment counters.
+  # Best-effort: a parsing error never fails the run completion.
+  defp parse_skill_invocations(run_id, workspace_id) do
+    case Arbiter.Worker.OutputLog.read_lines(run_id) do
+      {:ok, lines} ->
+        Arbiter.Skills.InvocationParser.parse_and_update(workspace_id, lines)
+
+      {:error, reason} ->
+        Logger.debug(
+          "Worker.parse_skill_invocations: failed to read transcript for #{run_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
   end
 
   defp capture_output_lines(%State{} = state) do
