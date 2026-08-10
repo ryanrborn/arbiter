@@ -28,9 +28,46 @@ defmodule Arbiter.Agents.Gemini.Stream do
   Only **assistant message text** opts into completion (`arb done`) detection —
   the user prompt echo, tool calls, and tool results are displayed but never
   trip the sentinel.
+
+  ## `agy` wire schema (bd-2fzwlc)
+
+  `Arbiter.Agents.Gemini.resolve_executable/0` prefers the `agy` fork over the
+  upstream `gemini` CLI when both are on `PATH`, and `agy` speaks a
+  *completely different* stream-json schema — a top-level `"event"`
+  discriminator (not `"type"`) with the payload nested under a same-named key,
+  and a flat (non-per-model) `usage` object. Every clause above only matches
+  `"type"`-keyed events, so every `agy` event fell through to the `%{}`
+  catch-all — this is why every Gemini `usage_events` row carried zero tokens
+  even though 150 sessions completed successfully. Confirmed live against
+  installed `agy` v1.1.11:
+
+      {"event":"init","conversation_id":..,"init":{"cwd":..,"tools":[..],"permission_mode":..}}
+      {"event":"step_update","step_update":{"conversation_id":..,"step_index":..,"state":"DONE","step_type":"user_input"|"unknown"|"agent_response"|"checkpoint",..}}
+      {"event":"result","result":{"conversation_id":..,"status":"SUCCESS"|..,"response":..,"duration_seconds":..,"num_turns":..,"usage":{"input_tokens":..,"output_tokens":..,"thinking_tokens":..,"cache_read_tokens":..,"total_tokens":..}}}
+
+  `agy`'s terminal `result.usage` has no per-model breakdown, and — confirmed
+  live (bd-2fzwlc round 2) — no `result` or `init` event names which model
+  actually ran; agy's own catalogue doesn't overlap the Gemini price table at
+  all (Gemini 3.x tiers, Claude models, GPT-OSS, no 2.5 model). Pricing a row
+  against the session's pre-resolved `fallback_model` would therefore stamp a
+  confident, wrong dollar figure — worse than no figure — so agy rows always
+  carry `cost_usd: nil` and a `:cost_note` explaining why, and never stamp a
+  guessed `:model` onto the row (that would pollute `usage_summarize --by
+  model` with a model agy didn't run).
   """
 
   alias Arbiter.Agents.Gemini.Pricing
+
+  # agy reports no model in any event (confirmed live, bd-2fzwlc round 2 —
+  # `init` carries only cwd/tools/permission_mode, and `result` carries no
+  # model field either), and its v1.1.11 catalogue does not overlap the
+  # Gemini price table at all (Gemini 3.x tiers, Claude models, GPT-OSS —
+  # no 2.5 model). Pricing an agy row against the session's pre-resolved
+  # `fallback_model` — which defaults to the hardcoded `gemini-2.5-pro` when
+  # nothing is configured — would stamp a confident, wrong dollar figure on
+  # a model agy never ran. So agy cost is always unavailable; the row must
+  # say why rather than guess.
+  @agy_cost_unavailable_note "cost unavailable: agy does not report which model it ran and its model catalogue does not overlap the Gemini price table"
 
   @doc """
   Reduce one decoded stream-json event to a map of usage fields to merge onto
@@ -62,6 +99,29 @@ defmodule Arbiter.Agents.Gemini.Stream do
       model: result_model(stats, fallback_model),
       result_status: event["status"],
       is_error: event["status"] == "error",
+      raw: event
+    })
+  end
+
+  def usage_fields(%{"event" => "init"} = event, _fallback_model) do
+    session_id = event["conversation_id"] || get_in(event, ["init", "conversation_id"])
+    drop_nil(%{session_id: session_id})
+  end
+
+  def usage_fields(%{"event" => "result", "result" => result} = event, _fallback_model)
+      when is_map(result) do
+    usage = result["usage"] || %{}
+    status = result["status"]
+
+    drop_nil(%{
+      tokens_in: number(usage["input_tokens"]),
+      tokens_out: number(usage["output_tokens"]),
+      cache_read_tokens: number(usage["cache_read_tokens"]),
+      duration_ms: agy_duration_ms(result["duration_seconds"]),
+      cost_usd: nil,
+      cost_note: @agy_cost_unavailable_note,
+      result_status: status,
+      is_error: status not in [nil, "SUCCESS"],
       raw: event
     })
   end
@@ -115,6 +175,34 @@ defmodule Arbiter.Agents.Gemini.Stream do
 
   def format_event(%{"type" => "result"} = event), do: [{result_summary(event), false}]
 
+  def format_event(%{"event" => "init"}) do
+    [{"⚙ gemini session started", false}]
+  end
+
+  # agy's terminal assistant text is delivered as an `agent_response` step —
+  # the only step class that may trip the `arb done` sentinel.
+  def format_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "agent_response", "text_delta" => text}
+      })
+      when is_binary(text) do
+    text |> lines() |> Enum.map(&{&1, true})
+  end
+
+  # Other step types (user_input echo, checkpoint, unknown bookkeeping steps)
+  # are not worker output — display nothing and never arm completion.
+  def format_event(%{"event" => "step_update"}), do: []
+
+  def format_event(%{"event" => "result", "result" => result}) when is_map(result),
+    do: [{agy_result_summary(result), false}]
+
+  # Mirrors Codex's bd-80kdgy "schema drift is loud" pattern: an unrecognized
+  # top-level `agy` event surfaces a visible warning instead of silently
+  # vanishing, so the next wire-schema break announces itself.
+  def format_event(%{"event" => ev}) when is_binary(ev) do
+    [{"⚠ gemini: unrecognized stream event #{ev} (schema drift?)", false}]
+  end
+
   def format_event(_event), do: []
 
   @doc """
@@ -132,6 +220,17 @@ defmodule Arbiter.Agents.Gemini.Stream do
 
   def activity_for_event(%{"type" => "tool_use"} = event),
     do: tool_activity(event["tool_name"], event["parameters"])
+
+  def activity_for_event(%{"event" => "init"}), do: "starting"
+  def activity_for_event(%{"event" => "result"}), do: "wrapping up"
+
+  def activity_for_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "agent_response", "text_delta" => text}
+      })
+      when is_binary(text) do
+    if String.trim(text) == "", do: nil, else: "responding"
+  end
 
   def activity_for_event(_event), do: nil
 
@@ -229,6 +328,29 @@ defmodule Arbiter.Agents.Gemini.Stream do
     parts =
       case Pricing.cost_usd(stats) do
         cost when is_number(cost) -> parts ++ ["~$#{Float.round(cost, 4)}"]
+        _ -> parts
+      end
+
+    Enum.join(parts, " · ")
+  end
+
+  defp agy_duration_ms(seconds) when is_number(seconds), do: round(seconds * 1000)
+  defp agy_duration_ms(_), do: nil
+
+  defp agy_result_summary(result) do
+    status = result["status"] || "done"
+    usage = result["usage"] || %{}
+    parts = ["⚙ gemini session #{status}"]
+
+    parts =
+      case number(result["duration_seconds"]) do
+        s when is_number(s) -> parts ++ ["#{Float.round(s * 1.0, 1)}s"]
+        _ -> parts
+      end
+
+    parts =
+      case number(usage["total_tokens"]) do
+        t when is_number(t) and t > 0 -> parts ++ ["#{t} tok"]
         _ -> parts
       end
 

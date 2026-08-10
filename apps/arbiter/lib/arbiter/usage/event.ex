@@ -82,7 +82,8 @@ defmodule Arbiter.Usage.Event do
         :worker_run_id,
         :occurred_at,
         :session_id,
-        :raw
+        :raw,
+        :cost_note
       ]
     end
   end
@@ -145,6 +146,13 @@ defmodule Arbiter.Usage.Event do
     attribute :cost_usd, :float do
       public? true
       description "Total session cost in USD. Nil when the CLI didn't return structured cost."
+    end
+
+    attribute :cost_note, :string do
+      public? true
+      constraints max_length: 500, trim?: true
+
+      description "Why cost_usd is nil (e.g. no priced model resolved, metered plan with no per-call dollar figure) — so a null cost reads as a known, explained limitation rather than a silent parse failure. Nil when cost_usd was actually derived."
     end
 
     attribute :duration_ms, :integer do

@@ -23,6 +23,19 @@ defmodule Arbiter.MCP.ToolsTest do
     {:ok, ws: ws, task: task, worker: worker, coordinator: coordinator}
   end
 
+  defp create_usage_event!(ctx, attrs) do
+    base = %{
+      task_id: ctx.task.id,
+      repo: "shipyard",
+      workspace_id: ctx.ws.id,
+      step: :work,
+      occurred_at: DateTime.utc_now()
+    }
+
+    {:ok, ev} = Ash.create(Arbiter.Usage.Event, base |> Map.merge(Map.new(attrs)))
+    ev
+  end
+
   describe "task_show/2" do
     test "a worker reads its own task (id defaulted from the token)", ctx do
       assert {:ok, data} = Tools.task_show(ctx.worker, %{})
@@ -2615,6 +2628,32 @@ defmodule Arbiter.MCP.ToolsTest do
     test "campaign is accepted as a deprecated alias and normalized to epic", ctx do
       assert {:ok, %{by: "epic", rollups: []}} =
                Tools.usage_summarize(ctx.coordinator, %{"by" => "campaign"})
+    end
+
+    test "returns no warnings when every provider has at least one non-zero row", ctx do
+      create_usage_event!(ctx, provider: "claude", tokens_in: 100, tokens_out: 50)
+
+      assert {:ok, %{warnings: []}} = Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
+    end
+
+    test "warns when a provider's rows are wholly zero-token (bd-2fzwlc)", ctx do
+      create_usage_event!(ctx, provider: "gemini", tokens_in: 0, tokens_out: 0)
+      create_usage_event!(ctx, provider: "gemini", tokens_in: nil, tokens_out: nil)
+      create_usage_event!(ctx, provider: "claude", tokens_in: 100, tokens_out: 50)
+
+      assert {:ok, %{warnings: [warning]}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
+
+      assert warning =~ "gemini"
+      assert warning =~ "2 usage_events row"
+      refute warning =~ "claude"
+    end
+
+    test "does not flag a provider with at least one non-zero row", ctx do
+      create_usage_event!(ctx, provider: "gemini", tokens_in: 0, tokens_out: 0)
+      create_usage_event!(ctx, provider: "gemini", tokens_in: 42, tokens_out: 10)
+
+      assert {:ok, %{warnings: []}} = Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
     end
   end
 

@@ -869,6 +869,7 @@ defmodule Arbiter.Worker do
       cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
       cache_read_tokens: Map.get(usage, :cache_read_tokens),
       cost_usd: Map.get(usage, :cost_usd),
+      cost_note: Map.get(usage, :cost_note),
       duration_ms: duration_ms,
       exit_status: exit_status,
       worker_run_id: state.run_id,

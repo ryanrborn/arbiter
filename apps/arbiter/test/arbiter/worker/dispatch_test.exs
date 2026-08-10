@@ -1352,11 +1352,15 @@ defmodule Arbiter.Worker.DispatchTest do
       # The Gemini adapter ran — and Claude did not.
       refute File.exists?(claude_file)
 
-      # The worker's routing config records the gemini provider + a model id.
+      # The worker's routing config records the gemini provider. The model is
+      # nil (bd-2fzwlc round 3): `agy` is the resolved executable here (it's
+      # preferred over `gemini` whenever both are on PATH), and agy's model
+      # catalogue doesn't overlap ours at all, so `Gemini.resolved_model/1`
+      # intentionally reports "unknown" rather than a guessed model id.
       snap = Worker.state(result.worker_pid)
       routing = snap.meta[:routing_config]
       assert routing.provider == "gemini"
-      assert routing.model =~ "gemini"
+      assert routing.model == nil
     end
 
     test "agent_type: :codex dispatches the Codex adapter, not Claude (bd-dcvo3n)",

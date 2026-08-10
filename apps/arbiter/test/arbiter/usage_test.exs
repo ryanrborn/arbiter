@@ -48,6 +48,21 @@ defmodule Arbiter.UsageTest do
       assert ev.step == :work
     end
 
+    test "persists cost_note explaining a null cost_usd (bd-2fzwlc)" do
+      ev =
+        create_event!(%{
+          model: "gemini-2.5-pro",
+          provider: "gemini",
+          tokens_in: 100,
+          tokens_out: 50,
+          cost_usd: nil,
+          cost_note: "cost unavailable: no model resolved for this session"
+        })
+
+      assert ev.cost_usd == nil
+      assert ev.cost_note == "cost unavailable: no model resolved for this session"
+    end
+
     test "missing cost/tokens are allowed (graceful degradation)" do
       ev = create_event!(%{model: "echo", provider: "other"})
       assert ev.cost_usd == nil
@@ -269,6 +284,77 @@ defmodule Arbiter.UsageTest do
 
       assert {:ok, rollups} = Usage.summarize(by: :campaign, workspace_id: "ws-usage")
       assert Enum.any?(rollups, &(&1.group == epic.id))
+    end
+  end
+
+  describe "zero_token_providers/1 (bd-2fzwlc)" do
+    test "flags a provider whose rows are wholly zero-token over the window" do
+      ws = "ws-zero-#{System.unique_integer([:positive])}"
+
+      create_event!(%{
+        provider: "gemini",
+        workspace_id: ws,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: nil
+      })
+
+      create_event!(%{
+        provider: "gemini",
+        workspace_id: ws,
+        tokens_in: nil,
+        tokens_out: nil,
+        cost_usd: nil
+      })
+
+      create_event!(%{
+        provider: "claude",
+        workspace_id: ws,
+        tokens_in: 500,
+        tokens_out: 200,
+        cost_usd: 0.12
+      })
+
+      assert {:ok, flagged} = Usage.zero_token_providers(workspace_id: ws)
+      assert [%{provider: "gemini", rows: 2}] = flagged
+    end
+
+    test "a provider with even one non-zero row is not flagged" do
+      ws = "ws-zero-mixed-#{System.unique_integer([:positive])}"
+
+      create_event!(%{provider: "codex", workspace_id: ws, tokens_in: 0, tokens_out: 0})
+      create_event!(%{provider: "codex", workspace_id: ws, tokens_in: 10, tokens_out: 5})
+
+      assert {:ok, []} = Usage.zero_token_providers(workspace_id: ws)
+    end
+
+    test "since filters the window like summarize/1" do
+      ws = "ws-zero-since-#{System.unique_integer([:positive])}"
+      old = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      create_event!(%{
+        provider: "gemini",
+        workspace_id: ws,
+        tokens_in: 0,
+        tokens_out: 0,
+        occurred_at: old
+      })
+
+      assert {:ok, []} = Usage.zero_token_providers(workspace_id: ws, since: DateTime.utc_now())
+    end
+
+    test "does not flag the synthetic 'arbiter' loop-bookkeeping provider" do
+      ws = "ws-zero-arbiter-#{System.unique_integer([:positive])}"
+
+      create_event!(%{
+        provider: "arbiter",
+        workspace_id: ws,
+        tokens_in: nil,
+        tokens_out: nil,
+        cost_usd: 0.05
+      })
+
+      assert {:ok, []} = Usage.zero_token_providers(workspace_id: ws)
     end
   end
 
