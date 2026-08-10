@@ -82,9 +82,10 @@ defmodule Arbiter.Loop.ProposalsTest do
           ]
         })
 
-      assert [candidate] = Proposals.candidates(r)
+      candidates = Proposals.candidates(r)
 
-      assert candidate.kind == :difficulty_override
+      candidate = Enum.find(candidates, &(&1.kind == :difficulty_override))
+
       assert candidate.scope == :task
       assert candidate.target == "bd-7rspia"
       assert candidate.difficulty == 1
@@ -94,6 +95,107 @@ defmodule Arbiter.Loop.ProposalsTest do
       assert candidate.gist =~ "D1 → D2"
       assert candidate.diff =~ "-difficulty: 1"
       assert candidate.diff =~ "+difficulty: 2"
+
+      # A lone occurrence in its cell still gets a fleet-scoped cluster
+      # candidate (bd-70nblx) — it just won't clear the evidence bar on its
+      # own, same as a below-bar reviewer-finding category.
+      cluster = Enum.find(candidates, &(&1.kind == :config_set))
+      assert cluster.scope == :fleet
+      assert cluster.difficulty == 1
+      assert cluster.repo == "arbiter"
+      assert cluster.task_refs == ["bd-7rspia"]
+    end
+
+    test "misestimates sharing a (from, to, repo) cell aggregate into one fleet-wide cluster candidate" do
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-2fzwlc",
+              dispatched_difficulty: 2,
+              rounds: 3,
+              cost_usd: 22.86,
+              reason: :rework,
+              cell: {2, "arbiter"},
+              recommendation: %{}
+            },
+            %{
+              task_id: "bd-4ku4ze",
+              dispatched_difficulty: 2,
+              rounds: 2,
+              cost_usd: 7.24,
+              reason: :rework,
+              cell: {2, "arbiter"},
+              recommendation: %{}
+            },
+            %{
+              task_id: "bd-61hnbb",
+              dispatched_difficulty: 2,
+              rounds: 2,
+              cost_usd: 13.84,
+              reason: :rework,
+              cell: {2, "arbiter"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      candidates = Proposals.candidates(r)
+
+      overrides = Enum.filter(candidates, &(&1.kind == :difficulty_override))
+      assert length(overrides) == 3
+
+      clusters = Enum.filter(candidates, &(&1.kind == :config_set))
+      assert [cluster] = clusters
+      assert cluster.scope == :fleet
+      assert cluster.difficulty == 2
+      assert cluster.repo == "arbiter"
+
+      assert Enum.sort(cluster.task_refs) == ["bd-2fzwlc", "bd-4ku4ze", "bd-61hnbb"]
+      assert Enum.sort(cluster.incident_refs) == ["bd-2fzwlc", "bd-4ku4ze", "bd-61hnbb"]
+      assert cluster.gist =~ "D2"
+      refute Map.has_key?(cluster.payload, "patch")
+    end
+
+    test "misestimates in different cells produce separate cluster candidates" do
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-a",
+              dispatched_difficulty: 1,
+              rounds: 2,
+              cost_usd: 5.0,
+              reason: :rework,
+              cell: {1, "arbiter"},
+              recommendation: %{}
+            },
+            %{
+              task_id: "bd-b",
+              dispatched_difficulty: 2,
+              rounds: 2,
+              cost_usd: 5.0,
+              reason: :rework,
+              cell: {2, "arbiter"},
+              recommendation: %{}
+            },
+            %{
+              task_id: "bd-c",
+              dispatched_difficulty: 1,
+              rounds: 2,
+              cost_usd: 5.0,
+              reason: :rework,
+              cell: {1, "other-repo"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      clusters = Proposals.candidates(r) |> Enum.filter(&(&1.kind == :config_set))
+
+      assert length(clusters) == 3
+      cells = Enum.map(clusters, &{&1.difficulty, &1.repo})
+      assert Enum.sort(cells) == [{1, "arbiter"}, {1, "other-repo"}, {2, "arbiter"}]
     end
 
     test "a misestimate on a task already at the difficulty ceiling is not a candidate" do
@@ -266,6 +368,140 @@ defmodule Arbiter.Loop.ProposalsTest do
         assert row.evidence_count == before.evidence_count
         assert row.distinct_tasks == before.distinct_tasks
       end
+    end
+  end
+
+  describe "record_all/2 — cross-task difficulty-misestimate cluster escalation (bd-70nblx)" do
+    # Regression fixture: the 2026-08-10 `arb loop analyze --since 7d --propose`
+    # window that surfaced this gap. Three distinct tasks, all D2 → D3 in the
+    # (2, arbiter) cell — clears the same evidence bar the pass already
+    # applies to reviewer-finding categories, so it must produce a fleet-wide
+    # proposal alongside (not instead of) the three per-task overrides.
+    defp misestimate_2026_08_10_fixture do
+      [
+        %{
+          task_id: "bd-2fzwlc",
+          dispatched_difficulty: 2,
+          rounds: 3,
+          cost_usd: 22.86,
+          reason: :rework,
+          cell: {2, "arbiter"},
+          recommendation: %{}
+        },
+        %{
+          task_id: "bd-4ku4ze",
+          dispatched_difficulty: 2,
+          rounds: 2,
+          cost_usd: 7.24,
+          reason: :rework,
+          cell: {2, "arbiter"},
+          recommendation: %{}
+        },
+        %{
+          task_id: "bd-61hnbb",
+          dispatched_difficulty: 2,
+          rounds: 2,
+          cost_usd: 13.84,
+          reason: :rework,
+          cell: {2, "arbiter"},
+          recommendation: %{}
+        }
+      ]
+    end
+
+    test "a re-run over the fixture window produces one fleet-wide proposal, not three isolated rows only" do
+      r = report(%{difficulty_misestimates: misestimate_2026_08_10_fixture()})
+
+      rows = Proposals.record_all(r)
+
+      overrides = Enum.filter(rows, &(&1.kind == :difficulty_override))
+      assert length(overrides) == 3
+      assert Enum.all?(overrides, &(&1.state == :proposed and &1.scope == :task))
+
+      clusters = Enum.filter(rows, &(&1.kind == :config_set))
+      assert [cluster] = clusters
+      assert cluster.scope == :fleet
+      assert cluster.state == :proposed
+      assert cluster.evidence_count == 3
+      assert cluster.distinct_tasks == 3
+      assert Loop.applicable?(cluster)
+    end
+
+    test "the cluster accumulates across windows and only escalates once the bar clears" do
+      [first, second, third] = misestimate_2026_08_10_fixture()
+
+      {:ok, after_first} =
+        Loop.record(
+          hd(
+            Proposals.candidates(report(%{difficulty_misestimates: [first]}))
+            |> Enum.filter(&(&1.kind == :config_set))
+          )
+        )
+
+      assert after_first.state == :hypothesis
+      refute Loop.applicable?(after_first)
+
+      {:ok, after_second} =
+        Loop.record(
+          hd(
+            Proposals.candidates(report(%{difficulty_misestimates: [second]}))
+            |> Enum.filter(&(&1.kind == :config_set))
+          )
+        )
+
+      assert after_second.id == after_first.id
+      assert after_second.state == :hypothesis
+      assert after_second.distinct_tasks == 2
+
+      {:ok, after_third} =
+        Loop.record(
+          hd(
+            Proposals.candidates(report(%{difficulty_misestimates: [third]}))
+            |> Enum.filter(&(&1.kind == :config_set))
+          )
+        )
+
+      assert after_third.id == after_first.id
+      assert after_third.state == :proposed
+      assert after_third.distinct_tasks == 3
+      assert Loop.applicable?(after_third)
+    end
+
+    test "isolated (n=1) misestimates in distinct cells never escalate a cluster" do
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-solo-1",
+              dispatched_difficulty: 1,
+              rounds: 2,
+              cost_usd: 4.0,
+              reason: :rework,
+              cell: {1, "arbiter"},
+              recommendation: %{}
+            },
+            %{
+              task_id: "bd-solo-2",
+              dispatched_difficulty: 2,
+              rounds: 2,
+              cost_usd: 4.0,
+              reason: :rework,
+              cell: {2, "other-repo"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      rows = Proposals.record_all(r)
+
+      overrides = Enum.filter(rows, &(&1.kind == :difficulty_override))
+      assert length(overrides) == 2
+      assert Enum.all?(overrides, &(&1.state == :proposed))
+
+      clusters = Enum.filter(rows, &(&1.kind == :config_set))
+      assert length(clusters) == 2
+      assert Enum.all?(clusters, &(&1.state == :hypothesis))
+      refute Enum.any?(clusters, &Loop.applicable?/1)
     end
   end
 end
