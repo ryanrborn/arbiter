@@ -158,4 +158,41 @@ defmodule Arbiter.Worker.OutputLogTest do
       assert {:error, :enoent} = OutputLog.tail_lines(run_id, 40)
     end
   end
+
+  describe "scan_for/2 — whole-transcript fingerprint scan" do
+    test "finds a matching line far outside the tail window", %{run_id: run_id} do
+      {:ok, handle} = OutputLog.open(run_id)
+      OutputLog.append(handle, "** (Phoenix.Ecto.PendingMigrationError) migrations pending")
+      Enum.each(1..200, fn i -> OutputLog.append(handle, "line #{i}") end)
+      OutputLog.close(handle)
+
+      # The fingerprint is at line 1 of a 201-line transcript — well outside
+      # any bounded tail read (e.g. the last 40 lines).
+      assert {:ok, tail} = OutputLog.tail_lines(run_id, 40)
+      refute Enum.any?(tail, &String.contains?(&1, "PendingMigrationError"))
+
+      assert {:ok, ["** (Phoenix.Ecto.PendingMigrationError) migrations pending"]} =
+               OutputLog.scan_for(run_id, ["phoenix.ecto.pendingmigrationerror"])
+    end
+
+    test "matches case-insensitively", %{run_id: run_id} do
+      {:ok, handle} = OutputLog.open(run_id)
+      OutputLog.append(handle, "** (DBConnection.ConnectionError) connection failed")
+      OutputLog.close(handle)
+
+      assert {:ok, [_]} = OutputLog.scan_for(run_id, ["dbconnection.connectionerror"])
+    end
+
+    test "returns [] when no pattern matches", %{run_id: run_id} do
+      {:ok, handle} = OutputLog.open(run_id)
+      OutputLog.append(handle, "all good, arb done")
+      OutputLog.close(handle)
+
+      assert {:ok, []} = OutputLog.scan_for(run_id, ["phoenix.ecto.pendingmigrationerror"])
+    end
+
+    test "a missing transcript is {:error, :enoent}, not a crash", %{run_id: run_id} do
+      assert {:error, :enoent} = OutputLog.scan_for(run_id, ["anything"])
+    end
+  end
 end

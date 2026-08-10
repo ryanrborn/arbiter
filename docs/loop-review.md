@@ -239,8 +239,30 @@ fraction of reviewed tasks need a round 2.
 
 Attempt 1 at this task died of context exhaustion from unbounded reads (a
 `find /`, repo-wide greps). The pass is built so the heavy lifting happens in
-Elixir (`Arbiter.Loop.Corpus` does bounded, aggregated SQL and reads only the
-*tail* of a failed run's transcript); the operator's context sees only the
-shaped report, never the raw 28 MB corpus. When you act on the report, keep the
-same discipline: drill into named `run_id`s with `arb worker log` /
-`worker_log`, never whole-corpus reads.
+Elixir (`Arbiter.Loop.Corpus` does bounded, aggregated SQL); the operator's
+context sees only the shaped report, never the raw 28 MB corpus. When you act
+on the report, keep the same discipline: drill into named `run_id`s with
+`arb worker log` / `worker_log`, never whole-corpus reads.
+
+### Transcript read bound (bd-3ozmaj / #1159)
+
+A failed run's `terminal_lines` — what `FailureClassifier` sees — is the union
+of two bounded reads, not a raw transcript read:
+
+- the last 40 lines (`OutputLog.tail_lines/2`) — the terminal signal
+  (autocompact thrash, `claude session error`, final `arb done`).
+- every line matching a narrow infra fingerprint (`OutputLog.scan_for/2`,
+  patterns from `FailureClassifier.infra_fingerprints/0` —
+  `Phoenix.Ecto.PendingMigrationError`, `DBConnection.ConnectionError`).
+
+The second read scans the *whole* transcript, not just the tail. Attempt 1 at
+bd-8mtb0q (#1132) taught the classifier those fingerprints, but the corpus
+still only ever showed it the last 40 lines, so a failure that occurred
+earlier in a long run (240–2500+ lines, agent kept going after the crash) was
+never seen and stayed `unclassified` — verified against the live corpus on
+2026-08-09. The fix keeps the tail read for everything else and adds a
+full-scan pass restricted to this narrow, unambiguous fingerprint list — safe
+because these strings can only come from Arbiter's own infrastructure, so a
+whole-file scan carries no false-positive risk, and the corpus is small
+(tens of files, single-digit MB). This scan is per-failed-run and its cost
+is included in the pass's own `duration_ms` usage-event row.

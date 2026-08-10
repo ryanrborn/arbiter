@@ -150,4 +150,39 @@ defmodule Arbiter.Worker.OutputLog do
   end
 
   def tail_lines(_, _), do: {:error, :invalid_run_id}
+
+  @doc """
+  Scan the *whole* transcript for lines matching any of `patterns`
+  (case-insensitive substrings), returning only the matching lines.
+
+  For narrow, unambiguous infrastructure fingerprints (`Arbiter.Loop.Corpus`
+  uses `Arbiter.Loop.FailureClassifier.infra_fingerprints/0`) the diagnostic
+  signal can sit anywhere in the transcript — the failure occurred there, but
+  the agent kept going, retried, and emitted unrelated output afterwards, so
+  `tail_lines/2`'s bounded window never sees it. This reads the full file
+  (the corpus is small — tens of files, single-digit MB) but returns only the
+  handful of matching lines, so callers never hold the full transcript.
+
+  Returns `{:ok, lines}` (matches in file order), or `{:error, reason}` when
+  the file is absent (`:enoent`) or unreadable.
+  """
+  @spec scan_for(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def scan_for(run_id, patterns)
+      when is_binary(run_id) and run_id != "" and is_list(patterns) do
+    case read_lines(run_id) do
+      {:ok, lines} ->
+        matches =
+          Enum.filter(lines, fn line ->
+            l = String.downcase(line)
+            Enum.any?(patterns, &String.contains?(l, &1))
+          end)
+
+        {:ok, matches}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def scan_for(_, _), do: {:error, :invalid_run_id}
 end
