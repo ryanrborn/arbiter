@@ -2881,7 +2881,12 @@ defmodule Arbiter.Worker.DispatchTest do
 
   defmodule StubMigrationsPending do
     @moduledoc false
-    def count_pending, do: 3
+    def count_pending, do: {:ok, 3}
+  end
+
+  defmodule StubMigrationsUnreachable do
+    @moduledoc false
+    def count_pending, do: {:error, :unreachable}
   end
 
   describe "pending migrations gate" do
@@ -2914,6 +2919,22 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) ==
                {:error, {:pending_migrations, 3}}
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert reloaded.status != :in_progress
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "dispatch is refused when the migration check fails (database unreachable)",
+         %{ws: ws} do
+      Application.put_env(:arbiter, :migrations_module, StubMigrationsUnreachable)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :migrations_module) end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "migrations check failed", workspace_id: ws.id})
+
+      assert Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) ==
+               {:error, {:migrations_check_failed, :unreachable}}
 
       reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status != :in_progress

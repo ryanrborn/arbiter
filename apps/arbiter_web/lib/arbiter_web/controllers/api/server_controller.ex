@@ -9,10 +9,25 @@ defmodule ArbiterWeb.Api.ServerController do
   use ArbiterWeb, :controller
 
   def migrations(conn, _params) do
-    pending_count = Arbiter.Migrations.count_pending()
+    case Arbiter.Migrations.count_pending() do
+      {:ok, 0} ->
+        json(conn, %{
+          status: "ok",
+          pending_count: 0
+        })
 
-    json(conn, %{
-      pending_count: pending_count
-    })
+      {:ok, count} ->
+        json(conn, %{
+          status: "warning",
+          pending_count: count
+        })
+
+      {:error, reason} ->
+        json(conn, %{
+          status: "unknown",
+          pending_count: nil,
+          error: Atom.to_string(reason)
+        })
+    end
   end
 end
