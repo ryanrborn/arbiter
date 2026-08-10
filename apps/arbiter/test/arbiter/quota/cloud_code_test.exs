@@ -42,6 +42,10 @@ defmodule Arbiter.Quota.CloudCodeTest do
       [
         antigravity_state_path: missing_path(".vscdb"),
         creds_path: missing_path(".json"),
+        # Never let a test shell out to a real `agy` binary that may happen to
+        # be installed on the machine running the suite — always stub the
+        # probe unless a test explicitly overrides `agy_probe`/`agy_cmd`.
+        agy_probe: fn -> :not_installed end,
         plug: {Req.Test, @stub}
       ],
       extra
@@ -301,6 +305,135 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       assert snap.models == []
       assert is_binary(snap.message)
+    end
+  end
+
+  describe "antigravity/1 agy CLI liveness probe (bd-4ku4ze)" do
+    test "reports a live-but-unreadable-credential status when no token file exists but agy CLI is authenticated" do
+      snap = CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :live end))
+
+      refute is_nil(snap)
+      assert snap.provider == "antigravity"
+      assert snap.models == []
+      assert is_binary(snap.message)
+      refute snap.message =~ "auth expired"
+      assert snap.message =~ "agy"
+    end
+
+    test "still returns nil when no token file exists and the agy CLI is not authenticated" do
+      assert CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :not_live end)) == nil
+    end
+
+    test "still returns nil when no token file exists and agy is not installed" do
+      assert CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :not_installed end)) == nil
+    end
+
+    test "a rejected file/DB token is distinguished from no-credential-found when agy CLI is still live" do
+      state = antigravity_state_file("stale-token")
+
+      Req.Test.stub(@stub, fn conn ->
+        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      snap =
+        CloudCode.antigravity(
+          antigravity_opts(
+            antigravity_state_path: state,
+            project_id: "p",
+            agy_probe: fn -> :live end
+          )
+        )
+
+      assert snap.models == []
+      assert is_binary(snap.message)
+      assert snap.message =~ "agy"
+      refute snap.message == "Antigravity quota auth expired; reconnect."
+    end
+
+    test "a rejected file/DB token with no live agy CLI keeps the plain auth-expired message" do
+      state = antigravity_state_file("stale-token")
+
+      Req.Test.stub(@stub, fn conn ->
+        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      snap =
+        CloudCode.antigravity(
+          antigravity_opts(
+            antigravity_state_path: state,
+            project_id: "p",
+            agy_probe: fn -> :not_live end
+          )
+        )
+
+      assert snap.models == []
+      assert snap.message == "Antigravity quota auth expired; reconnect."
+    end
+  end
+
+  describe "antigravity/1 agy CLI real shell-out path (bd-4ku4ze, agy_cmd, no agy_probe stub)" do
+    # These exercise `agy_cli_probe_default/1` / `run_agy_probe/2` for real —
+    # `agy_cmd` points at a real executable instead of stubbing `agy_probe`,
+    # so the `System.find_executable/1` resolution, the `sh -c` argv
+    # construction, and the exit-status mapping all actually run.
+    test "a 0-exit executable is treated as a live agy credential" do
+      snap =
+        CloudCode.antigravity(
+          Keyword.merge(antigravity_opts([]), agy_cmd: "true")
+          |> Keyword.delete(:agy_probe)
+        )
+
+      refute is_nil(snap)
+      assert snap.message =~ "agy"
+    end
+
+    test "a nonzero-exit executable is treated as not live (falls through to nil, no other creds)" do
+      snap =
+        CloudCode.antigravity(
+          Keyword.merge(antigravity_opts([]), agy_cmd: "false")
+          |> Keyword.delete(:agy_probe)
+        )
+
+      assert snap == nil
+    end
+
+    test "an executable name that does not resolve is treated as not installed" do
+      snap =
+        CloudCode.antigravity(
+          Keyword.merge(antigravity_opts([]), agy_cmd: "definitely-not-a-real-agy-binary-xyz")
+          |> Keyword.delete(:agy_probe)
+        )
+
+      assert snap == nil
+    end
+
+    test "the real subprocess result is memoized so repeated probes don't re-exec agy" do
+      dir = System.tmp_dir!()
+      script = Path.join(dir, "agy_counter_#{System.unique_integer([:positive])}.sh")
+      counter = script <> ".count"
+
+      File.write!(script, """
+      #!/bin/sh
+      echo x >> "#{counter}"
+      exit 0
+      """)
+
+      File.chmod!(script, 0o755)
+
+      on_exit(fn ->
+        File.rm(script)
+        File.rm(counter)
+      end)
+
+      opts =
+        Keyword.merge(antigravity_opts([]), agy_cmd: script)
+        |> Keyword.delete(:agy_probe)
+
+      refute is_nil(CloudCode.antigravity(opts))
+      refute is_nil(CloudCode.antigravity(opts))
+
+      {:ok, contents} = File.read(counter)
+      assert String.trim(contents) |> String.split("\n") |> length() == 1
     end
   end
 end
