@@ -187,11 +187,11 @@ defmodule Arbiter.Agents.Gemini do
   # equivalent) — see security_enforced?/0.
   defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
-      model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
+      thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:agy, exec, prompt, opts, _policy) do
-    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
+    [exec, "-p", prompt] ++ thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do

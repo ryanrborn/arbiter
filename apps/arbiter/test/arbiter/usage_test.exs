@@ -342,6 +342,20 @@ defmodule Arbiter.UsageTest do
 
       assert {:ok, []} = Usage.zero_token_providers(workspace_id: ws, since: DateTime.utc_now())
     end
+
+    test "does not flag the synthetic 'arbiter' loop-bookkeeping provider" do
+      ws = "ws-zero-arbiter-#{System.unique_integer([:positive])}"
+
+      create_event!(%{
+        provider: "arbiter",
+        workspace_id: ws,
+        tokens_in: nil,
+        tokens_out: nil,
+        cost_usd: 0.05
+      })
+
+      assert {:ok, []} = Usage.zero_token_providers(workspace_id: ws)
+    end
   end
 
   describe "worker session exit writes a usage row" do

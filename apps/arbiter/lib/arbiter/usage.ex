@@ -98,6 +98,13 @@ defmodule Arbiter.Usage do
     end
   end
 
+  # Providers that record `usage_events` rows for internal bookkeeping (e.g.
+  # `Arbiter.Loop.Corpus.record_pass_cost/1` writes `provider: "arbiter"` for
+  # loop-pass cost with no token counts) rather than by parsing an agent CLI's
+  # stream. They have no stream parser to fail, so they are always
+  # zero-token by design and must not trip the blindness detector below.
+  @synthetic_providers ~w(arbiter)
+
   @doc """
   Providers whose `usage_events` rows are **wholly** zero-token over the
   window — i.e. every row for that provider carries `tokens_in: 0/nil` and
@@ -124,6 +131,7 @@ defmodule Arbiter.Usage do
     flagged =
       events
       |> Enum.group_by(&(&1.provider || "(unknown)"))
+      |> Enum.reject(fn {provider, _evs} -> provider in @synthetic_providers end)
       |> Enum.filter(fn {_provider, evs} -> Enum.all?(evs, &zero_tokens?/1) end)
       |> Enum.map(fn {provider, evs} -> %{provider: provider, rows: length(evs)} end)
       |> Enum.sort_by(& &1.provider)
