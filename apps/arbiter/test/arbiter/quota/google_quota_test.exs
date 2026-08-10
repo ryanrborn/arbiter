@@ -149,8 +149,14 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
 
       assert degraded_row.used_percent == good_row.used_percent
       assert degraded_row.reset_at == good_row.reset_at
-      assert degraded_row.snapshot == good_row.snapshot
       assert degraded_row.message =~ "forbidden" or degraded_row.message =~ "Antigravity"
+
+      # The stored `snapshot` column (what `arb quota`/the MCP tool read back
+      # verbatim via `serialize_latest/2`) must carry the *new* degraded
+      # message, not the stale good-row copy — only the numeric figures
+      # (used_percent/reset_at, asserted above) are preserved.
+      assert degraded_row.snapshot["message"] == degraded_row.message
+      assert CloudCode.serialize_latest(ws.id, "antigravity")["message"] == degraded_row.message
     end
   end
 

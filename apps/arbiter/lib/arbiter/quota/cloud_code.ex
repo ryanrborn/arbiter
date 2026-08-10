@@ -431,14 +431,26 @@ defmodule Arbiter.Quota.CloudCode do
 
   # A snapshot with no model data (a transient API error, or the "agy is live
   # but we hold no readable token" liveness-only status) must not clobber the
-  # last good reading's figures — only its `message`/`plan`/`captured_at`
-  # should change. Falls back to writing the empty snapshot as-is when there
+  # last good reading's figures — but its `message`/`plan`/`captured_at` must
+  # still land in the stored `snapshot` column, since that's what
+  # `serialize_latest/2` (and therefore `arb quota`/the MCP quota tool) reads
+  # back verbatim. Falls back to writing the empty snapshot as-is when there
   # is no previous row to preserve.
   defp preserve_last_good(workspace_id, provider, snapshot) do
     case latest(workspace_id, provider) do
       %GoogleQuota{used_percent: used_percent, reset_at: reset_at, snapshot: prior}
       when not is_nil(prior) ->
-        {used_percent, reset_at, prior}
+        merged =
+          Map.merge(
+            prior,
+            stringify(%{
+              message: snapshot[:message],
+              plan: snapshot[:plan],
+              captured_at: snapshot[:captured_at]
+            })
+          )
+
+        {used_percent, reset_at, merged}
 
       _ ->
         {nil, nil, stringify(snapshot)}
@@ -663,20 +675,46 @@ defmodule Arbiter.Quota.CloudCode do
     end
   end
 
+  # A stale `state.vscdb` / degraded token is permanent by construction until
+  # the IDE reopens, so without caching `CloudProbe`'s 5-minute heartbeat
+  # (`Arbiter.Quota.CloudProbe.@default_interval_ms`) would spawn the ~199 MB
+  # `agy` binary — and the network call + backgrounded language-server it
+  # spawns (see `run_agy_probe/2`'s moduledoc) — forever, on every cycle, for
+  # every workspace. Memoize the outcome in `:persistent_term` for a few
+  # probe cycles so the real subprocess only runs occasionally.
+  @agy_probe_cache_key {__MODULE__, :agy_probe_cache}
+  @agy_probe_cache_ttl_ms 900_000
+
   defp agy_cli_probe_default(opts) do
     cmd = opts[:agy_cmd] || Application.get_env(:arbiter, :agy_cmd) || "agy"
+    ttl = Keyword.get(opts, :agy_probe_cache_ttl_ms, @agy_probe_cache_ttl_ms)
+    now = System.monotonic_time(:millisecond)
 
-    case System.find_executable(cmd) do
-      nil -> :not_installed
-      path -> run_agy_probe(path, opts)
+    case :persistent_term.get(@agy_probe_cache_key, nil) do
+      {^cmd, result, cached_at} when now - cached_at < ttl ->
+        result
+
+      _ ->
+        result =
+          case System.find_executable(cmd) do
+            nil -> :not_installed
+            path -> run_agy_probe(path, opts)
+          end
+
+        :persistent_term.put(@agy_probe_cache_key, {cmd, result, now})
+        result
     end
   rescue
     _ -> :not_installed
   end
 
   # Run `agy models` off-process with a hard timeout — a hung/prompting CLI
-  # must never block `arb quota`. Shutting the Task down closes the port,
-  # which terminates the underlying OS process.
+  # must never block `arb quota`. `Task.shutdown/2` on timeout closes our end
+  # of the port, but that only makes Erlang stop *waiting* on the OS process —
+  # it does not signal it, so a hung `agy` would otherwise be abandoned and
+  # keep running. To get an actual OS-side kill, we wrap the invocation in the
+  # `timeout` coreutil, which sends the signal itself once its own deadline
+  # elapses, independent of whether Erlang is still watching.
   #
   # `agy` backgrounds its own language-server process, which inherits
   # whatever file descriptor its stdout points at. When we capture output via
@@ -687,11 +725,16 @@ defmodule Arbiter.Quota.CloudCode do
   # a pipe) instead of capturing it sidesteps this entirely.
   defp run_agy_probe(path, opts) do
     timeout = Keyword.get(opts, :agy_probe_timeout, 5_000)
+    timeout_s = max(1, ceil(timeout / 1000))
 
     task =
       Task.async(fn ->
         try do
-          System.cmd("/bin/sh", ["-c", ~s(exec "$0" models >/dev/null 2>&1 </dev/null), path])
+          System.cmd("/bin/sh", [
+            "-c",
+            ~s(exec timeout -k 1 #{timeout_s} "$0" models >/dev/null 2>&1 </dev/null),
+            path
+          ])
         rescue
           _ -> {"", 1}
         catch
@@ -699,7 +742,7 @@ defmodule Arbiter.Quota.CloudCode do
         end
       end)
 
-    case Task.yield(task, timeout) do
+    case Task.yield(task, timeout + 1_000) do
       {:ok, {_out, 0}} ->
         :live
 

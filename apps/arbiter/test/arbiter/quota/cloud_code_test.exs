@@ -406,5 +406,34 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       assert snap == nil
     end
+
+    test "the real subprocess result is memoized so repeated probes don't re-exec agy" do
+      dir = System.tmp_dir!()
+      script = Path.join(dir, "agy_counter_#{System.unique_integer([:positive])}.sh")
+      counter = script <> ".count"
+
+      File.write!(script, """
+      #!/bin/sh
+      echo x >> "#{counter}"
+      exit 0
+      """)
+
+      File.chmod!(script, 0o755)
+
+      on_exit(fn ->
+        File.rm(script)
+        File.rm(counter)
+      end)
+
+      opts =
+        Keyword.merge(antigravity_opts([]), agy_cmd: script)
+        |> Keyword.delete(:agy_probe)
+
+      refute is_nil(CloudCode.antigravity(opts))
+      refute is_nil(CloudCode.antigravity(opts))
+
+      {:ok, contents} = File.read(counter)
+      assert String.trim(contents) |> String.split("\n") |> length() == 1
+    end
   end
 end
