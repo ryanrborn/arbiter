@@ -3507,7 +3507,8 @@ defmodule Arbiter.MCP.Tools do
       status: to_str(i.status),
       priority: i.priority,
       difficulty: i.difficulty,
-      issue_type: to_str(i.issue_type)
+      issue_type: to_str(i.issue_type),
+      workspace_id: i.workspace_id
     }
   end
 

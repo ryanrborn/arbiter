@@ -8,9 +8,27 @@ config :arbiter, Arbiter.Repo,
       "arbiter_test#{System.get_env("MIX_TEST_PARTITION", "")}.sqlite3"
     ),
   journal_mode: :wal,
-  busy_timeout: 5000,
+  # SQLite allows only one writer at a time, and a *second* class of failure
+  # is invisible to `busy_timeout`: under WAL, a connection that began its
+  # read snapshot before another connection committed a write cannot silently
+  # upgrade to a writer against that stale snapshot — SQLite returns
+  # SQLITE_BUSY_SNAPSHOT immediately, without ever invoking the busy handler
+  # `busy_timeout` installs (this is documented SQLite WAL behavior, not an
+  # Exqlite bug). Ecto.Adapters.SQL.Sandbox holds each test's transaction open
+  # for that test's whole lifetime, so with `pool_size: schedulers_online() *
+  # 2` (many) concurrent sandboxed connections all taking snapshots and
+  # writing against the same on-disk file, that race was common enough to
+  # show up as flaky `(Exqlite.Error) Database busy` failures scattered across
+  # unrelated test modules (bd-9j4znl) — not a bug in any of those tests.
+  # `busy_timeout` still buys headroom for the *ordinary* one-writer-at-a-time
+  # queueing case, so it stays generous; `pool_size: 1` closes the
+  # snapshot race by ensuring there is only ever one live sandboxed
+  # connection, so concurrent `async: true` tests queue for that single
+  # connection (via DBConnection's own queue, not SQLite's busy handler)
+  # instead of racing each other's WAL snapshots.
+  busy_timeout: 60_000,
   pool: Ecto.Adapters.SQL.Sandbox,
-  pool_size: System.schedulers_online() * 2
+  pool_size: 1
 
 config :arbiter_web, ArbiterWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
@@ -74,6 +92,17 @@ config :arbiter, Arbiter.MCP, inject_config: false, sse_max_lifetime_ms: 0
 # per-test with a unique tmp dir.
 config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-logs-test")
 
+# `Arbiter.Worker.Worktree` and `Arbiter.Reviews.Checkout` both fall back to a
+# hardcoded `/home/rborn/dev/arbiter-worktrees` default (the original author's
+# machine) when this is unset. That default isn't writable on any other box,
+# so any test exercising either module (`CheckoutTest`, `ExternalReviewTest`,
+# `MergeQueueConflictTest`, ...) failed with `:eacces` — UNLESS it happened to
+# run concurrently with `WorktreeTest`, whose setup/on_exit temporarily points
+# `:worktree_root` at its own tmp dir for the duration of its own tests. That
+# incidental overlap is what made the failures look order-dependent (bd-9j4znl).
+# Tests that need their own isolated root still override this per-test.
+config :arbiter, :worktree_root, Path.join(System.tmp_dir!(), "arbiter-worktrees-test")
+
 # Stalled-acolyte detection (bd-awi4nw): shorten the post-exit grace so the
 # deferred classify+escalate check fires fast under test. Still > 0 so a normal
 # completion's in-flight `arb done` wins the race before the check runs.
@@ -112,6 +141,14 @@ config :arbiter, :cloud_code_quota, enabled: false
 # and make no real network call. Tests exercising the live path inject
 # `credentials:`/`auth_path:` and enable the Req.Test stub explicitly.
 config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
+
+# `Arbiter.Quota.CloudCode.antigravity/1` falls back to the operator's real
+# `~/.config/Antigravity/...` state DB when no `:antigravity_state_path` is
+# given. Point the default at a path that never exists so the suite's quota
+# surface stays a pure no-op instead of reading real host state on whatever
+# machine happens to have Antigravity installed. Tests exercising the live
+# path pass `antigravity_state_path:` explicitly.
+config :arbiter, :antigravity_state_path, "/nonexistent/antigravity/state.vscdb"
 
 # Disable the fleet credential Watchdog in test — its probe is a real agent-CLI
 # round-trip per adapter (`codex exec` in particular bills against the ChatGPT

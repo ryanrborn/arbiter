@@ -2525,7 +2525,7 @@ defmodule Arbiter.Worker do
   defp inject_nudge_argv(%{argv: argv} = port_args, nudge, provider) when is_list(argv) do
     adapter = agent_adapter_for_provider(provider)
 
-    if function_exported?(adapter, :splice_prompt, 2) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
       case apply(adapter, :splice_prompt, [argv, [nudge]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, :no_print_slot} -> {:ok, port_args}
@@ -2894,7 +2894,7 @@ defmodule Arbiter.Worker do
       when is_list(argv) and is_binary(session_id) do
     adapter = agent_adapter_for_provider(provider)
 
-    if function_exported?(adapter, :splice_prompt, 2) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
       case apply(adapter, :splice_prompt, [argv, ["--resume", session_id, prompt]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, _} = err -> err
@@ -2915,7 +2915,7 @@ defmodule Arbiter.Worker do
   end
 
   defp get_prompt_tmpfile(adapter, argv) do
-    if function_exported?(adapter, :prompt_tmpfile, 1) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :prompt_tmpfile, 1) do
       adapter.prompt_tmpfile(argv)
     else
       nil

@@ -183,11 +183,15 @@ defmodule Arbiter.Worker.DriverTest do
       Process.sleep(50)
       assert Machine.status(machine_pid) == :idle
 
+      # Monitor before triggering completion (bd-9j4znl) — `interval_ms: 5` is
+      # fast enough for the Driver to tick and exit before a monitor() call
+      # placed after the trigger, delivering a spurious `:noproc` DOWN.
+      ref = Process.monitor(driver_pid)
+
       # Simulate Claude printing "arb done": advance worker then complete it.
       :ok = Worker.advance(worker_pid, :running)
       :ok = Worker.complete(worker_pid, :claude_done)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -212,9 +216,9 @@ defmodule Arbiter.Worker.DriverTest do
           claude_driven: true
         )
 
+      ref = Process.monitor(driver_pid)
       :ok = Worker.fail(worker_pid, :claude_crashed)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -295,10 +299,12 @@ defmodule Arbiter.Worker.DriverTest do
       assert Process.alive?(driver_pid),
              "driver should still be alive (ticks frozen at :awaiting_review)"
 
+      # Monitor before triggering completion (bd-9j4znl) — see comment above.
+      ref = Process.monitor(driver_pid)
+
       # Now simulate the Watchdog calling Worker.complete.
       :ok = Worker.complete(worker_pid, :merged)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       # Task must be closed — driver noticed :completed and closed it.
@@ -392,9 +398,9 @@ defmodule Arbiter.Worker.DriverTest do
 
       # The Watchdog (here, us) completes the worker — the driver's next guarded
       # check must close the task rather than stranding it.
+      ref = Process.monitor(driver_pid)
       :ok = Worker.complete(worker_pid, :merged)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -547,9 +553,9 @@ defmodule Arbiter.Worker.DriverTest do
           cleanup_worktree: true
         )
 
+      ref = Process.monitor(driver_pid)
       :ok = Worker.fail(worker_pid, :claude_crashed)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       refute File.dir?(wt_path)
@@ -589,9 +595,9 @@ defmodule Arbiter.Worker.DriverTest do
           cleanup_worktree: true
         )
 
+      ref = Process.monitor(driver_pid)
       :ok = Worker.fail(worker_pid, :no_commits_at_completion)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       # Worktree reaped AND the agent is dead — the agent can no longer run any
@@ -665,10 +671,15 @@ defmodule Arbiter.Worker.DriverTest do
           claude_driven: true
         )
 
+      # Monitor before triggering completion — `interval_ms: 5` is fast enough
+      # that the Driver can tick and exit between the trigger and a
+      # monitor() call placed after it, delivering a spurious `:noproc` DOWN
+      # instead of `:normal` under load (bd-9j4znl).
+      ref = Process.monitor(driver_pid)
+
       :ok = Worker.advance(worker_pid, :running)
       :ok = Worker.complete(worker_pid, :claude_done)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -699,6 +710,8 @@ defmodule Arbiter.Worker.DriverTest do
           claude_driven: true
         )
 
+      ref = Process.monitor(driver_pid)
+
       # Simulate a worker completion with mr_ref (from Watchdog merge)
       :ok = Worker.advance(worker_pid, :running)
       # Directly set the mr_ref via the worker's meta to simulate Watchdog completion
@@ -706,7 +719,6 @@ defmodule Arbiter.Worker.DriverTest do
       # Now complete the worker
       :ok = Worker.complete(worker_pid, :merged)
 
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)

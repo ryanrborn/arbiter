@@ -184,7 +184,19 @@ defmodule Arbiter.GitHub.Limiter do
   """
   @spec start_task(priority(), (-> term())) :: {:ok, pid()} | {:error, term()}
   def start_task(class, fun) when class in [:foreground, :background] and is_function(fun, 0) do
-    Task.start(fn -> with_priority(class, fun) end)
+    wrapped = fn -> with_priority(class, fun) end
+
+    # Supervised, not a raw `Task.start/1`: callers of this (e.g. the
+    # dashboard's PR-state resolver) can write to the DB, and a bare `Task`
+    # has no name a test's `on_exit` can find and wait on. Under
+    # `Arbiter.TaskSupervisor` it is swept by `Arbiter.DataCase` before the
+    # sandbox connection tears down, same as every other detached write path
+    # (bd-9j4znl) — an untracked one was exactly the residual "client exited"
+    # connection churn that survived the first round of that fix.
+    case Process.whereis(Arbiter.TaskSupervisor) do
+      pid when is_pid(pid) -> Task.Supervisor.start_child(pid, wrapped)
+      nil -> Task.start(wrapped)
+    end
   end
 
   # ---- Client: the request seam -------------------------------------------

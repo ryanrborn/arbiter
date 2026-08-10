@@ -293,10 +293,19 @@ defmodule Arbiter.QuotaTest do
     end
 
     test "no-ops to nils when enabled but credentials are absent" do
+      # `:creds_path` isolates `gemini/1`; `antigravity/1` reads a separate
+      # `:antigravity_state_path` (defaults to the real
+      # ~/.config/Antigravity/... state DB) — without overriding both, this
+      # test only no-ops deterministically on a machine with no Antigravity
+      # install, and hits live host state everywhere else.
       missing =
         Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.json")
 
-      assert Quota.google_snapshots(enabled: true, creds_path: missing) ==
+      assert Quota.google_snapshots(
+               enabled: true,
+               creds_path: missing,
+               antigravity_state_path: missing
+             ) ==
                %{gemini: nil, antigravity: nil}
     end
   end
