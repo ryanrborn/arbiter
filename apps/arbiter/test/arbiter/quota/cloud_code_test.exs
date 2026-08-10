@@ -42,6 +42,10 @@ defmodule Arbiter.Quota.CloudCodeTest do
       [
         antigravity_state_path: missing_path(".vscdb"),
         creds_path: missing_path(".json"),
+        # Never let a test shell out to a real `agy` binary that may happen to
+        # be installed on the machine running the suite — always stub the
+        # probe unless a test explicitly overrides `agy_probe`/`agy_cmd`.
+        agy_probe: fn -> :not_installed end,
         plug: {Req.Test, @stub}
       ],
       extra
@@ -301,6 +305,69 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
       assert snap.models == []
       assert is_binary(snap.message)
+    end
+  end
+
+  describe "antigravity/1 agy CLI liveness probe (bd-4ku4ze)" do
+    test "reports a live-but-unreadable-credential status when no token file exists but agy CLI is authenticated" do
+      snap = CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :live end))
+
+      refute is_nil(snap)
+      assert snap.provider == "antigravity"
+      assert snap.models == []
+      assert is_binary(snap.message)
+      refute snap.message =~ "auth expired"
+      assert snap.message =~ "agy"
+    end
+
+    test "still returns nil when no token file exists and the agy CLI is not authenticated" do
+      assert CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :not_live end)) == nil
+    end
+
+    test "still returns nil when no token file exists and agy is not installed" do
+      assert CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :not_installed end)) == nil
+    end
+
+    test "a rejected file/DB token is distinguished from no-credential-found when agy CLI is still live" do
+      state = antigravity_state_file("stale-token")
+
+      Req.Test.stub(@stub, fn conn ->
+        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      snap =
+        CloudCode.antigravity(
+          antigravity_opts(
+            antigravity_state_path: state,
+            project_id: "p",
+            agy_probe: fn -> :live end
+          )
+        )
+
+      assert snap.models == []
+      assert is_binary(snap.message)
+      assert snap.message =~ "agy"
+      refute snap.message == "Antigravity quota auth expired; reconnect."
+    end
+
+    test "a rejected file/DB token with no live agy CLI keeps the plain auth-expired message" do
+      state = antigravity_state_file("stale-token")
+
+      Req.Test.stub(@stub, fn conn ->
+        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      snap =
+        CloudCode.antigravity(
+          antigravity_opts(
+            antigravity_state_path: state,
+            project_id: "p",
+            agy_probe: fn -> :not_live end
+          )
+        )
+
+      assert snap.models == []
+      assert snap.message == "Antigravity quota auth expired; reconnect."
     end
   end
 end

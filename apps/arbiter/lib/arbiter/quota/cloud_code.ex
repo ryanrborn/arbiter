@@ -21,17 +21,49 @@ defmodule Arbiter.Quota.CloudCode do
   / `GOOGLE_OAUTH_CLIENT` client ids). Re-authenticating one has no effect on
   the other, and a stale Gemini CLI token does not mean Antigravity is stale
   (bd-5bchzv fixes the bd-4n1r8m spike's wrong assumption that they shared a
-  token). Antigravity itself — the IDE app, a VS Code fork — persists its live
-  access token in its own `globalStorage` sqlite DB at
-  `~/.config/Antigravity/User/globalStorage/state.vscdb`, under the
-  `antigravityAuthStatus` key's `apiKey` field, and rewrites that row every time
-  the app refreshes its token in the background. We read that DB read-only via
-  `Exqlite.Sqlite3`. If it's unavailable (e.g. Antigravity was never installed
-  on this host), we fall back to the shared Gemini CLI creds file as a
-  last-ditch attempt rather than reporting "not configured" outright. Neither
-  path is ever written, and we do **not** refresh either token — the real app
-  keeps its own fresh through normal use, so a stale token degrades to a
-  `message` rather than triggering an OAuth dance here.
+  token).
+
+  ### Antigravity token precedence (bd-4ku4ze)
+
+  1. **IDE `state.vscdb`** — the Antigravity IDE app (a VS Code fork) persists
+     its live access token in its own `globalStorage` sqlite DB at
+     `~/.config/Antigravity/User/globalStorage/state.vscdb`, under the
+     `antigravityAuthStatus` key's `apiKey` field, and rewrites that row every
+     time the app refreshes its token in the background. We read that DB
+     read-only via `Exqlite.Sqlite3`. This token goes stale as soon as the IDE
+     stops running, since nothing else refreshes it.
+  2. **Gemini CLI creds file fallback** — if the state DB is unavailable (e.g.
+     Antigravity was never installed on this host), we fall back to the shared
+     Gemini CLI creds file as a last-ditch attempt rather than reporting "not
+     configured" outright — even though it's a different OAuth client, it's
+     Google Cloud Code Assist auth and better than nothing.
+  3. **`agy` CLI liveness probe** — the `agy` CLI (Antigravity's own binary,
+     `~/.local/bin/agy`) keeps its token in the OS keyring via a `keyringAuth`
+     → `adcAuth` → WIF → file chain, invisible to both paths above. We do
+     **not** read the keyring directly (its Secret Service attribute schema is
+     undocumented and brittle to depend on); instead, when neither of the
+     above yields a usable token, we shell out to `agy models` as a pure
+     liveness check. A `0` exit proves a credential *does* exist somewhere in
+     `agy`'s chain, even though we can't read it ourselves — so we report a
+     live-but-unreadable status distinct from "not configured", and (bullet 3
+     of bd-4ku4ze) distinct from "credential found but rejected" (a 401 on an
+     actual token we hold). The same probe disambiguates a 401 on a stale
+     `state.vscdb`/fallback token: if `agy` is still live, only our stored
+     copy is stale, not the underlying account.
+
+  None of these paths is ever written, and we do **not** refresh any token —
+  the real app/CLI keeps its own fresh through normal use, so a stale token
+  degrades to a `message` rather than triggering an OAuth dance here.
+
+  ### Gemini CLI keyring review (bd-4ku4ze)
+
+  Reviewed whether the Gemini CLI (`@google/gemini-cli`, an npm/Node package)
+  has an equivalent keyring/ADC source hiding behind its `oauth_creds.json` —
+  it does not: the installed bundle has no keyring dependency, and the creds
+  file is the CLI's only token store. Its degraded `project id not available`
+  message (`project_missing_message/1`) is a separate failure mode — a valid
+  token but no cached Cloud Code project — already distinct from an auth
+  failure, so no probe is needed on that path.
 
   ## Flow
 
@@ -195,16 +227,37 @@ defmodule Arbiter.Quota.CloudCode do
 
   Reads Antigravity's own live access token from its `globalStorage` sqlite
   state DB (see the moduledoc) — falling back to the Gemini CLI creds file
-  only if that DB is unavailable. Options:
+  only if that DB is unavailable. If neither file yields a token, probes the
+  `agy` CLI's own auth chain (keyring/ADC/WIF) as a liveness check rather than
+  reporting "not configured" outright — see the moduledoc's "Antigravity
+  token precedence" section. Options:
 
     * `:antigravity_state_path` — override the state DB path (tests / non-default homes)
+    * `:agy_cmd` — override the `agy` executable name/path (default `"agy"`, resolved via `System.find_executable/1`)
+    * `:agy_probe` — override the liveness probe with a 0-arity fun returning `:live` / `:not_live` / `:not_installed` (tests)
+    * `:agy_probe_timeout` — max time to wait on the `agy` subprocess, ms (default 5000)
     * `:creds_path`, `:project_id`, `:plug`, `:receive_timeout` — see `gemini/1`
   """
   @spec antigravity(keyword()) :: snapshot() | nil
   def antigravity(opts \\ []) do
     case load_antigravity_token(opts) do
       {:ok, token} -> fetch_antigravity(token, opts)
-      :error -> nil
+      :error -> antigravity_without_token(opts)
+    end
+  end
+
+  # Neither the IDE's state.vscdb nor the Gemini CLI fallback yielded a token.
+  # That doesn't necessarily mean Antigravity has no live credential — the
+  # `agy` CLI keeps its own token in the OS keyring, invisible to us (see
+  # moduledoc). Probe it: if `agy models` succeeds, a credential *does* exist,
+  # just not one we can read to make the quota HTTP call ourselves, so we
+  # report a live-but-unreadable status instead of silently omitting
+  # Antigravity (the prior "not configured" `nil`, indistinguishable from
+  # Antigravity never having been used at all).
+  defp antigravity_without_token(opts) do
+    case agy_cli_probe(opts) do
+      :live -> snapshot("antigravity", "Unknown", [], agy_live_no_token_message())
+      _ -> nil
     end
   end
 
@@ -220,7 +273,7 @@ defmodule Arbiter.Quota.CloudCode do
         snapshot("antigravity", plan, [], "Antigravity quota API access forbidden.")
 
       {:ok, %Req.Response{status: 401}} ->
-        snapshot("antigravity", plan, [], "Antigravity quota auth expired; reconnect.")
+        snapshot("antigravity", plan, [], antigravity_expired_message(opts))
 
       {:ok, %Req.Response{status: status}} ->
         snapshot("antigravity", plan, [], "Antigravity quota error (#{status}).")
@@ -228,6 +281,28 @@ defmodule Arbiter.Quota.CloudCode do
       {:error, err} ->
         snapshot("antigravity", plan, [], "Antigravity quota error: #{transport_message(err)}")
     end
+  end
+
+  # A 401 on our stored token is "credential found but rejected" — but if the
+  # `agy` CLI is still live, the account itself isn't logged out, only
+  # Arbiter's file/DB copy is stale. Say so, rather than the generic message
+  # that sent this investigation (bd-4ku4ze) down the wrong path.
+  defp antigravity_expired_message(opts) do
+    case agy_cli_probe(opts) do
+      :live ->
+        "Antigravity quota token on file is stale (rejected), but the agy CLI session is " <>
+          "still authenticated — open the Antigravity IDE (or re-run `agy`) to refresh " <>
+          "the stored token."
+
+      _ ->
+        "Antigravity quota auth expired; reconnect."
+    end
+  end
+
+  defp agy_live_no_token_message do
+    "Antigravity CLI (agy) is authenticated, but Arbiter has no readable token: the IDE's " <>
+      "state.vscdb is missing or stale and there is no Gemini CLI fallback token. Open the " <>
+      "Antigravity IDE once to refresh state.vscdb, or reconnect."
   end
 
   defp resolve_antigravity_project(token, opts) do
@@ -533,6 +608,55 @@ defmodule Arbiter.Quota.CloudCode do
     case load_antigravity_state_token(opts) do
       {:ok, token} -> {:ok, token}
       :error -> load_access_token(opts)
+    end
+  end
+
+  # Liveness probe for the `agy` CLI's own auth chain (keyring → ADC → WIF →
+  # file — see moduledoc). We never attempt to read the keyring's attribute
+  # schema directly (brittle, duplicates auth logic the CLI already owns);
+  # instead we shell out and let `agy` tell us whether *it* considers itself
+  # authenticated. `:live` / `:not_live` / `:not_installed` — never raises.
+  defp agy_cli_probe(opts) do
+    case opts[:agy_probe] do
+      fun when is_function(fun, 0) -> fun.()
+      _ -> agy_cli_probe_default(opts)
+    end
+  end
+
+  defp agy_cli_probe_default(opts) do
+    cmd = opts[:agy_cmd] || Application.get_env(:arbiter, :agy_cmd) || "agy"
+
+    case System.find_executable(cmd) do
+      nil -> :not_installed
+      path -> run_agy_probe(path, opts)
+    end
+  rescue
+    _ -> :not_installed
+  end
+
+  # Run `agy models` off-process with a hard timeout — a hung/prompting CLI
+  # must never block `arb quota`. Shutting the Task down closes the port,
+  # which terminates the underlying OS process.
+  #
+  # `agy` backgrounds its own language-server process, which inherits
+  # whatever file descriptor its stdout points at. When we capture output via
+  # a plain `System.cmd/3` pipe, Erlang's port driver blocks waiting for that
+  # pipe's write end to close — but the backgrounded grandchild keeps it open
+  # indefinitely, so the port never sees EOF even though `agy` itself exits
+  # immediately. Routing stdout/stderr through `/dev/null` (a real sink, not
+  # a pipe) instead of capturing it sidesteps this entirely.
+  defp run_agy_probe(path, opts) do
+    timeout = Keyword.get(opts, :agy_probe_timeout, 5_000)
+
+    task =
+      Task.async(fn ->
+        System.cmd("/bin/sh", ["-c", ~s(exec "$0" models >/dev/null 2>&1 </dev/null), path])
+      end)
+
+    case Task.yield(task, timeout) do
+      {:ok, {_out, 0}} -> :live
+      {:ok, _other} -> :not_live
+      nil -> Task.shutdown(task, :brutal_kill) && :not_live
     end
   end
 
