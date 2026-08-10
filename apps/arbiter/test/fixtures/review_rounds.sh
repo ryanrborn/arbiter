@@ -13,12 +13,21 @@
 # fixture runs in the same CWD between passes but uses a different marker name.
 # Stands in for a real `claude --print` reviewer so tests never invoke the paid
 # CLI.
+#
+# Round 2+ carries a DISPOSITIONS block accounting for the round-1 finding
+# (bd-6r8caj): an APPROVE that leaves a prior Medium+ finding undispositioned is
+# now rejected. The disposition is `[OBSOLETE]` rather than `[ADDRESSED]` because
+# the paired `revise.sh` implementer only argues — it commits nothing — so an
+# "addressed" claim would (correctly) fail the mechanical no-diff backstop. A
+# reviewer persuaded by a rebuttal is exactly the case `[OBSOLETE]` exists for.
 later_verdict="${1:-APPROVE}"
 marker="./.review_gate_round_attempt"
 
 if [ -f "$marker" ]; then
   echo "re-reviewing the updated diff after the implementer's revision"
   echo "VERDICT: ${later_verdict}"
+  echo "DISPOSITIONS:"
+  echo "- [OBSOLETE] F1.1 — the rebuttal stands; the guard this asked for is unnecessary here"
   echo "findings: round-two assessment of the revised work"
   echo "arb done"
 else

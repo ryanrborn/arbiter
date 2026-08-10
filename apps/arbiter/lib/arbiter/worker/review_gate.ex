@@ -156,6 +156,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ResumeContext
+  alias Arbiter.Worker.ReviewFindings
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.StopReason
@@ -421,7 +422,18 @@ defmodule Arbiter.Worker.ReviewGate do
       # The reviewer (and the escalation diff) diff `base_sha..HEAD` so commits
       # that landed on the target AFTER the branch was cut are never attributed
       # to the branch. nil when no worktree / git is unavailable.
-      base_sha: nil
+      base_sha: nil,
+      # bd-6r8caj: the findings still open against this work, carried across
+      # rounds with stable `F<round>.<n>` ids. A round that rejects appends its
+      # own findings and drops the ones the round dispositioned as addressed or
+      # obsolete; an APPROVE must account for every Medium-or-higher entry here
+      # or it is not honored.
+      open_findings: [],
+      # The set of repo-relative paths the implementer's revise round(s)
+      # actually changed, accumulated across rounds. nil until the first revise
+      # round completes (and stays nil without a worktree / git), which keeps the
+      # untouched-file backstop silent rather than guessing.
+      revise_touched_files: nil
     }
 
     Process.monitor(author)
@@ -767,7 +779,23 @@ defmodule Arbiter.Worker.ReviewGate do
         #     shape) → handle_missing_criteria
         # Enforcing the breakdown only via prompt text left the gate itself open:
         # a reviewer that ignored the instruction reproduced occurrences #1/#2.
+        # bd-6r8caj: FIRST, before any criteria question, ask whether this round
+        # even accounted for the findings already open against the work. A
+        # revision round could previously return APPROVE / VERIFICATION: FULL
+        # having never revisited the finding it raised itself one round earlier
+        # (observed on bd-8mtb0q): findings were free prose, so "was F1.1
+        # addressed?" was not a question the gate could ask. Now it is, and an
+        # APPROVE that leaves a Medium-or-higher finding with no disposition —
+        # or marks one [NOT ADDRESSED], or claims [ADDRESSED] against a file no
+        # revision touched — is treated as malformed, exactly like a missing
+        # `VERDICT:` line. Round 1 has nothing open, so the common path is
+        # untouched.
+        gap = approval_gap(state, findings)
+
         cond do
+          ReviewFindings.gap?(gap) ->
+            handle_unaddressed_findings(state, findings, gap)
+
           has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
             handle_unmet_criteria(state, findings)
 
@@ -876,7 +904,22 @@ defmodule Arbiter.Worker.ReviewGate do
   # them on the same branch. The caller owns the `record_round` write so each
   # entry point can log its own honest verdict — a `:request_changes` reject vs.
   # an `:approve` that admits an unmet criterion.
-  defp route_after_reject(%{round: round, max_rounds: max} = state, findings)
+  defp route_after_reject(state, findings) do
+    state |> accumulate_open_findings(findings) |> do_route_after_reject(findings)
+  end
+
+  # bd-6r8caj: roll the open-finding set forward across the round boundary. The
+  # findings this round dispositioned as `[ADDRESSED]` or `[OBSOLETE]` are closed
+  # and drop out; everything else stays open and is joined by whatever this round
+  # newly raised, each with a fresh round-namespaced id. This is the state the
+  # next round's APPROVE is measured against — and the reason the set converges
+  # instead of growing without bound.
+  defp accumulate_open_findings(state, findings) do
+    carried = ReviewFindings.carry_over(Map.get(state, :open_findings, []), findings)
+    %{state | open_findings: carried ++ ReviewFindings.extract(findings, state.round)}
+  end
+
+  defp do_route_after_reject(%{round: round, max_rounds: max} = state, findings)
        when round >= max do
     state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
 
@@ -887,7 +930,7 @@ defmodule Arbiter.Worker.ReviewGate do
     {:done, finish(state, {:request_changes, escalation_payload(state)})}
   end
 
-  defp route_after_reject(state, findings) do
+  defp do_route_after_reject(state, findings) do
     enter_revise(state, findings)
   end
 
@@ -1003,6 +1046,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp note_head_change(state) do
     new_sha = current_head_sha(state)
     old_sha = state.head_sha
+    state = record_touched_files(state, old_sha, new_sha)
 
     cond do
       is_nil(new_sha) or is_nil(old_sha) ->
@@ -1036,6 +1080,32 @@ defmodule Arbiter.Worker.ReviewGate do
         {%{state | thread: state.thread ++ [entry]}, new_sha}
     end
   end
+
+  # bd-6r8caj: the mechanical backstop's raw material — which files the revise
+  # round actually changed, accumulated across rounds. `git diff --name-only
+  # old..new` between the SHA the reviewer last saw and the SHA after the
+  # implementer's round; an empty diff for a file a finding cited is the exact
+  # bd-8mtb0q signal ("the implementer only ran `mix format`"). Stays nil without
+  # a worktree or when either SHA is unknown, and an unchanged HEAD contributes
+  # nothing — both leave the backstop silent rather than guessing. Best-effort:
+  # a git failure is not allowed to break the round.
+  defp record_touched_files(%{worktree_path: wt} = state, old_sha, new_sha)
+       when is_binary(wt) and is_binary(old_sha) and is_binary(new_sha) do
+    changed =
+      case System.cmd("git", ["-C", wt, "diff", "--name-only", "#{old_sha}..#{new_sha}"],
+             stderr_to_stdout: true
+           ) do
+        {out, 0} -> out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)
+        _ -> []
+      end
+
+    prior = Map.get(state, :revise_touched_files) || MapSet.new()
+    %{state | revise_touched_files: MapSet.union(prior, MapSet.new(changed))}
+  rescue
+    _ -> state
+  end
+
+  defp record_touched_files(state, _old_sha, _new_sha), do: state
 
   # ---- infrastructure-failure classification (bd-b2glhm) ------------------
 
@@ -1220,6 +1290,87 @@ defmodule Arbiter.Worker.ReviewGate do
   # value.
   defp unverified_banner(findings) when is_binary(findings) do
     ReviewVerification.prepend_banner(findings)
+  end
+
+  # ---- prior-finding disposition guard (bd-6r8caj) --------------------------
+
+  # What this approving round failed to establish about the findings still open
+  # against the work. Pure — reads the carried-forward findings, the round's own
+  # DISPOSITIONS block, and the files the revise round(s) really changed.
+  defp approval_gap(state, findings) do
+    ReviewFindings.approval_gap(
+      Map.get(state, :open_findings, []),
+      findings,
+      Map.get(state, :revise_touched_files)
+    )
+  end
+
+  # An APPROVE that did not account for every Medium-or-higher open finding.
+  # Mirrors the unmet-criteria guard exactly: one more chance on the shared
+  # verdict-retry budget — a fresh reviewer mind, handed the open findings, their
+  # ids, and the diff the implementer actually produced, and told to disposition
+  # each one. If the budget is spent (or the retry can't spawn) the approval is
+  # NOT accepted at face value: the honest round is recorded and the payload is
+  # routed down the reject path behind a banner naming the findings it skipped.
+  defp handle_unaddressed_findings(%{retries_left: budget} = state, findings, gap)
+       when budget > 0 do
+    stop_acolyte(state)
+
+    review_id_for_reprompt =
+      if state.round > 1 do
+        reviewer_round_id(state.review_id, state.round)
+      else
+        state.review_id
+      end
+
+    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
+
+    case launch_acolyte(
+           %{state | retries_left: budget - 1},
+           retry_id,
+           :reviewer,
+           verdict_reprompt_prompt(state, :unaddressed_findings),
+           state.command
+         ) do
+      {:ok, state} ->
+        Logger.info(
+          "ReviewGate: reviewer for task=#{state.task_id} approved without dispositioning " <>
+            "#{length(ReviewFindings.gap_findings(gap))} open finding(s); re-prompting " <>
+            "(attempt #{state.attempt})"
+        )
+
+        {:reprompt, state}
+
+      {:error, spawn_error} ->
+        Logger.warning(
+          "ReviewGate: unaddressed-findings re-prompt failed to spawn for task=#{state.task_id}: " <>
+            "#{inspect(spawn_error)}; rejecting the approval, clearly marked"
+        )
+
+        reject_unaddressed_findings(state, findings, gap)
+    end
+  end
+
+  defp handle_unaddressed_findings(state, findings, gap) do
+    Logger.warning(
+      "ReviewGate: reviewer for task=#{state.task_id} approved without dispositioning open " <>
+        "finding(s) #{Enum.map_join(ReviewFindings.gap_findings(gap), ", ", & &1.id)} and the " <>
+        "re-prompt budget is exhausted; rejecting the approval, clearly marked"
+    )
+
+    reject_unaddressed_findings(state, findings, gap)
+  end
+
+  # Terminal handling for an APPROVE that skipped its dispositions. Record the
+  # HONEST round — verdict `:approve`, `converged: false`, with the per-finding
+  # dispositions and the undispositioned count — so "approved without accounting
+  # for finding X" is literally queryable in `review_gate_rounds`, then route the
+  # banner-prefixed payload down the shared reject path (escalate if the round
+  # budget is spent, else back to the implementer). Not `handle_reject/2`, which
+  # would mislabel the round as `:request_changes`.
+  defp reject_unaddressed_findings(state, findings, gap) do
+    record_round(state, :review, :approve, findings, converged: false)
+    route_after_reject(state, ReviewFindings.prepend_disposition_banner(findings, gap))
   end
 
   # ---- unmet-criteria guard (bd-4yhv4x) ------------------------------------
@@ -1455,6 +1606,21 @@ defmodule Arbiter.Worker.ReviewGate do
     # quality change.
     reviewer_tier = if role == :review, do: reviewer_tier_for(state), else: nil
 
+    # bd-6r8caj: give the round's findings identity, and record what this round
+    # said about every finding carried INTO it. `undispositioned_count` is the
+    # queryable form of the defect: an APPROVE row with a non-zero count is a
+    # round that approved without accounting for an open Medium+ finding.
+    open = Map.get(state, :open_findings, [])
+
+    {finding_ids, dispositions, undispositioned} =
+      if role == :review do
+        {ReviewFindings.encode_ids(ReviewFindings.extract(findings, state.round)),
+         ReviewFindings.encode_dispositions(open, findings),
+         length(ReviewFindings.approval_gap(open, findings, nil).missing)}
+      else
+        {nil, nil, nil}
+      end
+
     attrs = %{
       task_id: state.task_id,
       run_id: run_id,
@@ -1468,6 +1634,9 @@ defmodule Arbiter.Worker.ReviewGate do
       cost_usd: cost_usd,
       criteria_total: criteria_total,
       criteria_unmet: criteria_unmet,
+      finding_ids: finding_ids,
+      dispositions: dispositions,
+      undispositioned_count: undispositioned,
       converged: converged
     }
 
@@ -2319,9 +2488,45 @@ defmodule Arbiter.Worker.ReviewGate do
   """
   @spec verdict_reprompt_prompt(
           map(),
-          :no_verdict | :empty_findings | :unverified | :unmet_criteria | :missing_criteria
+          :no_verdict
+          | :empty_findings
+          | :unverified
+          | :unmet_criteria
+          | :missing_criteria
+          | :unaddressed_findings
         ) :: String.t()
   def verdict_reprompt_prompt(state, reason \\ :no_verdict)
+
+  def verdict_reprompt_prompt(state, :unaddressed_findings) do
+    """
+    A prior review pass of this diff returned `VERDICT: APPROVE`, but it never
+    established that the findings already open against this work were actually
+    addressed — it left at least one Medium-or-higher finding with no
+    disposition, marked one `[NOT ADDRESSED]`, or claimed one was `[ADDRESSED]`
+    while no revision touched any file it cited.
+
+    That is the failure this gate exists to catch, and it is the reason a
+    `VERIFICATION: FULL` line is not taken on trust: approving a revision round
+    without re-checking the round's own prior finding has merged real defects
+    behind a green verdict. An approval is a claim about every open finding, not
+    an impression of how the diff reads.
+
+    Re-review the CURRENT diff from scratch and this time:
+
+      * Account for EVERY open finding id listed below, one per line, in a
+        `DISPOSITIONS:` block right after your `VERDICT:` line.
+      * `[ADDRESSED]` requires that you re-opened the CURRENT file and saw the
+        problem gone — and that you name the `file:line` where the fix landed.
+        The implementer saying "FIXED" is not evidence; a file the revision never
+        touched cannot contain the fix.
+      * `[NOT ADDRESSED]` is the honest answer when the finding still stands. Use
+        it — and do not pair it with APPROVE, which will be rejected again.
+      * `[OBSOLETE]` is available when a different change genuinely invalidated
+        the finding (the code it cited is gone, or the concern can no longer
+        arise). Say why.
+
+    """ <> rereview_prompt(state)
+  end
 
   def verdict_reprompt_prompt(state, :missing_criteria) do
     """
@@ -2650,7 +2855,7 @@ defmodule Arbiter.Worker.ReviewGate do
     of the prior round's text. If the implementer's diff already addresses it,
     ACCEPT it and say so; restating a prior finding verbatim against code that
     has since changed is a false re-flag, not a legitimate hold.
-
+    #{open_findings_briefing(state)}#{revision_diff_briefing(state)}
     Prior discussion (oldest first):
 
     #{render_thread(state.thread)}
@@ -2658,6 +2863,52 @@ defmodule Arbiter.Worker.ReviewGate do
     ----------------------------------------------------------------------
 
     """ <> review_prompt(state)
+  end
+
+  # bd-6r8caj: the open findings, by id, plus the DISPOSITIONS instruction that
+  # makes an APPROVE checkable. Empty (and the round behaves exactly as before)
+  # when nothing is carried forward.
+  defp open_findings_briefing(state) do
+    case Map.get(state, :open_findings, []) do
+      [] ->
+        ""
+
+      open ->
+        "\n" <>
+          ReviewFindings.open_findings_block(open, Map.get(state, :revise_touched_files)) <>
+          "\n" <> ReviewFindings.disposition_block(open)
+    end
+  end
+
+  # bd-6r8caj: the diff the implementer ACTUALLY produced, named file by file.
+  # The bd-8mtb0q round approved a revision whose diff for the cited file was
+  # empty — it had no way to notice, because nothing put the real change set in
+  # front of it.
+  defp revision_diff_briefing(state) do
+    case Map.get(state, :revise_touched_files) do
+      nil ->
+        ""
+
+      touched ->
+        files =
+          case Enum.sort(touched) do
+            [] -> "  (NOTHING — no revision has changed a single file so far)"
+            list -> Enum.map_join(list, "\n", &("  " <> &1))
+          end
+
+        """
+
+        FILES THE REVISION(S) ACTUALLY CHANGED — this is `git diff --name-only`
+        across every revise round so far, not the implementer's own account of
+        its work:
+
+        #{files}
+
+        A finding whose file does not appear above was NOT fixed where it was
+        cited. Either the fix landed somewhere else (say where) or it did not
+        happen — an implementer claiming "FIXED" is not evidence.
+        """
+    end
   end
 
   # Returns the async-tool instruction block appropriate for the adapter
