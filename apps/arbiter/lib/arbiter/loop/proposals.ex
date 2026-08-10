@@ -11,8 +11,10 @@ defmodule Arbiter.Loop.Proposals do
 
   ## What becomes a candidate, and what deliberately does not
 
-    * **Every reviewer-finding category** becomes a `:skill_patch` candidate at
-      `:fleet` scope — including the ones below the evidence bar. That is the
+    * **Every reviewer-finding category** becomes a `:skill_patch` or
+      `:repo_doc_patch` candidate — whichever the suggestion's `destination`
+      names (`:skill` → `:skill_patch`, `:claude_md` → `:repo_doc_patch`) — at
+      `:fleet` scope, including the ones below the evidence bar. That is the
       point of Stage 2: a below-bar finding is kept as a `:hypothesis` carrying
       its incident refs instead of being discarded, so its third occurrence
       three weeks later counts from 1 + 2 rather than from zero. The bar is
@@ -20,10 +22,11 @@ defmodule Arbiter.Loop.Proposals do
       here.
 
       These carry **no patch content**: there is currently no mapping from a
-      finding category to a specific skill (`suggestion_targets/2` returns
-      `destination: :skill` without ever naming one), so authoring the patch
-      prose is Stage 3 work behind the category→skill attribution problem.
-      Applying such a row fails cleanly, naming the gap.
+      finding category to a specific skill or repo (`suggestion_targets/2`
+      returns a destination without ever naming one), so authoring the patch
+      prose — and, for `:repo_doc_patch`, attributing a repo — is Stage 3 work
+      behind the category→skill/repo attribution problem. Applying such a row
+      fails cleanly, naming the gap.
 
     * **Rework difficulty misestimates** become `:difficulty_override`
       candidates at `:task` scope (blast radius 1, so they bypass the bar) with
@@ -100,25 +103,32 @@ defmodule Arbiter.Loop.Proposals do
 
     Enum.map(report.finding_categories, fn cat ->
       suggestion = Map.get(by_title, cat.category, %{})
+      destination = Map.get(suggestion, :destination) || :skill
 
       %{
-        kind: :skill_patch,
+        kind: finding_kind(destination),
         scope: :fleet,
         category: cat.category,
         target: nil,
         difficulty: nil,
+        # No repo: a finding category is a fleet-wide aggregate with no
+        # attributed repo cell (see difficulty misestimates for the one place
+        # that attribution exists today). Left nil even for a `:claude_md`
+        # destination — the apply path refuses the row and names that gap
+        # rather than guessing which repo's file to patch.
         repo: nil,
-        gist: elide("working-practice guardrail for: #{cat.category}"),
+        gist: elide(finding_gist(destination, cat.category)),
         target_metric: Map.get(suggestion, :target_metric),
         baseline: Map.get(suggestion, :baseline),
         incident_refs: cat.run_ids,
         task_refs: cat.tasks,
-        # No `skill` key: the target skill is not attributed yet (Stage 3). The
-        # apply path refuses the row and says so rather than guessing.
+        # No `skill` key, no `repo`/`lesson`: the target skill or repo is not
+        # attributed yet (Stage 3). The apply path refuses the row and says so
+        # rather than guessing.
         payload: %{
           "category" => cat.category,
           "example" => Map.get(cat, :example),
-          "destination" => to_string(Map.get(suggestion, :destination) || :skill)
+          "destination" => to_string(destination)
         },
         diff: nil,
         origin: origin,
@@ -126,6 +136,17 @@ defmodule Arbiter.Loop.Proposals do
       }
     end)
   end
+
+  # A `:claude_md` destination is a repo-scoped lesson, so it belongs to the
+  # `:repo_doc_patch` write path (rung 2 of the destination ladder) rather
+  # than `:skill_patch` — routing it as a skill patch would fail with a
+  # misleading "no skill attributed" message instead of the accurate "no repo
+  # attributed" one `:repo_doc_patch` reports.
+  defp finding_kind(:claude_md), do: :repo_doc_patch
+  defp finding_kind(_destination), do: :skill_patch
+
+  defp finding_gist(:claude_md, category), do: "repo CLAUDE.md lesson for: #{category}"
+  defp finding_gist(_destination, category), do: "working-practice guardrail for: #{category}"
 
   # ---- difficulty misestimates --------------------------------------------
 

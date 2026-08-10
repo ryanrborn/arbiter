@@ -37,9 +37,11 @@ defmodule Arbiter.Loop do
 
   use Ash.Domain
 
-  alias Arbiter.Loop.PendingWrite
+  alias Arbiter.Loop.{PendingWrite, RepoDocPatch}
+  alias Arbiter.Mergers
   alias Arbiter.Messages.Message
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
+  alias Arbiter.Worker.Worktree
 
   require Ash.Query
   require Logger
@@ -668,6 +670,205 @@ defmodule Arbiter.Loop do
         {:ok, _} -> :ok
         {:error, err} -> {:error, {:invalid, ash_message(err)}}
       end
+    end
+  end
+
+  # Rung 2 of the destination ladder (Amendment D): a repo-scoped lesson lands
+  # as a patch to that repo's CLAUDE.md, applied through the normal PR path —
+  # not a direct table write, since the target is a file humans also edit.
+  # `Worktree.create/3` gives an isolated branch to commit into;
+  # `RepoDocPatch.upsert/4` owns the delimited managed section so a human edit
+  # and an Arbiter edit never clobber each other; `Mergers.for_workspace/1`
+  # opens the PR the same way any other change in that repo would be opened.
+  defp dispatch_apply(%PendingWrite{kind: :repo_doc_patch} = row, attribution) do
+    payload = row.payload
+
+    with {:ok, repo} <- repo_doc_repo(row),
+         {:ok, lesson} <- payload_string(payload, "lesson"),
+         {:ok, ws_id} <- config_workspace(payload, row.workspace_id),
+         {:ok, ws} <- fetch_workspace(ws_id),
+         {:ok, {repo_path, target_branch}} <- resolve_repo_doc_target(ws, repo) do
+      apply_repo_doc_patch(ws, repo_path, target_branch, row, lesson, attribution)
+    end
+  end
+
+  defp repo_doc_repo(%PendingWrite{repo: repo}) when is_binary(repo) and repo != "",
+    do: {:ok, repo}
+
+  defp repo_doc_repo(_row) do
+    {:error,
+     {:unmapped,
+      "this proposal names no repo: CLAUDE.md needs a repo-scoped finding to know which " <>
+        "repo's file to patch — attribute the finding to a repo before proposing it"}}
+  end
+
+  defp resolve_repo_doc_target(%Workspace{config: config}, repo) do
+    paths = Map.get(config || %{}, "repo_paths") || Map.get(config || %{}, "rig_paths") || %{}
+
+    case repo_doc_entry(paths, repo) do
+      nil ->
+        {:error,
+         {:unmapped, "repo #{inspect(repo)} is not registered in this workspace's repo_paths"}}
+
+      entry ->
+        case RepoConfig.repo_path_from_config(entry) do
+          nil ->
+            {:error, {:unmapped, "repo #{inspect(repo)}'s repo_paths entry has no path"}}
+
+          path ->
+            {:ok, {path, RepoConfig.repo_target_from_config(entry) || "main"}}
+        end
+    end
+  end
+
+  defp repo_doc_entry(paths, repo) when is_map(paths) do
+    case Map.get(paths, repo) do
+      nil ->
+        target = RepoConfig.normalize_slug(repo)
+        Enum.find_value(paths, fn {k, v} -> if RepoConfig.normalize_slug(k) == target, do: v end)
+
+      raw ->
+        raw
+    end
+  end
+
+  defp repo_doc_entry(_paths, _repo), do: nil
+
+  defp apply_repo_doc_patch(ws, repo_path, target_branch, row, lesson, attribution) do
+    branch = "loop/repo-doc-patch-#{row.id}"
+
+    case Worktree.create(repo_path, branch, target_branch) do
+      {:ok, worktree_path} ->
+        result =
+          write_repo_doc_patch(
+            ws,
+            repo_path,
+            target_branch,
+            worktree_path,
+            branch,
+            row,
+            lesson,
+            attribution
+          )
+
+        _ = Worktree.cleanup(worktree_path)
+        result
+
+      {:error, reason} ->
+        {:error,
+         {:invalid, "could not provision a worktree for #{repo_path}: #{inspect(reason)}"}}
+    end
+  end
+
+  defp write_repo_doc_patch(
+         ws,
+         repo_path,
+         target_branch,
+         worktree_path,
+         branch,
+         row,
+         lesson,
+         attribution
+       ) do
+    doc_path = repo_doc_path(row.payload)
+    file_path = Path.join(worktree_path, doc_path)
+    current = repo_doc_read(file_path)
+    cap_bytes = repo_doc_cap_bytes(row.payload)
+
+    with {:ok, %{content: new_content, removed: removed}} <-
+           RepoDocPatch.upsert(current, row.fingerprint, lesson, cap_bytes: cap_bytes),
+         :ok <- File.write(file_path, new_content),
+         :ok <-
+           repo_doc_commit(
+             worktree_path,
+             doc_path,
+             repo_doc_commit_message(row, removed, attribution)
+           ),
+         adapter <- Mergers.for_workspace(ws),
+         :ok <- repo_doc_maybe_push(adapter, worktree_path),
+         {:ok, _mr_ref} <-
+           Mergers.open_with_retry(
+             adapter,
+             branch,
+             row.gist,
+             repo_doc_pr_description(row, lesson, removed),
+             %{repo_path: repo_path, target_branch: target_branch}
+           ) do
+      :ok
+    else
+      {:error, {:entry_too_large, cap_bytes}} ->
+        {:error,
+         {:invalid,
+          "this lesson (#{byte_size(lesson)} bytes) alone exceeds the #{cap_bytes}-byte CLAUDE.md section cap"}}
+
+      {:error, reason} ->
+        {:error, {:invalid, inspect(reason)}}
+    end
+  end
+
+  defp repo_doc_path(payload) do
+    case Map.get(payload, "path") do
+      p when is_binary(p) and p != "" -> p
+      _ -> "CLAUDE.md"
+    end
+  end
+
+  defp repo_doc_cap_bytes(payload) do
+    case Map.get(payload, "cap_bytes") do
+      n when is_integer(n) and n > 0 -> n
+      _ -> 4_000
+    end
+  end
+
+  defp repo_doc_read(file_path) do
+    case File.read(file_path) do
+      {:ok, content} -> content
+      {:error, _} -> ""
+    end
+  end
+
+  defp repo_doc_commit(worktree_path, doc_path, message) do
+    with {_, 0} <- System.cmd("git", ["add", doc_path], cd: worktree_path, stderr_to_stdout: true),
+         {_, 0} <-
+           System.cmd("git", ["commit", "-m", message], cd: worktree_path, stderr_to_stdout: true) do
+      :ok
+    else
+      {output, _status} -> {:error, {:git_commit_failed, output}}
+    end
+  end
+
+  # `Direct` operates on the canonical repo's own refs (no remote), so pushing
+  # would just fail against whatever `origin` the local checkout has — or has
+  # none at all. Every remote-backed adapter needs the branch pushed first.
+  defp repo_doc_maybe_push(Mergers.Direct, _worktree_path), do: :ok
+
+  defp repo_doc_maybe_push(_adapter, worktree_path) do
+    case Worktree.push(worktree_path, set_upstream: true) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:git_push_failed, reason}}
+    end
+  end
+
+  defp repo_doc_commit_message(row, [], attribution),
+    do: "#{row.gist}\n\nApplied-by: #{attribution}"
+
+  defp repo_doc_commit_message(row, removed, attribution) do
+    "#{row.gist}\n\n" <>
+      "Evicted (over the CLAUDE.md size cap): #{Enum.join(removed, ", ")}\n\n" <>
+      "Applied-by: #{attribution}"
+  end
+
+  defp repo_doc_pr_description(row, lesson, removed) do
+    base =
+      "Repo-scoped lesson from the loop pass (bd-9j2g3x), applied as proposal `#{row.id}`.\n\n#{lesson}"
+
+    case removed do
+      [] ->
+        base
+
+      _ ->
+        base <>
+          "\n\n**Evicted to stay under the CLAUDE.md size cap:** #{Enum.join(removed, ", ")}"
     end
   end
 
