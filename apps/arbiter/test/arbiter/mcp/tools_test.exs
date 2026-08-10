@@ -3333,6 +3333,108 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  # bd-9j2g3x — the loop proposal queue over MCP. Coordinator-only tiering is
+  # asserted in Arbiter.MCP.CatalogTest; here we check the handlers themselves.
+  describe "loop_pending_* (bd-9j2g3x)" do
+    setup ctx do
+      {:ok, target} =
+        Ash.create(Issue, %{title: "loop target", difficulty: 2, workspace_id: ctx.ws.id})
+
+      {:ok, row} =
+        Arbiter.Loop.record(%{
+          kind: :difficulty_override,
+          scope: :task,
+          gist: "raise difficulty on #{target.id}: D2 → D3",
+          category: "difficulty misestimate (rework)",
+          target: target.id,
+          difficulty: 2,
+          repo: "arbiter",
+          incident_refs: [target.id],
+          task_refs: [target.id],
+          payload: %{"task_id" => target.id, "difficulty" => 3},
+          diff: "--- a/task\n+++ b/task\n@@ @@\n-difficulty: 2\n+difficulty: 3\n",
+          workspace_id: ctx.ws.id
+        })
+
+      {:ok, target: target, row: row}
+    end
+
+    test "loop_pending_list returns the live queue and the evidence bar", ctx do
+      assert {:ok, data} = Tools.loop_pending_list(ctx.coordinator, %{})
+
+      summary = Enum.find(data.pending, &(&1.id == ctx.row.id))
+      assert summary
+      assert data.count == length(data.pending)
+      assert data.evidence_bar == Arbiter.Loop.default_evidence_bar()
+      # Amendment D: a coordinator deciding over MCP sees the same recurring
+      # price a human sees in the CLI. A per-task override is free forever.
+      assert summary.context_cost_tokens == 0
+    end
+
+    test "loop_pending_list rejects an unknown state rather than silently returning nothing",
+         ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.loop_pending_list(ctx.coordinator, %{"state" => "propsed"})
+
+      assert message =~ "`state` must be one of"
+    end
+
+    test "loop_pending_diff returns the full row including the unified diff", ctx do
+      assert {:ok, data} = Tools.loop_pending_diff(ctx.coordinator, %{"id" => ctx.row.id})
+
+      assert data.diff =~ "+difficulty: 3"
+      assert data.fingerprint == ctx.row.fingerprint
+      assert data.applicable == true
+    end
+
+    test "loop_pending_apply goes through the domain API and paper-trails the proposal id", ctx do
+      assert {:ok, data} = Tools.loop_pending_apply(ctx.coordinator, %{"id" => ctx.row.id})
+      assert data.state == :applied
+
+      {:ok, target} = Ash.get(Issue, ctx.target.id)
+      assert target.difficulty == 3
+
+      versions =
+        Arbiter.Tasks.Issue.Version
+        |> Ash.Query.filter(version_source_id == ^ctx.target.id)
+        |> Ash.read!()
+
+      assert Enum.any?(
+               versions,
+               &(&1.version_action_inputs["change_origin"] == "loop:proposal:#{ctx.row.id}")
+             )
+    end
+
+    test "loop_pending_reject is soft — the row persists as rejected", ctx do
+      assert {:ok, data} =
+               Tools.loop_pending_reject(ctx.coordinator, %{
+                 "id" => ctx.row.id,
+                 "reason" => "handled in CLAUDE.md"
+               })
+
+      assert data.state == :rejected
+      assert {:ok, still_there} = Arbiter.Loop.get_pending(ctx.row.id)
+      assert still_there.rejection_reason == "handled in CLAUDE.md"
+    end
+
+    test "a scope bound to another workspace cannot reach the row", ctx do
+      {:ok, other} = Ash.create(Workspace, %{name: "other-loop-ws", prefix: "olw"})
+      intruder = %Scope{tier: :coordinator, workspace_id: other.id}
+
+      assert {:error, {:not_found, message}} =
+               Tools.loop_pending_diff(intruder, %{"id" => ctx.row.id})
+
+      assert message =~ "no loop proposal matching"
+    end
+
+    test "an unknown id is a tool error, not a crash", ctx do
+      assert {:error, {:not_found, message}} =
+               Tools.loop_pending_apply(ctx.coordinator, %{"id" => Ecto.UUID.generate()})
+
+      assert message =~ "no loop proposal matching"
+    end
+  end
+
   describe "Catalog.call/3 dispatch" do
     test "routes an authorized call to its handler and returns structured data", ctx do
       assert {:ok, data} = Catalog.call(ctx.worker, "task_show", %{})
