@@ -58,6 +58,22 @@ defmodule Arbiter.ReviewGate.Round do
                           Nil alongside a nil `criteria_total`; makes "APPROVE
                           with N criteria unmet" queryable without re-reading
                           the reviewer transcript.
+    * `finding_ids`     — JSON array of the `F<round>.<n>` ids this `:review` round
+                          raised (bd-6r8caj). Nil for `:impl` rows and for a round
+                          that raised none. Gives a finding an identity that
+                          survives the round boundary, so round N+1 can be asked
+                          "was F1.1 addressed?" — a question free prose could not
+                          answer.
+    * `dispositions`    — JSON object mapping every finding carried INTO this
+                          `:review` round to what the round said about it:
+                          `"addressed"` / `"not_addressed"` / `"obsolete"`, or
+                          `"none"` when the round never mentioned it. Nil when
+                          nothing was carried in (round 1) or for `:impl` rows.
+    * `undispositioned_count`
+                        — how many Medium-or-higher carried findings the round
+                          left with no disposition. A `:review` APPROVE row with
+                          a non-zero count IS the bd-8mtb0q defect, queryable
+                          without re-reading the reviewer transcript.
     * `converged`       — true for a `:review` row whose verdict is `:approve`
                           AND whose CRITERIA breakdown left no criterion unmet;
                           false otherwise (including all `:impl` rows, and an
@@ -112,6 +128,9 @@ defmodule Arbiter.ReviewGate.Round do
         :cost_usd,
         :criteria_total,
         :criteria_unmet,
+        :finding_ids,
+        :dispositions,
+        :undispositioned_count,
         :converged
       ]
     end
@@ -190,6 +209,24 @@ defmodule Arbiter.ReviewGate.Round do
       constraints min: 0
 
       description "How many addressed criteria the breakdown marked [NOT MET]. Nil when no breakdown."
+    end
+
+    attribute :finding_ids, :string do
+      public? true
+      description "JSON array of the F<round>.<n> ids this review round raised. Nil when none."
+    end
+
+    attribute :dispositions, :string do
+      public? true
+
+      description "JSON object of carried-in finding id => addressed/not_addressed/obsolete/none."
+    end
+
+    attribute :undispositioned_count, :integer do
+      public? true
+      constraints min: 0
+
+      description "Medium-or-higher carried findings this round left with no disposition."
     end
 
     attribute :converged, :boolean do

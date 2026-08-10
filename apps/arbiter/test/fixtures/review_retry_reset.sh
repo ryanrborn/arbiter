@@ -14,6 +14,11 @@
 #      "REQUEST_CHANGES" (→ escalate after cap). Default APPROVE.
 #
 # Stands in for a real `claude --print` reviewer so tests never invoke the CLI.
+#
+# The final pass dispositions F1.1 (bd-6r8caj); without it the APPROVE would be
+# rejected for leaving the round-1 finding unaccounted for. `[OBSOLETE]`, not
+# `[ADDRESSED]`: the paired `revise.sh` implementer commits nothing, so an
+# "addressed" claim would fail the no-diff backstop.
 verdict="${1:-APPROVE}"
 M1="./.trib_retry_reset_m1"
 M2="./.trib_retry_reset_m2"
@@ -38,6 +43,8 @@ elif [ ! -f "$M3" ]; then
 else
   echo "round 2 re-prompt: looks good after both rounds of revision"
   echo "VERDICT: ${verdict}"
+  echo "DISPOSITIONS:"
+  echo "- [OBSOLETE] F1.1 — the rebuttal stands; the nil guard is unnecessary"
   echo "arb done"
 fi
 exit 0

@@ -13,6 +13,12 @@
 #
 # Marker files in the CWD (the shared worktree, unique per test run) track which
 # pass is running. Stands in for a real `claude --print` reviewer.
+#
+# Each pass after the first dispositions every finding raised so far (bd-6r8caj);
+# without that the round-4 APPROVE would be rejected for leaving prior findings
+# unaccounted for. `[OBSOLETE]`, not `[ADDRESSED]`: the paired `revise.sh`
+# implementer commits nothing, so an "addressed" claim would fail the no-diff
+# backstop.
 verdict="${1:-APPROVE}"
 M1="./.rounds_empty_last_m1"
 M2="./.rounds_empty_last_m2"
@@ -27,6 +33,8 @@ if [ ! -f "$M1" ]; then
 elif [ ! -f "$M2" ]; then
   touch "$M2"
   echo "VERDICT: REQUEST_CHANGES"
+  echo "DISPOSITIONS:"
+  echo "- [OBSOLETE] F1.1 — the rebuttal stands; the nil guard is unnecessary"
   echo "findings: [medium] feature.txt:1 guard expression incomplete"
   echo "arb done"
 elif [ ! -f "$M3" ]; then
@@ -41,11 +49,18 @@ elif [ ! -f "$M4" ]; then
   touch "$M4"
   # Re-prompt for round 3: real findings this time.
   echo "VERDICT: REQUEST_CHANGES"
+  echo "DISPOSITIONS:"
+  echo "- [OBSOLETE] F1.1 — the rebuttal stands; the nil guard is unnecessary"
+  echo "- [OBSOLETE] F2.1 — the rebuttal stands; the guard expression is complete"
   echo "findings: [low] feature.txt:1 guard wording could be clearer"
   echo "arb done"
 else
   # Round 4 reviewer (only reached after the fix extends max_rounds to 4).
   echo "VERDICT: ${verdict}"
+  echo "DISPOSITIONS:"
+  echo "- [OBSOLETE] F1.1 — the rebuttal stands; the nil guard is unnecessary"
+  echo "- [OBSOLETE] F2.1 — the rebuttal stands; the guard expression is complete"
+  echo "- [OBSOLETE] F3.1 — wording nit withdrawn"
   echo "all findings addressed, change looks good"
   echo "arb done"
 fi
