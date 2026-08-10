@@ -25,6 +25,7 @@ defmodule Arbiter.Agents.Codex.StreamTest do
       assert fields[:tokens_in] == 10_500
       assert fields[:tokens_out] == 59
       assert fields[:cache_read_tokens] == 4_480
+      assert fields[:cost_note] =~ "metered"
     end
 
     test "task_complete carries the duration and error status" do
@@ -164,6 +165,17 @@ defmodule Arbiter.Agents.Codex.StreamTest do
       assert [{line, false}] = Stream.format_event(event)
       assert line =~ "codex session complete"
       assert Stream.activity_for_event(event) == "wrapping up"
+    end
+
+    test "turn.completed records why cost_usd stays nil — Codex plan usage is metered separately" do
+      event = %{
+        "type" => "turn.completed",
+        "usage" => %{"input_tokens" => 20_900, "output_tokens" => 126}
+      }
+
+      fields = Stream.usage_fields(event, "gpt-5-codex")
+      refute Map.has_key?(fields, :cost_usd)
+      assert fields[:cost_note] =~ "metered"
     end
 
     test "turn.failed flags the run as an error" do
