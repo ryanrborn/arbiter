@@ -98,6 +98,49 @@ defmodule Arbiter.Usage do
     end
   end
 
+  # Providers that record `usage_events` rows for internal bookkeeping (e.g.
+  # `Arbiter.Loop.Corpus.record_pass_cost/1` writes `provider: "arbiter"` for
+  # loop-pass cost with no token counts) rather than by parsing an agent CLI's
+  # stream. They have no stream parser to fail, so they are always
+  # zero-token by design and must not trip the blindness detector below.
+  @synthetic_providers ~w(arbiter)
+
+  @doc """
+  Providers whose `usage_events` rows are **wholly** zero-token over the
+  window — i.e. every row for that provider carries `tokens_in: 0/nil` and
+  `tokens_out: 0/nil`.
+
+  A provider whose stream parser silently drops usage (bd-2fzwlc: this is
+  exactly what happened to every Gemini/agy row before the fix) reads
+  identically to "that provider is just cheap" unless something calls this
+  out. A provider with even one non-zero row is not flagged — this is a
+  blindness detector, not a low-usage alert.
+
+  Accepts the same `:since` / `:workspace_id` options as `summarize/1`, plus
+  `:until` (`%DateTime{}`, filters `occurred_at <= until`) so a historical
+  window's flag reflects only the rows the window actually covers.
+  Returns `{:ok, [%{provider:, rows:}]}`, sorted by provider name.
+  """
+  @spec zero_token_providers(keyword()) :: {:ok, [%{provider: String.t(), rows: pos_integer()}]}
+  def zero_token_providers(opts \\ []) do
+    events =
+      Event
+      |> base_filter(opts)
+      |> Ash.read!()
+
+    flagged =
+      events
+      |> Enum.group_by(&(&1.provider || "(unknown)"))
+      |> Enum.reject(fn {provider, _evs} -> provider in @synthetic_providers end)
+      |> Enum.filter(fn {_provider, evs} -> Enum.all?(evs, &zero_tokens?/1) end)
+      |> Enum.map(fn {provider, evs} -> %{provider: provider, rows: length(evs)} end)
+      |> Enum.sort_by(& &1.provider)
+
+    {:ok, flagged}
+  end
+
+  defp zero_tokens?(ev), do: (ev.tokens_in || 0) == 0 and (ev.tokens_out || 0) == 0
+
   @spec valid_groupings() :: [group_by()]
   def valid_groupings, do: @valid_by
 
@@ -135,6 +178,12 @@ defmodule Arbiter.Usage do
       case Keyword.get(opts, :since) do
         nil -> query
         %DateTime{} = dt -> Ash.Query.filter(query, occurred_at >= ^dt)
+      end
+
+    query =
+      case Keyword.get(opts, :until) do
+        nil -> query
+        %DateTime{} = dt -> Ash.Query.filter(query, occurred_at <= ^dt)
       end
 
     case Keyword.get(opts, :workspace_id) do

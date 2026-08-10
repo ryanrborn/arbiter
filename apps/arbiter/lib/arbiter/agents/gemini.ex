@@ -127,11 +127,26 @@ defmodule Arbiter.Agents.Gemini do
   # configured the CLI defaults to `gemini-2.5-pro` (`DEFAULT_GEMINI_MODEL` in
   # the gemini-cli), so recording that is accurate even though we pass no
   # `--model` flag in that case.
+  #
+  # `agy` is the exception (bd-2fzwlc round 3): its model catalogue does not
+  # overlap the Gemini price table at all (confirmed live — every model this
+  # module knows about, tier-mapped or the `@default_model` fallback, is
+  # rejected by agy v1.1.11 as an unrecognized `--model`), and its stream
+  # events never name which model actually ran. Stamping any of our model ids
+  # on an agy row is a guess the row can't back up, so the ledger records the
+  # model as unknown rather than a name the session provably didn't run.
   @impl true
   def resolved_model(opts \\ []) do
-    # resolve_model/1 already chains explicit → tier → workspace active_model;
-    # @default_model is the terminal fallback (the gemini-cli's own default).
-    resolve_model(opts) || @default_model
+    case resolve_executable() do
+      {:ok, {:agy, _}} ->
+        nil
+
+      _ ->
+        # resolve_model/1 already chains explicit → tier → workspace
+        # active_model; @default_model is the terminal fallback (the
+        # gemini-cli's own default).
+        resolve_model(opts) || @default_model
+    end
   end
 
   # ---- Internals ---------------------------------------------------------
@@ -172,11 +187,11 @@ defmodule Arbiter.Agents.Gemini do
   # equivalent) — see security_enforced?/0.
   defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
-      model_flag(opts) ++ thinking_flag(opts)
+      thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:agy, exec, prompt, opts, _policy) do
-    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts)
+    [exec, "-p", prompt] ++ thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
@@ -188,12 +203,14 @@ defmodule Arbiter.Agents.Gemini do
     [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
 
-  # Only the upstream `gemini` CLI supports `--output-format stream-json` (it
-  # emits init/message/tool_use/tool_result/result JSONL events the worker
-  # parses for token usage + derived cost — see `Arbiter.Agents.Gemini.Stream`).
-  # The `agy` fork has no such flag (it only does `--print` plain text), so the
-  # agy branches above omit it and fall back to raw-line streaming with no
-  # token/cost capture — graceful degradation, same as before bd-bbpm5e.
+  # Both the upstream `gemini` CLI and the `agy` fork support
+  # `--output-format stream-json` (confirmed live against installed agy
+  # v1.1.11 — bd-2fzwlc). Prior to bd-2fzwlc this flag was omitted on the
+  # `:agy` branches on the mistaken belief that agy had no stream-json
+  # support; in fact agy was being invoked in plain-text mode the whole time,
+  # so every agy session emitted nothing `Arbiter.Agents.Gemini.Stream` could
+  # parse — the root cause of every Gemini `usage_events` row carrying zero
+  # tokens/cost, since `resolve_executable/0` prefers `agy` over `gemini`.
   defp output_format_flag, do: ["--output-format", "stream-json"]
 
   defp model_flag(opts) do

@@ -103,6 +103,14 @@ defmodule Arbiter.Agents.Codex.Stream do
     shutdown_complete
   )
 
+  # bd-2fzwlc: Codex plan usage is metered against the ChatGPT subscription
+  # (tracked separately by `Arbiter.Quota.Codex`), not billed per call, so
+  # `cost_usd` is legitimately nil on every row. Without this note a nil
+  # cost reads as indistinguishable from a stream-parser bug silently
+  # dropping usage.
+  @metered_cost_note "cost unavailable: Codex plan usage is metered against the ChatGPT " <>
+                       "subscription, not billed per call"
+
   @doc """
   Reduce one decoded event to a map of usage fields to merge onto the session's
   `:usage`. Returns `%{}` for events that carry no usage.
@@ -136,6 +144,7 @@ defmodule Arbiter.Agents.Codex.Stream do
       cache_read_tokens: number(usage["cached_input_tokens"]),
       result_status: "success",
       is_error: false,
+      cost_note: @metered_cost_note,
       raw: usage
     })
   end
@@ -155,6 +164,7 @@ defmodule Arbiter.Agents.Codex.Stream do
       # Codex reports cache *reads* (cached_input_tokens); it has no analogue to
       # Claude's cache-creation tokens, so that slot stays nil.
       cache_read_tokens: number(totals["cached_input_tokens"]),
+      cost_note: @metered_cost_note,
       raw: info
     })
   end
