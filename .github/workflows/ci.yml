@@ -151,5 +151,8 @@ jobs:
       - name: Fetch dependencies
         run: mix deps.get
 
+      - name: Setup database
+        run: mix ash.setup --quiet
+
       - name: Run tests
         run: mix test
