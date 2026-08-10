@@ -40,7 +40,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @rounds_empty_mid Path.expand("../../fixtures/review_rounds_empty_mid.sh", __DIR__)
   @rounds_empty_last Path.expand("../../fixtures/review_rounds_empty_last.sh", __DIR__)
   @retry_reset Path.expand("../../fixtures/review_retry_reset.sh", __DIR__)
+  @unaddressed Path.expand("../../fixtures/review_unaddressed_finding.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
+  @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
@@ -1850,6 +1852,245 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a distinct re-prompt reviewer run row"
+    end
+  end
+
+  # ---- prior-finding disposition guard (bd-6r8caj / #1137) -----------------
+
+  describe "prior-finding disposition guard (bd-6r8caj)" do
+    # The exact bd-8mtb0q (#1132) shape: round 1 raises a Medium finding citing
+    # feature.txt, the implementer round produces NO diff to that file (the
+    # @revise fixture only talks), and round 2 returns APPROVE / VERIFICATION:
+    # FULL with zero findings. Before this guard the branch merged on that
+    # verdict; now the approval is not honored.
+    test "round-2 APPROVE that never accounts for the round-1 finding does NOT merge",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@unaddressed, "BLIND"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+
+      # The gate re-prompted before rejecting, proving the blind APPROVE was not
+      # accepted at face value.
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id =~ "#r2#v")),
+             "expected a distinct round-2 re-prompt reviewer run row, got: " <>
+               inspect(Enum.map(runs, & &1.task_id))
+
+      # AC2: the round-1 finding has a stable id, and round 2's failure to
+      # account for it is persisted — not recoverable only by re-reading prose.
+      require Ash.Query
+
+      rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        |> Ash.read!()
+        |> Enum.filter(&(&1.role == :review))
+
+      assert [round1 | _] = rounds
+      assert round1.finding_ids == ~s(["F1.1"])
+
+      approve = Enum.find(rounds, &(&1.round == 2 and &1.verdict == :approve))
+      assert approve, "expected the round-2 APPROVE to be recorded honestly"
+      assert approve.converged == false
+      assert approve.dispositions == ~s({"F1.1":"none"})
+      assert approve.undispositioned_count == 1
+
+      # The rejection payload names the finding it failed to account for.
+      thread = Message.thread(task.id, workspace_id: ws.id)
+
+      assert Enum.any?(thread, fn m ->
+               m.body =~ "PRIOR FINDINGS NOT ACCOUNTED FOR" and m.body =~ "F1.1"
+             end),
+             "expected the disposition banner (naming F1.1) in the durable thread"
+
+      assert is_binary(review_id)
+    end
+
+    # AC1/AC5 counterpart: the loop still converges when the revision really
+    # happens and the reviewer says so per finding. The implementer commits to
+    # the cited file and round 2 marks F1.1 [ADDRESSED] → merge.
+    test "round-2 APPROVE with an [ADDRESSED] disposition backed by a real diff merges",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@unaddressed, "ADDRESSED"],
+            revise_command: [@revise_commit],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 1
+
+      require Ash.Query
+
+      approve =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+        |> Enum.find(&(&1.role == :review and &1.verdict == :approve))
+
+      assert approve.dispositions == ~s({"F1.1":"addressed"})
+      assert approve.undispositioned_count == 0
+      assert approve.converged == true
+    end
+
+    # AC5: a finding invalidated by a different change must be dispositionable,
+    # or the guard would dead-end legitimately obsolete findings. [OBSOLETE]
+    # clears the finding even though no revision touched the cited file.
+    test "an [OBSOLETE] disposition clears the finding and lets the approval stand",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@unaddressed, "OBSOLETE"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 1
+    end
+
+    # An approval that openly admits a Medium finding is still open gets the same
+    # fail-closed treatment as an admitted `[NOT MET]` criterion.
+    test "an APPROVE that marks a prior Medium finding [NOT ADDRESSED] does NOT merge",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@unaddressed, "NOT_ADDRESSED"],
+            revise_command: [@revise_commit],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+    end
+
+    test "rereview_prompt/1 hands the reviewer the open findings, their ids, and the revision diff",
+         %{ws: ws} do
+      task = new_task(ws)
+
+      open =
+        Arbiter.Worker.ReviewFindings.extract(
+          "VERDICT: REQUEST_CHANGES\n- **Medium**: over-matches (lib/foo.ex:12)",
+          1
+        )
+
+      prompt =
+        ReviewGate.rereview_prompt(%{
+          task_id: task.id,
+          workspace_id: ws.id,
+          review_id: ReviewGate.reviewer_task_id(task.id),
+          branch: "feature/rev",
+          target_branch: "main",
+          round: 2,
+          thread: [],
+          open_findings: open,
+          revise_touched_files: MapSet.new(["lib/bar.ex"]),
+          head_sha: nil,
+          base_sha: nil,
+          worktree_path: nil,
+          pr_ref: nil
+        })
+
+      assert prompt =~ "OPEN FINDINGS CARRIED FORWARD"
+      assert prompt =~ "F1.1"
+      assert prompt =~ "lib/foo.ex"
+      assert prompt =~ "NOT TOUCHED"
+      assert prompt =~ "DISPOSITIONS:"
+      assert prompt =~ "[OBSOLETE]"
+      # The diff the implementer actually produced, named explicitly.
+      assert prompt =~ "lib/bar.ex"
     end
   end
 
