@@ -35,6 +35,19 @@ defmodule ArbiterCli.Cmd.Loop do
       arb loop apply all [--state proposed]
       arb loop reject <id> [--reason "..."]
 
+  ## Hand-authoring a repo CLAUDE.md lesson (bd-1cusio)
+
+      arb loop propose repo-doc-patch --repo <repo> --lesson "..."
+                       [--category "..."] [--workspace <id>]
+
+  The Stage 1 pass cannot yet attribute a finding category to one repo, so
+  this is the entry point onto rung 2 of the destination ladder today: an
+  operator who has read a repo-specific lesson names the repo (its
+  `repo_paths` key in that workspace) and the lesson text directly. `--lesson`
+  must be a single line with no `arbiter:begin`/`arbiter:end` marker. Lands
+  `:proposed` immediately (task-scoped, like a difficulty override) — review
+  it with `arb loop diff <id>` and apply it like any other proposal.
+
   A finding below the evidence bar is kept as a `hypothesis` carrying its
   incident refs, so a later window reinforces it in place rather than starting
   its count from zero. Crossing the bar (default: 3 incidents across 2 distinct
@@ -63,17 +76,44 @@ defmodule ArbiterCli.Cmd.Loop do
       rest = Output.drop_json(argv)
 
       case rest do
-        ["analyze" | tail] -> analyze(tail, mode)
-        ["pending" | tail] -> pending(tail, mode)
-        ["diff", id | _] -> diff(id)
-        ["diff" | _] -> Output.die("usage: arb loop diff <id>")
-        ["apply", "all" | tail] -> apply_all(tail, mode)
-        ["apply", id | _] -> apply_one(id, mode)
-        ["apply" | _] -> Output.die("usage: arb loop apply <id> | arb loop apply all")
-        ["reject", id | tail] -> reject(id, tail, mode)
-        ["reject" | _] -> Output.die("usage: arb loop reject <id> [--reason \"...\"]")
-        [] -> analyze([], mode)
-        [other | _] -> Output.die("unknown `arb loop` subcommand: #{other}")
+        ["analyze" | tail] ->
+          analyze(tail, mode)
+
+        ["propose", "repo-doc-patch" | tail] ->
+          propose_repo_doc_patch(tail, mode)
+
+        ["propose" | _] ->
+          Output.die("usage: arb loop propose repo-doc-patch --repo <repo> --lesson \"...\"")
+
+        ["pending" | tail] ->
+          pending(tail, mode)
+
+        ["diff", id | _] ->
+          diff(id)
+
+        ["diff" | _] ->
+          Output.die("usage: arb loop diff <id>")
+
+        ["apply", "all" | tail] ->
+          apply_all(tail, mode)
+
+        ["apply", id | _] ->
+          apply_one(id, mode)
+
+        ["apply" | _] ->
+          Output.die("usage: arb loop apply <id> | arb loop apply all")
+
+        ["reject", id | tail] ->
+          reject(id, tail, mode)
+
+        ["reject" | _] ->
+          Output.die("usage: arb loop reject <id> [--reason \"...\"]")
+
+        [] ->
+          analyze([], mode)
+
+        [other | _] ->
+          Output.die("unknown `arb loop` subcommand: #{other}")
       end
     end
   end
@@ -109,6 +149,27 @@ defmodule ArbiterCli.Cmd.Loop do
 
     case result do
       {:ok, %{"markdown" => markdown} = envelope} -> emit(markdown, envelope, mode)
+      {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp propose_repo_doc_patch(argv, mode) do
+    {opts, _rest, _bad} =
+      OptionParser.parse(argv,
+        switches: [repo: :string, lesson: :string, category: :string, workspace: :string],
+        aliases: [r: :repo, l: :lesson, w: :workspace]
+      )
+
+    body =
+      %{}
+      |> maybe_put_map("repo", Keyword.get(opts, :repo))
+      |> maybe_put_map("lesson", Keyword.get(opts, :lesson))
+      |> maybe_put_map("category", Keyword.get(opts, :category))
+      |> maybe_put_map("workspace_id", Keyword.get(opts, :workspace))
+
+    case Client.post("/api/loop/propose/repo_doc_patch", body) do
+      {:ok, %{"pending" => row}} -> emit_decision(row, "proposed", mode)
       {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
       {:error, err} -> Output.die(err)
     end

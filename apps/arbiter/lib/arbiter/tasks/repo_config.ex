@@ -33,25 +33,30 @@ defmodule Arbiter.Tasks.RepoConfig do
   def normalize_slug(_), do: nil
 
   @doc """
-  Looks up `repo`'s filesystem path in a `repo_paths`/`rig_paths`-shaped
-  map. Exact key match first; falls back to a normalized match (see
-  `normalize_slug/1`) so a differently-separated key (`verus_server` vs
-  `verus-server`) still resolves. Returns `nil` if `map` isn't a map, or the
-  repo isn't registered.
+  Looks up `repo`'s raw entry in a `repo_paths`/`rig_paths`-shaped map. Exact
+  key match first; falls back to a normalized match (see `normalize_slug/1`)
+  so a differently-separated key (`verus_server` vs `verus-server`) still
+  resolves. Returns `nil` if `map` isn't a map, or the repo isn't registered.
   """
-  def find_path(map, repo) when is_map(map) and is_binary(repo) do
+  def find_entry(map, repo) when is_map(map) and is_binary(repo) do
     case Map.get(map, repo) do
       nil ->
         target = normalize_slug(repo)
-
-        Enum.find_value(map, fn {k, v} ->
-          if normalize_slug(k) == target, do: repo_path_from_config(v)
-        end)
+        Enum.find_value(map, fn {k, v} -> if normalize_slug(k) == target, do: v end)
 
       raw ->
-        repo_path_from_config(raw)
+        raw
     end
   end
 
-  def find_path(_map, _repo), do: nil
+  def find_entry(_map, _repo), do: nil
+
+  @doc """
+  Looks up `repo`'s filesystem path in a `repo_paths`/`rig_paths`-shaped
+  map. See `find_entry/2` for the matching rules. Returns `nil` if `map`
+  isn't a map, or the repo isn't registered.
+  """
+  def find_path(map, repo) do
+    map |> find_entry(repo) |> repo_path_from_config()
+  end
 end

@@ -98,7 +98,7 @@ defmodule Arbiter.MCP.Catalog do
   # they go straight into a JSON Schema; `Arbiter.Loop.PendingWrite` holds the
   # authoritative atom constraints.
   @loop_states ~w(proposed hypothesis applied rejected superseded)
-  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set)
+  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch)
 
   # The optional `workspace` field every workspace-resolving tool advertises.
   # Coordinator tokens are workspace-agnostic (one token, any workspace); naming

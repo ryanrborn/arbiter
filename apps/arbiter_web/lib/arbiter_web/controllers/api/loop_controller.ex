@@ -10,6 +10,10 @@ defmodule ArbiterWeb.Api.LoopController do
       `workspace_id`, `label`.
     * `POST /api/loop/propose` — the same pass, plus persistence of the
       proposals it implies. Same params.
+    * `POST /api/loop/propose/repo_doc_patch` — hand-author a `:repo_doc_patch`
+      proposal directly: `repo` + `lesson` (required), optional `category` /
+      `workspace_id`. The Stage 1 pass cannot attribute a finding category to
+      one repo yet, so this is the entry point onto that write path today.
     * `GET  /api/loop/pending` — list queued proposals. Optional `state` (one
       name or a comma-separated list; default the two live states), `kind`,
       `workspace_id`, `limit`.
@@ -37,6 +41,26 @@ defmodule ArbiterWeb.Api.LoopController do
   def analyze(conn, params), do: run_analysis(conn, params, propose?: false)
 
   def propose(conn, params), do: run_analysis(conn, params, propose?: true)
+
+  # bd-1cusio: the Stage 1 pass cannot yet attribute a finding category to one
+  # repo (Arbiter.Loop.Proposals leaves `repo: nil` on every `:claude_md`
+  # destination), so this is the production entry point onto the
+  # `:repo_doc_patch` write path today — an operator names the repo and the
+  # lesson text directly. See `Arbiter.Loop.propose_repo_doc_patch/1`.
+  def propose_repo_doc_patch(conn, params) do
+    attrs = %{
+      repo: params["repo"],
+      lesson: params["lesson"],
+      category: blank_to_nil(params["category"]),
+      workspace_id: blank_to_nil(params["workspace_id"]),
+      actor: @actor
+    }
+
+    case Loop.propose_repo_doc_patch(attrs) do
+      {:ok, row} -> json(conn, %{pending: render_pending(row, :full)})
+      {:error, reason} -> {:error, apply_error(reason)}
+    end
+  end
 
   defp run_analysis(conn, params, propose?: propose?) do
     with {:ok, since} <- parse_window(params["since"]),
@@ -211,7 +235,7 @@ defmodule ArbiterWeb.Api.LoopController do
   # rejected rather than silently dropped, so a typo can't look like an empty
   # queue.
   @states ~w(proposed hypothesis applied rejected superseded)
-  @kinds ~w(skill_patch skill_create difficulty_override config_set)
+  @kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch)
 
   defp parse_states(nil), do: {:ok, nil}
   defp parse_states(""), do: {:ok, nil}

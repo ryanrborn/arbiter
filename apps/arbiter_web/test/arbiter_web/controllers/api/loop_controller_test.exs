@@ -164,6 +164,35 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     end
   end
 
+  describe "POST /api/loop/propose/repo_doc_patch" do
+    test "hand-authors a :repo_doc_patch proposal", %{conn: conn} do
+      ws = workspace!()
+
+      conn =
+        post(conn, ~p"/api/loop/propose/repo_doc_patch", %{
+          repo: "myrepo",
+          lesson: "this repo's tests need FLAG=1 set",
+          workspace_id: ws.id
+        })
+
+      body = json_response(conn, 200)
+
+      assert body["pending"]["kind"] == "repo_doc_patch"
+      assert body["pending"]["state"] == "proposed"
+      assert body["pending"]["payload"]["lesson"] == "this repo's tests need FLAG=1 set"
+    end
+
+    test "400s when `repo` is missing", %{conn: conn} do
+      conn = post(conn, ~p"/api/loop/propose/repo_doc_patch", %{lesson: "some lesson"})
+      assert json_response(conn, 400)
+    end
+
+    test "400s when `lesson` is missing", %{conn: conn} do
+      conn = post(conn, ~p"/api/loop/propose/repo_doc_patch", %{repo: "myrepo"})
+      assert json_response(conn, 400)
+    end
+  end
+
   describe "the pending queue" do
     setup do
       row = proposed_row()
