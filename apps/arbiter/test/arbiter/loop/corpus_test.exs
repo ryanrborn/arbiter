@@ -2,6 +2,84 @@ defmodule Arbiter.Loop.CorpusTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Loop.Corpus
+  alias Arbiter.Worker.OutputLog
+  alias Arbiter.Workers.Run
+
+  describe "fetch/1 — infra fingerprints outside the bounded tail" do
+    setup do
+      prev = Application.get_env(:arbiter, :output_log_root)
+      root = Path.join(System.tmp_dir!(), "corpus-test-#{System.unique_integer([:positive])}")
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev do
+          Application.put_env(:arbiter, :output_log_root, prev)
+        else
+          Application.delete_env(:arbiter, :output_log_root)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a proxy_5xx fingerprint 200+ lines back from the end still reaches terminal_lines" do
+      since = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: "bd-test-fingerprint",
+          repo: "arbiter",
+          status: :failed,
+          failure_reason: "claude session error",
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(run.id)
+      OutputLog.append(handle, "** (Phoenix.Ecto.PendingMigrationError) migrations pending")
+      Enum.each(1..200, fn i -> OutputLog.append(handle, "line #{i}") end)
+      OutputLog.close(handle)
+
+      until = DateTime.add(DateTime.utc_now(), 3600, :second)
+      assert {:ok, [row], _meta} = Corpus.fetch(since: since, until: until)
+
+      assert Enum.any?(row.terminal_lines, &String.contains?(&1, "PendingMigrationError"))
+    end
+
+    test "context-exhaustion detection (tail-only signal) is unaffected by the fingerprint scan" do
+      since = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: "bd-test-context-exhaustion",
+          repo: "arbiter",
+          status: :failed,
+          failure_reason: "agent was rate-limited / the API was overloaded",
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(run.id)
+      Enum.each(1..200, fn i -> OutputLog.append(handle, "line #{i}") end)
+      OutputLog.append(handle, "Autocompact is thrashing — context window exhausted")
+      OutputLog.close(handle)
+
+      until = DateTime.add(DateTime.utc_now(), 3600, :second)
+      assert {:ok, [row], _meta} = Corpus.fetch(since: since, until: until)
+
+      # No infra fingerprint present — the autocompact line must still be
+      # visible (it's within the bounded tail), and no fingerprint lines
+      # were spuriously added.
+      refute Enum.any?(row.terminal_lines, &String.contains?(&1, "PendingMigrationError"))
+      refute Enum.any?(row.terminal_lines, &String.contains?(&1, "DBConnection"))
+
+      result =
+        Arbiter.Loop.FailureClassifier.classify(row.failure_reason, row.terminal_lines)
+
+      assert result.class == :agent_quality
+      assert result.subcategory == :context_exhaustion
+    end
+  end
 
   describe "record_pass_cost/1 — the pass's single ledger write" do
     test "inserts one usage_events row for the pass itself (step :other)" do
