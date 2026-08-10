@@ -14,11 +14,27 @@ defmodule Arbiter.Loop.Corpus do
   ## Read discipline (this is the module the crashed first attempt lacked)
 
   Everything here is a **bounded aggregate**: grouped counts and sums keyed by
-  run/task, never `SELECT *` over a 400-row table, and transcript reads are the
-  last N lines of failed runs only. That is deliberate — attempt 1 at this task
+  run/task, never `SELECT *` over a 400-row table, and transcript reads are
+  bounded per failed run. That is deliberate — attempt 1 at this task
   (`c88c77b0`) died of context exhaustion from unbounded reads. The whole point
   of doing the fetch in Elixir is that the operator's context never sees the
   raw corpus, only the shaped report.
+
+  A failed run's `terminal_lines` is the union of two bounded reads
+  (`OutputLog.tail_lines/2` + `OutputLog.scan_for/2`), not a raw transcript
+  read — see bd-3ozmaj (#1159) and the "bounded scan" note in
+  `docs/loop-review.md`:
+
+    * the last `@tail_n` (40) lines — the terminal signal (autocompact
+      thrash, `claude session error`, final `arb done`).
+    * every line matching `FailureClassifier.infra_fingerprints/0` — narrow,
+      unambiguous infra fingerprints (`Phoenix.Ecto.PendingMigrationError`,
+      `DBConnection.ConnectionError`) that can appear anywhere in the
+      transcript, not just its tail, because the agent typically keeps going
+      after the failure. This scan reads the whole file but returns only the
+      (typically zero or one) matching lines — safe because the fingerprint
+      list is narrow enough to carry no false-positive risk, and the corpus
+      is small (tens of files, single-digit MB).
 
   ## The one write
 
@@ -30,6 +46,7 @@ defmodule Arbiter.Loop.Corpus do
 
   require Logger
 
+  alias Arbiter.Loop.FailureClassifier
   alias Arbiter.Repo
   alias Arbiter.Worker.OutputLog
 
@@ -236,10 +253,19 @@ defmodule Arbiter.Loop.Corpus do
   end
 
   defp tail(run_id) do
-    case OutputLog.tail_lines(run_id, @tail_n) do
-      {:ok, lines} -> lines
-      {:error, _} -> []
-    end
+    tail_lines =
+      case OutputLog.tail_lines(run_id, @tail_n) do
+        {:ok, lines} -> lines
+        {:error, _} -> []
+      end
+
+    infra_lines =
+      case OutputLog.scan_for(run_id, FailureClassifier.infra_fingerprints()) do
+        {:ok, lines} -> lines
+        {:error, _} -> []
+      end
+
+    Enum.uniq(tail_lines ++ infra_lines)
   end
 
   # ---- helpers ------------------------------------------------------------
