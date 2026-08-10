@@ -1278,6 +1278,129 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "a ReviewGate-approved PR with red CI never auto-merges (bd-23y19q / #1176)" do
+    # bd-9j4znl (PR #1173) merged 4s after ReviewGate's APPROVE while its own
+    # `mix test` check had been concluded FAILURE for three minutes. Two
+    # independent gaps let that through, and both are covered here.
+
+    test "effective_block_reason/2 is via_review_gate-aware — :ci_failed is visible with no forge-visible review" do
+      # Gap 2. The gate approves in-process, so `classify/1` sees `:pending`
+      # forever on a hosted forge and the arity-1 (state-less) gate returns nil —
+      # which made the whole `:ci_failed` auto-resolve path dead code for exactly
+      # the population ReviewGate drives.
+      result = %{status: :open, approved: false, pipeline: :failed, block_reason: :ci_failed}
+
+      assert Watchdog.effective_block_reason(%{via_review_gate: true}, result) == :ci_failed
+
+      # Non-gate lanes keep the strict approval gate (#354).
+      assert Watchdog.effective_block_reason(%{via_review_gate: false}, result) == nil
+      assert Watchdog.effective_block_reason(result) == nil
+    end
+
+    test "a via_review_gate PR still terminal/approved keeps the arity-2 gate honest" do
+      # The gate override is `:pending -> :approved` only; terminal facts win, and
+      # a genuinely approved PR reports its reason on either arity.
+      merged = %{status: :merged, block_reason: :conflict}
+      approved = %{status: :open, approved: true, block_reason: :behind_base}
+
+      assert Watchdog.effective_block_reason(%{via_review_gate: true}, merged) == nil
+      assert Watchdog.effective_block_reason(%{via_review_gate: true}, approved) == :behind_base
+      assert Watchdog.effective_block_reason(%{via_review_gate: true}, nil) == nil
+    end
+
+    test "the bd-9j4znl shape does not merge and dispatches a fix-pass acolyte instead" do
+      # The live incident's exact poll shape: ReviewGate approved in-process
+      # (via_review_gate: true, no forge-visible review), auto_merge lane, and a
+      # pipeline that has already CONCLUDED :failed.
+      {pid, task_id} = running_worker()
+      StubMerger.set_failing_checks("!rg1", [%{name: "mix test", summary: "boom", url: nil}])
+
+      StubMerger.queue_get("!rg1", [
+        %{status: :open, approved: false, pipeline: :failed, block_reason: :ci_failed}
+      ])
+
+      start_watchdog(pid, task_id, "!rg1",
+        via_review_gate: true,
+        auto_merge: true,
+        interval_ms: 15,
+        fix_pass_dispatcher: StubFixPassDispatcher
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+
+      args = StubFixPassDispatcher.last_args()
+      assert args.task_id == task_id
+      assert args.pr_ref == "!rg1"
+      assert args.checks == [%{name: "mix test", summary: "boom", url: nil}]
+
+      # Several more polls: still no merge, and the worker is not "completed".
+      Process.sleep(120)
+      assert StubMerger.merge_count("!rg1") == 0
+      refute Worker.state(pid).status == :completed
+    end
+
+    test "a concluded-failed pipeline blocks the merge even when the adapter reports no block reason" do
+      # Gap 1 on its own: `ci_pending?/1` only knows `:running`/`:pending`, so a
+      # settled `:failed` fell straight through to the merge. Belt and braces for
+      # any adapter/poll that surfaces the red pipeline without a block reason.
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result(:ok)
+      StubMerger.queue_get("!rg2", [%{status: :open, approved: true, pipeline: :failed}])
+
+      start_watchdog(pid, task_id, "!rg2", auto_merge: true, interval_ms: 15)
+
+      Process.sleep(150)
+      assert StubMerger.merge_count("!rg2") == 0
+      refute Worker.state(pid).status == :completed
+    end
+
+    test "a green via_review_gate PR still auto-merges on the first poll (no regression of bd-66ey1o)" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result(:ok)
+      StubMerger.queue_get("!rg3", [%{status: :open, approved: false, pipeline: :success}])
+
+      start_watchdog(pid, task_id, "!rg3", via_review_gate: true, interval_ms: 15)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!rg3") == 1
+    end
+
+    test "a :neutral-pipeline via_review_gate PR still auto-merges (settled non-success is not failed)" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result(:ok)
+      StubMerger.queue_get("!rg4", [%{status: :open, approved: false, pipeline: :neutral}])
+
+      start_watchdog(pid, task_id, "!rg4", via_review_gate: true, interval_ms: 15)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert StubMerger.merge_count("!rg4") == 1
+    end
+
+    test "an auto_merge:false lane is unchanged — never merges, never fails, keeps polling for the human" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result(:ok)
+
+      StubMerger.queue_get("!rg5", [
+        %{status: :open, approved: false, pipeline: :failed, block_reason: :ci_failed}
+      ])
+
+      start_watchdog(pid, task_id, "!rg5",
+        via_review_gate: true,
+        auto_merge: false,
+        interval_ms: 15,
+        fix_pass_dispatcher: StubFixPassDispatcher
+      )
+
+      Process.sleep(150)
+      assert StubMerger.merge_count("!rg5") == 0
+      # The human-decides lane never auto-resolves — that's an auto_merge-only path.
+      assert StubFixPassDispatcher.call_count() == 0
+      refute Worker.state(pid).status == :failed
+      refute Worker.state(pid).status == :completed
+    end
+  end
+
   describe "open_mr resilience (bd-91rnwq)" do
     test "Worker.open_mr/5 transitions to :awaiting_review on successful MR creation" do
       # Regression guard: open_mr must always reach :awaiting_review when

@@ -271,16 +271,45 @@ defmodule Arbiter.Worker.Watchdog do
   This also keeps the escalation debounce honest — a reason can never latch
   during the pre-approval window and suppress a later, genuine post-approval
   re-block, because the gate returns `nil` until approval lands.
+
+  The arity-1 form is the state-less surface (the dashboard / LiveViews): it can
+  only read what the forge itself reports. The poll loop uses
+  `effective_block_reason/2`, which additionally knows whether the ReviewGate
+  already approved in-process — see there.
   """
   @spec effective_block_reason(map()) :: block_reason() | nil
-  def effective_block_reason(result) when is_map(result) do
-    case classify(result) do
+  def effective_block_reason(result),
+    do: effective_block_reason(%{via_review_gate: false}, result)
+
+  @doc """
+  `effective_block_reason/1`, but aware of an in-process ReviewGate approval —
+  the form the poll loop routes on (bd-23y19q / #1176).
+
+  The approval gate above is computed from `classify/1`, i.e. the forge's *own*
+  PR/MR review state. When the ReviewGate approved in-process, hosted-forge
+  adapters never see that approval on the PR itself, so `classify/1` returns
+  `:pending` forever and the arity-1 gate returns `nil` on every poll — which
+  made the entire block-handling surface (`:ci_failed` → fix-pass acolyte,
+  `:behind_base` → update-branch, the exhaustion escalation) dead code for
+  exactly the population ReviewGate drives. Live consequence: PR #1173
+  auto-merged four seconds after its APPROVE verdict with a `mix test` check
+  that had been concluded FAILURE for three minutes, because nothing on that
+  lane could see the `:ci_failed` block.
+
+  So this mirrors `effective_outcome/2`'s existing override: gate the reason on
+  the *effective* outcome rather than the raw `classify/1`. Terminal statuses
+  (`:merged` / `:closed`) still short-circuit to `nil` — they're facts about the
+  MR, not approval-state interpretation.
+  """
+  @spec effective_block_reason(map(), map()) :: block_reason() | nil
+  def effective_block_reason(state, result) when is_map(state) and is_map(result) do
+    case effective_outcome(state, result) do
       :approved -> block_reason(result)
       _ -> nil
     end
   end
 
-  def effective_block_reason(_), do: nil
+  def effective_block_reason(_state, _result), do: nil
 
   # ---- GenServer ----------------------------------------------------------
 
@@ -489,16 +518,39 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp apply_outcome(:approved, result, %{auto_merge: true} = state) do
-    if ci_pending?(result) do
-      Logger.info(
-        "Worker.Watchdog: deferring auto-merge for task=#{state.task_id} " <>
-          "mr=#{state.mr_ref}; pipeline still #{inspect(Map.get(result, :pipeline))}, " <>
-          "will retry next poll"
-      )
+    cond do
+      ci_pending?(result) ->
+        Logger.info(
+          "Worker.Watchdog: deferring auto-merge for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; pipeline still #{inspect(Map.get(result, :pipeline))}, " <>
+            "will retry next poll"
+        )
 
-      reschedule(state)
-    else
-      do_apply_approved_auto_merge(state)
+        reschedule(state)
+
+      # CI reported, and it reported *failure*. "Not pending" is not "safe to
+      # merge": before bd-23y19q this branch didn't exist, so a settled `:failed`
+      # pipeline fell straight through to the merge — PR #1173 merged four
+      # seconds after its ReviewGate APPROVE with a `mix test` check that had
+      # been concluded FAILURE for three minutes. Never merge on red.
+      #
+      # This is the last-resort guard, not the resolution path: a red pipeline
+      # normally surfaces as a `:ci_failed` block, and `handle_block/3` gets
+      # there first — dispatching a bounded fix-pass acolyte and escalating once
+      # the retries are exhausted (that block is now visible on ReviewGate lanes
+      # too, via `effective_block_reason/2`). This branch only catches the case
+      # where the adapter surfaces the red pipeline without a block reason, so
+      # we stay parked and keep polling rather than merging.
+      ci_failed?(result) ->
+        Logger.warning(
+          "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; pipeline concluded :failed, staying parked"
+        )
+
+        reschedule(state)
+
+      true ->
+        do_apply_approved_auto_merge(state)
     end
   end
 
@@ -533,6 +585,16 @@ defmodule Arbiter.Worker.Watchdog do
   # GitLab skipped/manual pipelines) to `:neutral` instead, so they fall
   # through to a real merge attempt rather than deferring forever.
   def ci_pending?(result), do: Map.get(result, :pipeline) in [:running, :pending]
+
+  @doc """
+  CI has *concluded*, and it failed. The strict complement of `ci_pending?/1`
+  for the merge decision: the two must never be conflated under "not pending"
+  (bd-23y19q / #1176). `:neutral` is deliberately excluded — both adapters map
+  their settled-but-non-success states (GitHub neutral/skipped/stale check runs,
+  GitLab skipped/manual pipelines) there, and those are not failures.
+  """
+  @spec ci_failed?(map()) :: boolean()
+  def ci_failed?(result), do: Map.get(result, :pipeline) == :failed
 
   defp do_apply_approved_auto_merge(state) do
     case safe_merge(state) do
@@ -626,7 +688,7 @@ defmodule Arbiter.Worker.Watchdog do
     do: state
 
   defp maybe_notify_awaiting_manual_merge(state, result) do
-    if awaiting_manual_merge?(result) do
+    if awaiting_manual_merge?(state, result) do
       safe(fn ->
         Arbiter.Messages.CoordinatorNotifier.approved_awaiting_merge(
           snapshot(state),
@@ -641,8 +703,9 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp awaiting_manual_merge?(result) do
-    effective_block_reason(result) == nil and block_reason(result) != :needs_nonauthor_approval
+  defp awaiting_manual_merge?(state, result) do
+    effective_block_reason(state, result) == nil and
+      block_reason(result) != :needs_nonauthor_approval
   end
 
   # Fire the approved-but-parked tracker hook. Best-effort + loud-on-failure
@@ -784,7 +847,7 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp route_merge_block(%{auto_resolve_conflict: true} = state, result) do
-    case effective_block_reason(result) do
+    case effective_block_reason(state, result) do
       :conflict -> reschedule(state)
       _ -> do_maybe_escalate_merge_block(state, result)
     end
@@ -793,7 +856,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp route_merge_block(state, result), do: do_maybe_escalate_merge_block(state, result)
 
   defp do_maybe_escalate_merge_block(state, result) do
-    case effective_block_reason(result) do
+    case effective_block_reason(state, result) do
       nil ->
         # The block cleared. Besides resetting the per-episode latches, restore
         # the configured poll ceiling *if a block episode was actually parked
@@ -832,6 +895,15 @@ defmodule Arbiter.Worker.Watchdog do
         # `max_auto_resolve_attempts`, which never sets `park_reason`) still
         # never trips this branch, so the finite ceiling stays monotonic for
         # those flapping episodes too (bd-krg7ci round 2).
+        #
+        # Deliberately raw `classify/1` here, not the ReviewGate-aware
+        # `effective_block_reason/2` / `effective_outcome/2` (bd-23y19q): on a
+        # gate lane the effective outcome is *always* `:approved`, which would
+        # collapse this condition to "no raw block reason right now" — precisely
+        # the signal lapse round 4 closed (GitLab maps an in-flight pipeline's
+        # reason to `nil`). Keeping it raw means a gate lane simply never
+        # revokes a park, which is the safe direction: the worker keeps watching
+        # and merges the moment the block genuinely clears.
         #
         # This still excludes the separate auto-merge-failure stall park
         # (`do_apply_approved_auto_merge/1`), which lifts `max_polls` to
@@ -1114,7 +1186,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp maybe_auto_resolve_conflict(%{auto_resolve_conflict: false} = state, _result), do: state
 
   defp maybe_auto_resolve_conflict(state, result) do
-    case effective_block_reason(result) do
+    case effective_block_reason(state, result) do
       :conflict -> drive_conflict_resolution(state)
       _ -> reset_conflict_state(state)
     end
