@@ -98,4 +98,21 @@ defmodule Arbiter.Loop.RepoDocPatchTest do
                RepoDocPatch.upsert("", "fp-1", String.duplicate("x", 500), cap_bytes: 100)
     end
   end
+
+  describe "upsert/4 — invalid entry text" do
+    test "rejects a multi-line lesson instead of silently dropping lines after the first" do
+      assert {:error, :invalid_entry_text} =
+               RepoDocPatch.upsert("", "fp-1", "first line\nsecond line")
+    end
+
+    test "rejects a lesson containing the begin marker" do
+      assert {:error, :invalid_entry_text} =
+               RepoDocPatch.upsert("", "fp-1", "text with #{RepoDocPatch.begin_marker()} inside")
+    end
+
+    test "rejects a lesson containing the end marker" do
+      assert {:error, :invalid_entry_text} =
+               RepoDocPatch.upsert("", "fp-1", "text with #{RepoDocPatch.end_marker()} inside")
+    end
+  end
 end

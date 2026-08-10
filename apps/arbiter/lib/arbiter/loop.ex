@@ -191,6 +191,71 @@ defmodule Arbiter.Loop do
     end
   end
 
+  @doc """
+  Hand-author a `:repo_doc_patch` candidate and persist it through `record/2`
+  (bd-1cusio).
+
+  The Stage 1 pass cannot attribute a reviewer-finding category to one repo
+  (`Arbiter.Loop.Proposals` leaves `repo: nil` on every `:claude_md`-destined
+  finding, and the apply path refuses a row with no repo), so this is
+  currently the only production entry point onto rung 2 of the destination
+  ladder: an operator who has read a repo-specific lesson names the repo and
+  the lesson text directly, rather than waiting on that attribution work.
+
+  `attrs`:
+
+    * `:repo` (required) — the `repo_paths`/`rig_paths` key in the target
+      workspace's config.
+    * `:lesson` (required) — the entry text. Must be a single line with no
+      `arbiter:begin`/`arbiter:end` marker (`RepoDocPatch.upsert/4` rejects
+      it otherwise); the apply path surfaces that as an `:invalid` error.
+    * `:category` (optional) — defaults to `"repo doc: " <> lesson` elided.
+    * `:workspace_id` (optional) — stamped on the row; the apply path falls
+      back to it when the payload names no workspace of its own.
+    * `:actor` (optional, default `"loop"`).
+
+  `:task`-scoped like a difficulty override: a hand-authored lesson is a
+  deliberate single proposal, not an aggregate that needs to clear the
+  evidence bar, so it lands `:proposed` immediately.
+  """
+  @spec propose_repo_doc_patch(map()) :: {:ok, PendingWrite.t()} | {:error, term()}
+  def propose_repo_doc_patch(attrs) when is_map(attrs) do
+    with {:ok, repo} <- required_string(attrs, :repo),
+         {:ok, lesson} <- required_string(attrs, :lesson) do
+      workspace_id = fetch(attrs, :workspace_id)
+      category = fetch(attrs, :category) || "repo doc: #{elide_gist(lesson)}"
+
+      candidate = %{
+        kind: :repo_doc_patch,
+        scope: :task,
+        category: category,
+        target: nil,
+        difficulty: nil,
+        repo: repo,
+        gist: elide_gist(lesson),
+        incident_refs: [],
+        task_refs: [],
+        payload: %{"lesson" => lesson},
+        diff: nil,
+        origin: "loop.propose_repo_doc_patch",
+        workspace_id: workspace_id
+      }
+
+      record(candidate, actor: fetch(attrs, :actor) || "loop")
+    end
+  end
+
+  defp required_string(attrs, key) do
+    case fetch(attrs, key) do
+      v when is_binary(v) and v != "" -> {:ok, v}
+      _ -> {:error, {:invalid, "`#{key}` is required"}}
+    end
+  end
+
+  @gist_limit 160
+  defp elide_gist(text) when byte_size(text) <= @gist_limit, do: text
+  defp elide_gist(text), do: String.slice(text, 0, @gist_limit - 1) <> "…"
+
   # Match precedence: a live row (:proposed before :hypothesis) first, then a
   # soft-rejected one. `:applied` / `:superseded` rows are deliberately not
   # matched — a recurrence after an apply is a *new* hypothesis, which is the
@@ -226,7 +291,12 @@ defmodule Arbiter.Loop do
       target_metric: fetch(candidate, :target_metric),
       baseline: fetch(candidate, :baseline),
       context_cost_tokens:
-        context_cost_tokens(fetch(candidate, :gist), scope, fetch(candidate, :kind)),
+        context_cost_tokens(
+          fetch(candidate, :gist),
+          scope,
+          fetch(candidate, :kind),
+          fetch(candidate, :payload)
+        ),
       evidence_count: length(incident_refs),
       distinct_tasks: length(task_refs),
       incident_refs: incident_refs,
@@ -285,7 +355,8 @@ defmodule Arbiter.Loop do
         context_cost_tokens(
           fetch(candidate, :gist) || existing.gist,
           existing.scope,
-          existing.kind
+          existing.kind,
+          fetch(candidate, :payload) || existing.payload
         ),
       diff: fetch(candidate, :diff) || existing.diff,
       payload: fetch(candidate, :payload) || existing.payload,
@@ -317,21 +388,35 @@ defmodule Arbiter.Loop do
   # Deliberately a cheap local estimate, not a tokenizer call: this runs inside
   # the analysis pass, which must stay free of network I/O and LLM calls.
 
+  # A repo_doc_patch is never blast-radius-1 even at :task scope: the managed
+  # CLAUDE.md section it writes is injected into *every* dispatch in that
+  # repo, forever — the opposite of a per-task override. Priced off the
+  # lesson text itself (what actually lands in the file), falling back to the
+  # gist when the payload has none yet (e.g. mid-analysis candidates).
+  defp context_cost_tokens(gist, _scope, :repo_doc_patch, payload) do
+    case payload && Map.get(payload, "lesson") do
+      lesson when is_binary(lesson) -> estimate_tokens(lesson)
+      _ -> context_cost_tokens(gist, :fleet, :other, nil)
+    end
+  end
+
   # Blast radius 1. A per-task override is charged once, against the one task
   # that carries it, and never lands in another dispatch's prompt.
-  defp context_cost_tokens(_gist, :task, _kind), do: 0
+  defp context_cost_tokens(_gist, :task, _kind, _payload), do: 0
 
   # A difficulty override is a routing change: it alters *which* model runs, not
   # what is in the prompt, so it is context-cost-neutral at any scope.
-  defp context_cost_tokens(_gist, _scope, :difficulty_override), do: 0
+  defp context_cost_tokens(_gist, _scope, :difficulty_override, _payload), do: 0
 
   # A config change sets a value; it does not add prose to the prompt.
-  defp context_cost_tokens(_gist, _scope, :config_set), do: 0
+  defp context_cost_tokens(_gist, _scope, :config_set, _payload), do: 0
 
   # What is left is fleet-wide prose — a skill patch or a new skill — which is
   # carried by every dispatch that materializes it, forever.
-  defp context_cost_tokens(gist, _scope, _kind) when is_binary(gist), do: estimate_tokens(gist)
-  defp context_cost_tokens(_gist, _scope, _kind), do: 0
+  defp context_cost_tokens(gist, _scope, _kind, _payload) when is_binary(gist),
+    do: estimate_tokens(gist)
+
+  defp context_cost_tokens(_gist, _scope, _kind, _payload), do: 0
 
   # Tokens, not bytes (Amendment D item 4). Skill clauses skew toward paths,
   # flags and code fragments, which tokenize far worse than prose, so a byte
@@ -688,7 +773,7 @@ defmodule Arbiter.Loop do
          {:ok, ws_id} <- config_workspace(payload, row.workspace_id),
          {:ok, ws} <- fetch_workspace(ws_id),
          {:ok, {repo_path, target_branch}} <- resolve_repo_doc_target(ws, repo) do
-      apply_repo_doc_patch(ws, repo_path, target_branch, row, lesson, attribution)
+      apply_repo_doc_patch(ws, repo, repo_path, target_branch, row, lesson, attribution)
     end
   end
 
@@ -705,7 +790,7 @@ defmodule Arbiter.Loop do
   defp resolve_repo_doc_target(%Workspace{config: config}, repo) do
     paths = Map.get(config || %{}, "repo_paths") || Map.get(config || %{}, "rig_paths") || %{}
 
-    case repo_doc_entry(paths, repo) do
+    case RepoConfig.find_entry(paths, repo) do
       nil ->
         {:error,
          {:unmapped, "repo #{inspect(repo)} is not registered in this workspace's repo_paths"}}
@@ -721,20 +806,7 @@ defmodule Arbiter.Loop do
     end
   end
 
-  defp repo_doc_entry(paths, repo) when is_map(paths) do
-    case Map.get(paths, repo) do
-      nil ->
-        target = RepoConfig.normalize_slug(repo)
-        Enum.find_value(paths, fn {k, v} -> if RepoConfig.normalize_slug(k) == target, do: v end)
-
-      raw ->
-        raw
-    end
-  end
-
-  defp repo_doc_entry(_paths, _repo), do: nil
-
-  defp apply_repo_doc_patch(ws, repo_path, target_branch, row, lesson, attribution) do
+  defp apply_repo_doc_patch(ws, repo, repo_path, target_branch, row, lesson, attribution) do
     branch = "loop/repo-doc-patch-#{row.id}"
 
     case Worktree.create(repo_path, branch, target_branch) do
@@ -742,6 +814,7 @@ defmodule Arbiter.Loop do
         result =
           write_repo_doc_patch(
             ws,
+            repo,
             repo_path,
             target_branch,
             worktree_path,
@@ -762,6 +835,7 @@ defmodule Arbiter.Loop do
 
   defp write_repo_doc_patch(
          ws,
+         repo,
          repo_path,
          target_branch,
          worktree_path,
@@ -784,6 +858,7 @@ defmodule Arbiter.Loop do
              doc_path,
              repo_doc_commit_message(row, removed, attribution)
            ),
+         :ok <- Mergers.prepare_with_repo(ws, repo),
          adapter <- Mergers.for_workspace(ws),
          :ok <- repo_doc_maybe_push(adapter, worktree_path),
          {:ok, _mr_ref} <-
@@ -801,17 +876,21 @@ defmodule Arbiter.Loop do
          {:invalid,
           "this lesson (#{byte_size(lesson)} bytes) alone exceeds the #{cap_bytes}-byte CLAUDE.md section cap"}}
 
+      {:error, :invalid_entry_text} ->
+        {:error,
+         {:invalid,
+          "this lesson must be a single line with no arbiter:begin/end markers " <>
+            "(CLAUDE.md entries are rendered one per line)"}}
+
       {:error, reason} ->
         {:error, {:invalid, inspect(reason)}}
     end
   end
 
-  defp repo_doc_path(payload) do
-    case Map.get(payload, "path") do
-      p when is_binary(p) and p != "" -> p
-      _ -> "CLAUDE.md"
-    end
-  end
+  # bd-1cusio: this write path is scoped to a repo's CLAUDE.md, not arbitrary
+  # files — any payload-supplied override is ignored so no proposal can steer
+  # `File.write/2` outside the file this feature exists to patch.
+  defp repo_doc_path(_payload), do: "CLAUDE.md"
 
   defp repo_doc_cap_bytes(payload) do
     case Map.get(payload, "cap_bytes") do
@@ -844,7 +923,7 @@ defmodule Arbiter.Loop do
 
   defp repo_doc_maybe_push(_adapter, worktree_path) do
     case Worktree.push(worktree_path, set_upstream: true) do
-      :ok -> :ok
+      {:ok, _output} -> :ok
       {:error, reason} -> {:error, {:git_push_failed, reason}}
     end
   end

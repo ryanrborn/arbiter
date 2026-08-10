@@ -55,32 +55,47 @@ defmodule Arbiter.Loop.RepoDocPatch do
       #{@default_cap_bytes}). Oldest entries are evicted first when the
       section would exceed it.
 
-  Returns `{:ok, %{content: new_content, removed: [id, ...]}}`, or
+  Returns `{:ok, %{content: new_content, removed: [id, ...]}}`,
   `{:error, {:entry_too_large, cap_bytes}}` when `text` alone (plus its
   rendered line overhead) cannot fit under the cap no matter what else is
-  evicted.
+  evicted, or `{:error, :invalid_entry_text}` when `text` contains a newline
+  or either managed-section marker — an entry is rendered as one line
+  (`render_entries/1`), so a newline would silently truncate on the next
+  parse (`parse_entries/1` splits on `"\n"`), and a marker would prematurely
+  close or reopen the managed section.
   """
   @spec upsert(String.t() | nil, String.t(), String.t(), keyword()) ::
           {:ok, %{content: String.t(), removed: [String.t()]}}
           | {:error, {:entry_too_large, pos_integer()}}
+          | {:error, :invalid_entry_text}
   def upsert(content, id, text, opts \\ [])
 
   def upsert(nil, id, text, opts), do: upsert("", id, text, opts)
 
   def upsert(content, id, text, opts)
       when is_binary(content) and is_binary(id) and is_binary(text) do
-    cap_bytes = Keyword.get(opts, :cap_bytes, @default_cap_bytes)
+    if invalid_entry_text?(text) do
+      {:error, :invalid_entry_text}
+    else
+      cap_bytes = Keyword.get(opts, :cap_bytes, @default_cap_bytes)
 
-    {before, entries, rest} = split(content)
-    updated_entries = upsert_entry(entries, id, text)
+      {before, entries, rest} = split(content)
+      updated_entries = upsert_entry(entries, id, text)
 
-    case fit_to_cap(updated_entries, cap_bytes) do
-      {:ok, kept, removed} ->
-        {:ok, %{content: render(before, kept, rest), removed: removed}}
+      case fit_to_cap(updated_entries, cap_bytes) do
+        {:ok, kept, removed} ->
+          {:ok, %{content: render(before, kept, rest), removed: removed}}
 
-      :error ->
-        {:error, {:entry_too_large, cap_bytes}}
+        :error ->
+          {:error, {:entry_too_large, cap_bytes}}
+      end
     end
+  end
+
+  defp invalid_entry_text?(text) do
+    String.contains?(text, "\n") or
+      String.contains?(text, @begin_marker) or
+      String.contains?(text, @end_marker)
   end
 
   # ---- parsing --------------------------------------------------------------
