@@ -33,6 +33,23 @@ defmodule Arbiter.Loop.Proposals do
       a concrete payload — `Issue.difficulty` + 1 on the named task — and a
       rendered unified diff.
 
+    * **Rework misestimates that share a `{from_difficulty, to_difficulty,
+      repo}` cell also become one `:config_set` candidate at `:fleet` scope**
+      per cell present in the window (bd-70nblx) — the same fingerprint
+      accumulation already built for reviewer-finding categories, applied to
+      this metric class instead of designing new machinery. This is additive
+      to, never a replacement for, the per-task `:difficulty_override` rows
+      above: a cell with a single occurrence still produces only its per-task
+      override plus a below-bar `:hypothesis` cluster row that carries no
+      immediate effect. A cluster only becomes actionable once it clears the
+      same evidence bar as everything else in Stage 2 (≥3 incidents across ≥2
+      distinct tasks), at which point it escalates as a fleet-wide proposal —
+      "raise the default dispatch difficulty for this cell" — rather than
+      leaving that signal to be inferred from three isolated task rows. Like
+      the finding categories above, it carries no patch content yet (no
+      `"patch"` key in payload — Stage 3 work); applying it fails cleanly,
+      naming the gap.
+
     * **`:quality_failure` misestimates do not become candidates.** The report's
       own recommendation for them is *"investigate the agent-quality failures
       before recommending a difficulty change — this is a cost anomaly, not a
@@ -63,7 +80,8 @@ defmodule Arbiter.Loop.Proposals do
     origin = Keyword.get(opts, :origin, "loop.analyze")
 
     finding_candidates(report, workspace_id, origin) ++
-      misestimate_candidates(report, workspace_id, origin)
+      misestimate_candidates(report, workspace_id, origin) ++
+      misestimate_cluster_candidates(report, workspace_id, origin)
   end
 
   @doc """
@@ -191,6 +209,61 @@ defmodule Arbiter.Loop.Proposals do
       }
     end)
   end
+
+  # ---- difficulty-misestimate clustering (bd-70nblx) ----------------------
+  #
+  # The per-task overrides above are the slow, indirect lever: each fixes one
+  # task's baseline going forward, but three of them landing in the same
+  # (from_difficulty, to_difficulty, repo) cell in one window is the same
+  # systemic-under-provisioning signal a recurring reviewer-finding category
+  # is — so it gets the same treatment: group by cell, emit one candidate per
+  # cell, and let `Arbiter.Loop.record/2`'s existing fingerprint accumulation
+  # decide whether it has cleared the bar (this window, or across several).
+
+  defp misestimate_cluster_candidates(report, workspace_id, origin) do
+    report.difficulty_misestimates
+    |> Enum.filter(&proposable_misestimate?/1)
+    |> Enum.group_by(&cluster_cell/1)
+    |> Enum.map(fn {{from, to, repo}, misestimates} ->
+      task_ids = misestimates |> Enum.map(& &1.task_id) |> Enum.uniq()
+
+      %{
+        kind: :config_set,
+        scope: :fleet,
+        category: cluster_category(from, to, repo),
+        target: nil,
+        difficulty: from,
+        repo: repo,
+        gist:
+          elide(
+            "raise default dispatch difficulty for D#{from}/#{repo || "unknown repo"} to D#{to} " <>
+              "(#{length(task_ids)} task(s) this window)"
+          ),
+        target_metric: "rework rate for D#{from}/#{repo || "unknown repo"} dispatches",
+        baseline:
+          "#{length(task_ids)} misestimate(s) across #{length(task_ids)} distinct task(s)",
+        # One flagged task is one incident of this cell running hot; unioning
+        # on task_id keeps a re-run over the same window idempotent, same as
+        # the per-task candidate above.
+        incident_refs: task_ids,
+        task_refs: task_ids,
+        payload: %{
+          "cell" => %{"from_difficulty" => from, "to_difficulty" => to, "repo" => repo},
+          "task_ids" => task_ids,
+          "reason" => "rework_cluster"
+        },
+        diff: nil,
+        origin: origin,
+        workspace_id: workspace_id
+      }
+    end)
+  end
+
+  defp cluster_cell(m),
+    do: {m.dispatched_difficulty, m.dispatched_difficulty + 1, misestimate_repo(m)}
+
+  defp cluster_category(from, to, repo),
+    do: "difficulty misestimate cluster: D#{from} -> D#{to} (#{repo || "unknown repo"})"
 
   # Only the `:rework` reason names a concrete difficulty bump; a
   # `:quality_failure` is a cost anomaly the report explicitly declines to turn
