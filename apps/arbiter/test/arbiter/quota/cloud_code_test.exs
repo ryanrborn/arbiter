@@ -370,4 +370,41 @@ defmodule Arbiter.Quota.CloudCodeTest do
       assert snap.message == "Antigravity quota auth expired; reconnect."
     end
   end
+
+  describe "antigravity/1 agy CLI real shell-out path (bd-4ku4ze, agy_cmd, no agy_probe stub)" do
+    # These exercise `agy_cli_probe_default/1` / `run_agy_probe/2` for real —
+    # `agy_cmd` points at a real executable instead of stubbing `agy_probe`,
+    # so the `System.find_executable/1` resolution, the `sh -c` argv
+    # construction, and the exit-status mapping all actually run.
+    test "a 0-exit executable is treated as a live agy credential" do
+      snap =
+        CloudCode.antigravity(
+          Keyword.merge(antigravity_opts([]), agy_cmd: "true")
+          |> Keyword.delete(:agy_probe)
+        )
+
+      refute is_nil(snap)
+      assert snap.message =~ "agy"
+    end
+
+    test "a nonzero-exit executable is treated as not live (falls through to nil, no other creds)" do
+      snap =
+        CloudCode.antigravity(
+          Keyword.merge(antigravity_opts([]), agy_cmd: "false")
+          |> Keyword.delete(:agy_probe)
+        )
+
+      assert snap == nil
+    end
+
+    test "an executable name that does not resolve is treated as not installed" do
+      snap =
+        CloudCode.antigravity(
+          Keyword.merge(antigravity_opts([]), agy_cmd: "definitely-not-a-real-agy-binary-xyz")
+          |> Keyword.delete(:agy_probe)
+        )
+
+      assert snap == nil
+    end
+  end
 end

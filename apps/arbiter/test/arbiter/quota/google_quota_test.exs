@@ -119,6 +119,39 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
       row = CloudCode.latest(ws.id, "antigravity")
       assert %GoogleQuota{provider: "antigravity", used_percent: 75.0} = row
     end
+
+    test "a subsequent degraded fetch (no model data) preserves the last good used_percent/reset_at/snapshot" do
+      ws = workspace!()
+      creds = creds_file("agtoken")
+
+      Req.Test.stub(@stub, fn conn ->
+        Req.Test.json(conn, %{
+          "models" => %{
+            "gemini-3-flash" => %{
+              "displayName" => "Gemini 3 Flash",
+              "quotaInfo" => %{"remainingFraction" => 0.25, "resetTime" => "1782250684"}
+            }
+          }
+        })
+      end)
+
+      assert CloudCode.refresh(ws.id, :antigravity, opts(creds, project_id: "p"))
+      good_row = CloudCode.latest(ws.id, "antigravity")
+      assert good_row.used_percent == 75.0
+      refute is_nil(good_row.reset_at)
+
+      Req.Test.stub(@stub, fn conn ->
+        conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"error" => "forbidden"})
+      end)
+
+      assert CloudCode.refresh(ws.id, :antigravity, opts(creds, project_id: "p"))
+      degraded_row = CloudCode.latest(ws.id, "antigravity")
+
+      assert degraded_row.used_percent == good_row.used_percent
+      assert degraded_row.reset_at == good_row.reset_at
+      assert degraded_row.snapshot == good_row.snapshot
+      assert degraded_row.message =~ "forbidden" or degraded_row.message =~ "Antigravity"
+    end
   end
 
   describe "view/1" do

@@ -59,11 +59,23 @@ defmodule Arbiter.Quota.CloudCode do
 
   Reviewed whether the Gemini CLI (`@google/gemini-cli`, an npm/Node package)
   has an equivalent keyring/ADC source hiding behind its `oauth_creds.json` —
-  it does not: the installed bundle has no keyring dependency, and the creds
-  file is the CLI's only token store. Its degraded `project id not available`
-  message (`project_missing_message/1`) is a separate failure mode — a valid
-  token but no cached Cloud Code project — already distinct from an auth
-  failure, so no probe is needed on that path.
+  it **does**: the installed bundle declares `@github/keytar` as a direct
+  dependency (`package.json`) and ships a keychain-backed
+  `code_assist/oauth-credential-storage.ts` `OAuthCredentialStorage`
+  (service `gemini-cli-oauth`, via `HybridTokenStorage`), plus a
+  `GOOGLE_APPLICATION_CREDENTIALS` ADC load path — both bypass
+  `oauth_creds.json` entirely. Which path is authoritative is gated by the
+  `GEMINI_FORCE_ENCRYPTED_FILE_STORAGE` env var: unset (the default), the CLI
+  reads/writes `oauth_creds.json` as Arbiter assumes; set to `"true"`, the
+  CLI never touches that file and Arbiter's read here goes stale exactly like
+  the original Antigravity bug this bead fixes. We do not probe the keyring
+  or ADC for Gemini CLI (no equivalent of `agy`'s own liveness-probe CLI
+  exists to shell out to), so a host running with that flag set will degrade
+  with `project id not available` even though Gemini CLI itself is live —
+  a known blind spot, not a silent-wrong-answer one. Its degraded
+  `project id not available` message (`project_missing_message/1`) is a
+  separate failure mode — a valid token but no cached Cloud Code project —
+  already distinct from an auth failure, so no probe is needed on that path.
 
   ## Flow
 
@@ -355,7 +367,15 @@ defmodule Arbiter.Quota.CloudCode do
   a successful fetch (persisting a row + broadcasting `{:quota_updated, ws, view}`),
   or `nil` when the provider isn't configured on this host (no creds) — in which
   case **no row is written**, so a transient logout doesn't wipe the last good
-  reading. `opts` are forwarded to `gemini/1` / `antigravity/1`.
+  reading.
+
+  A fetch that *does* return (a real API error, or the "agy is live but we hold
+  no readable token" liveness-only snapshot) still writes a row — but if that
+  snapshot has no model data, the write preserves the previous row's
+  `used_percent` / `reset_at` / `snapshot` figures rather than nulling them out,
+  so a transient error or a liveness-only probe result updates the status
+  `message` without wiping the last good quota reading. `opts` are forwarded to
+  `gemini/1` / `antigravity/1`.
   """
   @spec refresh(String.t(), :gemini | :antigravity, keyword()) :: snapshot() | nil
   def refresh(workspace_id, which, opts \\ [])
@@ -387,7 +407,11 @@ defmodule Arbiter.Quota.CloudCode do
   defp fetch_snapshot(:antigravity, opts), do: antigravity(opts)
 
   defp upsert(workspace_id, provider, snapshot) do
-    {used_percent, reset_at} = representative(snapshot)
+    {used_percent, reset_at, stored_snapshot} =
+      case representative(snapshot) do
+        {nil, nil} -> preserve_last_good(workspace_id, provider, snapshot)
+        {used_percent, reset_at} -> {used_percent, reset_at, stringify(snapshot)}
+      end
 
     attrs = %{
       workspace_id: workspace_id,
@@ -396,13 +420,29 @@ defmodule Arbiter.Quota.CloudCode do
       message: snapshot[:message],
       used_percent: used_percent,
       reset_at: reset_at,
-      snapshot: stringify(snapshot),
+      snapshot: stored_snapshot,
       captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
     }
 
     GoogleQuota
     |> Ash.Changeset.for_create(:upsert, attrs)
     |> Ash.create()
+  end
+
+  # A snapshot with no model data (a transient API error, or the "agy is live
+  # but we hold no readable token" liveness-only status) must not clobber the
+  # last good reading's figures — only its `message`/`plan`/`captured_at`
+  # should change. Falls back to writing the empty snapshot as-is when there
+  # is no previous row to preserve.
+  defp preserve_last_good(workspace_id, provider, snapshot) do
+    case latest(workspace_id, provider) do
+      %GoogleQuota{used_percent: used_percent, reset_at: reset_at, snapshot: prior}
+      when not is_nil(prior) ->
+        {used_percent, reset_at, prior}
+
+      _ ->
+        {nil, nil, stringify(snapshot)}
+    end
   end
 
   # The representative bar figure: the worst (most-used) important model, i.e.
@@ -650,13 +690,25 @@ defmodule Arbiter.Quota.CloudCode do
 
     task =
       Task.async(fn ->
-        System.cmd("/bin/sh", ["-c", ~s(exec "$0" models >/dev/null 2>&1 </dev/null), path])
+        try do
+          System.cmd("/bin/sh", ["-c", ~s(exec "$0" models >/dev/null 2>&1 </dev/null), path])
+        rescue
+          _ -> {"", 1}
+        catch
+          :exit, _ -> {"", 1}
+        end
       end)
 
     case Task.yield(task, timeout) do
-      {:ok, {_out, 0}} -> :live
-      {:ok, _other} -> :not_live
-      nil -> Task.shutdown(task, :brutal_kill) && :not_live
+      {:ok, {_out, 0}} ->
+        :live
+
+      {:ok, _other} ->
+        :not_live
+
+      nil ->
+        Task.shutdown(task, :brutal_kill)
+        :not_live
     end
   end
 
