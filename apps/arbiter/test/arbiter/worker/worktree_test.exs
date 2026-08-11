@@ -727,6 +727,66 @@ defmodule Arbiter.Worker.WorktreeTest do
 
       assert String.trim(out) == "main worker edits README"
     end
+
+    test "pushes directly without rebasing when the branch already merged origin/<branch> in via its own merge commit (bd-cdrr58)",
+         %{repo: repo, remote: remote, root: root} do
+      {:ok, path} = Worktree.create(repo, "feature/rebase-already-merged", "main")
+
+      # Something (e.g. a coordinator resolving a stalled task by hand) has
+      # already advanced origin/<branch>...
+      advance_origin_branch!(
+        root,
+        remote,
+        "feature/rebase-already-merged",
+        "shared.txt",
+        "already landed\n"
+      )
+
+      # Meanwhile the worktree made its own local commit first, so merging
+      # origin/<branch> in afterward produces a real merge commit rather than
+      # a fast-forward.
+      :ok = commit(path, "own-work.txt", "own work\n", "own work before merging")
+
+      # ...and this worktree's own branch has already pulled that in via a
+      # `git merge origin/<branch>` (mirrors merging origin/main in via a
+      # merge commit, per bd-cdrr58) rather than a fetch/rebase — so it is
+      # strictly ahead of origin/<branch> with nothing left to reconcile.
+      {_, 0} = System.cmd("git", ["-C", path, "fetch", "-q", "origin"])
+
+      {_, 0} =
+        System.cmd(
+          "git",
+          [
+            "-C",
+            path,
+            "merge",
+            "-q",
+            "--no-edit",
+            "origin/feature/rebase-already-merged"
+          ],
+          stderr_to_stdout: true
+        )
+
+      {before_sha, 0} = System.cmd("git", ["-C", path, "rev-parse", "HEAD"])
+
+      assert {:ok, :ahead} = Worktree.rebase_onto_origin(path, "feature/rebase-already-merged")
+
+      # No rebase was attempted — HEAD is untouched by the reconcile call.
+      {after_sha, 0} = System.cmd("git", ["-C", path, "rev-parse", "HEAD"])
+      assert before_sha == after_sha
+
+      assert {:ok, _} = Worktree.push(path, branch: "feature/rebase-already-merged")
+
+      {out, 0} =
+        System.cmd("git", [
+          "-C",
+          remote,
+          "show",
+          "feature/rebase-already-merged:shared.txt"
+        ])
+
+      assert out == "already landed\n"
+    end
   end
 
   describe "list/1" do

@@ -797,6 +797,11 @@ defmodule Arbiter.Worker.Worktree do
     * `{:ok, :rebased}` — local and remote had diverged; local's own commits
       were rebased onto the remote tip. HEAD is now strictly ahead of
       `origin/<branch>` and a plain push will succeed.
+    * `{:ok, :ahead}` — `origin/<branch>` is already an ancestor of HEAD (e.g.
+      the branch merged it in via its own merge commit at some point). Local
+      is strictly ahead with nothing to reconcile; a plain push will succeed
+      without rebasing (bd-cdrr58 — rebasing here would replay commits whose
+      content the branch already carries, producing false conflicts).
     * `{:error, {:diverged_conflict, %{files: [path], output: raw}}}` — the
       rebase hit textual conflicts. The rebase was ABORTED so the worktree is
       left clean on its own original HEAD (never half-rebased). The caller
@@ -804,7 +809,7 @@ defmodule Arbiter.Worker.Worktree do
     * `{:error, reason}` — `origin` is missing or the fetch failed.
   """
   @spec rebase_onto_origin(path(), String.t()) ::
-          {:ok, :up_to_date | :synced | :rebased}
+          {:ok, :up_to_date | :synced | :rebased | :ahead}
           | {:error,
              {:diverged_conflict, %{files: [String.t()], output: String.t()}} | error_reason()}
   def rebase_onto_origin(path, branch)
@@ -836,10 +841,22 @@ defmodule Arbiter.Worker.Worktree do
           end
 
         {:error, _} ->
-          # HEAD is NOT an ancestor of origin/<branch> — genuine divergence.
-          # Rebase the worktree's own commits onto the remote tip instead of
-          # failing closed.
-          rebase_onto(path, ref)
+          # HEAD is NOT an ancestor of origin/<branch>. Check the other
+          # direction before assuming genuine divergence: if origin/<branch>
+          # is itself an ancestor of HEAD, the branch already carries
+          # everything on the remote (e.g. via its own prior `git merge
+          # origin/main`) and a rebase would only replay already-integrated
+          # content, risking false conflicts (bd-cdrr58).
+          case run_git(["merge-base", "--is-ancestor", ref, "HEAD"], cd: path) do
+            {:ok, _} ->
+              {:ok, :ahead}
+
+            {:error, _} ->
+              # Neither is an ancestor of the other — genuine divergence.
+              # Rebase the worktree's own commits onto the remote tip instead
+              # of failing closed.
+              rebase_onto(path, ref)
+          end
       end
     end
   end
