@@ -116,8 +116,11 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   Merge a per-repo GitLab config override over the current process's active
   config.
 
-  Looks up `workspace.config["merge"]["config"]["repos"][repo]` and, if
-  present, merges it over the config already seeded by `put_active/1` — so a
+  Looks up `repo`'s entry in `workspace.config["merge"]["config"]["repos"]`
+  (via `RepoConfig.find_entry/2`, so a forge-qualified slug like `owner/repo`
+  still matches a bare rig-name key — callers like `ReviewPatrol` and
+  `MergedPRFinalizer` only have the slug on hand, bd-bnakt8) and, if present,
+  merges it over the config already seeded by `put_active/1` — so a
   multi-GitLab-project workspace (see moduledoc) resolves the right
   `project_id` for the repo actually being merged instead of the
   workspace-wide default.
@@ -129,7 +132,9 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   def override_repo(_workspace, repo) when repo in [nil, ""], do: :ok
 
   def override_repo(%Workspace{config: config} = workspace, repo) when is_binary(repo) do
-    case get_in(config || %{}, ["merge", "config", "repos", repo]) do
+    repos = get_in(config || %{}, ["merge", "config", "repos"]) || %{}
+
+    case Arbiter.Tasks.RepoConfig.find_entry(repos, repo) do
       %{} = override when map_size(override) > 0 ->
         active = Process.get(@pdict_key) || %{}
         embedded = CredentialsRef.embed_secrets(override, Workspace.secrets_map(workspace))
