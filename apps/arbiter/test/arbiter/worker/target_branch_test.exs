@@ -94,5 +94,20 @@ defmodule Arbiter.Worker.TargetBranchTest do
 
       assert "main" = TargetBranch.resolve(b, repo: nil)
     end
+
+    test "forge-qualified slug repo matches a rig_paths entry keyed by bare rig name (bd-c5f0n5)" do
+      ws =
+        workspace(%{
+          "rig_paths" => %{"repo-a" => %{"path" => "/tmp/repo-a", "target_branch" => "alpha"}},
+          "merge" => %{"base" => "beta"}
+        })
+
+      b = task(ws)
+
+      # PRPatrol dispatches with the forge-qualified slug ("org/repo-a"), not
+      # the bare rig name the config is keyed by. The per-repo override must
+      # still be found rather than silently falling through to merge.base.
+      assert "alpha" = TargetBranch.resolve(b, repo: "some-org/repo-a")
+    end
   end
 end
