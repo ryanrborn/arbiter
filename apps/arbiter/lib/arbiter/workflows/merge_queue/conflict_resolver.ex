@@ -227,9 +227,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   defp workspace_repo_path(_workspace, nil), do: nil
 
   defp workspace_repo_path(%Workspace{config: %{} = config}, repo) when is_binary(repo) do
-    RepoConfig.repo_path_from_config(
-      get_in(config, ["repo_paths", repo]) || get_in(config, ["rig_paths", repo])
-    )
+    RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
+      RepoConfig.find_path(get_in(config, ["rig_paths"]), repo)
   end
 
   defp workspace_repo_path(_, _), do: nil

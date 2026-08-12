@@ -33,16 +33,27 @@ defmodule Arbiter.Tasks.RepoConfig do
   def normalize_slug(_), do: nil
 
   @doc """
-  Looks up `repo`'s raw entry in a `repo_paths`/`rig_paths`-shaped map. Exact
-  key match first; falls back to a normalized match (see `normalize_slug/1`)
-  so a differently-separated key (`verus_server` vs `verus-server`) still
-  resolves. Returns `nil` if `map` isn't a map, or the repo isn't registered.
+  Looks up `repo`'s raw entry in a `repo_paths`/`rig_paths`-shaped map.
+
+  Three passes, in order:
+
+    1. Exact key match.
+    2. Normalized match (see `normalize_slug/1`) so a differently-separated
+       key (`verus_server` vs `verus-server`) still resolves.
+    3. If `repo` is a forge-qualified slug (`<org>/<repo>`), the same two
+       passes against just its trailing segment — `rig_paths`/`repo_paths`
+       are keyed by bare rig name, but callers like PRPatrol only have the
+       slug on hand (bd-c5f0n5).
+
+  Returns `nil` if `map` isn't a map, or the repo isn't registered.
   """
   def find_entry(map, repo) when is_map(map) and is_binary(repo) do
     case Map.get(map, repo) do
       nil ->
         target = normalize_slug(repo)
-        Enum.find_value(map, fn {k, v} -> if normalize_slug(k) == target, do: v end)
+
+        Enum.find_value(map, fn {k, v} -> if normalize_slug(k) == target, do: v end) ||
+          find_entry_by_slug_suffix(map, repo)
 
       raw ->
         raw
@@ -50,6 +61,13 @@ defmodule Arbiter.Tasks.RepoConfig do
   end
 
   def find_entry(_map, _repo), do: nil
+
+  defp find_entry_by_slug_suffix(map, repo) do
+    case String.split(repo, "/") do
+      [_owner, name] when name != "" -> find_entry(map, name)
+      _ -> nil
+    end
+  end
 
   @doc """
   Looks up `repo`'s filesystem path in a `repo_paths`/`rig_paths`-shaped

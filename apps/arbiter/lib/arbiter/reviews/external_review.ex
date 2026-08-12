@@ -1717,10 +1717,11 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp resolve_repo_path(_workspace, ""), do: nil
 
   defp resolve_repo_path(%Workspace{config: config}, repo) when is_binary(repo) do
+    config = config || %{}
+
     from_config =
-      RepoConfig.repo_path_from_config(
-        get_in(config || %{}, ["repo_paths", repo]) || get_in(config || %{}, ["rig_paths", repo])
-      )
+      RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
+        RepoConfig.find_path(get_in(config, ["rig_paths"]), repo)
 
     from_config || application_repo_path(repo)
   end

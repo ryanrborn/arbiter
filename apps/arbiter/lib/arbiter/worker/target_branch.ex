@@ -19,7 +19,11 @@ defmodule Arbiter.Worker.TargetBranch do
     3. Per-repo default in workspace config — the `repo_paths` map entry can be a
        string (the path) or a `{"path" => ..., "target_branch" => ...}` map for
        an integration branch shared by every task worked in that repo. Requires
-       the caller to pass the resolved `:repo`.
+       the caller to pass the resolved `:repo`. Looked up via
+       `Arbiter.Tasks.RepoConfig.find_entry/2`, which matches a bare rig-name
+       key against either a bare `:repo` or a forge-qualified slug
+       (`<org>/<repo>`) — callers like `PRPatrol` only have the slug on hand
+       (bd-c5f0n5).
     4. `:workspace_base` opt — a queue-level base. The `MergeQueue` passes its
        explicitly-configured `state.base` here so it sits *below* the per-task
        and per-repo config rather than short-circuiting them. nil when unset.
@@ -71,7 +75,8 @@ defmodule Arbiter.Worker.TargetBranch do
     case load_workspace_config(ws_id) do
       %{} = config ->
         repo_target_from_config(
-          get_in(config, ["repo_paths", repo]) || get_in(config, ["rig_paths", repo])
+          RepoConfig.find_entry(get_in(config, ["repo_paths"]) || %{}, repo) ||
+            RepoConfig.find_entry(get_in(config, ["rig_paths"]) || %{}, repo)
         )
 
       _ ->
