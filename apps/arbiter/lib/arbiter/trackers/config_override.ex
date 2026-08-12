@@ -34,11 +34,15 @@ defmodule Arbiter.Trackers.ConfigOverride do
   """
 
   alias Arbiter.Agents.CredentialsRef
+  alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
 
   @doc """
-  Merge `workspace.config["tracker"]["config"]["repos"][repo]` over the config
-  already seeded in the process dictionary under `pdict_key`.
+  Merge `repo`'s entry in `workspace.config["tracker"]["config"]["repos"]`
+  (via `RepoConfig.find_entry/2`, so a forge-qualified slug like `owner/repo`
+  still matches a bare repo-name key — callers like trackers may only have the
+  slug on hand, bd-36p5rh) over the config already seeded in the process
+  dictionary under `pdict_key`.
 
   Secrets in the override (`credentials_ref` DSL) are embedded with the same
   `Workspace.secrets_map/1` the adapter's `put_active/1` uses, so a repo
@@ -49,7 +53,9 @@ defmodule Arbiter.Trackers.ConfigOverride do
   def apply(_pdict_key, nil, _repo), do: :ok
 
   def apply(pdict_key, %Workspace{config: config} = workspace, repo) when is_binary(repo) do
-    case get_in(config || %{}, ["tracker", "config", "repos", repo]) do
+    repos = get_in(config || %{}, ["tracker", "config", "repos"]) || %{}
+
+    case RepoConfig.find_entry(repos, repo) do
       %{} = override when map_size(override) > 0 ->
         active = Process.get(pdict_key) || %{}
         embedded = CredentialsRef.embed_secrets(override, Workspace.secrets_map(workspace))

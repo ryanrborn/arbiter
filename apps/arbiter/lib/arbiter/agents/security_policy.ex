@@ -118,6 +118,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
   value rather than raising.
   """
 
+  alias Arbiter.Tasks.RepoConfig
+
   @enforce_keys [:permissions, :sandbox]
   defstruct [:permissions, :sandbox]
 
@@ -275,7 +277,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
   defp repo_override(_workspace_policy, repo) when repo in [nil, ""], do: %{}
 
   defp repo_override(workspace_policy, repo) when is_binary(repo) do
-    case get_in(workspace_policy, ["repos", repo]) do
+    repos = get_in(workspace_policy, ["repos"]) || %{}
+
+    case RepoConfig.find_entry(repos, repo) do
       %{} = override -> override
       _ -> %{}
     end
