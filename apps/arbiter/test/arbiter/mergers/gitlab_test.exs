@@ -956,6 +956,14 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert cfg.project_id == "999"
       assert cfg.token == "other-repo-token"
     end
+
+    test "matches a forge-qualified slug against a bare repos key (bd-bnakt8)" do
+      ws = workspace_with_repos(%{"tonic_device" => %{"project_id" => 999}})
+
+      assert :ok = Config.override_repo(ws, "emricare/tonic_device")
+      assert {:ok, cfg} = Config.resolve()
+      assert cfg.project_id == "999"
+    end
   end
 
   # ref_for_pr/2 — construct an mr_ref for an external MR (bd-d4ealy).
