@@ -207,6 +207,21 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert p.sandbox.network == true
     end
 
+    test "forge-qualified slug matches bare repos key (bd-36p5rh)" do
+      ws = multi_repo_ws()
+
+      # Caller has forge-qualified slug; config is keyed by bare name
+      device = SecurityPolicy.resolve(ws, %{}, "some-org/device")
+      # Should find the per-repo override, not fall back to workspace-wide
+      assert device.permissions.mode == :strict
+      assert device.sandbox.network == false
+
+      # Non-overridden repo still falls back to workspace-wide
+      other = SecurityPolicy.resolve(ws, %{}, "some-org/server")
+      assert other.permissions.mode == :auto
+      assert other.sandbox.network == true
+    end
+
     test "explicit per-dispatch override still wins over the repo layer" do
       ws = multi_repo_ws()
       p = SecurityPolicy.resolve(ws, %{"permissions" => %{"mode" => "bypass"}}, "device")
