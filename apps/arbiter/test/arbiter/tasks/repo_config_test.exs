@@ -82,5 +82,20 @@ defmodule Arbiter.Tasks.RepoConfigTest do
     test "returns nil for a non-map" do
       assert RepoConfig.find_path(nil, "widget") == nil
     end
+
+    test "matches a forge-qualified slug against a key of its bare trailing segment (bd-c5f0n5)" do
+      map = %{"widget" => %{"path" => "/home/dev/widget", "target_branch" => "main"}}
+      assert RepoConfig.find_path(map, "some-org/widget") == "/home/dev/widget"
+    end
+
+    test "matches a forge-qualified slug against a normalized bare key" do
+      map = %{"verus_server" => "/home/dev/verus_server"}
+      assert RepoConfig.find_path(map, "some-org/verus-server") == "/home/dev/verus_server"
+    end
+
+    test "does not match a slug whose owner segment happens to equal the key" do
+      map = %{"widget" => "/home/dev/widget"}
+      assert RepoConfig.find_path(map, "widget/other") == nil
+    end
   end
 end
