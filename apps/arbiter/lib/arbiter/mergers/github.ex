@@ -1563,7 +1563,10 @@ defmodule Arbiter.Mergers.Github do
         _ -> opener_nodes
       end
 
-    put_in(node, ["comments", "nodes"], merged)
+    case get_in(node, ["comments", "nodes"]) do
+      nil -> node
+      _ -> put_in(node, ["comments", "nodes"], merged)
+    end
   end
 
   # Same required+settled filter + summary as `list_required_check_failures/1`.

@@ -2370,12 +2370,20 @@ defmodule Arbiter.Mergers.GithubTest do
         "line" => 130,
         "comments" => %{
           "nodes" => [
-            %{"databaseId" => 1, "body" => "this doesn't exist", "author" => %{"login" => "copilot"}}
+            %{
+              "databaseId" => 1,
+              "body" => "this doesn't exist",
+              "author" => %{"login" => "copilot"}
+            }
           ]
         },
         "latest" => %{
           "nodes" => [
-            %{"databaseId" => 2, "body" => "it does, see tracer.ex:130", "author" => %{"login" => "arbiter-bot"}}
+            %{
+              "databaseId" => 2,
+              "body" => "it does, see tracer.ex:130",
+              "author" => %{"login" => "arbiter-bot"}
+            }
           ]
         }
       }
