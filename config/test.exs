@@ -125,6 +125,11 @@ config :arbiter, :quota_refresh_probe, enabled: false
 # synchronously with a Req.Test stub and start their own disabled instance.
 config :arbiter, :pr_state_poller, enabled: false
 
+# Disable the Stage 3 canary ticker in test — it would otherwise walk every
+# workspace a test creates on a timer, off the sandbox connection. Tests drive
+# `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.
+config :arbiter, :loop_canary_ticker, enabled: false
+
 # Disable the Codex / Gemini CLI / Antigravity refresh probe in test — there are
 # no real CLIs or endpoints to hit. Tests that exercise the prober inject a
 # :refresh_fun stub and enable explicitly.

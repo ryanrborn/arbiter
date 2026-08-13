@@ -72,6 +72,11 @@ defmodule Arbiter.Application do
       # panel stays accurate even when no dashboard LiveView is open. The
       # dashboard is a reader of pr_state; this is the writer of record.
       Arbiter.Reviews.PrStatePoller,
+      # Judges any running Stage 3 routing canary and reverts it automatically
+      # if first-pass convergence regressed (bd-6edc0u). Inert for every
+      # workspace that has not set `loop.autonomous_routing_enabled`, which is
+      # all of them by default.
+      Arbiter.Loop.CanaryTicker,
       # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
       # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
       # it starts without error but never reaches the MCP server — so a worker

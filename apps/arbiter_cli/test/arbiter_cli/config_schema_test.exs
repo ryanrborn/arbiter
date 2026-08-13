@@ -54,9 +54,29 @@ defmodule ArbiterCli.ConfigSchemaTest do
     text = ConfigSchema.render()
 
     for key <- ~w(tracker merge agent review_agent security routing review_gate
-                  review_automation quota conductor standing_orders repo_paths
+                  review_automation quota conductor loop standing_orders repo_paths
                   pr_patrol review_patrol) do
       assert text =~ key
     end
+  end
+
+  # bd-6edc0u: the only kill switch for Arbiter's one autonomous-write path.
+  # `arb config --help` is where an operator goes looking for it, so the
+  # reference has to name it and say which way is off.
+  test "render/0 documents the Stage 3 autonomy flag and its sample-size floor" do
+    text = ConfigSchema.render()
+
+    assert text =~ "autonomous_routing_enabled"
+    assert text =~ "canary_min_dispatches"
+    assert text =~ "canary_regression_tolerance"
+
+    assert text =~ ~r/autonomous_routing_enabled\s+bool — OFF/,
+           "the reference must be explicit that autonomous routing is off by default"
+
+    assert Arbiter.Loop.Canary.min_dispatches() == 20,
+           "the documented >= 20 floor must match the server's own constant"
+
+    assert Arbiter.Loop.Canary.max_regression_tolerance() == 0.5,
+           "the documented 0..0.5 tolerance range must match the server's own ceiling"
   end
 end
