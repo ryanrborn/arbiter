@@ -16,6 +16,20 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   Directive-closed events are intentionally **not** posted — too noisy.
 
+  ## ReviewGate non-convergence is not a crash (bd-3wgdie)
+
+  A `:failed` worker whose `meta[:failure_reason]` is `:review_gate_rejected`
+  or `:review_gate_inconclusive` gets distinct wording instead of the generic
+  `failed after <duration> — exit code <N>` template: e.g. `<title> escalated
+  — ReviewGate did not converge after 2 round(s) — …`. The worker completed
+  its work and exited 0 — it lost a review argument, not a crash — and the
+  generic template previously read as a dead worker, burying a real
+  human-judgement-needed escalation for 66 hours (see the bd-3wgdie
+  writeup). ReviewGate also mails an addressed `:escalation` (`to_ref:
+  "coordinator"`) with the full transcript via `Arbiter.Worker`'s
+  `escalate_review_gate/3` — this broadcast `:notification` is a second,
+  lower-friction surface (dashboard feed) carrying the same distinction.
+
   ## Actionable escalations (`worker_stopped`, `preflight_failed`)
 
   A dead/stopped worker (token exhaustion, crash, external kill, auth expiry)
@@ -810,14 +824,22 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   defp build(:failed, %{task_id: task_id} = snapshot) do
-    duration = format_duration(elapsed_seconds(snapshot))
+    case review_gate_reason(snapshot) do
+      nil ->
+        duration = format_duration(elapsed_seconds(snapshot))
 
-    base(task_id, snapshot, "failed", fn title ->
-      case exit_code(snapshot) do
-        nil -> "#{title} failed after #{duration}"
-        code -> "#{title} failed after #{duration} — exit code #{code}"
-      end
-    end)
+        base(task_id, snapshot, "failed", fn title ->
+          case exit_code(snapshot) do
+            nil -> "#{title} failed after #{duration}"
+            code -> "#{title} failed after #{duration} — exit code #{code}"
+          end
+        end)
+
+      reason ->
+        base(task_id, snapshot, "escalated — #{review_gate_label(reason)}", fn title ->
+          "#{title} escalated — #{review_gate_sentence(reason, snapshot)}"
+        end)
+    end
   end
 
   defp build(:awaiting_review, %{task_id: task_id} = snapshot) do
@@ -897,6 +919,45 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp exit_code(%{meta: meta}) when is_map(meta), do: Map.get(meta, :exit_status)
   defp exit_code(_), do: nil
+
+  # bd-3wgdie: a worker parked by ReviewGate (non-convergence or an
+  # unparseable verdict) completed its work and exited cleanly — it lost a
+  # review argument, it did not crash. `:failed` + `exit code 0` reads as a
+  # dead worker and buries the fact that a human decision is needed. Detect
+  # the two review-gate `failure_reason`s here so `build/2` can give them
+  # distinct, honest wording instead of the generic crash template.
+  defp review_gate_reason(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :failure_reason) do
+      :review_gate_rejected -> :rejected
+      :review_gate_inconclusive -> :inconclusive
+      _ -> nil
+    end
+  end
+
+  defp review_gate_reason(_), do: nil
+
+  defp review_gate_label(:rejected), do: "ReviewGate did not converge"
+  defp review_gate_label(:inconclusive), do: "ReviewGate inconclusive"
+
+  defp review_gate_sentence(:rejected, snapshot) do
+    "ReviewGate did not converge#{rounds_suffix(snapshot)} — the implementer and reviewer " <>
+      "did not reach agreement and it needs your judgement (see the task notes for the " <>
+      "full argument)."
+  end
+
+  defp review_gate_sentence(:inconclusive, snapshot) do
+    "ReviewGate produced no parseable verdict#{rounds_suffix(snapshot)} and needs your " <>
+      "judgement (see the task notes for details)."
+  end
+
+  defp rounds_suffix(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :review_gate_rounds) do
+      n when is_integer(n) -> " after #{n} round(s)"
+      _ -> ""
+    end
+  end
+
+  defp rounds_suffix(_), do: ""
 
   defp mr_ref(%{meta: meta}) when is_map(meta),
     do: Map.get(meta, :mr_ref) || Map.get(meta, :mr_url)

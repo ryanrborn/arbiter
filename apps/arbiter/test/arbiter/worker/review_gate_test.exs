@@ -2289,6 +2289,17 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert escalation.body =~ "Implementer → Reviewer"
       assert escalation.body =~ "Current diff"
 
+      # bd-3wgdie: the broadcast lifecycle notification must read as an
+      # escalation needing a human decision, not a crash — the worker
+      # completed its work and exited 0, it just lost the review argument.
+      notifications = Message.recent_notifications(10, workspace_id: ws.id)
+      notification = Enum.find(notifications, &(&1.from_ref == task.id))
+      assert notification, "expected a lifecycle notification for the task"
+      refute notification.body =~ "exit code"
+      assert notification.subject =~ "escalated"
+      assert notification.body =~ "ReviewGate did not converge"
+      assert notification.body =~ "2 round"
+
       # The same transcript is on the task notes (visible via arb show), including
       # the round count so operators can see it ran the full 2-round cap.
       {:ok, reloaded} = Ash.get(Issue, task.id)
