@@ -17,13 +17,23 @@ defmodule Arbiter.Worker.Stats do
 
   def task_costs_usd([]), do: %{}
 
+  # bd-cryhwk: ReviewGate reviewer/implementer passes write their
+  # `Arbiter.Usage.Event` rows under a synthetic, `#`-suffixed task id
+  # (`Arbiter.Worker.ReviewGate.reviewer_task_id/1`,
+  # `implementer_task_id/2` — e.g. "<base>#review", "<base>#review#impl1")
+  # so the row is still attributable to the pass that earned it. Filtering
+  # on exact `task_id` equality against the base ids silently dropped every
+  # review/impl row, so the reported total could be (and was observed to be)
+  # *less* than a single ReviewGate round for the same task. Roll up by each
+  # event's base task id instead, matching how `review_gate_rounds_list` and
+  # `Arbiter.Usage.base_task_id/1` already attribute this spend.
   def task_costs_usd(task_ids) when is_list(task_ids) do
-    require Ash.Query
+    base_ids = MapSet.new(task_ids)
 
     Arbiter.Usage.Event
-    |> Ash.Query.filter(task_id in ^task_ids)
     |> Ash.read!()
-    |> Enum.group_by(& &1.task_id)
+    |> Enum.group_by(&Arbiter.Worker.ReviewGate.base_task_id(&1.task_id))
+    |> Enum.filter(fn {base_id, _events} -> MapSet.member?(base_ids, base_id) end)
     |> Map.new(fn {id, events} ->
       total = Enum.reduce(events, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
       {id, total}
