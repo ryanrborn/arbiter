@@ -520,7 +520,12 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, %{pipeline: :success}} = Github.get(@ref)
     end
 
-    test "pipeline is nil when no check-runs exist" do
+    test "pipeline is :not_started when the check-runs API returns zero results (bd-aeb9wv)" do
+      # A distinct signal from `nil` (no head SHA, or the request itself
+      # failed): the SHA is present and the request succeeded, but GitHub
+      # hasn't recorded any check-runs for it yet — e.g. the check-suite for
+      # the commit hasn't been created yet (bd-aeb9wv / #1189). The Watchdog
+      # must treat this as pending, not vacuously "nothing blocking".
       stub(fn conn ->
         case conn.request_path do
           "/repos/octo/widget/pulls/42" ->
@@ -543,7 +548,7 @@ defmodule Arbiter.Mergers.GithubTest do
         end
       end)
 
-      assert {:ok, %{pipeline: nil}} = Github.get(@ref)
+      assert {:ok, %{pipeline: :not_started}} = Github.get(@ref)
     end
   end
 

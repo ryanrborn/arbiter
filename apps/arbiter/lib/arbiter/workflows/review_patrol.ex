@@ -1680,6 +1680,20 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # CI has "settled" when the head's pipeline is not actively running/pending, so
   # a re-review lands on a diff whose checks are done rather than firing on every
   # intermediate push. A nil pipeline (no checks / unknown) counts as settled.
+  #
+  # `:not_started` (bd-aeb9wv / #1189) is deliberately NOT in @unsettled_ci,
+  # unlike the Watchdog's merge-gate (`Watchdog.ci_pending?/1`), even though
+  # both read the same GitHub adapter signal. The two consumers have opposite
+  # failure modes for treating zero-check-runs as "wait": the Watchdog hard-
+  # fails the worker after `max_polls`, so it bounds the wait
+  # (`@not_started_grace_polls`) before falling through. ReviewPatrol has no
+  # such fallthrough here — `ci_settled?/1` only gates *when* a re-review
+  # fires, and ReviewPatrol re-checks on its own poll interval regardless, so
+  # treating `:not_started` as unsettled with no bound would mean a repo with
+  # no CI configured at all never gets re-reviewed on new commits (the
+  # pipeline never leaves `:not_started`). Counting it as settled matches the
+  # pre-existing `nil` behavior: worst case a re-review lands slightly before
+  # checks start, which is a stale-signal nuisance, not a merge-safety bug.
   defp ci_settled?(%{pipeline: status}) when status in @unsettled_ci, do: false
   defp ci_settled?(_pr), do: true
 

@@ -1276,6 +1276,54 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert Worker.state(pid).meta.result == :merged
       assert StubMerger.merge_count("!ci4") == 1
     end
+
+    test "does not call safe_merge while pipeline is :not_started (bd-aeb9wv), merges once check-runs appear" do
+      # PR #1188: the check-suite for the head SHA hadn't been created yet by
+      # the time the ReviewGate APPROVE landed — the check-runs API returned
+      # zero results, and the adapter's `nil` pipeline was (wrongly) treated
+      # as "nothing blocking" rather than "unknown, wait". `:not_started` is
+      # the adapter's distinct signal for that zero-results case.
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result({:error, :should_not_be_called})
+
+      StubMerger.queue_get("!ci5", [
+        %{status: :open, approved: true, pipeline: :not_started},
+        %{status: :open, approved: true, pipeline: :not_started}
+      ])
+
+      start_watchdog(pid, task_id, "!ci5", auto_merge: true, interval_ms: 15)
+
+      # Fewer polls than @not_started_grace_polls (5) so the grace-bounded
+      # fallthrough (bd-aeb9wv round 2) doesn't fire yet — see the dedicated
+      # "falls through ... once grace polls are exhausted" test below for that.
+      Process.sleep(40)
+      assert StubMerger.merge_count("!ci5") == 0
+      refute Worker.state(pid).status == :completed
+
+      StubMerger.set_merge_result(:ok)
+      StubMerger.queue_get("!ci5", [%{status: :open, approved: true, pipeline: :success}])
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!ci5") == 1
+    end
+
+    test "falls through to a merge attempt once :not_started grace polls are exhausted (bd-aeb9wv)" do
+      # Reviewer finding: treating `:not_started` as pending *forever* (like
+      # genuine `:running`/`:pending`) would make a repo with no CI configured
+      # at all hard-fail the worker at `max_polls` on every auto-merge lane.
+      # The pipeline never resolves for that repo, so the deferral must be
+      # bounded — after `@not_started_grace_polls` consecutive `:not_started`
+      # polls, the Watchdog stops waiting and attempts the merge.
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result(:ok)
+      StubMerger.queue_get("!ci6", [%{status: :open, approved: true, pipeline: :not_started}])
+
+      start_watchdog(pid, task_id, "!ci6", auto_merge: true, interval_ms: 15)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!ci6") == 1
+    end
   end
 
   describe "a ReviewGate-approved PR with red CI never auto-merges (bd-23y19q / #1176)" do
