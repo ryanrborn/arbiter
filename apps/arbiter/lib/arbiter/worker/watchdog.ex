@@ -103,6 +103,19 @@ defmodule Arbiter.Worker.Watchdog do
   @default_max_polls_auto 30
   @default_max_polls_manual :infinity
 
+  # Consecutive `:not_started` polls (zero check-runs on the head SHA) the
+  # Watchdog will defer auto-merge for before treating the pipeline as settled
+  # and falling through to a merge attempt (bd-aeb9wv / #1189). Bounded, not
+  # infinite: zero check-runs is ambiguous between "GitHub hasn't created the
+  # check-suite yet" (the #1188 race — resolves within a poll or two) and "no
+  # CI is configured for this repo at all" (never resolves). Treating
+  # `:not_started` the same as genuine `:running`/`:pending` forever would
+  # make every no-CI auto-merge lane time out at `max_polls` and hard-fail the
+  # worker. 5 polls at the default 60s interval is ~5 minutes — orders of
+  # magnitude more than the 1s gap in the incident report, while still bounded
+  # for repos that will never produce a check-run.
+  @not_started_grace_polls 5
+
   # Consecutive auto-resolve attempts (#354, Phase 2a) before the Watchdog stops
   # mechanically resolving a block and escalates to the coordinator with the
   # reason + attempt count. Override via opt `:max_auto_resolve_attempts` or
@@ -448,7 +461,13 @@ defmodule Arbiter.Worker.Watchdog do
           merge_fail_notify_threshold:
             Keyword.get(opts, :merge_fail_notify_threshold, @default_merge_fail_notify_threshold),
           merge_stall_notified: false,
-          last_merge_stall_poll: 0
+          last_merge_stall_poll: 0,
+          # Consecutive `:not_started` polls for the current approval episode
+          # (bd-aeb9wv / #1189). Resets whenever the pipeline reports anything
+          # other than `:not_started`. Once it reaches `@not_started_grace_polls`,
+          # the Watchdog stops deferring and falls through to a merge attempt —
+          # see `apply_outcome(:approved, result, %{auto_merge: true})`.
+          not_started_polls: 0
         }
 
         Process.monitor(worker_pid)
@@ -519,6 +538,26 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp apply_outcome(:approved, result, %{auto_merge: true} = state) do
     cond do
+      # `:not_started` (zero check-runs on the head SHA) is ambiguous between
+      # "check-suite not created yet" and "no CI on this repo at all" — defer,
+      # but only for a bounded number of polls (bd-aeb9wv / #1189). Once the
+      # grace is exhausted, fall out of this branch entirely (not into the
+      # `ci_pending?` branch below, which no longer matches `:not_started`) so
+      # a no-CI repo still becomes mergeable instead of hard-failing at
+      # `max_polls`. See `@not_started_grace_polls`.
+      Map.get(result, :pipeline) == :not_started and
+          state.not_started_polls + 1 < @not_started_grace_polls ->
+        state = %{state | not_started_polls: state.not_started_polls + 1}
+
+        Logger.info(
+          "Worker.Watchdog: deferring auto-merge for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; no check-runs yet for head SHA " <>
+            "(#{state.not_started_polls}/#{@not_started_grace_polls} grace polls), " <>
+            "will retry next poll"
+        )
+
+        reschedule(state)
+
       ci_pending?(result) ->
         Logger.info(
           "Worker.Watchdog: deferring auto-merge for task=#{state.task_id} " <>
@@ -526,7 +565,7 @@ defmodule Arbiter.Worker.Watchdog do
             "will retry next poll"
         )
 
-        reschedule(state)
+        reschedule(%{state | not_started_polls: 0})
 
       # CI reported, and it reported *failure*. "Not pending" is not "safe to
       # merge": before bd-23y19q this branch didn't exist, so a settled `:failed`
@@ -547,10 +586,10 @@ defmodule Arbiter.Worker.Watchdog do
             "mr=#{state.mr_ref}; pipeline concluded :failed, staying parked"
         )
 
-        reschedule(state)
+        reschedule(%{state | not_started_polls: 0})
 
       true ->
-        do_apply_approved_auto_merge(state)
+        do_apply_approved_auto_merge(%{state | not_started_polls: 0})
     end
   end
 
@@ -585,17 +624,20 @@ defmodule Arbiter.Worker.Watchdog do
   # GitLab skipped/manual pipelines) to `:neutral` instead, so they fall
   # through to a real merge attempt rather than deferring forever.
   #
-  # `:not_started` (bd-aeb9wv / #1189) is the distinct "unknown, wait" state:
-  # the GitHub adapter's check-runs API returned zero results for the head
-  # SHA — not a settled outcome, just CI that GitHub hasn't started recording
-  # yet. PR #1188 merged 6s after its ReviewGate APPROVE, one second *before*
-  # its check-suite was even created — the adapter's `nil` pipeline (also used
-  # for "no head SHA" and "no CI configured on this repo at all") was treated
-  # as vacuously "nothing blocking". Folding `nil` itself into this set would
-  # wrongly defer forever on a repo that has no CI at all; `:not_started`
-  # keeps that case distinct while still blocking the specific zero-check-runs
-  # race.
-  def ci_pending?(result), do: Map.get(result, :pipeline) in [:running, :pending, :not_started]
+  # `:not_started` (bd-aeb9wv / #1189) is deliberately NOT in this list. The
+  # GitHub adapter's check-runs API returned zero results for the head SHA —
+  # PR #1188 merged 6s after its ReviewGate APPROVE, one second *before* its
+  # check-suite was even created, so `ci_pending?/1` had nothing to classify
+  # and the merge went through on an unstarted pipeline. But zero check-runs
+  # is genuinely ambiguous: it's the same response GitHub gives for "no CI
+  # configured on this repo/commit at all" as for "check-suite not created
+  # yet". Putting `:not_started` in this set would make it identical to
+  # `:running`/`:pending` — deferred *forever*, since nothing ever moves a
+  # no-CI repo's pipeline out of `:not_started`. Instead `apply_outcome/3`
+  # handles `:not_started` itself, ahead of this check, deferring for only
+  # `@not_started_grace_polls` polls before falling through to a merge
+  # attempt — bounded waiting for the ambiguous case, not permanent blocking.
+  def ci_pending?(result), do: Map.get(result, :pipeline) in [:running, :pending]
 
   @doc """
   CI has *concluded*, and it failed. The strict complement of `ci_pending?/1`

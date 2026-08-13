@@ -1044,11 +1044,15 @@ defmodule Arbiter.Mergers.Github do
   # Returns nil when the SHA is absent or the request fails (best-effort — a
   # transient API error must not block the MR poll). Returns `:not_started`
   # when the SHA is present and the request succeeded but zero check-runs
-  # exist yet — GitHub's check-suite for the commit may simply not have been
-  # created yet (bd-aeb9wv / #1189: PR #1188 merged a full second *before*
-  # its check-suite existed). That's a distinct "unknown, wait" state, not
-  # "no CI configured" — the Watchdog's `ci_pending?/1` treats it as pending
-  # rather than clear-to-merge.
+  # exist yet (bd-aeb9wv / #1189: PR #1188 merged a full second *before* its
+  # check-suite existed). Zero check-runs is genuinely ambiguous from this API
+  # alone — it means either "GitHub hasn't created the check-suite yet" (the
+  # #1188 race) or "no CI is configured for this repo/commit at all" (no
+  # workflow, or every workflow excluded by its `on:` path filters); nothing
+  # in this response distinguishes the two. The Watchdog deliberately errs
+  # toward waiting on `:not_started` rather than treating it as clear-to-merge,
+  # but only for a bounded number of polls — see `@not_started_grace_polls` in
+  # watchdog.ex — so a repo with no CI at all still becomes mergeable.
   defp fetch_pipeline_status(_cfg, _owner, _repo, nil), do: nil
   defp fetch_pipeline_status(_cfg, _owner, _repo, ""), do: nil
 
