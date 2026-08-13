@@ -66,7 +66,13 @@ defmodule Arbiter.Workflows.ReviewThreadFollowUp do
     make the thread go away and do NOT fake an acknowledgement. Instead:
       * reply on the thread explaining, in your own words, why you're not
         making the change, AND
-      * escalate to the coordinator mailbox so a human can weigh in.
+      * escalate to the coordinator mailbox so a human can weigh in, AND
+      * still follow the resolve policy above for this thread's bot/human
+        classification once you've replied — a wrong finding does not
+        change whether the thread gets resolved, only what the reply says.
+        Your reply + the coordinator escalation are the record of the
+        dissent; a human can always re-open a resolved thread if they
+        disagree with your call.
 
     If instead you decide the right response is to DEFER the work (a
     follow-up, a separate PR, "later") rather than fix it now or push back:

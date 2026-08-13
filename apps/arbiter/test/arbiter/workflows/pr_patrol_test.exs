@@ -507,6 +507,124 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert tasks_for_repo() == []
     end
 
+    # bd-45x4yo: a thread we already replied to (even though the protocol
+    # forbids resolving a wrong-finding-on-a-bot-thread) must not keep
+    # re-triggering PRPatrol forever. "We had the last word" is enough to
+    # treat the thread as answered, independent of resolve state.
+    test "unresolved thread whose last comment is ours → no task (bd-45x4yo)", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"pr_patrol" => %{"our_login" => "arbiter-bot"}}},
+          action: :patch_config
+        )
+
+      stub(
+        signals_stub(
+          pulls: [pull(52, title: "already answered", html_url: "x")],
+          nodes: %{
+            52 =>
+              pr_node(
+                reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "copilot"}}],
+                threads: [
+                  %{
+                    "id" => "RT_1",
+                    "isResolved" => false,
+                    "comments" => %{
+                      "nodes" => [
+                        %{"body" => "wrong finding", "author" => %{"login" => "copilot"}},
+                        %{
+                          "body" => "Addressed: this is wrong, see file:line. Escalating.",
+                          "author" => %{"login" => "arbiter-bot"}
+                        }
+                      ]
+                    }
+                  }
+                ]
+              )
+          }
+        )
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = PRPatrol.tick(name)
+      assert tasks_for_repo() == []
+    end
+
+    test "unresolved thread already answered by us, but WITHOUT our_login configured → still 1 task",
+         %{ws: ws} do
+      # No config[pr_patrol][our_login] / config[review_patrol][our_login] set
+      # on `ws` — PRPatrol can't tell its own replies apart from anyone
+      # else's, so it must conservatively keep treating the thread as open
+      # (the pre-fix behaviour) rather than silently going quiet.
+      stub(
+        signals_stub(
+          pulls: [pull(53, title: "unconfigured our_login", html_url: "x")],
+          nodes: %{
+            53 =>
+              pr_node(
+                reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "copilot"}}],
+                threads: [
+                  %{
+                    "id" => "RT_1",
+                    "isResolved" => false,
+                    "comments" => %{
+                      "nodes" => [
+                        %{"body" => "wrong finding", "author" => %{"login" => "copilot"}},
+                        %{"body" => "Addressed: wrong.", "author" => %{"login" => "arbiter-bot"}}
+                      ]
+                    }
+                  }
+                ]
+              )
+          }
+        )
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = PRPatrol.tick(name)
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "53"
+    end
+
+    test "thread we answered, but a NEW comment landed after ours → still 1 task", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"pr_patrol" => %{"our_login" => "arbiter-bot"}}},
+          action: :patch_config
+        )
+
+      stub(
+        signals_stub(
+          pulls: [pull(54, title: "human pushed back", html_url: "x")],
+          nodes: %{
+            54 =>
+              pr_node(
+                reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "copilot"}}],
+                threads: [
+                  %{
+                    "id" => "RT_1",
+                    "isResolved" => false,
+                    "comments" => %{
+                      "nodes" => [
+                        %{"body" => "wrong finding", "author" => %{"login" => "copilot"}},
+                        %{"body" => "Addressed: wrong.", "author" => %{"login" => "arbiter-bot"}},
+                        %{
+                          "body" => "Actually I disagree, please reconsider",
+                          "author" => %{"login" => "human-reviewer"}
+                        }
+                      ]
+                    }
+                  }
+                ]
+              )
+          }
+        )
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = PRPatrol.tick(name)
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "54"
+    end
+
     test "dedup: second tick with the same actionable PR does NOT create another task", %{ws: ws} do
       stub(fn conn ->
         cond do
