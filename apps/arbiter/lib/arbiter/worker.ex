@@ -898,6 +898,21 @@ defmodule Arbiter.Worker do
       :error
   end
 
+  # bd-cryhwk: terminate-time backstop for `record_usage_event/3`. Every
+  # session starts with `:exited_at` seeded `nil`; a session that reached
+  # `handle_exit/2` (the normal `{:exit_status, _}` path) has it stamped to a
+  # real timestamp and already had its ledger row written there — skip it
+  # here to avoid a double-write. Only a session whose port exit was never
+  # observed (`:exited_at` still `nil`) reaches `record_usage_event/3` from
+  # this path, with whatever usage the stream managed to parse before
+  # teardown (possibly none, in which case `record_usage_event/3`'s own
+  # disk-reconciliation fallback takes over).
+  defp flush_unterminated_sessions(%State{claude_sessions: sessions} = state) do
+    sessions
+    |> Enum.reject(fn {_port, session} -> not is_nil(Map.get(session, :exited_at)) end)
+    |> Enum.each(fn {_port, session} -> record_usage_event(state, session, nil) end)
+  end
+
   # bd-au3xrq: fallback/audit path. The primary usage numbers come from the
   # CLI's terminal `result` event on stdout. When a Claude agent is killed or
   # crashes before that event, `usage` carries no token counts — but the CLI
@@ -3842,6 +3857,20 @@ defmodule Arbiter.Worker do
     # Nothing on that path ever marks the row terminal, so it stayed :running
     # until the next server boot. See finalize_run_on_terminate/1.
     finalize_run_on_terminate(state)
+
+    # bd-cryhwk: if the worker is torn down (StopWorker after a task closes,
+    # a kill, a crash) while a Claude session's port `:exit_status` message
+    # never got processed — the coordinator's close can race ahead of the
+    # child process actually exiting — `record_usage_event/3` never fires for
+    # that session and its spend silently vanishes from the ledger (no zero
+    # row, no row at all). Sweep every still-open session here as a backstop:
+    # `handle_exit/2` already stamps `exited_at` on the normal path, so this
+    # only touches sessions whose exit was never observed, and
+    # `record_usage_event/3` itself falls back to the on-disk session JSONL
+    # (`maybe_reconcile_usage_from_disk/3`) when the stream's own `result`
+    # event didn't land either — so even a session killed before printing
+    # cost still leaves a row (tokens, no dollar figure) instead of nothing.
+    flush_unterminated_sessions(state)
 
     # Explicitly unregister so callers that ask `whereis/1` immediately after
     # `GenServer.stop/1` see `nil` deterministically. Registry's own
