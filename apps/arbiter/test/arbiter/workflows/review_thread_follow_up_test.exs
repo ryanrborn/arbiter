@@ -71,5 +71,22 @@ defmodule Arbiter.Workflows.ReviewThreadFollowUpTest do
 
       assert text =~ "deferred" and text =~ "stays open"
     end
+
+    # bd-45x4yo: the wrong-suggestion (reply + escalate, don't fix) branch
+    # used to say nothing about resolving, leaving it ambiguous whether it
+    # overrides the resolve policy above — which is exactly why four of five
+    # PRPatrol re-dispatches in the incident left the bot thread unresolved
+    # "per protocol". The wrong-suggestion branch must explicitly say the
+    # resolve policy still applies.
+    test "the wrong-suggestion branch says the resolve policy above still applies" do
+      text = ReviewThreadFollowUp.instructions(%{})
+
+      [_, wrong_section] =
+        String.split(text, "If a suggestion is WRONG or not applicable", parts: 2)
+
+      [wrong_clause | _] = String.split(wrong_section, "If instead you decide", parts: 2)
+
+      assert wrong_clause =~ "resolve policy above"
+    end
   end
 end

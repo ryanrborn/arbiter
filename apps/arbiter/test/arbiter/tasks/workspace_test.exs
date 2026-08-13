@@ -861,6 +861,43 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "pr_patrol_our_login/1 (bd-45x4yo)" do
+    test "nil when neither pr_patrol nor review_patrol our_login is set" do
+      assert Workspace.pr_patrol_our_login(%Workspace{config: %{}}) == nil
+      assert Workspace.pr_patrol_our_login(%Workspace{config: %{"pr_patrol" => %{}}}) == nil
+    end
+
+    test "reads config[pr_patrol][our_login] when set" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{"pr_patrol" => %{"our_login" => "arbiter-bot"}}
+             }) == "arbiter-bot"
+    end
+
+    test "falls back to config[review_patrol][our_login] when pr_patrol's is unset" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{"review_patrol" => %{"our_login" => "arbiter-bot"}}
+             }) == "arbiter-bot"
+    end
+
+    test "an explicit pr_patrol our_login overrides the review_patrol fallback" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{
+                 "pr_patrol" => %{"our_login" => "pr-bot"},
+                 "review_patrol" => %{"our_login" => "review-bot"}
+               }
+             }) == "pr-bot"
+    end
+
+    test "blank pr_patrol our_login falls back to review_patrol's" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{
+                 "pr_patrol" => %{"our_login" => "  "},
+                 "review_patrol" => %{"our_login" => "review-bot"}
+               }
+             }) == "review-bot"
+    end
+  end
+
   describe "paper_trail version history (bd-9j6is7)" do
     test "each create/update/patch_config produces a version row" do
       {:ok, ws} = Ash.create(Workspace, %{name: "versioned", prefix: "ve"})

@@ -947,15 +947,33 @@ defmodule Arbiter.Mergers.Gitlab do
   defp unresolved_discussion?(_), do: false
 
   defp normalize_discussion(%{} = discussion) do
-    first = discussion |> Map.get("notes") |> List.wrap() |> List.first() || %{}
+    notes = discussion |> Map.get("notes") |> List.wrap()
+    first = List.first(notes) || %{}
     position = Map.get(first, "position") || %{}
+
+    # bd-45x4yo: populate `:comments` from the notes already in this response
+    # (GitLab discussions come back with the full note list, unlike GitHub's
+    # paginated batch query) — `answered_by_us?/2` in pr_patrol.ex reads
+    # `List.last(comments)[:author]` to detect a thread we've already replied
+    # to. Without this, GitLab hits `answered_by_us?/2`'s `_ -> false` clause
+    # for every thread and stays exposed to the same unbounded re-dispatch
+    # loop this task fixed on GitHub.
+    comments =
+      Enum.map(notes, fn note ->
+        %{
+          id: Map.get(note, "id"),
+          author: get_in(note, ["author", "username"]),
+          body: Map.get(note, "body")
+        }
+      end)
 
     %{
       id: Map.get(discussion, "id"),
       path: Map.get(position, "new_path") || Map.get(position, "old_path"),
       line: Map.get(position, "new_line") || Map.get(position, "old_line"),
       author: get_in(first, ["author", "username"]),
-      body: Map.get(first, "body")
+      body: Map.get(first, "body"),
+      comments: comments
     }
   end
 

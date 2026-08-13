@@ -17,6 +17,15 @@ defmodule Arbiter.Workflows.PRPatrol do
       comments without requesting changes — e.g. an automated reviewer — which
       the CHANGES_REQUESTED signal alone misses.
 
+      A thread whose LAST comment was posted by us (`Workspace.pr_patrol_our_login/1`,
+      falling back to `config["review_patrol"]["our_login"]`) is excluded from
+      this count even while still unresolved (bd-45x4yo) — otherwise a thread
+      the follow-up protocol forbids resolving (a wrong finding on a bot
+      thread, or any human-reviewer thread, which is NEVER auto-resolved)
+      stays "unresolved" forever and gets re-filed as an identical follow-up
+      on every tick. A new comment from anyone else after ours makes the
+      thread actionable again.
+
     * The PR has at least one **settled, REQUIRED** failing check, via the
       adapter's `list_required_check_failures/1` primitive (bd-ayetel). This
       catches an approved-but-BLOCKED PR whose CI failed silently — no review
@@ -397,7 +406,12 @@ defmodule Arbiter.Workflows.PRPatrol do
   # from the pre-fetched batched `signals` when present, else the per-PR fallback
   # path — and dispatch a follow-up if so. Returns `{state, dispatched?}`.
   defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter, signals) do
-    case actionable_reason(adapter, mr_ref, signals) do
+    case actionable_reason(
+           adapter,
+           mr_ref,
+           signals,
+           Workspace.pr_patrol_our_login(state.workspace)
+         ) do
       {reason, extra_protocol} when is_binary(reason) ->
         task = create_follow_up(mr, state, reason, extra_protocol)
         {dispatch_follow_up(task, pr_number, state), true}
@@ -624,12 +638,16 @@ defmodule Arbiter.Workflows.PRPatrol do
   # back to the per-PR adapter calls. Either source resolves to bit-for-bit the
   # same trigger decision — the batched decomposition reuses the adapter's own
   # per-PR extractors — so the priority order and semantics are unchanged.
-  defp actionable_reason(adapter, mr_ref, signals) do
+  #
+  # `our_login` (`Workspace.pr_patrol_our_login/1`) excludes threads we've
+  # already answered from the unresolved-thread count (bd-45x4yo) — see
+  # `reject_answered_threads/2`.
+  defp actionable_reason(adapter, mr_ref, signals, our_login) do
     cond do
       changes_requested_signal?(adapter, mr_ref, signals) ->
         {"at least one review with state=CHANGES_REQUESTED", ""}
 
-      (n = open_review_thread_count(adapter, mr_ref, signals)) > 0 ->
+      (n = open_review_thread_count(adapter, mr_ref, signals, our_login)) > 0 ->
         {"#{n} unresolved review thread(s) / inline review comment(s)", ""}
 
       (names = required_check_failure_names(adapter, mr_ref, signals)) != [] ->
@@ -657,26 +675,60 @@ defmodule Arbiter.Workflows.PRPatrol do
     end
   end
 
-  # Count of unresolved review threads: from the batched signals when present,
-  # else the per-PR `list_open_review_threads/1` fallback.
-  defp open_review_thread_count(_adapter, _mr_ref, %{review_threads: threads})
+  # Count of unresolved review threads that still need a response: from the
+  # batched signals when present, else the per-PR `list_open_review_threads/1`
+  # fallback. Threads we've already answered (`reject_answered_threads/2`) are
+  # excluded regardless of source.
+  defp open_review_thread_count(_adapter, _mr_ref, %{review_threads: threads}, our_login)
        when is_list(threads),
-       do: length(threads)
+       do: threads |> reject_answered_threads(our_login) |> length()
 
-  defp open_review_thread_count(adapter, mr_ref, _no_batch),
-    do: open_review_thread_count(adapter, mr_ref)
+  defp open_review_thread_count(adapter, mr_ref, _no_batch, our_login),
+    do: open_review_thread_count(adapter, mr_ref, our_login)
 
   # The count of unresolved review threads, via the adapter's optional
   # `list_open_review_threads/1` primitive. Adapters without a thread surface
   # (e.g. Direct) don't export it — treat that as zero.
-  defp open_review_thread_count(adapter, mr_ref) do
+  defp open_review_thread_count(adapter, mr_ref, our_login) do
     if function_exported?(adapter, :list_open_review_threads, 1) do
       case adapter.list_open_review_threads(mr_ref) do
-        {:ok, threads} when is_list(threads) -> length(threads)
-        _ -> 0
+        {:ok, threads} when is_list(threads) ->
+          threads |> reject_answered_threads(our_login) |> length()
+
+        _ ->
+          0
       end
     else
       0
+    end
+  end
+
+  # bd-45x4yo: drop threads where WE had the last word. The follow-up
+  # protocol has one branch (a wrong finding on a bot thread) that requires
+  # replying + escalating WITHOUT resolving the thread, and another rule
+  # that's unconditional for human threads ("do NOT resolve"). Either way,
+  # "unresolved" then stays true forever even though the thread has already
+  # been answered — and PRPatrol's only trigger condition is "unresolved
+  # thread exists", so it re-files the identical follow-up every tick. A
+  # thread whose most recent comment is ours is done, independent of resolve
+  # state; only a genuinely NEW comment after ours (a human pushing back, a
+  # bot re-flagging) should make it actionable again.
+  #
+  # `our_login` is `nil` when unconfigured (no `pr_patrol.our_login` and no
+  # `review_patrol.our_login` fallback) — we can't tell our own replies apart
+  # from anyone else's, so conservatively treat every unresolved thread as
+  # still open (the pre-fix behaviour).
+  defp reject_answered_threads(threads, our_login)
+       when is_binary(our_login) and our_login != "" do
+    Enum.reject(threads, &answered_by_us?(&1, our_login))
+  end
+
+  defp reject_answered_threads(threads, _our_login), do: threads
+
+  defp answered_by_us?(thread, our_login) do
+    case Map.get(thread, :comments) do
+      [_ | _] = comments -> List.last(comments)[:author] == our_login
+      _ -> false
     end
   end
 
