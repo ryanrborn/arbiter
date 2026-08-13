@@ -2357,6 +2357,56 @@ defmodule Arbiter.Mergers.GithubTest do
                Github.batch_pr_signals(["octo/widget#42"])
     end
 
+    test "a batched thread's comments carry the LAST comment, not just the opener (bd-45x4yo)" do
+      # A thread with 2 comments: the opener (from copilot) and a later reply
+      # from us. The batch query's `latest: comments(last: 1)` alias must be
+      # honored so the normalized thread's comment list ends with the reply,
+      # not the opener — otherwise `answered_by_us?/2` (pr_patrol.ex) checks
+      # the wrong comment and PRPatrol re-files a follow-up forever.
+      thread = %{
+        "id" => "RT_answered",
+        "isResolved" => false,
+        "path" => "lib/tracer.ex",
+        "line" => 130,
+        "comments" => %{
+          "nodes" => [
+            %{
+              "databaseId" => 1,
+              "body" => "this doesn't exist",
+              "author" => %{"login" => "copilot"}
+            }
+          ]
+        },
+        "latest" => %{
+          "nodes" => [
+            %{
+              "databaseId" => 2,
+              "body" => "it does, see tracer.ex:130",
+              "author" => %{"login" => "arbiter-bot"}
+            }
+          ]
+        }
+      }
+
+      by_number = %{42 => pr_node(threads: [thread])}
+
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        query = Jason.decode!(body)["query"]
+        assert query =~ "latest: comments(last: 1)"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(batch_data_from_query(query, by_number))
+      end)
+
+      assert {:ok, %{"octo/widget#42" => %{review_threads: [normalized]}}} =
+               Github.batch_pr_signals(["octo/widget#42"])
+
+      assert Enum.map(normalized.comments, & &1.id) == [1, 2]
+      assert List.last(normalized.comments).author == "arbiter-bot"
+    end
+
     test "empty ref list makes no request and returns {:ok, %{}}" do
       counter = :counters.new(1, [])
 

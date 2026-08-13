@@ -185,6 +185,12 @@ defmodule ArbiterCli.ConfigSchema do
                            threads after the follow-up worker replies; left
                            false by default so a human confirms their own
                            threads                                    (default: false)
+      our_login            string — the fleet's own forge login, used to detect
+                           review threads we've already answered so PRPatrol
+                           doesn't re-file a follow-up for one forever; falls
+                           back to review_patrol.our_login if unset, and if
+                           neither is set PRPatrol can't tell its own replies
+                           apart from anyone else's
 
     review_patrol  (map)
       our_login  string — the fleet's own forge login, used to filter PR review

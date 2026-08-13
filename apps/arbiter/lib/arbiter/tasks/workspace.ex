@@ -638,6 +638,38 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  The fleet's own forge login for PRPatrol, from
+  `config["pr_patrol"]["our_login"]`, falling back to
+  `config["review_patrol"]["our_login"]` when unset (bd-45x4yo) — both
+  patrols post under the same operator identity in the common case, so a
+  workspace that already configured `review_patrol.our_login` gets the
+  fallback for free; set `pr_patrol.our_login` explicitly to override.
+
+  Used to recognize a review thread PRPatrol's own follow-up worker already
+  replied to — the LAST comment in the thread being ours means it's answered,
+  regardless of resolve state — so `actionable_reason/2` stops treating it as
+  a fresh trigger. Without this, a thread the protocol forbids resolving (a
+  wrong finding on a bot thread, or any human-reviewer thread) stays
+  "unresolved" forever and PRPatrol re-files an unbounded stream of identical
+  follow-ups for it. Returns `nil` when both are unset/blank — PRPatrol then
+  cannot tell its own replies apart and conservatively treats every
+  unresolved thread as still actionable (the pre-fix behaviour).
+  """
+  @spec pr_patrol_our_login(t()) :: String.t() | nil
+  def pr_patrol_our_login(workspace) do
+    case get_in(workspace.config || %{}, ["pr_patrol", "our_login"]) do
+      s when is_binary(s) ->
+        case String.trim(s) do
+          "" -> review_patrol_our_login(workspace)
+          trimmed -> trimmed
+        end
+
+      _ ->
+        review_patrol_our_login(workspace)
+    end
+  end
+
+  @doc """
   The fleet's own forge login for ReviewPatrol, from
   `config["review_patrol"]["our_login"]`.
 
