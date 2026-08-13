@@ -1388,12 +1388,15 @@ defmodule Arbiter.Mergers.Github do
   #   * `reviews` states → changes_requested (same as `list_review_feedback/1`).
   #   * `reviewThreads { isResolved }` → the unresolved-thread COUNT PRPatrol
   #     triggers on. Comments are fetched `first: 1` (the opening comment, for
-  #     thread author/body context) — NOT `first: 100` like the single-PR
-  #     `@review_threads_query`. PRPatrol only needs the count; the full comment
-  #     tree is re-read per-PR by the follow-up worker via
-  #     `list_open_review_threads/1`. Dropping the 100×100 comment fan-out is
-  #     what keeps this query's node cost ~one rollup page per PR instead of
-  #     ~10k nodes/PR.
+  #     thread author/body context) plus a second aliased `last: 1` page (the
+  #     latest comment, bd-45x4yo — `answered_by_us?/2` needs to know who spoke
+  #     LAST, not who opened the thread, or a thread we already replied to and
+  #     left unresolved gets miscounted as still-open every tick) — NOT
+  #     `first: 100` like the single-PR `@review_threads_query`. PRPatrol
+  #     doesn't need the full comment tree; that's re-read per-PR by the
+  #     follow-up worker via `list_open_review_threads/1`. Dropping the 100×100
+  #     comment fan-out (2 comment nodes/thread instead) is what keeps this
+  #     query's node cost ~one rollup page per PR instead of ~10k nodes/PR.
   #   * `statusCheckRollup` contexts with per-PR `isRequired` → required-check
   #     failures (same as `@required_checks_query`).
   defp batch_pr_block(%{palias: palias, number: number}) do
@@ -1407,6 +1410,7 @@ defmodule Arbiter.Mergers.Github do
               path
               line
               comments(first: 1) { nodes { databaseId body author { login } } }
+              latest: comments(last: 1) { nodes { databaseId body author { login } } }
             }
           }
           commits(last: 1) {
@@ -1536,7 +1540,30 @@ defmodule Arbiter.Mergers.Github do
     |> List.wrap()
     |> Enum.reject(&is_nil/1)
     |> Enum.reject(fn n -> Map.get(n, "isResolved") == true end)
+    |> Enum.map(&merge_latest_thread_comment/1)
     |> Enum.map(&normalize_review_thread/1)
+  end
+
+  # bd-45x4yo: fold the `latest: comments(last: 1)` alias into `comments.nodes`
+  # so `normalize_review_thread/1`'s `List.last(comments)` sees the thread's
+  # most recent comment, not just its `first: 1` opener. When the thread has
+  # only one comment, the first-page and last-page nodes are the same comment
+  # (by `databaseId`) — keep just the one node rather than duplicating it.
+  defp merge_latest_thread_comment(node) do
+    opener_nodes =
+      node |> get_in(["comments", "nodes"]) |> List.wrap() |> Enum.reject(&is_nil/1)
+
+    latest_nodes =
+      node |> get_in(["latest", "nodes"]) |> List.wrap() |> Enum.reject(&is_nil/1)
+
+    merged =
+      case {opener_nodes, latest_nodes} do
+        {[o], [l]} when o != l -> [o, l]
+        {[o], _} -> [o]
+        _ -> opener_nodes
+      end
+
+    put_in(node, ["comments", "nodes"], merged)
   end
 
   # Same required+settled filter + summary as `list_required_check_failures/1`.

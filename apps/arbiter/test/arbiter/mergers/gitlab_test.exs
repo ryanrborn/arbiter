@@ -1213,6 +1213,45 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert thread.line == 9
       assert thread.author == "reviewer"
       assert thread.body == "please fix"
+      assert [%{author: "reviewer", body: "please fix"}] = thread.comments
+    end
+
+    test "returns the full note list as :comments, last entry last (bd-45x4yo)" do
+      # answered_by_us?/2 (pr_patrol.ex) reads `List.last(comments)[:author]`
+      # to detect a thread we've already replied to. GitLab discussions come
+      # back with every note already, so :comments must carry all of them in
+      # order — not just the opener — or GitLab stays exposed to the same
+      # unbounded PRPatrol re-dispatch loop this task fixed on GitHub.
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json([
+          %{
+            "id" => "disc_multi",
+            "notes" => [
+              %{
+                "id" => 1,
+                "resolvable" => true,
+                "resolved" => false,
+                "body" => "wrong finding",
+                "author" => %{"username" => "reviewer"},
+                "position" => %{"new_path" => "lib/foo.ex", "new_line" => 9}
+              },
+              %{
+                "id" => 2,
+                "resolvable" => true,
+                "resolved" => false,
+                "body" => "actually this is correct, see lib/foo.ex:9",
+                "author" => %{"username" => "arbiter-bot"}
+              }
+            ]
+          }
+        ])
+      end)
+
+      assert {:ok, [thread]} = Gitlab.list_open_review_threads(@ref)
+      assert Enum.map(thread.comments, & &1.id) == [1, 2]
+      assert List.last(thread.comments).author == "arbiter-bot"
     end
 
     test "no discussions → {:ok, []}" do
