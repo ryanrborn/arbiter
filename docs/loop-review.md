@@ -212,6 +212,72 @@ against that later re-grading pass), and author skill-patch *content* — no
 finding-category → skill mapping exists yet, so a `skill_patch` row with no
 target skill refuses to apply and says so.
 
+## Autonomous routing-tier adjustment (Stage 3, `bd-6edc0u`) — opt-in, default off
+
+Stage 3 lets Arbiter apply **one** narrow class of queued proposal without a
+human: a routing-tier adjustment — a single `D<n>` tier's `model_tier` /
+`thinking`. Nothing else. Skill bodies and `standing_orders` are prose that
+bloats every future prompt and can contradict itself; a routing rule is
+numeric, bounded, trivially reversible, and directly measurable. That is the
+whole reason it goes first, and alone.
+
+It is off everywhere until an operator sets, per workspace:
+
+    arb config set loop.autonomous_routing_enabled true --workspace <id>
+
+With the flag unset — the default on every workspace including `default` —
+routing, the queue, and the config are byte-for-byte what they were before
+Stage 3 existed. Unsetting it again is the kill switch and takes effect on the
+next dispatch, mid-canary, with no config to unwind.
+
+**What is eligible.** Only a `:proposed` row that has already been escalated to
+an operator at least once, whose evidence *still* clears the workspace's bar on
+its own terms (a `:task`-scoped row that bypassed the bar by blast radius is
+refused — a fleet routing change is not blast-radius 1), whose patch is exactly
+one `D<n>` tier's `model_tier`/`thinking` and nothing else, in a workspace that
+actually routes `by_difficulty`. The bar is never lowered for autonomy; if
+anything the gate is tighter than the operator's own `apply`.
+
+**The canary.** Starting one writes a `loop.canary` block to the workspace
+config — **not** `routing.rules`. The candidate rule is overlaid at dispatch
+time by `ByDifficulty`, and only for tasks in the canary arm: a stable 50/50
+split of task ids salted with the proposal id (`Canary.arm/2`). A task's
+`#review` runs hash into the same arm as the task. Alternating dispatches
+rather than a repo split, because `Routing.choose/3` is not handed the repo —
+the arm has to be derivable from what routing has and from what `worker_runs`
+records afterwards, or the application and the measurement would disagree about
+who was in which arm.
+
+**The verdict.** No verdict at all before the canary arm has **20** dispatches
+(`loop.canary_min_dispatches` may raise that floor, never lower it) and both
+arms have a reviewed task. Then first-pass ReviewGate convergence is compared
+between the arms:
+
+- **below** control (beyond `loop.canary_regression_tolerance` — a convergence
+  fraction in `0..0.5`, default `0.0`, rejected at the config boundary rather
+  than silently clamped, because a threshold nobody knows was ignored would
+  mask exactly the regression this stage exists to catch)
+  → **auto-revert**: the `loop.canary` block is deleted and the proposal is
+  soft-rejected with the measurement in `outcome_delta`. Nothing was ever
+  written to `routing.rules`, so the revert is a deletion, not a repair;
+- otherwise → **promote**: the rule lands on `routing.rules.D<n>` fleet-wide
+  and the proposal moves to `applied`.
+
+Cost per review round is reported alongside but never triggers a revert — a
+tier change that buys convergence with money is a judgement call, not a
+regression.
+
+An operator who rejects (or applies) the proposal while its canary is still
+running has overruled the experiment: the canary is **abandoned** on the next
+tick — block dropped, rule not landed — however well the canary arm was doing.
+Autonomy never outranks a decision you made.
+
+Both outcomes are a `paper_trail` version on `Workspace` attributed to
+`loop:proposal:<id>`, and both post coordinator mail. `Arbiter.Loop.CanaryTicker`
+is what makes the revert *automatic*: it walks every workspace on a timer and
+judges any running canary. For a workspace with the flag unset it does a single
+map lookup and stops.
+
 ## Where lessons land (you choose, per finding)
 
 - **A skill** — the primary home for a *general working practice* (read

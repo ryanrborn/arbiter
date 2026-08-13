@@ -304,29 +304,90 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_loop(changeset, nil), do: changeset
 
   defp validate_loop(changeset, loop) when is_map(loop) do
-    case Map.get(loop, "evidence_bar") do
-      nil ->
-        changeset
-
-      bar when is_map(bar) ->
-        changeset
-        |> validate_positive_int(bar, "min_incidents", "loop.evidence_bar.min_incidents")
-        |> validate_positive_int(
-          bar,
-          "min_distinct_tasks",
-          "loop.evidence_bar.min_distinct_tasks"
-        )
-
-      _ ->
-        Changeset.add_error(changeset,
-          field: :config,
-          message: "loop.evidence_bar must be a map"
-        )
-    end
+    changeset
+    |> validate_evidence_bar(Map.get(loop, "evidence_bar"))
+    |> validate_autonomy(loop)
   end
 
   defp validate_loop(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "loop must be a map")
+  end
+
+  defp validate_evidence_bar(changeset, nil), do: changeset
+
+  defp validate_evidence_bar(changeset, bar) when is_map(bar) do
+    changeset
+    |> validate_positive_int(bar, "min_incidents", "loop.evidence_bar.min_incidents")
+    |> validate_positive_int(bar, "min_distinct_tasks", "loop.evidence_bar.min_distinct_tasks")
+  end
+
+  defp validate_evidence_bar(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "loop.evidence_bar must be a map")
+  end
+
+  # bd-6edc0u: Stage 3 autonomous routing. The opt-in must be a real boolean —
+  # a `"true"` string reads as off to `Arbiter.Loop.Canary.enabled?/1`, and an
+  # operator who typed one would have no way of knowing their kill switch was
+  # never armed in the first place. The sample floor may be raised, never
+  # lowered: a canary judged on fewer than 20 dispatches is judging noise.
+  defp validate_autonomy(changeset, loop) do
+    changeset
+    |> validate_autonomy_flag(Map.get(loop, "autonomous_routing_enabled"))
+    |> validate_canary_block(Map.get(loop, "canary"))
+    |> validate_canary_min_dispatches(Map.get(loop, "canary_min_dispatches"))
+    |> validate_canary_tolerance(Map.get(loop, "canary_regression_tolerance"))
+  end
+
+  defp validate_autonomy_flag(changeset, nil), do: changeset
+  defp validate_autonomy_flag(changeset, v) when is_boolean(v), do: changeset
+
+  defp validate_autonomy_flag(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "loop.autonomous_routing_enabled must be true or false; got: #{inspect(other)}"
+    )
+  end
+
+  defp validate_canary_block(changeset, nil), do: changeset
+  defp validate_canary_block(changeset, c) when is_map(c), do: changeset
+
+  defp validate_canary_block(changeset, _),
+    do: Changeset.add_error(changeset, field: :config, message: "loop.canary must be a map")
+
+  defp validate_canary_min_dispatches(changeset, nil), do: changeset
+
+  defp validate_canary_min_dispatches(changeset, n) do
+    floor = Arbiter.Loop.Canary.min_dispatches()
+
+    if is_integer(n) and n >= floor do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message: "loop.canary_min_dispatches must be an integer >= #{floor}; got: #{inspect(n)}"
+      )
+    end
+  end
+
+  # The revert threshold itself. `Arbiter.Loop.Canary` clamps whatever it finds
+  # into range so a malformed block can never widen the tolerance — but a
+  # silently clamped threshold is the one config mistake that could mask the
+  # regression Stage 3 exists to catch, so it is refused here instead.
+  defp validate_canary_tolerance(changeset, nil), do: changeset
+
+  defp validate_canary_tolerance(changeset, t) do
+    ceiling = Arbiter.Loop.Canary.max_regression_tolerance()
+
+    if is_number(t) and t >= 0 and t <= ceiling do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "loop.canary_regression_tolerance must be a number between 0 and #{ceiling} " <>
+            "(a convergence fraction, not a percentage); got: #{inspect(t)}"
+      )
+    end
   end
 
   defp validate_conductor(changeset, nil), do: changeset

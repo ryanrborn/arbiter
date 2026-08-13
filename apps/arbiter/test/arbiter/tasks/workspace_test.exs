@@ -683,6 +683,75 @@ defmodule Arbiter.Tasks.WorkspaceTest do
 
       assert err |> Exception.message() |> String.contains?("loop must be a map")
     end
+  end
+
+  # bd-6edc0u: the Stage 3 autonomy opt-in. A typo here must not silently read
+  # as "off" (nobody would notice) or, worse, as "on" — so the flag is
+  # validated as a strict boolean at the config boundary.
+  describe "config validation: loop.autonomous_routing_enabled" do
+    test "accepts a boolean and defaults to off when absent" do
+      assert {:ok, on} =
+               Ash.create(Workspace, %{
+                 name: "loop-auto-1",
+                 config: %{"loop" => %{"autonomous_routing_enabled" => true}}
+               })
+
+      assert Arbiter.Loop.Canary.enabled?(on)
+
+      assert {:ok, off} = Ash.create(Workspace, %{name: "loop-auto-2", config: %{}})
+      refute Arbiter.Loop.Canary.enabled?(off)
+    end
+
+    test "rejects a stringly-typed flag" do
+      config = %{"loop" => %{"autonomous_routing_enabled" => "true"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-auto-3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.autonomous_routing_enabled must be true or false")
+    end
+
+    test "rejects a non-map canary block" do
+      config = %{"loop" => %{"canary" => "running"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-auto-4", config: config})
+      assert err |> Exception.message() |> String.contains?("loop.canary must be a map")
+    end
+
+    test "rejects a canary sample size below the Stage 3 floor" do
+      config = %{"loop" => %{"canary_min_dispatches" => 5}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-auto-5", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.canary_min_dispatches must be an integer >= 20")
+    end
+
+    # The tolerance *is* the auto-revert threshold. A value the canary silently
+    # clamps is the one config mistake that could mask the regression this
+    # whole stage exists to catch, so it is rejected rather than corrected.
+    test "rejects a regression tolerance that is not a fraction in 0..0.5" do
+      for bad <- ["0.05", -0.1, 0.9, 1] do
+        config = %{"loop" => %{"canary_regression_tolerance" => bad}}
+        name = "loop-auto-tol-#{:erlang.phash2(bad)}"
+
+        assert {:error, err} = Ash.create(Workspace, %{name: name, config: config}),
+               "#{inspect(bad)} must not be accepted as a revert threshold"
+
+        assert err
+               |> Exception.message()
+               |> String.contains?("loop.canary_regression_tolerance must be a number")
+      end
+    end
+
+    test "accepts a regression tolerance the canary will honour verbatim" do
+      config = %{"loop" => %{"canary_regression_tolerance" => 0.05}}
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-auto-tol-ok", config: config})
+      assert get_in(ws.config, ["loop", "canary_regression_tolerance"]) == 0.05
+    end
 
     test "the deep-merge patch_config surface honours the override" do
       {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-6", config: %{"merge" => %{}}})

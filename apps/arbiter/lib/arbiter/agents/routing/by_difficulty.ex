@@ -66,6 +66,7 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   @behaviour Arbiter.Agents.Routing.Policy
 
   alias Arbiter.Agents.Routing
+  alias Arbiter.Loop.Canary
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
@@ -90,9 +91,23 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   def choose(%Issue{} = task, workspace, _ledger_snapshot) do
     default = Routing.default_choice(workspace)
     difficulty = effective_difficulty(task.difficulty)
-    rule = merged_rule(workspace, difficulty)
+    rule = merged_rule(workspace, difficulty, task.id)
 
     %{default | config: Map.merge(default.config, rule)}
+  end
+
+  # A Stage 3 canary (bd-6edc0u) overlays its candidate rule on *half* the
+  # dispatches at one tier, so the other half keeps routing exactly as it did
+  # and the two can be compared. `Canary.overlay/3` is `nil` — and this is a
+  # no-op — for every workspace that has not opted in via
+  # `loop.autonomous_routing_enabled`, which is all of them by default.
+  defp merged_rule(workspace, difficulty, task_id) do
+    rule = merged_rule(workspace, difficulty)
+
+    case Canary.overlay(workspace, task_id, difficulty) do
+      nil -> rule
+      overlay -> Map.merge(rule, overlay)
+    end
   end
 
   @doc """

@@ -144,6 +144,26 @@ defmodule ArbiterCli.ConfigSchema do
     conductor  (map)
       max_concurrent  positive integer — cap on concurrently-dispatched workers
 
+    loop  (map — the loop-engineering review pipeline; see docs/loop-review.md)
+      evidence_bar  (map) — how much evidence a finding needs before it is
+                    proposed rather than filed as a hypothesis
+        min_incidents       positive integer                        (default: 3)
+        min_distinct_tasks  positive integer                        (default: 2)
+      autonomous_routing_enabled  bool — OFF on every workspace by default. Set
+                    true to let Arbiter apply one already-proposed routing-tier
+                    adjustment on its own, to half of this workspace's
+                    dispatches, and revert it automatically if first-pass review
+                    convergence regresses. Nothing else is ever auto-applied.
+                    Unset (or set false) to stop it, effective on the next
+                    dispatch even mid-canary.
+      canary_min_dispatches       integer >= 20 — canary-arm dispatches required
+                    before any verdict. May be raised, never lowered.
+      canary_regression_tolerance number in 0..0.5 — how far below the control
+                    arm's first-pass convergence the canary may sit without
+                    being reverted                                (default: 0.0)
+      canary        (map) — written and removed by Arbiter itself while a canary
+                    runs; not meant to be hand-edited
+
     standing_orders  (list)
       list of short imperative strings (or {"title","detail"} objects), surfaced
       high in every worker's `arb prime` briefing. Manage with
