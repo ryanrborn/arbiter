@@ -86,6 +86,69 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       assert only_notification(ws).body == "#{task_id} failed after 30s"
     end
+
+    # bd-3wgdie: a ReviewGate non-convergence is not a crash — the worker
+    # completed its work and exited 0, it just lost a review argument. The
+    # generic "failed ... exit code 0" wording reads as a dead worker and
+    # sent a real 66h-old escalation undiscovered. Distinguish the two.
+    test "reads as an escalation, not a crash, when ReviewGate did not converge" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.failed(%{
+                 task_id: task_id,
+                 workspace_id: ws,
+                 started_at: started_ago(518),
+                 meta: %{
+                   exit_status: 0,
+                   failure_reason: :review_gate_rejected,
+                   review_gate_rounds: 2
+                 }
+               })
+
+      notification = only_notification(ws)
+      refute notification.body =~ "exit code"
+      refute notification.subject =~ "failed"
+      assert notification.subject =~ "escalated"
+      assert notification.body =~ "escalated"
+      assert notification.body =~ "ReviewGate did not converge"
+      assert notification.body =~ "2 round"
+    end
+
+    test "reads as an escalation when ReviewGate could not produce a verdict" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.failed(%{
+                 task_id: task_id,
+                 workspace_id: ws,
+                 started_at: started_ago(30),
+                 meta: %{exit_status: 0, failure_reason: :review_gate_inconclusive}
+               })
+
+      notification = only_notification(ws)
+      refute notification.body =~ "exit code"
+      assert notification.subject =~ "escalated"
+      assert notification.body =~ "ReviewGate"
+      assert notification.body =~ "no parseable verdict" or notification.body =~ "inconclusive"
+    end
+
+    test "an unrelated crash keeps the plain failed wording even with exit code 0" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.failed(%{
+                 task_id: task_id,
+                 workspace_id: ws,
+                 started_at: started_ago(30),
+                 meta: %{exit_status: 0, failure_reason: :timeout}
+               })
+
+      assert only_notification(ws).body == "#{task_id} failed after 30s — exit code 0"
+    end
   end
 
   describe "awaiting_review/1" do
