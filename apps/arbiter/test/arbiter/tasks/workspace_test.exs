@@ -753,6 +753,27 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert get_in(ws.config, ["loop", "canary_regression_tolerance"]) == 0.05
     end
 
+    test "rejects a canary deadline outside 1..90 days" do
+      for bad <- [0, -1, 365, "14", 14.0] do
+        config = %{"loop" => %{"canary_max_age_days" => bad}}
+        name = "loop-auto-age-#{:erlang.phash2(bad)}"
+
+        assert {:error, err} = Ash.create(Workspace, %{name: name, config: config}),
+               "#{inspect(bad)} must not be accepted as a canary deadline"
+
+        assert err
+               |> Exception.message()
+               |> String.contains?("loop.canary_max_age_days must be an integer between 1 and 90")
+      end
+    end
+
+    test "accepts a canary deadline inside the range" do
+      config = %{"loop" => %{"canary_max_age_days" => 7}}
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-auto-age-ok", config: config})
+      assert get_in(ws.config, ["loop", "canary_max_age_days"]) == 7
+    end
+
     test "the deep-merge patch_config surface honours the override" do
       {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-6", config: %{"merge" => %{}}})
 

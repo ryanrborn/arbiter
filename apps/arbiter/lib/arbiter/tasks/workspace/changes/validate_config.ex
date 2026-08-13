@@ -336,6 +336,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_canary_block(Map.get(loop, "canary"))
     |> validate_canary_min_dispatches(Map.get(loop, "canary_min_dispatches"))
     |> validate_canary_tolerance(Map.get(loop, "canary_regression_tolerance"))
+    |> validate_canary_max_age(Map.get(loop, "canary_max_age_days"))
   end
 
   defp validate_autonomy_flag(changeset, nil), do: changeset
@@ -386,6 +387,25 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
         message:
           "loop.canary_regression_tolerance must be a number between 0 and #{ceiling} " <>
             "(a convergence fraction, not a percentage); got: #{inspect(t)}"
+      )
+    end
+  end
+
+  # How long a canary may run before it expires unjudged. Bounded on both ends:
+  # zero would expire every canary on its first tick, and something past a
+  # quarter is not a deadline at all.
+  defp validate_canary_max_age(changeset, nil), do: changeset
+
+  defp validate_canary_max_age(changeset, n) do
+    ceiling = Arbiter.Loop.Canary.max_age_days_ceiling()
+
+    if is_integer(n) and n >= 1 and n <= ceiling do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "loop.canary_max_age_days must be an integer between 1 and #{ceiling}; got: #{inspect(n)}"
       )
     end
   end

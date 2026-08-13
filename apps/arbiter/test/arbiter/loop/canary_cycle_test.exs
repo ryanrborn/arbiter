@@ -132,6 +132,32 @@ defmodule Arbiter.Loop.CanaryCycleTest do
 
   defp reload!(ws), do: Ash.get!(Workspace, ws.id)
 
+  defp patch!(ws, patch, unset \\ []) do
+    {:ok, ws} =
+      Ash.update(ws, %{patch: patch, unset_paths: unset},
+        action: :patch_config,
+        actor: "operator"
+      )
+
+    ws
+  end
+
+  defp enable!(ws), do: patch!(ws, %{"loop" => %{"autonomous_routing_enabled" => true}})
+
+  defp disable!(ws), do: patch!(ws, %{}, ["loop.autonomous_routing_enabled"])
+
+  # Backdate a running canary's `started_at`. Nothing else about it changes —
+  # the point is a canary that has been live for `days` without gathering its
+  # sample, which is otherwise a multi-day thing to observe.
+  defp age_canary!(ws, days) do
+    started =
+      DateTime.utc_now()
+      |> DateTime.add(-days * 24 * 3600, :second)
+      |> DateTime.to_iso8601()
+
+    patch!(ws, %{"loop" => %{"canary" => %{"started_at" => started}}})
+  end
+
   # Poll a condition rather than sleeping a fixed span: the assertion below is
   # about the ticker's *timer* firing at all, not about how fast it does.
   defp eventually(fun, attempts \\ 150) do
@@ -306,17 +332,127 @@ defmodule Arbiter.Loop.CanaryCycleTest do
       seed_arm!(ws, canary, :canary, 20, 0, "can")
       seed_arm!(ws, canary, :control, 20, 20, "con")
 
-      {:ok, off} =
-        Ash.update(ws, %{patch: %{}, unset_paths: ["loop.autonomous_routing_enabled"]},
-          action: :patch_config,
-          actor: "operator"
-        )
+      off = disable!(ws)
 
-      assert Canary.tick(off) == {:ok, :disabled}
+      # The canary is ended, not paused — and no verdict was reached on it,
+      # even though the seeded data is a textbook regression.
+      assert {:ok, {:stopped, %{reason: :kill_switch}}} = Canary.tick(off)
+      refute get_in(reload!(ws).config, ["loop", "canary"])
 
       # Nothing was auto-applied or auto-reverted behind the operator's back,
       # and routing is already back on the baseline (see CanaryTest).
       assert Ash.get!(PendingWrite, ctx.proposal.id).state == :proposed
+    end
+
+    # The dispatches that accumulate while the flag is off are baseline in
+    # *both* arms — the overlay returned `nil` for every one of them. If the
+    # canary block survived the kill switch, re-arming the flag would judge that
+    # window, find the arms identical (they were), and read the tie as a pass.
+    test "re-enabling after the kill switch never promotes on the stale window", ctx do
+      {:ok, ws} = Canary.start(ctx.ws, ctx.proposal, actor: "loop")
+      canary = Canary.active(ws)
+      started_at = get_in(reload!(ws).config, ["loop", "canary", "started_at"])
+
+      seed_arm!(ws, canary, :canary, 3, 3, "early")
+
+      # Kill switch, then a long quiet stretch of un-canaried dispatches: both
+      # arms sit at exactly the same convergence, which is what a comparison
+      # that never actually ran looks like.
+      off = disable!(ws)
+      assert {:ok, {:stopped, _}} = Canary.tick(off)
+
+      off = reload!(ws)
+      seed_arm!(off, canary, :canary, 25, 12, "after")
+      seed_arm!(off, canary, :control, 25, 12, "afterc")
+
+      # ...and the operator arms it again.
+      on = enable!(off)
+
+      assert {:ok, {:started, fresh}} = Canary.tick(on)
+
+      assert fresh.proposal_id == ctx.proposal.id
+      assert Ash.get!(PendingWrite, ctx.proposal.id).state == :proposed
+
+      refute get_in(reload!(ws).config, ["routing", "rules", "D2"]),
+             "a window the canary spent switched off must never promote the rule"
+
+      # The clean canary measures from *now*, not from the original start.
+      assert get_in(reload!(ws).config, ["loop", "canary", "started_at"]) > started_at
+
+      # And with the old dispatches out of the window, there is nothing to judge
+      # yet — exactly as if the canary had just begun, which it has.
+      assert {:ok, {:running, stats}} = Canary.tick(reload!(ws))
+      assert stats.canary.dispatches == 0
+    end
+
+    # A tier too quiet to reach `min_dispatches` must not keep an unvalidated
+    # rule live on half its dispatches forever.
+    test "a canary that never gathers its sample expires instead of running forever", ctx do
+      {:ok, ws} = Canary.start(ctx.ws, ctx.proposal, actor: "loop")
+      canary = Canary.active(ws)
+
+      seed_arm!(ws, canary, :canary, 4, 4, "can")
+
+      aged = age_canary!(ws, 15)
+
+      assert {:ok, {:expired, info}} = Canary.tick(aged)
+      assert info.proposal_id == ctx.proposal.id
+      assert info.age_days >= 14
+      assert info.max_age_days == 14
+
+      expired = reload!(ws)
+      refute get_in(expired.config, ["loop", "canary"])
+
+      refute get_in(expired.config, ["routing", "rules", "D2"]),
+             "an expired canary must never land its unjudged rule"
+
+      row = Ash.get!(PendingWrite, ctx.proposal.id)
+      assert row.state == :rejected
+      assert row.rejection_reason =~ "expired"
+      assert row.outcome_delta["verdict"] == "expired"
+    end
+
+    test "a canary still inside its deadline is left to run", ctx do
+      {:ok, ws} = Canary.start(ctx.ws, ctx.proposal, actor: "loop")
+      canary = Canary.active(ws)
+
+      seed_arm!(ws, canary, :canary, 4, 4, "can")
+
+      aged = age_canary!(ws, 13)
+
+      assert {:ok, {:running, _stats}} = Canary.tick(aged)
+      assert get_in(reload!(ws).config, ["loop", "canary", "status"]) == "running"
+      assert Ash.get!(PendingWrite, ctx.proposal.id).state == :proposed
+    end
+  end
+
+  # `Arbiter.Worker.ReviewGate.record_round/5` writes the implementer's revise
+  # pass into `review_gate_rounds` too, with the same task id and round number
+  # as the review it answers. Counting those as review rounds would understate
+  # cost/round in the operator's escalation mail and in the proposal's
+  # `outcome_delta`.
+  describe "the measurement" do
+    test "implementer revise rows are not counted as review rounds", ctx do
+      {:ok, ws} = Canary.start(ctx.ws, ctx.proposal, actor: "loop")
+      canary = Canary.active(ws)
+
+      # 10 tasks converge on round 1, 10 take two review rounds: 30 review
+      # rounds, at $1 per dispatch.
+      canary_ids = seed_arm!(ws, canary, :canary, 20, 10, "can")
+      seed_arm!(ws, canary, :control, 20, 10, "con")
+
+      # Every non-converging task also has an implementer revise row.
+      for {id, idx} <- Enum.with_index(canary_ids), idx >= 10 do
+        {:ok, _} = Ash.create(Round, %{task_id: id, round: 1, role: :impl, converged: false})
+      end
+
+      {_verdict, stats} = Canary.evaluate(ws)
+
+      assert stats.canary.review_rounds == 30,
+             "only :review rows are review rounds — :impl rows share the task id and round"
+
+      assert_in_delta stats.canary.cost_per_round, 20.0 / 30.0, 0.0001
+      assert_in_delta stats.canary.first_pass_convergence, 0.5, 0.001
     end
   end
 

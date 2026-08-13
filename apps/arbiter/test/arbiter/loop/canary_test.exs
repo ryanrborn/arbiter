@@ -13,7 +13,7 @@ defmodule Arbiter.Loop.CanaryTest do
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Loop
-  alias Arbiter.Loop.Canary
+  alias Arbiter.Loop.{Canary, PendingWrite}
   alias Arbiter.Tasks.{Issue, Workspace}
 
   require Ash.Query
@@ -295,6 +295,29 @@ defmodule Arbiter.Loop.CanaryTest do
       assert %{config: config} = Routing.choose(task, off, %{})
       assert config == ByDifficulty.default_mapping()[2]
     end
+
+    test "the next tick after the kill switch ends the canary rather than pausing it", ctx do
+      off = patch!(ctx.ws, %{}, ["loop.autonomous_routing_enabled"])
+
+      assert {:ok, {:stopped, info}} = Canary.tick(off)
+      assert info.proposal_id == ctx.row.id
+      assert info.reason == :kill_switch
+
+      stopped = Ash.get!(Workspace, ctx.ws.id)
+
+      refute get_in(stopped.config, ["loop", "canary"]),
+             "a canary the operator switched off must not stay in config to be resumed later"
+
+      refute get_in(stopped.config, ["routing", "rules", "D2"]),
+             "the kill switch must not land the canaried rule"
+
+      # The proposal itself is untouched: the operator stopped the experiment,
+      # they did not judge the proposal.
+      assert Ash.get!(PendingWrite, ctx.row.id).state == :proposed
+
+      # ...and it is one write, once.
+      assert Canary.tick(stopped) == {:ok, :disabled}
+    end
   end
 
   describe "byte-for-byte default behaviour" do
@@ -368,6 +391,61 @@ defmodule Arbiter.Loop.CanaryTest do
 
       assert {:error, reason} = Canary.start(ws, row, actor: "loop")
       assert reason =~ "autonomous_routing_enabled"
+    end
+  end
+
+  describe "candidate selection" do
+    # `Loop.list_pending/1` filters on the `workspace_id` *column*, but
+    # eligibility resolves the workspace from `payload["workspace_id"]`. When
+    # the two disagree, the row can never start here — and if it were the only
+    # candidate tried, one such row would wedge autonomy for the whole
+    # workspace: every tick would error and no other proposal would be reached.
+    test "a candidate whose payload names another workspace does not block the queue",
+         %{ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{name: "other-ws", prefix: "ow", config: @routing_config})
+
+      good = proposed!(ws)
+
+      # Created last, so `list_pending/1` (created_at desc) hands it back first.
+      poisoned =
+        proposed!(ws, %{
+          target: "routing.rules.D3",
+          difficulty: 3,
+          payload: %{
+            "workspace_id" => other_ws.id,
+            "patch" => %{"routing" => %{"rules" => %{"D3" => %{"thinking" => "high"}}}}
+          }
+        })
+
+      assert {:ok, %{workspace_id: other_id}} = Canary.eligible(poisoned)
+      assert other_id == other_ws.id, "the poisoned row is eligible — just not here"
+
+      assert {:ok, {:started, canary}} = ws |> enable!() |> Canary.tick(actor: "loop")
+
+      assert canary.proposal_id == good.id,
+             "the mismatched candidate must be skipped, not allowed to wedge the cycle"
+
+      assert Ash.get!(PendingWrite, poisoned.id).state == :proposed
+    end
+
+    test "reports nothing_eligible when every candidate targets another workspace",
+         %{ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{name: "other-ws-2", prefix: "o2", config: @routing_config})
+
+      _poisoned =
+        proposed!(ws, %{
+          payload: %{
+            "workspace_id" => other_ws.id,
+            "patch" => %{"routing" => %{"rules" => %{"D2" => @canaried_rule}}}
+          }
+        })
+
+      enabled = enable!(ws)
+
+      assert Canary.tick(enabled, actor: "loop") == {:ok, :nothing_eligible}
+      refute get_in(Ash.get!(Workspace, ws.id).config, ["loop", "canary"])
     end
   end
 end

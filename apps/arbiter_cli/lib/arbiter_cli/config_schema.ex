@@ -161,6 +161,9 @@ defmodule ArbiterCli.ConfigSchema do
       canary_regression_tolerance number in 0..0.5 — how far below the control
                     arm's first-pass convergence the canary may sit without
                     being reverted                                (default: 0.0)
+      canary_max_age_days         integer 1..90 — a canary that has not reached
+                    canary_min_dispatches by then expires: the rule is dropped,
+                    the proposal soft-rejected, the operator mailed (default: 14)
       canary        (map) — written and removed by Arbiter itself while a canary
                     runs; not meant to be hand-edited
 

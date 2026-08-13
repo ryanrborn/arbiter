@@ -230,6 +230,13 @@ routing, the queue, and the config are byte-for-byte what they were before
 Stage 3 existed. Unsetting it again is the kill switch and takes effect on the
 next dispatch, mid-canary, with no config to unwind.
 
+The kill switch **ends** the canary rather than pausing it: the first tick after
+the flag disappears drops the `loop.canary` block. While the flag is off the
+overlay is `nil` for every dispatch, so both "arms" are the same arm — if the
+block survived, re-arming the flag later would judge a window full of dispatches
+the canary never influenced, find the two arms identical (they were), and read
+that tie as a pass. Re-enabling starts a clean canary instead.
+
 **What is eligible.** Only a `:proposed` row that has already been escalated to
 an operator at least once, whose evidence *still* clears the workspace's bar on
 its own terms (a `:task`-scoped row that bypassed the bar by blast radius is
@@ -266,6 +273,14 @@ between the arms:
 Cost per review round is reported alongside but never triggers a revert — a
 tier change that buys convergence with money is a judgement call, not a
 regression.
+
+**The deadline.** A canary that has not gathered its sample within
+`loop.canary_max_age_days` (default 14, ceiling 90) **expires**: the block is
+dropped, the proposal is soft-rejected with an `outcome_delta` saying how long
+it ran and how far it got, and the operator is mailed. A multi-day window is the
+design; an open-ended one would leave an unvalidated rule live on half of a
+quiet tier's dispatches indefinitely, with no second notice after the start
+mail.
 
 An operator who rejects (or applies) the proposal while its canary is still
 running has overruled the experiment: the canary is **abandoned** on the next

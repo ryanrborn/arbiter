@@ -22,7 +22,15 @@ defmodule Arbiter.Loop.Canary do
   flag unset, `active/1` returns `nil`, the routing overlay is never consulted,
   and `tick/2` is `{:ok, :disabled}` — behaviour is byte-for-byte what it was
   before this module existed. Unsetting the flag mid-canary is the kill switch:
-  the overlay stops on the next dispatch, with no config unwinding needed.
+  the overlay stops on the very next dispatch, with no config unwinding needed.
+
+  The kill switch is **terminal**, not a pause. The first `tick/2` after the
+  flag goes away drops the `loop.canary` block (one write, once), because a
+  paused canary is worse than no canary: while the flag is off both arms route
+  identically, so every dispatch in that window is baseline in *both* arms. If
+  the block survived, re-arming the flag would judge — and possibly promote —
+  on a window that contains dispatches the canary never influenced. Re-enabling
+  starts a clean canary with a fresh `started_at` instead.
 
   ## What is eligible
 
@@ -69,7 +77,11 @@ defmodule Arbiter.Loop.Canary do
   No verdict is returned before the canary arm has at least 20 dispatches
   (`min_dispatches`, floor-clamped — a workspace may raise it, never lower it).
   At current fleet volume that is a multi-day window by design, not an instant
-  flip.
+  flip. It is not, however, an *unbounded* one: a canary that has not gathered
+  its sample within `loop.canary_max_age_days` (default 14) expires — the block
+  is dropped, the proposal is soft-rejected with the reason, and the operator is
+  mailed. A tier too quiet to measure must not keep an unvalidated rule live on
+  half of its dispatches forever.
 
   Then:
 
@@ -103,7 +115,8 @@ defmodule Arbiter.Loop.Canary do
     :started_at,
     arm_strategy: :alternating,
     min_dispatches: 20,
-    regression_tolerance: 0.0
+    regression_tolerance: 0.0,
+    max_age_days: 14
   ]
 
   @type t :: %__MODULE__{}
@@ -124,6 +137,15 @@ defmodule Arbiter.Loop.Canary do
   # with the brake removed.
   @max_regression_tolerance 0.5
 
+  # How long a canary may run without reaching `min_dispatches`. A multi-day
+  # window is the design; an indefinite one is a rule nobody validated sitting
+  # live on half a tier's dispatches with no second operator notice.
+  @default_max_age_days 14
+
+  # ...and the longest a workspace may stretch that. Past a quarter it is not a
+  # deadline, it is the absence of one.
+  @max_max_age_days 90
+
   # The knobs a canaried routing rule may carry. Anything else (a pinned
   # `model`, an adapter override) is out of scope for autonomous application.
   @rule_keys ~w(model_tier thinking)
@@ -135,6 +157,14 @@ defmodule Arbiter.Loop.Canary do
   @doc "The widest revert threshold a workspace may configure."
   @spec max_regression_tolerance() :: float()
   def max_regression_tolerance, do: @max_regression_tolerance
+
+  @doc "How long a canary may run before it expires unjudged, by default."
+  @spec default_max_age_days() :: pos_integer()
+  def default_max_age_days, do: @default_max_age_days
+
+  @doc "The longest expiry a workspace may configure."
+  @spec max_age_days_ceiling() :: pos_integer()
+  def max_age_days_ceiling, do: @max_max_age_days
 
   # ---- the flag -----------------------------------------------------------
 
@@ -183,7 +213,8 @@ defmodule Arbiter.Loop.Canary do
         started_at: started_at,
         arm_strategy: :alternating,
         min_dispatches: clamp_min_dispatches(Map.get(block, "min_dispatches")),
-        regression_tolerance: clamp_tolerance(Map.get(block, "regression_tolerance"))
+        regression_tolerance: clamp_tolerance(Map.get(block, "regression_tolerance")),
+        max_age_days: clamp_max_age(Map.get(block, "max_age_days"))
       }
     else
       _ -> nil
@@ -208,6 +239,9 @@ defmodule Arbiter.Loop.Canary do
     do: min(t / 1, @max_regression_tolerance)
 
   defp clamp_tolerance(_), do: 0.0
+
+  defp clamp_max_age(n) when is_integer(n) and n > 0, do: min(n, @max_max_age_days)
+  defp clamp_max_age(_), do: @default_max_age_days
 
   # ---- arms ---------------------------------------------------------------
 
@@ -456,6 +490,7 @@ defmodule Arbiter.Loop.Canary do
         "started_at" => DateTime.to_iso8601(DateTime.utc_now()),
         "min_dispatches" => clamp_min_dispatches(configured_min_dispatches(ws)),
         "regression_tolerance" => clamp_tolerance(configured_tolerance(ws)),
+        "max_age_days" => clamp_max_age(configured_max_age_days(ws)),
         "status" => "running"
       }
 
@@ -488,6 +523,9 @@ defmodule Arbiter.Loop.Canary do
 
   defp configured_tolerance(ws),
     do: get_in(ws.config || %{}, ["loop", "canary_regression_tolerance"])
+
+  defp configured_max_age_days(ws),
+    do: get_in(ws.config || %{}, ["loop", "canary_max_age_days"])
 
   # ---- evaluate -----------------------------------------------------------
 
@@ -536,37 +574,115 @@ defmodule Arbiter.Loop.Canary do
   One autonomy cycle for a workspace: judge the running canary, or start one.
 
   Returns `{:ok, :disabled}` when the opt-in flag is unset — which is every
-  workspace until an operator sets it.
+  workspace until an operator sets it. The one thing a disabled workspace still
+  does is clear a canary block left behind by the kill switch (`{:ok,
+  {:stopped, _}}`, once); see the moduledoc for why that has to be terminal.
   """
   @spec tick(Workspace.t(), keyword()) ::
           {:ok, :disabled}
           | {:ok, :nothing_eligible}
           | {:ok, {:started, t()}}
           | {:ok, {:abandoned, map()}}
+          | {:ok, {:stopped, map()}}
+          | {:ok, {:expired, map()}}
           | {:ok, {:running | :reverted | :promoted, stats()}}
           | {:error, String.t()}
   def tick(workspace, opts \\ [])
 
   def tick(%Workspace{} = ws, opts) do
-    if enabled?(ws) do
-      case active(ws) do
-        nil -> maybe_start(ws, opts)
-        canary -> judge(ws, canary, opts)
-      end
-    else
-      {:ok, :disabled}
+    cond do
+      enabled?(ws) ->
+        case active(ws) do
+          nil -> maybe_start(ws, opts)
+          canary -> judge(ws, canary, opts)
+        end
+
+      is_map(get_in(ws.config || %{}, @canary_path)) ->
+        stop_for_kill_switch(ws)
+
+      true ->
+        {:ok, :disabled}
     end
   end
 
   def tick(_ws, _opts), do: {:ok, :disabled}
+
+  # The kill switch, made terminal. While the flag was off the overlay returned
+  # `nil` for every dispatch, so both arms were the *same* arm: judging a window
+  # that includes those dispatches would compare a rule against itself and read
+  # the tie as a pass. Dropping the block is one write, and it happens once —
+  # after it, re-enabling the flag starts a clean canary rather than resuming a
+  # window that was never measured.
+  defp stop_for_kill_switch(ws) do
+    proposal_id = ws.config |> get_in(@canary_path) |> Map.get("proposal_id")
+
+    case patch(ws, %{}, ["loop.canary"], attribution(proposal_id)) do
+      {:ok, _updated} ->
+        Logger.info(
+          "Loop.Canary stopped on #{ws.id}: loop.autonomous_routing_enabled is unset, so the " <>
+            "canary block for proposal #{inspect(proposal_id)} was dropped rather than paused"
+        )
+
+        {:ok, {:stopped, %{proposal_id: proposal_id, reason: :kill_switch}}}
+
+      {:error, reason} ->
+        {:error, "could not drop the canary block after the kill switch: #{reason}"}
+    end
+  end
 
   # An operator who rejects (or applies) the proposal mid-canary has overruled
   # the experiment. Autonomy never outranks that, however well the canary arm
   # is doing: the block is dropped and the rule is not landed.
   defp judge(ws, canary, opts) do
     case proposal_state(canary.proposal_id) do
-      :proposed -> judge_metrics(ws, canary, opts)
+      :proposed -> judge_age(ws, canary, opts)
       other -> abandon(ws, canary, other)
+    end
+  end
+
+  # Before measuring: has this canary had long enough? A tier with too little
+  # traffic never reaches `min_dispatches`, and `judge_metrics/3` would answer
+  # `{:running, _}` forever while the unvalidated rule stayed live on half of
+  # that tier's dispatches, with no operator notice after `announce_start/3`.
+  defp judge_age(ws, canary, opts) do
+    age_days = DateTime.diff(DateTime.utc_now(), canary.started_at, :day)
+
+    if age_days >= canary.max_age_days do
+      expire(ws, canary, age_days, opts)
+    else
+      judge_metrics(ws, canary, opts)
+    end
+  end
+
+  defp expire(ws, canary, age_days, opts) do
+    reason =
+      "the canary ran #{age_days} day(s) without the canary arm reaching " <>
+        "#{canary.min_dispatches} dispatch(es) at D#{canary.difficulty}, so it expired " <>
+        "unjudged (loop.canary_max_age_days: #{canary.max_age_days}). Nothing was written to " <>
+        "routing.rules; this tier does not see enough traffic to validate the change " <>
+        "autonomously, so apply it by hand if you still want it"
+
+    case patch(ws, %{}, ["loop.canary"], attribution(canary.proposal_id)) do
+      {:ok, _updated} ->
+        close_proposal(canary.proposal_id, :expire, expiry_delta(canary, age_days), reason, opts)
+        notify(ws, canary, "expired unjudged", reason)
+
+        Logger.info(
+          "Loop.Canary expired on #{ws.id}: proposal #{canary.proposal_id} ran #{age_days} " <>
+            "day(s) without a verdict"
+        )
+
+        {:ok,
+         {:expired,
+          %{
+            proposal_id: canary.proposal_id,
+            difficulty: canary.difficulty,
+            age_days: age_days,
+            max_age_days: canary.max_age_days
+          }}}
+
+      {:error, reason} ->
+        {:error, "could not expire the canary: #{reason}"}
     end
   end
 
@@ -600,23 +716,34 @@ defmodule Arbiter.Loop.Canary do
     end
   end
 
+  # Try every eligible candidate, not just the first. A row whose payload names
+  # a different workspace than the column `Loop.list_pending/1` filtered on
+  # passes `eligible/1` and then fails `same_workspace/2` inside `start/3` — and
+  # if that were the end of the cycle, one such row would wedge autonomy for the
+  # whole workspace: every tick would error, and no other proposal would ever be
+  # tried. So candidates are pre-filtered to those that actually target this
+  # workspace, and a start that still fails falls through to the next.
   defp maybe_start(ws, opts) do
-    candidates = Loop.list_pending(state: :proposed, kind: :config_set, workspace_id: ws.id)
+    Loop.list_pending(state: :proposed, kind: :config_set, workspace_id: ws.id)
+    |> Enum.filter(&targets_workspace?(&1, ws))
+    |> Enum.reduce_while({:ok, :nothing_eligible}, fn row, acc ->
+      case start(ws, row, opts) do
+        {:ok, started} ->
+          {:halt, {:ok, {:started, active(started)}}}
 
-    case Enum.find_value(candidates, fn row ->
-           case eligible(row) do
-             {:ok, _spec} -> row
-             {:error, _} -> nil
-           end
-         end) do
-      nil ->
-        {:ok, :nothing_eligible}
+        {:error, reason} ->
+          Logger.warning(
+            "Loop.Canary could not start proposal #{row.id} on #{ws.id}: #{reason}; " <>
+              "trying the next candidate"
+          )
 
-      row ->
-        with {:ok, started} <- start(ws, row, opts) do
-          {:ok, {:started, active(started)}}
-        end
-    end
+          {:cont, acc}
+      end
+    end)
+  end
+
+  defp targets_workspace?(row, %Workspace{id: ws_id}) do
+    match?({:ok, %{workspace_id: ^ws_id}}, eligible(row))
   end
 
   # ---- revert / promote ---------------------------------------------------
@@ -636,7 +763,7 @@ defmodule Arbiter.Loop.Canary do
 
     case patch(ws, %{}, ["loop.canary"], attribution(canary.proposal_id)) do
       {:ok, _updated} ->
-        close_proposal(canary.proposal_id, :revert, stats, reason, opts)
+        close_proposal(canary.proposal_id, :revert, outcome_delta(:revert, stats), reason, opts)
         notify(ws, canary, "auto-reverted", reason)
         {:ok, {:reverted, stats}}
 
@@ -656,7 +783,14 @@ defmodule Arbiter.Loop.Canary do
 
     case patch(ws, patch_map, ["loop.canary"], attribution(canary.proposal_id)) do
       {:ok, _updated} ->
-        close_proposal(canary.proposal_id, :promote, stats, promote_reason(stats), opts)
+        close_proposal(
+          canary.proposal_id,
+          :promote,
+          outcome_delta(:promote, stats),
+          promote_reason(stats),
+          opts
+        )
+
         notify(ws, canary, "promoted fleet-wide", promote_reason(stats))
         {:ok, {:promoted, stats}}
 
@@ -682,18 +816,18 @@ defmodule Arbiter.Loop.Canary do
 
   # The proposal is closed out through the same domain API an operator uses, so
   # the queue's own paper trail records the autonomous decision too.
-  defp close_proposal(proposal_id, verdict, stats, reason, opts) do
+  defp close_proposal(proposal_id, verdict, delta, reason, opts) do
     actor = Keyword.get(opts, :actor, "loop")
 
     with {:ok, row} <- Loop.get_pending(proposal_id) do
       {:ok, row} =
-        Ash.update(row, %{outcome_delta: outcome_delta(verdict, stats), actor: actor},
+        Ash.update(row, %{outcome_delta: delta, actor: actor},
           action: :record_outcome,
           actor: actor
         )
 
       case verdict do
-        :revert ->
+        v when v in [:revert, :expire] ->
           Loop.reject_pending(row, reason: reason, actor: actor)
 
         :promote ->
@@ -721,6 +855,21 @@ defmodule Arbiter.Loop.Canary do
     }
   end
 
+  # An expiry has no measurement to attach — that *is* the outcome: the tier
+  # never produced enough dispatches to compare. Recording it keeps the reason
+  # on the proposal rather than only in mail.
+  defp expiry_delta(canary, age_days) do
+    %{
+      "verdict" => "expired",
+      "metric" => "first-pass ReviewGate convergence",
+      "difficulty" => canary.difficulty,
+      "min_dispatches" => canary.min_dispatches,
+      "age_days" => age_days,
+      "max_age_days" => canary.max_age_days,
+      "measured_at" => DateTime.to_iso8601(DateTime.utc_now())
+    }
+  end
+
   defp arm_delta(arm) do
     %{
       "dispatches" => arm.dispatches,
@@ -734,7 +883,12 @@ defmodule Arbiter.Loop.Canary do
 
   # ---- plumbing -----------------------------------------------------------
 
-  defp attribution(proposal_id), do: "loop:proposal:#{proposal_id}"
+  # A malformed block may carry no proposal id at all; the version still has to
+  # say who wrote it, and "loop:proposal:" alone would not.
+  defp attribution(proposal_id) when is_binary(proposal_id) and proposal_id != "",
+    do: "loop:proposal:#{proposal_id}"
+
+  defp attribution(_), do: "loop"
 
   # Invariant 4 of `Arbiter.Loop`: config changes go through the deep-merge
   # `:patch_config` action, never a raw overwrite — and `actor` is accepted so

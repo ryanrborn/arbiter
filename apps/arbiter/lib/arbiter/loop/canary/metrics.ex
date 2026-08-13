@@ -163,10 +163,18 @@ defmodule Arbiter.Loop.Canary.Metrics do
 
   # A review row's task_id is the base id, optionally `#`-suffixed — match both
   # rather than pulling the whole table and filtering in Elixir.
+  #
+  # The whole disjunction is wrapped: it is spliced after an `AND`, and SQL
+  # binds `AND` tighter than `OR`, so without the outer parentheses the
+  # `role = 'review'` predicate would apply to the first task only and every
+  # other task's `:impl` rows would be counted as review rounds.
   defp base_task_filter(placeholders) do
-    placeholders
-    |> String.split(", ")
-    |> Enum.map_join(" OR ", fn p -> "(task_id = #{p} OR task_id LIKE #{p} || '#%')" end)
+    inner =
+      placeholders
+      |> String.split(", ")
+      |> Enum.map_join(" OR ", fn p -> "(task_id = #{p} OR task_id LIKE #{p} || '#%')" end)
+
+    "(" <> inner <> ")"
   end
 
   defp in_chunks(values, fun) do

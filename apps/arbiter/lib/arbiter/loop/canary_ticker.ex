@@ -12,7 +12,11 @@ defmodule Arbiter.Loop.CanaryTicker do
   For a workspace that has not set `loop.autonomous_routing_enabled`, `tick/2`
   returns `{:ok, :disabled}` after a single map lookup and nothing else happens
   — no reads, no writes, no mail. That is every workspace by default, which is
-  what keeps this process inert until an operator deliberately opts one in.
+  what keeps this process inert until an operator deliberately opts one in. The
+  sole exception is a workspace whose flag was unset *while a canary was
+  running*: the next tick clears the leftover block, once, so re-enabling the
+  flag later starts a clean canary instead of judging a window the canary spent
+  switched off (see `Arbiter.Loop.Canary`'s moduledoc).
 
   Each workspace is ticked under its own rescue: one bad config block, or one
   failed write, must not stop the cycle before it reaches the workspace whose
