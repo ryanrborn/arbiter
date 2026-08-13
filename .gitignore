@@ -1,6 +1,9 @@
 # The directory Mix will write compiled artifacts to.
 /_build/
 
+# Alternate MIX_BUILD_PATH used for isolated test compiles.
+/_build_t/
+
 # If you run "mix test --cover", coverage assets end up here.
 /cover/
 
