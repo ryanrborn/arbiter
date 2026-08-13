@@ -1041,9 +1041,14 @@ defmodule Arbiter.Mergers.Github do
   defp present_body?(_), do: false
 
   # Fetch CI status via the check-runs API for the head commit SHA.
-  # Returns nil when the SHA is absent or no check-runs exist (no CI configured)
-  # or the request fails (best-effort — a transient API error must not block the
-  # MR poll).
+  # Returns nil when the SHA is absent or the request fails (best-effort — a
+  # transient API error must not block the MR poll). Returns `:not_started`
+  # when the SHA is present and the request succeeded but zero check-runs
+  # exist yet — GitHub's check-suite for the commit may simply not have been
+  # created yet (bd-aeb9wv / #1189: PR #1188 merged a full second *before*
+  # its check-suite existed). That's a distinct "unknown, wait" state, not
+  # "no CI configured" — the Watchdog's `ci_pending?/1` treats it as pending
+  # rather than clear-to-merge.
   defp fetch_pipeline_status(_cfg, _owner, _repo, nil), do: nil
   defp fetch_pipeline_status(_cfg, _owner, _repo, ""), do: nil
 
@@ -1052,6 +1057,9 @@ defmodule Arbiter.Mergers.Github do
          |> handle_json() do
       {:ok, %{"check_runs" => [_ | _] = runs}} ->
         map_check_run_status(runs)
+
+      {:ok, %{"check_runs" => []}} ->
+        :not_started
 
       _ ->
         nil

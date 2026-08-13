@@ -584,7 +584,18 @@ defmodule Arbiter.Worker.Watchdog do
   # *settled*-but-non-success states (GitHub neutral/skipped/stale check runs,
   # GitLab skipped/manual pipelines) to `:neutral` instead, so they fall
   # through to a real merge attempt rather than deferring forever.
-  def ci_pending?(result), do: Map.get(result, :pipeline) in [:running, :pending]
+  #
+  # `:not_started` (bd-aeb9wv / #1189) is the distinct "unknown, wait" state:
+  # the GitHub adapter's check-runs API returned zero results for the head
+  # SHA — not a settled outcome, just CI that GitHub hasn't started recording
+  # yet. PR #1188 merged 6s after its ReviewGate APPROVE, one second *before*
+  # its check-suite was even created — the adapter's `nil` pipeline (also used
+  # for "no head SHA" and "no CI configured on this repo at all") was treated
+  # as vacuously "nothing blocking". Folding `nil` itself into this set would
+  # wrongly defer forever on a repo that has no CI at all; `:not_started`
+  # keeps that case distinct while still blocking the specific zero-check-runs
+  # race.
+  def ci_pending?(result), do: Map.get(result, :pipeline) in [:running, :pending, :not_started]
 
   @doc """
   CI has *concluded*, and it failed. The strict complement of `ci_pending?/1`
