@@ -1645,24 +1645,24 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # (`Arbiter.Mcp.Tools.guard_review_automation/3`). Public (not just used by
   # this module's own ticks) so `ReviewPatrolSupervisor` can resolve the same
   # rig name to gate patrol startup on a repo's `:off`-mode override
-  # (bd-4brb2j) without duplicating the rig_paths-remote-resolution logic.
+  # (bd-4brb2j) without duplicating the repo_paths-remote-resolution logic.
   #
   # Single-repo workspaces: `merge.config.repo` IS that bare name directly.
-  # Multi-repo workspaces: find the `repo_paths`/`rig_paths` entry whose git
+  # Multi-repo workspaces: find the `repo_paths` entry whose git
   # remote resolves to this "owner/repo" and use its key.
   def rig_name_for_repo(%Workspace{config: config}, repo) when is_binary(repo) and repo != "" do
     config = config || %{}
 
     case get_in(config, ["merge", "config", "repo"]) do
       name when is_binary(name) and name != "" -> name
-      _ -> rig_name_from_rig_paths(config, repo)
+      _ -> rig_name_from_repo_paths(config, repo)
     end
   end
 
   def rig_name_for_repo(_workspace, _repo), do: nil
 
-  defp rig_name_from_rig_paths(config, repo) do
-    rig_map = Map.get(config, "repo_paths") || Map.get(config, "rig_paths") || %{}
+  defp rig_name_from_repo_paths(config, repo) do
+    rig_map = Map.get(config, "repo_paths") || %{}
 
     Enum.find_value(rig_map, fn {rig_name, rig_config} ->
       with path when is_binary(path) <- RepoConfig.repo_path_from_config(rig_config),

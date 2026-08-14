@@ -422,7 +422,7 @@ defmodule Arbiter.Tasks.Workspace do
   @doc """
   Whether a successful merge to a repo's default branch should fast-forward
   that repo's *primary* local checkout (the shared directory registered in
-  `repo_paths`/`rig_paths` — not a worker's isolated worktree) to the new
+  `repo_paths` — not a worker's isolated worktree) to the new
   `origin/<default>`, from `config["merge"]["auto_sync_primary"]`.
 
   Defaults to `false`: fast-forwarding a checkout a human may have open is

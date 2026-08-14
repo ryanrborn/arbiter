@@ -198,14 +198,13 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   defp workspace_repo_path(_workspace, nil), do: nil
 
   defp workspace_repo_path(%Workspace{config: %{} = config}, repo) when is_binary(repo) do
-    RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
-      RepoConfig.find_path(get_in(config, ["rig_paths"]), repo)
+    RepoConfig.find_path(get_in(config, ["repo_paths"]), repo)
   end
 
   defp workspace_repo_path(_, _), do: nil
 
   defp first_repo_path(%Workspace{config: %{} = config}) do
-    case Map.get(config, "repo_paths") || Map.get(config, "rig_paths") do
+    case Map.get(config, "repo_paths") do
       %{} = paths -> paths |> Map.values() |> Enum.find_value(&RepoConfig.repo_path_from_config/1)
       _ -> nil
     end
@@ -229,7 +228,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   end
 
   defp resolve_repo_name(%Workspace{config: %{} = config}) do
-    case Map.get(config, "repo_paths") || Map.get(config, "rig_paths") do
+    case Map.get(config, "repo_paths") do
       %{} = paths -> paths |> Map.keys() |> List.first()
       _ -> nil
     end

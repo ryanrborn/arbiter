@@ -634,54 +634,6 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["repo_paths"] == %{}
     end
 
-    test "adding a repo_path on a rig_paths workspace doesn't shadow existing rig_paths entries",
-         %{conn: conn} do
-      ws =
-        new_workspace(%{
-          config: %{"rig_paths" => %{"arbiter" => "/home/ryan/dev/arbiter"}}
-        })
-
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
-
-      view
-      |> form("form[phx-submit=add_repo_path]", %{
-        "repo_path" => %{"repo" => "other", "path" => "/home/ryan/dev/other"}
-      })
-      |> render_submit()
-
-      {:ok, reloaded} = Ash.get(Workspace, ws.id)
-
-      assert reloaded.config["rig_paths"] == %{
-               "arbiter" => "/home/ryan/dev/arbiter",
-               "other" => "/home/ryan/dev/other"
-             }
-
-      refute Map.has_key?(reloaded.config, "repo_paths")
-    end
-
-    test "removing a repo_path on a rig_paths workspace doesn't leave it live in rig_paths",
-         %{conn: conn} do
-      ws =
-        new_workspace(%{
-          config: %{
-            "rig_paths" => %{
-              "arbiter" => "/home/ryan/dev/arbiter",
-              "other" => "/home/ryan/dev/other"
-            }
-          }
-        })
-
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
-
-      view
-      |> element("button[phx-click=rm_repo_path][phx-value-repo='other']")
-      |> render_click()
-
-      {:ok, reloaded} = Ash.get(Workspace, ws.id)
-      assert reloaded.config["rig_paths"] == %{"arbiter" => "/home/ryan/dev/arbiter"}
-      refute Map.has_key?(reloaded.config, "repo_paths")
-    end
-
     test "re-adding a repo_path with the richer map shape preserves target_branch", %{
       conn: conn
     } do

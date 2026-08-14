@@ -247,7 +247,7 @@ needed, orient itself with `arb prime`, and be ready to coordinate your work.
 A **repo** is a local git repository that workers check out and work in. Register your projects via the dashboard (Workspace → Repos), or directly in `config/dev.exs`:
 
 ```elixir
-config :arbiter, :rig_paths, %{
+config :arbiter, :repo_paths, %{
   "my-project" => Path.expand("~/dev/my-project"),
   "another-project" => Path.expand("~/dev/another-project")
 }

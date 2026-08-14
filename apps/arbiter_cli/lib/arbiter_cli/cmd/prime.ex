@@ -146,12 +146,12 @@ defmodule ArbiterCli.Cmd.Prime do
   defp gather_standing_orders(_), do: {:ok, []}
 
   # Rig-scoped standing orders live alongside the path/target_branch overrides
-  # in `config.repo_paths.<rig>.standing_orders` (alias `rig_paths`) — same
-  # place as `arb workspace standing-order add --rig`. Only rigs that carry at
-  # least one order are returned, in `[{rig, orders}]` form so text rendering
-  # can walk it in order and JSON can turn it into a map.
+  # in `config.repo_paths.<rig>.standing_orders` — same place as
+  # `arb workspace standing-order add --rig`. Only rigs that carry at least
+  # one order are returned, in `[{rig, orders}]` form so text rendering can
+  # walk it in order and JSON can turn it into a map.
   defp gather_rig_standing_orders(%{"config" => config}) when is_map(config) do
-    repo_paths = config["repo_paths"] || config["rig_paths"] || %{}
+    repo_paths = config["repo_paths"] || %{}
 
     repo_paths
     |> Enum.map(fn {rig, entry} -> {rig, rig_standing_orders(entry)} end)

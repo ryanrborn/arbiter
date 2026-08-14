@@ -8,7 +8,7 @@
 
 ## Problem
 
-A workspace's `repo_paths`/`rig_paths` config points at a repo's *primary*
+A workspace's `repo_paths` config points at a repo's *primary*
 local checkout — a shared directory a human/coordinator may `cd` into
 directly, distinct from a worker's isolated per-task worktree. Before this
 change, nothing in Arbiter ever fast-forwarded that checkout's local branch
@@ -70,7 +70,7 @@ how to turn it on (`arb config set merge.auto_sync_primary true`).
 
 ### Repo-path resolution
 
-`repo_paths`/`rig_paths` values are a JSON map keyed by the same `repo`
+`repo_paths` values are a JSON map keyed by the same `repo`
 string `MergeQueue` items already carry (`item.repo`, resolved from the
 task's most recent worker run). The lookup — exact key match, falling back
 to a normalized underscore/hyphen-insensitive match — previously lived only
@@ -84,7 +84,7 @@ duplicating the logic for `MergeQueue`.
 - It never touches a worker's isolated per-task worktree — those are always
   freshly branched from `origin/<base>` at creation time and are unaffected.
 - It does not run for a repo with no `auto_sync_primary` opt-in, or with no
-  primary checkout registered in `repo_paths`/`rig_paths` for the merged
+  primary checkout registered in `repo_paths` for the merged
   repo key.
 - It is best-effort: a git failure (missing repo, missing `origin` remote,
   fetch failure) is logged as a warning and never blocks task close or

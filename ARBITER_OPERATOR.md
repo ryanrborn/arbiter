@@ -25,7 +25,7 @@ External comms (GitHub, Slack) stay in normal professional voice.
 The six most-burned-by operating pitfalls. Check these first:
 
 - [ ] **Concurrency** — keep concurrent tasks FILE-DISJOINT. Tasks that touch the same file (especially CLI verb list, command-alias map, or router) **will collide at merge**. The auto-conflict-resolver helps, but do not rely on it. Serialize those tasks.
-- [ ] **Config** — use `arb config get/set/unset` only. **Never** send partial config via raw API PATCH — it replaces the whole map and **silently clobbers** siblings (`rig_paths`, tracker, merge config, vernacular).
+- [ ] **Config** — use `arb config get/set/unset` only. **Never** send partial config via raw API PATCH — it replaces the whole map and **silently clobbers** siblings (`repo_paths`, tracker, merge config, vernacular).
 - [ ] **Deploy** — before restarting the server, check for active workers (`arb prime` or `arb worker list`). **Restarting the server KILLS all in-flight workers and abandons their work.**
 - [ ] **Freshness** — keep repos current. Workers branch from the repo's base branch. A stale repo means stale, possibly regressed state for every new worker.
 - [ ] **Verify** — a worker can show "running" while its subprocess is dead. **Check the port/log, not just status.** A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
@@ -89,7 +89,7 @@ fetch from origin.
 
 That auto-fetch (`Worktree.fetch_origin/2`) only refreshes the
 `origin/<base>` *ref* inside a repo's primary checkout (the shared directory
-in `repo_paths`/`rig_paths` — not a worker's isolated worktree). It never
+in `repo_paths` — not a worker's isolated worktree). It never
 touches that checkout's own local branch, HEAD, index, or working tree — so
 `git log`/`git status` run directly in the primary checkout (by you, or by a
 `task`-type worker reading it for context) can still show a branch that's
@@ -115,7 +115,7 @@ repo.
 Workspace config is a single JSON map stored in the database.
 
 **NEVER** send a partial config via the raw API PATCH — it replaces the whole
-map and **silently clobbers** siblings (`rig_paths`, tracker, merge config,
+map and **silently clobbers** siblings (`repo_paths`, tracker, merge config,
 vernacular).
 
 **Use `arb config get/set/unset` (deep-merge) only.**

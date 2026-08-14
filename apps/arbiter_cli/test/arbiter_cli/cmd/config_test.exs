@@ -49,9 +49,9 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert Config.drop_path(m, ["nope", "x"]) == m
     end
 
-    test "safety_check/1 flags empty rig_paths" do
-      assert {:unsafe, [reason]} = Config.safety_check(%{"rig_paths" => %{}})
-      assert reason =~ "rig_paths is empty"
+    test "safety_check/1 flags empty repo_paths" do
+      assert {:unsafe, [reason]} = Config.safety_check(%{"repo_paths" => %{}})
+      assert reason =~ "repo_paths is empty"
     end
 
     test "safety_check/1 flags tracker.type != none without tracker.config" do
@@ -163,9 +163,9 @@ defmodule ArbiterCli.Cmd.ConfigTest do
     end
 
     test "refuses (without --force) when the resulting config drops a required key" do
-      # rig_paths starts with one entry; setting the only entry to a different
+      # repo_paths starts with one entry; setting the only entry to a different
       # key isn't a drop, so we test the bare-empty case by setting an
-      # unrelated key on a config that already has empty rig_paths is bogus.
+      # unrelated key on a config that already has empty repo_paths is bogus.
       # Cleanest test: existing has tracker.type=github + config; user clobbers
       # tracker.config — actually, set creates/overwrites a leaf, not removes,
       # so we instead trigger the *type-without-config* path by setting type
@@ -253,13 +253,13 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert err =~ "key not found"
     end
 
-    test "refuses an unset that empties rig_paths without --force" do
-      initial = %{"rig_paths" => %{"arbiter" => "/srv/arbiter"}}
+    test "refuses an unset that empties repo_paths without --force" do
+      initial = %{"repo_paths" => %{"arbiter" => "/srv/arbiter"}}
       stub_routes([{{"get", "/api/workspaces"}, {default_ws(initial), 200}}])
 
-      {_out, err, code} = capture(fn -> Config.run(["unset", "rig_paths.arbiter"]) end)
+      {_out, err, code} = capture(fn -> Config.run(["unset", "repo_paths.arbiter"]) end)
       assert code == 1
-      assert err =~ "rig_paths is empty"
+      assert err =~ "repo_paths is empty"
     end
   end
 

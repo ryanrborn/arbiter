@@ -1343,7 +1343,6 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp resolve_primary_repo_path(%Workspace{config: %{} = config}, repo)
        when is_binary(repo) and repo != "" do
     RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
-      RepoConfig.find_path(get_in(config, ["rig_paths"]), repo) ||
       RepoConfig.find_path(Application.get_env(:arbiter, :repo_paths, %{}), repo)
   end
 
