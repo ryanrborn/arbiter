@@ -17,6 +17,7 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
   require Logger
 
   alias Arbiter.Worker
+  alias Arbiter.Worker.Registry, as: WorkerRegistry
 
   @impl true
   def change(changeset, _opts, _context) do
@@ -38,10 +39,21 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
       String.starts_with?(registry_key, task_id <> "#")
   end
 
+  # Enumerates via the Registry (not `Worker.list_children/0`, which probes
+  # each pid with `GenServer.call(pid, :snapshot, 500)` and silently drops
+  # any worker that doesn't answer within the timeout — e.g. one mid-merge
+  # in `handle_call({:open_mr, ...})`). Registry enumeration needs no call
+  # to the worker process itself, so a busy sub-worker is still swept.
   defp stop_all(task_id) do
-    Worker.list_children()
-    |> Enum.filter(fn %{registry_key: registry_key} -> owned_by?(registry_key, task_id) end)
-    |> Enum.each(fn %{pid: pid, registry_key: registry_key} -> stop(pid, registry_key) end)
+    WorkerRegistry.all()
+    |> Enum.filter(fn {registry_key, _pid} -> owned_by?(registry_key, task_id) end)
+    |> Enum.each(fn {registry_key, pid} -> stop(pid, registry_key) end)
+  rescue
+    e ->
+      Logger.warning("StopWorker: error enumerating workers for #{task_id}: #{Exception.message(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("StopWorker: exit enumerating workers for #{task_id}: #{inspect(reason)}")
   end
 
   defp stop(pid, registry_key) do
