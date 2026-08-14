@@ -121,6 +121,28 @@ defmodule Arbiter.Worker.StopDetectionTest do
       assert state.meta.stop_reason.category == :auth_expired
     end
 
+    test "simulated 5h usage-limit exhaustion is classified as :quota_exhausted (bd-3hr6g2)",
+         %{ws: ws} do
+      {pid, _task} = start_worker(ws)
+      :ok = Worker.advance(pid, :claude)
+      cwd = tmp_dir!("sd-quota")
+
+      # No session id is ever captured for a plain shell fixture, so the resume
+      # path's :no_session_id guard fires and this still lands at :failed —
+      # exactly like the credit/auth/kill cases above — but classified under
+      # its own category rather than the generic :credit_exhausted bucket.
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "echo 'Claude AI usage limit reached|1735689600'; exit 1"]
+        )
+
+      state = wait_for_failed(pid)
+      assert state.meta.stop_reason.category == :quota_exhausted
+      refute state.meta.stop_reason.category == :credit_exhausted
+    end
+
     test "a killed subprocess is classified as :killed", %{ws: ws} do
       {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)

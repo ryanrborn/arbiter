@@ -68,6 +68,70 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — 5h usage-limit exhaustion (bd-3hr6g2)" do
+    test "Claude CLI's usage-limit-reached message, with a reset epoch" do
+      reason = StopReason.classify(1, ["Claude AI usage limit reached|1735689600"])
+
+      assert reason.category == :quota_exhausted
+      assert reason.retry_after == DateTime.from_unix!(1_735_689_600)
+      assert reason.remediation =~ "resets"
+    end
+
+    test "usage-limit-reached message with no parseable reset timestamp" do
+      reason = StopReason.classify(1, ["5-hour limit reached, try again later"])
+
+      assert reason.category == :quota_exhausted
+      assert reason.retry_after == nil
+    end
+
+    test "does not fall into the generic credit/quota-exceeded bucket" do
+      # "usage limit reached" carries no "credit"/"quota exceeded"-shaped words,
+      # so it must not be swallowed by the broader @credit_signature.
+      reason = StopReason.classify(1, ["Claude AI usage limit reached|1735689600"])
+      refute reason.category == :credit_exhausted
+    end
+
+    test "wins over a bare non-zero exit (specific beats generic :crashed)" do
+      reason = StopReason.classify(1, ["usage limit reached"])
+      assert reason.category == :quota_exhausted
+    end
+
+    # bd-3wgdie: the phrase must lead its line (module docstrings, grep hits,
+    # and other tool output the worker merely read embed it mid-line) unless
+    # the reset-epoch suffix is present.
+    test "does not false-match the phrase quoted mid-line in a file the worker read" do
+      reason =
+        StopReason.classify(1, [
+          "    25\t      was reached (\"Claude AI usage limit reached\", \"5-hour limit reached\"),"
+        ])
+
+      refute reason.category == :quota_exhausted
+    end
+
+    test "does not false-match a grep-style prefixed line" do
+      reason =
+        StopReason.classify(1, [
+          "stop_reason.ex:25:      (\"Claude AI usage limit reached\")"
+        ])
+
+      refute reason.category == :quota_exhausted
+    end
+
+    test "still matches when the phrase leads the line after only whitespace" do
+      reason = StopReason.classify(1, ["   Claude AI usage limit reached"])
+      assert reason.category == :quota_exhausted
+    end
+
+    test "the reset-epoch suffix matches even without line anchoring" do
+      reason =
+        StopReason.classify(1, [
+          "some prefix noise usage limit reached|1735689600"
+        ])
+
+      assert reason.category == :quota_exhausted
+    end
+  end
+
   describe "classify/2 — gateway / proxy errors (bd-298jz0)" do
     test "proxy_error body from the local Anthropic proxy (502)" do
       reason =
@@ -302,6 +366,15 @@ defmodule Arbiter.Worker.StopReasonTest do
       assert is_binary(map.summary)
       assert map.exit_status == 1
       refute Map.has_key?(map, :__struct__)
+    end
+
+    test "quota_exhausted label and to_map carry the reset time" do
+      reason = StopReason.classify(1, ["Claude AI usage limit reached|1735689600"])
+      assert StopReason.label(reason) == "5h usage limit reached (exit 1)"
+
+      map = StopReason.to_map(reason)
+      assert map.category == :quota_exhausted
+      assert map.retry_after == DateTime.from_unix!(1_735_689_600)
     end
   end
 end
