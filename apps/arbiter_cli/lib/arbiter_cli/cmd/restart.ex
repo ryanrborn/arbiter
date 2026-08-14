@@ -60,7 +60,7 @@ defmodule ArbiterCli.Cmd.Restart do
       timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
       force = opts[:force] || false
 
-      guard_acolyte_session!()
+      guard_worker_session!()
 
       root =
         case Start.project_root() do
@@ -294,16 +294,16 @@ defmodule ArbiterCli.Cmd.Restart do
 
   @doc """
   Abort with an error when the calling process is itself inside a worker
-  session (i.e. `ARB_ACOLYTE_BEAD_ID` is set in the environment).
+  session (i.e. `ARB_WORKER_BEAD_ID` is set in the environment).
 
   A worker must never be able to bounce or kill the live orchestrating
   server — doing so would kill the worker that owns the worker and leave
   the task stuck. Shared with `arb update` (deploy), `arb start`, and
   `arb install-service`.
   """
-  @spec guard_acolyte_session!() :: :ok
-  def guard_acolyte_session! do
-    case System.get_env("ARB_ACOLYTE_BEAD_ID") do
+  @spec guard_worker_session!() :: :ok
+  def guard_worker_session! do
+    case System.get_env("ARB_WORKER_BEAD_ID") do
       id when is_binary(id) and id != "" ->
         Output.die(
           "this command cannot be run from inside a worker session",

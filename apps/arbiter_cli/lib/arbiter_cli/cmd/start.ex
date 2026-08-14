@@ -52,7 +52,7 @@ defmodule ArbiterCli.Cmd.Start do
       mode = if opts[:json], do: :json, else: :text
       timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
 
-      Restart.guard_acolyte_session!()
+      Restart.guard_worker_session!()
 
       if Doctor.reachable?() do
         already_running(mode)

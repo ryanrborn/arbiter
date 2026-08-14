@@ -13,7 +13,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     System.delete_env("ARB_HOST")
     # Clear the worker guard env so deploy tests run even when executed
     # from inside a worker session.
-    System.delete_env("ARB_ACOLYTE_BEAD_ID")
+    System.delete_env("ARB_WORKER_BEAD_ID")
     on_exit(fn -> System.delete_env("ARB_HOME") end)
     Process.put(:bd2_sleep, fn _ms -> :ok end)
     # TCP port check seam: default to "port is free" so wait_port_free returns
