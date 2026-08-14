@@ -346,4 +346,187 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert err =~ "no standing orders"
     end
   end
+
+  describe "standing-order --rig" do
+    defp ws_with_rig_paths(repo_paths) do
+      stub_get("/api/workspaces", %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"repo_paths" => repo_paths}
+          }
+        ]
+      })
+    end
+
+    defp stub_rig_order_patch(repo_paths, expected_patch, returned_repo_paths) do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{
+                "id" => "ws-1",
+                "name" => "default",
+                "prefix" => "bd",
+                "config" => %{"repo_paths" => repo_paths}
+              }
+            ]
+          }, 200}},
+        {{"patch", "/api/workspaces/ws-1/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           decoded = Jason.decode!(body)
+           assert decoded["patch"]["repo_paths"] == expected_patch
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "id" => "ws-1",
+             "name" => "default",
+             "config" => %{"repo_paths" => returned_repo_paths}
+           })
+         end}
+      ])
+    end
+
+    test "ls lists a rig's own orders, not the workspace-global ones" do
+      ws_with_rig_paths(%{
+        "client" => %{"path" => "/x/client", "standing_orders" => ["Link the Figma design."]}
+      })
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run(["standing-order", "ls", "--workspace", "default", "--rig", "client"])
+        end)
+
+      assert code == 0
+      assert out =~ "1. Link the Figma design."
+    end
+
+    test "ls reports when a registered rig has none" do
+      ws_with_rig_paths(%{"client" => %{"path" => "/x/client"}})
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run(["standing-order", "ls", "--workspace", "default", "--rig", "client"])
+        end)
+
+      assert code == 0
+      assert out =~ "(no standing orders"
+    end
+
+    test "add appends onto a map-shaped rig entry, preserving its path" do
+      stub_rig_order_patch(
+        %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one"]}},
+        %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one", "Add two"]}},
+        %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one", "Add two"]}}
+      )
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "add",
+            "Add two",
+            "--workspace",
+            "default",
+            "--rig",
+            "client"
+          ])
+        end)
+
+      assert code == 0
+      assert out =~ "2 standing order(s)"
+    end
+
+    test "add on a bare-string rig entry upgrades it to a map, keeping the path" do
+      stub_rig_order_patch(
+        %{"server" => "/x/server"},
+        %{"server" => %{"path" => "/x/server", "standing_orders" => ["First order"]}},
+        %{"server" => %{"path" => "/x/server", "standing_orders" => ["First order"]}}
+      )
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "add",
+            "First order",
+            "--workspace",
+            "default",
+            "--rig",
+            "server"
+          ])
+        end)
+
+      assert code == 0
+      assert out =~ "1 standing order(s)"
+    end
+
+    test "add errors when the named rig isn't registered in repo_paths" do
+      ws_with_rig_paths(%{"client" => %{"path" => "/x/client"}})
+
+      {_out, err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "add",
+            "text",
+            "--workspace",
+            "default",
+            "--rig",
+            "nope"
+          ])
+        end)
+
+      assert code == 1
+      assert err =~ "no rig named"
+    end
+
+    test "rm removes by index scoped to the rig, leaving the global list untouched" do
+      stub_rig_order_patch(
+        %{"client" => %{"path" => "/x/client", "standing_orders" => ["a", "b"]}},
+        %{"client" => %{"path" => "/x/client", "standing_orders" => ["a"]}},
+        %{"client" => %{"path" => "/x/client", "standing_orders" => ["a"]}}
+      )
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "rm",
+            "2",
+            "--workspace",
+            "default",
+            "--rig",
+            "client"
+          ])
+        end)
+
+      assert code == 0
+      assert out =~ "1 standing order(s)"
+    end
+
+    test "rm errors when the rig has no orders" do
+      ws_with_rig_paths(%{"client" => %{"path" => "/x/client"}})
+
+      {_out, err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "rm",
+            "1",
+            "--workspace",
+            "default",
+            "--rig",
+            "client"
+          ])
+        end)
+
+      assert code == 1
+      assert err =~ "no standing orders"
+    end
+  end
 end

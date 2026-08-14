@@ -15,6 +15,12 @@ defmodule ArbiterCli.Cmd.Workspace do
                                                remove one standing order (1-based
                                                index, or exact text match)
 
+      All three accept `--rig <name>` to target a rig-scoped standing order
+      (stored under `repo_paths.<rig>.standing_orders`) instead of the
+      workspace-global list. The rig must already be registered in
+      `repo_paths`/`rig_paths` (add its path first with
+      `arb config set repo_paths.<rig>.path <path>`).
+
       arb workspace secret ls                  names of the configured secrets
       arb workspace secret set <key> <value>   store/overwrite an encrypted secret
       arb workspace secret rm <key>            remove an encrypted secret
@@ -50,6 +56,7 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   @switches [
     workspace: :string,
+    rig: :string,
     json: :boolean,
     prefix: :string,
     description: :string,
@@ -190,26 +197,27 @@ defmodule ArbiterCli.Cmd.Workspace do
     {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     workspace_opt = opts[:workspace]
+    rig_opt = opts[:rig]
 
     case rest do
       ["ls"] ->
-        standing_order_ls(workspace_opt, mode)
+        standing_order_ls(workspace_opt, rig_opt, mode)
 
       ["ls" | _] ->
         Output.die("workspace standing-order ls takes no positional arguments")
 
       ["add" | text] when text != [] ->
-        standing_order_add(workspace_opt, Enum.join(text, " "), mode)
+        standing_order_add(workspace_opt, rig_opt, Enum.join(text, " "), mode)
 
       ["add" | _] ->
         Output.die("workspace standing-order add requires <text>")
 
       ["rm", target] ->
-        standing_order_rm(workspace_opt, target, mode)
+        standing_order_rm(workspace_opt, rig_opt, target, mode)
 
       ["rm" | rest_args] when rest_args != [] ->
         # Allow an unquoted multi-word text match as a convenience.
-        standing_order_rm(workspace_opt, Enum.join(rest_args, " "), mode)
+        standing_order_rm(workspace_opt, rig_opt, Enum.join(rest_args, " "), mode)
 
       ["rm" | _] ->
         Output.die("workspace standing-order rm requires an <index|text>")
@@ -225,19 +233,19 @@ defmodule ArbiterCli.Cmd.Workspace do
     end
   end
 
-  defp standing_order_ls(workspace_opt, mode) do
+  defp standing_order_ls(workspace_opt, rig_opt, mode) do
     ws = resolve_workspace!(workspace_opt)
-    orders = current_standing_orders(ws)
+    orders = current_standing_orders(ws, rig_opt)
 
     case mode do
       :json ->
-        IO.puts(Jason.encode!(%{"standing_orders" => orders}))
+        IO.puts(Jason.encode!(orders_json(orders, rig_opt)))
 
       :text ->
         if orders == [] do
-          IO.puts("(no standing orders)")
+          IO.puts("(no standing orders#{rig_label(rig_opt)})")
         else
-          IO.puts("Standing orders (#{length(orders)}):")
+          IO.puts("Standing orders#{rig_label(rig_opt)} (#{length(orders)}):")
 
           orders
           |> Enum.with_index(1)
@@ -246,21 +254,25 @@ defmodule ArbiterCli.Cmd.Workspace do
     end
   end
 
-  defp standing_order_add(workspace_opt, text, mode) do
+  defp standing_order_add(workspace_opt, rig_opt, text, mode) do
     text = String.trim(text)
     if text == "", do: Output.die("workspace standing-order add: text must not be empty")
 
     ws = resolve_workspace!(workspace_opt)
-    orders = current_standing_orders(ws)
-    patch_standing_orders(ws, orders ++ [text], mode)
+    require_registered_rig!(ws, rig_opt, "add")
+    orders = current_standing_orders(ws, rig_opt)
+    patch_standing_orders(ws, rig_opt, orders ++ [text], mode)
   end
 
-  defp standing_order_rm(workspace_opt, target, mode) do
+  defp standing_order_rm(workspace_opt, rig_opt, target, mode) do
     ws = resolve_workspace!(workspace_opt)
-    orders = current_standing_orders(ws)
+    require_registered_rig!(ws, rig_opt, "rm")
+    orders = current_standing_orders(ws, rig_opt)
 
     if orders == [] do
-      Output.die("workspace standing-order rm: this workspace has no standing orders")
+      Output.die(
+        "workspace standing-order rm: this workspace has no standing orders#{rig_label(rig_opt)}"
+      )
     end
 
     new_orders =
@@ -284,21 +296,42 @@ defmodule ArbiterCli.Cmd.Workspace do
           end
       end
 
-    patch_standing_orders(ws, new_orders, mode)
+    patch_standing_orders(ws, rig_opt, new_orders, mode)
   end
 
   # Patches `config.standing_orders` wholesale (a list patch replaces the list,
-  # never appends) while leaving sibling config keys untouched.
-  defp patch_standing_orders(%{} = ws, orders, mode) do
+  # never appends) while leaving sibling config keys untouched. With `--rig`,
+  # patches just that rig's `standing_orders` sub-key under `repo_paths`
+  # (or `rig_paths`, whichever the entry actually lives under), preserving
+  # its `path`/`target_branch` siblings.
+  defp patch_standing_orders(%{} = ws, nil, orders, mode) do
     payload = %{"patch" => %{"standing_orders" => orders}}
+    do_patch_standing_orders(ws, nil, payload, mode)
+  end
 
+  defp patch_standing_orders(%{} = ws, rig, orders, mode) do
+    {repo_paths_key, entry_key, entry} = resolve_rig(ws, rig)
+
+    entry_map =
+      case entry do
+        %{} = m -> m
+        p when is_binary(p) -> %{"path" => p}
+        _ -> %{}
+      end
+
+    new_entry = Map.put(entry_map, "standing_orders", orders)
+    payload = %{"patch" => %{repo_paths_key => %{entry_key => new_entry}}}
+    do_patch_standing_orders(ws, rig, payload, mode)
+  end
+
+  defp do_patch_standing_orders(%{} = ws, rig, payload, mode) do
     case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
       {:ok, updated} ->
-        new_orders = current_standing_orders(updated)
+        new_orders = current_standing_orders(updated, rig)
 
         case mode do
           :json ->
-            IO.puts(Jason.encode!(%{"standing_orders" => new_orders}))
+            IO.puts(Jason.encode!(orders_json(new_orders, rig)))
 
           :text ->
             IO.puts("ok — #{length(new_orders)} standing order(s)")
@@ -313,12 +346,80 @@ defmodule ArbiterCli.Cmd.Workspace do
     end
   end
 
-  defp current_standing_orders(ws) do
+  defp orders_json(orders, nil), do: %{"standing_orders" => orders}
+  defp orders_json(orders, rig), do: %{"standing_orders" => orders, "rig" => rig}
+
+  defp rig_label(nil), do: ""
+  defp rig_label(rig), do: " for rig #{rig}"
+
+  defp current_standing_orders(ws, nil) do
     case get_in(ws, ["config", "standing_orders"]) do
       orders when is_list(orders) -> orders
       _ -> []
     end
   end
+
+  defp current_standing_orders(ws, rig) do
+    case resolve_rig(ws, rig) do
+      {_key, _entry_key, %{"standing_orders" => orders}} when is_list(orders) -> orders
+      _ -> []
+    end
+  end
+
+  # Requires `rig` (when given) to already be registered under
+  # `repo_paths`/`rig_paths` — a standing order scoped to an unregistered rig
+  # is almost always a typo, and silently creating a path-less rig entry would
+  # hide it.
+  defp require_registered_rig!(_ws, nil, _verb), do: :ok
+
+  defp require_registered_rig!(ws, rig, verb) do
+    case resolve_rig(ws, rig) do
+      {_key, _entry_key, nil} ->
+        Output.die(
+          "workspace standing-order #{verb}: no rig named #{inspect(rig)} registered",
+          "register its path first: arb config set repo_paths.#{rig}.path <path>"
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Finds `rig`'s entry under `config.repo_paths` (falling back to the
+  # `rig_paths` alias), matching loosely the way `Arbiter.Tasks.RepoConfig`
+  # does server-side (exact key, then normalized `_`/`-` match). Returns
+  # `{repo_paths_key, matched_entry_key, entry_or_nil}` — `repo_paths_key` is
+  # which of the two top-level keys to patch back into, and `matched_entry_key`
+  # is the literal key already used in config (so a normalized-match write
+  # lands on the existing entry instead of creating a sibling).
+  defp resolve_rig(ws, rig) do
+    {repo_paths_key, map} =
+      case get_in(ws, ["config", "repo_paths"]) do
+        m when is_map(m) and map_size(m) > 0 ->
+          {"repo_paths", m}
+
+        _ ->
+          case get_in(ws, ["config", "rig_paths"]) do
+            m when is_map(m) -> {"rig_paths", m}
+            _ -> {"repo_paths", %{}}
+          end
+      end
+
+    case Map.fetch(map, rig) do
+      {:ok, entry} ->
+        {repo_paths_key, rig, entry}
+
+      :error ->
+        target = normalize_rig_slug(rig)
+
+        case Enum.find(map, fn {k, _v} -> normalize_rig_slug(k) == target end) do
+          {k, entry} -> {repo_paths_key, k, entry}
+          nil -> {repo_paths_key, rig, nil}
+        end
+    end
+  end
+
+  defp normalize_rig_slug(s), do: s |> String.downcase() |> String.replace("_", "-")
 
   # A standing order is either a short imperative string or a {title, detail}
   # object; render either to a single human-readable line (matches `arb prime`).
