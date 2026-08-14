@@ -16,6 +16,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
+  alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Worktree
 
   setup do
@@ -301,6 +302,46 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       refute File.dir?(wt_path)
     end
 
+    # The bd-801xs5 mechanism end to end, and the case a registry-only guard
+    # cannot see: the thing holding the worktree open is not the sub-worker's
+    # GenServer but its agent's OS process — and, one level down, whatever
+    # that agent spawned (`mix test` in the incident). Erlang does not reap
+    # either on port close, so stopping the GenServer alone leaves both
+    # running in a directory `:close` is about to delete. Teardown must kill
+    # the whole tree first.
+    test "kills the sub-worker's agent OS process tree before removing the worktree",
+         %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "live agent wt", workspace_id: ws.id})
+
+      branch = BranchNamer.derive(task)
+      {:ok, wt_path} = Worktree.create(repo, branch, "main")
+
+      {:ok, fixpass_pid} =
+        Worker.start(task_id: task.id, registry_key: task.id <> ":fixpass", repo: "test/repo")
+
+      # `sh -c "sleep 60; :"` forks rather than exec'ing, so there is a real
+      # grandchild — the `mix test` of the incident — under the agent process.
+      {:ok, port} =
+        ClaudeSession.start(
+          owner: fixpass_pid,
+          worktree_path: wt_path,
+          command: ["sh", "-c", "sleep 60; :"]
+        )
+
+      {:os_pid, agent_os_pid} = Port.info(port, :os_pid)
+      child_os_pid = await_child_os_pid(agent_os_pid)
+
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      refute Process.alive?(fixpass_pid)
+      refute os_alive?(agent_os_pid), "agent os_pid #{agent_os_pid} survived :close"
+      refute os_alive?(child_os_pid), "agent child os_pid #{child_os_pid} survived :close"
+
+      # ... and only then is the worktree removed.
+      refute File.dir?(wt_path)
+    end
+
     # An unrelated task whose id merely string-prefixes another's must not
     # have its live worker block this task's cleanup (same separator rule as
     # StopWorker's sweep).
@@ -323,6 +364,26 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
 
       Worker.stop(unrelated)
     end
+  end
+
+  # Poll until the shell has actually forked its child; returns the child's pid.
+  defp await_child_os_pid(parent_os_pid, attempts \\ 50) do
+    case System.cmd("pgrep", ["-P", Integer.to_string(parent_os_pid)], stderr_to_stdout: true) do
+      {out, 0} ->
+        out |> String.split(~r/\s+/, trim: true) |> hd() |> String.to_integer()
+
+      _ when attempts > 0 ->
+        Process.sleep(20)
+        await_child_os_pid(parent_os_pid, attempts - 1)
+
+      _ ->
+        flunk("agent os_pid #{parent_os_pid} never spawned a child")
+    end
+  end
+
+  defp os_alive?(os_pid) do
+    {_, code} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    code == 0
   end
 
   defp worktree_env(_context) do

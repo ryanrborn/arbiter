@@ -60,6 +60,23 @@ defmodule Arbiter.Worker.Registry do
     Enum.filter(all(), fn {registry_key, _pid} -> owned_by?(registry_key, task_id) end)
   end
 
+  @doc """
+  Like `all_for/1`, but drops entries whose process is already dead.
+
+  Registry's monitor-based cleanup is asynchronous, so a worker that died
+  without its `terminate/2` running (a crash, a kill) can leave a corpse row
+  behind for a short window. A corpse owns nothing and must not block
+  teardown, so every "is anyone still using this task's worktree?" check
+  (`CleanupWorktree`'s drain, the Driver's post-workflow reap) filters on
+  `Process.alive?/1` through here rather than reading `all_for/1` raw.
+  """
+  @spec live_for(String.t()) :: [{String.t(), pid()}]
+  def live_for(task_id) when is_binary(task_id) do
+    task_id
+    |> all_for()
+    |> Enum.filter(fn {_registry_key, pid} -> Process.alive?(pid) end)
+  end
+
   defp owned_by?(registry_key, task_id) do
     registry_key == task_id or
       String.starts_with?(registry_key, task_id <> ":") or

@@ -608,6 +608,51 @@ defmodule Arbiter.Worker.DriverTest do
       assert code != 0, "agent os process #{os_pid} should be dead after teardown"
     end
 
+    # bd-bmmj4w: the `:close` hook refuses to delete a worktree a live worker
+    # still owns; this second removal path must obey the same rule. A
+    # sub-worker (`<task_id>:fixpass`) is one the Driver never started and
+    # never stops, so its agent can still be mid-run in the directory the
+    # Driver is about to reap.
+    test "skips cleanup while a sub-worker for the task is still live", %{
+      ws: ws,
+      wt_path: wt_path
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "cw-live-sub", workspace_id: ws.id})
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, fixpass_pid} =
+        Worker.start(task_id: task.id, registry_key: task.id <> ":fixpass", repo: "r")
+
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true,
+          worktree_path: wt_path,
+          cleanup_worktree: true
+        )
+
+      ref = Process.monitor(driver_pid)
+      # The :failed branch reaps the worktree without closing the task, so
+      # nothing else stops the sub-worker first.
+      :ok = Worker.fail(worker_pid, :claude_crashed)
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      assert Process.alive?(fixpass_pid)
+      assert File.dir?(wt_path), "worktree reaped while a :fixpass sub-worker was still live"
+
+      Worker.stop(fixpass_pid)
+    end
+
     test "skips cleanup when the worktree has commits ahead of base", %{ws: ws, wt_path: wt_path} do
       # Commit a new file in the worktree, then have a clean working tree.
       File.write!(Path.join(wt_path, "new.txt"), "claude wrote me\n")

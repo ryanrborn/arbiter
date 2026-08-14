@@ -31,11 +31,28 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
   safe to delete — a clean, fully-pushed worktree can still have a live
   sub-worker (`:fixpass`, `#review`, ...) mid-`mix test` inside it, and
   removing it then destroys the directory out from under a running process.
-  `StopWorker` runs immediately before this hook, but its per-worker stop is
-  bounded and best-effort, so before touching either worktree this hook
-  independently waits (briefly) for every worker registered under this task
-  to actually exit; if any is still alive when the grace window closes, both
-  removals are skipped with a warning, same as the dirty path.
+
+  The guard has two halves, and it is the pair that makes it sound:
+
+    * `Worker.terminate/2` SIGKILLs the agent's OS process **and its
+      descendants** before the worker GenServer finishes dying. Erlang does
+      not reap a `:spawn_executable` port's OS process on owner death, so
+      without that half a stopped worker still leaves a live `claude` (and
+      its `mix test` child) running in the worktree, and no registry check
+      could see it.
+    * This hook then waits (briefly) for every worker registered under this
+      task to actually leave the registry, because `StopWorker` — which runs
+      immediately before it — uses a *bounded* per-worker stop and may return
+      while a worker is still mid-`terminate/2`. If any is still alive when
+      the grace window closes, both removals are skipped with a warning, same
+      as the dirty path.
+
+  So what this hook checks directly is "no worker GenServer for this task is
+  still registered and alive"; that stands in for "no agent still owns the
+  directory" only because of the first half above. It is not a general
+  live-process probe of the directory: a process that is neither an agent
+  descendant nor owned by a registered worker (an operator's own shell sitting
+  in the worktree, say) is still invisible to it.
 
   Failures from `Worktree.cleanup/1` are logged but never propagated — the
   `:close` action must succeed even if teardown does not.
@@ -112,7 +129,10 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
   end
 
   defp await_worker_drain(task_id, deadline) do
-    case live_workers(task_id) do
+    # `live_for/1` (not `all_for/1`) so an unreaped registry corpse — a worker
+    # that died without terminate/2 running, whose row Registry clears
+    # asynchronously — cannot block cleanup forever.
+    case WorkerRegistry.live_for(task_id) do
       [] ->
         :drained
 
@@ -124,15 +144,6 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
           await_worker_drain(task_id, deadline)
         end
     end
-  end
-
-  # `Process.alive?/1` filters entries whose process is already dead but
-  # whose registry row hasn't been reaped yet (Registry's monitor cleanup is
-  # async when terminate/2 didn't run) — a corpse must not block cleanup.
-  defp live_workers(task_id) do
-    task_id
-    |> WorkerRegistry.all_for()
-    |> Enum.filter(fn {_registry_key, pid} -> Process.alive?(pid) end)
   end
 
   defp drain_ms do

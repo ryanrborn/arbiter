@@ -8,6 +8,11 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
   stop a worker is logged but never propagated — the `:close` action must
   succeed even if teardown does not.
 
+  Stopping a worker also kills its agent's OS process tree, synchronously,
+  inside `Worker.terminate/2` (bd-bmmj4w) — so when this hook's stop returns
+  `:ok` the agent is provably no longer running in the task's worktree, which
+  is the precondition `CleanupWorktree` relies on before removing it.
+
   Pairs with `Arbiter.Tasks.Issue.Changes.CleanupWorktree`, which handles
   the on-disk side of teardown.
   """
@@ -16,6 +21,7 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
 
   require Logger
 
+  alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: WorkerRegistry
 
   @impl true
@@ -46,15 +52,17 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
       Logger.warning("StopWorker: exit enumerating workers for #{task_id}: #{inspect(reason)}")
   end
 
-  # Bounded stop, where `Worker.stop/1` would wait on GenServer.stop's
-  # default `:infinity`: this hook runs inside the :close action's hook
-  # pipeline, so a worker wedged in a slow terminate must not hang every
-  # close of its task. On timeout the worker is left still terminating —
-  # which is exactly why CleanupWorktree independently re-checks liveness
-  # before removing the worktree that worker may still be running in
-  # (bd-bmmj4w), rather than assuming this sweep fully drained everything.
+  # Bounded stop, where `Worker.stop/2` defaults to GenServer.stop's
+  # `:infinity`: this hook runs inside the :close action's hook pipeline, so a
+  # worker wedged in a slow terminate must not hang every close of its task.
+  # On timeout the worker is left still terminating — which is exactly why
+  # CleanupWorktree independently re-checks liveness before removing the
+  # worktree that worker may still be running in (bd-bmmj4w), rather than
+  # assuming this sweep fully drained everything. Goes through `Worker.stop/3`
+  # rather than `GenServer.stop/3` so any teardown the Worker module adds to
+  # its own stop API applies here too.
   defp stop(pid, registry_key) do
-    GenServer.stop(pid, :normal, stop_timeout_ms())
+    Worker.stop(pid, :normal, stop_timeout_ms())
   rescue
     e ->
       Logger.warning(
