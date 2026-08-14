@@ -64,6 +64,7 @@ defmodule Arbiter.Loop.FailureClassifier do
     {"server restarted", :server_restart},
     {"rate-limited", :rate_limited},
     {"api was overloaded", :rate_limited},
+    {"usage limit reached", :quota_exhausted},
     {"could not authenticate", :auth_failure},
     {"credentials exp", :auth_failure},
     {":awaiting_review_timeout", :review_timeout},

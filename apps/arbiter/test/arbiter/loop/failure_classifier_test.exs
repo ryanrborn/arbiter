@@ -30,6 +30,15 @@ defmodule Arbiter.Loop.FailureClassifierTest do
       assert FC.classify(reason, []).class == :operational
       assert FC.classify(reason, []).subcategory == :merge_failed
     end
+
+    # bd-3hr6g2: a 5h plan usage-limit exhaustion is provider throttling, same
+    # bucket as a rate-limit or auth failure — never agent_quality, since no
+    # prompt/skill change can move it.
+    test "5h usage-limit exhaustion is operational" do
+      r = FC.classify("5h usage limit reached (exit 1)", [])
+      assert r.class == :operational
+      assert r.subcategory == :quota_exhausted
+    end
   end
 
   describe "agent-quality allowlist (label-only)" do

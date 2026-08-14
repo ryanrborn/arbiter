@@ -21,6 +21,15 @@ defmodule Arbiter.Worker.StopReason do
       authentication credentials" / OAuth expiry). Remediation: re-authenticate.
       Distinct from a generic failure because the fix is operator credentials,
       not the task. Provider-agnostic (Claude OAuth, Gemini API key).
+    * `:quota_exhausted` — the Claude CLI's own 5h (or 7d) plan usage-limit
+      was reached ("Claude AI usage limit reached", "5-hour limit reached"),
+      distinct from `:credit_exhausted` (bd-3hr6g2). Not a billing problem —
+      the account has a *time-boxed* allowance that refills on a known
+      schedule, so this is provider-imposed throttling, not agent or task
+      failure. When the CLI reports a reset timestamp it is parsed into
+      `retry_after`; remediation is to wait for the window to reset (or
+      switch to a workspace/key not sharing the exhausted plan), never a
+      re-dispatch against the same account.
     * `:credit_exhausted` — out of credits / insufficient balance / quota /
       billing. Remediation: top up credits or rotate to a funded key.
     * `:rate_limited` — 429 / rate-limit / overloaded / resource exhausted.
@@ -89,6 +98,7 @@ defmodule Arbiter.Worker.StopReason do
   @typedoc "Classified stop category."
   @type category ::
           :auth_expired
+          | :quota_exhausted
           | :credit_exhausted
           | :rate_limited
           | :gateway_error
@@ -107,11 +117,12 @@ defmodule Arbiter.Worker.StopReason do
           summary: String.t(),
           remediation: String.t() | nil,
           exit_status: integer() | nil,
-          signal: integer() | nil
+          signal: integer() | nil,
+          retry_after: DateTime.t() | nil
         }
 
   @enforce_keys [:category, :summary]
-  defstruct [:category, :summary, :remediation, :exit_status, :signal]
+  defstruct [:category, :summary, :remediation, :exit_status, :signal, :retry_after]
 
   # Output signatures. Ordered most-specific-first; the first hit wins so an
   # auth 401 isn't swallowed by the broader rate-limit pattern. Matched
@@ -128,6 +139,22 @@ defmodule Arbiter.Worker.StopReason do
     | please[ _](run|sign|log)[ _-]?in
     | \/login\b
   /ix
+
+  # bd-3hr6g2: the Claude CLI's own plan usage-limit message, distinct from a
+  # billing/credit failure — this is a time-boxed allowance, not an account
+  # balance. Checked ahead of @credit_signature so "usage limit reached" isn't
+  # swallowed by the generic quota wording below (it wouldn't match anyway,
+  # but ordering keeps the two signatures independent as either evolves).
+  # The CLI appends the reset time as a unix-epoch-seconds after a `|`
+  # (`"Claude AI usage limit reached|1735689600"`); parsed opportunistically
+  # by `retry_after_from/1` — its absence just means no reset time is known.
+  @quota_signature ~r/
+      usage[ _]limit[ _]reached
+    | 5[ -]hour[ _]limit[ _]reached
+    | 5h[ _]limit[ _]reached
+  /ix
+
+  @quota_reset_signature ~r/usage[ _]limit[ _]reached\|(\d+)/i
 
   @credit_signature ~r/
       insufficient[^\n]{0,20}(credit|balance|funds|quota)
@@ -226,6 +253,18 @@ defmodule Arbiter.Worker.StopReason do
               "narrow reads with grep + bounded offset/limit ranges instead of whole-file reads.",
           exit_status: exit_status,
           signal: signal
+        }
+
+      Regex.match?(@quota_signature, haystack) ->
+        retry_after = retry_after_from(haystack)
+
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: "agent's 5h plan usage limit was reached (not a billing/credit failure)",
+          remediation: quota_remediation(retry_after),
+          exit_status: exit_status,
+          signal: signal,
+          retry_after: retry_after
         }
 
       Regex.match?(@auth_signature, haystack) ->
@@ -392,6 +431,7 @@ defmodule Arbiter.Worker.StopReason do
     base =
       case category do
         :auth_expired -> "credentials expired"
+        :quota_exhausted -> "5h usage limit reached"
         :credit_exhausted -> "credits exhausted"
         :rate_limited -> "rate-limited"
         :gateway_error -> "gateway error (proxy/upstream)"
@@ -424,7 +464,8 @@ defmodule Arbiter.Worker.StopReason do
       summary: reason.summary,
       remediation: reason.remediation,
       exit_status: reason.exit_status,
-      signal: reason.signal
+      signal: reason.signal,
+      retry_after: reason.retry_after
     }
   end
 
@@ -457,5 +498,30 @@ defmodule Arbiter.Worker.StopReason do
   # line-buffering, so trim before checking for emptiness.
   defp blank_output?(output_lines) do
     Enum.all?(output_lines, fn line -> is_binary(line) and String.trim(line) == "" end)
+  end
+
+  # Opportunistically pull the unix-epoch-seconds reset time the Claude CLI
+  # appends to its usage-limit message ("...reached|1735689600"). Returns nil
+  # when the message doesn't carry one (older CLI versions, or a paraphrase
+  # like "5-hour limit reached, try again later") — the caller falls back to a
+  # generic "wait for the window to reset" remediation.
+  defp retry_after_from(haystack) do
+    with [_, secs] <- Regex.run(@quota_reset_signature, haystack),
+         {secs, _} <- Integer.parse(secs),
+         {:ok, dt} <- DateTime.from_unix(secs) do
+      dt
+    else
+      _ -> nil
+    end
+  end
+
+  defp quota_remediation(%DateTime{} = retry_after) do
+    "Provider-side plan usage limit, not a billing failure — no action needed. " <>
+      "The window resets at #{DateTime.to_iso8601(retry_after)}; auto-resuming after that."
+  end
+
+  defp quota_remediation(nil) do
+    "Provider-side plan usage limit, not a billing failure — no action needed. " <>
+      "Wait for the 5h window to reset (no reset time was reported), then re-dispatch."
   end
 end

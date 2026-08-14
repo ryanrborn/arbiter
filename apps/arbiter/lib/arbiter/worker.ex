@@ -2756,12 +2756,17 @@ defmodule Arbiter.Worker do
   #   * (bd-4g0fsh) a backoff between attempts (`resume_backoff_ms/2`): the
   #     respawn is scheduled, not inline, so a transient blip has a beat to clear
   #     before the retry — an instant respawn would just re-hit it.
-  # `:exited_without_done` and `:gateway_error` are auto-resumed; auth/credit/
-  # rate/crash/kill fall straight through to fail_stopped.
+  # `:exited_without_done`, `:gateway_error`, and `:quota_exhausted` are
+  # auto-resumed; auth/credit/rate/crash/kill fall straight through to
+  # fail_stopped.
   # gateway_error: the local proxy got a transient 502/503 from Anthropic; the
   # session context is intact so a `claude --resume` picks up where it left off
   # (bd-298jz0 investigation — Mode A from issue #512 harness safety net).
-  @resumable_stop_categories [:exited_without_done, :gateway_error]
+  # quota_exhausted (bd-3hr6g2): the CLI's own 5h plan usage limit, not a
+  # billing failure — the account provably has capacity again once the window
+  # resets, so a resume (rather than a permanent :failed) is the correct
+  # outcome. Distinct backoff: see resume_backoff_for/2.
+  @resumable_stop_categories [:exited_without_done, :gateway_error, :quota_exhausted]
 
   defp maybe_resume_continuation(%State{meta: meta} = state, session) do
     exit_status = Map.get(session, :exit_status)
@@ -2783,7 +2788,7 @@ defmodule Arbiter.Worker do
         # schedule the respawn after a bounded backoff. The session that just
         # exited rides along so the deferred handler can fail cleanly if the
         # respawn itself can't be built.
-        backoff = resume_backoff_ms(reason.category, attempts)
+        backoff = resume_backoff_for(reason, attempts)
 
         Logger.info(
           "Worker: bd-4g0fsh scheduling resume task=#{state.task_id} " <>
@@ -2910,6 +2915,41 @@ defmodule Arbiter.Worker do
   def resume_backoff_ms(category, attempt) when is_integer(attempt) and attempt >= 0 do
     base = Map.get(@resume_backoff_base_ms, category, @resume_backoff_default_base_ms)
     min(base * Integer.pow(2, attempt), @resume_backoff_max_ms)
+  end
+
+  # bd-3hr6g2: a 5h usage-limit exhaustion is recoverable, but on an hours-long
+  # provider timer — not a network blip. Feeding it through the exponential
+  # backoff above (capped at 30s) would hammer a `--resume` every 30 seconds
+  # for hours, itself indistinguishable from abuse and certain to just re-hit
+  # the same limit. Instead wait until the CLI's own reported reset time (plus
+  # a short buffer for clock skew), falling back to the known 5h window length
+  # when no reset timestamp was parsed from the crash output.
+  @quota_reset_buffer_ms 60_000
+  @quota_default_wait_ms :timer.hours(5)
+
+  @doc false
+  @spec resume_backoff_for(Arbiter.Worker.StopReason.t(), non_neg_integer()) ::
+          non_neg_integer()
+  def resume_backoff_for(
+        %Arbiter.Worker.StopReason{category: :quota_exhausted} = reason,
+        _attempt
+      ) do
+    quota_resume_backoff_ms(reason.retry_after)
+  end
+
+  def resume_backoff_for(%Arbiter.Worker.StopReason{category: category}, attempt) do
+    resume_backoff_ms(category, attempt)
+  end
+
+  @doc false
+  @spec quota_resume_backoff_ms(DateTime.t() | nil) :: non_neg_integer()
+  def quota_resume_backoff_ms(nil), do: @quota_default_wait_ms
+
+  def quota_resume_backoff_ms(%DateTime{} = retry_after) do
+    case DateTime.diff(retry_after, DateTime.utc_now(), :millisecond) do
+      ms when ms > 0 -> ms + @quota_reset_buffer_ms
+      _ -> @quota_reset_buffer_ms
+    end
   end
 
   # Insert `--resume <session_id>` immediately after `--print` and swap in the
