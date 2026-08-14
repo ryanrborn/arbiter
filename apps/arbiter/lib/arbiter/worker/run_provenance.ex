@@ -4,7 +4,7 @@ defmodule Arbiter.Worker.RunProvenance do
   recorded on `Arbiter.Workers.Run` (bd-dzz6ly): the effective post-layering
   skill set, the workspace's standing_orders digest, and which routing policy
   is configured. Called from both `Arbiter.Worker.Dispatch` (the main worker
-  spawn) and `Arbiter.Worker.ReviewGate` (reviewer/implementer acolytes) so
+  spawn) and `Arbiter.Worker.ReviewGate` (reviewer/implementer workers) so
   every agent type reports through the same shape.
   """
 

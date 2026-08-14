@@ -17,7 +17,7 @@ defmodule Arbiter.Worker.ResumeContext do
 
   The briefing is plain text derived from `git` — no Claude/Gemini session id,
   no provider `--resume` flag. Any agent, on any provider, gets the same
-  worktree-state summary. This is the deliberate design choice (Admiral sign-off
+  worktree-state summary. This is the deliberate design choice (coordinator sign-off
   2026-06-05): approach (b) — reattach a fresh agent to the preserved worktree
   with a git-derived briefing — over approach (a) provider session-resume.
 

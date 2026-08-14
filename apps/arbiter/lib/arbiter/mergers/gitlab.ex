@@ -722,7 +722,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # required approval. If the MR was opened by the fleet's own identity, GitLab's
   # approval rules require an approval from someone *other than the author* (a
   # project commonly enables "prevent author approval"), which the fleet can't
-  # supply. The Watchdog parks + summons a human once on `:needs_nonauthor_approval`
+  # supply. The Watchdog parks + escalates to a human once on `:needs_nonauthor_approval`
   # rather than failing at the poll ceiling (bd-c3lchp). `requested_changes` is a
   # genuine review action and `approvals_syncing` is transient, so both stay
   # `:needs_approval`; non-fleet authorship also falls back to `:needs_approval`.

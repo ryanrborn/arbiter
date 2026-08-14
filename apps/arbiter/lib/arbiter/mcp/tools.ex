@@ -142,7 +142,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- coordinator_inbox --------------------------------------------------
 
   @doc """
-  The Admiral escalation mailbox for the bound workspace — the structured
+  The coordinator escalation mailbox for the bound workspace — the structured
   replacement for `arb message inbox` / `arb inbox`. Coordinator only; the
   worker tier is denied at the catalog level.
 

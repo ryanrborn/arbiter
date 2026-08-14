@@ -900,7 +900,7 @@ defmodule Arbiter.Mergers.Github do
   # requires an approval from someone *other than the author* — which the fleet
   # can never supply, because GitHub forbids approving your own pull request. The
   # Watchdog treats `:needs_nonauthor_approval` specially: it parks indefinitely
-  # and summons a human once, instead of failing at the auto_merge poll ceiling
+  # and escalates to a human once, instead of failing at the auto_merge poll ceiling
   # (bd-c3lchp / lt-4kjaoe). When authorship can't be confirmed as the fleet's,
   # fall back to the generic `:needs_approval` (a reviewer may still act).
   defp blocked_review_reason(cfg, pr) do

@@ -186,7 +186,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "coordinator_inbox",
       tiers: @coordinator,
       description:
-        "Read the Admiral escalation mailbox for the workspace — the structured " <>
+        "Read the coordinator escalation mailbox for the workspace — the structured " <>
           "replacement for `arb message inbox` / `arb inbox`. Lists messages where " <>
           "`to_ref == \"coordinator\"`. Two states: `state: \"unread\"` (default) lists unread " <>
           "messages and marks them read on return; optionally `clear: true` also soft-clears the " <>
@@ -1760,7 +1760,7 @@ defmodule Arbiter.MCP.Catalog do
         "Resume a paused graph branch by re-dispatching the failed task that blocked it " <>
           "(C5 of #482). Searches all running Conductors for one that has `task_id` in its " <>
           "failed set and re-dispatches it, unblocking the downstream branch. " <>
-          "Use after receiving a conductor failure escalation in the Admiral inbox.",
+          "Use after receiving a conductor failure escalation in the coordinator inbox.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
