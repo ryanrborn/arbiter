@@ -46,6 +46,60 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       assert {:ok, closed} = Ash.update(task, %{}, action: :close)
       assert closed.status == :closed
     end
+
+    # bd-801xs5: a `:fixpass` sub-worker registers under `<task_id>:fixpass`,
+    # not the bare task_id, so the primary worker's exact-match `whereis/1`
+    # lookup never finds it and it leaks past :close.
+    test "stops a :fixpass sub-worker registered under a synthetic key", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "with fixpass", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, fixpass_pid} =
+        Worker.start(task_id: task.id, registry_key: task.id <> ":fixpass", repo: "test/repo")
+
+      assert Worker.whereis(task.id <> ":fixpass") == fixpass_pid
+
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      assert Worker.whereis(task.id <> ":fixpass") == nil
+      refute Process.alive?(fixpass_pid)
+    end
+
+    # The ReviewGate family registers its own distinct synthetic task_id
+    # (`<task_id>#review`, etc), so both the registry key AND the worker's
+    # own `state.task_id` are the synthetic id — unlike :fixpass, where only
+    # registry_key differs.
+    test "stops a #review sub-worker registered under a synthetic key", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "with review", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, review_pid} = Worker.start(task_id: task.id <> "#review", repo: "test/repo")
+
+      assert Worker.whereis(task.id <> "#review") == review_pid
+
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      assert Worker.whereis(task.id <> "#review") == nil
+      refute Process.alive?(review_pid)
+    end
+
+    # A separate task whose id happens to be a string-prefix of another task's
+    # id (e.g. closing "bd-1" while "bd-12:fixpass" is live) must not have its
+    # unrelated worker swept up.
+    test "does not stop a worker for an unrelated task whose id is a prefix", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "closing", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      unrelated_id = task.id <> "x"
+      {:ok, unrelated_pid} = Worker.start(task_id: unrelated_id, repo: "test/repo")
+
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      assert Worker.whereis(unrelated_id) == unrelated_pid
+      assert Process.alive?(unrelated_pid)
+
+      Worker.stop(unrelated_pid)
+    end
   end
 
   describe "CleanupWorktree after_action" do

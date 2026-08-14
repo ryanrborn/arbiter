@@ -29,6 +29,17 @@ defmodule Arbiter.Worker.Registry do
   end
 
   @doc """
+  Return every `{registry_key, pid}` pair currently registered, regardless
+  of key shape. Used by teardown paths that need to sweep synthetic
+  sub-worker keys (`<task_id>:fixpass`, `<task_id>#review`, ...) rather than
+  looking up a single exact key.
+  """
+  @spec all() :: [{String.t(), pid()}]
+  def all do
+    Registry.select(__MODULE__, [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+  end
+
+  @doc """
   Explicitly remove this process's registration. Called from the worker's
   `terminate/2` callback so callers observe `whereis/1 == nil` synchronously
   after `GenServer.stop/1` returns, rather than waiting on Registry's async
