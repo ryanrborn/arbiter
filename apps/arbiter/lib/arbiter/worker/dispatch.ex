@@ -233,7 +233,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
   `dispatch/2`. Resume-specific errors: `{:error, :no_outpost}`,
-  `{:error, {:acolyte_active, status}}`, `{:error, :repo_unknown}`.
+  `{:error, {:worker_active, status}}`, `{:error, :repo_unknown}`.
   """
   @spec resume(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def resume(task_id, opts \\ []) when is_binary(task_id) do
@@ -311,7 +311,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
   `dispatch/2`. Session-resume-specific errors: `{:error, :no_outpost}`,
-  `{:error, :no_session}`, `{:error, {:acolyte_active, status}}`,
+  `{:error, :no_session}`, `{:error, {:worker_active, status}}`,
   `{:error, :repo_unknown}`.
   """
   @spec resume_session(String.t(), dispatch_opts()) ::
@@ -356,7 +356,7 @@ defmodule Arbiter.Worker.Dispatch do
       pid ->
         case safe_worker_status(pid) do
           status when status in [:failed, :completed, nil] -> :ok
-          status -> {:error, {:acolyte_active, status}}
+          status -> {:error, {:worker_active, status}}
         end
     end
   end

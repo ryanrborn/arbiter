@@ -65,11 +65,11 @@ config :arbiter, :gitlab_http_stub, true
 config :arbiter, :oauth_usage_http_stub, true
 config :arbiter, :auto_start_refineries, false
 
-# Acolyte CLAUDE_CONFIG_DIR isolation (bd-3y2mda) is off by default in the suite
+# Worker CLAUDE_CONFIG_DIR isolation (bd-3y2mda) is off by default in the suite
 # so unit tests never touch the real cache dir or symlink the operator's config.
-# Tests that exercise isolation enable it and point :acolyte_config_dir at a tmp
+# Tests that exercise isolation enable it and point :worker_config_dir at a tmp
 # dir of their own.
-config :arbiter, :acolyte_isolate_config, false
+config :arbiter, :worker_isolate_config, false
 
 # Anthropic quota proxy (bd-5boun6): off in test so adapter/dispatch specs see
 # the raw spawn env. Specs that exercise the wiring flip this on per-test.
@@ -103,7 +103,7 @@ config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-
 # Tests that need their own isolated root still override this per-test.
 config :arbiter, :worktree_root, Path.join(System.tmp_dir!(), "arbiter-worktrees-test")
 
-# Stalled-acolyte detection (bd-awi4nw): shorten the post-exit grace so the
+# Stalled-worker detection (bd-awi4nw): shorten the post-exit grace so the
 # deferred classify+escalate check fires fast under test. Still > 0 so a normal
 # completion's in-flight `arb done` wins the race before the check runs.
 config :arbiter, :worker_exit_grace_ms, 50

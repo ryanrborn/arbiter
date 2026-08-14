@@ -90,7 +90,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   `resolve/3` layers, lowest precedence first:
 
     1. `base/0` — the hardcoded safe baseline (this module).
-    2. `Application.get_env(:arbiter, :acolyte_security_policy)` — the
+    2. `Application.get_env(:arbiter, :worker_security_policy)` — the
        install-wide default override.
     3. **`workspace.config["agent"]["security"]` — the CANONICAL per-domain
        (workspace-wide) posture.** This is the documented, stable config path.
@@ -187,13 +187,13 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   @doc """
   The install-wide default: `base/0` overlaid with
-  `Application.get_env(:arbiter, :acolyte_security_policy)`. This is the floor
+  `Application.get_env(:arbiter, :worker_security_policy)`. This is the floor
   used whenever no workspace policy is in play (ad-hoc ReviewGate runs, bare
   `ClaudeSession.start/1` callers).
   """
   @spec default() :: t()
   def default do
-    merge(base(), Application.get_env(:arbiter, :acolyte_security_policy, %{}))
+    merge(base(), Application.get_env(:arbiter, :worker_security_policy, %{}))
   end
 
   @doc """

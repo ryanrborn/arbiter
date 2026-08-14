@@ -136,20 +136,20 @@ config :arbiter, :cloud_quota_probe, enabled: true, interval_ms: 300_000
 # Override at runtime with ANTHROPIC_PROXY_RECEIVE_TIMEOUT (ms).
 config :arbiter_web, :anthropic_proxy, receive_timeout: 120_000
 
-# Install-wide default acolyte security posture (the floor every spawn
+# Install-wide default worker security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline
 # lives in `Arbiter.Agents.SecurityPolicy.base/0` — auto mode, a non-empty
 # destructive-op deny list, worktree-scoped filesystem. Set this to override
 # the install default without editing source or anyone's ~/.claude. Example:
 #
-#   config :arbiter, :acolyte_security_policy, %{
+#   config :arbiter, :worker_security_policy, %{
 #     "permissions" => %{"mode" => "auto", "deny" => ["Bash(docker:*)"]},
 #     "sandbox" => %{"network" => false}
 #   }
 #
 # Per-domain overrides go in `workspace.config["agent"]["security"]`; see
 # docs/worker-security.md.
-config :arbiter, :acolyte_security_policy, %{}
+config :arbiter, :worker_security_policy, %{}
 
 config :arbiter_web,
   ecto_repos: [Arbiter.Repo],

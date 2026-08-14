@@ -412,7 +412,7 @@ defmodule Arbiter.Worker.ReviewGate do
       current_id: nil,
       # The prompt handed to the current reviewer pass, retained so a timeout
       # retry can re-launch the SAME pass (same review context) with a fresh
-      # mind rather than reconstructing it. Set by launch_acolyte/5 (bd-78vg4v).
+      # mind rather than reconstructing it. Set by launch_worker/5 (bd-78vg4v).
       current_prompt: nil,
       reviewer_pid: nil,
       lines: [],
@@ -503,7 +503,7 @@ defmodule Arbiter.Worker.ReviewGate do
             {:stop, :normal, %{state | reported?: true}}
 
           :ok ->
-            case launch_acolyte(
+            case launch_worker(
                    state,
                    state.review_id,
                    :reviewer,
@@ -697,10 +697,10 @@ defmodule Arbiter.Worker.ReviewGate do
         "retrying with a fresh reviewer (#{budget} left)"
     )
 
-    stop_acolyte(state)
+    stop_worker(state)
     retry_id = timeout_retry_id(state.current_id, state.attempt)
 
-    case launch_acolyte(
+    case launch_worker(
            %{state | timeout_retries_left: budget - 1},
            retry_id,
            :reviewer,
@@ -949,11 +949,11 @@ defmodule Arbiter.Worker.ReviewGate do
 
     # The reviewer's subprocess has exited; stop its worker so it can't linger
     # (it may not have self-completed if it never printed `arb done`).
-    stop_acolyte(state)
+    stop_worker(state)
 
     impl_id = implementer_task_id(state.review_id, state.round)
 
-    case launch_acolyte(
+    case launch_worker(
            %{state | phase: :revising},
            impl_id,
            :implementer,
@@ -1010,7 +1010,7 @@ defmodule Arbiter.Worker.ReviewGate do
     {state, new_head_sha} = note_head_change(state)
 
     # The implementer's subprocess has exited; stop its worker so it can't linger.
-    stop_acolyte(state)
+    stop_worker(state)
 
     # Reset the per-round retry budget so a reprompt used in this round does not
     # prevent a reprompt in the next round (bug bd-79goxj).
@@ -1026,7 +1026,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     review_id = reviewer_round_id(next.review_id, next.round)
 
-    case launch_acolyte(next, review_id, :reviewer, rereview_prompt(next), next.command) do
+    case launch_worker(next, review_id, :reviewer, rereview_prompt(next), next.command) do
       {:ok, state} ->
         {:continue, state}
 
@@ -1163,7 +1163,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # escalate as inconclusive. This stays in the current round: a malformed verdict
   # is not a revision.
   defp maybe_reprompt(%{retries_left: budget} = state, reason) when budget > 0 do
-    stop_acolyte(state)
+    stop_worker(state)
 
     # For round > 1, the reprompt should be based on the round-specific review_id
     # (bd-bgeo6i). For round 1, use the base review_id.
@@ -1185,7 +1185,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # extension would incorrectly trigger enter_revise for that configuration.
     max_ext = if reason == :empty_findings and state.max_rounds > 1, do: 1, else: 0
 
-    case launch_acolyte(
+    case launch_worker(
            %{state | retries_left: budget - 1, max_rounds: state.max_rounds + max_ext},
            retry_id,
            :reviewer,
@@ -1244,7 +1244,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # verdict was issued without full verification (satisfies acceptance option
   # (b): the coordinator/implementer can weight it accordingly).
   defp handle_partial_verification(%{retries_left: budget} = state, findings) when budget > 0 do
-    stop_acolyte(state)
+    stop_worker(state)
 
     review_id_for_reprompt =
       if state.round > 1 do
@@ -1255,7 +1255,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
 
-    case launch_acolyte(
+    case launch_worker(
            %{state | retries_left: budget - 1},
            retry_id,
            :reviewer,
@@ -1320,7 +1320,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # routed down the reject path behind a banner naming the findings it skipped.
   defp handle_unaddressed_findings(%{retries_left: budget} = state, findings, gap)
        when budget > 0 do
-    stop_acolyte(state)
+    stop_worker(state)
 
     review_id_for_reprompt =
       if state.round > 1 do
@@ -1331,7 +1331,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
 
-    case launch_acolyte(
+    case launch_worker(
            %{state | retries_left: budget - 1},
            retry_id,
            :reviewer,
@@ -1410,7 +1410,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # banner, so the thread, revise prompt, and any escalation all carry the
   # unmet-criteria reason and count.
   defp handle_unmet_criteria(%{retries_left: budget} = state, findings) when budget > 0 do
-    stop_acolyte(state)
+    stop_worker(state)
 
     review_id_for_reprompt =
       if state.round > 1 do
@@ -1421,7 +1421,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
 
-    case launch_acolyte(
+    case launch_worker(
            %{state | retries_left: budget - 1},
            retry_id,
            :reviewer,
@@ -1482,7 +1482,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # re-review WITH the per-criterion breakdown, then — if the budget is spent or
   # the retry can't spawn — reject the approval rather than clean-merge it.
   defp handle_missing_criteria(%{retries_left: budget} = state, findings) when budget > 0 do
-    stop_acolyte(state)
+    stop_worker(state)
 
     review_id_for_reprompt =
       if state.round > 1 do
@@ -1493,7 +1493,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
 
-    case launch_acolyte(
+    case launch_worker(
            %{state | retries_left: budget - 1},
            retry_id,
            :reviewer,
@@ -1986,11 +1986,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # (the subprocess may finish almost immediately — a fast worker or a test
   # fixture). The topic is known from the id alone, so subscribing ahead of the
   # port open is safe.
-  defp launch_acolyte(state, id, role, prompt, command) do
+  defp launch_worker(state, id, role, prompt, command) do
     Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> id)
     attempt = state.attempt + 1
 
-    case spawn_acolyte(state, id, role, prompt, command) do
+    case spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
         Process.send_after(self(), {:timeout, attempt}, state.timeout_ms)
 
@@ -2013,28 +2013,28 @@ defmodule Arbiter.Worker.ReviewGate do
   # worker gets workspace_id: nil so its completion stays silent — no Admiral
   # notification, no MergeQueue pickup for the synthetic id — while still recording
   # its own run row.
-  defp spawn_acolyte(state, id, role, prompt, command) do
-    with {:ok, pid} <- start_acolyte_worker(state, id, role),
-         :ok <- start_acolyte_session(state, pid, role, prompt, command) do
+  defp spawn_worker(state, id, role, prompt, command) do
+    with {:ok, pid} <- start_worker_process(state, id, role),
+         :ok <- start_worker_session(state, pid, role, prompt, command) do
       _ = Worker.advance(pid, step_for(role))
       {:ok, pid}
     end
   end
 
-  defp start_acolyte_worker(state, id, role) do
+  defp start_worker_process(state, id, role) do
     case Worker.start(
            task_id: id,
            repo: state.repo,
            workspace_id: nil,
-           meta: acolyte_meta(state, role)
+           meta: worker_meta(state, role)
          ) do
       {:ok, pid} -> {:ok, pid}
       {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, reason} -> {:error, {:acolyte_start_failed, reason}}
+      {:error, reason} -> {:error, {:worker_start_failed, reason}}
     end
   end
 
-  defp acolyte_meta(state, :reviewer) do
+  defp worker_meta(state, :reviewer) do
     %{
       role: :reviewer,
       reviews: state.task_id,
@@ -2042,7 +2042,7 @@ defmodule Arbiter.Worker.ReviewGate do
     }
   end
 
-  defp acolyte_meta(state, :implementer) do
+  defp worker_meta(state, :implementer) do
     %{
       role: :implementer,
       revises: state.task_id,
@@ -2086,16 +2086,16 @@ defmodule Arbiter.Worker.ReviewGate do
   defp step_for(:reviewer), do: :reviewing
   defp step_for(:implementer), do: :revising
 
-  defp start_acolyte_session(state, pid, role, prompt, command) do
+  defp start_worker_session(state, pid, role, prompt, command) do
     case build_session_opts(state, pid, role, prompt, command) do
       {:ok, session_opts} ->
         case ClaudeSession.start(session_opts) do
           {:ok, _port} -> :ok
-          {:error, reason} -> {:error, {:acolyte_session_failed, reason}}
+          {:error, reason} -> {:error, {:worker_session_failed, reason}}
         end
 
       {:error, reason} ->
-        {:error, {:acolyte_session_failed, reason}}
+        {:error, {:worker_session_failed, reason}}
     end
   end
 
@@ -2135,7 +2135,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # bd-dzz6ly: same provenance backfill the main dispatch path reports
         # (Arbiter.Worker.Dispatch.build_agent_session_opts/4), so a reviewer
         # or revise-round implementer run answers "what governed it" too.
-        # No `resolved_skills` here — these acolyte roles don't carry a
+        # No `resolved_skills` here — these reviewer/implementer roles don't carry a
         # materialized skill set today, unlike the main worker.
         Worker.report(pid, :run_provenance, %{
           resolved_skills: [],
@@ -2288,7 +2288,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # Stop the current worker worker if it's still alive. Best-effort — used
   # before spawning the next worker so one that finished without printing `arb
   # done` (and so never self-completed) can't linger.
-  defp stop_acolyte(state) do
+  defp stop_worker(state) do
     if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
       safe(fn -> Worker.stop(state.reviewer_pid, :normal) end)
     end

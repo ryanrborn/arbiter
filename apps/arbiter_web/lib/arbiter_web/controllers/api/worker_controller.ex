@@ -245,7 +245,7 @@ defmodule ArbiterWeb.Api.WorkerController do
           "could not resolve the repo for this task; pass it explicitly: `arb worker resume <task> <repo>`",
           %{task_id: task_id}}}
 
-      {:error, {:acolyte_active, status}} ->
+      {:error, {:worker_active, status}} ->
         {:error,
          {:invalid_request,
           "a worker is still active for this task (#{status}); stop it before resuming",
