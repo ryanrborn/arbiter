@@ -738,7 +738,96 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     {subject, body}
   end
 
-  defp escalation_payload(event, %{task_id: task_id} = snapshot, %StopReason{} = reason) do
+  # bd-8lq2g7: a *subordinate* pass (merge-queue CI fix pass / conflict
+  # resolver) runs under the task's own id but its own registry key, alongside
+  # the task's primary worker parked at `:awaiting_review`. Its death is not the
+  # task's worker dying, and the generic payload below said it was — subject
+  # `"<task_id> stopped — exited without completing (exit 0)"` with the
+  # remediation "run `arb worker resume <task_id>`". That hint is both wrong and
+  # unfollowable: `resume` is refused while the primary is parked, so the
+  # operator stops the healthy primary and the whole ReviewGate re-runs from
+  # round 1. Attribute the stop to the pass that actually stopped instead.
+  defp escalation_payload(:worker_stopped, %{task_id: task_id} = snapshot, %StopReason{} = reason) do
+    case Arbiter.Worker.subordinate_label(snapshot) do
+      nil ->
+        primary_escalation_payload(:worker_stopped, snapshot, reason)
+
+      label ->
+        registry_key = Map.get(snapshot, :registry_key) || task_id
+        subject = "#{task_id} #{label} stopped — #{StopReason.label(reason)}"
+
+        body =
+          [
+            "The #{label} for #{title_for(task_id)} stopped: #{reason.summary}.",
+            "Task: #{task_id}",
+            "Worker: #{registry_key} (subordinate #{label} — NOT the task's own worker)",
+            "Repo: #{repo(snapshot)}",
+            exit_line(reason),
+            activity_line(snapshot),
+            subordinate_remediation(reason),
+            "The task's own worker is unaffected — it is still parked awaiting its " <>
+              "merge/review and must be left alone. Do NOT run `arb worker stop`/" <>
+              "`arb worker resume` on #{task_id}: that kills the healthy worker and " <>
+              "re-runs the review gate from scratch. #{retry_hint(label, task_id, registry_key)}"
+          ]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.join("\n")
+
+        {subject, body}
+    end
+  end
+
+  defp escalation_payload(event, snapshot, %StopReason{} = reason),
+    do: primary_escalation_payload(event, snapshot, reason)
+
+  # Categories whose remediation is nothing but "re-dispatch (the task)" —
+  # `:exited_without_done` ("Review the transcript, then re-dispatch"),
+  # `:stalled` ("stop and re-dispatch the task"), `:crashed` ("check stderr,
+  # then re-dispatch"). For a subordinate that verb points at the TASK, which is
+  # the exact harm this payload exists to prevent, and the merge queue already
+  # owns the pass's own retry — so those lines are dropped.
+  @task_redispatch_only [:exited_without_done, :stalled, :crashed]
+
+  # Every other category's remediation is about the environment, the account, or
+  # the harness (re-authenticate, wait for the quota window, top up credits, use
+  # a 1M-context model, pin the agent CLI) and applies no matter who re-runs the
+  # pass. Dropping those wholesale left the coordinator with an escalation that
+  # said only "the queue retries automatically" — i.e. retry straight back into
+  # the same expired credential. Carry them, pass-scoped so the label can't be
+  # read as an instruction to re-dispatch the task (bd-8lq2g7).
+  defp subordinate_remediation(%StopReason{category: category})
+       when category in @task_redispatch_only,
+       do: nil
+
+  defp subordinate_remediation(%StopReason{remediation: nil}), do: nil
+
+  defp subordinate_remediation(%StopReason{remediation: remediation}),
+    do: "Remediation (for the pass, not the task): #{remediation}"
+
+  # The merge queue owns re-dispatch for both subordinate passes: the Watchdog
+  # re-dispatches a fix pass on its next poll once this worker is terminal
+  # (`fix_pass_active?/1` treats :failed as not active), and the queue re-runs
+  # conflict resolution on its next tick. That re-dispatch goes through
+  # `Worker.start_or_reap_terminal/1`, which reaps this now-terminal worker so
+  # it can't squat the subordinate registry key and no-op every retry — without
+  # that, the promise below would be a lie and the task would park forever
+  # (bd-8lq2g7). The manual fallback names the SUBORDINATE key, the only
+  # intervention that is safe here: `arb worker stop` takes a registry key
+  # verbatim, so it reaches the pass without touching the task's own worker.
+  defp retry_hint("fix pass", task_id, registry_key),
+    do:
+      "The merge queue re-dispatches the fix pass automatically on its next poll " <>
+        "(this terminal pass is reaped when it does); inspect the run with " <>
+        "`arb worker runs #{task_id}`, and if the pass itself is wedged stop it by " <>
+        "its own key — `arb worker stop #{registry_key}` — never by the task id."
+
+  defp retry_hint(_label, task_id, registry_key),
+    do:
+      "The merge queue owns the retry; inspect the run with `arb worker runs #{task_id}`, " <>
+        "and if the pass itself is wedged stop it by its own key — " <>
+        "`arb worker stop #{registry_key}` — never by the task id."
+
+  defp primary_escalation_payload(event, %{task_id: task_id} = snapshot, %StopReason{} = reason) do
     verb =
       case event do
         :worker_stopped -> "stopped"

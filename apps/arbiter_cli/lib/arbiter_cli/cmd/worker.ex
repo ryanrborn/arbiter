@@ -192,6 +192,15 @@ defmodule ArbiterCli.Cmd.Worker do
 
     IO.puts("Issue:       #{snap["task_id"]}")
     if snap["worker_type"], do: IO.puts("Type:       #{snap["worker_type"]}")
+
+    # bd-8lq2g7: a merge-queue subordinate pass shares the task's id but runs
+    # under its own registry key, alongside the task's own worker. Say so, so a
+    # stalled/failed pass isn't mistaken for the task's worker.
+    if snap["role"] && snap["registry_key"] != snap["task_id"] do
+      IO.puts("Role:       #{snap["role"]} (subordinate pass — not the task's own worker)")
+      IO.puts("Worker key: #{snap["registry_key"]}")
+    end
+
     IO.puts("Status:     #{snap["status"]}")
     # A claude-driven worker has no ticking workflow step; show the live
     # activity derived from its stream instead of a frozen step. See bd-c919xj.

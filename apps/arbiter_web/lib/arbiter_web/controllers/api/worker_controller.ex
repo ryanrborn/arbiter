@@ -247,8 +247,7 @@ defmodule ArbiterWeb.Api.WorkerController do
 
       {:error, {:worker_active, status}} ->
         {:error,
-         {:invalid_request,
-          "a worker is still active for this task (#{status}); stop it before resuming",
+         {:invalid_request, Arbiter.Worker.Dispatch.worker_active_message(status, task_id),
           %{task_id: task_id}}}
 
       {:error, reason} ->

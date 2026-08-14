@@ -44,7 +44,12 @@ defmodule Arbiter.Workers.Run do
   # review-only worker) that judges the diff, and an `:impl` worker (the
   # review-gate's revise-round implementer) that addresses findings. Recording
   # the type lets the history list show *who* worked the task at each step.
-  @worker_types ~w(main review impl)a
+  #
+  # bd-8lq2g7 adds the two merge-queue *subordinate* passes, which run under the
+  # task's own id alongside the parked primary: `:fix_pass` (CI fix on the open
+  # PR) and `:conflict` (conflict resolution). They were previously recorded as
+  # `:main`, making a failed subordinate read as the authoring worker failing.
+  @worker_types ~w(main review impl fix_pass conflict)a
 
   sqlite do
     table "worker_runs"
@@ -158,8 +163,10 @@ defmodule Arbiter.Workers.Run do
       constraints one_of: @worker_types
 
       description "Which kind of worker produced this run: :main (authoring), " <>
-                    ":review (review-gate or review-only reviewer), or :impl " <>
-                    "(review-gate revise-round implementer)."
+                    ":review (review-gate or review-only reviewer), :impl " <>
+                    "(review-gate revise-round implementer), :fix_pass " <>
+                    "(merge-queue CI fix pass), or :conflict (merge-queue " <>
+                    "conflict resolver)."
     end
 
     attribute :status, :atom do

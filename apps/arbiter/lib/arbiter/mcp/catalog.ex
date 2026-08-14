@@ -723,8 +723,14 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_list",
       tiers: @coordinator,
       description:
-        "List active workers in the workspace: task_id, status, repo, started_at, activity, " <>
-          "model (short display name e.g. \"Sonnet\"), and cost_usd (sum of all ledger entries for the task).",
+        "List active workers in the workspace: task_id, registry_key, role, status, repo, " <>
+          "started_at, activity, model (short display name e.g. \"Sonnet\"), and cost_usd (sum " <>
+          "of all ledger entries for the task). A task may have TWO rows: its own worker " <>
+          "(registry_key == task_id, role null) plus a merge-queue subordinate pass " <>
+          "(registry_key `<task_id>:fixpass` / `<task_id>:conflict`, role `fix_pass` / " <>
+          "`conflict_resolver`) running while the primary is parked awaiting its merge. " <>
+          "Never stop/resume the task on account of a subordinate row — the merge queue " <>
+          "owns those passes.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.worker_list/2
     },
