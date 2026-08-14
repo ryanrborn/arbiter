@@ -784,7 +784,7 @@ defmodule Arbiter.Worker do
   # ---- Usage ledger (Arbiter.Usage.Event) -------------------------------
 
   # bd-93ru7w: reviewer/implementer workers get `workspace_id: nil` on their
-  # own State deliberately (see `spawn_worker/5`) so their completion stays
+  # own State deliberately (see `Arbiter.Worker.ReviewGate.spawn_worker/5`) so their completion stays
   # silent — no Admiral notification, no MergeQueue pickup for the synthetic
   # id. But that same nil was leaking into the *ledger* (Usage.Event and
   # Workers.Run rows), which made `Arbiter.Usage.summarize/1` invisible to

@@ -102,6 +102,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   def ensure do
     if enabled?() do
       dir = path()
+      migrate_legacy_dir(dir)
 
       with :ok <- File.mkdir_p(dir),
            :ok <- write_memory(dir),
@@ -196,15 +197,42 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
   # ---- internals ---------------------------------------------------------
 
-  defp default_path do
-    base =
-      System.get_env("XDG_CACHE_HOME") ||
-        case System.user_home() do
-          home when is_binary(home) and home != "" -> Path.join(home, ".cache")
-          _ -> System.tmp_dir!()
-        end
+  # bd-5szsrw: the isolated config dir was renamed from "acolyte-claude" to
+  # "worker-claude". Installations that spawned workers before this rename
+  # have accumulated session history (projects/, sessions/, shell-snapshots/)
+  # under the legacy name; --resume looks it up by CLAUDE_CONFIG_DIR, so a
+  # blind rename would silently orphan every pre-existing session. Migrate
+  # the directory in place, once, the first time we'd otherwise create a
+  # fresh one. Only applies to the default path — an operator-overridden
+  # `:worker_config_dir` opts out, since we can't know its legacy sibling.
+  defp migrate_legacy_dir(dir) do
+    if dir == default_path() and not File.exists?(dir) and File.exists?(legacy_default_path()) do
+      legacy = legacy_default_path()
 
-    Path.join([base, "arbiter", "worker-claude"])
+      case File.rename(legacy, dir) do
+        :ok ->
+          Logger.info(
+            "Arbiter.Agents.Claude.ConfigDir: migrated legacy config dir #{legacy} -> #{dir}"
+          )
+
+        {:error, reason} ->
+          Logger.warning(
+            "Arbiter.Agents.Claude.ConfigDir: could not migrate legacy config dir " <>
+              "#{legacy} -> #{dir} (#{inspect(reason)}); worker will get a fresh dir"
+          )
+      end
+    end
+  end
+
+  defp default_path, do: Path.join([cache_base(), "arbiter", "worker-claude"])
+  defp legacy_default_path, do: Path.join([cache_base(), "arbiter", "acolyte-claude"])
+
+  defp cache_base do
+    System.get_env("XDG_CACHE_HOME") ||
+      case System.user_home() do
+        home when is_binary(home) and home != "" -> Path.join(home, ".cache")
+        _ -> System.tmp_dir!()
+      end
   end
 
   # Always (re)write the clean worker memory so it can't drift from the source

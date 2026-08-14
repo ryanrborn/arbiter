@@ -145,4 +145,73 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       refute File.exists?(target)
     end
   end
+
+  describe "ensure/0 legacy dir migration (bd-5szsrw)" do
+    # These exercise the *default* path (no :worker_config_dir override), since
+    # migration only applies there — an operator override opts out.
+    setup %{source: source} do
+      uniq = System.unique_integer([:positive])
+      cache_home = Path.join(System.tmp_dir!(), "arbiter-configdir-migrate-#{uniq}")
+      legacy = Path.join([cache_home, "arbiter", "acolyte-claude"])
+      fresh = Path.join([cache_home, "arbiter", "worker-claude"])
+
+      prev_dir = Application.get_env(:arbiter, :worker_config_dir)
+      prev_xdg = System.get_env("XDG_CACHE_HOME")
+
+      Application.delete_env(:arbiter, :worker_config_dir)
+      System.put_env("XDG_CACHE_HOME", cache_home)
+      System.put_env("CLAUDE_CONFIG_DIR", source)
+
+      on_exit(fn ->
+        restore_env(:worker_config_dir, prev_dir)
+
+        case prev_xdg do
+          nil -> System.delete_env("XDG_CACHE_HOME")
+          v -> System.put_env("XDG_CACHE_HOME", v)
+        end
+
+        File.rm_rf!(cache_home)
+      end)
+
+      {:ok, legacy: legacy, fresh: fresh}
+    end
+
+    test "renames an existing legacy acolyte-claude dir to worker-claude", %{
+      legacy: legacy,
+      fresh: fresh
+    } do
+      File.mkdir_p!(legacy)
+      File.write!(Path.join(legacy, "CLAUDE.md"), "stale worker memory")
+      File.mkdir_p!(Path.join(legacy, "projects"))
+      File.write!(Path.join([legacy, "projects", "session.jsonl"]), "{}")
+
+      assert {:ok, ^fresh} = ConfigDir.ensure()
+
+      refute File.exists?(legacy)
+      assert File.dir?(fresh)
+      # Accumulated session history survives the rename...
+      assert File.exists?(Path.join([fresh, "projects", "session.jsonl"]))
+      # ...and ensure/0 still refreshes the memory file on top of it.
+      assert File.read!(Path.join(fresh, "CLAUDE.md")) =~ "Arbiter Worker"
+    end
+
+    test "does nothing when there is no legacy dir", %{fresh: fresh} do
+      assert {:ok, ^fresh} = ConfigDir.ensure()
+      assert File.dir?(fresh)
+    end
+
+    test "does not touch the legacy dir once the fresh dir already exists", %{
+      legacy: legacy,
+      fresh: fresh
+    } do
+      File.mkdir_p!(legacy)
+      File.write!(Path.join(legacy, "marker"), "legacy")
+      File.mkdir_p!(fresh)
+
+      assert {:ok, ^fresh} = ConfigDir.ensure()
+
+      assert File.exists?(legacy)
+      refute File.exists?(Path.join(fresh, "marker"))
+    end
+  end
 end

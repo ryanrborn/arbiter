@@ -65,7 +65,7 @@ config :arbiter, :gitlab_http_stub, true
 config :arbiter, :oauth_usage_http_stub, true
 config :arbiter, :auto_start_refineries, false
 
-# Acolyte CLAUDE_CONFIG_DIR isolation (bd-3y2mda) is off by default in the suite
+# Worker CLAUDE_CONFIG_DIR isolation (bd-3y2mda) is off by default in the suite
 # so unit tests never touch the real cache dir or symlink the operator's config.
 # Tests that exercise isolation enable it and point :worker_config_dir at a tmp
 # dir of their own.
