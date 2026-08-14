@@ -125,6 +125,30 @@ defmodule Arbiter.Worker.ResumeTest do
     test "falls back to the known 5h window when no reset time was parsed" do
       assert Worker.quota_resume_backoff_ms(nil) == :timer.hours(5)
     end
+
+    # bd-3wgdie: unlike resume_backoff_ms/2, this path fed the wall-clock diff
+    # through unclamped — a bad/adversarial reset epoch could park a worker far
+    # longer than any real plan window. Mirror the exponential path's ceiling.
+    test "clamps an absurdly far-out reset time to the max-wait ceiling" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_resume_backoff_ms(retry_after) == :timer.hours(24 * 8)
+    end
+  end
+
+  describe "quota_wait_exceeds_max?/1 — routes absurd waits to fail instead of resume" do
+    test "false for no reset time (falls back to the known 5h default)" do
+      refute Worker.quota_wait_exceeds_max?(nil)
+    end
+
+    test "false for a reset time within the 7-day plan window" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 6), :millisecond)
+      refute Worker.quota_wait_exceeds_max?(retry_after)
+    end
+
+    test "true for a reset time far beyond any real plan window" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_wait_exceeds_max?(retry_after)
+    end
   end
 
   describe "resume_backoff_for/2 — dispatches by category (bd-3hr6g2)" do

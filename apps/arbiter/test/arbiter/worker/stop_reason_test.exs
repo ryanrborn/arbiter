@@ -95,6 +95,41 @@ defmodule Arbiter.Worker.StopReasonTest do
       reason = StopReason.classify(1, ["usage limit reached"])
       assert reason.category == :quota_exhausted
     end
+
+    # bd-3wgdie: the phrase must lead its line (module docstrings, grep hits,
+    # and other tool output the worker merely read embed it mid-line) unless
+    # the reset-epoch suffix is present.
+    test "does not false-match the phrase quoted mid-line in a file the worker read" do
+      reason =
+        StopReason.classify(1, [
+          "    25\t      was reached (\"Claude AI usage limit reached\", \"5-hour limit reached\"),"
+        ])
+
+      refute reason.category == :quota_exhausted
+    end
+
+    test "does not false-match a grep-style prefixed line" do
+      reason =
+        StopReason.classify(1, [
+          "stop_reason.ex:25:      (\"Claude AI usage limit reached\")"
+        ])
+
+      refute reason.category == :quota_exhausted
+    end
+
+    test "still matches when the phrase leads the line after only whitespace" do
+      reason = StopReason.classify(1, ["   Claude AI usage limit reached"])
+      assert reason.category == :quota_exhausted
+    end
+
+    test "the reset-epoch suffix matches even without line anchoring" do
+      reason =
+        StopReason.classify(1, [
+          "some prefix noise usage limit reached|1735689600"
+        ])
+
+      assert reason.category == :quota_exhausted
+    end
   end
 
   describe "classify/2 — gateway / proxy errors (bd-298jz0)" do

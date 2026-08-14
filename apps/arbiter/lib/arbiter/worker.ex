@@ -2781,7 +2781,14 @@ defmodule Arbiter.Worker do
     prev_fp = meta && Map.get(meta, :resume_fingerprint)
     cur_fp = worktree_fingerprint(state)
 
-    case resume_decision(reason.category, session_id, attempts, cap, prev_fp, cur_fp) do
+    decision =
+      if reason.category == :quota_exhausted and quota_wait_exceeds_max?(reason.retry_after) do
+        {:fail, :quota_wait_exceeds_max}
+      else
+        resume_decision(reason.category, session_id, attempts, cap, prev_fp, cur_fp)
+      end
+
+    case decision do
       :resume ->
         # bd-4g0fsh: don't respawn inline — a transient gateway blip needs a beat
         # to clear. Hold at :resuming (a live status, but with no open port) and
@@ -2804,7 +2811,7 @@ defmodule Arbiter.Worker do
         %State{state | status: :resuming}
 
       {:fail, why} ->
-        if why in [:cap_exhausted, :no_progress] do
+        if why in [:cap_exhausted, :no_progress, :quota_wait_exceeds_max] do
           Logger.info(
             "Worker: task=#{state.task_id} not resuming (#{why}, attempt " <>
               "#{attempts}/#{cap}) — failing."
@@ -2927,6 +2934,16 @@ defmodule Arbiter.Worker do
   @quota_reset_buffer_ms 60_000
   @quota_default_wait_ms :timer.hours(5)
 
+  # bd-3wgdie: the module docstring covers both the 5h AND the 7-day plan
+  # limit under the same :quota_exhausted category, and a malformed/adversarial
+  # reset epoch in the crash output is otherwise unbounded — `resume_backoff_ms/2`
+  # deliberately caps at `@resume_backoff_max_ms` for the same reason. Anything
+  # past the longest real plan window (7 days) plus slack is not a wait worth
+  # holding a live worker + worktree for; `quota_wait_exceeds_max?/1` routes
+  # those to `resume_decision/6` as a fail (escalated, not silently parked), and
+  # this ceiling is a defense-in-depth clamp on top for any other caller.
+  @quota_max_wait_ms :timer.hours(24 * 8)
+
   @doc false
   @spec resume_backoff_for(Arbiter.Worker.StopReason.t(), non_neg_integer()) ::
           non_neg_integer()
@@ -2946,10 +2963,25 @@ defmodule Arbiter.Worker do
   def quota_resume_backoff_ms(nil), do: @quota_default_wait_ms
 
   def quota_resume_backoff_ms(%DateTime{} = retry_after) do
-    case DateTime.diff(retry_after, DateTime.utc_now(), :millisecond) do
-      ms when ms > 0 -> ms + @quota_reset_buffer_ms
-      _ -> @quota_reset_buffer_ms
-    end
+    ms =
+      case DateTime.diff(retry_after, DateTime.utc_now(), :millisecond) do
+        ms when ms > 0 -> ms + @quota_reset_buffer_ms
+        _ -> @quota_reset_buffer_ms
+      end
+
+    min(ms, @quota_max_wait_ms)
+  end
+
+  # bd-3wgdie: true when the CLI-reported reset time is far enough out that
+  # waiting for it live (rather than failing + escalating) would park a worker
+  # and its worktree for longer than any real plan window justifies — e.g. a
+  # bad epoch parse or a 7-day-limit message misclassified with a bogus reset.
+  @doc false
+  @spec quota_wait_exceeds_max?(DateTime.t() | nil) :: boolean()
+  def quota_wait_exceeds_max?(nil), do: false
+
+  def quota_wait_exceeds_max?(%DateTime{} = retry_after) do
+    DateTime.diff(retry_after, DateTime.utc_now(), :millisecond) > @quota_max_wait_ms
   end
 
   # Insert `--resume <session_id>` immediately after `--print` and swap in the

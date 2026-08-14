@@ -148,11 +148,22 @@ defmodule Arbiter.Worker.StopReason do
   # The CLI appends the reset time as a unix-epoch-seconds after a `|`
   # (`"Claude AI usage limit reached|1735689600"`); parsed opportunistically
   # by `retry_after_from/1` — its absence just means no reset time is known.
+  #
+  # bd-3wgdie: the bare phrase is NOT anchored — a worker whose last 80 output
+  # lines happen to include a tool result or file read that quotes/discusses
+  # this exact wording (e.g. this very module's docstring, or a grep hit) would
+  # otherwise false-match and pay a 5h+ park instead of a fast fail (the
+  # `:quota_exhausted` remediation is "wait", not "re-dispatch", so a false hit
+  # is expensive). Require the phrase to lead its line (only whitespace before
+  # it, as the CLI actually emits it standalone) UNLESS the `|<epoch>` reset
+  # suffix is present, which is specific enough on its own — real prose
+  # discussing the message doesn't happen to append a matching unix timestamp.
   @quota_signature ~r/
-      usage[ _]limit[ _]reached
-    | 5[ -]hour[ _]limit[ _]reached
-    | 5h[ _]limit[ _]reached
-  /ix
+      ^[ \t]*(claude[ _]ai[ _])?usage[ _]limit[ _]reached
+    | ^[ \t]*5[ -]hour[ _]limit[ _]reached
+    | ^[ \t]*5h[ _]limit[ _]reached
+    | usage[ _]limit[ _]reached\|\d+
+  /mix
 
   @quota_reset_signature ~r/usage[ _]limit[ _]reached\|(\d+)/i
 
