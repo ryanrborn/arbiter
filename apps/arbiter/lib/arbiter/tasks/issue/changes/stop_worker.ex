@@ -50,7 +50,9 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
     |> Enum.each(fn {registry_key, pid} -> stop(pid, registry_key) end)
   rescue
     e ->
-      Logger.warning("StopWorker: error enumerating workers for #{task_id}: #{Exception.message(e)}")
+      Logger.warning(
+        "StopWorker: error enumerating workers for #{task_id}: #{Exception.message(e)}"
+      )
   catch
     :exit, reason ->
       Logger.warning("StopWorker: exit enumerating workers for #{task_id}: #{inspect(reason)}")
@@ -65,8 +67,6 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
       )
   catch
     :exit, reason ->
-      Logger.warning(
-        "StopWorker: exit stopping worker key=#{registry_key}: #{inspect(reason)}"
-      )
+      Logger.warning("StopWorker: exit stopping worker key=#{registry_key}: #{inspect(reason)}")
   end
 end
