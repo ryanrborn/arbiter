@@ -107,6 +107,24 @@ defmodule Arbiter.GitHub.Limiter do
   periodically — so the next incident is diagnosable from the server rather
   than by sampling GitHub from a laptop.
 
+  Allowed background calls are additionally attributed to the **subsystem**
+  that issued them (`with_priority/3`), and the periodic line carries that
+  breakdown: `bg=443 (pr_state_poller=380 pr_patrol=51 merge_queue=12)`.
+  Without it, "the background lane is busy while the fleet is idle" is only
+  answerable by bisecting the pollers one at a time (bd-7qgxf9).
+
+  ## What `bg_paused` does and does not mean
+
+  `bg_paused` counts background calls the limiter **withheld**, and every
+  reason it can be withheld for is an *exhaustion* signal: the account is
+  under `:background_headroom`, under the operator's `:foreground_reserve`,
+  or inside a secondary-limit cooldown. It is a safety valve at the bottom of
+  the budget, not a pacing mechanism — so a healthy account that is burning
+  steadily while idle shows `bg_paused` frozen at zero and *that is correct*.
+  Pacing belongs to the pollers themselves (each backs its own cadence off
+  when it finds nothing to do); the limiter cannot pace for them, because it
+  sees a request only once the caller has already decided to make it.
+
   ## Availability
 
   The limiter fails **open**: if the server is unavailable, `gate/3` lets the
@@ -125,8 +143,14 @@ defmodule Arbiter.GitHub.Limiter do
   @default_poll_interval_ms 60_000
 
   @priority_key {__MODULE__, :priority}
+  @subsystem_key {__MODULE__, :subsystem}
+
+  # Background traffic from a caller that never tagged itself. Not an error —
+  # it just cannot be attributed in the report line.
+  @unattributed :unattributed
 
   @type priority :: :foreground | :background
+  @type subsystem :: atom()
   @type pool_id :: :shared | {:account, String.t()}
   @type rate_info :: %{
           optional(:remaining) => non_neg_integer() | nil,
@@ -163,13 +187,33 @@ defmodule Arbiter.GitHub.Limiter do
   @spec with_priority(priority(), (-> result)) :: result when result: var
   def with_priority(class, fun)
       when class in [:foreground, :background] and is_function(fun, 0) do
+    with_priority(class, current_subsystem(), fun)
+  end
+
+  @doc "Read the ambient subsystem tag for the current process."
+  @spec current_subsystem() :: subsystem()
+  def current_subsystem, do: Process.get(@subsystem_key, @unattributed)
+
+  @doc """
+  Like `with_priority/2`, but also tags the traffic with the `subsystem` that
+  owns it (`:pr_state_poller`, `:pr_patrol`, …) so the periodic report can say
+  *which* poller is spending the background budget (bd-7qgxf9).
+
+  Purely an accounting label — it never changes a throttling decision.
+  """
+  @spec with_priority(priority(), subsystem(), (-> result)) :: result when result: var
+  def with_priority(class, subsystem, fun)
+      when class in [:foreground, :background] and is_atom(subsystem) and is_function(fun, 0) do
     previous = Process.get(@priority_key, :foreground)
+    previous_subsystem = current_subsystem()
     Process.put(@priority_key, class)
+    Process.put(@subsystem_key, subsystem)
 
     try do
       fun.()
     after
       Process.put(@priority_key, previous)
+      Process.put(@subsystem_key, previous_subsystem)
     end
   end
 
@@ -184,7 +228,11 @@ defmodule Arbiter.GitHub.Limiter do
   """
   @spec start_task(priority(), (-> term())) :: {:ok, pid()} | {:error, term()}
   def start_task(class, fun) when class in [:foreground, :background] and is_function(fun, 0) do
-    wrapped = fn -> with_priority(class, fun) end
+    # Capture the subsystem tag here, in the *calling* process — the spawned
+    # task starts with an empty process dictionary, so reading it on the other
+    # side would always come back `:unattributed`.
+    subsystem = current_subsystem()
+    wrapped = fn -> with_priority(class, subsystem, fun) end
 
     # Supervised, not a raw `Task.start/1`: callers of this (e.g. the
     # dashboard's PR-state resolver) can write to the DB, and a bare `Task`
@@ -269,7 +317,10 @@ defmodule Arbiter.GitHub.Limiter do
   @spec acquire(String.t(), priority(), GenServer.server()) ::
           :ok | {:paused, :low_headroom | :secondary_backoff | :foreground_reserve}
   def acquire(token, priority, server \\ __MODULE__) do
-    GenServer.call(server, {:acquire, token, priority})
+    # The subsystem tag is read here rather than passed in: `gate/3` and every
+    # other caller runs in the process that carries the ambient tag, so this is
+    # the one place that can see it without threading it through every seam.
+    GenServer.call(server, {:acquire, token, priority, current_subsystem()})
   end
 
   @doc "Feed observed rate-limit numbers into `token`'s pool."
@@ -362,13 +413,13 @@ defmodule Arbiter.GitHub.Limiter do
   end
 
   @impl true
-  def handle_call({:acquire, token, priority}, _from, state) do
+  def handle_call({:acquire, token, priority, subsystem}, _from, state) do
     {pool_id, state} = resolve(token, state)
     now = state.clock_fun.()
     pool = get_pool(state, pool_id)
 
     decision = decide(priority, pool, state, now)
-    pool = bump_count(pool, priority, decision)
+    pool = bump_count(pool, priority, decision, subsystem)
     state = put_pool(state, pool_id, pool)
 
     {:reply, decision, state}
@@ -486,19 +537,26 @@ defmodule Arbiter.GitHub.Limiter do
 
   defp low_headroom?(_pool, _headroom), do: false
 
-  defp bump_count(pool, :foreground, :ok),
+  defp bump_count(pool, :foreground, :ok, _subsystem),
     do: update_in(pool.counts.foreground, &(&1 + 1))
 
-  defp bump_count(pool, :background, :ok),
-    do: update_in(pool.counts.background, &(&1 + 1))
+  # Only *allowed* background calls are attributed: a withheld call spends no
+  # budget, so folding it into the breakdown would make the per-subsystem
+  # numbers stop summing to `bg` exactly when the operator is reading them to
+  # find out where the budget went.
+  defp bump_count(pool, :background, :ok, subsystem) do
+    pool
+    |> update_in([:counts, :background], &(&1 + 1))
+    |> update_in([:counts, :by_subsystem], &Map.update(&1, subsystem, 1, fn n -> n + 1 end))
+  end
 
-  defp bump_count(pool, :background, {:paused, _reason}),
+  defp bump_count(pool, :background, {:paused, _reason}, _subsystem),
     do: update_in(pool.counts.background_paused, &(&1 + 1))
 
-  defp bump_count(pool, :foreground, {:paused, _reason}),
+  defp bump_count(pool, :foreground, {:paused, _reason}, _subsystem),
     do: update_in(pool.counts.foreground_paused, &(&1 + 1))
 
-  defp bump_count(pool, _priority, _decision), do: pool
+  defp bump_count(pool, _priority, _decision, _subsystem), do: pool
 
   # ---- Pool state ---------------------------------------------------------
 
@@ -514,7 +572,11 @@ defmodule Arbiter.GitHub.Limiter do
         foreground_paused: 0,
         background: 0,
         background_paused: 0,
-        secondary_trips: 0
+        secondary_trips: 0,
+        # subsystem => allowed background calls (bd-7qgxf9). Sums to
+        # `background`; a caller that never tagged itself lands under
+        # `:unattributed`.
+        by_subsystem: %{}
       }
     }
   end
@@ -715,11 +777,24 @@ defmodule Arbiter.GitHub.Limiter do
 
         "#{inspect(pool_id)} remaining=#{inspect(pool.remaining)} " <>
           "fg=#{c.foreground} fg_paused=#{c.foreground_paused} " <>
-          "bg=#{c.background} bg_paused=#{c.background_paused} " <>
+          "bg=#{c.background}#{subsystem_breakdown(c)} bg_paused=#{c.background_paused} " <>
           "secondary_trips=#{c.secondary_trips}"
       end)
       |> Enum.join(" | ")
 
     Logger.info("GitHub limiter: #{summary}")
   end
+
+  # Biggest spender first — the operator reading this line is looking for the
+  # one subsystem to go turn down, not an alphabetical inventory.
+  defp subsystem_breakdown(%{by_subsystem: by_subsystem}) when map_size(by_subsystem) > 0 do
+    detail =
+      by_subsystem
+      |> Enum.sort_by(fn {name, count} -> {-count, name} end)
+      |> Enum.map_join(" ", fn {name, count} -> "#{name}=#{count}" end)
+
+    " (#{detail})"
+  end
+
+  defp subsystem_breakdown(_counts), do: ""
 end

@@ -680,8 +680,9 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   # Pass 1 (polling) is background (bd-b88l3l): this queue polls on a 30s
   # timer and must yield to — and never starve — foreground work like a
-  # deploy or a human-triggered merge. `with_priority/2` tags the current
-  # process for the duration of the poll; the forge clients read that ambient
+  # deploy or a human-triggered merge. `with_priority/3` tags the current
+  # process for the duration of the poll (and names it in the limiter report,
+  # bd-7qgxf9); the forge clients read that ambient
   # class at their request seam. Runs synchronously in the queue's process,
   # so the tag applies.
   #
@@ -691,7 +692,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   # background pause would strand the item at :failed permanently.
   defp poll_all(%State{items: items} = state) do
     {advanced, state} =
-      Limiter.with_priority(:background, fn ->
+      Limiter.with_priority(:background, :merge_queue, fn ->
         # Pass 1: poll + advance each item up to (but not through) the merge.
         # Items that are approved, CI-clean, and up-to-date park at
         # :ready_to_merge; behind-base items are rebased forward and park at

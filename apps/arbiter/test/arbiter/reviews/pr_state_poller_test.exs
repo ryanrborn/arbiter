@@ -73,10 +73,26 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
   # Boot a poller with polling disabled (no timer) so we drive it synchronously.
   # The resolve cycle runs in the poller's process, so hand it access to this
   # test's Req.Test stub (and the shared DB sandbox connection).
-  defp start_poller do
-    poller = start_supervised!({PrStatePoller, name: nil, enabled: false})
+  defp start_poller(opts \\ []) do
+    poller =
+      start_supervised!({PrStatePoller, Keyword.merge([name: nil, enabled: false], opts)})
+
     Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), poller)
     poller
+  end
+
+  # Each record carries its own poll cadence (bd-7qgxf9), so a test that drives
+  # two cycles back-to-back has to move the clock between them — otherwise the
+  # second cycle correctly finds nothing due. Returns the poller and an
+  # `advance` function that jumps it one base interval forward.
+  defp start_paced_poller do
+    {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+    on_exit(fn -> if Process.alive?(clock), do: Agent.stop(clock) end)
+
+    poller = start_poller(interval_ms: 60_000, clock_fun: fn -> Agent.get(clock, & &1) end)
+    advance = fn -> Agent.update(clock, &DateTime.add(&1, 60_000, :millisecond)) end
+
+    {poller, advance}
   end
 
   defp stub_pr(fun), do: Req.Test.stub(Arbiter.Mergers.Github.HTTP, fun)
@@ -169,11 +185,12 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
       ws = github_ws()
       rec = record(ws, %{pr_state: "open"})
       stub_not_found()
-      poller = start_poller()
+      {poller, advance} = start_paced_poller()
 
       assert :ok = PrStatePoller.poll(poller)
       assert Ash.get!(Record, rec.id).pr_state == "unknown"
 
+      advance.()
       assert :ok = PrStatePoller.poll(poller)
       updated = Ash.get!(Record, rec.id)
       assert updated.pr_state == "gone"
@@ -185,12 +202,13 @@ defmodule Arbiter.Reviews.PrStatePollerTest do
       ws = github_ws()
       rec = record(ws, %{pr_state: "open"})
       stub_not_found()
-      poller = start_poller()
+      {poller, advance} = start_paced_poller()
 
       assert :ok = PrStatePoller.poll(poller)
       assert Ash.get!(Record, rec.id).pr_state == "unknown"
 
       stub_open()
+      advance.()
       assert :ok = PrStatePoller.poll(poller)
 
       updated = Ash.get!(Record, rec.id)

@@ -9,6 +9,11 @@ defmodule Arbiter.Workflows.PatrolPacing do
   patrol) because the two patrols are deliberately separate modules/registries
   — see `ReviewPatrolSupervisor`'s moduledoc — but this pacing math has no
   patrol-specific behavior worth duplicating.
+
+  `Arbiter.Reviews.PrStatePoller` reuses `idle_backoff_ms/3` too (bd-7qgxf9),
+  per *record* rather than per patrol: the shape of the problem — "this thing
+  found nothing new again, so stop asking so often" — is identical, and the
+  background GitHub budget it protects is the same one.
   """
 
   # +/- 15%: enough to desynchronize 18 patrols started within the same
