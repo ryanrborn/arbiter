@@ -150,13 +150,90 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
              "escalation must not tell the coordinator to resume the task's primary " <>
                "worker, got:\n#{escalation.body}"
 
-      # Nor may it fall back to the generic "re-dispatch" remediation, which
-      # would re-dispatch the task itself — the same harm by another verb.
-      refute escalation.body =~ "Remediation:",
-             "escalation must not carry the generic re-dispatch remediation, " <>
+      # Nor may it fall back to a remediation whose only content is "re-dispatch"
+      # — for a subordinate that verb means the TASK, the same harm by another
+      # verb. `:exited_without_done`'s remediation ("Review the transcript, then
+      # re-dispatch") is exactly that, so it must not appear at all.
+      refute escalation.body =~ "then re-dispatch",
+             "escalation must not carry a bare task re-dispatch remediation, " <>
+               "got:\n#{escalation.body}"
+
+      refute escalation.body =~ "Review the transcript",
+             "escalation must not carry the :exited_without_done remediation verbatim, " <>
                "got:\n#{escalation.body}"
 
       assert escalation.body =~ "unaffected"
+    end
+
+    test "points the operator at the subordinate's own key, not the task", %{
+      ws: ws,
+      task: task
+    } do
+      escalation = escalation_for(ws, task)
+
+      # The only safe manual intervention. `arb worker stop` passes its argument
+      # straight to `Worker.stop/2` -> registry lookup, so the subordinate key
+      # works verbatim; the coordinator previously had no named action at all.
+      assert escalation.body =~ "arb worker stop #{task.id}:fixpass",
+             "escalation must name the subordinate key as the manual fallback, " <>
+               "got:\n#{escalation.body}"
+
+      refute escalation.body =~ "`arb worker stop #{task.id}`",
+             "escalation must never name a bare `arb worker stop <task_id>`, " <>
+               "got:\n#{escalation.body}"
+    end
+
+    # bd-8lq2g7 finding 2: dropping `reason.remediation` wholesale was right only
+    # for the categories whose remediation IS "re-dispatch the task". For an
+    # expired credential / exhausted quota / thrashed context, the remediation is
+    # the only actionable content there is, and it holds no matter who re-runs
+    # the pass — suppressing it left "the queue retries automatically", i.e.
+    # retry straight back into the same auth failure.
+    test "carries a pass-scoped remediation when the cause is not a re-dispatch", %{
+      ws: ws,
+      task: task
+    } do
+      pid =
+        start_worker(ws, task,
+          registry_key: task.id <> ":fixpass-auth",
+          meta: %{role: :fix_pass, target_branch: "main"}
+        )
+
+      :ok = Worker.advance(pid, :claude)
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: tmp_dir!("sub-fixpass-auth"),
+          command: ["sh", "-c", "echo '401 invalid authentication credentials'; exit 1"]
+        )
+
+      state =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :failed} = s -> s
+            _ -> nil
+          end
+        end)
+
+      assert state.meta.stop_reason.category == :auth_expired
+
+      escalation =
+        eventually(fn ->
+          Message.inbox("admiral", workspace_id: ws.id)
+          |> Enum.find(
+            &(&1.kind == :escalation and &1.directive_ref == task.id and
+                &1.subject =~ "fix pass" and &1.body =~ "fixpass-auth")
+          )
+        end)
+
+      assert escalation.body =~ "Re-authenticate",
+             "the auth remediation is the only actionable content in this stop, " <>
+               "got:\n#{escalation.body}"
+
+      # ...but scoped to the pass, so it can never read as "re-dispatch the task".
+      assert escalation.body =~ "Remediation (for the pass, not the task):"
+      refute escalation.body =~ "arb worker resume #{task.id}"
     end
 
     test "exposes registry_key + role so two rows for one task_id are legible", %{
@@ -170,6 +247,79 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
       assert snap, "worker_list must expose registry_key to distinguish subordinate rows"
       assert snap[:role] == :fix_pass
       assert snap.task_id == task.id
+    end
+  end
+
+  # bd-8lq2g7 finding 1: the escalation promises "the merge queue re-dispatches
+  # the fix pass automatically on its next poll". That was false. `fail_stopped`
+  # only sets `status: :failed`; the worker is a `:temporary` DynamicSupervisor
+  # child and stays alive, still registered under `<task_id>:fixpass` (the
+  # registry entry is dropped in `terminate/2`, which nothing calls). Meanwhile
+  # the Watchdog's `fix_pass_active?/1` reads `:failed` as "not active" and
+  # re-dispatches — into `{:error, {:already_started, pid}}`, discarded silently,
+  # once per poll until the auto-resolve budget is gone and the task parks with
+  # nothing running.
+  describe "a terminal subordinate does not squat its registry key" do
+    setup %{ws: ws, task: task} do
+      pid =
+        start_worker(ws, task,
+          registry_key: task.id <> ":fixpass",
+          meta: %{role: :fix_pass, target_branch: "main"}
+        )
+
+      exit_zero_without_done(pid, "sub-reap")
+      {:ok, dead_pid: pid}
+    end
+
+    test "plain start/1 still collides with it (the bug)", %{ws: ws, task: task} do
+      assert {:error, {:already_started, _pid}} =
+               Worker.start(
+                 task_id: task.id,
+                 repo: "test/repo",
+                 workspace_id: ws.id,
+                 registry_key: task.id <> ":fixpass",
+                 meta: %{role: :fix_pass}
+               )
+    end
+
+    test "start_or_reap_terminal/1 reaps it and the re-dispatch succeeds", %{
+      ws: ws,
+      task: task,
+      dead_pid: dead_pid
+    } do
+      assert {:ok, fresh} =
+               Worker.start_or_reap_terminal(
+                 task_id: task.id,
+                 repo: "test/repo",
+                 workspace_id: ws.id,
+                 registry_key: task.id <> ":fixpass",
+                 meta: %{role: :fix_pass}
+               )
+
+      on_exit(fn -> if Process.alive?(fresh), do: GenServer.stop(fresh, :normal) end)
+
+      assert fresh != dead_pid
+      refute Process.alive?(dead_pid)
+      assert Worker.whereis(task.id <> ":fixpass") == fresh
+    end
+
+    test "a LIVE pass is never reaped", %{ws: ws, task: task} do
+      live =
+        start_worker(ws, task,
+          registry_key: task.id <> ":conflict",
+          meta: %{role: :conflict_resolver}
+        )
+
+      assert {:error, {:already_started, ^live}} =
+               Worker.start_or_reap_terminal(
+                 task_id: task.id,
+                 repo: "test/repo",
+                 workspace_id: ws.id,
+                 registry_key: task.id <> ":conflict",
+                 meta: %{role: :conflict_resolver}
+               )
+
+      assert Process.alive?(live)
     end
   end
 

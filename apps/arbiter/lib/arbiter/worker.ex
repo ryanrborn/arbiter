@@ -204,6 +204,11 @@ defmodule Arbiter.Worker do
   @resume_backoff_default_base_ms 1_000
   @resume_backoff_max_ms 30_000
 
+  # Ceiling on `start_or_reap_terminal/1`'s stop of a terminal worker. Its
+  # `terminate/2` only finalizes a run row and flushes session usage, so this is
+  # generous; the point is that a wedged teardown can't block a merge-queue tick.
+  @reap_stop_timeout_ms 5_000
+
   # ---- public API ---------------------------------------------------------
 
   @doc """
@@ -225,6 +230,77 @@ defmodule Arbiter.Worker do
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
     DynamicSupervisor.start_child(Arbiter.Worker.Supervisor, {__MODULE__, opts})
+  end
+
+  @doc """
+  Like `start/1`, but first reaps a *terminal* worker squatting the requested
+  registry key.
+
+  bd-8lq2g7: a worker that reaches `:failed`/`:completed` is not stopped — it is
+  a `:temporary` child of `Arbiter.Worker.Supervisor` and stays alive (and
+  registered) until something calls `stop/2`; the registry entry is only dropped
+  in `terminate/2`. For the *primary* worker that is deliberate: the task's
+  `:close` after-action owns its teardown, and its post-mortem state is what
+  `arb worker show` reads. For a merge-queue *subordinate* pass it is a trap.
+  Both the Watchdog's `fix_pass_active?/1` and the merge queue treat a terminal
+  pass as "not running" and re-dispatch, but the dead pass still holds
+  `<task_id>:fixpass` / `<task_id>:conflict`, so every re-dispatch returns
+  `{:error, {:already_started, pid}}` forever: the retry silently no-ops, the
+  attempt budget drains, and the task parks with nothing running — the #1204
+  symptom. Reaping here makes the "the merge queue re-dispatches automatically"
+  promise in the stop escalation actually true.
+
+  Only terminal workers are reaped; a live pass still yields
+  `{:error, {:already_started, pid}}` so callers keep refusing to open a second
+  agent session against it.
+  """
+  @spec start_or_reap_terminal(keyword()) :: DynamicSupervisor.on_start_child()
+  def start_or_reap_terminal(opts) when is_list(opts) do
+    case start(opts) do
+      {:error, {:already_started, pid}} = already_started ->
+        # Retry exactly once: a second `:already_started` means someone raced us
+        # to the key with a live worker, which is the answer the caller wants.
+        if reap_terminal(pid), do: start(opts), else: already_started
+
+      other ->
+        other
+    end
+  end
+
+  # True when `pid` is gone (or was terminal and has now been stopped), i.e. the
+  # registry key is free to re-take. Never touches a live worker.
+  defp reap_terminal(pid) when is_pid(pid) do
+    cond do
+      not Process.alive?(pid) ->
+        true
+
+      terminal_status(pid) in [:failed, :completed] ->
+        Logger.info("Worker: reaping terminal worker #{inspect(pid)} to free its registry key")
+        stop_quietly(pid)
+
+      true ->
+        false
+    end
+  end
+
+  defp terminal_status(pid) do
+    case state(pid) do
+      %{status: status} -> status
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp stop_quietly(pid) do
+    GenServer.stop(pid, :normal, @reap_stop_timeout_ms)
+    true
+  catch
+    # A terminate/2 that hangs or a process that died under us: either way the
+    # key is only free if the process is actually gone.
+    :exit, _ -> not Process.alive?(pid)
   end
 
   @doc """
