@@ -40,6 +40,50 @@ defmodule Arbiter.Worker.Registry do
   end
 
   @doc """
+  Return every `{registry_key, pid}` pair owned by `task_id`: the exact key
+  itself plus synthetic sub-worker keys (`<task_id>:fixpass`,
+  `<task_id>:conflict`, `<task_id>#review`, `<task_id>#r<N>`, ...).
+
+  Ownership requires the separator (`:` or `#`) immediately after the prefix —
+  rather than a bare `String.starts_with?/2` on `task_id` alone — so an
+  unrelated task whose id happens to be a string-prefix of another
+  (e.g. "bd-1" vs "bd-12:fixpass") never matches.
+
+  This is the single definition of "which workers belong to this task" shared
+  by the `:close` teardown hooks (`StopWorker`, `CleanupWorktree`); keeping
+  them on one predicate is what lets CleanupWorktree's liveness re-check
+  (bd-bmmj4w) trust that anything StopWorker was responsible for stopping is
+  also something it will refuse to delete a worktree under.
+  """
+  @spec all_for(String.t()) :: [{String.t(), pid()}]
+  def all_for(task_id) when is_binary(task_id) do
+    Enum.filter(all(), fn {registry_key, _pid} -> owned_by?(registry_key, task_id) end)
+  end
+
+  @doc """
+  Like `all_for/1`, but drops entries whose process is already dead.
+
+  Registry's monitor-based cleanup is asynchronous, so a worker that died
+  without its `terminate/2` running (a crash, a kill) can leave a corpse row
+  behind for a short window. A corpse owns nothing and must not block
+  teardown, so every "is anyone still using this task's worktree?" check
+  (`CleanupWorktree`'s drain, the Driver's post-workflow reap) filters on
+  `Process.alive?/1` through here rather than reading `all_for/1` raw.
+  """
+  @spec live_for(String.t()) :: [{String.t(), pid()}]
+  def live_for(task_id) when is_binary(task_id) do
+    task_id
+    |> all_for()
+    |> Enum.filter(fn {_registry_key, pid} -> Process.alive?(pid) end)
+  end
+
+  defp owned_by?(registry_key, task_id) do
+    registry_key == task_id or
+      String.starts_with?(registry_key, task_id <> ":") or
+      String.starts_with?(registry_key, task_id <> "#")
+  end
+
+  @doc """
   Explicitly remove this process's registration. Called from the worker's
   `terminate/2` callback so callers observe `whereis/1 == nil` synchronously
   after `GenServer.stop/1` returns, rather than waiting on Registry's async
