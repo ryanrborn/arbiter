@@ -75,26 +75,74 @@ fleet's GitHub traffic should be **near zero**, and in particular must not scale
 with the size of the open backlog. Two sweeps walk stored records rather than
 work in flight and so are the ones that can violate this:
 
-- `PrStatePoller` — bounded by `:fetch_limit` (500) per cycle, and its set
-  shrinks as records reach a terminal state.
+- `PrStatePoller` — bounded by `:fetch_limit` (500) per cycle and
+  `:max_checks_per_cycle` (25) per cycle actually re-resolved, and each record
+  carries its own backing-off cadence (below).
 - `MergedPRFinalizer` — bounded by `:merged_pr_finalizer_max_checks_per_tick`
   (25) with a rolling cursor, so a large backlog is swept over successive ticks
   instead of all at once. Note one `adapter.get/1` costs *two* GitHub calls (the
   PR, then its reviews).
 
-`Arbiter.GitHub.IdleFloorTest` locks both invariants down: nothing in flight
-issues zero traffic, and a backlog is swept entirely as background.
+`Arbiter.GitHub.IdleFloorTest` locks all three invariants down: nothing in
+flight issues zero traffic, a backlog is swept entirely as background, and a
+settled backlog decays toward zero.
+
+### "Idle" is about time, not backlog size (bd-7qgxf9)
+
+The first version of this floor read "no work in flight" as "no *non-terminal
+records*", which is not what an idle installation looks like. A long-lived
+install carries a standing population of review records whose PR is simply
+still `open`, plus rows parked at `unknown` after a token blip — none of them
+work in flight, all of them non-terminal. `PrStatePoller` re-resolved every one
+on every cycle, so its cost was a flat function of *history*: ~30 such records
+measured as ~1,776 calls/hour (~36% of the 5,000/hr account budget) on a fleet
+with zero workers and zero ready issues.
+
+So the poller now paces **per record** rather than globally. A check that finds
+the state unchanged — or that fails, which is no evidence of change — doubles
+that record's personal interval, from `:interval_ms` up to
+`:backoff_ceiling_ms`; a check that finds a real transition resets it to the
+base, so a PR that is actually moving is followed closely again immediately. A
+settled record costs ~6 calls in its first hour and one per ceiling after that,
+and the floor decays toward zero no matter how much history the install
+carries.
+
+The cadence lives in the poller's memory, not on the row: a restart is worth
+one full re-sweep (which is also a useful re-verification after downtime) and
+then decays again within minutes — not worth a migration or a DB write per
+skipped record.
 
 ## Observability
 
 `Limiter.stats/0` returns per-pool counters (`foreground`, `foreground_paused`,
-`background`, `background_paused`, `secondary_trips`) and the last-seen numbers.
-The limiter also logs a summary line periodically, so the next incident is
-diagnosable from the server rather than by sampling GitHub from a laptop.
+`background`, `background_paused`, `secondary_trips`, `by_subsystem`) and the
+last-seen numbers. The limiter also logs a summary line periodically, so the
+next incident is diagnosable from the server rather than by sampling GitHub
+from a laptop.
+
+Allowed background calls are attributed to the subsystem that issued them, and
+the periodic line carries the breakdown biggest-spender-first:
+
+    GitHub limiter: {:account, "leo"} remaining=4407 fg=0 fg_paused=0
+      bg=443 (pr_state_poller=380 pr_patrol=51 merge_queue=12) bg_paused=0
+      secondary_trips=0
+
+Tag a new background caller by using `Limiter.with_priority/3` instead of
+`/2`; untagged background traffic is still counted, under `:unattributed`.
+Only *allowed* calls are attributed, so the breakdown sums to `bg` exactly.
 
 Every real HTTP request is gated exactly once — including each attempt of the
 merger's bounded secondary-limit retry — so the counters reflect calls actually
 issued rather than call *sites* entered.
+
+### `bg_paused` is an exhaustion valve, not a throttle
+
+Every reason background can be withheld — `:background_headroom`,
+`:foreground_reserve`, a secondary-limit cooldown — is a signal that the
+account is near the bottom of its budget. So a healthy account burning steadily
+while idle shows `bg_paused` frozen at zero, and that is correct rather than a
+sign the mechanism is broken. Pacing is the pollers' job: the limiter only ever
+sees a request after its caller has already decided to make it.
 
 ## Configuration (application env, `:arbiter`)
 
@@ -105,6 +153,15 @@ issued rather than call *sites* entered.
 | `:github_limiter_secondary_cooldown_ms` | `120_000` | How long background stays fully paused after a secondary-limit hit (re-armed on each hit). |
 | `:github_limiter_probe` | `true` (`false` in test) | Whether to resolve owning accounts (`GET /user`) and poll the exempt `/rate_limit` endpoint. |
 | `:merged_pr_finalizer_max_checks_per_tick` | `25` | Tasks the merged-PR sweep checks per tick (non-positive disables the cap). |
+
+`PrStatePoller` is configured separately, under `config :arbiter, :pr_state_poller`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `:interval_ms` | `60_000` | Cycle interval, and the base of each record's backoff. |
+| `:fetch_limit` | `500` | Non-terminal records scanned (DB only) per cycle. |
+| `:backoff_ceiling_ms` | `3_600_000` | Longest a settled record's own interval may grow to. |
+| `:max_checks_per_cycle` | `25` | Records actually re-resolved per cycle, most-overdue first. |
 
 ### The foreground reserve
 

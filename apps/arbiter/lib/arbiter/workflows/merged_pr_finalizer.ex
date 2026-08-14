@@ -29,7 +29,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   ## Cost (bd-8y1i58)
 
   Every call this sweep makes is unattended periodic polling, so it runs under
-  the limiter's `:background` class (`Arbiter.GitHub.Limiter.with_priority/2`)
+  the limiter's `:background` class (`Arbiter.GitHub.Limiter.with_priority/3`)
   and is shed before it can starve foreground work or the operator's own `gh`.
 
   It is also **budgeted**: at most `:max_checks_per_tick` tasks are checked per
@@ -187,7 +187,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   # zero work in flight. The tag is process-scoped and `do_tick_body/1` runs
   # synchronously in this process, so it applies to every call below.
   defp do_tick(state) do
-    Limiter.with_priority(:background, fn -> do_tick_body(state) end)
+    Limiter.with_priority(:background, :merged_pr_finalizer, fn -> do_tick_body(state) end)
   end
 
   defp do_tick_body(state) do

@@ -271,11 +271,12 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   # All GitHub traffic this tick issues is background (bd-3p5vqc): the forge
   # polling here must yield to — and never starve — foreground work like a
-  # deploy or a PR merge. `with_priority/2` tags the current process for the
-  # duration of the tick; the GitHub clients read that ambient class at their
-  # request seam. Runs synchronously in the patrol process, so the tag applies.
+  # deploy or a PR merge. `with_priority/3` tags the current process for the
+  # duration of the tick (and names it in the limiter report, bd-7qgxf9); the
+  # GitHub clients read that ambient class at their request seam. Runs
+  # synchronously in the patrol process, so the tag applies.
   defp do_tick(state) do
-    Limiter.with_priority(:background, fn -> do_tick_body(state) end)
+    Limiter.with_priority(:background, :pr_patrol, fn -> do_tick_body(state) end)
   end
 
   defp do_tick_body(state) do
