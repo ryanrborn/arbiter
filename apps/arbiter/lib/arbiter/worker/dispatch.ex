@@ -135,7 +135,7 @@ defmodule Arbiter.Worker.Dispatch do
   # blackholed PRPatrol dedup for the underlying PR (it treats any non-closed
   # follow-up as "already handled"). On error, explicitly fail the worker
   # (`:idle` -> `:failed` is a valid FSM transition) with a `:spawn_failed`
-  # `StopReason` and escalate to the Admiral, mirroring the
+  # `StopReason` and escalate to the coordinator, mirroring the
   # `realign_task_if_orphaned/2` pattern (bd-cgmidt) above.
   defp finish_dispatch(task, worker_pid, worktree_path, opts) do
     with {:ok, claude_port} <-
@@ -171,7 +171,7 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # Fail the just-started worker into `:failed` with a `:spawn_failed`
-  # StopReason and raise an Admiral escalation, so the caller's error return
+  # StopReason and raise a coordinator escalation, so the caller's error return
   # is never the *only* signal — the bead is not left silently stranded.
   # Best-effort: a dead worker (already terminated some other way) or a
   # notification hiccup must never mask the original dispatch error.
@@ -210,7 +210,7 @@ defmodule Arbiter.Worker.Dispatch do
   This is the explicit `arb resume <task>` path. It is provider-agnostic — no
   Claude/Gemini session-resume id; the continuity comes entirely from the
   preserved worktree state plus a `Arbiter.Worker.ResumeContext` briefing
-  prepended to the standard work prompt (Admiral sign-off 2026-06-05, approach
+  prepended to the standard work prompt (coordinator sign-off 2026-06-05, approach
   (b)).
 
   ## Steps
@@ -1178,7 +1178,7 @@ defmodule Arbiter.Worker.Dispatch do
   # dispatching a (paid, autonomous) worker, verify the agent CLI can
   # authenticate with a single cheap probe. If it can't — the confirmed
   # OAuth-expiry case where every spawn 401s — REFUSE to dispatch, escalate to the
-  # Admiral with a re-auth remediation, and abort before any task/worktree state
+  # coordinator with a re-auth remediation, and abort before any task/worktree state
   # is mutated.
   #
   # Only runs on the real-agent path: skipped unless `start_claude: true`, and
@@ -1598,7 +1598,7 @@ defmodule Arbiter.Worker.Dispatch do
   # Claude CLI's "Autocompact is thrashing" loop detector) will die identically
   # on a plain retry — the working set that overflowed the window hasn't
   # changed. Auto-escalate the redispatch to a 1M-context model so the
-  # Admiral/coordinator doesn't have to remember to pass a manual `model:`
+  # coordinator doesn't have to remember to pass a manual `model:`
   # override every time. This is a *default*, not an override: it's applied
   # before `apply_model_override/2`, so an explicit `opts[:model]` still wins.
   @context_window_escalation_model "claude-sonnet-5[1m]"
@@ -1902,12 +1902,12 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   @doc """
-  Briefing for a **conflict-resolve** acolyte (#354, Phase 2b).
+  Briefing for a **conflict-resolve** worker (#354, Phase 2b).
 
-  The Watchdog (`Arbiter.Worker.Watchdog`) dispatches a short-lived acolyte
+  The Watchdog (`Arbiter.Worker.Watchdog`) dispatches a short-lived worker
   against the task's existing worktree when an *approved* PR is blocked as
   `:conflict` — mergeable in isolation but no longer applying cleanly on top of
-  the current base. The acolyte's job is narrow: rebase the branch onto the
+  the current base. The worker's job is narrow: rebase the branch onto the
   current base, resolve the conflicts **honoring the task's original intent**,
   fix anything the rebase broke, and force-push so the Watchdog's next poll can
   re-attempt the merge.
@@ -2057,15 +2057,15 @@ defmodule Arbiter.Worker.Dispatch do
 
         arb inbox #{task.id}
 
-    This shows any direction from the Admiral or flags from sibling workers
+    This shows any direction from the coordinator or flags from sibling workers
     (e.g. an upstream API shape changed) and marks them read. To leave a flag
     for another worker, use `arb message <their-task-id> <text>`.
 
     Between major steps, also check for `.arbiter/INBOX` in your working
     directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
     NOT error when the file is absent — the normal case). If it exists, read
-    it, act on any Admiral instructions it contains, then delete the file to
-    acknowledge receipt. Treat it as a real-time message from the Admiral — it
+    it, act on any coordinator instructions it contains, then delete the file to
+    acknowledge receipt. Treat it as a real-time message from the coordinator — it
     takes precedence over your current task if it redirects you.
 
     CRITICAL — continuation discipline: NEVER end a response with only a plan
@@ -2129,7 +2129,7 @@ defmodule Arbiter.Worker.Dispatch do
       2. Write your findings to the directive's `notes` field by calling the
          `task_update_progress` MCP tool with its `notes` argument (Markdown is
          fine). Make it self-contained: what you investigated, what you found,
-         and any recommendation or conclusion the Admiral needs — they read it
+         and any recommendation or conclusion the coordinator needs — they read it
          via `arb show #{task.id}` and the dashboard.
 
     A notes gate enforces this: if you print `arb done` while `notes` is still
@@ -2141,12 +2141,12 @@ defmodule Arbiter.Worker.Dispatch do
 
         arb inbox #{task.id}
 
-    This shows any direction from the Admiral or flags from sibling workers and
+    This shows any direction from the coordinator or flags from sibling workers and
     marks them read. To leave a flag for another worker, use
     `arb message <their-task-id> <text>`.
 
     Between major steps, also check for `.arbiter/INBOX` in your working
-    directory. If it exists, read it, act on any Admiral instructions it
+    directory. If it exists, read it, act on any coordinator instructions it
     contains, then delete the file to acknowledge receipt.
 
     *** ASYNC TOOLS: You may run any diagnostic tool — including in parallel or

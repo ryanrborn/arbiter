@@ -31,7 +31,7 @@ defmodule Arbiter.Worker.Worktree do
 
   @default_root "/home/rborn/dev/arbiter-worktrees"
 
-  # Mix envs that acolytes actually use. `test` is the minimum; `dev` is
+  # Mix envs that workers actually use. `test` is the minimum; `dev` is
   # included because some dispatched workers compile in dev mode.
   @seed_envs ~w(test dev)
 
@@ -468,7 +468,7 @@ defmodule Arbiter.Worker.Worktree do
   # seed that was never actually implemented — see bd-6040y1).
   #
   # `.mcp.json` / `.gemini/` / `.codex/` are Arbiter-injected agent-config files
-  # (see bd-9q966y). `.arbiter/` is the Admiral/coordinator mailbox delivery
+  # (see bd-9q966y). `.arbiter/` is the coordinator mailbox delivery
   # directory (`Arbiter.Messages.WorktreeDelivery`, bd-bhrji9) — not a secret,
   # but equally an out-of-band Arbiter artifact that must never land in a
   # contributor commit. All four are gitignored via `info/exclude` (written by
@@ -1007,7 +1007,7 @@ defmodule Arbiter.Worker.Worktree do
 
   @doc """
   Seed the worktree's `deps/` and `_build/<env>/lib/` with the fetched and
-  pre-compiled dependencies from `source_repo`, so acolytes can run `mix
+  pre-compiled dependencies from `source_repo`, so workers can run `mix
   test` without a `mix deps.get` network fetch or a full dep recompile.
 
   ## Why copy, not symlink
@@ -1035,7 +1035,7 @@ defmodule Arbiter.Worker.Worktree do
 
   ## Envs seeded
 
-  Both `test` and `dev` `_build` envs are seeded (acolytes use `test`; some
+  Both `test` and `dev` `_build` envs are seeded (workers use `test`; some
   dispatched workers compile in `dev`). `deps/` is env-independent and seeded
   once. A missing source dir is silently skipped so this function is safe to
   call on a repo that has never been compiled or had deps fetched.

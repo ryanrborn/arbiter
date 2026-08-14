@@ -336,7 +336,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         mr_ref && "PR/MR: #{mr_ref}",
         "Reason: #{reason}",
         "Remediation: #{block_remediation(reason)}",
-        "The Warden detected this on its merge poll and parked the PR rather " <>
+        "The Watchdog detected this on its merge poll and parked the PR rather " <>
           "than failing it — resolve the block (or force-merge) and the next " <>
           "poll will pick it up."
       ]
@@ -423,13 +423,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 
   @doc """
-  Escalate a blocked merge the Warden tried — and failed — to auto-resolve
+  Escalate a blocked merge the Watchdog tried — and failed — to auto-resolve
   (#354, Phase 2a).
 
   Fired by `Arbiter.Worker.Watchdog` after it has attempted to mechanically
-  resolve a `:behind_base` (update-branch) or `:ci_failed` (fix-pass acolyte)
+  resolve a `:behind_base` (update-branch) or `:ci_failed` (fix-pass worker)
   block `attempts` times without the PR becoming mergeable. Unlike
-  `merge_blocked/3` — which fires immediately for a block the Warden does not
+  `merge_blocked/3` — which fires immediately for a block the Watchdog does not
   auto-resolve — this names the auto-resolve attempt count so the operator knows
   the autonomous path was tried first. Same addressed `:escalation` **mailbox**
   shape. Best-effort, returns `:ok`.
@@ -449,7 +449,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         "Reason: #{reason}",
         "Auto-resolve attempts: #{attempts}",
         "Remediation: #{block_remediation(reason)}",
-        "The Warden auto-resolved this block #{attempts} time(s) without success " <>
+        "The Watchdog auto-resolved this block #{attempts} time(s) without success " <>
           "and has stopped retrying. Resolve it manually (or force-merge) and the " <>
           "next poll will pick it up."
       ]
