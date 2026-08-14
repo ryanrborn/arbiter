@@ -2500,6 +2500,53 @@ defmodule Arbiter.Worker.ReviewGateTest do
       refute findings_section =~ "arb done"
       assert findings_section =~ "1. fix it"
     end
+
+    # bd-5l1p63: revise-round implementers were observed re-deriving context the
+    # briefing already supplied (re-reading files, re-narrating "let me check the
+    # current code") instead of trusting it and acting on findings directly. The
+    # briefing must say so explicitly, and only when there IS a briefing to trust.
+    test "instructs the implementer to trust the briefing instead of re-deriving it",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws, %{description: "the directive", acceptance: "it works"})
+      branch = "feature/rev"
+
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      File.write!(Path.join(repo, "fix.ex"), "defmodule Fix, do: nil\n")
+      {_, 0} = git(["add", "fix.ex"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "round 1 fix"], repo)
+
+      state = %{
+        task_id: task.id,
+        branch: branch,
+        target_branch: "main",
+        worktree_path: repo,
+        round: 2
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix the thing")
+
+      assert prompt =~ "authoritative"
+      assert prompt =~ ~r/do not re-?read|without re-?reading|not.*re-derive/i
+    end
+
+    # A worktree-less run has no git-derived briefing to trust, so the
+    # trust-the-briefing instruction (which only makes sense alongside one) must
+    # not appear — nothing to be "authoritative" about.
+    test "omits the trust-the-briefing instruction with no worktree", %{ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+
+      state = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix it")
+
+      refute prompt =~ "authoritative"
+    end
   end
 
   # ---- Pre-spawn commit gate and HEAD-SHA anchoring (bd-1mksks) ------------

@@ -2732,6 +2732,15 @@ defmodule Arbiter.Worker.ReviewGate do
     do NOT restart; build on what is already committed:
 
     #{ResumeContext.work_so_far(wt, tb)}
+
+    This briefing is authoritative for what happened in prior rounds: trust it
+    and act on the reviewer findings below directly, rather than re-reading
+    files just to re-establish context it already gives you. Do not re-read a
+    file, or narrate "let me check the current code," solely to confirm
+    something already summarized above — that re-derives what you've already
+    been told and wastes a round trip. Do read files for context genuinely
+    outside this briefing: code the summary doesn't mention, or anything you
+    need to see in full before editing it.
     """
   end
 
