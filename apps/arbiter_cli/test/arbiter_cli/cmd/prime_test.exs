@@ -280,6 +280,70 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       refute out =~ "Standing Orders"
     end
 
+    test "renders a per-rig Standing Orders section from repo_paths.<rig>.standing_orders" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{
+              "standing_orders" => ["Follow the PR template."],
+              "repo_paths" => %{
+                "client" => %{
+                  "path" => "/home/rborn/dev/leotech/client",
+                  "standing_orders" => [
+                    "If the work has an associated Figma design, link it in the Jira ticket."
+                  ]
+                },
+                "server" => "/home/rborn/dev/leotech/server"
+              }
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "== Standing Orders =="
+      assert out =~ "[ ] Follow the PR template."
+
+      assert out =~ "== Standing Orders — client =="
+      assert out =~ "[ ] If the work has an associated Figma design, link it in the Jira ticket."
+      refute out =~ "== Standing Orders — server =="
+
+      # Rig-scoped block comes after the global one, still ahead of the work list.
+      global_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
+      rig_at = :binary.match(out, "== Standing Orders — client ==") |> elem(0)
+      ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
+      assert global_at < rig_at
+      assert rig_at < ready_at
+    end
+
+    test "omits per-rig Standing Orders sections when no rig carries any" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{
+              "repo_paths" => %{"server" => "/home/rborn/dev/leotech/server"}
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      refute out =~ "Standing Orders —"
+    end
+
     test "never shows an Operating Pitfalls section" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
@@ -420,6 +484,36 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {:ok, decoded} = Jason.decode(String.trim(out))
       [ws] = decoded["workspaces"]
       assert ws["standing_orders"] == ["Watch the Coordinator inbox"]
+    end
+
+    test "rig_standing_orders carries per-rig orders keyed by rig, through --json" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{
+              "repo_paths" => %{
+                "client" => %{
+                  "path" => "/x/client",
+                  "standing_orders" => ["Link the Figma design."]
+                },
+                "server" => %{"path" => "/x/server"}
+              }
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
+      assert exit_code == 0
+
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      [ws] = decoded["workspaces"]
+      assert ws["rig_standing_orders"] == %{"client" => ["Link the Figma design."]}
     end
   end
 end
