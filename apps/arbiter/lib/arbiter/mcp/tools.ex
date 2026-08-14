@@ -1284,7 +1284,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, opts} <- worker_dispatch_opts(scope, args) do
       case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
+        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
       end
     end
   end
@@ -1306,7 +1306,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, _task} <- fetch_task(scope, args, task_id) do
       case Dispatch.resume(task_id, dispatch_opts(scope, args)) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
+        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
       end
     end
   end
@@ -1354,7 +1354,7 @@ defmodule Arbiter.MCP.Tools do
 
       case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
+        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
       end
     end
   end
@@ -3276,10 +3276,15 @@ defmodule Arbiter.MCP.Tools do
   defp dispatch_error_message(:repo_unknown),
     do: "could not resolve the repo for this task; pass `repo` explicitly"
 
-  defp dispatch_error_message({:worker_active, status}),
-    do: "a worker is still active for this task (#{status}); stop it before resuming"
-
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
+
+  # bd-8lq2g7: `{:worker_active, …}` is rendered from the /2 arity so the message
+  # can name the parked worker and its subordinate passes, rather than issuing
+  # the generic (and, at a review park, destructive) "stop it before resuming".
+  defp dispatch_error_message({:worker_active, status}, task_id),
+    do: Dispatch.worker_active_message(status, task_id)
+
+  defp dispatch_error_message(other, _task_id), do: dispatch_error_message(other)
 
   # ---- Phase 2 fetch helpers ---------------------------------------------
 
@@ -3573,6 +3578,13 @@ defmodule Arbiter.MCP.Tools do
 
     %{
       task_id: snap.task_id,
+      # bd-8lq2g7: a task can legitimately have TWO live rows — its primary
+      # worker plus a merge-queue subordinate pass registered under
+      # `<task_id>:fixpass` / `:conflict`. Without these two fields the rows are
+      # indistinguishable, which is what made a dead fix pass look like the
+      # task's own worker having gone stale.
+      registry_key: Map.get(snap, :registry_key) || snap.task_id,
+      role: to_str(Map.get(snap, :role)),
       status: to_str(snap.status),
       repo: snap.repo,
       started_at: iso(snap.started_at),
@@ -3589,6 +3601,10 @@ defmodule Arbiter.MCP.Tools do
     %{
       source: "live",
       task_id: snap.task_id,
+      # See serialize_worker_summary/2 — a subordinate pass shares the task's id
+      # and is only distinguishable by its registry key + role (bd-8lq2g7).
+      registry_key: Map.get(snap, :registry_key) || snap.task_id,
+      role: to_str(Map.get(snap, :role)),
       workspace_id: snap.workspace_id,
       repo: snap.repo,
       current_step: snap.current_step,

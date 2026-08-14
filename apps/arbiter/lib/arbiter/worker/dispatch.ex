@@ -344,6 +344,39 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  @doc """
+  Operator-facing explanation for an `{:error, {:worker_active, status}}`
+  refusal. Single source of truth for the MCP tool and the HTTP API.
+
+  bd-8lq2g7: the two review-park statuses need their own wording. The generic
+  "stop it before resuming" is sound advice for a worker that is genuinely
+  mid-run, but destructive for a parked one: `:awaiting_review_gate` means the
+  ReviewGate is judging the diff right now, and `:awaiting_review` means the
+  MR/PR is open and the Watchdog is polling it. Stopping either discards that
+  in-flight outcome, and the re-dispatch re-runs the review gate from round 1.
+  A parked worker is nearly always parked *correctly* — the thing that actually
+  failed was some other pass running alongside it (see `Arbiter.Worker.subordinate?/1`).
+  """
+  @spec worker_active_message(atom(), String.t()) :: String.t()
+  def worker_active_message(:awaiting_review_gate, task_id) do
+    "#{task_id}'s worker is parked at awaiting_review_gate — the review gate is " <>
+      "judging its diff right now. It is not stalled and must not be stopped: " <>
+      "stopping it discards the review in flight and the next dispatch restarts " <>
+      "the gate from round 1. Wait for the verdict, or check `arb worker list` for " <>
+      "a subordinate pass (`#{task_id}:fixpass` / `:conflict`) if something else failed."
+  end
+
+  def worker_active_message(:awaiting_review, task_id) do
+    "#{task_id}'s worker is parked at awaiting_review — its MR/PR is open and the " <>
+      "watchdog is polling it to completion. It is not stalled and must not be " <>
+      "stopped: stopping it drops the watchdog and the next dispatch re-runs the " <>
+      "whole review gate. Check the PR, or check `arb worker list` for a subordinate " <>
+      "pass (`#{task_id}:fixpass` / `:conflict`) if something else failed."
+  end
+
+  def worker_active_message(status, _task_id),
+    do: "a worker is still active for this task (#{status}); stop it before resuming"
+
   # Resume only applies to a stopped/failed/dead worker. If a worker is still
   # live in a working state, refuse rather than stomp in-flight work — the
   # operator should `arb worker stop` it first. A :failed (the stopped state)

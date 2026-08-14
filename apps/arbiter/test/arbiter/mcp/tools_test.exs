@@ -2919,6 +2919,36 @@ defmodule Arbiter.MCP.ToolsTest do
       assert entry.provider == "gemini"
       assert entry.model == "gemini-2.5-pro"
     end
+
+    test "labels a subordinate pass so two rows for one task_id are legible (bd-8lq2g7)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "two rows one task", workspace_id: ctx.ws.id})
+
+      {:ok, primary} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      {:ok, fixpass} =
+        Worker.start(
+          task_id: task.id,
+          registry_key: task.id <> ":fixpass",
+          repo: "test/repo",
+          workspace_id: ctx.ws.id,
+          meta: %{role: :fix_pass}
+        )
+
+      on_exit(fn ->
+        Process.alive?(primary) && GenServer.stop(primary, :normal)
+        Process.alive?(fixpass) && GenServer.stop(fixpass, :normal)
+      end)
+
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      rows = Enum.filter(workers, &(&1.task_id == task.id))
+      assert length(rows) == 2
+
+      primary_row = Enum.find(rows, &(&1.registry_key == task.id))
+      fixpass_row = Enum.find(rows, &(&1.registry_key == task.id <> ":fixpass"))
+
+      assert primary_row.role == nil
+      assert fixpass_row.role == "fix_pass"
+    end
   end
 
   describe "task_list/2" do

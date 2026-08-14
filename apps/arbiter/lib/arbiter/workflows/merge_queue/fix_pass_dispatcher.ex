@@ -266,12 +266,18 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       meta: meta
     ]
 
-    case Worker.start(opts) do
+    # `start_or_reap_terminal/1`, not `start/1`: a fix pass that already ran and
+    # went terminal (`:failed`/`:completed`) stays alive holding
+    # `<task_id>:fixpass`, because nothing stops a terminal worker. The Watchdog
+    # counts that pass as inactive and re-dispatches, so plain `start/1` would
+    # return `:already_started` on every poll from then on — burning the
+    # auto-resolve budget without ever running a pass (bd-8lq2g7 / #1204).
+    case Worker.start_or_reap_terminal(opts) do
       {:ok, pid} ->
         {:ok, pid}
 
-      # A fix pass is already in flight for this task (a previous tick's spawn
-      # that hasn't terminated). Don't open a second Claude session against it.
+      # A fix pass is genuinely still in flight for this task (a previous tick's
+      # spawn, not yet terminal). Don't open a second Claude session against it.
       {:error, {:already_started, pid}} ->
         {:error, {:fix_pass_already_running, pid}}
 

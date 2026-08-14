@@ -27,6 +27,11 @@ defmodule ArbiterWeb.Api.WorkerJSON do
 
           %{
             task_id: snap.task_id,
+            # bd-8lq2g7: a task can have two live rows — its primary worker plus
+            # a merge-queue subordinate pass under `<task_id>:fixpass` /
+            # `:conflict`. These two fields are what tell them apart.
+            registry_key: Map.get(snap, :registry_key) || snap.task_id,
+            role: to_string_atom(Map.get(snap, :role)),
             workspace_id: snap.workspace_id,
             repo: snap.repo,
             current_step: snap.current_step,
@@ -50,6 +55,9 @@ defmodule ArbiterWeb.Api.WorkerJSON do
     %{
       source: "live",
       task_id: snap.task_id,
+      # See index/1 — a subordinate pass shares the task's id (bd-8lq2g7).
+      registry_key: Map.get(snap, :registry_key) || snap.task_id,
+      role: to_string_atom(Map.get(snap, :role)),
       workspace_id: snap.workspace_id,
       repo: snap.repo,
       current_step: snap.current_step,

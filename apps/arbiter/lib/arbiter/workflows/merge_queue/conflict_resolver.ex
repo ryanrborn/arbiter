@@ -322,14 +322,18 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       meta: meta
     ]
 
-    case Worker.start(opts) do
+    # `start_or_reap_terminal/1`, not `start/1`: a resolver that already went
+    # terminal (`:failed`/`:completed`) is never stopped, so it keeps holding
+    # `<task_id>:conflict` and every later tick's re-dispatch would collide with
+    # a corpse and report a live resolver that isn't (bd-8lq2g7 / #1204).
+    case Worker.start_or_reap_terminal(opts) do
       {:ok, pid} ->
         {:ok, pid}
 
-      # A resolver is already in flight for this task (a previous tick's
-      # spawn that hasn't terminated yet). Don't open a second Claude session
-      # against it — surface the collision so the MergeQueue's escalation path
-      # mails the Admiral instead of pretending we restarted the rebase.
+      # A resolver is genuinely still in flight for this task (a previous tick's
+      # spawn, not yet terminal). Don't open a second Claude session against it
+      # — surface the collision so the MergeQueue's escalation path mails the
+      # Admiral instead of pretending we restarted the rebase.
       {:error, {:already_started, pid}} ->
         {:error, {:resolver_already_running, pid}}
 

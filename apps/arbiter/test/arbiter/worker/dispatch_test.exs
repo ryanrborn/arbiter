@@ -2421,6 +2421,31 @@ defmodule Arbiter.Worker.DispatchTest do
                Dispatch.resume(task.id, start_driver: false)
     end
 
+    # bd-8lq2g7: the refusal message is the last thing an operator reads before
+    # deciding what to do, and "stop it before resuming" is actively harmful when
+    # the live worker is PARKED awaiting its review/merge — stopping it discards
+    # the review-gate outcome and the Watchdog, and the re-dispatch re-runs the
+    # whole gate from round 1. Say what's really going on instead.
+    test "the refusal message warns rather than instructs a stop when parked at review" do
+      for status <- [:awaiting_review, :awaiting_review_gate] do
+        msg = Dispatch.worker_active_message(status, "vs-6jrn9m")
+
+        assert msg =~ "vs-6jrn9m"
+        assert msg =~ to_string(status)
+
+        refute msg =~ "stop it before resuming",
+               "parked status #{status} must not be told to stop the worker, got: #{msg}"
+
+        assert msg =~ "review",
+               "message must explain what the park means, got: #{msg}"
+      end
+    end
+
+    test "the refusal message still tells an operator to stop a genuinely working worker" do
+      msg = Dispatch.worker_active_message(:running, "vs-6jrn9m")
+      assert msg =~ "stop it before resuming"
+    end
+
     test "inherits the repo from the prior run when omitted", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "repo inherit", workspace_id: ws.id})
       _ = stop_worker_with_outpost(task.id)
