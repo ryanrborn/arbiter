@@ -1,5 +1,5 @@
 defmodule ArbiterCli.Cmd.ServerTest do
-  # async: false — tests that mutate ARB_HOME / ARB_ACOLYTE_BEAD_ID and route
+  # async: false — tests that mutate ARB_HOME / ARB_WORKER_BEAD_ID and route
   # through the shared `:bd2_cmd_runner` / `:bd2_sleep` process-dict seams.
   use ArbiterCli.CliCase, async: false
 
@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.ServerTest do
   @no_workers %{"data" => []}
 
   setup do
-    System.delete_env("ARB_ACOLYTE_BEAD_ID")
+    System.delete_env("ARB_WORKER_BEAD_ID")
     System.delete_env("ARB_HOME")
     System.delete_env("ARB_RELEASE_REPO")
     :ok
@@ -64,7 +64,7 @@ defmodule ArbiterCli.Cmd.ServerTest do
   describe "migrate — server running" do
     setup do
       System.put_env("ARB_HOME", System.tmp_dir!())
-      System.delete_env("ARB_ACOLYTE_BEAD_ID")
+      System.delete_env("ARB_WORKER_BEAD_ID")
       Process.put(:bd2_sleep, fn _ms -> :ok end)
       # Port check seam: report port as free so wait_port_free returns immediately.
       Process.put(:bd2_port_check, fn _port -> true end)
