@@ -6,7 +6,7 @@ defmodule Arbiter.Usage.WorkspaceBackfill do
 
   `Arbiter.Worker.ReviewGate.spawn_worker/5` starts those workers with
   `workspace_id: nil` deliberately, to keep the synthetic review/impl task id
-  out of Admiral notifications and MergeQueue pickup. That same nil leaked
+  out of coordinator notifications and MergeQueue pickup. That same nil leaked
   into the usage ledger, making `Arbiter.Usage.summarize/1` blind to review
   and rework spend. `Arbiter.Worker.effective_workspace_id/1` fixes new rows
   at write time; this module repairs the historical ones.

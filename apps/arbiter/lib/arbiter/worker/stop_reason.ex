@@ -13,7 +13,7 @@ defmodule Arbiter.Worker.StopReason do
   of captured output to put a human-actionable label on it. The exit
   status/signal is authoritative; the output signatures only refine the label
   (e.g. distinguishing an auth-expiry 401 from a generic non-zero crash) so the
-  Admiral escalation carries the right remediation.
+  coordinator escalation carries the right remediation.
 
   ## Categories
 

@@ -15,7 +15,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     * APPROVE → the author proceeds to the merger (`do_open_mr`).
     * REQUEST_CHANGES (after the loop is exhausted) / inconclusive / timed-out →
-      the author parks the task with the findings and escalates to the Admiral;
+      the author parks the task with the findings and escalates to the coordinator;
       the branch is **not** merged.
 
   ## The reviewer
@@ -207,7 +207,7 @@ defmodule Arbiter.Worker.ReviewGate do
   @default_reviewer_tier_offset 1
 
   # Defensive cap on the escalation diff so a huge branch can't bloat the
-  # Admiral's mailbox row beyond reason.
+  # coordinator's mailbox row beyond reason.
   @diff_cap_bytes 50_000
 
   # StopReason categories that mean the reviewer/implementer subprocess died for
@@ -611,7 +611,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # The escalation findings for a branch that conflicts with its target: name
   # the conflicting files and instruct resolution. A request_changes verdict, so
-  # the author parks + escalates to the Admiral rather than merging stale work.
+  # the author parks + escalates to the coordinator rather than merging stale work.
   defp conflict_escalation(state, %{files: files}) do
     files_block =
       case files do
@@ -1952,7 +1952,7 @@ defmodule Arbiter.Worker.ReviewGate do
      "ReviewGate: diff range `#{base}..HEAD` is empty — HEAD and merge-base are the same " <>
        "commit (`#{head}`). The branch's commits may have already been incorporated into the " <>
        "target branch. The reviewer would see an empty diff and bogusly conclude 'no work'. " <>
-       "Escalating for Admiral review rather than running a reviewer over an empty diff."}
+       "Escalating for coordinator review rather than running a reviewer over an empty diff."}
   end
 
   defp empty_diff_guard(_state), do: :ok
@@ -2010,7 +2010,7 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   # Start an worker as a distinct worker + claude session under `id`. The
-  # worker gets workspace_id: nil so its completion stays silent — no Admiral
+  # worker gets workspace_id: nil so its completion stays silent — no coordinator
   # notification, no MergeQueue pickup for the synthetic id — while still recording
   # its own run row.
   defp spawn_worker(state, id, role, prompt, command) do

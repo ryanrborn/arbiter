@@ -33,7 +33,7 @@ defmodule Arbiter.Worker.Watchdog do
       :behind_base -> `adapter.update_branch/1` (update-branch), then re-poll.
                       A failed update (conflict introduced) falls through to
                       `:conflict` handling.
-      :ci_failed   -> dispatch a fix-pass acolyte (briefed with the failing
+      :ci_failed   -> dispatch a fix-pass worker (briefed with the failing
                       check logs via `adapter.failing_check_logs/1`) to fix the
                       root cause and push, then re-poll.
 
@@ -58,7 +58,7 @@ defmodule Arbiter.Worker.Watchdog do
   author — which the fleet can never be, having authored the PR) is a special
   case the adapters report as `:needs_nonauthor_approval`. The auto_merge poll
   ceiling used to mark such a PR FAILED even though nothing was broken. The
-  Watchdog now parks it: it summons a human reviewer **once** and lifts its poll
+  Watchdog now parks it: it escalates to a human reviewer **once** and lifts its poll
   ceiling to `:infinity`, handing off to indefinite watching so a later human
   approval auto-merges. No failed worker, on any forge.
 
@@ -122,11 +122,11 @@ defmodule Arbiter.Worker.Watchdog do
   # workspace config["merge"]["max_auto_resolve_attempts"].
   @default_max_auto_resolve_attempts 2
 
-  # The default dispatcher the Watchdog uses to spawn a fix-pass acolyte for a
+  # The default dispatcher the Watchdog uses to spawn a fix-pass worker for a
   # :ci_failed block. Swappable via the `:fix_pass_dispatcher` opt (tests stub it).
   @default_fix_pass_dispatcher Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
-  # Consecutive safe_merge failures before the Watchdog pages the Admiral with a
+  # Consecutive safe_merge failures before the Watchdog pages the coordinator with a
   # stall notification (bd-6gxosc). The Watchdog keeps retrying after notifying;
   # the counter resets on a successful merge so a future stall re-notifies.
   @default_merge_fail_notify_threshold 3
@@ -136,11 +136,11 @@ defmodule Arbiter.Worker.Watchdog do
   @fix_pass_registry_suffix ":fixpass"
   # Bounded rebase attempts before the Watchdog gives up auto-resolving a
   # `:conflict` block and escalates to the coordinator (#354, Phase 2b). Each
-  # attempt is one dispatched rebase-resolve acolyte; if two consecutive passes
+  # attempt is one dispatched rebase-resolve worker; if two consecutive passes
   # don't clear the conflict it is almost certainly semantic and needs a human.
   @default_max_conflict_attempts 2
 
-  # The resolver that dispatches a rebase-resolve acolyte against the task's
+  # The resolver that dispatches a rebase-resolve worker against the task's
   # existing worktree. Injectable via the `:conflict_resolver` opt (tests pass a
   # stub). The default is the same module the MergeQueue uses, so the Watchdog-
   # driven Phase 2b flow and the legacy #122 MergeQueue path share one resolver.
@@ -302,7 +302,7 @@ defmodule Arbiter.Worker.Watchdog do
   PR/MR review state. When the ReviewGate approved in-process, hosted-forge
   adapters never see that approval on the PR itself, so `classify/1` returns
   `:pending` forever and the arity-1 gate returns `nil` on every poll — which
-  made the entire block-handling surface (`:ci_failed` → fix-pass acolyte,
+  made the entire block-handling surface (`:ci_failed` → fix-pass worker,
   `:behind_base` → update-branch, the exhaustion escalation) dead code for
   exactly the population ReviewGate drives. Live consequence: PR #1173
   auto-merged four seconds after its APPROVE verdict with a `mix test` check
@@ -434,14 +434,14 @@ defmodule Arbiter.Worker.Watchdog do
           approved_merge_notified: false,
           # Auto-resolve of an approved `:conflict` block (#354, Phase 2b).
           #   auto_resolve_conflict  — master switch (workspace-tunable).
-          #   conflict_resolver      — module that dispatches the rebase acolyte.
+          #   conflict_resolver      — module that dispatches the rebase worker.
           #   max_conflict_attempts  — bounded rebase passes before escalation.
           #   conflict_attempts      — passes dispatched for the current conflict.
-          #   conflict_resolving     — a resolver acolyte is in flight right now.
+          #   conflict_resolving     — a resolver worker is in flight right now.
           #   conflict_resolver_pid  — that resolver worker's pid. We poll its
           #                            terminal status to detect completion: the
           #                            resolver worker does NOT exit when its
-          #                            acolyte finishes (it lingers :completed/
+          #                            worker finishes (it lingers :completed/
           #                            :failed until task :close), so a `:DOWN`
           #                            monitor never fires on a normal finish.
           #   conflict_branch        — branch label (for the exhaustion escalation).
@@ -575,7 +575,7 @@ defmodule Arbiter.Worker.Watchdog do
       #
       # This is the last-resort guard, not the resolution path: a red pipeline
       # normally surfaces as a `:ci_failed` block, and `handle_block/3` gets
-      # there first — dispatching a bounded fix-pass acolyte and escalating once
+      # there first — dispatching a bounded fix-pass worker and escalating once
       # the retries are exhausted (that block is now visible on ReviewGate lanes
       # too, via `effective_block_reason/2`). This branch only catches the case
       # where the adapter surfaces the red pipeline without a block reason, so
@@ -803,7 +803,7 @@ defmodule Arbiter.Worker.Watchdog do
     end)
   end
 
-  # When watch_pipeline is enabled, escalate to the Admiral on the first poll
+  # When watch_pipeline is enabled, escalate to the coordinator on the first poll
   # that reports a failed pipeline. Stay parked — a human may force-merge or
   # rerun. Only escalates once per failure sequence (tracks last_pipeline to
   # suppress repeated alerts on consecutive :failed polls).
@@ -815,7 +815,7 @@ defmodule Arbiter.Worker.Watchdog do
     if current_pipeline == :failed and state.last_pipeline != :failed do
       Logger.warning(
         "Worker.Watchdog: CI pipeline failed for task=#{state.task_id} mr=#{state.mr_ref}; " <>
-          "escalating to Admiral, staying parked"
+          "escalating to coordinator, staying parked"
       )
 
       safe(fn ->
@@ -1076,7 +1076,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp auto_resolvable?(_), do: false
 
   # :behind_base needs the adapter to support `update_branch/1`; :ci_failed is
-  # resolved by dispatching a fix-pass acolyte (adapter-agnostic — the failing
+  # resolved by dispatching a fix-pass worker (adapter-agnostic — the failing
   # check logs are best-effort).
   defp adapter_supports?(%{adapter: adapter}, :behind_base),
     do: function_exported?(adapter, :update_branch, 1)
@@ -1121,7 +1121,7 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  # :ci_failed — dispatch a fix-pass acolyte (briefed with the failing check
+  # :ci_failed — dispatch a fix-pass worker (briefed with the failing check
   # logs) to fix the root cause and push, then re-poll. Only one fix pass runs at
   # a time: while a prior one is still working we wait rather than spawning a
   # second, so the attempt counter tracks *completed* fix passes.
@@ -1133,7 +1133,7 @@ defmodule Arbiter.Worker.Watchdog do
       checks = safe_failing_checks(state)
 
       Logger.info(
-        "Worker.Watchdog: auto-resolving :ci_failed via fix-pass acolyte for " <>
+        "Worker.Watchdog: auto-resolving :ci_failed via fix-pass worker for " <>
           "task=#{state.task_id} mr=#{state.mr_ref} (attempt #{attempts}, " <>
           "#{length(checks)} failing check(s))"
       )
@@ -1145,7 +1145,7 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  # True when a fix-pass acolyte for this task is still working (registered under
+  # True when a fix-pass worker for this task is still working (registered under
   # the `:fixpass` suffix and not yet terminal).
   defp fix_pass_active?(state) do
     case Worker.whereis(state.task_id <> @fix_pass_registry_suffix) do
@@ -1225,8 +1225,8 @@ defmodule Arbiter.Worker.Watchdog do
   # Auto-resolve an approved-but-conflicting PR (#354, Phase 2b). When the
   # merger reports a `:conflict` block on an *approved* PR — mergeable in
   # isolation but no longer applying cleanly on the moved base — the Watchdog
-  # dispatches a short-lived rebase-resolve acolyte against the task's existing
-  # worktree instead of parking and paging a human. The acolyte rebases,
+  # dispatches a short-lived rebase-resolve worker against the task's existing
+  # worktree instead of parking and paging a human. The worker rebases,
   # resolves honoring the task intent, runs tests, and force-pushes; the next
   # poll then re-attempts the merge.
   #
@@ -1245,8 +1245,8 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  # A resolver acolyte is in flight. The resolver is an `Arbiter.Worker`
-  # GenServer that does NOT exit when its rebase acolyte finishes — it lingers
+  # A resolver worker is in flight. The resolver is an `Arbiter.Worker`
+  # GenServer that does NOT exit when its rebase worker finishes — it lingers
   # in a terminal status (:completed/:failed) until task :close — so we drive
   # completion off the worker's status on each poll rather than a process
   # `:DOWN` that only fires on an abnormal crash (#354 review). While the
@@ -1286,7 +1286,7 @@ defmodule Arbiter.Worker.Watchdog do
         attempt = state.conflict_attempts + 1
 
         Logger.info(
-          "Worker.Watchdog: dispatched conflict-resolve acolyte " <>
+          "Worker.Watchdog: dispatched conflict-resolve worker " <>
             "(attempt #{attempt}/#{state.max_conflict_attempts}) for " <>
             "task=#{state.task_id} mr=#{state.mr_ref}"
         )
@@ -1301,7 +1301,7 @@ defmodule Arbiter.Worker.Watchdog do
 
       {:error, reason} ->
         Logger.warning(
-          "Worker.Watchdog: could not dispatch conflict-resolve acolyte for " <>
+          "Worker.Watchdog: could not dispatch conflict-resolve worker for " <>
             "task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; escalating"
         )
 
@@ -1330,9 +1330,9 @@ defmodule Arbiter.Worker.Watchdog do
   defp reset_conflict_state(state),
     do: %{teardown_resolver(state) | conflict_attempts: 0, conflict_escalated: false}
 
-  # Has the in-flight resolver acolyte finished its rebase pass? The resolver is
+  # Has the in-flight resolver worker finished its rebase pass? The resolver is
   # an `Arbiter.Worker` that lingers in a terminal status (:completed/:failed)
-  # after its acolyte exits — it is only torn down on task :close — so "finished"
+  # after its worker exits — it is only torn down on task :close — so "finished"
   # means the worker reports a terminal status (or its process is already gone).
   # This replaces the `:DOWN` monitor, which never fired on a normal completion
   # and left `conflict_resolving` latched true forever (#354 review).
@@ -1461,7 +1461,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp watch_pipeline_from_workspace(_), do: false
 
   # Watchdog: bd-66ey1o / bd-akr4il. After `:max_polls` consecutive non-terminal
-  # polls, escalate to the Admiral and either:
+  # polls, escalate to the coordinator and either:
   #   - auto_merge ON  → fail the worker (auto-merge should fire quickly; a 30-
   #                       min timeout means something is broken on the forge side)
   #   - auto_merge OFF → park the worker (a human reviewer may take overnight or
@@ -1551,7 +1551,7 @@ defmodule Arbiter.Worker.Watchdog do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  # Best-effort fetch of the failing-check briefing for the fix-pass acolyte. An
+  # Best-effort fetch of the failing-check briefing for the fix-pass worker. An
   # adapter that doesn't expose check logs, or any error, yields an empty list —
   # the fix pass still dispatches, just without log context.
   defp safe_failing_checks(%{adapter: adapter, mr_ref: mr_ref}) do

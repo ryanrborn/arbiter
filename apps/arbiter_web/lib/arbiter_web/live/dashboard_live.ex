@@ -1636,7 +1636,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── E. Workspaces / Warships as compact cards ────────────── --%>
+        <%!-- ── E. Workspaces as compact cards ──────────────────────── --%>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <section id="workspaces-section" class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
