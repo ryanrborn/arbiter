@@ -36,7 +36,7 @@ defmodule Arbiter.Worker do
 
   ## Review gate (`:awaiting_review_gate`)
 
-  A standing order: an worker must not merge its own work. When the worker's
+  A standing order: a worker must not merge its own work. When the worker's
   `arb done` fires and the workspace requires review
   (`Workspace.review_required?/1`), the worker parks at `:awaiting_review_gate` and
   spawns an `Arbiter.Worker.ReviewGate` — which runs a **distinct** reviewer
@@ -48,7 +48,7 @@ defmodule Arbiter.Worker do
 
   ## Merge-request review (`:awaiting_review`)
 
-  When an worker finishes its work the worker opens a merge request via
+  When a worker finishes its work the worker opens a merge request via
   `open_mr/5` instead of completing immediately. That call resolves the
   workspace's merger adapter (`Arbiter.Mergers.for_workspace/1`), opens the
   MR, stores the `mr_ref` + clickable `merger_url` on the worker, transitions
@@ -2034,7 +2034,7 @@ defmodule Arbiter.Worker do
   # word-bounded marker (claude_session.ex emits the done message exclusively for
   # assistant text / the raw-line fallback, never for tool calls or tool
   # results). Scanning the raw output buffer instead would re-admit the mid-task
-  # false positive the live detector guards against (an worker that cats/echoes
+  # false positive the live detector guards against (a worker that cats/echoes
   # "arb done"), so we deliberately rely on the already-scoped signal.
   defp run_signalled_done?(%State{meta: meta}), do: Map.get(meta || %{}, :done_seen, false)
 
@@ -2540,7 +2540,7 @@ defmodule Arbiter.Worker do
   # worker to "commit+push your work", which it already did (incorrectly including
   # the secret). Removing the secret from history requires a `git rebase --onto` or
   # `git filter-repo` operation that the worker cannot safely self-apply; the
-  # The coordinator must intervene (squash-merge + rotate if necessary).
+  # coordinator must intervene (squash-merge + rotate if necessary).
   defp handle_commit_gate(state, _branch, :secret_in_commit) do
     park_commit_gate(state, :secret_in_commit, :no_retry)
   end
