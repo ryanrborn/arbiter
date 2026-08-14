@@ -46,6 +46,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
+  @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
   @no_verdict_auth_prose Path.expand(
                            "../../fixtures/review_no_verdict_auth_prose.sh",
                            __DIR__
@@ -1248,6 +1249,56 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "did not expect a re-prompt run row for an auth-expiry crash"
+    end
+
+    # bd-3hr6g2: a reviewer subprocess that dies because the account's own 5h
+    # plan usage limit was reached never gets far enough to print a VERDICT
+    # line either — and, unlike a generic crash, re-prompting within the same
+    # exhausted window is guaranteed to fail identically. Must be classified
+    # and escalated the same way as the other infra-failure categories above,
+    # under its own :quota_exhausted reason rather than being swallowed by
+    # :credit_exhausted (a real billing failure) or left as a generic crash
+    # (which WOULD get a re-prompt).
+    test "a reviewer that crashes on 5h usage-limit exhaustion escalates with the real reason, no re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-quota"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@quota_exhausted],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation for the task"
+      assert escalation.body =~ "usage limit"
+
+      # No re-prompt run row: retrying within the same exhausted window would
+      # fail identically, so the gate must not waste an attempt on it.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "did not expect a re-prompt run row for a quota-exhaustion crash"
     end
 
     # bd-b2glhm round 2: a reviewer that exits 0 (finished cleanly) but merely

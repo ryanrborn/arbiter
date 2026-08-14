@@ -220,8 +220,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # `:exited_without_done`: those have no specific signature, so a re-prompt may
   # still be worth trying (a near-miss on the reviewer's part, not a known
   # infra failure).
+  #
+  # bd-3hr6g2: `:quota_exhausted` (the CLI's own 5h plan usage limit, distinct
+  # from `:credit_exhausted`) belongs here for the same reason — a reviewer
+  # that just hit the account's usage ceiling cannot produce a verdict no
+  # matter how many times it's re-prompted within the same window.
   @infra_failure_categories [
     :auth_expired,
+    :quota_exhausted,
     :credit_exhausted,
     :rate_limited,
     :gateway_error,

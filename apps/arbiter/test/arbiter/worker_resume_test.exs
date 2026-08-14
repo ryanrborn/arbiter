@@ -63,6 +63,18 @@ defmodule Arbiter.Worker.ResumeTest do
       assert {:fail, :cap_exhausted} =
                Worker.resume_decision(:gateway_error, "sid-gw", 3, 3, "a", "b")
     end
+
+    # bd-3hr6g2: a 5h plan usage-limit exhaustion is recoverable — the account
+    # provably has capacity again once the window resets — so it resumes under
+    # the same hard cap + no-progress guard as the other recoverable stops.
+    test "resumes a quota-exhaustion stop" do
+      assert :resume = Worker.resume_decision(:quota_exhausted, "sid-q", 0, 3, nil, nil)
+    end
+
+    test "a quota-exhaustion stop still fails once the hard cap is reached" do
+      assert {:fail, :cap_exhausted} =
+               Worker.resume_decision(:quota_exhausted, "sid-q", 3, 3, "a", "b")
+    end
   end
 
   describe "resume_backoff_ms/2 — bounded exponential backoff (bd-4g0fsh)" do
@@ -92,6 +104,80 @@ defmodule Arbiter.Worker.ResumeTest do
 
     test "falls back to a default base for any other category" do
       assert Worker.resume_backoff_ms(:something_else, 0) == 1_000
+    end
+  end
+
+  describe "quota_resume_backoff_ms/1 — wait-for-window-reset (bd-3hr6g2)" do
+    test "waits until the reported reset time, plus a buffer" do
+      retry_after = DateTime.add(DateTime.utc_now(), 3_600, :second)
+      ms = Worker.quota_resume_backoff_ms(retry_after)
+
+      # ~1 hour, plus the fixed buffer — not the 30s exponential ceiling.
+      assert ms > 3_600_000
+      assert ms < 3_660_000
+    end
+
+    test "a reset time already in the past still waits the short buffer, not 0" do
+      retry_after = DateTime.add(DateTime.utc_now(), -60, :second)
+      assert Worker.quota_resume_backoff_ms(retry_after) == 60_000
+    end
+
+    test "falls back to the known 5h window when no reset time was parsed" do
+      assert Worker.quota_resume_backoff_ms(nil) == :timer.hours(5)
+    end
+
+    # bd-3wgdie: unlike resume_backoff_ms/2, this path fed the wall-clock diff
+    # through unclamped — a bad/adversarial reset epoch could park a worker far
+    # longer than any real plan window. Mirror the exponential path's ceiling.
+    test "clamps an absurdly far-out reset time to the max-wait ceiling" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_resume_backoff_ms(retry_after) == :timer.hours(24 * 8)
+    end
+  end
+
+  describe "quota_wait_exceeds_max?/1 — routes absurd waits to fail instead of resume" do
+    test "false for no reset time (falls back to the known 5h default)" do
+      refute Worker.quota_wait_exceeds_max?(nil)
+    end
+
+    test "false for a reset time within the 7-day plan window" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 6), :millisecond)
+      refute Worker.quota_wait_exceeds_max?(retry_after)
+    end
+
+    test "true for a reset time far beyond any real plan window" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_wait_exceeds_max?(retry_after)
+    end
+  end
+
+  describe "resume_backoff_for/2 — dispatches by category (bd-3hr6g2)" do
+    test "a quota exhaustion with a reset time uses the reset-based wait, bypassing the 30s cap" do
+      retry_after = DateTime.add(DateTime.utc_now(), 7_200, :second)
+
+      reason = %Arbiter.Worker.StopReason{
+        category: :quota_exhausted,
+        summary: "s",
+        retry_after: retry_after
+      }
+
+      ms = Worker.resume_backoff_for(reason, 0)
+      assert ms > 7_200_000
+    end
+
+    test "a quota exhaustion with no reset time falls back to the 5h default" do
+      reason = %Arbiter.Worker.StopReason{
+        category: :quota_exhausted,
+        summary: "s",
+        retry_after: nil
+      }
+
+      assert Worker.resume_backoff_for(reason, 0) == :timer.hours(5)
+    end
+
+    test "a gateway error still uses the ordinary exponential backoff" do
+      reason = %Arbiter.Worker.StopReason{category: :gateway_error, summary: "s"}
+      assert Worker.resume_backoff_for(reason, 0) == Worker.resume_backoff_ms(:gateway_error, 0)
     end
   end
 
