@@ -211,7 +211,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # half-close stdin while keeping stdout open for reading.
   #
   # Env isolation mirrors ClaudeSession: CLAUDE_CONFIG_DIR is pinned to the
-  # arbiter-managed acolyte config dir so the reviewer never inherits the
+  # arbiter-managed worker config dir so the reviewer never inherits the
   # operator's personal ~/.claude persona, MCP servers, or permission posture.
   # Release-env vars (ROOTDIR/BINDIR/RELEASE_*) are stripped so a node repo's
   # .nvmrc — if picked up by a shell hook — can't switch the Node runtime out

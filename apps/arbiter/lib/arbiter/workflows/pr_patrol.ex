@@ -427,7 +427,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   # (bd-bi5pn0). A follow-up whose dispatch fails is closed immediately (rather
   # than left open as a zombie `:idle` registration) so `deduped?/2` naturally
   # frees the PR for a retry on the next patrol tick, and an escalation is sent
-  # to the Admiral so a persistently-failing repo/quota/worktree condition
+  # to the coordinator so a persistently-failing repo/quota/worktree condition
   # doesn't retry silently forever. A quota hold is NOT a failure: it means
   # Dispatch.dispatch/2 already enqueued the intent in DispatchQueue for
   # automatic re-drain, and closing the task here would make that later

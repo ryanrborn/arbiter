@@ -43,7 +43,7 @@ defmodule Arbiter.Worker do
   worker over the diff — *instead of* calling the merger. The ReviewGate reports a
   verdict back via `review_gate_verdict/2`: APPROVE proceeds to `do_open_mr` (the
   same merge path), REQUEST_CHANGES (or an inconclusive review) parks the task
-  with the findings and escalates to the Admiral without merging. When review is
+  with the findings and escalates to the coordinator without merging. When review is
   not required (the default) completion routes straight to the merger as before.
 
   ## Merge-request review (`:awaiting_review`)
@@ -471,7 +471,7 @@ defmodule Arbiter.Worker do
     * `{:approve, findings}` → records the approval and proceeds to the merger
       (`do_open_mr`); the worker transitions to `:awaiting_review`.
     * `{:request_changes, findings}` → records the findings, escalates to the
-      Admiral, and parks the worker at `:failed` **without** merging. The task
+      coordinator, and parks the worker at `:failed` **without** merging. The task
       stays `:in_progress` (the Driver leaves a `:failed` worker's task open for
       inspection / re-dispatch).
     * `{:no_verdict, reason}` → an inconclusive review; treated like a rejection
@@ -578,7 +578,7 @@ defmodule Arbiter.Worker do
   # Review-only workers (`meta[:review_only] == true`) skip the merge queue
   # broadcast — they don't author code, so there's nothing for the merge queue
   # to do, and the task they're reviewing may not even belong to the fleet.
-  # The Admiral notification still fires so the dashboard / inbox feed picks
+  # The coordinator notification still fires so the dashboard / inbox feed picks
   # up the completion.
   #
   # bd-6v2my2: a `:task` directive (`task_type?/1`) skips it for the same
@@ -923,7 +923,7 @@ defmodule Arbiter.Worker do
 
   # bd-93ru7w: reviewer/implementer workers get `workspace_id: nil` on their
   # own State deliberately (see `Arbiter.Worker.ReviewGate.spawn_worker/5`) so their completion stays
-  # silent — no Admiral notification, no MergeQueue pickup for the synthetic
+  # silent — no coordinator notification, no MergeQueue pickup for the synthetic
   # id. But that same nil was leaking into the *ledger* (Usage.Event and
   # Workers.Run rows), which made `Arbiter.Usage.summarize/1` invisible to
   # ~20% of spend — precisely the review/rework spend this ledger exists to
@@ -1486,7 +1486,7 @@ defmodule Arbiter.Worker do
   # terminal/review state, the exit was the expected end of a normal completion
   # — nothing to do. Otherwise the subprocess is genuinely gone with the task
   # unfinished: classify the cause from exit status + captured output and fail +
-  # escalate to the Admiral (bd-awi4nw).
+  # escalate to the coordinator (bd-awi4nw).
   #
   # bd-1pdyov: a stop check must consider the WHOLE run, not just the one port
   # that closed. A single task run can span multiple ClaudeSession ports — the
@@ -1955,7 +1955,7 @@ defmodule Arbiter.Worker do
   # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the
   # stop from the exit status + captured output, fail the worker into an
   # obviously-stalled state (not silent in_progress), and raise an addressed
-  # Admiral escalation naming the task + cause + remediation. Distinct from
+  # coordinator escalation naming the task + cause + remediation. Distinct from
   # fail_now/2's generic "exit code N" notification: the StopReason carries the
   # actionable classification (auth expiry, credit exhaustion, kill, …).
   #
@@ -2154,7 +2154,7 @@ defmodule Arbiter.Worker do
   # bd-7pe74i: the worker signalled done on a code directive but no worktree was
   # ever provisioned, so there is no branch to integrate and no deliverable. Do
   # NOT complete (which would broadcast {:worker_done} and let the MergeQueue
-  # close the bead) — fail the worker and raise an addressed Admiral escalation,
+  # close the bead) — fail the worker and raise an addressed coordinator escalation,
   # exactly like a stopped-subprocess failure. The bead stays open: the Driver's
   # :failed path leaves the task :in_progress, and no {:worker_done} is ever
   # broadcast, so the bead is never silently closed.
@@ -2540,7 +2540,7 @@ defmodule Arbiter.Worker do
   # worker to "commit+push your work", which it already did (incorrectly including
   # the secret). Removing the secret from history requires a `git rebase --onto` or
   # `git filter-repo` operation that the worker cannot safely self-apply; the
-  # Admiral must intervene (squash-merge + rotate if necessary).
+  # The coordinator must intervene (squash-merge + rotate if necessary).
   defp handle_commit_gate(state, _branch, :secret_in_commit) do
     park_commit_gate(state, :secret_in_commit, :no_retry)
   end
@@ -2876,7 +2876,7 @@ defmodule Arbiter.Worker do
       1. Call the `task_update_progress` MCP tool with its `notes` argument set
          to your findings / results summary for this directive (Markdown is fine).
       2. Make it self-contained: what you investigated, what you found, and any
-         recommendation or conclusion the Admiral needs — they read it via
+         recommendation or conclusion the coordinator needs — they read it via
          `arb show #{task_id}` and the dashboard.
 
     Do NOT shell out to the `arb` CLI for the notes — use the MCP tool. Then
@@ -3209,7 +3209,7 @@ defmodule Arbiter.Worker do
     _ -> ""
   end
 
-  # Final park: record on the task, escalate to the Admiral, fail the worker.
+  # Final park: record on the task, escalate to the coordinator, fail the worker.
   # We deliberately do NOT auto-commit (per bd-ofql8k: "Prefer send-back/retry
   # over a blind auto-commit (so half-work/junk is not committed)") — an
   # uncommitted worktree at gate-cap is escalated for human / dispatcher
@@ -3370,13 +3370,13 @@ defmodule Arbiter.Worker do
   end
 
   # bd-5lc99r: the notes gate could not be satisfied (nudge cap exhausted or the
-  # send-back relaunch failed). Escalate to the Admiral and fail the worker so
+  # send-back relaunch failed). Escalate to the coordinator and fail the worker so
   # the directive is not silently closed without its findings deliverable.
   #
   # Unlike the commit gate, we deliberately do NOT write the gate-trip summary
   # into `notes` — that field IS what the gate checks, so polluting it would let
   # a re-dispatched worker satisfy the gate without producing real findings. The
-  # escalation mail surfaces the trip to the Admiral instead.
+  # escalation mail surfaces the trip to the coordinator instead.
   defp park_notes_gate(%State{} = state, why) do
     summary = notes_gate_summary(state, why)
     escalate_notes_gate(state, summary)
@@ -3518,7 +3518,7 @@ defmodule Arbiter.Worker do
   # Direct merger runs `git merge --abort` on conflict — see bd-1rhyla: a
   # half-merged tree took the live server down), so main stays clean and
   # compilable. Here we own the lifecycle side: fail the worker WITHOUT closing
-  # the task, and — for a genuine conflict — escalate to the Admiral inbox with
+  # the task, and — for a genuine conflict — escalate to the coordinator inbox with
   # the conflicting files so the task can be rebased / re-resolved.
   #
   # failure_reason stays a short term (it shares the Run.failure_reason column);
@@ -3563,7 +3563,7 @@ defmodule Arbiter.Worker do
     "## Merge conflict — aborted, needs rebase (#{stamp})\n\n#{merge_conflict_body(branch, detail)}"
   end
 
-  # Raise an escalation to the Admiral's mailbox naming the conflicting files.
+  # Raise an escalation to the coordinator's mailbox naming the conflicting files.
   # Requires a workspace (messages are workspace-scoped); mirrors
   # escalate_review_gate/3.
   defp escalate_merge_conflict(%State{workspace_id: ws_id, task_id: task_id}, branch, detail)
@@ -3591,7 +3591,7 @@ defmodule Arbiter.Worker do
   # push failed, config was missing, etc. — still leaves an approved run
   # stranded with no PR merged (bd-8rrn9t: a 422 "already exists" on
   # create-PR left an approved PR open+mergeable with the failure otherwise
-  # silent). Escalate to the Admiral with the branch, MR ref (if one was
+  # silent). Escalate to the coordinator with the branch, MR ref (if one was
   # already opened), and error so this never strands invisibly. Mirrors
   # escalate_merge_conflict/3.
   defp escalate_merge_failure(
@@ -3967,7 +3967,7 @@ defmodule Arbiter.Worker do
     park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
   end
 
-  # Reject path: record findings, escalate to the Admiral, and park the worker
+  # Reject path: record findings, escalate to the coordinator, and park the worker
   # at :failed WITHOUT merging. failure_reason stays a short atom; the full
   # findings live in meta + task notes + the escalation message (well under the
   # Run.failure_reason length cap).
@@ -4022,7 +4022,7 @@ defmodule Arbiter.Worker do
     "## #{header} (#{stamp})#{rounds_line}\n\n#{findings}"
   end
 
-  # On a non-approve verdict, raise an escalation to the Admiral's mailbox with
+  # On a non-approve verdict, raise an escalation to the coordinator's mailbox with
   # the reviewer's findings. Requires a workspace (messages are workspace-scoped).
   defp escalate_review_gate(%State{workspace_id: ws_id, task_id: task_id}, verdict, findings)
        when is_binary(ws_id) do
@@ -4281,7 +4281,7 @@ defmodule Arbiter.Worker do
     # Guard: MR already exists on the forge. Watchdog startup failure must
     # NOT prevent the worker from parking at :awaiting_review — the MR
     # is real and must not be discarded. If the Watchdog can't start for
-    # any reason, escalate to the Admiral so the MR is not silently
+    # any reason, escalate to the coordinator so the MR is not silently
     # orphaned while the worker parks indefinitely.
     watchdog_ok? =
       try do
@@ -4722,7 +4722,7 @@ defmodule Arbiter.Worker do
   end
 
   # An MR was opened but the Watchdog failed to start. The worker stays at
-  # :awaiting_review (the MR is real and must not be discarded), but the Admiral
+  # :awaiting_review (the MR is real and must not be discarded), but the coordinator
   # is escalated so the orphaned MR can be resolved manually rather than hanging
   # indefinitely with no watcher.
   defp escalate_watchdog_failure(%State{

@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.Queue do
                                      the failed task that blocked it
 
   When a graph member's worker fails, the Conductor pauses all tasks downstream
-  of the failure and posts an escalation to the Admiral inbox. `resume` clears
+  of the failure and posts an escalation to the coordinator inbox. `resume` clears
   the failed state, re-dispatches the task, and allows the branch to continue.
   """
 
