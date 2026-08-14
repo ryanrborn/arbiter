@@ -380,8 +380,6 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
         {:noreply, assign(socket, :config_error, "Repo path can't be empty.")}
 
       true ->
-        key = repo_paths_key(socket.assigns.workspace)
-        other_key = other_repo_paths_key(key)
         existing = repo_paths_raw(socket.assigns.workspace)
 
         entry =
@@ -394,8 +392,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
         case patch_config(
                socket.assigns.workspace,
-               %{key => new_paths},
-               [key, other_key]
+               %{"repo_paths" => new_paths},
+               ["repo_paths"]
              ) do
           {:ok, ws} ->
             {:noreply,
@@ -411,11 +409,9 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   end
 
   def handle_event("rm_repo_path", %{"repo" => repo}, socket) do
-    key = repo_paths_key(socket.assigns.workspace)
-    other_key = other_repo_paths_key(key)
     paths = socket.assigns.workspace |> repo_paths_raw() |> Map.delete(repo)
 
-    case patch_config(socket.assigns.workspace, %{key => paths}, [key, other_key]) do
+    case patch_config(socket.assigns.workspace, %{"repo_paths" => paths}, ["repo_paths"]) do
       {:ok, ws} ->
         {:noreply,
          socket |> assign(:workspace, ws) |> assign(:config_error, nil) |> load_derived()}
@@ -1356,34 +1352,16 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
-  # The raw `repo_paths` map (falling back to the legacy `rig_paths` key) —
-  # entries may be a bare path string or the richer
-  # `%{"path" => ..., "target_branch" => ...}` shape set via the CLI. Used
-  # as-is for `rm_repo_path` so removing one entry can't flatten/clobber a
-  # sibling's `target_branch`.
+  # The raw `repo_paths` map — entries may be a bare path string or the
+  # richer `%{"path" => ..., "target_branch" => ...}` shape set via the CLI.
+  # Used as-is for `rm_repo_path` so removing one entry can't flatten/clobber
+  # a sibling's `target_branch`.
   defp repo_paths_raw(ws) do
-    case cfg(ws, ["repo_paths"]) || cfg(ws, ["rig_paths"]) do
+    case cfg(ws, ["repo_paths"]) do
       m when is_map(m) -> m
       _ -> %{}
     end
   end
-
-  # Which config key this workspace's repo-path map actually lives under.
-  # `repo_paths` takes precedence when both are (improbably) present, matching
-  # `repo_paths_raw/1` / every runtime consumer's `||` precedence. Writers use
-  # this so edits land on the key the workspace already uses instead of
-  # shadowing it with a second, divergent map (see `add_repo_path` /
-  # `rm_repo_path`).
-  defp repo_paths_key(ws) do
-    cond do
-      is_map(cfg(ws, ["repo_paths"])) -> "repo_paths"
-      is_map(cfg(ws, ["rig_paths"])) -> "rig_paths"
-      true -> "repo_paths"
-    end
-  end
-
-  defp other_repo_paths_key("repo_paths"), do: "rig_paths"
-  defp other_repo_paths_key("rig_paths"), do: "repo_paths"
 
   # `repo_paths_raw/1` flattened to a simple repo -> path string map for
   # display, same as `RepoConfig.find_path/2` elsewhere reads it. Entries that
@@ -2027,8 +2005,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 <span class="text-base-content/40 font-normal">({length(@repo_paths)})</span>
               </h3>
               <p class="text-xs text-base-content/50 mt-1">
-                <code>repo_paths</code> (alias: <code>rig_paths</code>) — repo name to local
-                filesystem checkout path, used to resolve a dispatch's working directory.
+                <code>repo_paths</code> — repo name to local filesystem checkout path, used
+                to resolve a dispatch's working directory.
               </p>
 
               <ul :if={@repo_paths != []} id="repo-paths" class="flex flex-col gap-1.5 mt-2">

@@ -9,7 +9,7 @@ defmodule ArbiterWeb.Api.RepoController do
   A "repo" is a named repository checkout. Repos are discovered from three
   sources, mirroring `ArbiterWeb.DashboardLive.refresh_repos/1`:
 
-    * each workspace's `config["repo_paths"]` map (with compat fallback to `config["rig_paths"]`),
+    * each workspace's `config["repo_paths"]` map,
     * the application-env `:arbiter, :repo_paths` fallback (`source: "(app)"`),
     * any repo name a live worker is running against that isn't configured
       anywhere (`source: "(unconfigured)"`).
@@ -68,8 +68,8 @@ defmodule ArbiterWeb.Api.RepoController do
   end
 
   # Build {repo_name => %{path:, source:}} from every workspace's
-  # config["repo_paths"] (with compat fallback to config["rig_paths"]) plus
-  # the application-env fallback. Workspace entries win over app-env when names collide.
+  # config["repo_paths"] plus the application-env fallback. Workspace entries
+  # win over app-env when names collide.
   defp collect_repo_paths(workspaces) do
     app_paths =
       :arbiter
@@ -82,7 +82,6 @@ defmodule ArbiterWeb.Api.RepoController do
       ws_repo_paths =
         case ws.config do
           %{"repo_paths" => paths} when is_map(paths) -> paths
-          %{"rig_paths" => paths} when is_map(paths) -> paths
           _ -> %{}
         end
 

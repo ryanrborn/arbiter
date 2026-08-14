@@ -227,15 +227,13 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   defp workspace_repo_path(_workspace, nil), do: nil
 
   defp workspace_repo_path(%Workspace{config: %{} = config}, repo) when is_binary(repo) do
-    RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
-      RepoConfig.find_path(get_in(config, ["rig_paths"]), repo)
+    RepoConfig.find_path(get_in(config, ["repo_paths"]), repo)
   end
 
   defp workspace_repo_path(_, _), do: nil
 
   defp first_repo_path(%Workspace{config: %{} = config}) do
-    paths =
-      Map.get(config, "repo_paths") || Map.get(config, "rig_paths")
+    paths = Map.get(config, "repo_paths")
 
     case paths do
       %{} ->
@@ -271,7 +269,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   end
 
   defp resolve_repo_name(%Workspace{config: %{} = config}) do
-    paths = Map.get(config, "repo_paths") || Map.get(config, "rig_paths")
+    paths = Map.get(config, "repo_paths")
 
     case paths do
       %{} -> paths |> Map.keys() |> List.first()
