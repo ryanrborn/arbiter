@@ -50,9 +50,22 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
   So what this hook checks directly is "no worker GenServer for this task is
   still registered and alive"; that stands in for "no agent still owns the
   directory" only because of the first half above. It is not a general
-  live-process probe of the directory: a process that is neither an agent
-  descendant nor owned by a registered worker (an operator's own shell sitting
-  in the worktree, say) is still invisible to it.
+  live-process probe of the directory, and two residual cases stay invisible
+  to it:
+
+    * a process that never belonged to a worker at all — an operator's own
+      shell sitting in the worktree, say;
+    * an *orphaned* agent, whose worker died without `terminate/2` running
+      (`Process.exit(pid, :kill)`, or a linked exit — `Worker` does not trap
+      exits). Nothing killed its OS process, and the registry row for the
+      dead worker is filtered out by `live_for/1` as a corpse, so the drain
+      reports `:drained` while the agent is still running in the directory.
+      Every path that stops a worker deliberately (`Worker.stop/3`, and so
+      `StopWorker`) goes through `GenServer.stop`, which always runs
+      `terminate/2` — so this is the abnormal-kill case, not the `:close`
+      path the incident came from. Closing it would take an OS-level probe
+      of the directory (`/proc/*/cwd`, `lsof`), which is platform-specific;
+      it is deliberately out of scope here.
 
   Failures from `Worktree.cleanup/1` are logged but never propagated — the
   `:close` action must succeed even if teardown does not.
