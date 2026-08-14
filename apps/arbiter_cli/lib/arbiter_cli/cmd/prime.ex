@@ -294,7 +294,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp maybe_emit_coordinator_inbox(_), do: :ok
 
-  # `[bd-9bn4n9] failure    — Acolyte exited with code 1 (5m ago)`
+  # `[bd-9bn4n9] failure    — Worker exited with code 1 (5m ago)`
   defp inbox_line(m) do
     directive = m["directive_ref"] || "-"
     kind = m["kind"] |> to_string() |> String.pad_trailing(10)
