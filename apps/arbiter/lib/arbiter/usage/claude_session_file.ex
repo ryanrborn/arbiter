@@ -26,7 +26,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       <config_dir>/projects/<project-slug>/<session-id>.jsonl
 
   where `config_dir` is the effective `CLAUDE_CONFIG_DIR` (workers run with an
-  isolated `~/.cache/arbiter/acolyte-claude`, not the default `~/.claude` — see
+  isolated `~/.cache/arbiter/worker-claude`, not the default `~/.claude` — see
   `Arbiter.Agents.Claude.ConfigDir`), and `project-slug` is the worker's cwd
   with **every non-alphanumeric character replaced by `-`** (so `/` and `.` and
   `_` all become `-`; letter case is preserved). Each line is one JSON event;

@@ -326,7 +326,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp resume_failure(:repo_unknown),
     do: "no repo could be resolved for this task — dispatch it explicitly instead."
 
-  defp resume_failure({:acolyte_active, status}),
+  defp resume_failure({:worker_active, status}),
     do: "a worker is still active (#{status}) — stop it first."
 
   defp resume_failure({:task_closed, _id}), do: "the issue is closed."

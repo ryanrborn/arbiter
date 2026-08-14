@@ -59,10 +59,10 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
   ## Config
 
-    * `config :arbiter, :acolyte_isolate_config, boolean` — master switch
+    * `config :arbiter, :worker_isolate_config, boolean` — master switch
       (default `true`). The test suite sets it `false` so unit tests don't touch
       the real cache dir or shell out.
-    * `config :arbiter, :acolyte_config_dir, "/path"` — override the directory
+    * `config :arbiter, :worker_config_dir, "/path"` — override the directory
       (tests that *do* exercise isolation point this at a tmp dir).
   """
 
@@ -131,11 +131,11 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
   @doc "Whether worker config isolation is enabled (default `true`)."
   @spec enabled?() :: boolean()
-  def enabled?, do: Application.get_env(:arbiter, :acolyte_isolate_config, true)
+  def enabled?, do: Application.get_env(:arbiter, :worker_isolate_config, true)
 
-  @doc "The isolated config dir path (override via `:arbiter, :acolyte_config_dir`)."
+  @doc "The isolated config dir path (override via `:arbiter, :worker_config_dir`)."
   @spec path() :: String.t()
-  def path, do: Application.get_env(:arbiter, :acolyte_config_dir) || default_path()
+  def path, do: Application.get_env(:arbiter, :worker_config_dir) || default_path()
 
   @doc """
   The operator's real config dir we seed auth/permissions from — `$CLAUDE_CONFIG_DIR`
@@ -204,7 +204,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
           _ -> System.tmp_dir!()
         end
 
-    Path.join([base, "arbiter", "acolyte-claude"])
+    Path.join([base, "arbiter", "worker-claude"])
   end
 
   # Always (re)write the clean worker memory so it can't drift from the source

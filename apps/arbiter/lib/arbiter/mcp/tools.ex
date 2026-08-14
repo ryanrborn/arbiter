@@ -3276,7 +3276,7 @@ defmodule Arbiter.MCP.Tools do
   defp dispatch_error_message(:repo_unknown),
     do: "could not resolve the repo for this task; pass `repo` explicitly"
 
-  defp dispatch_error_message({:acolyte_active, status}),
+  defp dispatch_error_message({:worker_active, status}),
     do: "a worker is still active for this task (#{status}); stop it before resuming"
 
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"

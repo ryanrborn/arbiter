@@ -275,14 +275,14 @@ defmodule Arbiter.Agents.ClaudeTest do
       target =
         Path.join(System.tmp_dir!(), "arbiter-spawnenv-iso-#{System.unique_integer([:positive])}")
 
-      prev_isolate = Application.get_env(:arbiter, :acolyte_isolate_config)
-      prev_dir = Application.get_env(:arbiter, :acolyte_config_dir)
-      Application.put_env(:arbiter, :acolyte_isolate_config, true)
-      Application.put_env(:arbiter, :acolyte_config_dir, target)
+      prev_isolate = Application.get_env(:arbiter, :worker_isolate_config)
+      prev_dir = Application.get_env(:arbiter, :worker_config_dir)
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_config_dir, target)
 
       on_exit(fn ->
-        put_or_delete(:acolyte_isolate_config, prev_isolate)
-        put_or_delete(:acolyte_config_dir, prev_dir)
+        put_or_delete(:worker_isolate_config, prev_isolate)
+        put_or_delete(:worker_config_dir, prev_dir)
         File.rm_rf!(target)
       end)
 

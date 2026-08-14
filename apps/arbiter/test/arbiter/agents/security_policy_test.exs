@@ -1,5 +1,5 @@
 defmodule Arbiter.Agents.SecurityPolicyTest do
-  # async: false — one test toggles the :acolyte_security_policy app env.
+  # async: false — one test toggles the :worker_security_policy app env.
   use ExUnit.Case, async: false
 
   alias Arbiter.Agents.SecurityPolicy
@@ -17,17 +17,17 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert p.sandbox == %{enabled: true, filesystem: :worktree, network: true}
     end
 
-    test "default/0 overlays the :acolyte_security_policy app env" do
-      prev = Application.get_env(:arbiter, :acolyte_security_policy)
+    test "default/0 overlays the :worker_security_policy app env" do
+      prev = Application.get_env(:arbiter, :worker_security_policy)
 
       on_exit(fn ->
         case prev do
-          nil -> Application.delete_env(:arbiter, :acolyte_security_policy)
-          v -> Application.put_env(:arbiter, :acolyte_security_policy, v)
+          nil -> Application.delete_env(:arbiter, :worker_security_policy)
+          v -> Application.put_env(:arbiter, :worker_security_policy, v)
         end
       end)
 
-      Application.put_env(:arbiter, :acolyte_security_policy, %{
+      Application.put_env(:arbiter, :worker_security_policy, %{
         "permissions" => %{"mode" => "strict"},
         "sandbox" => %{"network" => false}
       })

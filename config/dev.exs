@@ -9,7 +9,7 @@ config :ash, policies: [show_policy_breakdowns?: true]
 config :arbiter, :repo_paths, %{}
 config :arbiter, :worktree_root, Path.expand("~/dev/arbiter-worktrees")
 
-# Root for durable, append-only per-run acolyte transcripts
+# Root for durable, append-only per-run worker transcripts
 # (Arbiter.Worker.OutputLog). One file per run: <root>/<run_id>.log.
 config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-worker-logs")
 
