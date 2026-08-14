@@ -175,7 +175,7 @@ defmodule ArbiterCli.ConfigSchema do
       `repo_paths.<rig>.standing_orders` instead (see below), or manage it
       with `arb workspace standing-order ls|add|rm --rig <name>`.
 
-    repo_paths  (map, alias: rig_paths)
+    repo_paths  (map)
       repo name -> local worktree root path used to resolve a dispatch's working dir.
       An entry may be a bare string path, or a map carrying:
         path             string — the worktree root (required in map form)

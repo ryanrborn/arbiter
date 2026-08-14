@@ -2447,7 +2447,6 @@ defmodule Arbiter.MCP.Tools do
       ws_repo_paths =
         case ws.config do
           %{"repo_paths" => paths} when is_map(paths) -> paths
-          %{"rig_paths" => paths} when is_map(paths) -> paths
           _ -> %{}
         end
 

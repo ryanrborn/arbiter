@@ -58,7 +58,7 @@ links to the runbook with the full story.
       `workspace_config_set` / `workspace_config_unset` (CLI:
       `arb config get/set/unset`) only. **Never** send partial config via
       raw API PATCH — it replaces the whole map and **silently clobbers**
-      siblings (`rig_paths`, tracker, merge config).
+      siblings (`repo_paths`, tracker, merge config).
 - [ ] **Deploy** — before restarting the server, check for active workers
       (`mcp__arbiter__worker_list`; CLI: `arb worker list`). **Restarting
       kills all in-flight workers and abandons their work.** See
@@ -161,7 +161,7 @@ against the workspace's real base branch (forks vary — some are cut from
 Workspace config is a single JSON map stored in the database.
 
 **NEVER** send a partial config via the raw API PATCH — it replaces the whole
-map and **silently clobbers** siblings (`rig_paths`, tracker, merge config).
+map and **silently clobbers** siblings (`repo_paths`, tracker, merge config).
 
 **Use `mcp__arbiter__workspace_config_get` / `workspace_config_set` /
 `workspace_config_unset` (deep-merge) — CLI fallback: `arb config

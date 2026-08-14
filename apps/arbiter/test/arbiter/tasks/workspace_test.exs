@@ -219,7 +219,7 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     test "deep-merges a patch without clobbering sibling keys" do
       initial = %{
         "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
-        "rig_paths" => %{"arbiter" => "/srv/arbiter"},
+        "repo_paths" => %{"arbiter" => "/srv/arbiter"},
         "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo", "repo" => "arbiter"}}
       }
 
@@ -235,7 +235,7 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert updated.config["merge"]["config"]["owner"] == "leo"
       assert updated.config["merge"]["config"]["repo"] == "arbiter"
       assert updated.config["tracker"]["type"] == "github"
-      assert updated.config["rig_paths"]["arbiter"] == "/srv/arbiter"
+      assert updated.config["repo_paths"]["arbiter"] == "/srv/arbiter"
     end
 
     test "merges into a nil/empty existing config" do

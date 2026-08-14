@@ -472,13 +472,7 @@ defmodule ArbiterCli.Cmd.Config do
         ["repo_paths is empty — worker dispatch cannot resolve a working dir" | reasons]
 
       _ ->
-        case Map.fetch(config, "rig_paths") do
-          {:ok, m} when is_map(m) and map_size(m) == 0 ->
-            ["rig_paths is empty — worker dispatch cannot resolve a working dir" | reasons]
-
-          _ ->
-            reasons
-        end
+        reasons
     end
   end
 

@@ -215,7 +215,7 @@ register one patrol per repo under `"workspace_id:owner/repo"`.
 
 ReviewPatrol starts automatically at boot for any workspace whose merge strategy
 is `"github"` and that has a resolvable repo (either `merge.config.repo` set, or
-a `rig_paths` map whose rigs have a GitHub `origin` remote). No separate
+a `repo_paths` map whose repos have a GitHub `origin` remote). No separate
 configuration key is required.
 
 To set the patrol interval (default: 60 s), set the `:review_patrol_interval_ms`
@@ -281,7 +281,7 @@ replies). Authors not in the list fall back to `review_automation.default`
 Setting `atlas: "report_only"` ensures atlas PRs are always fully reviewed but
 never auto-posted — the findings + proposed comments go to the coordinator to
 greenlight — even when the PR author is in `auto_authors`. The key is the rig
-name as defined in `merge.config.repo_paths` (or `rig_paths`).
+name as defined in `merge.config.repo_paths`.
 
 Example: a workspace with backend engineers trusted for auto-review, while the
 infra repos are review-and-report-only (never auto-post):

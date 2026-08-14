@@ -203,7 +203,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
         if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
           ["#{owner}/#{repo}"]
         else
-          repos_from_rig_paths(config)
+          repos_from_repo_paths(config)
         end
 
       _ ->
@@ -211,8 +211,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
     end
   end
 
-  defp repos_from_rig_paths(config) do
-    case Map.get(config, "repo_paths") || Map.get(config, "rig_paths") do
+  defp repos_from_repo_paths(config) do
+    case Map.get(config, "repo_paths") do
       rig_map when is_map(rig_map) ->
         rig_map
         |> Map.values()

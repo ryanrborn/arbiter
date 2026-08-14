@@ -722,8 +722,8 @@ defmodule ArbiterWeb.DashboardLive do
   defp values_or_load(%{} = m), do: Map.values(m)
 
   # Build {repo_name => %{path:, source:}} from every workspace's
-  # config["repo_paths"] (or legacy "rig_paths") plus the application-env
-  # fallback. Workspace entries win over app-env when names collide.
+  # config["repo_paths"] plus the application-env fallback. Workspace entries
+  # win over app-env when names collide.
   defp collect_repo_paths(workspaces) do
     app_paths =
       :arbiter
@@ -737,7 +737,6 @@ defmodule ArbiterWeb.DashboardLive do
       ws_repo_paths =
         case ws.config do
           %{"repo_paths" => paths} when is_map(paths) -> paths
-          %{"rig_paths" => paths} when is_map(paths) -> paths
           _ -> %{}
         end
 

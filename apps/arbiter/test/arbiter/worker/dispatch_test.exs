@@ -215,7 +215,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
   # bd-49ajyt: PRPatrol/ReviewPatrol dispatch a follow-up with the PR's GitHub
   # "owner/repo" slug as the :repo opt, but a multi-repo workspace's
-  # repo_paths/rig_paths map is keyed by *rig name* (e.g. "client"), not by
+  # repo_paths map is keyed by *rig name* (e.g. "client"), not by
   # slug. The direct + normalized key lookup misses (a rig name never
   # normalizes to an owner/repo slug), so dispatch used to fail
   # {:repo_not_found}, spinning PRPatrol in a 1/min escalation loop. Dispatch
@@ -1695,7 +1695,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert File.dir?(result.worktree_path)
     end
 
-    test "per-workspace rig_paths overrides the Application env", %{repo: repo} do
+    test "per-workspace repo_paths overrides the Application env", %{repo: repo} do
       {:ok, ws_local} =
         Ash.create(Workspace, %{
           name: "per-ws-#{System.unique_integer([:positive])}",

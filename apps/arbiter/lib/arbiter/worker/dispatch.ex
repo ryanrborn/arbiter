@@ -958,7 +958,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   # Reverse resolution (bd-49ajyt): PRPatrol/ReviewPatrol dispatch a follow-up
   # with the PR's GitHub `owner/repo` slug as the `:repo` opt, but a multi-repo
-  # workspace's `repo_paths`/`rig_paths` map is keyed by *rig name* (e.g.
+  # workspace's `repo_paths` map is keyed by *rig name* (e.g.
   # "client"), not by slug — so the direct + normalized key lookups above miss
   # (a rig name never normalizes to an `owner/repo` slug) and dispatch used to
   # fail `{:repo_not_found}`, spinning PRPatrol in a 1/min escalation loop.
@@ -991,15 +991,14 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # All locally-checked-out rig paths registered for this workspace (config
-  # `repo_paths`/`rig_paths`) plus the global Application `:repo_paths`,
-  # deduplicated. The values are paths to git checkouts whose `origin` remote
+  # `repo_paths`) plus the global Application `:repo_paths`, deduplicated.
+  # The values are paths to git checkouts whose `origin` remote
   # `slug_repo_path/2` can resolve.
   defp candidate_repo_paths(ws_id) do
     ws_paths =
       case load_workspace_config(ws_id) do
         %{} = config ->
-          [get_in(config, ["repo_paths"]), get_in(config, ["rig_paths"])]
-          |> Enum.flat_map(&config_repo_paths/1)
+          config_repo_paths(get_in(config, ["repo_paths"]))
 
         _ ->
           []
@@ -1038,8 +1037,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp workspace_repo_path(ws_id, repo) do
     case load_workspace_config(ws_id) do
       %{} = config ->
-        find_repo_path(get_in(config, ["repo_paths"]), repo) ||
-          find_repo_path(get_in(config, ["rig_paths"]), repo)
+        find_repo_path(get_in(config, ["repo_paths"]), repo)
 
       _ ->
         nil
@@ -1109,7 +1107,7 @@ defmodule Arbiter.Worker.Dispatch do
   Enumerate all repo names this task could be dispatched against — every name
   that has a **resolvable** path, drawn from:
 
-    1. The task's workspace config `repo_paths` map (or legacy `rig_paths`).
+    1. The task's workspace config `repo_paths` map.
     2. The global Application env `:repo_paths` map.
 
   Both sources are combined, de-duplicated, and sorted. Entries whose
@@ -1125,11 +1123,6 @@ defmodule Arbiter.Worker.Dispatch do
     ws_repos =
       case load_workspace_config(ws_id) do
         %{"repo_paths" => rp} when is_map(rp) ->
-          Enum.flat_map(rp, fn {k, v} ->
-            if repo_path_from_config(v) != nil, do: [k], else: []
-          end)
-
-        %{"rig_paths" => rp} when is_map(rp) ->
           Enum.flat_map(rp, fn {k, v} ->
             if repo_path_from_config(v) != nil, do: [k], else: []
           end)

@@ -348,7 +348,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
   end
 
   describe "standing-order --rig" do
-    defp ws_with_rig_paths(repo_paths) do
+    defp ws_with_repo_paths(repo_paths) do
       stub_get("/api/workspaces", %{
         "data" => [
           %{
@@ -392,7 +392,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     end
 
     test "ls lists a rig's own orders, not the workspace-global ones" do
-      ws_with_rig_paths(%{
+      ws_with_repo_paths(%{
         "client" => %{"path" => "/x/client", "standing_orders" => ["Link the Figma design."]}
       })
 
@@ -406,7 +406,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     end
 
     test "ls reports when a registered rig has none" do
-      ws_with_rig_paths(%{"client" => %{"path" => "/x/client"}})
+      ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
 
       {out, _err, code} =
         capture(fn ->
@@ -466,7 +466,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     end
 
     test "add errors when the named rig isn't registered in repo_paths" do
-      ws_with_rig_paths(%{"client" => %{"path" => "/x/client"}})
+      ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
 
       {_out, err, code} =
         capture(fn ->
@@ -510,7 +510,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     end
 
     test "rm errors when the rig has no orders" do
-      ws_with_rig_paths(%{"client" => %{"path" => "/x/client"}})
+      ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
 
       {_out, err, code} =
         capture(fn ->

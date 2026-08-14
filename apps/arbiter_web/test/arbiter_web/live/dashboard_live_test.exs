@@ -171,15 +171,15 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "dashboard-test-repo"
     end
 
-    test "renders without error when a workspace rig_paths entry is in object form",
+    test "renders without error when a workspace repo_paths entry is in object form",
          %{conn: conn, ws: ws} do
-      # Regression for bd-bkkvbe: a `rig_paths` value of
+      # Regression for bd-bkkvbe: a `repo_paths` value of
       # `%{"path" => ..., "target_branch" => ...}` crashed refresh_rigs/1 with
       # a CaseClauseError because the path was stored unnormalized.
       {:ok, _ws2} =
         Ash.update(ws, %{
           config: %{
-            "rig_paths" => %{
+            "repo_paths" => %{
               "object-form-repo" => %{
                 "path" => "/tmp/object-form-repo",
                 "target_branch" => "integration/dolphin"

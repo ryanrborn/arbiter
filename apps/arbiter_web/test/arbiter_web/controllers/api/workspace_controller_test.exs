@@ -236,7 +236,7 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
     setup do
       initial = %{
         "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
-        "rig_paths" => %{"arbiter" => "/srv/arbiter"},
+        "repo_paths" => %{"arbiter" => "/srv/arbiter"},
         "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo", "repo" => "arb"}}
       }
 
@@ -256,7 +256,7 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert body["config"]["merge"]["strategy"] == "github"
       assert body["config"]["merge"]["config"]["owner"] == "leo"
       assert body["config"]["tracker"]["type"] == "github"
-      assert body["config"]["rig_paths"]["arbiter"] == "/srv/arbiter"
+      assert body["config"]["repo_paths"]["arbiter"] == "/srv/arbiter"
     end
 
     test "unset_paths removes a dotted leaf", %{conn: conn, ws: ws} do

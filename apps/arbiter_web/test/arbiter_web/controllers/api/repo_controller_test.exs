@@ -41,23 +41,6 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
       assert is_integer(alpha["worktrees"])
     end
 
-    test "surfaces a workspace's legacy rig_paths with compat fallback", %{conn: conn} do
-      {:ok, _ws} =
-        Ash.create(Workspace, %{
-          name: "rig-compat-ws",
-          prefix: "rcw",
-          config: %{"rig_paths" => %{"beta" => "/tmp/does-not-exist-beta"}}
-        })
-
-      conn = get(conn, ~p"/api/repos")
-      assert %{"data" => data} = json_response(conn, 200)
-
-      beta = Enum.find(data, &(&1["name"] == "beta"))
-      assert beta
-      assert beta["path"] == "/tmp/does-not-exist-beta"
-      assert beta["source"] == "rig-compat-ws"
-    end
-
     test "responds with JSON, not an HTML 404", %{conn: conn} do
       conn = get(conn, ~p"/api/repos")
       assert json_response(conn, 200)

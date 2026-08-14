@@ -1,7 +1,7 @@
 defmodule Arbiter.Worker.PrimarySync do
   @moduledoc """
   Safe fast-forward of a repo's *primary* local checkout (the shared
-  directory registered in a workspace's `repo_paths`/`rig_paths` config —
+  directory registered in a workspace's `repo_paths` config —
   not a worker's isolated worktree) to the current `origin/<base_branch>`.
 
   `Arbiter.Worker.Worktree.fetch_origin/2` already refreshes the

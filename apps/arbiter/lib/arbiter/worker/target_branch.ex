@@ -75,8 +75,7 @@ defmodule Arbiter.Worker.TargetBranch do
     case load_workspace_config(ws_id) do
       %{} = config ->
         repo_target_from_config(
-          RepoConfig.find_entry(get_in(config, ["repo_paths"]) || %{}, repo) ||
-            RepoConfig.find_entry(get_in(config, ["rig_paths"]) || %{}, repo)
+          RepoConfig.find_entry(get_in(config, ["repo_paths"]) || %{}, repo)
         )
 
       _ ->

@@ -18,7 +18,7 @@ defmodule ArbiterCli.Cmd.Workspace do
       All three accept `--rig <name>` to target a rig-scoped standing order
       (stored under `repo_paths.<rig>.standing_orders`) instead of the
       workspace-global list. The rig must already be registered in
-      `repo_paths`/`rig_paths` (add its path first with
+      `repo_paths` (add its path first with
       `arb config set repo_paths.<rig>.path <path>`).
 
       arb workspace secret ls                  names of the configured secrets
@@ -301,9 +301,8 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   # Patches `config.standing_orders` wholesale (a list patch replaces the list,
   # never appends) while leaving sibling config keys untouched. With `--rig`,
-  # patches just that rig's `standing_orders` sub-key under `repo_paths`
-  # (or `rig_paths`, whichever the entry actually lives under), preserving
-  # its `path`/`target_branch` siblings.
+  # patches just that rig's `standing_orders` sub-key under `repo_paths`,
+  # preserving its `path`/`target_branch` siblings.
   defp patch_standing_orders(%{} = ws, nil, orders, mode) do
     payload = %{"patch" => %{"standing_orders" => orders}}
     do_patch_standing_orders(ws, nil, payload, mode)
@@ -367,7 +366,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   end
 
   # Requires `rig` (when given) to already be registered under
-  # `repo_paths`/`rig_paths` — a standing order scoped to an unregistered rig
+  # `repo_paths` — a standing order scoped to an unregistered rig
   # is almost always a typo, and silently creating a path-less rig entry would
   # hide it.
   defp require_registered_rig!(_ws, nil, _verb), do: :ok
@@ -385,24 +384,20 @@ defmodule ArbiterCli.Cmd.Workspace do
     end
   end
 
-  # Finds `rig`'s entry under `config.repo_paths` (falling back to the
-  # `rig_paths` alias), matching loosely the way `Arbiter.Tasks.RepoConfig`
-  # does server-side (exact key, then normalized `_`/`-` match). Returns
-  # `{repo_paths_key, matched_entry_key, entry_or_nil}` — `repo_paths_key` is
-  # which of the two top-level keys to patch back into, and `matched_entry_key`
-  # is the literal key already used in config (so a normalized-match write
-  # lands on the existing entry instead of creating a sibling).
+  # Finds `rig`'s entry under `config.repo_paths`, matching loosely the way
+  # `Arbiter.Tasks.RepoConfig` does server-side (exact key, then normalized
+  # `_`/`-` match). Returns `{repo_paths_key, matched_entry_key,
+  # entry_or_nil}` — `repo_paths_key` is which top-level key to patch back
+  # into, and `matched_entry_key` is the literal key already used in config
+  # (so a normalized-match write lands on the existing entry instead of
+  # creating a sibling).
   defp resolve_rig(ws, rig) do
-    {repo_paths_key, map} =
-      case get_in(ws, ["config", "repo_paths"]) do
-        m when is_map(m) and map_size(m) > 0 ->
-          {"repo_paths", m}
+    repo_paths_key = "repo_paths"
 
-        _ ->
-          case get_in(ws, ["config", "rig_paths"]) do
-            m when is_map(m) -> {"rig_paths", m}
-            _ -> {"repo_paths", %{}}
-          end
+    map =
+      case get_in(ws, ["config", "repo_paths"]) do
+        m when is_map(m) -> m
+        _ -> %{}
       end
 
     case Map.fetch(map, rig) do

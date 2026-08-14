@@ -95,10 +95,10 @@ defmodule Arbiter.Worker.TargetBranchTest do
       assert "main" = TargetBranch.resolve(b, repo: nil)
     end
 
-    test "forge-qualified slug repo matches a rig_paths entry keyed by bare rig name (bd-c5f0n5)" do
+    test "forge-qualified slug repo matches a repo_paths entry keyed by bare rig name (bd-c5f0n5)" do
       ws =
         workspace(%{
-          "rig_paths" => %{"repo-a" => %{"path" => "/tmp/repo-a", "target_branch" => "alpha"}},
+          "repo_paths" => %{"repo-a" => %{"path" => "/tmp/repo-a", "target_branch" => "alpha"}},
           "merge" => %{"base" => "beta"}
         })
 

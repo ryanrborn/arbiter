@@ -1707,10 +1707,10 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   # ---- repo path resolution ------------------------------------------------
   #
-  # Map a repo name to its local checkout via the workspace `repo_paths` (legacy
-  # `rig_paths`) config, falling back to the global `:arbiter, :repo_paths` app
-  # env — the same lookup order `Arbiter.Worker.Dispatch` uses. nil when no repo
-  # was named or it isn't mapped (a bare PR number then can't derive owner/repo
+  # Map a repo name to its local checkout via the workspace `repo_paths`
+  # config, falling back to the global `:arbiter, :repo_paths` app env — the
+  # same lookup order `Arbiter.Worker.Dispatch` uses. nil when no repo was
+  # named or it isn't mapped (a bare PR number then can't derive owner/repo
   # and a full PR URL is required).
 
   defp resolve_repo_path(_workspace, nil), do: nil
@@ -1719,9 +1719,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp resolve_repo_path(%Workspace{config: config}, repo) when is_binary(repo) do
     config = config || %{}
 
-    from_config =
-      RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
-        RepoConfig.find_path(get_in(config, ["rig_paths"]), repo)
+    from_config = RepoConfig.find_path(get_in(config, ["repo_paths"]), repo)
 
     from_config || application_repo_path(repo)
   end

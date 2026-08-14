@@ -33,7 +33,7 @@ defmodule Arbiter.Tasks.RepoConfig do
   def normalize_slug(_), do: nil
 
   @doc """
-  Looks up `repo`'s raw entry in a `repo_paths`/`rig_paths`-shaped map.
+  Looks up `repo`'s raw entry in a `repo_paths`-shaped map.
 
   Three passes, in order:
 
@@ -41,9 +41,9 @@ defmodule Arbiter.Tasks.RepoConfig do
     2. Normalized match (see `normalize_slug/1`) so a differently-separated
        key (`verus_server` vs `verus-server`) still resolves.
     3. If `repo` is a forge-qualified slug (`<org>/<repo>`), the same two
-       passes against just its trailing segment — `rig_paths`/`repo_paths`
-       are keyed by bare rig name, but callers like PRPatrol only have the
-       slug on hand (bd-c5f0n5).
+       passes against just its trailing segment — `repo_paths` is keyed by
+       bare rig name, but callers like PRPatrol only have the slug on hand
+       (bd-c5f0n5).
 
   Returns `nil` if `map` isn't a map, or the repo isn't registered.
   """
@@ -70,8 +70,8 @@ defmodule Arbiter.Tasks.RepoConfig do
   end
 
   @doc """
-  Looks up `repo`'s filesystem path in a `repo_paths`/`rig_paths`-shaped
-  map. See `find_entry/2` for the matching rules. Returns `nil` if `map`
+  Looks up `repo`'s filesystem path in a `repo_paths`-shaped map. See
+  `find_entry/2` for the matching rules. Returns `nil` if `map`
   isn't a map, or the repo isn't registered.
   """
   def find_path(map, repo) do

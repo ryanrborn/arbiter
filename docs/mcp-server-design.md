@@ -227,7 +227,7 @@ is a design decision, not an oversight:
   it would let any coordinator token mint a broader one, collapsing the scope
   model.
 - **Config mutation — `config get` / `set` / `unset`.** Blast radius: workspace
-  config drives trackers, vernacular, `rig_paths`, security posture. A bad `set`
+  config drives trackers, vernacular, `repo_paths`, security posture. A bad `set`
   clobbers all of it for every future dispatch. This is operator-only. If a
   future autonomous coordinator genuinely needs it, it should be gated behind a
   **new strict `operator` tier** (not `coordinator`), reusing the before/after

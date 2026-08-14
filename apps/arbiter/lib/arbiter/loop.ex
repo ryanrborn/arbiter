@@ -204,7 +204,7 @@ defmodule Arbiter.Loop do
 
   `attrs`:
 
-    * `:repo` (required) — the `repo_paths`/`rig_paths` key in the target
+    * `:repo` (required) — the `repo_paths` key in the target
       workspace's config.
     * `:lesson` (required) — the entry text. Must be a single line with no
       `arbiter:begin`/`arbiter:end` marker (`RepoDocPatch.upsert/4` rejects
@@ -788,7 +788,7 @@ defmodule Arbiter.Loop do
   end
 
   defp resolve_repo_doc_target(%Workspace{config: config}, repo) do
-    paths = Map.get(config || %{}, "repo_paths") || Map.get(config || %{}, "rig_paths") || %{}
+    paths = Map.get(config || %{}, "repo_paths") || %{}
 
     case RepoConfig.find_entry(paths, repo) do
       nil ->
