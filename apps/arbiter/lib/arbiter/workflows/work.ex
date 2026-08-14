@@ -35,12 +35,12 @@ defmodule Arbiter.Workflows.Work do
 
   Workers coordinate through the inter-agent message queue
   (`Arbiter.Messages.Message`), not tmux prompt injection. By **convention**
-  (not enforced by the Driver), an worker checks its mailbox at the start of
+  (not enforced by the Driver), a worker checks its mailbox at the start of
   each workflow step by running:
 
       arb inbox <task-id>
 
-  This surfaces any unread direction from the Admiral (`arb message <task-id>
+  This surfaces any unread direction from the coordinator (`arb message <task-id>
   <text>`) or flags from sibling workers, and marks them read. The Driver
   does not poll the mailbox — it is the worker's responsibility via the CLI.
   See `Arbiter.Worker.Dispatch.prompt_for/1` for where this is wired into the

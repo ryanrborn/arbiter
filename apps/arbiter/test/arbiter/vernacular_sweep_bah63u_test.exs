@@ -22,10 +22,23 @@ defmodule Arbiter.VernacularSweepBah63uTest do
     lib/arbiter/messages/coordinator_notifier.ex
     lib/arbiter/mergers/github.ex
     lib/arbiter/mergers/gitlab.ex
+    lib/arbiter/worker.ex
+    lib/arbiter/workflows/merge_queue/conflict_resolver.ex
+    lib/arbiter/workflows/merge_queue/fix_pass_dispatcher.ex
+    lib/arbiter/workflows/conductor.ex
+    lib/arbiter/workflows/work.ex
+    lib/arbiter/workflows/merge_queue.ex
+    lib/arbiter/workflows/pr_patrol.ex
+    lib/arbiter/workflows/code_review/checks.ex
   )
 
   @web_target_files ~w(
     lib/arbiter_web/live/dashboard_live.ex
+  )
+
+  @cli_target_files ~w(
+    lib/arbiter_cli/cmd/queue.ex
+    lib/arbiter_cli/cmd/update.ex
   )
 
   describe "stale vocabulary is gone from lib targets" do
@@ -36,13 +49,13 @@ defmodule Arbiter.VernacularSweepBah63uTest do
         refute content =~ ~r/\bAdmiral\b/,
                "#{unquote(file)} still contains 'Admiral' — should be 'coordinator'"
 
-        refute content =~ ~r/\bacolyte(s)?\b/,
+        refute content =~ ~r/\bacolyte(s)?\b/i,
                "#{unquote(file)} still contains 'acolyte' — should be 'worker'"
 
         refute content =~ ~r/\bWarden\b/,
                "#{unquote(file)} still contains 'Warden' — should be 'Watchdog'"
 
-        refute content =~ ~r/\bsummons\b/,
+        refute content =~ ~r/\bsummons\b/i,
                "#{unquote(file)} still contains 'summons' — should be 'escalates'"
       end
     end
@@ -56,6 +69,29 @@ defmodule Arbiter.VernacularSweepBah63uTest do
         refute content =~ "Warships",
                "#{unquote(file)} still contains 'Warships'"
       end
+    end
+  end
+
+  describe "stale vocabulary is gone from arbiter_cli targets" do
+    for file <- @cli_target_files do
+      test "#{file}: no bare Admiral vocabulary remains" do
+        content = read_file(Path.join("../arbiter_cli", unquote(file)))
+
+        refute content =~ ~r/\bAdmiral\b/,
+               "#{unquote(file)} still contains 'Admiral' — should be 'coordinator'"
+      end
+    end
+  end
+
+  describe "workflows/work.ex mailbox grammar" do
+    test "says 'a worker checks its mailbox', not 'an worker'" do
+      content = read_file("lib/arbiter/workflows/work.ex")
+
+      refute content =~ "an worker checks its mailbox",
+             "should be 'a worker checks its mailbox', not 'an worker'"
+
+      assert content =~ "a worker checks its mailbox",
+             "expected 'a worker checks its mailbox' after the grammar fix"
     end
   end
 

@@ -9,8 +9,8 @@ defmodule Arbiter.Workflows.Conductor do
       effective_cap = min(workspace_max_concurrent, system_max_concurrent, quota_headroom)
 
   C5 adds failure handling: when a member's worker fails, the Conductor pauses
-  that node's downstream branch and escalates to the Admiral inbox. Independent
-  branches keep running. The Admiral can resume via the `queue_resume` MCP tool
+  that node's downstream branch and escalates to the coordinator inbox. Independent
+  branches keep running. The coordinator can resume via the `queue_resume` MCP tool
   or `arb queue resume <task_id>`.
 
   ## Crash-safe boot recovery (C6)
@@ -269,7 +269,7 @@ defmodule Arbiter.Workflows.Conductor do
   Find the running Conductor that has `task_id` in its failed set and resume it.
 
   Searches all running Conductors via the `ConductorSupervisor` Registry. The
-  Admiral calls this when acknowledging a failure escalation — no need to know
+  coordinator calls this when acknowledging a failure escalation — no need to know
   which graph the task belongs to.
 
   Returns `:ok`, `{:error, :not_found}` (no conductor holds the task as failed),
@@ -855,7 +855,7 @@ defmodule Arbiter.Workflows.Conductor do
     new_state
   end
 
-  # Post an addressed :escalation mailbox message to the Admiral.
+  # Post an addressed :escalation mailbox message to the coordinator.
   defp post_failure_escalation(failed_id, paused_ids, %State{
          workspace_id: ws_id,
          graph_id: graph_id

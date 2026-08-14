@@ -50,7 +50,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   When `adapter.get` reports `conflicting: true` we used to
   freeze the item and wait for a human rebase — twice in one morning that
-  meant an Admiral page on parallel dispatcher-task waves. Now the MergeQueue
+  meant a coordinator page on parallel dispatcher-task waves. Now the MergeQueue
   side-steps that:
 
       :awaiting_approval (or any non-terminal status)
@@ -63,7 +63,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         ▼
       (next tick observes conflicting: false; restore_after_resolution/2
        returns the item to its prior status, posts a :notification so the
-       Admiral feed sees the auto-rebase succeeded, and the queue resumes)
+       coordinator feed sees the auto-rebase succeeded, and the queue resumes)
 
   Each conflict gets **exactly one** resolver attempt. The resolver is a
   *mechanical* rebase; if a single pass + force-push doesn't unblock the

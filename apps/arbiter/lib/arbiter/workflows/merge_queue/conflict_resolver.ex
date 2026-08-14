@@ -6,7 +6,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   Invoked by `Arbiter.Workflows.MergeQueue` when a merge queue item enters the
   CONFLICTING state (the merger reports `mergeable: false` on the PR).
   Before this, the queue froze the item and waited for a human to rebase —
-  twice this morning that meant an Admiral page on a dispatcher-task
+  twice this morning that meant a coordinator page on a dispatcher-task
   collision (#117, #121). The resolver worker exists so that case unblocks
   itself.
 
@@ -86,13 +86,13 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   When the worker cannot be spawned (no local checkout, no branch,
   workspace missing) returns `{:error, reason}`. The MergeQueue's escalation
-  path handles that by mailing the Admiral so the task does not sit in
+  path handles that by mailing the coordinator so the task does not sit in
   CONFLICTING limbo.
   """
   @callback resolve(args :: resolve_args()) :: resolve_result()
 
   @doc """
-  Optional: post an `:escalation` mailbox message to the Admiral about an
+  Optional: post an `:escalation` mailbox message to the coordinator about an
   unresolved conflict. The MergeQueue calls this on spawn failure and on the
   second consecutive CONFLICTING observation. The real
   `Arbiter.Workflows.MergeQueue.ConflictResolver` implements it; test stubs
@@ -333,7 +333,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       # A resolver is genuinely still in flight for this task (a previous tick's
       # spawn, not yet terminal). Don't open a second Claude session against it
       # — surface the collision so the MergeQueue's escalation path mails the
-      # Admiral instead of pretending we restarted the rebase.
+      # coordinator instead of pretending we restarted the rebase.
       {:error, {:already_started, pid}} ->
         {:error, {:resolver_already_running, pid}}
 
@@ -399,7 +399,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   # ---- escalation helper ---------------------------------------------------
 
   @doc """
-  Post an `:escalation` mailbox message to the Admiral about an unresolved
+  Post an `:escalation` mailbox message to the coordinator about an unresolved
   conflict. Used by the MergeQueue when the resolver itself can't be spawned
   or the second consecutive CONFLICTING observation arrives (the rebase
   pass didn't unblock the PR).
