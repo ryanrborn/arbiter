@@ -370,6 +370,7 @@ defmodule Arbiter.Worker.Driver do
   #   - `cleanup_worktree` is false (default)
   #   - `worktree_path` is nil (no worktree was provisioned)
   #   - the worktree has uncommitted changes (operator should inspect)
+  #   - a worker for this task is still registered and alive (bd-bmmj4w)
   #
   # Failures are logged but never propagated — the task is already closed
   # and the workflow is done, so we don't want to crash the Driver over a
@@ -377,14 +378,25 @@ defmodule Arbiter.Worker.Driver do
   defp maybe_cleanup_worktree(%{cleanup_worktree: false}), do: :ok
   defp maybe_cleanup_worktree(%{worktree_path: nil}), do: :ok
 
-  defp maybe_cleanup_worktree(%{worktree_path: path, task_id: task_id}) do
+  defp maybe_cleanup_worktree(%{worktree_path: path} = state) do
+    # The task's :close after_action may already have removed the worktree
+    # (see Arbiter.Tasks.Issue.Changes.CleanupWorktree) — nothing left to do,
+    # and skipping silently keeps this legacy Driver-side path from logging a
+    # warning about a path that is already gone.
+    if File.dir?(path), do: cleanup_unowned_worktree(state), else: :ok
+  end
+
+  defp cleanup_unowned_worktree(%{worktree_path: path, task_id: task_id} = state) do
+    blocking = blocking_workers(state)
+
     cond do
-      # The task's :close after_action already removed the worktree (see
-      # Arbiter.Tasks.Issue.Changes.CleanupWorktree) — nothing left to do.
-      # Returning :ok silently keeps the legacy Driver-side path from
-      # logging a warning about a path that is already gone.
-      not File.dir?(path) ->
-        :ok
+      # bd-bmmj4w: same invariant the `:close` hook enforces — never remove a
+      # directory a worker may still be running an agent in.
+      blocking != [] ->
+        Logger.info(
+          "Worker.Driver: worker(s) #{Enum.join(blocking, ", ")} still live for " <>
+            "task=#{task_id}; skipping worktree cleanup"
+        )
 
       worktree_dirty?(path, task_id) ->
         Logger.info(
@@ -409,6 +421,36 @@ defmodule Arbiter.Worker.Driver do
     end
 
     :ok
+  end
+
+  # bd-bmmj4w: which workers still owning this task's worktree must block its
+  # removal. Every live registry entry for the task counts — most importantly
+  # sub-workers (`<task_id>:fixpass`, `<task_id>#review`, ...) which this
+  # Driver never started, never stops, and whose agents may well be mid-run in
+  # the very directory it is about to delete.
+  #
+  # The Driver's OWN worker is exempt once it is terminal: `:failed` runs
+  # `fail_now/2` (which SIGKILLs the agent before the status flips, bd-7a0pi8)
+  # and `:completed` reaches here only after `close_task/2` stopped it, so in
+  # both cases its agent is provably dead even though the GenServer may linger.
+  # A non-terminal own worker — the max_ticks giving-up branch, where nothing
+  # failed it — is NOT exempt: its agent can still be running.
+  defp blocking_workers(%{task_id: task_id, worker_pid: own_pid}) do
+    Arbiter.Worker.Registry.live_for(task_id)
+    |> Enum.reject(fn {_key, pid} -> pid == own_pid and agent_terminal?(pid) end)
+    |> Enum.map(fn {key, _pid} -> key end)
+  rescue
+    # A registry that isn't running (a bare unit-test Driver) must not crash
+    # the reap. "Can't tell" resolves to "don't delete" — leaking a worktree
+    # is recoverable, deleting a live one is not.
+    _ -> ["<registry-unavailable>"]
+  end
+
+  defp agent_terminal?(pid) do
+    case safe_worker_state(pid) do
+      %{status: status} -> status in [:completed, :failed]
+      _ -> false
+    end
   end
 
   defp worktree_dirty?(path, task_id) do

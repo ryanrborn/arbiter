@@ -8,6 +8,11 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
   stop a worker is logged but never propagated — the `:close` action must
   succeed even if teardown does not.
 
+  Stopping a worker also kills its agent's OS process tree, synchronously,
+  inside `Worker.terminate/2` (bd-bmmj4w) — so when this hook's stop returns
+  `:ok` the agent is provably no longer running in the task's worktree, which
+  is the precondition `CleanupWorktree` relies on before removing it.
+
   Pairs with `Arbiter.Tasks.Issue.Changes.CleanupWorktree`, which handles
   the on-disk side of teardown.
   """
@@ -27,26 +32,15 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
     end)
   end
 
-  # A worker belongs to `task_id` when its registry key IS `task_id`, or is
-  # `task_id` immediately followed by a synthetic-key separator (`:fixpass`,
-  # `:conflict`, `#review`, `#r<N>`, ...). Requiring the separator right after
-  # the prefix (rather than a bare `String.starts_with?/2` on `task_id`
-  # alone) keeps an unrelated task whose id happens to be a string-prefix of
-  # another (e.g. "bd-1" vs "bd-12:fixpass") from matching.
-  defp owned_by?(registry_key, task_id) do
-    registry_key == task_id or
-      String.starts_with?(registry_key, task_id <> ":") or
-      String.starts_with?(registry_key, task_id <> "#")
-  end
-
   # Enumerates via the Registry (not `Worker.list_children/0`, which probes
   # each pid with `GenServer.call(pid, :snapshot, 500)` and silently drops
   # any worker that doesn't answer within the timeout — e.g. one mid-merge
   # in `handle_call({:open_mr, ...})`). Registry enumeration needs no call
   # to the worker process itself, so a busy sub-worker is still swept.
+  # `all_for/1` owns the synthetic-key matching rule (`:fixpass`, `#review`,
+  # ...) shared with CleanupWorktree's liveness re-check.
   defp stop_all(task_id) do
-    WorkerRegistry.all()
-    |> Enum.filter(fn {registry_key, _pid} -> owned_by?(registry_key, task_id) end)
+    WorkerRegistry.all_for(task_id)
     |> Enum.each(fn {registry_key, pid} -> stop(pid, registry_key) end)
   rescue
     e ->
@@ -58,8 +52,17 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
       Logger.warning("StopWorker: exit enumerating workers for #{task_id}: #{inspect(reason)}")
   end
 
+  # Bounded stop, where `Worker.stop/2` defaults to GenServer.stop's
+  # `:infinity`: this hook runs inside the :close action's hook pipeline, so a
+  # worker wedged in a slow terminate must not hang every close of its task.
+  # On timeout the worker is left still terminating — which is exactly why
+  # CleanupWorktree independently re-checks liveness before removing the
+  # worktree that worker may still be running in (bd-bmmj4w), rather than
+  # assuming this sweep fully drained everything. Goes through `Worker.stop/3`
+  # rather than `GenServer.stop/3` so any teardown the Worker module adds to
+  # its own stop API applies here too.
   defp stop(pid, registry_key) do
-    Worker.stop(pid)
+    Worker.stop(pid, :normal, stop_timeout_ms())
   rescue
     e ->
       Logger.warning(
@@ -68,5 +71,9 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
   catch
     :exit, reason ->
       Logger.warning("StopWorker: exit stopping worker key=#{registry_key}: #{inspect(reason)}")
+  end
+
+  defp stop_timeout_ms do
+    Application.get_env(:arbiter, :stop_worker_timeout_ms, 15_000)
   end
 end

@@ -493,15 +493,23 @@ defmodule Arbiter.Worker do
 
   @doc """
   Stop the worker cleanly.
-  """
-  @spec stop(ref(), term()) :: :ok | {:error, :not_found}
-  def stop(ref, reason \\ :normal)
-  def stop(pid, reason) when is_pid(pid), do: GenServer.stop(pid, reason)
 
-  def stop(task_id, reason) when is_binary(task_id) do
+  `timeout` bounds the wait on `terminate/2` and defaults to `:infinity`
+  (GenServer's own default). Teardown callers that run inside a request path —
+  `Arbiter.Tasks.Issue.Changes.StopWorker`, in the `:close` action's hook
+  pipeline — pass a finite budget so a worker wedged in a slow `terminate/2`
+  cannot hang every close of its task. Route stops through here rather than
+  calling `GenServer.stop/3` directly, so teardown behaviour added to this
+  function reaches every call site.
+  """
+  @spec stop(ref(), term(), timeout()) :: :ok | {:error, :not_found}
+  def stop(ref, reason \\ :normal, timeout \\ :infinity)
+  def stop(pid, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
+
+  def stop(task_id, reason, timeout) when is_binary(task_id) do
     case whereis(task_id) do
       nil -> {:error, :not_found}
-      pid -> GenServer.stop(pid, reason)
+      pid -> GenServer.stop(pid, reason, timeout)
     end
   end
 
@@ -1901,12 +1909,27 @@ defmodule Arbiter.Worker do
       end
 
     if is_integer(os_pid) do
-      _ = System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      # bd-bmmj4w: enumerate the agent's descendants BEFORE killing it. The
+      # process actually holding the worktree open is usually not `claude`
+      # itself but what it spawned (`mix test`, `git`, ...); once the parent
+      # dies those are reparented to init and `pgrep -P` can no longer reach
+      # them, so they would outlive teardown and keep writing into a directory
+      # `CleanupWorktree` is about to remove.
+      descendants = descendant_os_pids(os_pid)
 
-      unless os_process_gone?(os_pid) do
-        Logger.warning(
-          "Worker: task=#{task_id} agent os_pid=#{os_pid} still alive after SIGKILL during teardown"
-        )
+      Enum.each([os_pid | descendants], fn pid ->
+        _ = System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+      end)
+
+      case Enum.reject([os_pid | descendants], &os_process_gone?/1) do
+        [] ->
+          :ok
+
+        survivors ->
+          Logger.warning(
+            "Worker: task=#{task_id} agent os_pid(s) #{Enum.join(survivors, ",")} " <>
+              "still alive after SIGKILL during teardown"
+          )
       end
     end
 
@@ -1932,6 +1955,51 @@ defmodule Arbiter.Worker do
     end
   rescue
     _ -> :error
+  end
+
+  # Every OS process descended from the agent, breadth-first, depth-bounded.
+  # `pgrep -P` is present on both Linux and macOS; when it is missing or the
+  # probe blows up we return [] and fall back to killing the agent alone —
+  # best-effort, never a teardown crash. The BEAM shares its process group
+  # with the port's children, so a group kill is not an option here: the
+  # descendants have to be enumerated and signalled individually.
+  @max_descendant_depth 5
+
+  defp descendant_os_pids(root_os_pid) do
+    collect_descendants([root_os_pid], MapSet.new(), @max_descendant_depth)
+  end
+
+  defp collect_descendants([], acc, _depth), do: MapSet.to_list(acc)
+  defp collect_descendants(_frontier, acc, 0), do: MapSet.to_list(acc)
+
+  defp collect_descendants(frontier, acc, depth) do
+    next =
+      frontier
+      |> Enum.flat_map(&child_os_pids/1)
+      |> Enum.reject(&MapSet.member?(acc, &1))
+      |> Enum.uniq()
+
+    collect_descendants(next, Enum.into(next, acc), depth - 1)
+  end
+
+  defp child_os_pids(os_pid) do
+    case System.cmd("pgrep", ["-P", Integer.to_string(os_pid)], stderr_to_stdout: true) do
+      {out, 0} ->
+        out
+        |> String.split(~r/\s+/, trim: true)
+        |> Enum.flat_map(fn token ->
+          case Integer.parse(token) do
+            {pid, ""} -> [pid]
+            _ -> []
+          end
+        end)
+
+      # exit 1 == "no matching processes", i.e. a leaf.
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
   end
 
   # Poll `kill -0` until the OS process is gone (SIGKILL is prompt, so this
@@ -4063,6 +4131,20 @@ defmodule Arbiter.Worker do
 
   @impl true
   def terminate(_reason, %State{} = state) do
+    # bd-bmmj4w: kill any still-live agent FIRST, on every teardown path — not
+    # just the failure path (`fail_now/2`). Erlang does not reap a
+    # `:spawn_executable` port's OS process when its owner dies, so without
+    # this the `claude` process (and whatever it is blocked on — a `mix test`
+    # child, say) survives `GenServer.stop/1` with its cwd still inside the
+    # task's worktree. That is exactly the bd-801xs5 loss: `:close` stops the
+    # `<task>:fixpass` worker, the registry empties, `CleanupWorktree`'s drain
+    # sees nobody home, and `git worktree remove` deletes the directory out
+    # from under a test run that is still writing to it. Doing the kill here
+    # makes "StopWorker returned" actually imply "the agent is dead", which is
+    # what lets the registry drain serve as a sound proxy for the worktree
+    # being unowned. Synchronous and bounded (see terminate_session_port/2).
+    state = terminate_live_sessions(state)
+
     # Finalize the run row before we tear down. This is the normal-path
     # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
     # real worker-completion path is `arb done` -> task closes -> the task
