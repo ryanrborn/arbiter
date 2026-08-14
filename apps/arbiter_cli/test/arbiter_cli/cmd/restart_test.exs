@@ -15,12 +15,12 @@ defmodule ArbiterCli.Cmd.RestartTest do
     System.delete_env("ARB_HOST")
     # Clear the worker guard so tests aren't blocked when run inside a worker session.
     # The worker-session guard tests set this themselves.
-    prior_worker_id = System.get_env("ARB_ACOLYTE_BEAD_ID")
-    System.delete_env("ARB_ACOLYTE_BEAD_ID")
+    prior_worker_id = System.get_env("ARB_WORKER_BEAD_ID")
+    System.delete_env("ARB_WORKER_BEAD_ID")
 
     on_exit(fn ->
       System.delete_env("ARB_HOME")
-      if prior_worker_id, do: System.put_env("ARB_ACOLYTE_BEAD_ID", prior_worker_id)
+      if prior_worker_id, do: System.put_env("ARB_WORKER_BEAD_ID", prior_worker_id)
     end)
 
     Process.put(:bd2_sleep, fn _ms -> :ok end)
@@ -452,9 +452,9 @@ defmodule ArbiterCli.Cmd.RestartTest do
   end
 
   describe "worker-session guard (bd-crqku8)" do
-    test "refuses to restart when ARB_ACOLYTE_BEAD_ID is set" do
-      System.put_env("ARB_ACOLYTE_BEAD_ID", "bd-test-worker")
-      on_exit(fn -> System.delete_env("ARB_ACOLYTE_BEAD_ID") end)
+    test "refuses to restart when ARB_WORKER_BEAD_ID is set" do
+      System.put_env("ARB_WORKER_BEAD_ID", "bd-test-worker")
+      on_exit(fn -> System.delete_env("ARB_WORKER_BEAD_ID") end)
 
       {_out, err, code} = capture(fn -> Restart.run([]) end)
 
@@ -463,8 +463,8 @@ defmodule ArbiterCli.Cmd.RestartTest do
       assert err =~ "bd-test-worker"
     end
 
-    test "proceeds normally when ARB_ACOLYTE_BEAD_ID is not set" do
-      System.delete_env("ARB_ACOLYTE_BEAD_ID")
+    test "proceeds normally when ARB_WORKER_BEAD_ID is not set" do
+      System.delete_env("ARB_WORKER_BEAD_ID")
 
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},

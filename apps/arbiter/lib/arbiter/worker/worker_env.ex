@@ -20,12 +20,12 @@ defmodule Arbiter.Worker.WorkerEnv do
 
   Wired into `env_pairs/3` as:
 
-      release_clean ++ dev_server_clean ++ worker_env ++ caller_env ++ [ARB_ACOLYTE_BEAD_ID]
+      release_clean ++ dev_server_clean ++ worker_env ++ caller_env ++ [ARB_WORKER_BEAD_ID]
 
   User vars sit **after** the release/dev-server cleanups (so a user could
   intentionally override `DATABASE_PATH`, at their own risk) but **before** the
   caller-explicit `:env` — the agent's own auth (`ANTHROPIC_API_KEY`,
-  `CLAUDE_CONFIG_DIR`, …) and the always-last `ARB_ACOLYTE_BEAD_ID` guard always
+  `CLAUDE_CONFIG_DIR`, …) and the always-last `ARB_WORKER_BEAD_ID` guard always
   win, so a user env var can never break the agent's ability to authenticate or
   the bead-id self-recursion guard.
   """

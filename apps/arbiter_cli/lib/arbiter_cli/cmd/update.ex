@@ -160,7 +160,7 @@ defmodule ArbiterCli.Cmd.Update do
 
     ensure_on_integration_branch(root)
     ensure_clean_tree(root)
-    Restart.guard_acolyte_session!()
+    Restart.guard_worker_session!()
     Restart.guard_active_workers!(force)
 
     before_sha = head_sha(root)

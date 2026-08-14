@@ -20,7 +20,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     System.put_env("ARB_RELEASE_REPO", @repo)
     System.delete_env("ARB_HOST")
     System.delete_env("GITHUB_TOKEN")
-    System.delete_env("ARB_ACOLYTE_BEAD_ID")
+    System.delete_env("ARB_WORKER_BEAD_ID")
     System.delete_env("ARB_GITHUB_API")
 
     on_exit(fn ->

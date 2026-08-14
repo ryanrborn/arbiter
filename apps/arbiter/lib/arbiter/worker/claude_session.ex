@@ -1115,7 +1115,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # so even those spawns don't inherit the operator's ~/.claude. In the test
   # env config isolation is disabled, so this resolves to [] there.
   #
-  # bd-crqku8: always inject ARB_ACOLYTE_BEAD_ID so any `arb restart/update/
+  # bd-crqku8: always inject ARB_WORKER_BEAD_ID so any `arb restart/update/
   # start` invoked from inside the worker session can detect it and refuse,
   # preventing an worker from bouncing the live orchestrating server.
   #
@@ -1137,7 +1137,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # `worker_env` is the workspace's user-defined vars (bd-62d3jh), resolved by
   # the caller so one workspace load serves both it and the session's
   # `redact_values`. They sit after the release/dev-server cleanups but before
-  # caller-explicit `:env` (agent auth) and the always-last ARB_ACOLYTE_BEAD_ID
+  # caller-explicit `:env` (agent auth) and the always-last ARB_WORKER_BEAD_ID
   # guard, so a user var can never clobber the agent's auth or the
   # self-recursion guard.
   defp env_pairs(opts, task_id, worker_env) do
@@ -1152,7 +1152,7 @@ defmodule Arbiter.Worker.ClaudeSession do
 
     case task_id do
       id when is_binary(id) and id != "" ->
-        release_clean ++ dev_server_clean ++ worker_env ++ base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
+        release_clean ++ dev_server_clean ++ worker_env ++ base ++ [{"ARB_WORKER_BEAD_ID", id}]
 
       _ ->
         release_clean ++ base

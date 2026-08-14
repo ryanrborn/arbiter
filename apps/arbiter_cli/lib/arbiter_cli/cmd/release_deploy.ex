@@ -106,7 +106,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     # deploy must not abandon active workers. Same guards as `arb restart`.
     # Resolve the repo first so a misconfiguration fails fast, before we reach
     # for the (HTTP-backed) active-worker check.
-    Restart.guard_acolyte_session!()
+    Restart.guard_worker_session!()
     repo = release_repo()
     Restart.guard_active_workers!(force)
 
