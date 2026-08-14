@@ -6,7 +6,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
   Invoked by `Arbiter.Worker.Watchdog` when an approved PR is
   blocked because its required checks are failing. Before this, the Watchdog only
-  *escalated* a `:ci_failed` block to the Admiral and parked the PR; the fix-pass
+  *escalated* a `:ci_failed` block to the coordinator and parked the PR; the fix-pass
   dispatcher lets the common, mechanically-fixable failures (a broken test, a
   formatting violation, a missing compile fix) unblock themselves.
 

@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.Update do
   `git pull --ff-only`s the integration branch (`main`) in the Arbiter
   checkout, then runs an explicit deploy sequence: migrations → CLI escript
   rebuild (if changed) → Phoenix restart. One verb for the contributor +
-  Admiral to ship merged work.
+  coordinator to ship merged work.
 
   Steps:
 
