@@ -784,7 +784,7 @@ defmodule Arbiter.Worker do
   # ---- Usage ledger (Arbiter.Usage.Event) -------------------------------
 
   # bd-93ru7w: reviewer/implementer workers get `workspace_id: nil` on their
-  # own State deliberately (see `spawn_acolyte/4`) so their completion stays
+  # own State deliberately (see `Arbiter.Worker.ReviewGate.spawn_worker/5`) so their completion stays
   # silent — no Admiral notification, no MergeQueue pickup for the synthetic
   # id. But that same nil was leaking into the *ledger* (Usage.Event and
   # Workers.Run rows), which made `Arbiter.Usage.summarize/1` invisible to
@@ -1333,7 +1333,7 @@ defmodule Arbiter.Worker do
         # grace so an in-flight `arb done` (which the exit_status message can
         # race ahead of) still wins and the check no-ops on a normal completion.
         if new_state.status in @live_statuses do
-          Process.send_after(self(), {:__acolyte_stopped__, port}, exit_grace_ms())
+          Process.send_after(self(), {:__worker_stopped__, port}, exit_grace_ms())
         end
 
         {:noreply, new_state}
@@ -1363,7 +1363,7 @@ defmodule Arbiter.Worker do
   #   2. the run already signalled `arb done` somewhere (primary OR continuation)
   #      → prefer completion. Re-enter on_claude_done so the commit gate decides:
   #      committed work routes to the ReviewGate, uncommitted work still diverts.
-  def handle_info({:__acolyte_stopped__, port}, %State{status: status} = state)
+  def handle_info({:__worker_stopped__, port}, %State{status: status} = state)
       when status in @live_statuses do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
@@ -1402,7 +1402,7 @@ defmodule Arbiter.Worker do
     end
   end
 
-  def handle_info({:__acolyte_stopped__, _port}, %State{} = state) do
+  def handle_info({:__worker_stopped__, _port}, %State{} = state) do
     # The worker completed (arb done won the race) or already failed — the
     # subprocess exit was expected. No escalation.
     {:noreply, state}
@@ -1654,7 +1654,7 @@ defmodule Arbiter.Worker do
   defp append_prompt(_state, _prompt, _session_config), do: :ok
 
   # The effective CLAUDE_CONFIG_DIR a spawn ran under: the value injected into
-  # this spawn's env (workers isolate into `~/.cache/arbiter/acolyte-claude`),
+  # this spawn's env (workers isolate into `~/.cache/arbiter/worker-claude`),
   # else the inherited `$CLAUDE_CONFIG_DIR`, else Claude's `~/.claude` default.
   # port_args.env is the pre-charlist binary-pair list built by
   # `Arbiter.Worker.ClaudeSession.env_pairs/3`, which appends the caller/agent
@@ -1923,7 +1923,7 @@ defmodule Arbiter.Worker do
       # It produces a findings summary in `notes`, NOT a code change — so there
       # is no commit gate, no review gate, no PR, and no merge. The only gate is
       # the notes gate: refuse to let `arb done` close the directive until the
-      # acolyte has written its findings to `notes`. Then complete directly,
+      # worker has written its findings to `notes`. Then complete directly,
       # regardless of whether a worktree/branch exists (the worktree is optional
       # for a task and is never integrated).
       task_type?(meta) and not review_only?(meta) ->
@@ -2626,7 +2626,7 @@ defmodule Arbiter.Worker do
   # deliverable is a findings summary in the directive's `notes`, not a code
   # change. The notes gate is the task-type analogue of the commit gate: it
   # refuses to let `arb done` close the directive while `notes` is blank, and
-  # reprompts the acolyte to write its findings via the `task_update_progress`
+  # reprompts the worker to write its findings via the `task_update_progress`
   # MCP tool.
   #
   # Returns `:ok` to proceed, or `{:gate, :blank}` to divert. A DB read failure
@@ -3268,7 +3268,7 @@ defmodule Arbiter.Worker do
     #{detail_blurb}
 
     The directive cannot close without its findings. Re-dispatch it and ensure
-    the acolyte writes its results to `notes` via the `task_update_progress` MCP
+    the worker writes its results to `notes` via the `task_update_progress` MCP
     tool before completing.
     """
     |> String.trim()

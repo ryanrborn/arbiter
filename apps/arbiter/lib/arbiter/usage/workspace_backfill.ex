@@ -4,7 +4,7 @@ defmodule Arbiter.Usage.WorkspaceBackfill do
   and `worker_runs` rows written NULL by ReviewGate-spawned reviewer/
   implementer workers.
 
-  `Arbiter.Worker.spawn_acolyte/4` starts those workers with
+  `Arbiter.Worker.ReviewGate.spawn_worker/5` starts those workers with
   `workspace_id: nil` deliberately, to keep the synthetic review/impl task id
   out of Admiral notifications and MergeQueue pickup. That same nil leaked
   into the usage ledger, making `Arbiter.Usage.summarize/1` blind to review

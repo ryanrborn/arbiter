@@ -59,11 +59,11 @@ defmodule Arbiter.Workers.RunTest do
           status: :running,
           started_at: DateTime.utc_now(),
           session_id: "11111111-2222-3333-4444-555555555555",
-          config_dir: "/home/ryan/.cache/arbiter/acolyte-claude"
+          config_dir: "/home/ryan/.cache/arbiter/worker-claude"
         })
 
       assert run.session_id == "11111111-2222-3333-4444-555555555555"
-      assert run.config_dir == "/home/ryan/.cache/arbiter/acolyte-claude"
+      assert run.config_dir == "/home/ryan/.cache/arbiter/worker-claude"
     end
 
     test "rejects an unknown status" do
