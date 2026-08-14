@@ -143,7 +143,9 @@ defmodule Arbiter.Workers.RunTest do
 
   describe "worker_types/0" do
     test "exposes the canonical worker_type list" do
-      assert Run.worker_types() == [:main, :review, :impl]
+      # bd-8lq2g7 added the two merge-queue subordinate passes, which run under
+      # the task's own id alongside its parked primary worker.
+      assert Run.worker_types() == [:main, :review, :impl, :fix_pass, :conflict]
     end
   end
 end

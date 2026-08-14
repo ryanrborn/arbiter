@@ -545,13 +545,67 @@ defmodule Arbiter.Worker do
 
   defp broadcast_worker_failed(%State{workspace_id: nil}), do: :ok
 
-  defp broadcast_worker_failed(%State{workspace_id: ws_id, task_id: task_id, meta: meta}) do
-    unless review_only?(meta) do
+  defp broadcast_worker_failed(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
+    # `worker_failed` is a statement about the TASK's worker: the Conductor
+    # pauses the member's downstream branch on it and the API event stream
+    # reports it as "the worker for <task> stopped". Only the task's own primary
+    # worker may make that statement. Review-only workers were already excluded;
+    # bd-8lq2g7 adds the subordinate passes, which run under the same task_id
+    # while the primary is parked at :awaiting_review (see subordinate?/1).
+    unless review_only?(meta) or subordinate?(state) do
       Arbiter.Events.broadcast(ws_id, "worker_failed", %{task_id: task_id})
     end
 
     :ok
   end
+
+  @doc """
+  True when this worker is a **subordinate** pass rather than the task's own
+  primary worker (bd-8lq2g7).
+
+  A subordinate runs under the task's own `task_id` — so its runs, usage, and
+  escalations stay attributed to the task — but registers under a distinct
+  registry key so it can coexist with the primary. The merge queue starts two:
+  the CI fix pass (`<task_id>:fixpass`, `Arbiter.Workflows.MergeQueue.FixPassDispatcher`)
+  and the conflict resolver (`<task_id>:conflict`, `.ConflictResolver`). Both
+  run *while* the primary sits parked at `:awaiting_review` awaiting the merge.
+
+  This is why `worker_list` can show two rows for one `task_id`, and why a
+  subordinate's death must not be reported as the task's worker dying: the
+  remedy for a dead subordinate is never "stop and resume the task's worker".
+
+  Accepts either a `%State{}` or a `snapshot/1` map.
+  """
+  @spec subordinate?(map()) :: boolean()
+  def subordinate?(%{task_id: task_id, registry_key: key})
+      when is_binary(key) and is_binary(task_id),
+      do: key != task_id
+
+  def subordinate?(_), do: false
+
+  @doc """
+  Human-readable label for a subordinate worker's role, e.g. `"fix pass"`.
+
+  Returns `nil` for the task's primary worker and for roles with no subordinate
+  label. Used to attribute escalations to the pass that actually stopped.
+  """
+  @spec subordinate_label(map()) :: String.t() | nil
+  def subordinate_label(worker_or_snapshot) do
+    if subordinate?(worker_or_snapshot) do
+      case Map.get(worker_or_snapshot, :role) ||
+             role_from_meta(Map.get(worker_or_snapshot, :meta)) do
+        :fix_pass -> "fix pass"
+        :conflict_resolver -> "conflict resolution pass"
+        role when is_atom(role) and not is_nil(role) -> to_string(role)
+        _ -> "subordinate pass"
+      end
+    end
+  end
+
+  defp role_from_meta(meta) when is_map(meta),
+    do: Map.get(meta, :role) || Map.get(meta, "role")
+
+  defp role_from_meta(_), do: nil
 
   defp review_only?(%{review_only: true}), do: true
   defp review_only?(%{"review_only" => true}), do: true
@@ -621,12 +675,20 @@ defmodule Arbiter.Worker do
   # tags the ReviewGate and Dispatch stamp:
   #   * role == :reviewer  → :review  (review-gate reviewer)
   #   * role == :implementer → :impl  (review-gate revise-round implementer)
+  #   * role == :fix_pass → :fix_pass (merge-queue CI fix pass)
+  #   * role == :conflict_resolver → :conflict (merge-queue conflict resolver)
   #   * review_only == true → :review (coordinator-dispatched review-only worker)
   #   * otherwise           → :main   (the authoring worker)
+  #
+  # bd-8lq2g7: the two merge-queue subordinate passes were previously recorded
+  # as :main, so a failed fix pass showed up in the task's run history — and in
+  # the loop analytics' "dispatches" count — as the authoring worker failing.
   defp worker_type_from_meta(meta) when is_map(meta) do
     cond do
       Map.get(meta, :role) == :reviewer -> :review
       Map.get(meta, :role) == :implementer -> :impl
+      Map.get(meta, :role) == :fix_pass -> :fix_pass
+      Map.get(meta, :role) == :conflict_resolver -> :conflict
       review_only?(meta) -> :review
       true -> :main
     end
@@ -1829,8 +1891,12 @@ defmodule Arbiter.Worker do
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
     reason = Arbiter.Worker.StopReason.classify(exit_status, output_lines)
 
+    # bd-8lq2g7: name the subordinate pass in the log line too — "worker for
+    # task=X stopped" reads as the task's own worker dying when it was a
+    # merge-queue fix pass / conflict resolver running alongside it.
     Logger.warning(
-      "Worker: worker for task=#{state.task_id} stopped — #{Arbiter.Worker.StopReason.label(reason)}"
+      "Worker: #{subordinate_label(state) || "worker"} for task=#{state.task_id} stopped — " <>
+        Arbiter.Worker.StopReason.label(reason)
     )
 
     if reason.category == :auth_expired do
@@ -4000,6 +4066,13 @@ defmodule Arbiter.Worker do
   defp snapshot(%State{} = s) do
     %{
       task_id: s.task_id,
+      # bd-8lq2g7: `registry_key` + `role` are what make two rows for one
+      # `task_id` legible — a subordinate pass (`<task_id>:fixpass` /
+      # `:conflict`) running alongside the task's parked primary. Consumers
+      # (worker_list, the escalation notifier) branch on subordinate?/1, which
+      # reads exactly these two fields.
+      registry_key: s.registry_key || s.task_id,
+      role: role_from_meta(s.meta),
       workspace_id: s.workspace_id,
       repo: s.repo,
       current_step: s.current_step,
