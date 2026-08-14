@@ -153,7 +153,7 @@ defmodule ArbiterCli.Cmd.Server do
             "(Boot.Migrator runs on every boot)…"
         )
 
-        Restart.guard_acolyte_session!()
+        Restart.guard_worker_session!()
         Restart.guard_active_workers!(force)
 
         case Restart.perform(root, timeout_ms) do
