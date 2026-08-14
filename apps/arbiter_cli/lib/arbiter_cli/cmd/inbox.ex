@@ -23,7 +23,7 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   Line format:
 
-      0b9d1f2a  [bd-1qx1nt] completion from acolyte-019e — GitLab adapter complete (2m ago)
+      0b9d1f2a  [bd-1qx1nt] completion from worker-019e — GitLab adapter complete (2m ago)
 
   The leading token is a short message id — pass it (or a unique prefix) to
   `arb inbox read`. The bracket is the directive the message concerns.
@@ -237,7 +237,7 @@ defmodule ArbiterCli.Cmd.Inbox do
     IO.puts(m["body"] || "")
   end
 
-  # `0b9d1f2a  [bd-1qx1nt] completion from acolyte-019e — gist (2m ago)`
+  # `0b9d1f2a  [bd-1qx1nt] completion from worker-019e — gist (2m ago)`
   defp format_line(m) do
     short = m["id"] |> to_string() |> String.slice(0, 8)
     directive = m["directive_ref"] || "-"

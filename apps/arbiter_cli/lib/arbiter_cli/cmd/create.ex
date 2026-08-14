@@ -30,7 +30,7 @@ defmodule ArbiterCli.Cmd.Create do
                     correctness-critical; may warrant exploration
                     or multiple passes.
 
-  The Admiral / filing session sets `--difficulty` at create time with a
+  The coordinator / filing session sets `--difficulty` at create time with a
   one-line justification in the task's description. Routing maps the value
   to abstract `{model_tier, thinking}` (see `Arbiter.Agents.Routing.ByDifficulty`).
 
