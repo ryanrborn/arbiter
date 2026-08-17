@@ -611,4 +611,103 @@ defmodule Arbiter.Messages.MessageTest do
       assert bodies == ["needs attention"]
     end
   end
+
+  describe "last_with_subject/3 (bd-brwx7w escalation dedupe)" do
+    defp escalate(subject, task, opts \\ []) do
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "coordinator",
+          workspace_id: Keyword.get(opts, :workspace_id, @ws),
+          directive_ref: task,
+          subject: subject,
+          body: subject
+        })
+
+      m
+    end
+
+    test "returns nil when nothing matches, and the row when one does" do
+      task = "bd-lws-#{System.unique_integer([:positive])}"
+
+      assert Message.last_with_subject("coordinator", ["nope"],
+               workspace_id: @ws,
+               directive_ref: task
+             ) == nil
+
+      m = escalate("blocked A", task)
+
+      assert %{id: id} =
+               Message.last_with_subject("coordinator", ["blocked A"],
+                 workspace_id: @ws,
+                 directive_ref: task
+               )
+
+      assert id == m.id
+    end
+
+    test "any subject in the list matches — the dedupe key can span several spellings" do
+      task = "bd-lws-#{System.unique_integer([:positive])}"
+      escalate("blocked B", task)
+
+      assert Message.last_with_subject("coordinator", ["blocked A", "blocked B"],
+               workspace_id: @ws,
+               directive_ref: task
+             )
+    end
+
+    test "an empty subject list never matches" do
+      assert Message.last_with_subject("coordinator", [], workspace_id: @ws) == nil
+    end
+
+    test "scopes to the directive so another task's identical subject does not match" do
+      mine = "bd-lws-#{System.unique_integer([:positive])}"
+      theirs = "bd-lws-#{System.unique_integer([:positive])}"
+      escalate("shared subject", theirs)
+
+      assert Message.last_with_subject("coordinator", ["shared subject"],
+               workspace_id: @ws,
+               directive_ref: mine
+             ) == nil
+    end
+
+    test "uncleared: true skips a cleared row but keeps an unread or outstanding one" do
+      task = "bd-lws-#{System.unique_integer([:positive])}"
+      m = escalate("cleared soon", task)
+      scope = [workspace_id: @ws, directive_ref: task, uncleared: true]
+
+      assert Message.last_with_subject("coordinator", ["cleared soon"], scope)
+
+      {:ok, _} = Message.mark_read(m.id)
+      assert Message.last_with_subject("coordinator", ["cleared soon"], scope)
+
+      {:ok, _} = Message.mark_cleared(m.id)
+      assert Message.last_with_subject("coordinator", ["cleared soon"], scope) == nil
+
+      # ...but it is still the last matching row when cleared rows count.
+      assert Message.last_with_subject("coordinator", ["cleared soon"],
+               workspace_id: @ws,
+               directive_ref: task
+             )
+    end
+
+    test "reads the legacy admiral address too" do
+      task = "bd-lws-#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          workspace_id: @ws,
+          directive_ref: task,
+          subject: "legacy addressed",
+          body: "x"
+        })
+
+      assert Message.last_with_subject("coordinator", ["legacy addressed"],
+               workspace_id: @ws,
+               directive_ref: task
+             )
+    end
+  end
 end

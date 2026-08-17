@@ -436,6 +436,67 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
+  The most recent mailbox-family message addressed to `to_ref` whose `subject`
+  is one of `subjects`, or `nil` when there is none (bd-brwx7w).
+
+  This is the durable dedupe/backoff surface for repeated escalations. Two
+  independent pollers (and the same poller across a restart) can each ask
+  "has this exact page already gone out?" and get the same answer, because the
+  state lives in the message table rather than in either poller's memory.
+
+  `subjects` is a list so a caller can treat several near-identical subjects as
+  one dedupe key (e.g. the two ways a missing approval is reported).
+
+  Options:
+
+    * `:workspace_id` — scope to a workspace.
+    * `:directive_ref` — scope to the task the message concerns.
+    * `:uncleared` — when `true`, consider only rows with `cleared_at IS NULL`
+      (unread *or* outstanding); a cleared row has been addressed and no longer
+      suppresses a repeat.
+
+  Pure read.
+  """
+  @spec last_with_subject(String.t(), [String.t()], keyword()) :: struct() | nil
+  def last_with_subject(to_ref, subjects, opts \\ [])
+
+  def last_with_subject(_to_ref, [], _opts), do: nil
+
+  def last_with_subject(to_ref, subjects, opts) when is_binary(to_ref) and is_list(subjects) do
+    refs = ref_variants(to_ref)
+
+    query =
+      __MODULE__
+      |> Ash.Query.filter(to_ref in ^refs and kind in ^@mailbox_kinds and subject in ^subjects)
+      |> Ash.Query.sort(inserted_at: :desc)
+      |> Ash.Query.limit(1)
+
+    query =
+      case Keyword.get(opts, :workspace_id) do
+        ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
+        _ -> query
+      end
+
+    query =
+      case Keyword.get(opts, :directive_ref) do
+        dr when is_binary(dr) -> Ash.Query.filter(query, directive_ref == ^dr)
+        _ -> query
+      end
+
+    query =
+      if Keyword.get(opts, :uncleared, false) do
+        Ash.Query.filter(query, is_nil(cleared_at))
+      else
+        query
+      end
+
+    case Ash.read!(query) do
+      [message | _] -> message
+      [] -> nil
+    end
+  end
+
+  @doc """
   Clear the outstanding tail of a mailbox: **soft-clear** (stamp `cleared_at`)
   every *read-but-uncleared* message addressed to `to_ref`. Pending (unread)
   mail is left untouched — you read it first, then clear. Rows are **retained**
