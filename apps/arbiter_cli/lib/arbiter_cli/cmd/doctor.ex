@@ -8,6 +8,9 @@ defmodule ArbiterCli.Cmd.Doctor do
     2. Does at least one workspace exist? (DB reachable + reasonable state)
     3. Can we resolve the configured workspace? (ARB_WORKSPACE, else the
        workspace named "default", else the sole workspace if there's only one)
+    4. Do any repos resolve? (zero repos means nothing can be dispatched)
+    5. Do the CLI and server report the same version?
+    6. Are database migrations up to date?
 
   Exit code 0 on all green, 1 on any failure.
   """
@@ -42,6 +45,7 @@ defmodule ArbiterCli.Cmd.Doctor do
       check_phoenix(),
       check_workspaces_exist(),
       check_active_workspace(),
+      check_repos(),
       check_versions(),
       check_migrations()
     ]
@@ -296,6 +300,173 @@ defmodule ArbiterCli.Cmd.Doctor do
           fatal: true,
           blocks_readiness: false
         }
+    end
+  end
+
+  # Repo config is the one piece of workspace state every dispatch depends on
+  # and nothing else here validates. bd-3pqzsa: v0.1.56 removed the `rig_paths`
+  # fallback, so an un-migrated install resolved ZERO repos — every dispatch
+  # failed, PRPatrol went silent — while doctor reported 5/5 green for three
+  # days, because "config intact" and "config read" are indistinguishable from
+  # the config alone. Two signals make that state loud: any workspace still on
+  # a retired config key (exact, names the workspace, count-independent — see
+  # legacy_workspaces/1), and otherwise an explicit repo count, which is the
+  # generic backstop the next config-key rename lands on.
+  #
+  # `fatal: true` — an install that resolves no repos is operator-actionable
+  # and `arb doctor` should exit non-zero. `blocks_readiness: false` — it says
+  # nothing about whether the *deployed server* is healthy, so it must never
+  # auto-roll-back a deploy (same reasoning as check_active_workspace, bd-8ix2tw).
+  defp check_repos do
+    workspaces = workspace_entries()
+
+    case legacy_workspaces(workspaces) do
+      [] -> check_repo_count(workspaces)
+      names -> legacy_key_result(names)
+    end
+  end
+
+  # The repo count alone is not enough: `GET /api/repos` aggregates across
+  # *every* workspace plus the `:arbiter, :repo_paths` app-env fallback, so on
+  # a two-workspace install a migrated workspace A supplies repos while an
+  # un-migrated workspace B dispatches nothing — a non-zero total, and the same
+  # silence all over again. So flag a lingering `rig_paths` on its own,
+  # independent of the count, and name the workspace.
+  #
+  # Only a *map* under `rig_paths` counts, matching
+  # `Arbiter.Boot.ConfigMigrator`'s own candidate filter exactly: anything else
+  # is junk the migration will never clear, and flagging it would pin doctor
+  # red with no remediation that works.
+  defp legacy_workspaces(entries) do
+    entries
+    |> Enum.filter(&is_map(Map.get(&1.config, "rig_paths")))
+    |> Enum.map(& &1.name)
+  end
+
+  defp legacy_key_result(names) do
+    %Result{
+      name: "repos resolved",
+      status: :fail,
+      detail:
+        "#{workspace_phrase(names)} still on the retired `rig_paths` key: #{Enum.join(names, ", ")}",
+      hint: legacy_key_hint(),
+      fatal: true,
+      blocks_readiness: false
+    }
+  end
+
+  defp workspace_phrase([_]), do: "1 workspace"
+  defp workspace_phrase(names), do: "#{length(names)} workspaces"
+
+  # Lead with the remediation that works on every install shape. Production
+  # installs are Mix-less releases (`arb server deploy` ships a tarball), so
+  # `mix arbiter.migrate_rig_paths` is unrunnable there and belongs last.
+  defp legacy_key_hint do
+    "Its repo map is intact but nothing reads it. Restart the server " <>
+      "(`arb server restart`) — the boot config migrator moves it to `repo_paths` " <>
+      "automatically. To migrate without a restart: `bin/arbiter eval " <>
+      "Arbiter.Release.migrate_config` on a release install, or " <>
+      "`mix arbiter.migrate_rig_paths --apply` from a source checkout."
+  end
+
+  defp check_repo_count(workspaces) do
+    case Client.get("/api/repos") do
+      {:ok, %{"data" => [_ | _] = repos}} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "#{length(repos)} repo(s)",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"data" => []}} ->
+        no_repos_result(workspaces)
+
+      {:ok, _other} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "unexpected response — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :connection_refused}} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "server unreachable",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :http, status: 404}} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "server does not expose repos",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{} = err} ->
+        %Result{
+          name: "repos resolved",
+          status: :fail,
+          detail: err.message,
+          hint: err.hint,
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # Zero repos on a fresh install with no workspace yet is expected, not a
+  # fault — the workspace check already owns that failure and we must not
+  # double-report it. Once a workspace exists, zero repos means no work can be
+  # dispatched, and the hint names the exact remediation. (The `rig_paths` case
+  # never reaches here — `check_repos` catches it ahead of the count.)
+  defp no_repos_result([]) do
+    %Result{
+      name: "repos resolved",
+      status: :ok,
+      detail: "no workspaces — nothing to resolve",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp no_repos_result(_workspaces) do
+    %Result{
+      name: "repos resolved",
+      status: :fail,
+      detail: "no repos registered",
+      hint: "Register a repo with `arb config set repo_paths.<repo>.path <path>`.",
+      fatal: true,
+      blocks_readiness: false
+    }
+  end
+
+  # `%{name: , config: }` per workspace — the name so a failure can point at
+  # the workspace that needs fixing, the config so key-level checks (the
+  # retired `rig_paths`, and whatever the next rename is) can run client-side.
+  defp workspace_entries do
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} when is_list(list) ->
+        Enum.map(list, fn ws ->
+          %{name: Map.get(ws, "name") || Map.get(ws, "id") || "(unnamed)", config: config_of(ws)}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp config_of(ws) do
+    case Map.get(ws, "config") do
+      config when is_map(config) -> config
+      _ -> %{}
     end
   end
 
