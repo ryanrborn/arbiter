@@ -76,6 +76,20 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   @config_key "coordinator_notifications"
   @legacy_config_key "admiral_notifications"
 
+  # How long a merge-block escalation stays "recent enough" to suppress a repeat
+  # even after the coordinator has cleared it (bd-brwx7w). The primary dedupe is
+  # "an identical page is still uncleared"; this is the second gate, so that a
+  # `clear_all` on a block the fleet structurally cannot resolve
+  # (`:needs_nonauthor_approval`) does not immediately re-open the once-a-minute
+  # flood. Override with `config :arbiter, :merge_block_escalation_cooldown_ms`.
+  @default_block_escalation_cooldown_ms :timer.hours(6)
+
+  # The merge-block reasons that mean "a human reviewer has not approved yet".
+  # The forge forbids the fleet approving its own PR, so these can only clear
+  # out-of-band — they are one dedupe family and the only ones that earn the
+  # post-clear cooldown. See `block_family/1` and `fleet_unresolvable?/1`.
+  @approval_block_reasons [:needs_approval, :needs_nonauthor_approval]
+
   @typedoc """
   The subset of an `Arbiter.Worker` snapshot this module reads. Passing the
   full snapshot map is fine — extra keys are ignored.
@@ -322,36 +336,64 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   `snapshot` carries `:task_id` + `:workspace_id`; `mr_ref` is the PR/MR ref (may
   be `nil`); `reason` is the block-reason atom. Best-effort, returns `:ok`.
+
+  ## Deduped and backed off (bd-brwx7w)
+
+  A block reason the fleet cannot resolve on its own — `:needs_nonauthor_approval`
+  above all, where the forge forbids the author approving their own PR — is
+  re-detected on *every* poll, forever. Each poller used to hold its own
+  in-memory latch, so two pollers watching one PR paged the coordinator roughly
+  once a minute indefinitely, drowning the mailbox and tripping event-stream
+  watchers' rate cutoffs.
+
+  The latch now lives in the message table, which every poller and every restart
+  shares. A page is suppressed when an identical escalation for this
+  `(workspace, task, reason-family)` is **still uncleared**, or when one was
+  raised inside the cooldown window (`@default_block_escalation_cooldown_ms`).
+  `:needs_approval` and `:needs_nonauthor_approval` share one family — they are
+  two spellings of "waiting on a human reviewer", and alternating between them
+  is exactly what defeated the old per-reason latch. A genuinely *different*
+  block (a conflict appearing on top of a missing approval) is a different
+  family and still pages immediately.
   """
   @spec merge_blocked(map(), String.t() | nil, atom()) :: :ok
   def merge_blocked(%{workspace_id: ws_id} = snapshot, mr_ref, reason)
       when is_binary(ws_id) and is_atom(reason) do
     task_id = Map.get(snapshot, :task_id, "system")
 
-    subject = "#{task_id} merge blocked — #{block_label(reason)}"
+    subject = block_subject(task_id, reason)
 
-    body =
-      [
-        "#{title_for(task_id)} cannot merge: #{block_label(reason)}.",
-        mr_ref && "PR/MR: #{mr_ref}",
-        "Reason: #{reason}",
-        "Remediation: #{block_remediation(reason)}",
-        "The Watchdog detected this on its merge poll and parked the PR rather " <>
-          "than failing it — resolve the block (or force-merge) and the next " <>
-          "poll will pick it up."
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n")
+    if duplicate_block_escalation?(ws_id, task_id, reason) do
+      Logger.debug(
+        "CoordinatorNotifier.merge_blocked/3 suppressed duplicate escalation " <>
+          "task=#{task_id} reason=#{reason} (bd-brwx7w)"
+      )
+    else
+      body =
+        [
+          "#{title_for(task_id)} cannot merge: #{block_label(reason)}.",
+          mr_ref && "PR/MR: #{mr_ref}",
+          "Reason: #{reason}",
+          "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
+          "The Watchdog detected this on its merge poll and parked the PR rather " <>
+            "than failing it — resolve the block (or force-merge) and the next " <>
+            "poll will pick it up.",
+          "This escalation is raised once per block episode — it will not repeat " <>
+            "while it is outstanding in the inbox."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: task_id,
-      workspace_id: ws_id,
-      directive_ref: task_id,
-      subject: subject,
-      body: body
-    })
+      Message.send_mail(%{
+        kind: :escalation,
+        to_ref: Message.coordinator_ref(),
+        from_ref: task_id,
+        workspace_id: ws_id,
+        directive_ref: task_id,
+        subject: subject,
+        body: body
+      })
+    end
 
     :ok
   rescue
@@ -448,7 +490,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         mr_ref && "PR/MR: #{mr_ref}",
         "Reason: #{reason}",
         "Auto-resolve attempts: #{attempts}",
-        "Remediation: #{block_remediation(reason)}",
+        "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
         "The Watchdog auto-resolved this block #{attempts} time(s) without success " <>
           "and has stopped retrying. Resolve it manually (or force-merge) and the " <>
           "next poll will pick it up."
@@ -552,6 +594,87 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   def approved_awaiting_merge(_snapshot, _mr_ref, _via_review_gate), do: :ok
 
+  defp block_subject(task_id, reason), do: "#{task_id} merge blocked — #{block_label(reason)}"
+
+  # The dedupe key (bd-brwx7w). Reasons in one family describe the same
+  # real-world block under different names, so they must not page separately:
+  #
+  #   * `:needs_approval` — the generic "a required approval is missing" path.
+  #   * `:needs_nonauthor_approval` — the same PR seen by the Watchdog's
+  #     non-author path, which knows the fleet authored it.
+  #
+  # Two pollers alternating between these two atoms is precisely what produced
+  # the ~1/min flood: each poller's per-reason latch reset on every flip.
+  defp block_family(reason) when reason in @approval_block_reasons,
+    do: @approval_block_reasons
+
+  defp block_family(reason), do: [reason]
+
+  # Blocks the fleet structurally cannot clear by retrying: the forge forbids a
+  # PR's author approving it, so no amount of polling changes the answer. These
+  # are the ones that earn the post-clear cooldown below. Every other reason
+  # (`:conflict`, `:ci_failed`, `:behind_base`, …) *can* resolve and then
+  # genuinely recur, so once the coordinator has cleared its page, a fresh
+  # occurrence is fresh news and pages again immediately.
+  defp fleet_unresolvable?(reason), do: reason in @approval_block_reasons
+
+  # True when an identical page for this workspace/task/reason-family is still
+  # uncleared, or — for a block the fleet cannot resolve — was raised inside the
+  # cooldown window. Both checks read the durable message table, so they hold
+  # across pollers *and* across restarts, which is what kills the stale
+  # duplicates that used to survive a server restart.
+  #
+  # Fails open: an unreadable mailbox must never swallow a genuine escalation.
+  defp duplicate_block_escalation?(ws_id, task_id, reason) do
+    subjects = Enum.map(block_family(reason), &block_subject(task_id, &1))
+    scope = [workspace_id: ws_id, directive_ref: task_id]
+    coordinator = Message.coordinator_ref()
+
+    cond do
+      Message.last_with_subject(coordinator, subjects, scope ++ [uncleared: true]) != nil ->
+        true
+
+      not fleet_unresolvable?(reason) ->
+        false
+
+      true ->
+        case Message.last_with_subject(coordinator, subjects, scope) do
+          nil -> false
+          last -> within_cooldown?(last)
+        end
+    end
+  rescue
+    _ -> false
+  end
+
+  defp within_cooldown?(%{inserted_at: %DateTime{} = at}) do
+    cooldown =
+      Application.get_env(
+        :arbiter,
+        :merge_block_escalation_cooldown_ms,
+        @default_block_escalation_cooldown_ms
+      )
+
+    is_integer(cooldown) and cooldown > 0 and
+      DateTime.diff(DateTime.utc_now(), at, :millisecond) < cooldown
+  end
+
+  defp within_cooldown?(_), do: false
+
+  # Whether this workspace merges an approved PR itself. Defaults to `false` on
+  # an unreadable workspace, matching `Workspace.auto_merge?/1`'s own default:
+  # promising an auto-merge that never comes is the failure this guards against.
+  defp auto_merge?(ws_id) when is_binary(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, workspace} -> Workspace.auto_merge?(workspace)
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp auto_merge?(_), do: false
+
   defp block_label(:conflict), do: "merge conflict with the base branch"
   defp block_label(:behind_base), do: "branch is behind the base branch"
   defp block_label(:ci_failed), do: "required CI checks are failing"
@@ -565,30 +688,53 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp block_label(:blocked_other), do: "a forge merge rule is unsatisfied"
   defp block_label(other), do: "merge is blocked (#{other})"
 
-  defp block_remediation(:conflict),
+  defp block_remediation(reason, auto_merge?)
+
+  defp block_remediation(:conflict, _auto_merge?),
     do: "rebase or resolve the conflicts with the base branch, then re-push."
 
-  defp block_remediation(:behind_base),
+  defp block_remediation(:behind_base, _auto_merge?),
     do: "update the branch from its base (merge or rebase) and re-push."
 
-  defp block_remediation(:ci_failed),
+  defp block_remediation(:ci_failed, _auto_merge?),
     do: "fix the failing checks (or re-run flaky ones), then re-push."
 
-  defp block_remediation(:needs_approval),
-    do: "approve the PR, or re-request review if a prior approval was dismissed."
+  defp block_remediation(:needs_approval, auto_merge?),
+    do:
+      "approve the PR, or re-request review if a prior approval was dismissed. " <>
+        after_approval_note(auto_merge?)
 
-  defp block_remediation(:needs_nonauthor_approval),
+  # bd-brwx7w: this used to promise "will auto-merge once approved"
+  # unconditionally, which is a lie on a `merge.auto_merge: false` workspace —
+  # an operator who approves and walks away leaves the PR sitting open forever,
+  # and the *same* mailbox already carried an `approved_awaiting_merge/3` page
+  # saying the opposite about the same PR.
+  defp block_remediation(:needs_nonauthor_approval, auto_merge?),
     do:
       "have a human reviewer (someone other than the PR author) approve the PR — " <>
-        "the fleet authored it and the forge forbids self-approval. The PR is parked " <>
-        "and will auto-merge once approved; no further action is needed to keep it alive."
+        "the fleet authored it and the forge forbids self-approval. " <>
+        after_approval_note(auto_merge?)
 
-  defp block_remediation(:draft), do: "mark the PR ready for review."
+  defp block_remediation(:draft, _auto_merge?), do: "mark the PR ready for review."
 
-  defp block_remediation(:blocked_other),
+  defp block_remediation(:blocked_other, _auto_merge?),
     do: "inspect the PR's merge requirements on the forge and satisfy them."
 
-  defp block_remediation(_other), do: "inspect the PR on the forge."
+  defp block_remediation(_other, _auto_merge?), do: "inspect the PR on the forge."
+
+  # What actually happens once the approval lands — conditional on the
+  # workspace's merge policy rather than asserted.
+  defp after_approval_note(true),
+    do:
+      "The PR is parked and will auto-merge once approved; no further action is " <>
+        "needed to keep it alive."
+
+  defp after_approval_note(false),
+    do:
+      "The PR is parked, but this workspace has `merge.auto_merge` disabled — so " <>
+        "the fleet will not merge it automatically. Merge it yourself once it is " <>
+        "approved (or set `merge.auto_merge` to true for this workspace); the " <>
+        "Watchdog keeps watching until then, so nothing is lost."
 
   defp describe_reason(%{message: msg, kind: kind}) when is_binary(msg),
     do: "#{msg} (#{kind})"

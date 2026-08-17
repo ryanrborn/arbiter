@@ -382,6 +382,173 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
     end
   end
 
+  describe "merge_blocked/3 dedupe + backoff (bd-brwx7w)" do
+    defp merge_escalations(ws), do: Message.inbox("admiral", workspace_id: ws)
+
+    test "a repeated block for the same reason escalates once, not once per poll" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws}
+
+      for _ <- 1..5 do
+        assert :ok =
+                 CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+      end
+
+      assert [_only_one] = merge_escalations(ws)
+    end
+
+    test "the two approval-block reasons share a dedupe key (two pollers, one page)" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws}
+
+      # The Watchdog's non-author path and the generic block path report the same
+      # real-world condition under two different atoms; alternating between them
+      # must not defeat the latch.
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_approval)
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_approval)
+
+      assert [only_one] = merge_escalations(ws)
+      assert only_one.body =~ "Reason: needs_approval"
+    end
+
+    test "a genuinely different block reason still escalates" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws}
+
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :ci_failed)
+
+      assert [_approval, _ci] = merge_escalations(ws)
+    end
+
+    test "an outstanding (read-but-uncleared) escalation still dedupes" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws}
+
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+      assert [msg] = merge_escalations(ws)
+      Message.mark_read(msg.id)
+
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+
+      assert [_still_one] = Message.outstanding("admiral", workspace_id: ws)
+      assert merge_escalations(ws) == []
+    end
+
+    test "a different task with the same reason is not suppressed" do
+      ws = uniq("ws")
+
+      assert :ok =
+               CoordinatorNotifier.merge_blocked(
+                 %{task_id: uniq("bd"), workspace_id: ws},
+                 "#1",
+                 :needs_nonauthor_approval
+               )
+
+      assert :ok =
+               CoordinatorNotifier.merge_blocked(
+                 %{task_id: uniq("bd"), workspace_id: ws},
+                 "#2",
+                 :needs_nonauthor_approval
+               )
+
+      assert [_a, _b] = merge_escalations(ws)
+    end
+
+    test "a cleared *resolvable* block re-escalates immediately when it comes back" do
+      # The cooldown exists to damp a block the fleet cannot resolve. A CI
+      # failure that was addressed and then reappears is genuine new news, and
+      # must not be swallowed by it.
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws}
+
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :ci_failed)
+      assert [msg] = merge_escalations(ws)
+      Message.mark_cleared(msg.id)
+
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :ci_failed)
+      assert [_fresh] = merge_escalations(ws)
+    end
+
+    test "once cleared, the block re-escalates only after the cooldown elapses" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws}
+
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+      assert [msg] = merge_escalations(ws)
+      Message.mark_cleared(msg.id)
+
+      # Cleared but still inside the cooldown window: silence.
+      assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+      assert merge_escalations(ws) == []
+
+      with_cooldown(0, fn ->
+        assert :ok =
+                 CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
+      end)
+
+      assert [_fresh] = merge_escalations(ws)
+    end
+
+    defp with_cooldown(ms, fun) do
+      prev = Application.get_env(:arbiter, :merge_block_escalation_cooldown_ms)
+      Application.put_env(:arbiter, :merge_block_escalation_cooldown_ms, ms)
+
+      try do
+        fun.()
+      after
+        case prev do
+          nil -> Application.delete_env(:arbiter, :merge_block_escalation_cooldown_ms)
+          val -> Application.put_env(:arbiter, :merge_block_escalation_cooldown_ms, val)
+        end
+      end
+    end
+  end
+
+  describe "merge_blocked/3 remediation respects merge.auto_merge (bd-brwx7w)" do
+    defp workspace_with(config) do
+      {:ok, ws} = Ash.create(Arbiter.Tasks.Workspace, %{name: uniq("ws"), config: config})
+      ws
+    end
+
+    test "auto_merge on promises the auto-merge" do
+      ws = workspace_with(%{"merge" => %{"auto_merge" => true}})
+
+      assert :ok =
+               CoordinatorNotifier.merge_blocked(
+                 %{task_id: uniq("bd"), workspace_id: ws.id},
+                 "#1226",
+                 :needs_nonauthor_approval
+               )
+
+      assert [msg] = Message.inbox("admiral", workspace_id: ws.id)
+      assert msg.body =~ "will auto-merge once approved"
+    end
+
+    test "auto_merge off says the fleet will not merge it and a human must" do
+      ws = workspace_with(%{"merge" => %{"auto_merge" => false}})
+
+      assert :ok =
+               CoordinatorNotifier.merge_blocked(
+                 %{task_id: uniq("bd"), workspace_id: ws.id},
+                 "#1226",
+                 :needs_nonauthor_approval
+               )
+
+      assert [msg] = Message.inbox("admiral", workspace_id: ws.id)
+      refute msg.body =~ "will auto-merge once approved"
+      assert msg.body =~ "`merge.auto_merge` disabled"
+      assert msg.body =~ "will not merge it automatically"
+    end
+  end
+
   describe "merge_block_unresolved/4 (#354 Phase 2a)" do
     test "names the reason, attempt count, and remediation after auto-resolve fails" do
       ws = uniq("ws")
