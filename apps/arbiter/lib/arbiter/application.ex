@@ -145,6 +145,13 @@ defmodule Arbiter.Application do
   #     before reconcile/merge_queue so those run against the current schema. It is
   #     a one-shot worker (returns :ignore), not a Task, precisely so it BLOCKS
   #     the boot until the schema is current. See Arbiter.Boot.Migrator.
+  #   * config_migrator: run workspace-config DATA migrations (config lives in a
+  #     JSON column, so Ecto migrations never touch it) once the schema is at
+  #     head — currently the retired `rig_paths` -> `repo_paths` key rename.
+  #     Same primary-instance gate and same synchronous one-shot shape as the
+  #     migrator, and placed right after it so every later child (patrols,
+  #     queues) enumerates workspaces whose repo config is already current.
+  #     See Arbiter.Boot.ConfigMigrator and bd-3pqzsa.
   #   * reconcile: sweep orphaned :running worker_runs left behind by a node
   #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
@@ -170,6 +177,7 @@ defmodule Arbiter.Application do
     [
       Arbiter.SingleInstance,
       Arbiter.Boot.Migrator,
+      Arbiter.Boot.ConfigMigrator,
       Supervisor.child_spec(
         {Task,
          fn ->
