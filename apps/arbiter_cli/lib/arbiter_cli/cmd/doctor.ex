@@ -308,14 +308,68 @@ defmodule ArbiterCli.Cmd.Doctor do
   # fallback, so an un-migrated install resolved ZERO repos — every dispatch
   # failed, PRPatrol went silent — while doctor reported 5/5 green for three
   # days, because "config intact" and "config read" are indistinguishable from
-  # the config alone. An explicit repo count makes that state loud, and does so
-  # generically: the next config-key rename lands on this same check.
+  # the config alone. Two signals make that state loud: any workspace still on
+  # a retired config key (exact, names the workspace, count-independent — see
+  # legacy_workspaces/1), and otherwise an explicit repo count, which is the
+  # generic backstop the next config-key rename lands on.
   #
   # `fatal: true` — an install that resolves no repos is operator-actionable
   # and `arb doctor` should exit non-zero. `blocks_readiness: false` — it says
   # nothing about whether the *deployed server* is healthy, so it must never
   # auto-roll-back a deploy (same reasoning as check_active_workspace, bd-8ix2tw).
   defp check_repos do
+    workspaces = workspace_entries()
+
+    case legacy_workspaces(workspaces) do
+      [] -> check_repo_count(workspaces)
+      names -> legacy_key_result(names)
+    end
+  end
+
+  # The repo count alone is not enough: `GET /api/repos` aggregates across
+  # *every* workspace plus the `:arbiter, :repo_paths` app-env fallback, so on
+  # a two-workspace install a migrated workspace A supplies repos while an
+  # un-migrated workspace B dispatches nothing — a non-zero total, and the same
+  # silence all over again. So flag a lingering `rig_paths` on its own,
+  # independent of the count, and name the workspace.
+  #
+  # Only a *map* under `rig_paths` counts, matching
+  # `Arbiter.Boot.ConfigMigrator`'s own candidate filter exactly: anything else
+  # is junk the migration will never clear, and flagging it would pin doctor
+  # red with no remediation that works.
+  defp legacy_workspaces(entries) do
+    entries
+    |> Enum.filter(&is_map(Map.get(&1.config, "rig_paths")))
+    |> Enum.map(& &1.name)
+  end
+
+  defp legacy_key_result(names) do
+    %Result{
+      name: "repos resolved",
+      status: :fail,
+      detail:
+        "#{workspace_phrase(names)} still on the retired `rig_paths` key: #{Enum.join(names, ", ")}",
+      hint: legacy_key_hint(),
+      fatal: true,
+      blocks_readiness: false
+    }
+  end
+
+  defp workspace_phrase([_]), do: "1 workspace"
+  defp workspace_phrase(names), do: "#{length(names)} workspaces"
+
+  # Lead with the remediation that works on every install shape. Production
+  # installs are Mix-less releases (`arb server deploy` ships a tarball), so
+  # `mix arbiter.migrate_rig_paths` is unrunnable there and belongs last.
+  defp legacy_key_hint do
+    "Its repo map is intact but nothing reads it. Restart the server " <>
+      "(`arb server restart`) — the boot config migrator moves it to `repo_paths` " <>
+      "automatically. To migrate without a restart: `bin/arbiter eval " <>
+      "Arbiter.Release.migrate_config` on a release install, or " <>
+      "`mix arbiter.migrate_rig_paths --apply` from a source checkout."
+  end
+
+  defp check_repo_count(workspaces) do
     case Client.get("/api/repos") do
       {:ok, %{"data" => [_ | _] = repos}} ->
         %Result{
@@ -327,7 +381,7 @@ defmodule ArbiterCli.Cmd.Doctor do
         }
 
       {:ok, %{"data" => []}} ->
-        no_repos_result()
+        no_repos_result(workspaces)
 
       {:ok, _other} ->
         %Result{
@@ -371,51 +425,48 @@ defmodule ArbiterCli.Cmd.Doctor do
   # Zero repos on a fresh install with no workspace yet is expected, not a
   # fault — the workspace check already owns that failure and we must not
   # double-report it. Once a workspace exists, zero repos means no work can be
-  # dispatched, and the hint names the exact remediation.
-  defp no_repos_result do
-    case workspace_configs() do
-      [] ->
-        %Result{
-          name: "repos resolved",
-          status: :ok,
-          detail: "no workspaces — nothing to resolve",
-          fatal: false,
-          blocks_readiness: false
-        }
-
-      configs ->
-        %Result{
-          name: "repos resolved",
-          status: :fail,
-          detail: "no repos registered",
-          hint: no_repos_hint(configs),
-          fatal: true,
-          blocks_readiness: false
-        }
-    end
+  # dispatched, and the hint names the exact remediation. (The `rig_paths` case
+  # never reaches here — `check_repos` catches it ahead of the count.)
+  defp no_repos_result([]) do
+    %Result{
+      name: "repos resolved",
+      status: :ok,
+      detail: "no workspaces — nothing to resolve",
+      fatal: false,
+      blocks_readiness: false
+    }
   end
 
-  # A workspace still carrying the retired `rig_paths` key is the bd-3pqzsa
-  # case exactly: its repo map is intact but no longer read by anything. Say so
-  # and name the migration, rather than sending the operator to re-enter nine
-  # paths by hand.
-  defp no_repos_hint(configs) do
-    if Enum.any?(configs, &is_map(Map.get(&1, "rig_paths"))) do
-      "A workspace still carries the retired `rig_paths` config key — its repos are " <>
-        "intact but no longer read. Migrate it with `mix arbiter.migrate_rig_paths --apply` " <>
-        "on the server (a server restart also migrates it automatically)."
-    else
-      "Register a repo with `arb config set repo_paths.<repo>.path <path>`."
-    end
+  defp no_repos_result(_workspaces) do
+    %Result{
+      name: "repos resolved",
+      status: :fail,
+      detail: "no repos registered",
+      hint: "Register a repo with `arb config set repo_paths.<repo>.path <path>`.",
+      fatal: true,
+      blocks_readiness: false
+    }
   end
 
-  defp workspace_configs do
+  # `%{name: , config: }` per workspace — the name so a failure can point at
+  # the workspace that needs fixing, the config so key-level checks (the
+  # retired `rig_paths`, and whatever the next rename is) can run client-side.
+  defp workspace_entries do
     case Client.get("/api/workspaces") do
       {:ok, %{"data" => list}} when is_list(list) ->
-        Enum.map(list, fn ws -> Map.get(ws, "config") || %{} end)
+        Enum.map(list, fn ws ->
+          %{name: Map.get(ws, "name") || Map.get(ws, "id") || "(unnamed)", config: config_of(ws)}
+        end)
 
       _ ->
         []
+    end
+  end
+
+  defp config_of(ws) do
+    case Map.get(ws, "config") do
+      config when is_map(config) -> config
+      _ -> %{}
     end
   end
 

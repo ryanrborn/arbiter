@@ -9,8 +9,13 @@ defmodule Mix.Tasks.Arbiter.MigrateRigPaths do
   The migration itself lives in `Arbiter.Boot.ConfigMigrator` and runs
   automatically on every boot of the primary instance (bd-3pqzsa) — relying on
   an operator to remember a one-off task is what let a live install run three
-  days with zero repos resolved. This task remains useful for two things: a
-  dry-run preview of what a boot would do, and migrating without a restart.
+  days with zero repos resolved. This task remains useful for a dry-run preview
+  of what a boot would do, and for migrating without a restart.
+
+  **This task only exists on a source checkout.** A production install is a
+  Mix-less release (`arb server deploy` ships a tarball), where the equivalents
+  are `arb server restart` (boot migrates) or, without a restart,
+  `bin/arbiter eval Arbiter.Release.migrate_config`.
 
   ## Usage
 

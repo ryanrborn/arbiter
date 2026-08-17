@@ -11,6 +11,19 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     ]
   }
 
+  defp legacy_workspaces_resp do
+    %{
+      "data" => [
+        %{
+          "id" => "ws-1",
+          "name" => "default",
+          "prefix" => "bd",
+          "config" => %{"rig_paths" => %{"tonic" => "/srv/tonic"}}
+        }
+      ]
+    }
+  end
+
   # Use the actual compiled CLI version so the version check passes in all-green tests.
   defp matching_version_resp do
     %{
@@ -374,19 +387,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
 
     test "zero repos names the legacy rig_paths key when a workspace still carries it" do
-      legacy_workspaces = %{
-        "data" => [
-          %{
-            "id" => "ws-1",
-            "name" => "default",
-            "prefix" => "bd",
-            "config" => %{"rig_paths" => %{"tonic" => "/srv/tonic"}}
-          }
-        ]
-      }
-
       stub_routes([
-        {{"get", "/api/workspaces"}, {legacy_workspaces, 200}},
+        {{"get", "/api/workspaces"}, {legacy_workspaces_resp(), 200}},
         {{"get", "/api/repos"}, {%{"data" => []}, 200}},
         {{"get", "/api/version"}, {matching_version_resp(), 200}},
         {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
@@ -397,6 +399,81 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "[fail] repos resolved"
       assert out =~ "rig_paths"
       assert out =~ "arbiter.migrate_rig_paths"
+    end
+
+    # `/api/repos` aggregates across every workspace (plus the app-env
+    # fallback), so a count-only check goes green the moment *anything* supplies
+    # repos — while the un-migrated workspace still dispatches nothing.
+    test "a workspace on rig_paths fails even when other workspaces supply repos" do
+      mixed = %{
+        "data" => [
+          %{"id" => "ws-1", "name" => "migrated", "prefix" => "bd", "config" => %{}},
+          %{
+            "id" => "ws-2",
+            "name" => "leotech",
+            "prefix" => "lt",
+            "config" => %{"rig_paths" => %{"tonic" => "/srv/tonic"}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {mixed, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] repos resolved"
+      assert out =~ "1 workspace still on the retired `rig_paths` key: leotech"
+    end
+
+    # A release install has no Mix, so the mix task cannot be the lead
+    # instruction — `arb server restart` works everywhere.
+    test "the rig_paths hint leads with a remediation that works on a release install" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {legacy_workspaces_resp(), 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "arb server restart"
+      assert out =~ "Arbiter.Release.migrate_config"
+
+      [hint] = Regex.run(~r/hint: .*/, out)
+      restart_at = :binary.match(hint, "arb server restart") |> elem(0)
+      mix_at = :binary.match(hint, "mix arbiter.migrate_rig_paths") |> elem(0)
+      assert restart_at < mix_at
+    end
+
+    # Only a map under `rig_paths` is a migration candidate, so only a map is
+    # worth reporting — otherwise doctor pins red on junk no migration clears.
+    test "a non-map rig_paths value is not reported as the legacy key" do
+      junk = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"rig_paths" => "x"}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {junk, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] repos resolved"
     end
 
     test "zero repos is not a deploy-rollback signal" do

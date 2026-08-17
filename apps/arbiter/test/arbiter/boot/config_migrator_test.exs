@@ -92,6 +92,53 @@ defmodule Arbiter.Boot.ConfigMigratorTest do
       refute Map.has_key?(config, "repo_paths")
     end
 
+    # bd-3pqzsa review: `repo_paths` is not validated anywhere (ValidateConfig
+    # allows unknown keys), and an operator debugging the zero-repos symptom is
+    # very likely to type `arb config set repo_paths /srv/foo`, which stores a
+    # bare string. Merging that would raise inside a supervision-tree child and
+    # the server would not boot at all.
+    test "a non-map repo_paths is replaced rather than raising" do
+      ws =
+        create_ws!("malformed", %{
+          "rig_paths" => %{"tonic" => "/srv/tonic"},
+          "repo_paths" => "/srv/verus-specs"
+        })
+
+      log =
+        capture_log(fn ->
+          assert [result] = ConfigMigrator.migrate_rig_paths()
+          assert result.status == :migrated
+          assert result.repos == ["tonic"]
+        end)
+
+      assert log =~ "non-map repo_paths"
+
+      config = reload!(ws).config
+      assert config["repo_paths"] == %{"tonic" => "/srv/tonic"}
+      refute Map.has_key?(config, "rig_paths")
+    end
+
+    test "a non-map repo_paths does not stop other workspaces from migrating" do
+      bad = create_ws!("bad", %{"rig_paths" => %{"a" => "/srv/a"}, "repo_paths" => 42})
+      good = create_ws!("good", %{"rig_paths" => %{"b" => "/srv/b"}})
+
+      capture_log(fn ->
+        assert results = ConfigMigrator.migrate_rig_paths()
+        assert length(results) == 2
+        assert Enum.all?(results, &(&1.status == :migrated))
+      end)
+
+      assert reload!(bad).config["repo_paths"] == %{"a" => "/srv/a"}
+      assert reload!(good).config["repo_paths"] == %{"b" => "/srv/b"}
+    end
+
+    test "a non-map rig_paths is not a migration candidate at all" do
+      ws = create_ws!("junk", %{"rig_paths" => "/srv/tonic"})
+
+      assert ConfigMigrator.migrate_rig_paths() == []
+      assert reload!(ws).config == %{"rig_paths" => "/srv/tonic"}
+    end
+
     test "logs a warning naming the workspace and the repos it moved" do
       create_ws!("loud", %{"rig_paths" => %{"tonic" => "/srv/tonic"}})
 
@@ -108,6 +155,20 @@ defmodule Arbiter.Boot.ConfigMigratorTest do
       ws = create_ws!("primary", %{"rig_paths" => %{"tonic" => "/srv/tonic"}})
 
       assert ConfigMigrator.start_link(primary?: true) == :ignore
+      assert reload!(ws).config["repo_paths"] == %{"tonic" => "/srv/tonic"}
+    end
+
+    # A raise here would fail Supervisor.start_link/2 and the server would not
+    # boot at all — worse than the zero-repos bug this module exists to fix.
+    test "a malformed workspace config never aborts the boot" do
+      ws =
+        create_ws!("malformed-boot", %{
+          "rig_paths" => %{"tonic" => "/srv/tonic"},
+          "repo_paths" => "/srv/tonic"
+        })
+
+      capture_log(fn -> assert ConfigMigrator.start_link(primary?: true) == :ignore end)
+
       assert reload!(ws).config["repo_paths"] == %{"tonic" => "/srv/tonic"}
     end
 

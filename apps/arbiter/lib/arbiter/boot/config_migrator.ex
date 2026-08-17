@@ -104,6 +104,10 @@ defmodule Arbiter.Boot.ConfigMigrator do
   nothing needs migrating — which is the steady state after the first boot, so
   this is safe to run on every boot.
 
+  A workspace is only a migration candidate when `rig_paths` holds a map; a
+  non-map value under either key cannot hold repos and is handled without
+  raising (see `current_map/2`), because this runs inside the supervision tree.
+
   Options:
 
     * `:apply?` (default `true`) — when `false`, report what would move without
@@ -115,8 +119,8 @@ defmodule Arbiter.Boot.ConfigMigrator do
 
     Workspace
     |> read_workspaces()
-    |> Enum.filter(&is_map(get_in(&1.config, [@legacy_key])))
-    |> Enum.map(&migrate_workspace(&1, apply?))
+    |> Enum.filter(&legacy_map?/1)
+    |> Enum.map(&safe_migrate_workspace(&1, apply?))
   end
 
   defp read_workspaces(resource) do
@@ -127,9 +131,42 @@ defmodule Arbiter.Boot.ConfigMigrator do
       []
   end
 
+  defp legacy_map?(%{config: config}) when is_map(config),
+    do: is_map(Map.get(config, @legacy_key))
+
+  defp legacy_map?(_ws), do: false
+
+  # The module's contract is that a failure here never aborts the boot — but
+  # that only holds for `{:error, _}` returns, not for raises. This child runs
+  # in the supervision tree, so an uncaught exception fails
+  # `Supervisor.start_link/2` and the server does not come up at all: strictly
+  # worse than the zero-repos bug being fixed, and it would land on exactly
+  # the un-migrated installs this module targets. Rescue per workspace so one
+  # malformed config cannot take the whole install down, and report it as an
+  # error result rather than skipping it silently.
+  defp safe_migrate_workspace(ws, apply?) do
+    migrate_workspace(ws, apply?)
+  rescue
+    e ->
+      message = Exception.message(e)
+
+      Logger.error(
+        "Boot.ConfigMigrator: workspace #{ws.name} still carries #{@legacy_key} — migration to " <>
+          "#{@current_key} CRASHED, its repos will not resolve: #{message}"
+      )
+
+      %{
+        workspace: ws.name,
+        workspace_id: ws.id,
+        repos: [],
+        repo_paths: %{},
+        status: {:error, message}
+      }
+  end
+
   defp migrate_workspace(ws, apply?) do
     legacy = ws.config[@legacy_key]
-    current = ws.config[@current_key] || %{}
+    current = current_map(ws, ws.config[@current_key])
 
     # `deep_merge(left, right)` lets `right` win, and the current key is the
     # more recent source of truth — so legacy is the LEFT operand here.
@@ -152,6 +189,26 @@ defmodule Arbiter.Boot.ConfigMigrator do
 
       Map.put(base, :status, :dry_run)
     end
+  end
+
+  # `repo_paths` is not schema-validated — `ValidateConfig` allows unknown keys
+  # and has no rule for it, and `arb config set repo_paths /srv/foo` (no dotted
+  # path) stores a bare string. `PatchConfig.deep_merge/2` only accepts two
+  # maps, so a non-map here would raise straight through the supervision tree.
+  # A non-map value cannot hold repos and is read by nothing, so treat it as
+  # absent — but log it at warning level so the discarded value stays
+  # recoverable from the boot log.
+  defp current_map(_ws, current) when is_map(current), do: current
+  defp current_map(_ws, nil), do: %{}
+
+  defp current_map(ws, other) do
+    Logger.warning(
+      "Boot.ConfigMigrator: workspace #{ws.name} has a non-map #{@current_key} " <>
+        "(#{inspect(other)}) — it cannot hold repos and will be replaced by the " <>
+        "migrated #{@legacy_key} map"
+    )
+
+    %{}
   end
 
   defp apply_migration(ws, merged, repos) do
