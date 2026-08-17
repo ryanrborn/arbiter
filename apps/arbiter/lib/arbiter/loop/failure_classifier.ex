@@ -9,7 +9,13 @@ defmodule Arbiter.Loop.FailureClassifier do
   into:
 
     * `:operational`  — server restarts, rate-limits, auth failures, merge/CI
-      infra, review-timeouts. Route to ops; **never** to prompt changes.
+      infra, review-timeouts, and **spawn failures** (`worker spawn failed
+      after registration: ...`, and the `:inspect_worktree_failed` /
+      `:fetch_failed` / `:worktree_failed` tags it wraps — #1220). A spawn
+      failure happens after worker registration but before any agent starts:
+      no prompt, no model call, no transcript, so it carries zero
+      agent-quality signal by construction and must never fall through to
+      `:unclassified`. Route to ops; **never** to prompt changes.
     * `:agent_quality` — `:review_gate_rejected`, "never signalled `arb done`",
       `:uncommitted_at_completion`, `:no_commits_at_completion`,
       `:secret_in_commit`, and **context exhaustion**. These are the only
@@ -70,7 +76,11 @@ defmodule Arbiter.Loop.FailureClassifier do
     {":awaiting_review_timeout", :review_timeout},
     {":merge_failed", :merge_failed},
     {":mr_closed", :merge_failed},
-    {"merge_failed", :merge_failed}
+    {"merge_failed", :merge_failed},
+    {"worker spawn failed after registration", :spawn_failure},
+    {":inspect_worktree_failed", :spawn_failure},
+    {":fetch_failed", :spawn_failure},
+    {":worktree_failed", :spawn_failure}
   ]
 
   # Agent-quality allowlist.

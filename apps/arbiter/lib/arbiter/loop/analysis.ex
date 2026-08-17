@@ -495,10 +495,12 @@ defmodule Arbiter.Loop.Analysis do
         task_id: first.task_id,
         difficulty: difficulty,
         repo: first.repo,
+        title: Map.get(first, :title),
         cost: task_rows |> Enum.map(&(&1.cost_usd || 0.0)) |> Enum.sum(),
         reworked?: Enum.any?(task_rows, &(&1.max_round >= 2))
       }
     end)
+    |> collapse_duplicate_dispatches()
     |> Enum.group_by(&{&1.difficulty, &1.repo})
     |> Enum.map(fn {{difficulty, repo}, tasks} ->
       n = length(tasks)
@@ -514,6 +516,56 @@ defmodule Arbiter.Loop.Analysis do
       }
     end)
     |> Enum.sort_by(&{&1.repo, &1.difficulty})
+  end
+
+  # #1221: the same unit of work re-filed as N separate tasks (same repo, same
+  # title/target signature) must not read as N independent clean successes —
+  # each near-duplicate group collapses to a single unit whose cost is the sum
+  # across the group (not diluted by the inflated denominator) and which is
+  # itself treated as reworked (N re-filings for one unit of work is the
+  # pathology this cell exists to catch, not a healthy 0%-rework signal).
+  defp collapse_duplicate_dispatches(tasks) do
+    tasks
+    |> Enum.group_by(&{&1.repo, duplicate_signature(&1.title)})
+    |> Enum.flat_map(fn
+      {{_repo, nil}, group} ->
+        group
+
+      {_key, [single]} ->
+        [single]
+
+      {{repo, _sig}, group} ->
+        [
+          %{
+            task_id: group |> Enum.map(& &1.task_id) |> Enum.join("+"),
+            difficulty:
+              group |> Enum.map(& &1.difficulty) |> Enum.reject(&is_nil/1) |> min_or_nil(),
+            repo: repo,
+            title: hd(group).title,
+            cost: group |> Enum.map(& &1.cost) |> Enum.sum(),
+            reworked?: true
+          }
+        ]
+    end)
+  end
+
+  # A duplicate-dispatch signature: tasks filed against the same PR/MR ref are
+  # the same referent regardless of any incidental title drift; otherwise fall
+  # back to the trimmed title itself. `nil`/blank titles never cluster — there
+  # is no signature to match on, so each such task stays its own unit.
+  defp duplicate_signature(nil), do: nil
+
+  defp duplicate_signature(title) when is_binary(title) do
+    case Regex.run(~r/^PR #(\d+)/i, title) do
+      [_, num] ->
+        {:pr, num}
+
+      _ ->
+        case String.trim(title) do
+          "" -> nil
+          trimmed -> {:title, trimmed}
+        end
+    end
   end
 
   # ---- suggestions + evidence bar ----------------------------------------
