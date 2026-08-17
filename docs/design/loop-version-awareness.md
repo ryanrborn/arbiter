@@ -60,15 +60,15 @@ surfaced by `GET /api/version`. Live response from the running fleet:
  "built_at":"2026-08-17T21:49:50Z","booted_at":"2026-08-14T23:29:02Z"}
 ```
 
-### 2. The release tag is the wrong unit — off by ~35×
+### 2. The release tag is the wrong unit — off by ~13×
 
 The issue frames the problem as releases (8 in two weeks against a 7d window).
 The real granularity is worse, and the live response above shows it:
 
 | observation | value |
 |---|---|
-| release tags in the current 7d window | **1** (`v0.1.56`) |
-| first-parent merges to `main` in the same window | **35** |
+| release tags in the current 7d window | **2** (`v0.1.55`, `v0.1.56`) |
+| first-parent merges to `main` in the same window | **27** |
 | commits on `main` past the newest tag | **8** |
 | running node's sha | `4daeac8a` — i.e. `v0.1.56 + 8 commits` |
 | `built_at` (2026-08-17) vs `booted_at` (2026-08-14) | modules hot-reloaded 3 days into the node's life |
@@ -89,7 +89,7 @@ Release size is also wildly uneven — `v0.1.53..v0.1.54` is 2 commits,
 `v0.1.54..v0.1.55` is 24 — so "one version" is not even a consistent quantity
 of change. Splitting the current window at its two tag boundaries makes the
 point concretely: **28 / 148 / 60 runs**. The middle bucket is 63% of the
-corpus in a single tag-labelled bin that actually spans ~20 merges — a
+corpus in a single tag-labelled bin that actually spans 15 merges — a
 composition line built on tags would report that as one homogeneous
 population.
 
@@ -131,12 +131,22 @@ other 72%**, and the report pools them without saying so.
 The issue's Q4 is about hypotheses accumulating across a boundary. That is the
 *slow* path. The fast path is worse and unmentioned:
 
-`Analysis.cells/1` (`analysis.ex:485-517`) computes a **per-cell median cost**
-over the whole window, and `difficulty_misestimates/1` scores each task against
-it. The live report shows 12 misestimates in cell `(2, arbiter)` measured
-against a `$2.61` median — a median pooling 65 pre-`#1188` runs (which
-under-report cost) with 171 post-fix runs. A depressed median makes post-fix
-tasks look like cost outliers.
+`difficulty_misestimates/1` builds its own `{difficulty, repo}` cohorts
+(`analysis.ex:292`) and scores each task against a **cohort median cost**
+computed inside `cohort_verdict/3` (`analysis.ex:383` for rework, `:398` for
+quality failures) — a task is flagged only if `t.cost > cohort_cost`. That
+median is computed over the whole window, so it pools 65 pre-`#1188` runs
+(which under-report cost) with 171 post-fix runs. A depressed median makes
+post-fix tasks look like cost outliers, and the live report shows 12
+misestimates in cell `(2, arbiter)`.
+
+`Analysis.cells/1` (`analysis.ex:485-517`) does *not* feed that test: it pools a
+**mean** (`mean_cost_usd`, `analysis.ex:513`) — which is the `$2.61` the report
+table renders (`report.ex:209`) — over the same `{difficulty, repo}` grouping of
+the same `main_rows`. So the two agree on the population (which is why the
+per-cell `builds` column below is measured on the right set), but they disagree
+on the statistic, and the number that actually gates a proposal is the cohort
+median, which is never rendered.
 
 Those 12 become `:difficulty_override` candidates at `scope: :task`
 (`proposals.ex:171-200`), and:
@@ -211,7 +221,7 @@ dimension.
 **Do not backfill.** `nil` means "predates version stamping", exactly the
 convention the provenance fields already use (`workers/run.ex:29-31`). An
 approximate backfill from tag timestamps is available and is precisely the
-thing [finding 2](#2-the-release-tag-is-the-wrong-unit--off-by-35) shows to be
+thing [finding 2](#2-the-release-tag-is-the-wrong-unit--off-by-13) shows to be
 wrong; a backfill that is confidently wrong is worse than a `nil` that is
 honestly absent.
 
@@ -236,7 +246,7 @@ top 3: v0.1.56+090c96bc (34) · v0.1.55+d3d75272 (52) · v0.1.55+7451a0ee (31)
 (Illustrative shape — the exact per-sha counts are not computable until rung 1
 lands. The per-version rollup, `176 / 60`, is real: it is the current window
 split at the `v0.1.56` tag, and it is exactly the over-coarse binning
-[finding 2](#2-the-release-tag-is-the-wrong-unit--off-by-35) warns about.) Render the rollup always and the top-N shas
+[finding 2](#2-the-release-tag-is-the-wrong-unit--off-by-13) warns about.) Render the rollup always and the top-N shas
 underneath, because the sha list is long by construction and the version
 rollup is what a human scans first.
 
@@ -260,8 +270,9 @@ actionable claims are per-cell, and a cell is a much smaller population than
 the corpus. `cells/1` already groups by `{difficulty, repo}`
 (`analysis.ex:502`); add the count of distinct builds among the pooled tasks.
 A cell with `builds: 1` is internally comparable. A cell with `builds: 3` is
-where a median is suspect — and cell `(2, arbiter)` above, with its `$2.61`
-median and 12 misestimates hanging off it, is exactly that.
+where its statistics are suspect — and cell `(2, arbiter)` above, with its
+`$2.61` rendered mean, the unrendered cohort median behind it, and 12
+misestimates hanging off that median, is exactly that.
 
 Mechanically this requires `Corpus.base_runs/3` to select the two new columns
 (`corpus.ex:162-173` currently selects neither them nor `started_at`) and
@@ -276,7 +287,7 @@ without parsing markdown.
 **Warn by default. Refuse — narrowly and by downgrade, not by dropping — in
 exactly one declarable class.**
 
-Refusing on "the window straddles a release" refuses essentially always: 35
+Refusing on "the window straddles a release" refuses essentially always: 27
 merges in the current 7d window means every practical window straddles
 something. That is the issue's own stated non-goal, and it is the right call.
 
@@ -285,8 +296,10 @@ The defensible narrow rule is not about the *window*, it is about the
 a metric a specific in-window build provably changed. Today that is one rule:
 
 > A `:difficulty_override` or `:config_set` candidate justified by a **cost**
-> comparison, whose cell pools runs from both sides of a cost-accounting build,
-> is recorded as `:hypothesis` rather than `:proposed` — i.e. it is denied the
+> comparison — i.e. against the cohort median in `cohort_verdict/3`
+> (`analysis.ex:383/398`) — whose cohort pools runs from both sides of a
+> cost-accounting build, is recorded as `:hypothesis` rather than
+> `:proposed` — i.e. it is denied the
 > `:task`-scope bar bypass at `loop.ex:432` — with the reason recorded on the
 > row.
 
@@ -296,7 +309,11 @@ because no in-window build changed how rounds are counted for *them*
 specifically — which is a claim the [Q5](#q5--can-a-releases-changelog-inform-the-pass)
 mapping makes checkable rather than assumed.
 
-Add `--allow-mixed-build` to `arb loop propose` as the operator escape hatch.
+Add `--allow-mixed-build` to `arb loop analyze --propose` as the operator escape
+hatch — the generative path, i.e. the flag on `analyze` (`cmd/loop.ex:19`, routed
+to `POST /api/loop/propose` at `cmd/loop.ex:141-147`), not the separate
+`arb loop propose repo-doc-patch` verb (`cmd/loop.ex:82-86`), which is an
+operator-authored lesson and never runs the analysis pass.
 The operator is in the loop by design; the job here is to make them see it, not
 to make the decision for them.
 
@@ -309,14 +326,14 @@ liveness condition on promotion, and change nothing else.**
 **Rejected: partition hypotheses by version.** This means adding version to
 `Loop.fingerprint/1` (`loop.ex:141`), whose docstring already explains why
 everything that accumulates is excluded: including it "would make every window
-a fresh fingerprint and defeat the mechanic". At 35 builds/week, partitioning
+a fresh fingerprint and defeat the mechanic". At 27 builds/week, partitioning
 gives every hypothesis a population of one, forever. It does not weaken the
 accumulation mechanic — it deletes it. Reject outright.
 
 **Rejected: time-decay of confidence.** Age is the wrong axis. What invalidates
 an incident is a change to *the code path that produced it*, and those two are
 only loosely correlated. A hypothesis about reviewer prose quality is untouched
-by 35 merges to the PR poller; decay penalises it identically to one about cost
+by 27 merges to the PR poller; decay penalises it identically to one about cost
 accounting. Decay is a proxy that is easy to implement and wrong in a way that
 is hard to notice.
 
@@ -438,7 +455,7 @@ time, append `" (measured on v0.1.56+4daeac8a)"` to `baseline`
 text, and it is already refreshed on reinforce, so it stays honest.
 
 **(b) The real answer: do not build a before/after outcome checker at all.** At
-35 builds/week, any pre/post comparison of a pre-registered baseline against a
+27 builds/week, any pre/post comparison of a pre-registered baseline against a
 later outcome attributes the intervening releases to the proposal. That is a
 false-positive generator for the loop's measurement of its own effectiveness —
 the worst possible place for one, because it is the mechanism that is supposed
@@ -486,7 +503,7 @@ Rung 5 is a paragraph and should land with rung 1 regardless of the rest.
 | invalidate refs older than the running build | the issue's own non-goal; discards nearly everything |
 | auto-reject fossilised hypotheses | `:rejected` is sticky and near-irreversible (`loop.ex:333`) |
 | LLM changelog → metric-impact inference | fails silently; declare it in code instead (Q5) |
-| hard refusal of `--propose` on any straddle | refuses ~always at 35 merges/window (Q3) |
+| hard refusal of `--propose` on any straddle | refuses ~always at 27 merges/window (Q3) |
 | backfill version from tag timestamps | tag time ≠ deploy time; confidently wrong beats honestly `nil` (Q1) |
 | a new `:stale` proposal state | a derived filter covers it; a sixth state does not earn itself (Q4) |
 
