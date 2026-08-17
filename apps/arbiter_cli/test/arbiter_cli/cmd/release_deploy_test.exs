@@ -102,6 +102,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
         {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
         {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha_text) end},
         {{"get", "/api/workspaces"}, {workspaces, 200}},
+        {{"get", "/api/repos"},
+         {%{"data" => [%{"name" => "tonic", "source" => "leotech", "path" => "/srv/tonic"}]},
+          200}},
         {{"get", "/api/workers"}, {@no_workers, 200}}
       ] ++ version_route
     )

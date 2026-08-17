@@ -5,6 +5,12 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
   @workspaces_resp %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
 
+  @repos_resp %{
+    "data" => [
+      %{"name" => "tonic", "source" => "default", "path" => "/srv/tonic"}
+    ]
+  }
+
   # Use the actual compiled CLI version so the version check passes in all-green tests.
   defp matching_version_resp do
     %{
@@ -18,6 +24,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   test "all-green when Phoenix responds with a workspace named default" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -34,6 +41,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   test "pending migrations shows [fail] with count in detail" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "warning", "pending_count" => 3}, 200}}
     ])
@@ -46,6 +54,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   test "unreachable DB or DB error shows [fail] with 'could not check'" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"},
        {%{"status" => "unknown", "pending_count" => nil, "error" => "unreachable"}, 200}}
@@ -65,6 +74,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   test "server without the migrations endpoint (404) does not fail doctor" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"}, {%{}, 404}}
     ])
@@ -77,6 +87,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   test "unexpected migrations response shape does not crash doctor" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"}, {%{"unexpected" => "shape"}, 200}}
     ])
@@ -98,6 +109,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   test "no workspaces → workspace check fails with hint" do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},
+      {{"get", "/api/repos"}, {%{"data" => []}, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -112,6 +124,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   test "--json emits structured payload" do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -120,7 +133,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 5
+    assert length(checks) == 6
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -133,6 +146,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {mismatched_version_resp, 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -158,6 +172,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {mismatched_version_resp, 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -179,6 +194,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {release_version_resp, 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -199,6 +215,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {release_version_resp, 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -220,6 +237,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {release_version_resp, 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -247,6 +265,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {ambiguous_workspaces, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {matching_version_resp(), 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -276,6 +295,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {same_sha_diff_version_resp, 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -301,6 +321,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
       {{"get", "/api/version"}, {stale_server_resp, 200}},
       {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
     ])
@@ -314,5 +335,94 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     # Non-fatal: a version check on its own must not gate `arb server deploy`'s
     # auto-rollback — only Phoenix/workspace reachability does.
     assert Doctor.green?() == true
+  end
+
+  # ---- repo config check (bd-3pqzsa) --------------------------------------
+  #
+  # v0.1.56 dropped the `rig_paths` fallback, so an un-migrated install
+  # resolved zero repos while doctor stayed 5/5 green. Zero repos is now an
+  # explicit, failing line.
+
+  describe "repos resolved check" do
+    test "reports the repo count on a healthy install" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] repos resolved"
+      assert out =~ "1 repo(s)"
+    end
+
+    test "zero repos with a workspace present is a failing, actionable line" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] repos resolved"
+      assert out =~ "no repos registered"
+      assert out =~ "repo_paths"
+    end
+
+    test "zero repos names the legacy rig_paths key when a workspace still carries it" do
+      legacy_workspaces = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"rig_paths" => %{"tonic" => "/srv/tonic"}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {legacy_workspaces, 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] repos resolved"
+      assert out =~ "rig_paths"
+      assert out =~ "arbiter.migrate_rig_paths"
+    end
+
+    test "zero repos is not a deploy-rollback signal" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      # An empty repo map says nothing about whether the *deployed server* is
+      # healthy — it must never auto-roll-back a deploy (cf. bd-8ix2tw).
+      assert Doctor.green?() == true
+    end
+
+    test "no workspaces at all does not double-report as a repo failure" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] repos resolved"
+      assert out =~ "no workspaces"
+    end
   end
 end

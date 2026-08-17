@@ -85,6 +85,28 @@ defmodule Arbiter.ApplicationTest do
       assert migrator_ix < pr_patrol_ix
     end
 
+    test "the config migrator runs after the schema migrator and before workspace enumeration" do
+      # bd-3pqzsa: workspace config lives in a JSON column, so the retired
+      # `rig_paths` -> `repo_paths` rename needs a DATA migration at boot. It
+      # must run after the schema is at head, and before any boot Task
+      # enumerates workspaces — otherwise patrols/queues come up against repo
+      # config that is about to change under them.
+      ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
+
+      assert Arbiter.Boot.ConfigMigrator in ids
+
+      migrator_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.Migrator))
+      config_migrator_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.ConfigMigrator))
+      merge_queue_ix = Enum.find_index(ids, &(&1 == :merge_queue_boot_task))
+      pr_patrol_ix = Enum.find_index(ids, &(&1 == :pr_patrol_boot_task))
+      dispatch_queue_ix = Enum.find_index(ids, &(&1 == :dispatch_queue_boot_task))
+
+      assert migrator_ix < config_migrator_ix
+      assert config_migrator_ix < merge_queue_ix
+      assert config_migrator_ix < pr_patrol_ix
+      assert config_migrator_ix < dispatch_queue_ix
+    end
+
     test "the gated boot tasks are absent when auto_start? is false (the test-env default)" do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 
@@ -94,6 +116,7 @@ defmodule Arbiter.ApplicationTest do
       refute :pr_patrol_boot_task in ids
       refute Arbiter.SingleInstance in ids
       refute Arbiter.Boot.Migrator in ids
+      refute Arbiter.Boot.ConfigMigrator in ids
     end
   end
 end

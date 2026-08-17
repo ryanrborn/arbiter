@@ -1,17 +1,16 @@
 defmodule Mix.Tasks.Arbiter.MigrateRigPaths do
   @shortdoc "Migrate any workspace still keyed under the retired rig_paths config key"
   @moduledoc """
-  One-off migration for the `rig_paths` → `repo_paths` config-key rename
-  (bd-1e6ysj). Any workspace whose config still carries a top-level
-  `rig_paths` map is silently ignored by the schema (unknown keys are
-  dropped) and loses its repo map entirely, since every reader now looks
-  up `repo_paths` only.
+  Operator-facing front end for the `rig_paths` → `repo_paths` config-key
+  rename (bd-1e6ysj). Any workspace whose config still carries a top-level
+  `rig_paths` map loses its repo map entirely, since every reader now looks up
+  `repo_paths` only.
 
-  For each workspace with a `rig_paths` key:
-
-    1. deep-merge `rig_paths` into `repo_paths` (existing `repo_paths`
-       entries win on key collision — they're presumed more current), and
-    2. drop `rig_paths`.
+  The migration itself lives in `Arbiter.Boot.ConfigMigrator` and runs
+  automatically on every boot of the primary instance (bd-3pqzsa) — relying on
+  an operator to remember a one-off task is what let a live install run three
+  days with zero repos resolved. This task remains useful for two things: a
+  dry-run preview of what a boot would do, and migrating without a restart.
 
   ## Usage
 
@@ -24,8 +23,7 @@ defmodule Mix.Tasks.Arbiter.MigrateRigPaths do
 
   use Mix.Task
 
-  alias Arbiter.Tasks.Workspace
-  alias Arbiter.Tasks.Workspace.Changes.PatchConfig
+  alias Arbiter.Boot.ConfigMigrator
 
   @switches [apply: :boolean]
 
@@ -34,37 +32,27 @@ defmodule Mix.Tasks.Arbiter.MigrateRigPaths do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     Mix.Task.run("app.start")
 
-    affected =
-      Workspace
-      |> Ash.read!()
-      |> Enum.filter(&is_map(get_in(&1.config, ["rig_paths"])))
+    apply? = opts[:apply] == true
 
-    if affected == [] do
-      Mix.shell().info("No workspace carries rig_paths — nothing to migrate.")
-    else
-      for ws <- affected do
-        rig_paths = ws.config["rig_paths"]
-        repo_paths = ws.config["repo_paths"] || %{}
-        merged = PatchConfig.deep_merge(rig_paths, repo_paths)
+    case ConfigMigrator.migrate_rig_paths(apply?: apply?) do
+      [] ->
+        Mix.shell().info("No workspace carries rig_paths — nothing to migrate.")
 
-        if opts[:apply] == true do
-          case Ash.update(ws, %{patch: %{"repo_paths" => merged}, unset_paths: ["rig_paths"]},
-                 action: :patch_config
-               ) do
-            {:ok, _updated} ->
-              Mix.shell().info("#{ws.name}: migrated -> #{inspect(merged)}")
+      results ->
+        Enum.each(results, &report/1)
 
-            {:error, err} ->
-              Mix.shell().error("#{ws.name}: failed -- #{inspect(err)}")
-          end
-        else
-          Mix.shell().info("#{ws.name}: would migrate -> #{inspect(merged)}")
+        unless apply? do
+          Mix.shell().info("\nDry-run only. Re-run with --apply to commit.")
         end
-      end
-
-      unless opts[:apply] == true do
-        Mix.shell().info("\nDry-run only. Re-run with --apply to commit.")
-      end
     end
   end
+
+  defp report(%{status: :migrated} = r),
+    do: Mix.shell().info("#{r.workspace}: migrated -> #{inspect(r.repo_paths)}")
+
+  defp report(%{status: :dry_run} = r),
+    do: Mix.shell().info("#{r.workspace}: would migrate -> #{inspect(r.repo_paths)}")
+
+  defp report(%{status: {:error, message}} = r),
+    do: Mix.shell().error("#{r.workspace}: failed -- #{message}")
 end

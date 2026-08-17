@@ -8,6 +8,9 @@ defmodule ArbiterCli.Cmd.Doctor do
     2. Does at least one workspace exist? (DB reachable + reasonable state)
     3. Can we resolve the configured workspace? (ARB_WORKSPACE, else the
        workspace named "default", else the sole workspace if there's only one)
+    4. Do any repos resolve? (zero repos means nothing can be dispatched)
+    5. Do the CLI and server report the same version?
+    6. Are database migrations up to date?
 
   Exit code 0 on all green, 1 on any failure.
   """
@@ -42,6 +45,7 @@ defmodule ArbiterCli.Cmd.Doctor do
       check_phoenix(),
       check_workspaces_exist(),
       check_active_workspace(),
+      check_repos(),
       check_versions(),
       check_migrations()
     ]
@@ -296,6 +300,122 @@ defmodule ArbiterCli.Cmd.Doctor do
           fatal: true,
           blocks_readiness: false
         }
+    end
+  end
+
+  # Repo config is the one piece of workspace state every dispatch depends on
+  # and nothing else here validates. bd-3pqzsa: v0.1.56 removed the `rig_paths`
+  # fallback, so an un-migrated install resolved ZERO repos — every dispatch
+  # failed, PRPatrol went silent — while doctor reported 5/5 green for three
+  # days, because "config intact" and "config read" are indistinguishable from
+  # the config alone. An explicit repo count makes that state loud, and does so
+  # generically: the next config-key rename lands on this same check.
+  #
+  # `fatal: true` — an install that resolves no repos is operator-actionable
+  # and `arb doctor` should exit non-zero. `blocks_readiness: false` — it says
+  # nothing about whether the *deployed server* is healthy, so it must never
+  # auto-roll-back a deploy (same reasoning as check_active_workspace, bd-8ix2tw).
+  defp check_repos do
+    case Client.get("/api/repos") do
+      {:ok, %{"data" => [_ | _] = repos}} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "#{length(repos)} repo(s)",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"data" => []}} ->
+        no_repos_result()
+
+      {:ok, _other} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "unexpected response — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :connection_refused}} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "server unreachable",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :http, status: 404}} ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "server does not expose repos",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{} = err} ->
+        %Result{
+          name: "repos resolved",
+          status: :fail,
+          detail: err.message,
+          hint: err.hint,
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # Zero repos on a fresh install with no workspace yet is expected, not a
+  # fault — the workspace check already owns that failure and we must not
+  # double-report it. Once a workspace exists, zero repos means no work can be
+  # dispatched, and the hint names the exact remediation.
+  defp no_repos_result do
+    case workspace_configs() do
+      [] ->
+        %Result{
+          name: "repos resolved",
+          status: :ok,
+          detail: "no workspaces — nothing to resolve",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      configs ->
+        %Result{
+          name: "repos resolved",
+          status: :fail,
+          detail: "no repos registered",
+          hint: no_repos_hint(configs),
+          fatal: true,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # A workspace still carrying the retired `rig_paths` key is the bd-3pqzsa
+  # case exactly: its repo map is intact but no longer read by anything. Say so
+  # and name the migration, rather than sending the operator to re-enter nine
+  # paths by hand.
+  defp no_repos_hint(configs) do
+    if Enum.any?(configs, &is_map(Map.get(&1, "rig_paths"))) do
+      "A workspace still carries the retired `rig_paths` config key — its repos are " <>
+        "intact but no longer read. Migrate it with `mix arbiter.migrate_rig_paths --apply` " <>
+        "on the server (a server restart also migrates it automatically)."
+    else
+      "Register a repo with `arb config set repo_paths.<repo>.path <path>`."
+    end
+  end
+
+  defp workspace_configs do
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} when is_list(list) ->
+        Enum.map(list, fn ws -> Map.get(ws, "config") || %{} end)
+
+      _ ->
+        []
     end
   end
 
