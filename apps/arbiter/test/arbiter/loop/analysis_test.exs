@@ -12,6 +12,7 @@ defmodule Arbiter.Loop.AnalysisTest do
         run_id: "run-#{System.unique_integer([:positive])}",
         task_id: "bd-x",
         repo: "arbiter",
+        title: nil,
         worker_type: :main,
         status: :completed,
         model: "claude-sonnet-5",
@@ -587,6 +588,123 @@ defmodule Arbiter.Loop.AnalysisTest do
       assert cell.tasks == 2
       assert_in_delta cell.rework_rate, 0.5, 0.001
       assert_in_delta cell.mean_cost_usd, 5.0, 0.001
+    end
+  end
+
+  # #1221: the same unit of work re-filed as N separate tasks must not read as
+  # N independent clean successes in the cost/rework cells — the real repro is
+  # PRPatrol re-filing the same PR #3701 follow-up 5x on a ~3-minute tick.
+  describe "duplicate dispatch (#1221)" do
+    defp dup_dispatch_rows do
+      titles_and_costs = [
+        {"lt-6glz4n", 3.357},
+        {"lt-bushr3", 1.135},
+        {"lt-8za50u", 0.000},
+        {"lt-3973ne", 1.561},
+        {"lt-l52wk3", 0.000}
+      ]
+
+      for {task_id, cost} <- titles_and_costs do
+        row(%{
+          task_id: task_id,
+          repo: "verus_server",
+          difficulty: nil,
+          title: "PR #3701: chore: merge integration/dolphin i…",
+          cost_usd: cost,
+          max_round: 1
+        })
+      end
+    end
+
+    test "collapses near-duplicate task filings into one unit in the cost/rework cell" do
+      report = Analysis.build_report(dup_dispatch_rows(), label: "test")
+
+      cell = Enum.find(report.cells, &(&1.repo == "verus_server"))
+      assert cell
+      # 5 re-filings of the same follow-up must not read as 5 independent
+      # clean tasks — the cell should count them as (at most) one unit.
+      assert cell.tasks == 1
+      assert_in_delta cell.mean_cost_usd, 6.053, 0.001
+      # A duplicate-dispatch cluster is itself a rework signal — 5 filings for
+      # one unit of work is not a 0%-rework, healthy cell.
+      assert cell.rework_rate > 0.0
+    end
+
+    test "a genuinely distinct task in the same repo is not folded into the cluster" do
+      rows =
+        dup_dispatch_rows() ++
+          [
+            row(%{
+              task_id: "lt-unrelated",
+              repo: "verus_server",
+              difficulty: nil,
+              title: "Fix unrelated flaky test in checkout flow",
+              cost_usd: 2.0,
+              max_round: 1
+            })
+          ]
+
+      report = Analysis.build_report(rows, label: "test")
+      cell = Enum.find(report.cells, &(&1.repo == "verus_server"))
+      assert cell.tasks == 2
+    end
+  end
+
+  # #1220: spawn failures happen after worker registration but before any
+  # agent starts — no prompt, no model call, no transcript. They must land as
+  # a distinct operational category, never :unclassified, and must not
+  # starve/pollute the corpus-integrity denominator.
+  describe "spawn failures (#1220)" do
+    defp spawn_failure_rows do
+      for {run_id, task_id} <- [
+            {"dd64b9ae", "lt-1og9tl"},
+            {"f816cfa3", "lt-dvllax"},
+            {"bf11af00", "lt-2806jz"},
+            {"27d9d2bf", "lt-b20dzw"}
+          ] do
+        row(%{
+          run_id: run_id,
+          task_id: task_id,
+          repo: "verus-specs",
+          status: :failed,
+          failure_reason:
+            "worker spawn failed after registration: {:inspect_worktree_failed, " <>
+              "{:fetch_failed, \"git fetch origin development failed in " <>
+              "/home/rborn/dev/leotech/verus-specs: fatal: couldn't find remote ref development\"}}",
+          terminal_lines: []
+        })
+      end
+    end
+
+    test "all four are segmented as operational/spawn_failure, not unclassified" do
+      report = Analysis.build_report(spawn_failure_rows(), label: "test")
+
+      refute Enum.any?(report.segmentation, &(&1.class == :unknown))
+
+      spawn_seg =
+        Enum.find(
+          report.segmentation,
+          &(&1.class == :operational and &1.subcategory == :spawn_failure)
+        )
+
+      assert spawn_seg
+      assert spawn_seg.count == 4
+    end
+
+    test "spawn failures have no transcript, so they are excluded from the corpus-integrity denominator" do
+      report = Analysis.build_report(spawn_failure_rows(), label: "test")
+
+      assert report.misclassification.corroborated == 0
+      assert report.misclassification.reclassified == 0
+      assert report.misclassification.rate == nil
+    end
+
+    test "renders as its own operational subcategory in the markdown report" do
+      report = Analysis.build_report(spawn_failure_rows(), label: "test")
+      md = Report.to_markdown(report)
+
+      assert md =~ "spawn_failure"
+      refute md =~ "unclassified"
     end
   end
 

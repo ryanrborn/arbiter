@@ -39,6 +39,39 @@ defmodule Arbiter.Loop.FailureClassifierTest do
       assert r.class == :operational
       assert r.subcategory == :quota_exhausted
     end
+
+    # #1220: a spawn failure happens after worker registration but before any
+    # agent starts — no prompt, no model call, no transcript. It carries zero
+    # agent-quality signal by construction, so it must land in its own
+    # operational subcategory, never fall through to :unclassified.
+    test "spawn failed after registration is operational/spawn_failure" do
+      reason =
+        "worker spawn failed after registration: {:inspect_worktree_failed, " <>
+          "{:fetch_failed, \"git fetch origin development failed\"}}"
+
+      r = FC.classify(reason, [])
+      assert r.class == :operational
+      assert r.subcategory == :spawn_failure
+      assert r.label_class == :operational
+      refute r.reclassified
+    end
+
+    test "the inner :inspect_worktree_failed / :fetch_failed tags are operational/spawn_failure independently" do
+      assert FC.classify(":inspect_worktree_failed", []).subcategory == :spawn_failure
+      assert FC.classify(":fetch_failed", []).subcategory == :spawn_failure
+    end
+
+    # bd-6v2my2 (#1179) renamed the pre-existing tag; keep recognising the old
+    # form so historical runs under the old tag still classify correctly.
+    test "the pre-rename :worktree_failed tag is operational/spawn_failure" do
+      assert FC.classify(":worktree_failed", []).subcategory == :spawn_failure
+    end
+
+    test "a spawn failure has no transcript, so it is excluded from the corpus-integrity denominator" do
+      r = FC.classify("worker spawn failed after registration: boom", [])
+      assert r.class == :operational
+      refute r.corroborated
+    end
   end
 
   describe "agent-quality allowlist (label-only)" do

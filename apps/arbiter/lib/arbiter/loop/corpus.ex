@@ -97,6 +97,7 @@ defmodule Arbiter.Loop.Corpus do
           run_id: run_id,
           task_id: task_id,
           repo: r["repo"],
+          title: r["task_title"],
           worker_type: to_atom(r["worker_type"]),
           status: status,
           model: r["model"],
@@ -164,7 +165,7 @@ defmodule Arbiter.Loop.Corpus do
 
     query(
       """
-      SELECT id AS run_id, task_id, repo, worker_type, status, model, failure_reason
+      SELECT id AS run_id, task_id, repo, task_title, worker_type, status, model, failure_reason
       FROM worker_runs
       WHERE started_at >= ?1 AND started_at < ?2
       ORDER BY started_at DESC

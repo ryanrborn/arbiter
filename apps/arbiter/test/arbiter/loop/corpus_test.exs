@@ -113,6 +113,26 @@ defmodule Arbiter.Loop.CorpusTest do
       assert meta.since == since
       assert meta.until == until
     end
+
+    # #1221: duplicate-dispatch clustering keys on the task's title, so the
+    # corpus fetch must surface it (it's already denormalised onto
+    # worker_runs.task_title for the dashboard's history list).
+    test "surfaces the run's task_title as :title" do
+      since = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      {:ok, _run} =
+        Ash.create(Run, %{
+          task_id: "lt-6glz4n",
+          repo: "verus_server",
+          task_title: "PR #3701: chore: merge integration/dolphin i…",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      until = DateTime.add(DateTime.utc_now(), 3600, :second)
+      assert {:ok, [row], _meta} = Corpus.fetch(since: since, until: until)
+      assert row.title == "PR #3701: chore: merge integration/dolphin i…"
+    end
   end
 
   defp count_events do
