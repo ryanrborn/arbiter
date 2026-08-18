@@ -103,7 +103,7 @@ defmodule Arbiter.Trackers.Tracker do
     * `:name` — the human-facing field label, used when escalating a missing
       required field (e.g. `"QA Testing Notes"`).
     * `:value` — optional pre-resolved value the adapter supplies from workspace
-      config for fields that can't be sourced from the task bead (e.g. a Jira
+      config for fields that can't be sourced from the task (e.g. a Jira
       fix-version name). When present and non-nil, the sync layer uses this
       directly instead of looking up the task's produced value.
   """
@@ -248,7 +248,7 @@ defmodule Arbiter.Trackers.Tracker do
   requires, so the gate stays correct without any provider-specific logic
   leaking up into the workflow/sync layer.
 
-  The sync layer uses this to push the bead's produced values into the gating
+  The sync layer uses this to push the task's produced values into the gating
   fields *before* attempting the transition, and to escalate — naming the exact
   missing field — when a required field has no produced value.
 

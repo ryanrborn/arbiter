@@ -147,11 +147,11 @@ defmodule Arbiter.Worker.Dispatch do
          # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
          # async close (in production, the MergeQueue direct-strategy close of an
          # in-flight `{:worker_done}` from the just-stopped run) can land in the
-         # window between that guard and `start_worker/3`, flipping the bead to
+         # window between that guard and `start_worker/3`, flipping the task to
          # `:closed` AFTER the guard passed but as/just before the new worker is
          # attached — leaving a live worker orphaned on a `:closed` task (the
          # close's own StopWorker found no worker to stop). Re-assert here, now
-         # that the worker is live, and realign a raced-closed bead.
+         # that the worker is live, and realign a raced-closed task.
          {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
       {:ok,
        %{
@@ -172,7 +172,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   # Fail the just-started worker into `:failed` with a `:spawn_failed`
   # StopReason and raise a coordinator escalation, so the caller's error return
-  # is never the *only* signal — the bead is not left silently stranded.
+  # is never the *only* signal — the task is not left silently stranded.
   # Best-effort: a dead worker (already terminated some other way) or a
   # notification hiccup must never mask the original dispatch error.
   defp fail_spawned_worker(worker_pid, reason) when is_pid(worker_pid) do
@@ -534,7 +534,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp ensure_not_closed(_task), do: :ok
 
   # Invariant backstop for the dispatch window (bd-cgmidt): when a live worker has
-  # just been attached to `task_id`, guarantee the bead is not `:closed`. A close
+  # just been attached to `task_id`, guarantee the task is not `:closed`. A close
   # can land asynchronously between `ensure_not_closed/1` (checked once, at the
   # front of `dispatch/2`) and `start_worker/3` — e.g. the MergeQueue's
   # direct-strategy close of an in-flight `{:worker_done}` from the run the
@@ -543,7 +543,7 @@ defmodule Arbiter.Worker.Dispatch do
   # started), the freshly-started worker would otherwise be orphaned on a
   # `:closed` task — the 2026-07-08 lt-c9td4r failure.
   #
-  # When the bead raced to `:closed` and the worker is still alive, atomically
+  # When the task raced to `:closed` and the worker is still alive, atomically
   # reopen it (`:reopen` → `:in_progress`) so the live worker is realigned rather
   # than orphaned — the same recovery the operator had to perform by hand
   # (`task_reopen`). Otherwise the task is returned unchanged. Public (`@doc
@@ -953,7 +953,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   # A branch dispatch found a *detached* worktree sitting at the branch leaf.
   # Since bd-9r1tta an inspect checkout uses its own leaf, so this only happens
-  # for a bead whose inspect tree predates that split — but the failure it caused
+  # for a task whose inspect tree predates that split — but the failure it caused
   # was permanent (`create/3` refuses, the `already exists` → `attach/2` recovery
   # doesn't match "different branch", and nothing else reclaims the directory), so
   # recover instead of stranding the dispatch. Safe by inspection: a detached tree
@@ -1411,7 +1411,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   # An isolated, detached checkout at the tip of `origin/<target>`, at the task's
   # *inspect* leaf (`Worktree.inspect_name/1` — the branch name plus a suffix, so
-  # it can never collide with a branch worktree for the same bead).
+  # it can never collide with a branch worktree for the same task).
   # `Issue.Changes.CleanupWorktree` reclaims that leaf on close exactly as it does
   # a code worktree.
   #

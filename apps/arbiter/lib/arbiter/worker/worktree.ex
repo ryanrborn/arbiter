@@ -137,7 +137,7 @@ defmodule Arbiter.Worker.Worktree do
   Idempotent, but NOT a no-op on re-provision: a directory already at the target
   path is **re-pointed** at the freshly-fetched `origin/<base_branch>` rather
   than reused as-is. Reusing it would re-open exactly the hole this function
-  closes — the leaf is keyed to the bead, and a worktree outlives its run
+  closes — the leaf is keyed to the task, and a worktree outlives its run
   (`CleanupWorktree` removes it only on close, and skips a dirty one), so a
   re-dispatched audit would otherwise read the *first* dispatch's snapshot of
   upstream, however old it has since become. Nothing in a detached inspect
@@ -176,9 +176,9 @@ defmodule Arbiter.Worker.Worktree do
   The worktree name a *detached inspect* checkout for `base_name` uses.
 
   Deliberately distinct from the branch leaf `create/3` would use for the same
-  bead (`<base_name>` vs `<base_name>#{@inspect_suffix}`). One bead can need
+  task (`<base_name>` vs `<base_name>#{@inspect_suffix}`). One task can need
   both — an audit that is later re-filed as code work, or the
-  `provision_worktree: true` escape hatch on a `task`-type bead — and sharing a
+  `provision_worktree: true` escape hatch on a `task`-type task — and sharing a
   leaf makes the two collide: `create/3` finds a detached HEAD there, reports
   "worktree exists … on a different branch", and the dispatch hard-fails until
   someone removes the directory by hand. Separate leaves also mean a path's
@@ -233,7 +233,7 @@ defmodule Arbiter.Worker.Worktree do
         # The directory is not a live git worktree — git's metadata was pruned,
         # a `worktree add` was interrupted, or something left a plain directory
         # behind. Reclaim it (`cleanup/1` also drops any stale registration) and
-        # provision fresh, rather than failing this bead's dispatch forever.
+        # provision fresh, rather than failing this task's dispatch forever.
         _ = cleanup(path)
         add_detached(repo_path, path, base_branch)
     end
@@ -267,7 +267,7 @@ defmodule Arbiter.Worker.Worktree do
 
   # A leaf still registered in `.git/worktrees` whose directory is gone makes
   # `worktree add` fail permanently ("is a missing but already registered
-  # worktree"), which would strand every future dispatch of that bead. Prune the
+  # worktree"), which would strand every future dispatch of that task. Prune the
   # stale registration once and retry.
   defp add_detached_git(repo_path, path, base_branch) do
     args = ["worktree", "add", "--detach", path, "origin/" <> base_branch]

@@ -2163,11 +2163,11 @@ defmodule Arbiter.Worker do
           #
           # Completing here is the silent-task-loss bug: complete_now/2
           # broadcasts {:worker_done}, the workspace MergeQueue enqueues the
-          # task, and on the :direct strategy `do_enqueue` closes the bead as
-          # :done on enqueue (no PR, no commit). The bead reaches :closed via a
-          # worker with zero deliverable — violating the invariant that a bead
+          # task, and on the :direct strategy `do_enqueue` closes the task as
+          # :done on enqueue (no PR, no commit). The task reaches :closed via a
+          # worker with zero deliverable — violating the invariant that a task
           # only closes on a real completion or an explicit close. Refuse: fail
-          # + escalate and leave the bead open for re-dispatch.
+          # + escalate and leave the task open for re-dispatch.
           reviewable_code_type?(meta) ->
             fail_missing_worktree(state)
 
@@ -2222,10 +2222,10 @@ defmodule Arbiter.Worker do
   # bd-7pe74i: the worker signalled done on a code directive but no worktree was
   # ever provisioned, so there is no branch to integrate and no deliverable. Do
   # NOT complete (which would broadcast {:worker_done} and let the MergeQueue
-  # close the bead) — fail the worker and raise an addressed coordinator escalation,
-  # exactly like a stopped-subprocess failure. The bead stays open: the Driver's
+  # close the task) — fail the worker and raise an addressed coordinator escalation,
+  # exactly like a stopped-subprocess failure. The task stays open: the Driver's
   # :failed path leaves the task :in_progress, and no {:worker_done} is ever
-  # broadcast, so the bead is never silently closed.
+  # broadcast, so the task is never silently closed.
   defp fail_missing_worktree(%State{} = state) do
     reason = %Arbiter.Worker.StopReason{
       category: :missing_worktree,
@@ -2233,7 +2233,7 @@ defmodule Arbiter.Worker do
         "worker signalled `arb done` but no per-task branch/worktree was provisioned — " <>
           "there is nothing to integrate, so the directive produced no deliverable",
       remediation:
-        "Do NOT treat this as complete: the bead is left open, NOT closed. Investigate why " <>
+        "Do NOT treat this as complete: the task is left open, NOT closed. Investigate why " <>
           "worktree provisioning was skipped (repo mapping missing, `provision_worktree: false`, " <>
           "or a dispatch-time race under a concurrency window), then re-dispatch the task.",
       exit_status: nil,

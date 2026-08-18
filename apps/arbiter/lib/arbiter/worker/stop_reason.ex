@@ -72,7 +72,7 @@ defmodule Arbiter.Worker.StopReason do
       code directive but no per-task branch/worktree was ever provisioned, so
       there is nothing to integrate (bd-7pe74i). Not a subprocess-exit
       classification — synthesized by the completion path to refuse closing a
-      bead that produced no deliverable. Remediation: investigate why
+      task that produced no deliverable. Remediation: investigate why
       provisioning was skipped, then re-dispatch.
     * `:spawn_failed` — a step of `Arbiter.Worker.Dispatch.dispatch/2` AFTER
       `start_worker/3` failed (e.g. a transient network/VPN outage during the

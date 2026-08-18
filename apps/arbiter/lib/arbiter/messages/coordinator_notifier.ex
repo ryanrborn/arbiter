@@ -744,13 +744,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp format_elapsed_seconds(ms) when is_integer(ms), do: "#{Float.round(ms / 1000, 1)}s"
 
-  # A required tracker field had no produced value on the bead — name the
+  # A required tracker field had no produced value on the task — name the
   # specific field(s) rather than the generic status_map hint, which would
   # send the operator down the wrong path (this is a missing-value problem, not
   # a config-mismatch one).
   defp sync_hint(%{kind: :gated_fields_missing, missing_fields: names})
        when is_list(names) and names != [] do
-    "The bead has not produced a value for required tracker field(s): " <>
+    "The task has not produced a value for required tracker field(s): " <>
       "#{Enum.join(names, ", ")}. Populate them on the task " <>
       "(e.g. `arb issue update <id> --qa-notes ... --deployment-notes ...`) and re-run the sync."
   end

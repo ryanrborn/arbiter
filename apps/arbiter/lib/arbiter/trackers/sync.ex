@@ -268,14 +268,14 @@ defmodule Arbiter.Trackers.Sync do
   defp upstream_at_target?(:shortcut, :closed, %{"completed" => true}), do: true
   defp upstream_at_target?(_, _, _), do: false
 
-  # Push the bead's produced field values into the transition's gating fields
+  # Push the task's produced field values into the transition's gating fields
   # BEFORE the transition is attempted. The adapter (not this layer) decides
   # which fields gate the transition — see `Tracker.gating_fields/2` — so this
   # stays provider-agnostic: Jira's `field_ids` today, any future tracker via
   # its own adapter.
   #
   #   * No gate (`{:ok, []}`) → nothing to push, proceed to transition.
-  #   * A required field with no produced value on the bead → `{:error, ...}`
+  #   * A required field with no produced value on the task → `{:error, ...}`
   #     naming the exact field (escalated by the caller).
   #   * All required fields have produced values → push them, then transition.
   #
@@ -318,7 +318,7 @@ defmodule Arbiter.Trackers.Sync do
 
   # Returns the value to push for a gating field. Prefers the adapter's
   # pre-resolved `:value` (e.g. a Jira fix-version name resolved from workspace
-  # config) over the bead's produced value, so adapters can inject config-driven
+  # config) over the task's produced value, so adapters can inject config-driven
   # scalars without coupling this layer to tracker internals.
   defp field_value(issue, f) do
     case Map.get(f, :value) do
@@ -327,7 +327,7 @@ defmodule Arbiter.Trackers.Sync do
     end
   end
 
-  # The bead carries the worker-produced values under task-domain keys
+  # The task carries the worker-produced values under task-domain keys
   # (`:qa_notes`, `:deployment_notes`, `:description`, ...). A gating field with
   # no task-domain key (`nil`) has no produced value by definition.
   defp produced_value(_issue, nil), do: nil
@@ -340,7 +340,7 @@ defmodule Arbiter.Trackers.Sync do
       kind: :gated_fields_missing,
       missing_fields: names,
       message:
-        "the tracker gates this transition on field(s) the bead hasn't produced: " <>
+        "the tracker gates this transition on field(s) the task hasn't produced: " <>
           "#{Enum.join(names, ", ")}. Produce the value(s) on the task " <>
           "(e.g. qa_notes / deployment_notes) and re-run the sync"
     }

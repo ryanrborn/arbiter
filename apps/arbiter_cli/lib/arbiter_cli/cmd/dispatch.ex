@@ -58,7 +58,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
         case rest do
           [id] -> {id, nil}
           [id, repo] -> {id, repo}
-          [] -> Output.die("dispatch requires an issue id (e.g. `arb dispatch gte-006`)")
+          [] -> Output.die("dispatch requires an issue id (e.g. `arb dispatch bd-abc123`)")
           _ -> Output.die("dispatch takes at most two positional arguments: <task-id> [<repo>]")
         end
 

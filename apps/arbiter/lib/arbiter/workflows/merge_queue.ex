@@ -114,7 +114,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   head before its own merge. A PR that was `:ready_to_merge` but is now behind
   (because the base moved) drops back to `:updating_base` automatically.
 
-  This governs the **queue-driven** merge lane (auto-merge off, the Refinery is
+  This governs the **queue-driven** merge lane (auto-merge off, the merge queue is
   the merger). The per-worker Watchdog's review-gate fast-merge is the explicit
   non-queued bypass and is unaffected.
 

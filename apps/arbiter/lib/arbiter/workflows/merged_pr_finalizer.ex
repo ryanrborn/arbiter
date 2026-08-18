@@ -315,7 +315,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
       # bd-38l3px: this sweep exists to finalize tasks whose worker/Watchdog is
       # GONE (see moduledoc). A task with a LIVE worker is being actively worked
       # — its own worker + Watchdog own the terminal transition. Closing it from
-      # here would silently kill an in-flight bead whose `pr_ref` is stale (a
+      # here would silently kill an in-flight task whose `pr_ref` is stale (a
       # merged PR from a PRIOR run that was reopened/re-dispatched). Leave it to
       # its worker.
       live_worker?(task) ->
@@ -368,7 +368,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
     cond do
       # bd-38l3px: same live-worker guard as maybe_finalize/2 — never close a
-      # bead that a worker is actively driving.
+      # task that a worker is actively driving.
       live_worker?(task) ->
         skip_live_worker(task)
 
@@ -396,7 +396,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   # bd-38l3px: does the task have a live worker registered right now? The sweep
   # is a fallback for orphaned tasks (worker/Watchdog gone) — a task with a live
   # worker is left to that worker to finalize, so a stale `pr_ref`/`source_pr`
-  # from a prior run can never make this sweep close an in-flight bead.
+  # from a prior run can never make this sweep close an in-flight task.
   #
   # bd-6w7j8h: registration alone isn't enough. `Worker.complete_now/2` never
   # stops the Worker GenServer — it lingers at `status: :completed`, still

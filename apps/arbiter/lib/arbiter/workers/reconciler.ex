@@ -105,20 +105,20 @@ defmodule Arbiter.Workers.Reconciler do
   instead of merely escalating them.
 
   After a reboot the ephemeral worker/Watchdog that was following the PR no longer
-  exists, so a bead parked in awaiting_review loses its active watcher: merge
+  exists, so a task parked in awaiting_review loses its active watcher: merge
   detection and review-feedback follow-up are dropped until a human notices. The
   patrol layer (`PRPatrol` + `MergedPRFinalizer`, or `ReviewPatrol` for review-only
-  engagements) is exactly the durable, restart-surviving watcher for these beads.
-  This sweep hands each orphaned open-PR bead back to that layer explicitly so:
+  engagements) is exactly the durable, restart-surviving watcher for these tasks.
+  This sweep hands each orphaned open-PR task back to that layer explicitly so:
 
     * `MergedPRFinalizer` finalizes the task when the PR merges (keys on `pr_ref`), and
     * `PRPatrol` re-drives review-feedback (CHANGES_REQUESTED / unresolved threads).
 
-  Escalation is kept only as the fallback: a bead whose workspace has no patrol
+  Escalation is kept only as the fallback: a task whose workspace has no patrol
   coverage (e.g. no hosted-forge merger configured) can't be auto-watched, so it
   still lands in the coordinator's mailbox rather than being silently dropped.
 
-  Respects the `worker_live?` guard (C6): a bead that still has a live worker is
+  Respects the `worker_live?` guard (C6): a task that still has a live worker is
   left untouched — no duplicate watcher is established.
 
   Returns `{:ok, %{rewatched: non_neg_integer(), escalated: non_neg_integer()}}`,
@@ -129,8 +129,8 @@ defmodule Arbiter.Workers.Reconciler do
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
       When `false`, skips and returns `{:ok, :skipped}`.
     * `:rewatch_fun` — 1-arity fun `(Issue.t() -> :ok | {:error, term()})` used to
-      re-establish patrol coverage for a bead. Defaults to `&default_rewatch/1`
-      (starts the real patrol supervisors for the bead's workspace). Injectable so
+      re-establish patrol coverage for a task. Defaults to `&default_rewatch/1`
+      (starts the real patrol supervisors for the task's workspace). Injectable so
       tests can drive the re-watch/escalate branches without booting patrols.
   """
   @spec reconcile_open_pr_tasks(keyword()) ::
@@ -196,11 +196,11 @@ defmodule Arbiter.Workers.Reconciler do
   Resume is delegated to `Dispatch.resume/2`, which already enforces the safety
   guards this sweep requires: it refuses a closed task, refuses when a worker is
   still active for the task (the `worker_live?` / C6 guard — no duplicate worker),
-  and refuses (`{:error, :no_outpost}`) when the worktree was cleaned up. Any bead
+  and refuses (`{:error, :no_outpost}`) when the worktree was cleaned up. Any task
   that cannot be safely resumed falls back to an escalation rather than being
   dropped.
 
-  Open-PR / awaiting_review beads are intentionally **not** handled here — they
+  Open-PR / awaiting_review tasks are intentionally **not** handled here — they
   belong to the patrol layer via `reconcile_open_pr_tasks/1`; resuming them would
   spawn a redundant worker to redo already-shipped work.
 
@@ -211,7 +211,7 @@ defmodule Arbiter.Workers.Reconciler do
 
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
     * `:resume_fun` — 1-arity fun `(Issue.t() -> {:ok, term()} | {:error, term()})`
-      used to resume a bead. Defaults to `&default_resume/1` (the real
+      used to resume a task. Defaults to `&default_resume/1` (the real
       `Dispatch.resume/2`). Injectable so tests can exercise the resume/escalate
       branches without spawning a real worker.
   """
@@ -268,7 +268,7 @@ defmodule Arbiter.Workers.Reconciler do
       {:error, e}
   end
 
-  # An orphaned in_progress bead is re-watchable (belongs to the patrol layer)
+  # An orphaned in_progress task is re-watchable (belongs to the patrol layer)
   # when it has an open PR of its own (pr_ref) or is a review-only engagement
   # (driven by ReviewPatrol via source_pr).
   defp rewatchable?(%Issue{} = issue), do: not is_nil(issue.pr_ref) or review_only?(issue)
@@ -278,9 +278,9 @@ defmodule Arbiter.Workers.Reconciler do
 
   defp live_worker_for_issue?(%Issue{id: task_id}), do: not is_nil(Worker.whereis(task_id))
 
-  # Default re-watch: hand the bead back to the durable patrol layer for its
+  # Default re-watch: hand the task back to the durable patrol layer for its
   # workspace. Review-only engagements go to ReviewPatrol; author-side open-PR
-  # beads go to PRPatrol (review-feedback follow-up) + MergedPRFinalizer (merge
+  # tasks go to PRPatrol (review-feedback follow-up) + MergedPRFinalizer (merge
   # finalization). All supervisor starts are idempotent — an already-running
   # patrol reports `{:error, {:already_started, _}}`, which we treat as covered.
   # Returns `:ok` when at least one relevant patrol is established, otherwise
