@@ -13,7 +13,7 @@ defmodule ArbiterCli.Cmd.Prime do
        b. Standing Orders — the domain's operating disciplines, sourced from
           `config.standing_orders`. Omitted when empty.
        c. Per-repo Standing Orders — one section per repo carrying orders in
-          `config.repo_paths.<rig>.standing_orders`. Omitted per repo when
+          `config.repo_paths.<repo>.standing_orders`. Omitted per repo when
           empty.
        d. Active workers — task_id, status, current_step, runtime, scoped to
           this workspace.
@@ -45,7 +45,8 @@ defmodule ArbiterCli.Cmd.Prime do
           {
             "workspace": {...},
             "standing_orders": [...],
-            "rig_standing_orders": {"<rig>": [...]},
+            "repo_standing_orders": {"<repo>": [...]},
+            "rig_standing_orders": {"<repo>": [...]},  // deprecated alias, dual-emitted
             "workers": [...],
             "ready": [...],
             "coordinator_inbox": [...]
@@ -83,10 +84,16 @@ defmodule ArbiterCli.Cmd.Prime do
   end
 
   defp workspace_to_json(%{} = ws_section) do
+    repo_standing_orders = Map.new(ws_section.repo_standing_orders)
+
     %{
       workspace: ws_section.workspace,
       standing_orders: unwrap(ws_section.standing_orders),
-      rig_standing_orders: Map.new(ws_section.repo_standing_orders),
+      # "repo_standing_orders" is canonical; "rig_standing_orders" is
+      # dual-emitted alongside it as a deprecated legacy key so existing
+      # consumers keep working (bd-1aw9dl).
+      repo_standing_orders: repo_standing_orders,
+      rig_standing_orders: repo_standing_orders,
       workers: unwrap(ws_section.workers),
       ready: unwrap(ws_section.ready),
       coordinator_inbox: unwrap(ws_section.coordinator_inbox)
@@ -146,8 +153,8 @@ defmodule ArbiterCli.Cmd.Prime do
   defp gather_standing_orders(_), do: {:ok, []}
 
   # Repo-scoped standing orders live alongside the path/target_branch overrides
-  # in `config.repo_paths.<rig>.standing_orders` — same place as
-  # `arb workspace standing-order add --rig`. Only repos that carry at least
+  # in `config.repo_paths.<repo>.standing_orders` — same place as
+  # `arb workspace standing-order add --repo`. Only repos that carry at least
   # one order are returned, in `[{repo, orders}]` form so text rendering can
   # walk it in order and JSON can turn it into a map.
   defp gather_repo_standing_orders(%{"config" => config}) when is_map(config) do

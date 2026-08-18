@@ -347,7 +347,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
     end
   end
 
-  describe "standing-order --rig" do
+  describe "standing-order --repo (canonical) and --rig (deprecated alias)" do
     defp ws_with_repo_paths(repo_paths) do
       stub_get("/api/workspaces", %{
         "data" => [
@@ -527,6 +527,69 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
 
       assert code == 1
       assert err =~ "no standing orders"
+    end
+
+    test "ls accepts --repo as the canonical flag, same as --rig" do
+      ws_with_repo_paths(%{
+        "client" => %{"path" => "/x/client", "standing_orders" => ["Link the Figma design."]}
+      })
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run(["standing-order", "ls", "--workspace", "default", "--repo", "client"])
+        end)
+
+      assert code == 0
+      assert out =~ "1. Link the Figma design."
+    end
+
+    test "--repo wins when both --repo and --rig are given" do
+      ws_with_repo_paths(%{
+        "client" => %{"path" => "/x/client", "standing_orders" => ["Link the Figma design."]},
+        "server" => %{"path" => "/x/server", "standing_orders" => ["Deploy to staging."]}
+      })
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "ls",
+            "--workspace",
+            "default",
+            "--repo",
+            "client",
+            "--rig",
+            "server"
+          ])
+        end)
+
+      assert code == 0
+      assert out =~ "1. Link the Figma design."
+      refute out =~ "Deploy to staging."
+    end
+
+    test "ls --json emits both the canonical \"repo\" key and the legacy \"rig\" key" do
+      ws_with_repo_paths(%{
+        "client" => %{"path" => "/x/client", "standing_orders" => ["Link the Figma design."]}
+      })
+
+      {out, _err, code} =
+        capture(fn ->
+          Workspace.run([
+            "standing-order",
+            "ls",
+            "--workspace",
+            "default",
+            "--repo",
+            "client",
+            "--json"
+          ])
+        end)
+
+      assert code == 0
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      assert decoded["repo"] == "client"
+      assert decoded["rig"] == "client"
     end
   end
 end
