@@ -227,6 +227,7 @@ defmodule Arbiter.VernacularSweepTest do
         "lib/arbiter/workflows/pr_patrol_supervisor.ex",
         "lib/arbiter/workflows/review_patrol.ex",
         "lib/arbiter/workflows/review_patrol_supervisor.ex",
+        "lib/arbiter/workflows/merged_pr_finalizer_supervisor.ex",
         "../arbiter_web/lib/arbiter_web/live/dashboard_live.ex",
         "../../docs/design/review-worker-lifecycle.md"
       ]
