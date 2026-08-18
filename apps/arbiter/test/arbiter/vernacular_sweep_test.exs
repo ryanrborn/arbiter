@@ -200,12 +200,21 @@ defmodule Arbiter.VernacularSweepTest do
         content = read_file(file)
 
         # Check that "sling" is not used as Gas Town terminology in comments.
-        # Exclude main.ex which intentionally defines the `arb sling` compat alias.
-        unless String.contains?(file, ["main.ex", "decommission_sweep"]) do
+        # Exclude decommission_sweep which may contain historical artifact matching.
+        unless String.contains?(file, ["decommission_sweep"]) do
           refute content =~ ~r/\bsling\b/,
                  "File #{file}: Found 'sling' (Gas Town terminology) — should be removed or replaced with Arbiter terminology in comments"
         end
       end
+    end
+
+    test "CLI: hidden 'arb sling' backwards-compat alias has been retired" do
+      main_ex_content = read_file("../arbiter_cli/lib/arbiter_cli/main.ex")
+
+      # The `arb sling` hidden backwards-compat alias to `arb dispatch` was never
+      # documented or used. Assert it has been removed during Gas Town vernacular retirement.
+      refute main_ex_content =~ ~r/dispatch\("sling"/,
+             "main.ex: Found 'arb sling' backwards-compat alias — should be removed as it is unused Gas Town terminology"
     end
 
     test "CLI help text: gte-NNN examples updated to current format" do
