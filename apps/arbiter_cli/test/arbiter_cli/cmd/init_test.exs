@@ -327,6 +327,87 @@ defmodule ArbiterCli.Cmd.InitTest do
     end
   end
 
+  describe "--diff mode" do
+    test "reports all files as new when the target dir is empty" do
+      stub_install()
+      dir = tmp_dir()
+      File.mkdir_p!(dir)
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+
+      assert out =~ "new upstream file, not present locally"
+      assert out =~ "AGENTS.md"
+
+      # Strictly a reporting mode — nothing is written.
+      refute File.exists?(Path.join(dir, "AGENTS.md"))
+    end
+
+    test "reports no diff for a file that matches the current template" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+
+      # AGENTS.md was just scaffolded from the current template, so it's
+      # unchanged and shouldn't show up as a diffed or new file.
+      refute out =~ "AGENTS.md\n"
+      refute out =~ "new upstream file"
+    end
+
+    test "prints unified diff hunks for a locally-modified file, without writing anything" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      original = File.read!(Path.join(dir, "AGENTS.md"))
+      File.write!(Path.join(dir, "AGENTS.md"), original <> "\nLocal note: filed under X.\n")
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+
+      assert out =~ "AGENTS.md"
+      assert out =~ "@@"
+      assert out =~ "Local note: filed under X."
+
+      # Report-only — the on-disk file must be untouched.
+      assert File.read!(Path.join(dir, "AGENTS.md")) ==
+               original <> "\nLocal note: filed under X.\n"
+    end
+
+    test "--json --diff emits {path, status, diff} per file" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      original = File.read!(Path.join(dir, "AGENTS.md"))
+      File.write!(Path.join(dir, "AGENTS.md"), original <> "\nLocal note.\n")
+      File.rm!(Path.join(dir, "ARBITER_OPERATOR.md"))
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff", "--json"]) end)
+      assert exit_code == 0
+
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      files = decoded["files"]
+
+      agents = Enum.find(files, fn f -> f["path"] == "AGENTS.md" end)
+      assert agents["status"] == "diff"
+      assert is_binary(agents["diff"])
+      assert agents["diff"] =~ "Local note."
+
+      operator = Enum.find(files, fn f -> f["path"] == "ARBITER_OPERATOR.md" end)
+      assert operator["status"] == "new"
+      assert operator["diff"] == nil
+
+      memory = Enum.find(files, fn f -> f["path"] == "memory/MEMORY.md" end)
+      assert memory["status"] == "unchanged"
+      assert memory["diff"] == nil
+    end
+  end
+
   describe "docs/external-trackers.md" do
     test "includes gotchas for code-evidence audits, GitLab config, and status_map" do
       stub_install()
