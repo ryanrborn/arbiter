@@ -30,8 +30,9 @@ defmodule Arbiter.Messages.Message do
   `:mailbox`, `:direction`, `:flag`, `:completion`, `:failure`,
   `:escalation`, and `:info` together are the "mailbox family": addressed
   messages that show up in an inbox and are read-acknowledged. The
-  `:directive_ref` they may carry links the message to the task it concerns
-  (shown in brackets in `arb inbox`). See `mailbox_kinds/0`.
+  `:task_ref` they may carry links the message to the task it concerns (shown
+  in brackets in `arb inbox`; `:directive_ref` is the deprecated legacy alias
+  during the bd-58vtjk compat window). See `mailbox_kinds/0`.
 
   ## Mailbox lifecycle (three durable states)
 
@@ -100,7 +101,32 @@ defmodule Arbiter.Messages.Message do
 
     create :create do
       primary? true
-      accept [:kind, :from_ref, :to_ref, :workspace_id, :subject, :body, :directive_ref]
+
+      accept [
+        :kind,
+        :from_ref,
+        :to_ref,
+        :workspace_id,
+        :subject,
+        :body,
+        :task_ref,
+        :directive_ref
+      ]
+
+      # bd-58vtjk: `task_ref` is the canonical field; `directive_ref` is the
+      # deprecated legacy alias (old fleet vernacular for "task"). Dual-write
+      # both so a row is findable under either name during the compat window,
+      # regardless of which one the caller supplied. task_ref wins when both
+      # are given and disagree.
+      change fn changeset, _context ->
+        task_ref = Ash.Changeset.get_attribute(changeset, :task_ref)
+        directive_ref = Ash.Changeset.get_attribute(changeset, :directive_ref)
+        canonical = task_ref || directive_ref
+
+        changeset
+        |> Ash.Changeset.force_change_attribute(:task_ref, canonical)
+        |> Ash.Changeset.force_change_attribute(:directive_ref, canonical)
+      end
 
       change after_action(fn _changeset, message, _context ->
                Arbiter.Messages.Message.broadcast_new(message)
@@ -195,11 +221,26 @@ defmodule Arbiter.Messages.Message do
       description ~s(Short label, e.g. "bd-7wyihw complete".)
     end
 
+    attribute :task_ref, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "The task_id this message concerns. Shown in brackets by arb inbox. nil = not about a specific task."
+    end
+
+    # bd-58vtjk: legacy alias for `task_ref`, kept for the retirement compat
+    # window. "directive" here is old fleet vernacular for "task/issue" — it
+    # predates, and is unrelated to, the Graph/Conductor `directive` concept
+    # (`graph_add_directive` etc., which uses `issue_id`). Dual-written by the
+    # `:create` action's change so a row written under either name is found
+    # under either; readers should prefer `task_ref/1`. Drop this attribute
+    # (and the compat branches in :create and `task_ref/1`) once no old
+    # producer remains.
     attribute :directive_ref, :string do
       public? true
       constraints max_length: 255, trim?: true
 
-      description "The directive task_id this message concerns. Shown in brackets by arb inbox. nil = not about a specific directive."
+      description "Deprecated legacy alias for task_ref. nil = not about a specific task."
     end
 
     attribute :body, :string do
@@ -254,6 +295,15 @@ defmodule Arbiter.Messages.Message do
   def ref_variants(ref) when ref in @coordinator_refs, do: @coordinator_refs
   def ref_variants(ref), do: [ref]
 
+  @doc """
+  The preferred task reference for a message: `task_ref` if set, else the
+  legacy `directive_ref` alias. Both are dual-written by `:create`, so this
+  only differs for rows written before bd-58vtjk shipped.
+  """
+  def task_ref(%{task_ref: ref}) when is_binary(ref), do: ref
+  def task_ref(%{directive_ref: ref}), do: ref
+  def task_ref(_), do: nil
+
   # ---- PubSub --------------------------------------------------------------
 
   @doc false
@@ -271,7 +321,7 @@ defmodule Arbiter.Messages.Message do
 
     if Map.get(message, :to_ref) in @coordinator_refs do
       Arbiter.Events.broadcast(ws_id, "inbox", %{
-        task_id: Map.get(message, :directive_ref),
+        task_id: task_ref(message),
         from_ref: Map.get(message, :from_ref),
         subject: Map.get(message, :subject),
         kind: to_string(Map.get(message, :kind) || "")
@@ -450,7 +500,7 @@ defmodule Arbiter.Messages.Message do
   Options:
 
     * `:workspace_id` — scope to a workspace.
-    * `:directive_ref` — scope to the task the message concerns.
+    * `:task_ref` — scope to the task the message concerns.
     * `:uncleared` — when `true`, consider only rows with `cleared_at IS NULL`
       (unread *or* outstanding); a cleared row has been addressed and no longer
       suppresses a repeat.
@@ -478,8 +528,8 @@ defmodule Arbiter.Messages.Message do
       end
 
     query =
-      case Keyword.get(opts, :directive_ref) do
-        dr when is_binary(dr) -> Ash.Query.filter(query, directive_ref == ^dr)
+      case Keyword.get(opts, :task_ref) do
+        tr when is_binary(tr) -> Ash.Query.filter(query, task_ref == ^tr)
         _ -> query
       end
 
@@ -607,9 +657,8 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
-  The full inter-agent thread about a directive (task), oldest first: every
-  mailbox-family message whose `directive_ref` is `ref`, regardless of direction
-  or read state.
+  The full inter-agent thread about a task, oldest first: every mailbox-family
+  message whose `task_ref` is `ref`, regardless of direction or read state.
 
   This is the durable implementer↔reviewer transcript the ReviewGate's
   revise-and-rediscuss loop builds (each reviewer finding and implementer
@@ -620,7 +669,7 @@ defmodule Arbiter.Messages.Message do
   def thread(ref, opts \\ []) when is_binary(ref) do
     query =
       __MODULE__
-      |> Ash.Query.filter(directive_ref == ^ref and kind in ^@mailbox_kinds)
+      |> Ash.Query.filter(task_ref == ^ref and kind in ^@mailbox_kinds)
       |> Ash.Query.sort(inserted_at: :asc)
 
     query =

@@ -7,8 +7,9 @@ defmodule ArbiterCli.Cmd.Message do
                          the coordinator's mailbox (messages sent *up* the
                          chain); a `<task-id>` drains that task's unread
                          direction.
-      arb message send   <recipient> <body> [--subject ...] [--directive bd-x]
+      arb message send   <recipient> <body> [--subject ...] [--task bd-x]
                          [--kind notification|completion|failure|escalation|info]
+                         (--directive is a deprecated alias for --task)
                          send a message up (or across) the chain. The `from`
                          identity defaults to $ARB_FROM, falling back to "cli".
       arb message notify [--limit N]
@@ -45,7 +46,9 @@ defmodule ArbiterCli.Cmd.Message do
     rest = Output.drop_json(argv)
 
     {opts, positional, _invalid} =
-      OptionParser.parse(rest, strict: [subject: :string, directive: :string, kind: :string])
+      OptionParser.parse(rest,
+        strict: [subject: :string, task: :string, directive: :string, kind: :string]
+      )
 
     case positional do
       [recipient | [_ | _] = words] ->
@@ -71,7 +74,7 @@ defmodule ArbiterCli.Cmd.Message do
             workspace_id: Workspace.id_or_halt()
           }
           |> put_optional(:subject, opts[:subject])
-          |> put_optional(:directive_ref, opts[:directive])
+          |> put_optional(:task_ref, opts[:task] || opts[:directive])
 
         case Client.post("/api/messages", payload) do
           {:ok, message} -> emit_send(message, recipient, kind, mode)

@@ -34,6 +34,35 @@ defmodule ArbiterCli.Cmd.InboxTest do
       assert out =~ "0b9d1f2a"
     end
 
+    test "prefers task_ref over the legacy directive_ref when both are present" do
+      stub_get(
+        "/api/messages",
+        %{
+          "data" => [
+            coordinator_msg(%{"task_ref" => "bd-canonical", "directive_ref" => "bd-legacy"})
+          ]
+        },
+        200
+      )
+
+      {out, _err, code} = capture(fn -> Inbox.run([]) end)
+      assert code == 0
+      assert out =~ "[bd-canonical]"
+      refute out =~ "bd-legacy"
+    end
+
+    test "falls back to task_ref alone when directive_ref is absent" do
+      stub_get(
+        "/api/messages",
+        %{"data" => [coordinator_msg(%{"task_ref" => "bd-canonical", "directive_ref" => nil})]},
+        200
+      )
+
+      {out, _err, code} = capture(fn -> Inbox.run([]) end)
+      assert code == 0
+      assert out =~ "[bd-canonical]"
+    end
+
     test "does NOT mark messages read (triage is deliberate)" do
       # Only the GET is stubbed. If the command tried to POST a read,
       # the stub would 500 and the body assertion below would fail.

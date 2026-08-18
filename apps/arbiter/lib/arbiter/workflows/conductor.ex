@@ -883,7 +883,7 @@ defmodule Arbiter.Workflows.Conductor do
       to_ref: Message.coordinator_ref(),
       from_ref: failed_id,
       workspace_id: ws_id,
-      directive_ref: failed_id,
+      task_ref: failed_id,
       subject: subject,
       body: body
     })

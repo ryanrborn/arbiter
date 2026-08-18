@@ -9,7 +9,9 @@ defmodule ArbiterWeb.Api.MessageController do
                                        both nil], outstanding=true [read, not
                                        cleared], limit [default 50])
     * `POST /api/messages`           — :create (body: kind, from_ref, to_ref,
-                                       subject, body, directive_ref, workspace_id)
+                                       subject, body, task_ref (or the
+                                       deprecated directive_ref alias),
+                                       workspace_id)
     * `POST /api/messages/:id/read`  — :read (stamp read_at = now)
     * `DELETE /api/messages`         — :clear (soft-clear messages addressed to
                                        `to_ref` by stamping cleared_at; rows are
@@ -51,7 +53,10 @@ defmodule ArbiterWeb.Api.MessageController do
   def create(conn, params) do
     attrs =
       coerce_kind(
-        Map.take(params, ~w(kind from_ref to_ref subject body directive_ref workspace_id))
+        Map.take(
+          params,
+          ~w(kind from_ref to_ref subject body task_ref directive_ref workspace_id)
+        )
       )
 
     case Ash.create(Message, attrs) do

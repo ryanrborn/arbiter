@@ -853,7 +853,7 @@ defmodule Arbiter.Reviews.ExternalReview do
           to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: "external_review",
           workspace_id: ws_id,
-          directive_ref: String.slice(prepared.mr_ref, 0, 255),
+          task_ref: String.slice(prepared.mr_ref, 0, 255),
           subject:
             "Report-only review: #{prepared.mr_ref} — #{result.findings} proposed comment(s), " <>
               "recommend #{result.verdict}",

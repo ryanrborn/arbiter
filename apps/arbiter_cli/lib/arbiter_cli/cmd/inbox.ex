@@ -26,7 +26,7 @@ defmodule ArbiterCli.Cmd.Inbox do
       0b9d1f2a  [bd-1qx1nt] completion from worker-019e — GitLab adapter complete (2m ago)
 
   The leading token is a short message id — pass it (or a unique prefix) to
-  `arb inbox read`. The bracket is the directive the message concerns.
+  `arb inbox read`. The bracket is the task the message concerns.
 
   Flags:
     --json    emit JSON instead of human-readable text
@@ -218,14 +218,14 @@ defmodule ArbiterCli.Cmd.Inbox do
   defp emit_full(message, :json), do: IO.puts(Jason.encode!(message))
 
   defp emit_full(m, :text) do
-    directive = m["directive_ref"]
+    task_ref = m["task_ref"] || m["directive_ref"]
 
     fields =
       [
         {"From", m["from_ref"]},
         {"To", m["to_ref"]},
         {"Kind", m["kind"]},
-        {"Issue", directive},
+        {"Issue", task_ref},
         {"Subject", m["subject"]},
         {"Sent", m["inserted_at"]}
       ]
@@ -240,12 +240,12 @@ defmodule ArbiterCli.Cmd.Inbox do
   # `0b9d1f2a  [bd-1qx1nt] completion from worker-019e — gist (2m ago)`
   defp format_line(m) do
     short = m["id"] |> to_string() |> String.slice(0, 8)
-    directive = m["directive_ref"] || "-"
+    task_ref = m["task_ref"] || m["directive_ref"] || "-"
     kind = m["kind"] |> to_string() |> String.pad_trailing(10)
     from = truncate(m["from_ref"] || "?", 16)
     gist = gist(m)
     age = age_suffix(m["inserted_at"])
-    "#{short}  [#{directive}] #{kind} from #{from} — #{gist}#{age}"
+    "#{short}  [#{task_ref}] #{kind} from #{from} — #{gist}#{age}"
   end
 
   defp gist(m) do
