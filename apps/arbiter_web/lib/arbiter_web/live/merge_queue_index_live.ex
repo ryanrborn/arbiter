@@ -84,7 +84,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   # The live, serialized, base-aware queue (#354, Phase 3): each running
   # workspace MergeQueue's items, in merge-admission order. Distinct from the
   # worker-based `entries` above (which list awaiting-review workers) — this is
-  # the Refinery's own view of the queue it is integrating one PR at a time.
+  # the merge queue's own view of the queue it is integrating one PR at a time.
   # Best-effort: a failure to reach the queues yields an empty section.
   defp serialized_queue_entries(workspaces_by_id) do
     MergeQueueSupervisor.queue_views()
@@ -331,7 +331,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     end
   end
 
-  # Serialized-queue item status (#354, Phase 3) — the Refinery's own view of where each
+  # Serialized-queue item status (#354, Phase 3) — the merge queue's own view of where each
   # queued PR is in the serialized, base-aware merge pipeline.
   defp serialized_queue_status_label(:opening), do: "Opening"
   defp serialized_queue_status_label(:awaiting_approval), do: "In review"

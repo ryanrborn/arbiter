@@ -68,7 +68,7 @@ defmodule Arbiter.Quota.CloudCode do
   `GEMINI_FORCE_ENCRYPTED_FILE_STORAGE` env var: unset (the default), the CLI
   reads/writes `oauth_creds.json` as Arbiter assumes; set to `"true"`, the
   CLI never touches that file and Arbiter's read here goes stale exactly like
-  the original Antigravity bug this bead fixes. We do not probe the keyring
+  the original Antigravity bug this task fixes. We do not probe the keyring
   or ADC for Gemini CLI (no equivalent of `agy`'s own liveness-probe CLI
   exists to shell out to), so a host running with that flag set will degrade
   with `project id not available` even though Gemini CLI itself is live —

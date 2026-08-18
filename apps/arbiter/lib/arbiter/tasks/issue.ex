@@ -283,13 +283,13 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:status, :open)
       change set_attribute(:closed_at, nil)
 
-      # bd-38l3px: a reopened bead starts a FRESH attempt — the PR it opened in
+      # bd-38l3px: a reopened task starts a FRESH attempt — the PR it opened in
       # its prior (now-closed) run is no longer its active PR. Leaving `pr_ref` /
       # `source_pr` populated lets `MergedPRFinalizer` re-detect that
-      # already-merged PR on a later sweep and silently re-close the bead every
+      # already-merged PR on a later sweep and silently re-close the task every
       # reopen cycle (the query keys on `pr_ref`, independent of tracker_type).
       # Clearing them here severs the stale reference at the source so the next
-      # dispatch opens a new PR and the finalizer never targets the wrong bead.
+      # dispatch opens a new PR and the finalizer never targets the wrong task.
       change set_attribute(:pr_ref, nil)
       change set_attribute(:source_pr, nil)
 

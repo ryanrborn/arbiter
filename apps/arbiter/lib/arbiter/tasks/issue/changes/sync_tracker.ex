@@ -22,7 +22,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   Testing Notes" and "Deployment Notes" fields are filled. That gate is handled
   **provider-agnostically inside `Arbiter.Trackers.Sync.transition_event/2`**:
   it asks the adapter which fields gate the transition (`Tracker.gating_fields/2`),
-  pushes the bead's produced values into them *before* transitioning, and
+  pushes the task's produced values into them *before* transitioning, and
   escalates — naming the exact missing field — when a required value hasn't been
   produced. This change therefore carries no provider-specific gating logic; it
   just routes the status transition through `Sync`.
