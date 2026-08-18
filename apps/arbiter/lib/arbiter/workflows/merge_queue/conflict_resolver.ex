@@ -424,7 +424,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: workspace_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: "Merge queue: unresolved conflict on #{task_id}",
       body: body
     })

@@ -149,6 +149,72 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
+  describe "task_ref (bd-58vtjk canonical field) dual-write/dual-read" do
+    test "writing task_ref dual-writes directive_ref" do
+      {:ok, m} =
+        Ash.create(Message, %{
+          kind: :info,
+          to_ref: "admiral",
+          body: "x",
+          task_ref: "bd-canonical",
+          workspace_id: @ws
+        })
+
+      assert m.task_ref == "bd-canonical"
+      assert m.directive_ref == "bd-canonical"
+    end
+
+    test "writing the legacy directive_ref dual-writes task_ref" do
+      {:ok, m} =
+        Ash.create(Message, %{
+          kind: :info,
+          to_ref: "admiral",
+          body: "x",
+          directive_ref: "bd-legacy",
+          workspace_id: @ws
+        })
+
+      assert m.task_ref == "bd-legacy"
+      assert m.directive_ref == "bd-legacy"
+    end
+
+    test "task_ref wins when both are given and disagree" do
+      {:ok, m} =
+        Ash.create(Message, %{
+          kind: :info,
+          to_ref: "admiral",
+          body: "x",
+          task_ref: "bd-new",
+          directive_ref: "bd-old",
+          workspace_id: @ws
+        })
+
+      assert m.task_ref == "bd-new"
+      assert m.directive_ref == "bd-new"
+    end
+
+    test "Message.task_ref/1 prefers task_ref, falls back to directive_ref" do
+      assert Message.task_ref(%{task_ref: "bd-1", directive_ref: "bd-2"}) == "bd-1"
+      assert Message.task_ref(%{task_ref: nil, directive_ref: "bd-2"}) == "bd-2"
+      assert Message.task_ref(%{task_ref: nil, directive_ref: nil}) == nil
+    end
+
+    test "Message.thread/2 finds a message written under either name" do
+      {:ok, _} =
+        Ash.create(Message, %{
+          kind: :flag,
+          from_ref: "bd-a",
+          to_ref: "bd-b",
+          body: "via task_ref",
+          task_ref: "bd-thread",
+          workspace_id: @ws
+        })
+
+      [msg] = Message.thread("bd-thread", workspace_id: @ws)
+      assert msg.body == "via task_ref"
+    end
+  end
+
   describe "coordinator mailbox literal + admiral→coordinator compat" do
     test "coordinator_ref/0 is the canonical literal; coordinator_refs/0 covers both" do
       assert Message.coordinator_ref() == "coordinator"
@@ -619,7 +685,7 @@ defmodule Arbiter.Messages.MessageTest do
           kind: :escalation,
           to_ref: "coordinator",
           workspace_id: Keyword.get(opts, :workspace_id, @ws),
-          directive_ref: task,
+          task_ref: task,
           subject: subject,
           body: subject
         })
@@ -632,7 +698,7 @@ defmodule Arbiter.Messages.MessageTest do
 
       assert Message.last_with_subject("coordinator", ["nope"],
                workspace_id: @ws,
-               directive_ref: task
+               task_ref: task
              ) == nil
 
       m = escalate("blocked A", task)
@@ -640,7 +706,7 @@ defmodule Arbiter.Messages.MessageTest do
       assert %{id: id} =
                Message.last_with_subject("coordinator", ["blocked A"],
                  workspace_id: @ws,
-                 directive_ref: task
+                 task_ref: task
                )
 
       assert id == m.id
@@ -652,7 +718,7 @@ defmodule Arbiter.Messages.MessageTest do
 
       assert Message.last_with_subject("coordinator", ["blocked A", "blocked B"],
                workspace_id: @ws,
-               directive_ref: task
+               task_ref: task
              )
     end
 
@@ -667,14 +733,14 @@ defmodule Arbiter.Messages.MessageTest do
 
       assert Message.last_with_subject("coordinator", ["shared subject"],
                workspace_id: @ws,
-               directive_ref: mine
+               task_ref: mine
              ) == nil
     end
 
     test "uncleared: true skips a cleared row but keeps an unread or outstanding one" do
       task = "bd-lws-#{System.unique_integer([:positive])}"
       m = escalate("cleared soon", task)
-      scope = [workspace_id: @ws, directive_ref: task, uncleared: true]
+      scope = [workspace_id: @ws, task_ref: task, uncleared: true]
 
       assert Message.last_with_subject("coordinator", ["cleared soon"], scope)
 
@@ -687,7 +753,7 @@ defmodule Arbiter.Messages.MessageTest do
       # ...but it is still the last matching row when cleared rows count.
       assert Message.last_with_subject("coordinator", ["cleared soon"],
                workspace_id: @ws,
-               directive_ref: task
+               task_ref: task
              )
     end
 
@@ -699,14 +765,14 @@ defmodule Arbiter.Messages.MessageTest do
           kind: :escalation,
           to_ref: "admiral",
           workspace_id: @ws,
-          directive_ref: task,
+          task_ref: task,
           subject: "legacy addressed",
           body: "x"
         })
 
       assert Message.last_with_subject("coordinator", ["legacy addressed"],
                workspace_id: @ws,
-               directive_ref: task
+               task_ref: task
              )
     end
   end

@@ -296,11 +296,11 @@ defmodule ArbiterCli.Cmd.Prime do
 
   # `[bd-9bn4n9] failure    — Worker exited with code 1 (5m ago)`
   defp inbox_line(m) do
-    directive = m["directive_ref"] || "-"
+    task_ref = m["task_ref"] || m["directive_ref"] || "-"
     kind = m["kind"] |> to_string() |> String.pad_trailing(10)
     gist = m["subject"] || m["body"] || ""
     gist = gist |> to_string() |> String.split("\n") |> List.first() |> truncate(60)
-    "[#{directive}] #{kind} — #{gist}#{age_suffix(m["inserted_at"])}"
+    "[#{task_ref}] #{kind} — #{gist}#{age_suffix(m["inserted_at"])}"
   end
 
   defp age_suffix(iso) when is_binary(iso) do

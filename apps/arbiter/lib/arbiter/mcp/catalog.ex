@@ -689,11 +689,15 @@ defmodule Arbiter.MCP.Catalog do
               "Message kind (notification|completion|failure|escalation|info). " <>
                 "Defaults to auto-derived kind based on scope (direction for coordinator, flag for worker)."
           },
-          "directive_ref" => %{
+          "task_ref" => %{
             "type" => "string",
             "description" =>
-              "The directive (task) id this message concerns. Shown in brackets by `arb inbox`. " <>
+              "The task id this message concerns. Shown in brackets by `arb inbox`. " <>
                 "Defaults to the recipient task_id."
+          },
+          "directive_ref" => %{
+            "type" => "string",
+            "description" => "Deprecated alias for task_ref. Ignored if task_ref is also given."
           }
         },
         "required" => ["task_id", "body"],

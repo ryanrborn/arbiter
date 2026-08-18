@@ -788,7 +788,21 @@ defmodule Arbiter.MCP.ToolsTest do
       assert msg.to_ref == ctx.task.id
     end
 
-    test "accepts optional directive_ref parameter", ctx do
+    test "accepts optional task_ref parameter", ctx do
+      {:ok, other_task} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "issue with this task",
+                 "task_ref" => other_task.id
+               })
+
+      assert msg.task_ref == other_task.id
+      assert msg.directive_ref == other_task.id
+    end
+
+    test "accepts the deprecated directive_ref alias for task_ref", ctx do
       {:ok, other_task} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
 
       assert {:ok, msg} =
@@ -798,7 +812,24 @@ defmodule Arbiter.MCP.ToolsTest do
                  "directive_ref" => other_task.id
                })
 
+      assert msg.task_ref == other_task.id
       assert msg.directive_ref == other_task.id
+    end
+
+    test "task_ref wins over directive_ref when both are given", ctx do
+      {:ok, canonical_task} = Ash.create(Issue, %{title: "canonical", workspace_id: ctx.ws.id})
+      {:ok, legacy_task} = Ash.create(Issue, %{title: "legacy", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "issue with this task",
+                 "task_ref" => canonical_task.id,
+                 "directive_ref" => legacy_task.id
+               })
+
+      assert msg.task_ref == canonical_task.id
+      assert msg.directive_ref == canonical_task.id
     end
 
     test "rejects invalid kind values", ctx do

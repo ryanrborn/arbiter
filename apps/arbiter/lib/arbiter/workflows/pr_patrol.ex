@@ -559,7 +559,7 @@ defmodule Arbiter.Workflows.PRPatrol do
       to_ref: Message.coordinator_ref(),
       from_ref: task.id,
       workspace_id: state.workspace_id,
-      directive_ref: task.id,
+      task_ref: task.id,
       subject: "PRPatrol follow-up dispatch failed for PR ##{task.source_pr}",
       body:
         "PRPatrol auto-filed a follow-up for #{state.repo} PR ##{task.source_pr}, but " <>

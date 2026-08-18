@@ -1771,7 +1771,7 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   # Persist one thread entry as an inter-agent `:flag` message scoped to the
-  # task's workspace. directive_ref = the author task id, so `Messages.thread/2`
+  # task's workspace. task_ref = the author task id, so `Messages.thread/2`
   # reconstructs the ordered conversation for the task. Best-effort: a workspace-
   # less ReviewGate (ad-hoc run) or a DB hiccup never breaks the loop.
   defp persist_message(%{workspace_id: ws} = state, role, subject, body) when is_binary(ws) do
@@ -1783,7 +1783,7 @@ defmodule Arbiter.Worker.ReviewGate do
         from_ref: from_ref,
         to_ref: to_ref,
         workspace_id: ws,
-        directive_ref: state.task_id,
+        task_ref: state.task_id,
         subject: cap(subject, 500),
         body: body
       })
