@@ -362,7 +362,7 @@ defmodule Arbiter.Trackers.Jira do
   # `field_ids`) so the sync layer can pull the task's produced value; an id
   # with no task-domain mapping yields `key: nil` and is escalated by name.
   #
-  # For fields that cannot be sourced from the task task, the descriptor includes
+  # For fields that cannot be sourced from the task, the descriptor includes
   # a pre-resolved `:value` from the workspace config. Currently only
   # `fixVersions`: when the workspace has `fix_version_name` set, the value is
   # pre-resolved as `[%{"name" => name}]` so the sync layer can push it before
@@ -387,7 +387,7 @@ defmodule Arbiter.Trackers.Jira do
   defp required_field_descriptors(_cfg, _transition), do: []
 
   # Pre-resolve field values from the workspace config for fields that cannot be
-  # sourced from the task task directly. Only `fixVersions` is handled here;
+  # sourced from the task directly. Only `fixVersions` is handled here;
   # all other fields return nil (deferring to the task's produced value).
   defp pre_resolve_field_value(%{fix_version_name: name}, "fixVersions")
        when is_binary(name) and name != "",

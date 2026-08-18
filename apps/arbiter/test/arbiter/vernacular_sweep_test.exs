@@ -193,6 +193,19 @@ defmodule Arbiter.VernacularSweepTest do
       end
     end
 
+    test "gas_town_files: 'sling' (Gas Town terminology) not used in comments/prose" do
+      for file <- @gas_town_files do
+        content = read_file(file)
+
+        # Check that "sling" is not used as Gas Town terminology in comments.
+        # Exclude main.ex which intentionally defines the `arb sling` compat alias.
+        unless String.contains?(file, ["main.ex", "decommission_sweep"]) do
+          refute content =~ ~r/\bsling\b/,
+                 "File #{file}: Found 'sling' (Gas Town terminology) — should be removed or replaced with Arbiter terminology in comments"
+        end
+      end
+    end
+
     test "CLI help text: gte-NNN examples updated to current format" do
       dispatch_content = read_file("../arbiter_cli/lib/arbiter_cli/cmd/dispatch.ex")
       show_content = read_file("../arbiter_cli/lib/arbiter_cli/cmd/show.ex")

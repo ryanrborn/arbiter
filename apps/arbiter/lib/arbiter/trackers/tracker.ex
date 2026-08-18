@@ -103,7 +103,7 @@ defmodule Arbiter.Trackers.Tracker do
     * `:name` — the human-facing field label, used when escalating a missing
       required field (e.g. `"QA Testing Notes"`).
     * `:value` — optional pre-resolved value the adapter supplies from workspace
-      config for fields that can't be sourced from the task task (e.g. a Jira
+      config for fields that can't be sourced from the task (e.g. a Jira
       fix-version name). When present and non-nil, the sync layer uses this
       directly instead of looking up the task's produced value.
   """
