@@ -361,7 +361,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       })
     end
 
-    defp stub_rig_order_patch(repo_paths, expected_patch, returned_repo_paths) do
+    defp stub_repo_order_patch(repo_paths, expected_patch, returned_repo_paths) do
       stub_routes([
         {{"get", "/api/workspaces"},
          {%{
@@ -391,7 +391,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       ])
     end
 
-    test "ls lists a rig's own orders, not the workspace-global ones" do
+    test "ls lists a repo's own orders, not the workspace-global ones" do
       ws_with_repo_paths(%{
         "client" => %{"path" => "/x/client", "standing_orders" => ["Link the Figma design."]}
       })
@@ -405,7 +405,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "1. Link the Figma design."
     end
 
-    test "ls reports when a registered rig has none" do
+    test "ls reports when a registered repo has none" do
       ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
 
       {out, _err, code} =
@@ -417,8 +417,8 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "(no standing orders"
     end
 
-    test "add appends onto a map-shaped rig entry, preserving its path" do
-      stub_rig_order_patch(
+    test "add appends onto a map-shaped repo entry, preserving its path" do
+      stub_repo_order_patch(
         %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one"]}},
         %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one", "Add two"]}},
         %{"client" => %{"path" => "/x/client", "standing_orders" => ["Keep one", "Add two"]}}
@@ -441,8 +441,8 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "2 standing order(s)"
     end
 
-    test "add on a bare-string rig entry upgrades it to a map, keeping the path" do
-      stub_rig_order_patch(
+    test "add on a bare-string repo entry upgrades it to a map, keeping the path" do
+      stub_repo_order_patch(
         %{"server" => "/x/server"},
         %{"server" => %{"path" => "/x/server", "standing_orders" => ["First order"]}},
         %{"server" => %{"path" => "/x/server", "standing_orders" => ["First order"]}}
@@ -465,7 +465,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "1 standing order(s)"
     end
 
-    test "add errors when the named rig isn't registered in repo_paths" do
+    test "add errors when the named repo isn't registered in repo_paths" do
       ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
 
       {_out, err, code} =
@@ -482,11 +482,11 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
         end)
 
       assert code == 1
-      assert err =~ "no rig named"
+      assert err =~ "no repo named"
     end
 
-    test "rm removes by index scoped to the rig, leaving the global list untouched" do
-      stub_rig_order_patch(
+    test "rm removes by index scoped to the repo, leaving the global list untouched" do
+      stub_repo_order_patch(
         %{"client" => %{"path" => "/x/client", "standing_orders" => ["a", "b"]}},
         %{"client" => %{"path" => "/x/client", "standing_orders" => ["a"]}},
         %{"client" => %{"path" => "/x/client", "standing_orders" => ["a"]}}
@@ -509,7 +509,7 @@ defmodule ArbiterCli.Cmd.WorkspaceTest do
       assert out =~ "1 standing order(s)"
     end
 
-    test "rm errors when the rig has no orders" do
+    test "rm errors when the repo has no orders" do
       ws_with_repo_paths(%{"client" => %{"path" => "/x/client"}})
 
       {_out, err, code} =

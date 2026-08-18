@@ -162,13 +162,13 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
-  defp init_rig(dir) do
+  defp init_repo(dir) do
     repo = Path.join(dir, "repo")
     bare = Path.join(dir, "origin.git")
     File.mkdir_p!(repo)
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
     {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
-    {_, 0} = git(["config", "user.name", "Rig"], repo)
+    {_, 0} = git(["config", "user.name", "Repo"], repo)
     {_, 0} = git(["config", "commit.gpgsign", "false"], repo)
     File.write!(Path.join(repo, "README.md"), "seed\n")
     {_, 0} = git(["add", "README.md"], repo)
@@ -216,7 +216,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   setup do
     tmp = Path.join(System.tmp_dir!(), "review_gate-#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
-    repo = init_rig(tmp)
+    repo = init_repo(tmp)
 
     put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
     put_app_env(:arbiter, :repo_paths, %{"trib/repo" => repo})
@@ -2661,8 +2661,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # be spawned (mirrors the #97 abort-on-conflict posture).
     test "a branch that conflicts with an advanced target escalates before the reviewer spawns",
          %{repo: repo, ws: ws} do
-      # Give the rig an origin remote and push main, so update_from_target can
-      # fetch + merge origin/main. init_rig already added origin (origin.git), so
+      # Give the repo an origin remote and push main, so update_from_target can
+      # fetch + merge origin/main. init_repo already added origin (origin.git), so
       # point it at this test's bare conflict repo instead.
       remote = Path.join(Path.dirname(repo), "remote-conflict.git")
       {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])

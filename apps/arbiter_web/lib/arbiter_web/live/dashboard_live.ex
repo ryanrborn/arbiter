@@ -115,7 +115,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_workspaces()
      |> subscribe_messages(live?)
      |> refresh_coordinator_inbox()
-     |> refresh_rigs()
+     |> refresh_repos()
      |> refresh_workers()
      |> refresh_merge_queue()
      |> refresh_completed_runs()
@@ -143,7 +143,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_completed_runs()
      |> refresh_pending_reviews()
      |> refresh_workspaces()
-     |> refresh_rigs()
+     |> refresh_repos()
      |> refresh_external_reviews()}
   end
 
@@ -671,23 +671,23 @@ defmodule ArbiterWeb.DashboardLive do
 
   # ---- repos ----
 
-  defp refresh_rigs(socket) do
+  defp refresh_repos(socket) do
     workspaces = socket.assigns[:workspaces_by_id] |> values_or_load()
 
     paths_by_repo = collect_repo_paths(workspaces)
     workers_by_repo = group_workers_by_repo()
 
     # Build alias => remote_key map so worker repos keyed by "owner/repo"
-    # (e.g. PRPatrol workers) can be matched back to their configured rig alias.
+    # (e.g. PRPatrol workers) can be matched back to their configured repo alias.
     alias_to_remote =
       Map.new(paths_by_repo, fn {alias, %{path: path}} ->
-        {alias, rig_remote_key(path)}
+        {alias, repo_remote_key(path)}
       end)
 
     remote_to_alias =
       for {a, rk} <- alias_to_remote, rk != nil, into: %{}, do: {rk, a}
 
-    rigs =
+    repos =
       paths_by_repo
       |> Map.merge(repos_from_workers(workers_by_repo, paths_by_repo, remote_to_alias))
       |> Enum.map(fn {name, entry} ->
@@ -715,7 +715,7 @@ defmodule ArbiterWeb.DashboardLive do
       end)
       |> Enum.sort_by(& &1.name)
 
-    assign(socket, :rigs, rigs)
+    assign(socket, :repos, repos)
   end
 
   defp values_or_load(nil), do: load_workspaces()
@@ -763,7 +763,7 @@ defmodule ArbiterWeb.DashboardLive do
   # legacy value). Surface those as well so the operator can see them.
   #
   # Workers whose repo is a full "owner/repo" slug (e.g. PRPatrol) are matched
-  # via remote_to_alias so they don't appear as "(unconfigured)" when the rig
+  # via remote_to_alias so they don't appear as "(unconfigured)" when the repo
   # is configured under a short alias.
   defp repos_from_workers(workers_by_repo, configured, remote_to_alias) do
     workers_by_repo
@@ -774,9 +774,9 @@ defmodule ArbiterWeb.DashboardLive do
     |> Map.new(fn name -> {name, %{path: nil, source: "(unconfigured)"}} end)
   end
 
-  defp rig_remote_key(nil), do: nil
+  defp repo_remote_key(nil), do: nil
 
-  defp rig_remote_key(path) when is_binary(path) do
+  defp repo_remote_key(path) when is_binary(path) do
     case Arbiter.Mergers.Github.RepoResolver.from_remote(path) do
       {:ok, {owner, repo}} -> "#{owner}/#{repo}"
       _ -> nil
@@ -1680,18 +1680,18 @@ defmodule ArbiterWeb.DashboardLive do
             <div class="card-body p-4 gap-4">
               <h2 class="text-lg font-semibold flex items-center gap-2">
                 <.icon name="hero-server-stack" class="size-5 text-base-content/70" />
-                {cap_plural(@repo_label)} ({length(@rigs)})
+                {cap_plural(@repo_label)} ({length(@repos)})
               </h2>
 
-              <p :if={@rigs == []} class="text-sm text-base-content/60 italic">
+              <p :if={@repos == []} class="text-sm text-base-content/60 italic">
                 No {plural(@repo_label)} configured. Add entries to
                 <code class="text-xs">:arbiter, :repo_paths</code>
                 in config or to a {@workspace_label}'s <code class="text-xs">config["repo_paths"]</code>.
               </p>
 
-              <div :if={@rigs != []} class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div :if={@repos != []} class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div
-                  :for={repo <- @rigs}
+                  :for={repo <- @repos}
                   class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-secondary/40"
                 >
                   <div class="flex items-center justify-between gap-2">

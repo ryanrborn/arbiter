@@ -146,27 +146,27 @@ defmodule Arbiter.Reviews.ExternalReview do
          mr_ref: mr_ref,
          repo_path: repo_path,
          pr: pr,
-         rig_name: rig_name(Map.get(opts, :repo), mr_ref),
+         repo_name: repo_name(Map.get(opts, :repo), mr_ref),
          link: safe_link(adapter, mr_ref)
        }}
     end
   end
 
-  # The repo/rig name `review_automation.repo_overrides` is keyed by — the same
+  # The repo name `review_automation.repo_overrides` is keyed by — the same
   # bare name `worker_review`'s `args["repo"]` uses (bd-3cpcw2). An explicit
   # `repo:` opt always wins; otherwise (bd-7opdaf Part 1) it's parsed out of the
   # resolved `mr_ref` itself, since a `pr:` dispatch is very often a fully-
   # qualified "owner/repo#N" slug/URL with NO separate `repo:` arg — before this
-  # fallback, that shape silently resolved `rig_name` to `nil` and every
+  # fallback, that shape silently resolved `repo_name` to `nil` and every
   # `repo_overrides` entry was skipped regardless of what the config said.
-  defp rig_name(repo, _mr_ref) when is_binary(repo) and repo != "", do: repo
-  defp rig_name(_repo, mr_ref), do: rig_name_from_mr_ref(mr_ref)
+  defp repo_name(repo, _mr_ref) when is_binary(repo) and repo != "", do: repo
+  defp repo_name(_repo, mr_ref), do: repo_name_from_mr_ref(mr_ref)
 
   # Only GitHub's adapter embeds "owner/repo" in `mr_ref` (e.g. "octo/widget#42",
   # optionally "github:owner/repo#N" — bd-3jjk0e); GitLab's is a bare "!<iid>"
   # with no repo embedded, so this simply returns nil there (unchanged, existing
   # behavior — GitLab workspaces are single-project and gate via `repo:`).
-  defp rig_name_from_mr_ref(mr_ref) when is_binary(mr_ref) do
+  defp repo_name_from_mr_ref(mr_ref) when is_binary(mr_ref) do
     mr_ref = String.replace_prefix(mr_ref, "github:", "")
 
     case Regex.run(~r{^[^/\s#]+/([^/\s#]+)#\d+$}, mr_ref) do
@@ -175,7 +175,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
-  defp rig_name_from_mr_ref(_mr_ref), do: nil
+  defp repo_name_from_mr_ref(_mr_ref), do: nil
 
   @doc """
   Run an external review **synchronously** and return the verdict.
@@ -259,23 +259,23 @@ defmodule Arbiter.Reviews.ExternalReview do
       "skipped: #{ref} already has a current approving review from this identity — " <>
         "pass force: true to review it anyway"
 
-  def describe_error({:automation_off, rig_name, :repo_override}) when is_binary(rig_name),
+  def describe_error({:automation_off, repo_name, :repo_override}) when is_binary(repo_name),
     do:
-      "review_automation is \"off\" for #{rig_name} " <>
-        "(review_automation.repo_overrides[#{inspect(rig_name)}]); refusing to dispatch a " <>
+      "review_automation is \"off\" for #{repo_name} " <>
+        "(review_automation.repo_overrides[#{inspect(repo_name)}]); refusing to dispatch a " <>
         "reviewer — pass force: true to override"
 
-  def describe_error({:automation_off, rig_name, :explicit}),
+  def describe_error({:automation_off, repo_name, :explicit}),
     do:
-      "review_automation was explicitly set to \"off\" for #{rig_name || "this PR"} " <>
+      "review_automation was explicitly set to \"off\" for #{repo_name || "this PR"} " <>
         "(the automation argument); refusing to dispatch a reviewer — pass force: true to override"
 
-  def describe_error({:automation_off, rig_name, :default}) when is_binary(rig_name),
+  def describe_error({:automation_off, repo_name, :default}) when is_binary(repo_name),
     do:
-      "review_automation is \"off\" by default for #{rig_name} (review_automation.default); " <>
+      "review_automation is \"off\" by default for #{repo_name} (review_automation.default); " <>
         "refusing to dispatch a reviewer — pass force: true to override"
 
-  def describe_error({:automation_off, _rig_name, :default}),
+  def describe_error({:automation_off, _repo_name, :default}),
     do:
       "review_automation is \"off\" by default for this workspace (review_automation.default); " <>
         "refusing to dispatch a reviewer — pass force: true to override"
@@ -587,35 +587,35 @@ defmodule Arbiter.Reviews.ExternalReview do
   # `force: true` overrides, exactly like the self-approve guard.
   defp guard_automation_off(prepared, opts) do
     config = workspace_config(prepared.workspace)
-    rig_name = Map.get(prepared, :rig_name)
+    repo_name = Map.get(prepared, :repo_name)
     explicit = Map.get(opts, :automation)
 
     # bd-7opdaf: the PR author isn't known yet on the `pr:` path (it's only
     # fetched later, in `run_workflow`/engagement creation). An explicit
-    # `automation:` arg or a matching `repo_overrides[rig_name]` both resolve
+    # `automation:` arg or a matching `repo_overrides[repo_name]` both resolve
     # without the author, so only pay for the extra adapter round-trip when
     # resolution would actually fall through to `auto_authors`/`default` —
     # otherwise a `default: "off"` policy would silently ignore `auto_authors`
     # exceptions (they'd always resolve against a `nil` author).
     pr_author =
       if is_nil(ReviewAutomation.normalize(explicit)) &&
-           is_nil(ReviewAutomation.repo_override_mode(config, rig_name)) do
+           is_nil(ReviewAutomation.repo_override_mode(config, repo_name)) do
         {_head_sha, author} = fetch_pr_baseline(Map.get(prepared, :adapter), prepared.mr_ref)
         author
       end
 
     {mode, source} =
-      ReviewAutomation.resolve_with_source(config, pr_author, rig_name, explicit)
+      ReviewAutomation.resolve_with_source(config, pr_author, repo_name, explicit)
 
     Logger.info(
       "ExternalReview: resolved review_automation=#{mode} (source: #{source}) for " <>
-        "#{prepared.mr_ref}#{if rig_name, do: " [#{rig_name}]", else: ""}"
+        "#{prepared.mr_ref}#{if repo_name, do: " [#{repo_name}]", else: ""}"
     )
 
     cond do
       mode != :off -> :ok
       Map.get(opts, :force) == true -> :ok
-      true -> {:error, {:automation_off, rig_name, source}}
+      true -> {:error, {:automation_off, repo_name, source}}
     end
   end
 
@@ -824,7 +824,7 @@ defmodule Arbiter.Reviews.ExternalReview do
 
           nil ->
             config = workspace_config(prepared.workspace)
-            ReviewAutomation.resolve(config, nil, Map.get(prepared, :rig_name)) == :report_only
+            ReviewAutomation.resolve(config, nil, Map.get(prepared, :repo_name)) == :report_only
         end
     end
   end
@@ -1225,7 +1225,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     # trigger a re-review) + the PR author (for automation-mode resolution).
     {head_sha, pr_author} = fetch_pr_baseline(adapter, mr_ref)
     watermark = fetch_comment_watermark(adapter, mr_ref)
-    mode = resolve_automation(opts, prepared.workspace, pr_author, Map.get(prepared, :rig_name))
+    mode = resolve_automation(opts, prepared.workspace, pr_author, Map.get(prepared, :repo_name))
 
     case create_engagement_issue(prepared, opts, mode, head_sha, watermark, findings) do
       {:ok, issue} ->
@@ -1397,7 +1397,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   # otherwise the workspace review_automation policy against the actual PR author.
   # A report-only review always yields a :report_only engagement so re-reviews
   # stay report-only.
-  defp resolve_automation(opts, workspace, pr_author, rig_name) do
+  defp resolve_automation(opts, workspace, pr_author, repo_name) do
     config = workspace_config(workspace)
 
     cond do
@@ -1408,7 +1408,7 @@ defmodule Arbiter.Reviews.ExternalReview do
         mode
 
       true ->
-        ReviewAutomation.resolve(config, pr_author, rig_name)
+        ReviewAutomation.resolve(config, pr_author, repo_name)
     end
   end
 

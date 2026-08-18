@@ -2053,9 +2053,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
-  describe "prepare/1 — rig_name resolution from the pr slug (bd-7opdaf Part 1)" do
-    test "derives rig_name from an owner/repo#N slug when repo: is omitted" do
-      ws = github_ws("er-rig-slug")
+  describe "prepare/1 — repo_name resolution from the pr slug (bd-7opdaf Part 1)" do
+    test "derives repo_name from an owner/repo#N slug when repo: is omitted" do
+      ws = github_ws("er-repo-slug")
 
       assert {:ok, prepared} =
                ExternalReview.prepare(
@@ -2063,11 +2063,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                  workspace: ws.name
                )
 
-      assert prepared.rig_name == "voice_biometrics"
+      assert prepared.repo_name == "voice_biometrics"
     end
 
-    test "derives rig_name from a full forge URL when repo: is omitted" do
-      ws = github_ws("er-rig-url")
+    test "derives repo_name from a full forge URL when repo: is omitted" do
+      ws = github_ws("er-repo-url")
 
       assert {:ok, prepared} =
                ExternalReview.prepare(
@@ -2075,11 +2075,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                  workspace: ws.name
                )
 
-      assert prepared.rig_name == "atlas"
+      assert prepared.repo_name == "atlas"
     end
 
     test "an explicit repo: arg still wins over the parsed pr slug" do
-      ws = github_ws("er-rig-explicit")
+      ws = github_ws("er-repo-explicit")
 
       assert {:ok, prepared} =
                ExternalReview.prepare(
@@ -2088,14 +2088,14 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                  workspace: ws.name
                )
 
-      assert prepared.rig_name == "explicit_repo"
+      assert prepared.repo_name == "explicit_repo"
     end
 
-    test "rig_name is nil for a bare PR number with no repo: or checkout" do
-      ws = github_ws("er-rig-bare")
+    test "repo_name is nil for a bare PR number with no repo: or checkout" do
+      ws = github_ws("er-repo-bare")
 
       assert {:ok, prepared} = ExternalReview.prepare(pr: "42", workspace: ws.name)
-      assert prepared.rig_name == nil
+      assert prepared.repo_name == nil
     end
   end
 
@@ -2295,7 +2295,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
           }
         })
 
-      # A bare PR number with no repo:/repo_paths — rig_name genuinely can't be
+      # A bare PR number with no repo:/repo_paths — repo_name genuinely can't be
       # resolved, so the default applies with no repo name to report.
       assert {:error, {:automation_off, nil, :default}} =
                ExternalReview.dispatch(pr: "1", workspace: ws.name)

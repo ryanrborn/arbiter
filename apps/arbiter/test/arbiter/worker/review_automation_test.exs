@@ -104,7 +104,7 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.resolve(@config, nil, "atlas") == :flag
     end
 
-    test "author-in-auto_authors wins when no repo_override for that rig" do
+    test "author-in-auto_authors wins when no repo_override for that repo" do
       # alice is in auto_authors; "backend" has no override
       assert ReviewAutomation.resolve(@config, "alice", "backend") == :auto
     end
@@ -113,7 +113,7 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.resolve(@config, "charlie", "backend") == :flag
     end
 
-    test "nil rig_name falls through to author resolution" do
+    test "nil repo_name falls through to author resolution" do
       assert ReviewAutomation.resolve(@config, "alice", nil) == :auto
       assert ReviewAutomation.resolve(@config, "charlie", nil) == :flag
     end
@@ -124,11 +124,11 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.resolve(config, "charlie", "atlas") == :flag
     end
 
-    test "unknown rig falls through to author resolution" do
+    test "unknown repo falls through to author resolution" do
       assert ReviewAutomation.resolve(@config, "alice", "unknown_repo") == :auto
     end
 
-    test "returns :flag for nil config regardless of rig" do
+    test "returns :flag for nil config regardless of repo" do
       assert ReviewAutomation.resolve(nil, "alice", "atlas") == :flag
     end
   end
@@ -191,7 +191,7 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.repo_override_mode(@config, "backend") == nil
     end
 
-    test "returns nil for nil/blank rig_name" do
+    test "returns nil for nil/blank repo_name" do
       assert ReviewAutomation.repo_override_mode(@config, nil) == nil
       assert ReviewAutomation.repo_override_mode(@config, "") == nil
     end

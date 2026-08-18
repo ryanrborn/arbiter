@@ -280,7 +280,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       refute out =~ "Standing Orders"
     end
 
-    test "renders a per-rig Standing Orders section from repo_paths.<rig>.standing_orders" do
+    test "renders a per-repo Standing Orders section from repo_paths.<rig>.standing_orders" do
       stub_all(
         [
           %{
@@ -315,15 +315,15 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "[ ] If the work has an associated Figma design, link it in the Jira ticket."
       refute out =~ "== Standing Orders — server =="
 
-      # Rig-scoped block comes after the global one, still ahead of the work list.
+      # Repo-scoped block comes after the global one, still ahead of the work list.
       global_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
-      rig_at = :binary.match(out, "== Standing Orders — client ==") |> elem(0)
+      repo_at = :binary.match(out, "== Standing Orders — client ==") |> elem(0)
       ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
-      assert global_at < rig_at
-      assert rig_at < ready_at
+      assert global_at < repo_at
+      assert repo_at < ready_at
     end
 
-    test "omits per-rig Standing Orders sections when no rig carries any" do
+    test "omits per-repo Standing Orders sections when no repo carries any" do
       stub_all(
         [
           %{
@@ -486,7 +486,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert ws["standing_orders"] == ["Watch the Coordinator inbox"]
     end
 
-    test "rig_standing_orders carries per-rig orders keyed by rig, through --json" do
+    test "rig_standing_orders carries per-repo orders keyed by repo, through --json" do
       stub_all(
         [
           %{

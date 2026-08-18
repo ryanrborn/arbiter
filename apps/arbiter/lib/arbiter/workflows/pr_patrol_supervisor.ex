@@ -9,10 +9,10 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   Multi-repo workspaces (no `repo` pinned in the merge config — only an
   `owner`) get one PRPatrol per repo, registered under
   `"workspace_id:owner/repo"`. The repo list is derived from the workspace's
-  `repo_paths` map: each locally-checked-out rig's `origin` remote
+  `repo_paths` map: each locally-checked-out repo's `origin` remote
   is resolved to an `"owner/repo"` slug via `RepoResolver`, the same mechanism
   the worker dispatch path uses. This covers the leotech workspace shape, whose
-  rigs are separate `leo-technologies-llc/*` repos that must each be patrolled
+  repos are separate `leo-technologies-llc/*` repos that must each be patrolled
   independently — without this, leotech (a jira-tracker + github-merger
   workspace) got no patrol at all and Copilot review comments went unaddressed.
 
@@ -33,7 +33,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   The registry key scheme depends on how many repos resolve for a workspace at
   call time. If a workspace's resolvable-repo count crosses 1↔N between
-  restarts (a rig added or removed, or a previously-unreachable remote starts
+  restarts (a repo added or removed, or a previously-unreachable remote starts
   resolving), `start_patrol/2` automatically stops any stale patrol registered
   under the old scheme before starting new ones under the new scheme. This
   reconciliation prevents a ghost patrol from running under the wrong key after
@@ -42,12 +42,12 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   ## Multi-repo workspace create-time deferral
 
   When a new multi-repo workspace is created, the `StartPRPatrol` after_action
-  hook calls `start_patrol/2` immediately. If the workspace's rigs are not yet
+  hook calls `start_patrol/2` immediately. If the workspace's repos are not yet
   checked out at that point, `repos_from_repo_paths/1` returns `[]` and the call
   returns `:skip` — the patrol is deferred to the next application boot via
   `start_for_existing_workspaces/0`. This is intentional: a freshly created
-  multi-repo workspace has no rigs on disk yet, so there is nothing to patrol.
-  The boot-time enumeration catches it once the rigs are present.
+  multi-repo workspace has no repos on disk yet, so there is nothing to patrol.
+  The boot-time enumeration catches it once the repos are present.
 
   ## Observable signals
 
@@ -81,7 +81,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   Single-repo workspaces (`config["merge"]["config"]["repo"]` is set) start
   one patrol registered under `workspace_id`. Multi-repo workspaces (repo
-  derived per-rig from `repo_paths`) start one patrol per repo,
+  derived per-repo from `repo_paths`) start one patrol per repo,
   each registered under `"workspace_id:owner/repo"`.
 
   Idempotent: a duplicate start for an already-running patrol returns
@@ -109,7 +109,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
         Logger.info(
           "PRPatrolSupervisor: skip workspace #{workspace.id} (#{workspace.name}) — " <>
             "no repos resolvable (set merge.config.repo, or a repo_paths " <>
-            "map whose rigs have a github origin remote)"
+            "map whose repos have a github origin remote)"
         )
 
         :skip
@@ -352,11 +352,11 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   #
   # GitHub supports two shapes:
   #   - Single-repo: merge.config.repo is set → one patrol against owner/repo.
-  #   - Multi-repo: no repo pinned in the merge config → one patrol per rig,
-  #     with each rig's "owner/repo" derived from its `origin` remote. The rig
+  #   - Multi-repo: no repo pinned in the merge config → one patrol per repo,
+  #     with each repo's "owner/repo" derived from its `origin` remote. The repo
   #     list comes from the workspace's repo_paths map — the same
   #     source the worker dispatch path resolves worktrees from. Used by
-  #     workspaces like leotech, whose rigs are distinct leo-technologies-llc/*
+  #     workspaces like leotech, whose repos are distinct leo-technologies-llc/*
   #     repos.
   defp patrol_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
@@ -377,13 +377,13 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
     end
   end
 
-  # Resolve every locally-checked-out rig's `origin` remote into an
-  # "owner/repo" slug. Best-effort: a rig whose path is missing, isn't a git
+  # Resolve every locally-checked-out repo's `origin` remote into an
+  # "owner/repo" slug. Best-effort: a repo whose path is missing, isn't a git
   # checkout, or whose remote can't be parsed is logged and skipped.
   defp repos_from_repo_paths(config) do
     case Map.get(config, "repo_paths") do
-      rig_map when is_map(rig_map) ->
-        rig_map
+      repo_map when is_map(repo_map) ->
+        repo_map
         |> Map.values()
         |> Enum.map(&RepoConfig.repo_path_from_config/1)
         |> Enum.reject(&is_nil/1)
@@ -394,7 +394,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
             {:error, err} ->
               Logger.info(
-                "PRPatrolSupervisor: could not derive repo for rig path #{path} " <>
+                "PRPatrolSupervisor: could not derive repo for path #{path} " <>
                   "(skipping): #{inspect(err)}"
               )
 

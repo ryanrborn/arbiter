@@ -213,8 +213,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
 
   defp repos_from_repo_paths(config) do
     case Map.get(config, "repo_paths") do
-      rig_map when is_map(rig_map) ->
-        rig_map
+      repo_map when is_map(repo_map) ->
+        repo_map
         |> Map.values()
         |> Enum.map(&RepoConfig.repo_path_from_config/1)
         |> Enum.reject(&is_nil/1)
@@ -225,7 +225,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
 
             {:error, err} ->
               Logger.info(
-                "MergedPRFinalizerSupervisor: could not derive repo for rig path #{path} " <>
+                "MergedPRFinalizerSupervisor: could not derive repo for path #{path} " <>
                   "(skipping): #{inspect(err)}"
               )
 

@@ -407,11 +407,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
              adapter when not is_nil(adapter) <- resolve_adapter(workspace),
              true <- function_exported?(adapter, :get, 1),
              :ok <- Mergers.prepare_with_repo(workspace, state.repo) do
-          rig_name = rig_name_for_repo(workspace, state.repo)
+          repo_name = repo_name_for_repo(workspace, state.repo)
 
           state.workspace_id
           |> open_engagements(state.repo)
-          |> process_engagements_paced(adapter, workspace, rig_name, state.rate_limit)
+          |> process_engagements_paced(adapter, workspace, repo_name, state.rate_limit)
         else
           # On any failure (missing workspace, unsupported adapter), no-op the
           # cycle but still bump the tick counter below so the patrol is observable.
@@ -515,7 +515,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # trip, the remaining (unprocessed) engagements are deferred and the whole
   # workspace/repo is paused; see `trip_circuit/4`. A run that completes
   # without tripping resets the circuit (any prior backoff level forgotten).
-  defp process_engagements_paced(engagements, adapter, workspace, rig_name, rate_limit) do
+  defp process_engagements_paced(engagements, adapter, workspace, repo_name, rate_limit) do
     threshold = rate_limit_trip_threshold(workspace)
     total = length(engagements)
 
@@ -538,7 +538,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
             end
 
           :ok ->
-            outcome = process_engagement_result(engagement, result, adapter, workspace, rig_name)
+            outcome = process_engagement_result(engagement, result, adapter, workspace, repo_name)
             {:cont, {[outcome | outcomes], 0, nil}}
         end
       end)
@@ -706,7 +706,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          result,
          adapter,
          workspace,
-         rig_name
+         repo_name
        )
        when is_binary(source_pr) and source_pr != "" do
     case result do
@@ -717,7 +717,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         end
 
       {:ok, %{status: :open} = pr} ->
-        handle_open_pr(engagement, pr, adapter, workspace, rig_name)
+        handle_open_pr(engagement, pr, adapter, workspace, repo_name)
 
       {:ok, _other} ->
         nil
@@ -732,13 +732,19 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     end
   end
 
-  defp process_engagement_result(_engagement, _result, _adapter, _workspace, _rig_name), do: nil
+  defp process_engagement_result(_engagement, _result, _adapter, _workspace, _repo_name), do: nil
 
   # An open source PR. First sighting (last_reviewed_sha unset) → record the head
   # SHA and stop. If the head advanced, consider a new-commit re-review under the
   # spam guards (task D). Otherwise (head unchanged — no new commits this tick)
   # check our review threads for author replies to answer / escalate (task G).
-  defp handle_open_pr(%Issue{last_reviewed_sha: nil} = engagement, pr, _adapter, _workspace, _rig) do
+  defp handle_open_pr(
+         %Issue{last_reviewed_sha: nil} = engagement,
+         pr,
+         _adapter,
+         _workspace,
+         _repo_name
+       ) do
     maybe_record_head_sha(engagement, pr)
     nil
   end
@@ -748,21 +754,21 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          %{head_sha: head} = pr,
          adapter,
          workspace,
-         rig_name
+         repo_name
        )
        when is_binary(head) and head != "" and head != last do
     # The head advanced — new commits were pushed. This is the "fresh code change
     # discussion" case: defer to task D's re-review path rather than replying in
     # a thread. Author replies (if any) are picked up on a later tick once the
     # head settles (they remain newer than `last_seen_comment_id`).
-    maybe_rereview(engagement, pr, adapter, workspace, rig_name)
+    maybe_rereview(engagement, pr, adapter, workspace, repo_name)
   end
 
   # No new commits this tick (head unchanged, or head unknown/blank). Look for
   # new author replies on the review threads we own and handle them per the
   # engagement's automation mode.
-  defp handle_open_pr(%Issue{} = engagement, pr, adapter, workspace, rig_name) do
-    maybe_handle_author_replies(engagement, pr, adapter, workspace, rig_name)
+  defp handle_open_pr(%Issue{} = engagement, pr, adapter, workspace, repo_name) do
+    maybe_handle_author_replies(engagement, pr, adapter, workspace, repo_name)
   end
 
   # Close the engagement's task. review_only == true, so SyncTracker skips every
@@ -811,7 +817,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # The head advanced past `last_reviewed_sha`. Apply the spam guards in order —
   # CI settle, debounce, fetch the new-diff-only, relevance gate — then act by
   # automation mode: `:auto` posts a re-review, `:flag` raises a mailbox flag.
-  defp maybe_rereview(%Issue{} = engagement, pr, adapter, workspace, rig_name) do
+  defp maybe_rereview(%Issue{} = engagement, pr, adapter, workspace, repo_name) do
     cond do
       not ci_settled?(pr) ->
         Logger.info(
@@ -832,7 +838,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         handle_review_cap(engagement, workspace)
 
       true ->
-        gate_on_relevance(engagement, pr, adapter, workspace, rig_name)
+        gate_on_relevance(engagement, pr, adapter, workspace, repo_name)
     end
   end
 
@@ -950,7 +956,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # Fetch the diff SINCE `last_reviewed_sha` (new-diff-only) and re-review only
   # when it touches a file we previously flagged. A push that touches only
   # unrelated files is not our concern and is skipped without advancing anything.
-  defp gate_on_relevance(engagement, pr, adapter, workspace, rig_name) do
+  defp gate_on_relevance(engagement, pr, adapter, workspace, repo_name) do
     opts = %{
       base: engagement.last_reviewed_sha,
       head: pr.head_sha,
@@ -975,7 +981,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
             decline_for_sticky_approval(engagement, pr.head_sha)
 
           true ->
-            act_on_new_commits(engagement, pr.head_sha, adapter, workspace, opts, rig_name)
+            act_on_new_commits(engagement, pr.head_sha, adapter, workspace, opts, repo_name)
         end
 
       {:error, reason} ->
@@ -1139,8 +1145,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   defp normalize_ws(s), do: s |> String.trim() |> String.replace(~r/\s+/, " ")
 
-  defp act_on_new_commits(engagement, head, adapter, workspace, opts, rig_name) do
-    case automation_mode(engagement, workspace, rig_name) do
+  defp act_on_new_commits(engagement, head, adapter, workspace, opts, repo_name) do
+    case automation_mode(engagement, workspace, repo_name) do
       :auto -> run_rereview(engagement, head, adapter, workspace, opts)
       :report_only -> report_rereview(engagement, head, adapter, workspace, opts)
       # :off (bd-7opdaf) is a hard opt-out — never dispatch a reviewer, same
@@ -1381,7 +1387,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # threads are ours, and the PR author login (from the adapter's get/1) to tell
   # an author's reply apart from another reviewer's comment (decision 6). When
   # either is unavailable, we conservatively skip — never guessing.
-  defp maybe_handle_author_replies(%Issue{} = engagement, pr, adapter, workspace, rig_name) do
+  defp maybe_handle_author_replies(%Issue{} = engagement, pr, adapter, workspace, repo_name) do
     with our_login when is_binary(our_login) and our_login != "" <- our_login(workspace),
          pr_author when is_binary(pr_author) and pr_author != "" <- Map.get(pr, :author),
          true <- function_exported?(adapter, :list_open_review_threads, 1),
@@ -1396,7 +1402,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
       case replies do
         [] -> nil
-        _ -> act_on_author_replies(engagement, replies, adapter, workspace, rig_name)
+        _ -> act_on_author_replies(engagement, replies, adapter, workspace, repo_name)
       end
     else
       _ -> nil
@@ -1407,12 +1413,12 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # the single most-recent reply (the current question) and advance the cursor
   # past ALL new replies in this batch — so a burst of replies yields exactly one
   # action and never re-fires.
-  defp act_on_author_replies(%Issue{} = engagement, replies, adapter, workspace, rig_name) do
+  defp act_on_author_replies(%Issue{} = engagement, replies, adapter, workspace, repo_name) do
     {thread, comment} = Enum.max_by(replies, fn {_t, c} -> c[:id] end)
     max_id = replies |> Enum.map(fn {_t, c} -> c[:id] end) |> Enum.max()
 
     outcome =
-      case automation_mode(engagement, workspace, rig_name) do
+      case automation_mode(engagement, workspace, repo_name) do
         :auto ->
           dispatch_reply(engagement, thread, comment, adapter, workspace)
 
@@ -1581,7 +1587,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # ---- guards / helpers --------------------------------------------------
 
   # The engagement's automation stance (task B). Re-resolved from the workspace's
-  # LIVE `review_automation.repo_overrides[rig_name]` on every tick (bd-3cpcw2):
+  # LIVE `review_automation.repo_overrides[repo_name]` on every tick (bd-3cpcw2):
   # a repo override is author-independent and is checked fresh — never just
   # trusted from `engagement.review_automation` — meaning a repo flipped to
   # `report_only`/`flag` immediately stops an in-flight engagement from
@@ -1612,10 +1618,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   #                  MORE restrictive so a repo flipped to :off downgrades an
   #                  in-flight engagement immediately, exactly like the
   #                  existing report_only downgrade.
-  defp automation_mode(%Issue{} = engagement, workspace, rig_name) do
+  defp automation_mode(%Issue{} = engagement, workspace, repo_name) do
     stored = stored_automation_mode(engagement)
 
-    case ReviewAutomation.repo_override_mode(workspace_config(workspace), rig_name) do
+    case ReviewAutomation.repo_override_mode(workspace_config(workspace), repo_name) do
       mode when mode in [:auto, :report_only, :flag, :off] -> most_restrictive(stored, mode)
       nil -> stored
     end
@@ -1640,36 +1646,36 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   @doc false
   # Reverse `repo` (the "owner/repo" string a patrol is started with, from
-  # `ReviewPatrolSupervisor.patrol_repos/1`) back to the bare rig/repo-config
+  # `ReviewPatrolSupervisor.patrol_repos/1`) back to the bare repo-config
   # name that `review_automation.repo_overrides` is keyed by (bd-3cpcw2) — the
   # same identifier `worker_review`'s `args["repo"]` uses at dispatch time
   # (`Arbiter.Mcp.Tools.guard_review_automation/3`). Public (not just used by
   # this module's own ticks) so `ReviewPatrolSupervisor` can resolve the same
-  # rig name to gate patrol startup on a repo's `:off`-mode override
+  # repo name to gate patrol startup on a repo's `:off`-mode override
   # (bd-4brb2j) without duplicating the repo_paths-remote-resolution logic.
   #
   # Single-repo workspaces: `merge.config.repo` IS that bare name directly.
   # Multi-repo workspaces: find the `repo_paths` entry whose git
   # remote resolves to this "owner/repo" and use its key.
-  def rig_name_for_repo(%Workspace{config: config}, repo) when is_binary(repo) and repo != "" do
+  def repo_name_for_repo(%Workspace{config: config}, repo) when is_binary(repo) and repo != "" do
     config = config || %{}
 
     case get_in(config, ["merge", "config", "repo"]) do
       name when is_binary(name) and name != "" -> name
-      _ -> rig_name_from_repo_paths(config, repo)
+      _ -> repo_name_from_repo_paths(config, repo)
     end
   end
 
-  def rig_name_for_repo(_workspace, _repo), do: nil
+  def repo_name_for_repo(_workspace, _repo), do: nil
 
-  defp rig_name_from_repo_paths(config, repo) do
-    rig_map = Map.get(config, "repo_paths") || %{}
+  defp repo_name_from_repo_paths(config, repo) do
+    repo_map = Map.get(config, "repo_paths") || %{}
 
-    Enum.find_value(rig_map, fn {rig_name, rig_config} ->
-      with path when is_binary(path) <- RepoConfig.repo_path_from_config(rig_config),
+    Enum.find_value(repo_map, fn {repo_name, repo_config} ->
+      with path when is_binary(path) <- RepoConfig.repo_path_from_config(repo_config),
            {:ok, {owner, r}} <- RepoResolver.from_remote(path),
            true <- "#{owner}/#{r}" == repo do
-        rig_name
+        repo_name
       else
         _ -> nil
       end

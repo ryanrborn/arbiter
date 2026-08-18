@@ -4,7 +4,7 @@ defmodule Arbiter.Worker.ReviewAutomation do
 
   Mode resolution order:
     1. An explicit per-dispatch `automation` override always wins.
-    2. If the rig name matches an entry in `review_automation.repo_overrides`,
+    2. If the repo name matches an entry in `review_automation.repo_overrides`,
        that value wins regardless of PR author.
     3. If the PR author is in `review_automation.auto_authors`, the mode is `:auto`.
     4. Otherwise, use `review_automation.default` from the workspace config.
@@ -49,7 +49,7 @@ defmodule Arbiter.Worker.ReviewAutomation do
   @typedoc """
   Where a resolved mode came from, most-specific first (bd-7opdaf):
   `:explicit` (a per-dispatch `automation` arg), `:repo_override`
-  (`review_automation.repo_overrides[rig_name]`), or `:default` (the
+  (`review_automation.repo_overrides[repo_name]`), or `:default` (the
   `auto_authors`/`default` fallback).
   """
   @type source :: :explicit | :repo_override | :default
@@ -59,21 +59,21 @@ defmodule Arbiter.Worker.ReviewAutomation do
 
   - `ws_config` — the raw `workspace.config` map (may be `nil` or `%{}`).
   - `pr_author` — the login of the PR author (may be `nil`).
-  - `rig_name`  — the rig/repo name (e.g. `"atlas"`); checked against
+  - `repo_name`  — the repo name (e.g. `"atlas"`); checked against
     `review_automation.repo_overrides` before the author lookup.
 
   Returns `:auto`, `:report_only`, or `:flag`.
   """
   @spec resolve(map() | nil, String.t() | nil, String.t() | nil) :: mode()
-  def resolve(ws_config, pr_author, rig_name \\ nil) do
+  def resolve(ws_config, pr_author, repo_name \\ nil) do
     block = ws_config && Map.get(ws_config, "review_automation")
-    resolve_from_block(block, pr_author, rig_name)
+    resolve_from_block(block, pr_author, repo_name)
   end
 
   @doc """
-  Look up ONLY the repo/rig override for `rig_name` — the highest-precedence,
+  Look up ONLY the repo override for `repo_name` — the highest-precedence,
   author-independent gate — without falling through to `auto_authors`/`default`.
-  Returns `nil` when no override is configured for `rig_name` (or `rig_name` is
+  Returns `nil` when no override is configured for `repo_name` (or `repo_name` is
   `nil`/blank), `ws_config` is `nil`/`%{}`, etc.
 
   Used by `ReviewPatrol` (bd-3cpcw2) to re-check a repo's override live on every
@@ -82,9 +82,9 @@ defmodule Arbiter.Worker.ReviewAutomation do
   already-open engagements, instead of only on new dispatches.
   """
   @spec repo_override_mode(map() | nil, String.t() | nil) :: mode() | nil
-  def repo_override_mode(ws_config, rig_name) do
+  def repo_override_mode(ws_config, repo_name) do
     block = ws_config && Map.get(ws_config, "review_automation")
-    repo_override(block, rig_name)
+    repo_override(block, repo_name)
   end
 
   @doc """
@@ -112,13 +112,13 @@ defmodule Arbiter.Worker.ReviewAutomation do
 
   - `explicit` — a raw `automation` arg/string; normalized internally. When it
     normalizes to a valid mode, it wins outright with source `:explicit`.
-  - Otherwise resolution falls through to `repo_overrides[rig_name]`
+  - Otherwise resolution falls through to `repo_overrides[repo_name]`
     (`:repo_override`), then `auto_authors`/`default` (`:default`) — the same
     precedence as `resolve/3`.
   """
   @spec resolve_with_source(map() | nil, String.t() | nil, String.t() | nil, term()) ::
           {mode(), source()}
-  def resolve_with_source(ws_config, pr_author, rig_name, explicit \\ nil) do
+  def resolve_with_source(ws_config, pr_author, repo_name, explicit \\ nil) do
     case normalize(explicit) do
       mode when not is_nil(mode) ->
         {mode, :explicit}
@@ -126,7 +126,7 @@ defmodule Arbiter.Worker.ReviewAutomation do
       nil ->
         block = ws_config && Map.get(ws_config, "review_automation")
 
-        case repo_override(block, rig_name) do
+        case repo_override(block, repo_name) do
           nil when is_map(block) -> {resolve_by_author(block, pr_author), :default}
           nil -> {:flag, :default}
           mode -> {mode, :repo_override}
@@ -134,10 +134,10 @@ defmodule Arbiter.Worker.ReviewAutomation do
     end
   end
 
-  defp resolve_from_block(nil, _author, _rig), do: :flag
+  defp resolve_from_block(nil, _author, _repo), do: :flag
 
-  defp resolve_from_block(%{} = block, author, rig) do
-    case repo_override(block, rig) do
+  defp resolve_from_block(%{} = block, author, repo) do
+    case repo_override(block, repo) do
       nil -> resolve_by_author(block, author)
       mode -> mode
     end
@@ -146,11 +146,11 @@ defmodule Arbiter.Worker.ReviewAutomation do
   defp repo_override(_block, nil), do: nil
   defp repo_override(_block, ""), do: nil
 
-  defp repo_override(%{"repo_overrides" => overrides}, rig) when is_map(overrides) do
-    normalize(Map.get(overrides, rig))
+  defp repo_override(%{"repo_overrides" => overrides}, repo) when is_map(overrides) do
+    normalize(Map.get(overrides, repo))
   end
 
-  defp repo_override(_block, _rig), do: nil
+  defp repo_override(_block, _repo), do: nil
 
   defp resolve_by_author(block, author) when is_binary(author) and author != "" do
     auto_authors = Map.get(block, "auto_authors") || []

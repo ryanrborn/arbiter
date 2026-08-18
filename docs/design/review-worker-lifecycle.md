@@ -250,7 +250,7 @@ workspace. Resolution order (most-specific wins):
 
 1. **Per-dispatch override** — the `automation` argument to `worker_review` always wins
    (`auto` | `report_only` / `propose` | `flag` / `notify` | `off` / `never` / `disabled`).
-2. **Per-repo override** — `review_automation.repo_overrides[rig_name]` hard-gates a
+2. **Per-repo override** — `review_automation.repo_overrides[repo_name]` hard-gates a
    specific repo regardless of PR author.
 3. **Author list** — if the PR author is in `auto_authors`, the mode is `:auto`.
 4. **Default** — `review_automation.default` (`:flag` when unset).
@@ -280,7 +280,7 @@ replies). Authors not in the list fall back to `review_automation.default`
 **Per-repo overrides** (`repo_overrides`) take precedence over the author list.
 Setting `atlas: "report_only"` ensures atlas PRs are always fully reviewed but
 never auto-posted — the findings + proposed comments go to the coordinator to
-greenlight — even when the PR author is in `auto_authors`. The key is the rig
+greenlight — even when the PR author is in `auto_authors`. The key is the repo
 name as defined in `merge.config.repo_paths`.
 
 Example: a workspace with backend engineers trusted for auto-review, while the

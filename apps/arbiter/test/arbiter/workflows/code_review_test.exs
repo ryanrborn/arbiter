@@ -1714,7 +1714,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       # When exceeded, execve returns errno E2BIG = 7.  Erlang's System.cmd
       # surfaces this as exit-code 7 with empty stdout — not an exception —
       # which is exactly the {:claude_failed, 7, ""} pattern that broke
-      # external reviews on the verus-client (FE) rig.
+      # external reviews on the verus-client (FE) repo.
       big = String.duplicate("x", 131_072)
       assert {"", 7} = System.cmd("echo", [big])
     end
