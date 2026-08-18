@@ -486,7 +486,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert ws["standing_orders"] == ["Watch the Coordinator inbox"]
     end
 
-    test "rig_standing_orders carries per-repo orders keyed by repo, through --json" do
+    test "repo_standing_orders (canonical) and rig_standing_orders (legacy alias) both carry per-repo orders keyed by repo, through --json" do
       stub_all(
         [
           %{
@@ -513,6 +513,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       {:ok, decoded} = Jason.decode(String.trim(out))
       [ws] = decoded["workspaces"]
+      assert ws["repo_standing_orders"] == %{"client" => ["Link the Figma design."]}
       assert ws["rig_standing_orders"] == %{"client" => ["Link the Figma design."]}
     end
   end
