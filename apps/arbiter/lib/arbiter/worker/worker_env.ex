@@ -27,7 +27,7 @@ defmodule Arbiter.Worker.WorkerEnv do
   caller-explicit `:env` — the agent's own auth (`ANTHROPIC_API_KEY`,
   `CLAUDE_CONFIG_DIR`, …) and the always-last `ARB_WORKER_BEAD_ID` guard always
   win, so a user env var can never break the agent's ability to authenticate or
-  the bead-id self-recursion guard.
+  the task-id self-recursion guard.
   """
 
   alias Arbiter.Tasks.Issue

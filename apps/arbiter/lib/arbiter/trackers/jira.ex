@@ -359,15 +359,15 @@ defmodule Arbiter.Trackers.Jira do
   # `expand=transitions.fields` returns `fields` as
   # `%{field_id => %{"required" => bool, "name" => label, ...}}`. We keep only
   # the required ones and reverse-map each id to its task-domain key (via
-  # `field_ids`) so the sync layer can pull the bead's produced value; an id
+  # `field_ids`) so the sync layer can pull the task's produced value; an id
   # with no task-domain mapping yields `key: nil` and is escalated by name.
   #
-  # For fields that cannot be sourced from the task bead, the descriptor includes
+  # For fields that cannot be sourced from the task task, the descriptor includes
   # a pre-resolved `:value` from the workspace config. Currently only
   # `fixVersions`: when the workspace has `fix_version_name` set, the value is
   # pre-resolved as `[%{"name" => name}]` so the sync layer can push it before
   # the transition without knowing Jira internals. A nil value falls back to the
-  # bead's produced value (or escalates as missing if neither is set).
+  # task's produced value (or escalates as missing if neither is set).
   defp required_field_descriptors(cfg, %{"fields" => fields}) when is_map(fields) do
     reverse = Map.new(cfg.field_ids, fn {k, v} -> {v, k} end)
 
@@ -387,8 +387,8 @@ defmodule Arbiter.Trackers.Jira do
   defp required_field_descriptors(_cfg, _transition), do: []
 
   # Pre-resolve field values from the workspace config for fields that cannot be
-  # sourced from the task bead directly. Only `fixVersions` is handled here;
-  # all other fields return nil (deferring to the bead's produced value).
+  # sourced from the task task directly. Only `fixVersions` is handled here;
+  # all other fields return nil (deferring to the task's produced value).
   defp pre_resolve_field_value(%{fix_version_name: name}, "fixVersions")
        when is_binary(name) and name != "",
        do: [%{"name" => name}]
@@ -771,7 +771,7 @@ defmodule Arbiter.Trackers.Jira do
           # "Done" but workspace maps :closed to "Code Merged"). Treat as a no-op:
           # the issue is complete and no further transition is needed. Without this check
           # the BFS returns :no_transition_path and the sync layer escalates — which
-          # produces noisy escalations when reconciling wrongly-imported beads whose
+          # produces noisy escalations when reconciling wrongly-imported tasks whose
           # Jira tickets were already Done.
           :ok
 

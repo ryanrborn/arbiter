@@ -23,6 +23,25 @@ defmodule Arbiter.VernacularSweepTest do
     "lib/arbiter/github.ex"
   ]
 
+  @gas_town_files [
+    "lib/arbiter/workers/reconciler.ex",
+    "lib/arbiter/messages/coordinator_notifier.ex",
+    "lib/arbiter/trackers/tracker.ex",
+    "lib/arbiter/trackers/jira.ex",
+    "lib/arbiter/trackers/sync.ex",
+    "lib/arbiter/tasks/issue.ex",
+    "lib/arbiter/worker.ex",
+    "lib/arbiter/worker/worktree.ex",
+    "lib/arbiter/worker/dispatch.ex",
+    "lib/arbiter/workflows/merged_pr_finalizer.ex",
+    "lib/arbiter/tasks/issue/changes/cleanup_worktree.ex",
+    "lib/arbiter/worker/worker_env.ex",
+    "lib/arbiter/worker/stop_reason.ex",
+    "lib/arbiter/quota/cloud_code.ex",
+    "lib/arbiter/tasks/issue/changes/sync_tracker.ex",
+    "lib/arbiter/workflows/merge_queue.ex"
+  ]
+
   describe "vernacular sweep" do
     test "config_dir.ex: acolyte_memory function is renamed to worker_memory" do
       content = read_file("lib/arbiter/agents/claude/config_dir.ex")
@@ -111,6 +130,30 @@ defmodule Arbiter.VernacularSweepTest do
              "Should preserve historical artifact title matching for string literals"
     end
 
+    test "reconciler.ex: bead → task in comments (Gas Town vocabulary)" do
+      content = read_file("lib/arbiter/workers/reconciler.ex")
+
+      # Should NOT find the old "bead" terminology in comments
+      refute content =~ ~r/a bead parked/i,
+             "Should replace 'a bead parked' with 'a task parked'"
+
+      refute content =~ ~r/beads\./i,
+             "Should replace 'beads' with 'tasks' in comments"
+    end
+
+    test "merge_queue.ex: Refinery → merge queue in comments" do
+      content = read_file("lib/arbiter/workflows/merge_queue.ex")
+
+      # Should NOT find "the Refinery is"
+      refute content =~ "the Refinery is",
+             "Should replace 'the Refinery is' with 'the merge queue is'"
+
+      # Should find "the merge queue" instead
+      assert content =~ "the merge queue is",
+             "Should have 'the merge queue' instead of 'the Refinery'"
+    end
+
+
     test "all target files compile without errors" do
       # This is a basic sanity check — the actual compilation is done by mix test
       # but we can at least verify the files exist and are readable
@@ -123,6 +166,42 @@ defmodule Arbiter.VernacularSweepTest do
         refute content == "",
                "File #{file} should not be empty"
       end
+    end
+
+    test "gas_town_files: 'bead'/'beads' replaced with 'task'/'issue'" do
+      for file <- @gas_town_files do
+        content = read_file(file)
+
+        # Check that "bead" is not used colloquially for task/issue in comments
+        # Allow it only if it's part of a known identifier or in decommission_sweep artifact matching
+        unless String.contains?(file, ["decommission_sweep", "Dolt"]) do
+          refute content =~ ~r/\bbead(?![\w:_-])/,
+                 "File #{file}: Found 'bead' used colloquially — should be 'task' or 'issue' in comments"
+
+          refute content =~ ~r/\bbeads\b/,
+                 "File #{file}: Found 'beads' — should be 'tasks' or 'issues' in comments"
+        end
+      end
+    end
+
+    test "merge_queue files: 'the Refinery' replaced with 'the merge queue'" do
+      for file <- ["lib/arbiter/workflows/merge_queue.ex", "../arbiter_web/lib/arbiter_web/live/merge_queue_index_live.ex"] do
+        content = read_file(file)
+
+        refute content =~ "the Refinery",
+               "File #{file}: Found 'the Refinery' — should be 'the merge queue'"
+      end
+    end
+
+    test "CLI help text: gte-NNN examples updated to current format" do
+      dispatch_content = read_file("../arbiter_cli/lib/arbiter_cli/cmd/dispatch.ex")
+      show_content = read_file("../arbiter_cli/lib/arbiter_cli/cmd/show.ex")
+
+      refute dispatch_content =~ "gte-006",
+             "dispatch.ex: Found 'gte-006' example — should use current issue id format"
+
+      refute show_content =~ "gte-006",
+             "show.ex: Found 'gte-006' example — should use current issue id format"
     end
   end
 

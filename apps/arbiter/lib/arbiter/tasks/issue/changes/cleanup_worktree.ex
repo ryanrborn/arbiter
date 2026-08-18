@@ -16,7 +16,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
       detached checkout a `task`-type audit/spike runs in. Nothing there is
       meant to be preserved (no branch, so nothing unpushed; the agent's
       deliverable is `notes`), so it is removed even when dirty. Leaving it
-      would leak a worktree per audited bead, which is the cost of giving the
+      would leak a worktree per audited task, which is the cost of giving the
       inspect checkout its own leaf.
 
   Best-effort. Skipped silently when:
