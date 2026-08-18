@@ -170,19 +170,20 @@ defmodule ArbiterCli.ConfigSchema do
     standing_orders  (list)
       list of short imperative strings (or {"title","detail"} objects), surfaced
       high in every worker's `arb prime` briefing. Manage with
-      `arb workspace standing-order ls|add|rm`. Workspace-global — every rig
-      sees them. For an order that only applies to one rig, scope it under
-      `repo_paths.<rig>.standing_orders` instead (see below), or manage it
-      with `arb workspace standing-order ls|add|rm --rig <name>`.
+      `arb workspace standing-order ls|add|rm`. Workspace-global — every repo
+      sees them. For an order that only applies to one repo, scope it under
+      `repo_paths.<repo>.standing_orders` instead (see below), or manage it
+      with `arb workspace standing-order ls|add|rm --repo <name>` (`--rig` is
+      accepted as a deprecated alias for `--repo`).
 
     repo_paths  (map)
       repo name -> local worktree root path used to resolve a dispatch's working dir.
       An entry may be a bare string path, or a map carrying:
         path             string — the worktree root (required in map form)
-        target_branch    string — base branch for this rig, overriding "main"
-        standing_orders  list — orders scoped to this rig only, surfaced in
+        target_branch    string — base branch for this repo, overriding "main"
+        standing_orders  list — orders scoped to this repo only, surfaced in
                           `arb prime` alongside the workspace-global ones.
-                          Manage with `arb workspace standing-order add --rig <name>`.
+                          Manage with `arb workspace standing-order add --repo <name>`.
 
     pr_patrol  (map)
       author_logins        list of forge logins — when non-empty, PRPatrol only

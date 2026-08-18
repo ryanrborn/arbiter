@@ -15,11 +15,13 @@ defmodule ArbiterCli.Cmd.Workspace do
                                                remove one standing order (1-based
                                                index, or exact text match)
 
-      All three accept `--rig <name>` to target a repo-scoped standing order
-      (stored under `repo_paths.<rig>.standing_orders`) instead of the
+      All three accept `--repo <name>` to target a repo-scoped standing order
+      (stored under `repo_paths.<repo>.standing_orders`) instead of the
       workspace-global list. The repo must already be registered in
       `repo_paths` (add its path first with
-      `arb config set repo_paths.<rig>.path <path>`).
+      `arb config set repo_paths.<repo>.path <path>`).
+      `--rig <name>` is accepted as a deprecated alias for `--repo <name>`;
+      if both are given, `--repo` wins.
 
       arb workspace secret ls                  names of the configured secrets
       arb workspace secret set <key> <value>   store/overwrite an encrypted secret
@@ -56,6 +58,7 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   @switches [
     workspace: :string,
+    repo: :string,
     rig: :string,
     json: :boolean,
     prefix: :string,
@@ -197,7 +200,9 @@ defmodule ArbiterCli.Cmd.Workspace do
     {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     workspace_opt = opts[:workspace]
-    repo_opt = opts[:rig]
+    # --repo is canonical; --rig is a deprecated alias kept for existing
+    # scripts/muscle-memory (bd-1aw9dl). --repo wins if both are given.
+    repo_opt = opts[:repo] || opts[:rig]
 
     case rest do
       ["ls"] ->
@@ -300,7 +305,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   end
 
   # Patches `config.standing_orders` wholesale (a list patch replaces the list,
-  # never appends) while leaving sibling config keys untouched. With `--rig`,
+  # never appends) while leaving sibling config keys untouched. With `--repo`,
   # patches just that repo's `standing_orders` sub-key under `repo_paths`,
   # preserving its `path`/`target_branch` siblings.
   defp patch_standing_orders(%{} = ws, nil, orders, mode) do
@@ -346,7 +351,11 @@ defmodule ArbiterCli.Cmd.Workspace do
   end
 
   defp orders_json(orders, nil), do: %{"standing_orders" => orders}
-  defp orders_json(orders, repo), do: %{"standing_orders" => orders, "rig" => repo}
+
+  # "repo" is canonical; "rig" is dual-emitted alongside it as a deprecated
+  # legacy key so existing consumers keep working (bd-1aw9dl).
+  defp orders_json(orders, repo),
+    do: %{"standing_orders" => orders, "repo" => repo, "rig" => repo}
 
   defp repo_label(nil), do: ""
   defp repo_label(repo), do: " for repo #{repo}"
