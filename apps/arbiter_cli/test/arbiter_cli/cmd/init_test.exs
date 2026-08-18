@@ -406,6 +406,35 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert memory["status"] == "unchanged"
       assert memory["diff"] == nil
     end
+
+    test "does not report .mcp.json as drift or leak the minted coordinator token" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "emr"}]}, 200}},
+        {{"post", "/api/mcp/tokens"}, {%{"token" => "REAL-LIVE-TOKEN-abc123"}, 201}}
+      ])
+
+      dir = tmp_dir()
+
+      # Scaffold with a real minted token on disk (as any live install would
+      # have), then diff — `--diff` itself never mints a token.
+      capture(fn -> Init.run([dir]) end)
+      assert File.read!(Path.join(dir, ".mcp.json")) =~ "REAL-LIVE-TOKEN-abc123"
+
+      {text_out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+      refute text_out =~ "REAL-LIVE-TOKEN-abc123"
+      assert text_out =~ "no drift — every local file matches the current template."
+
+      {json_out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff", "--json"]) end)
+      assert exit_code == 0
+      refute json_out =~ "REAL-LIVE-TOKEN-abc123"
+
+      {:ok, decoded} = Jason.decode(String.trim(json_out))
+      mcp_json = Enum.find(decoded["files"], fn f -> f["path"] == ".mcp.json" end)
+      assert mcp_json["status"] == "not_comparable"
+      assert mcp_json["diff"] == nil
+    end
   end
 
   describe "docs/external-trackers.md" do

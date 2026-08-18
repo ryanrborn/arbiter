@@ -53,7 +53,11 @@ defmodule ArbiterCli.Cmd.Init do
   operator (or coordinator session) to hand-review and cherry-pick from, the
   same way any diff gets reviewed. `--json --diff` emits the same
   `{path, status}` shape as plain `--json`, plus a `diff` field (unified
-  diff text, or `null` when unchanged/new).
+  diff text, or `null` when unchanged/new). `.mcp.json` is excluded from
+  the comparison (reported as `not_comparable`, `diff: null`) since it
+  holds a minted coordinator bearer token, not template content — diffing
+  it would only ever report install-local token churn, and would print a
+  live credential.
 
   ## Install topology
 
@@ -171,8 +175,12 @@ defmodule ArbiterCli.Cmd.Init do
 
       if diff_mode do
         results =
-          Enum.map(templated_files, fn {rel, contents} ->
-            {rel, diff_file(Path.join(dir, rel), contents)}
+          Enum.map(templated_files, fn
+            {".mcp.json" = rel, _contents} ->
+              {rel, {:not_comparable, nil}}
+
+            {rel, contents} ->
+              {rel, diff_file(Path.join(dir, rel), contents)}
           end)
 
         case mode do
@@ -238,6 +246,12 @@ defmodule ArbiterCli.Cmd.Init do
   # disk at `path`, writing nothing. Returns `{:new, nil}` when the file
   # doesn't exist locally yet, `{:unchanged, nil}` when the disk copy matches
   # the current template exactly, or `{:diff, unified_diff_text}`.
+  #
+  # `.mcp.json` is never passed here: it holds a minted coordinator bearer
+  # token, so "template drift" isn't a meaningful concept for it (every
+  # install's token differs from the placeholder and from every other
+  # install's) and diffing it would print a live credential to stdout/JSON.
+  # Callers report it as `{:not_comparable, nil}` instead.
   defp diff_file(path, rendered_contents) do
     if File.exists?(path) do
       local_contents = File.read!(path)
@@ -254,25 +268,39 @@ defmodule ArbiterCli.Cmd.Init do
 
   # Shells out to `diff -u` rather than reimplementing a unified-diff
   # formatter. `System.cmd/3` has no stdin-piping option, so both sides get
-  # scratch files even though the local copy is already on disk.
+  # scratch files even though the local copy is already on disk. The scratch
+  # dir is mode 0700 (not the shared, world-readable `/tmp` default) since a
+  # diffed file's on-disk contents may include local secrets, and the files
+  # are always cleaned up — even if `diff` itself is missing from `PATH` or
+  # `System.cmd/3` otherwise raises.
   defp unified_diff(rendered_contents, local_contents) do
     unique = Integer.to_string(System.unique_integer([:positive]))
-    rendered_path = Path.join(System.tmp_dir!(), "arb_init_diff_template_" <> unique)
-    local_path = Path.join(System.tmp_dir!(), "arb_init_diff_local_" <> unique)
+    scratch_dir = Path.join(System.tmp_dir!(), "arb_init_diff_" <> unique)
+    rendered_path = Path.join(scratch_dir, "template")
+    local_path = Path.join(scratch_dir, "local")
 
+    File.mkdir_p!(scratch_dir)
+    File.chmod!(scratch_dir, 0o700)
     File.write!(rendered_path, rendered_contents)
     File.write!(local_path, local_contents)
+    File.chmod!(rendered_path, 0o600)
+    File.chmod!(local_path, 0o600)
 
-    {out, _status} =
-      System.cmd(
-        "diff",
-        ["-u", "--label", "template", "--label", "local", rendered_path, local_path],
-        stderr_to_stdout: true
-      )
+    try do
+      {out, _status} =
+        System.cmd(
+          "diff",
+          ["-u", "--label", "template", "--label", "local", rendered_path, local_path],
+          stderr_to_stdout: true
+        )
 
-    File.rm(rendered_path)
-    File.rm(local_path)
-    out
+      out
+    rescue
+      ErlangError ->
+        Output.die("`diff` is required for `arb init --diff` but was not found on PATH.")
+    after
+      File.rm_rf(scratch_dir)
+    end
   end
 
   # ---- runtime values ----------------------------------------------------
@@ -421,9 +449,12 @@ defmodule ArbiterCli.Cmd.Init do
 
       {_rel, {:unchanged, nil}} ->
         :ok
+
+      {_rel, {:not_comparable, nil}} ->
+        :ok
     end)
 
-    if Enum.all?(results, fn {_, {status, _}} -> status == :unchanged end) do
+    if Enum.all?(results, fn {_, {status, _}} -> status in [:unchanged, :not_comparable] end) do
       IO.puts("no drift — every local file matches the current template.")
     end
   end
