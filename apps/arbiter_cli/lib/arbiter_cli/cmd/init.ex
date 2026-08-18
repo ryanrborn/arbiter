@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Init do
   @moduledoc """
-  `arb init [path] [--force] [--dev]` — scaffold a coordinator home base.
+  `arb init [path] [--force] [--dev] [--diff]` — scaffold a coordinator home base.
 
   A fresh Arbiter adopter has no coordinator working folder. This command
   pre-seeds one — pre-filled for *this* install — so a new session has role
@@ -43,6 +43,21 @@ defmodule ArbiterCli.Cmd.Init do
 
   Non-destructive: existing files are skipped and reported. Pass `--force`
   to overwrite them.
+
+  ## Reconciling with an already-scaffolded dir
+
+  Pass `--diff` instead of scaffolding: renders the current templates and
+  `diff -u`s each against whatever's on disk in the target dir, printing the
+  hunks per file (or "new upstream file, not present locally" for a file
+  that doesn't exist yet). Writes nothing — it's strictly a report for the
+  operator (or coordinator session) to hand-review and cherry-pick from, the
+  same way any diff gets reviewed. `--json --diff` emits the same
+  `{path, status}` shape as plain `--json`, plus a `diff` field (unified
+  diff text, or `null` when unchanged/new). `.mcp.json` is excluded from
+  the comparison (reported as `not_comparable`, `diff: null`) since it
+  holds a minted coordinator bearer token, not template content — diffing
+  it would only ever report install-local token churn, and would print a
+  live credential.
 
   ## Install topology
 
@@ -137,7 +152,7 @@ defmodule ArbiterCli.Cmd.Init do
   @gitignore_contents File.read!(@gitignore)
   defp render_gitignore(_assigns), do: @gitignore_contents
 
-  @switches [force: :boolean, json: :boolean, dev: :boolean]
+  @switches [force: :boolean, json: :boolean, dev: :boolean, diff: :boolean]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -147,6 +162,7 @@ defmodule ArbiterCli.Cmd.Init do
       mode = if opts[:json], do: :json, else: :text
       force = opts[:force] || false
       dev_mode = opts[:dev] || false
+      diff_mode = opts[:diff] || false
 
       dir =
         case rest do
@@ -154,35 +170,55 @@ defmodule ArbiterCli.Cmd.Init do
           [] -> File.cwd!()
         end
 
-      assigns = build_assigns(dev_mode)
+      assigns = build_assigns(dev_mode, diff_mode)
+      templated_files = templated_files(assigns)
 
-      results =
-        [
-          {"AGENTS.md", render_agents_md(assigns)},
-          {"ARBITER_OPERATOR.md", render_operator_guide(assigns)},
-          {"AGENTS.local.md", render_agents_local(assigns)},
-          {".gitignore", render_gitignore(assigns)},
-          {".mcp.json", render_mcp_json(assigns)},
-          {"memory/MEMORY.md", render_memory_md(assigns)},
-          {"notes/README.md", render_notes_readme(assigns)},
-          {"runbooks/arbiter-event-monitor.md", render_runbook_event_monitor(assigns)},
-          {"docs/deploy.md", render_doc_deploy(assigns)},
-          {"docs/monitoring.md", render_doc_monitoring(assigns)},
-          {"docs/quota-and-auth.md", render_doc_quota_and_auth(assigns)},
-          {"docs/worktrees-and-workers.md", render_doc_worktrees_and_workers(assigns)},
-          {"docs/reviewgate.md", render_doc_reviewgate(assigns)},
-          {"docs/pr-patrol.md", render_doc_pr_patrol(assigns)},
-          {"docs/external-trackers.md", render_doc_external_trackers(assigns)}
-        ]
-        |> Enum.map(fn {rel, contents} ->
-          {rel, scaffold_file(Path.join(dir, rel), contents, force)}
-        end)
+      if diff_mode do
+        results =
+          Enum.map(templated_files, fn
+            {".mcp.json" = rel, _contents} ->
+              {rel, {:not_comparable, nil}}
 
-      case mode do
-        :json -> emit_json(dir, assigns, results)
-        :text -> emit_text(dir, assigns, results)
+            {rel, contents} ->
+              {rel, diff_file(Path.join(dir, rel), contents)}
+          end)
+
+        case mode do
+          :json -> emit_diff_json(dir, assigns, results)
+          :text -> emit_diff_text(dir, results)
+        end
+      else
+        results =
+          Enum.map(templated_files, fn {rel, contents} ->
+            {rel, scaffold_file(Path.join(dir, rel), contents, force)}
+          end)
+
+        case mode do
+          :json -> emit_json(dir, assigns, results)
+          :text -> emit_text(dir, assigns, results)
+        end
       end
     end
+  end
+
+  defp templated_files(assigns) do
+    [
+      {"AGENTS.md", render_agents_md(assigns)},
+      {"ARBITER_OPERATOR.md", render_operator_guide(assigns)},
+      {"AGENTS.local.md", render_agents_local(assigns)},
+      {".gitignore", render_gitignore(assigns)},
+      {".mcp.json", render_mcp_json(assigns)},
+      {"memory/MEMORY.md", render_memory_md(assigns)},
+      {"notes/README.md", render_notes_readme(assigns)},
+      {"runbooks/arbiter-event-monitor.md", render_runbook_event_monitor(assigns)},
+      {"docs/deploy.md", render_doc_deploy(assigns)},
+      {"docs/monitoring.md", render_doc_monitoring(assigns)},
+      {"docs/quota-and-auth.md", render_doc_quota_and_auth(assigns)},
+      {"docs/worktrees-and-workers.md", render_doc_worktrees_and_workers(assigns)},
+      {"docs/reviewgate.md", render_doc_reviewgate(assigns)},
+      {"docs/pr-patrol.md", render_doc_pr_patrol(assigns)},
+      {"docs/external-trackers.md", render_doc_external_trackers(assigns)}
+    ]
   end
 
   # ---- scaffold ----------------------------------------------------------
@@ -204,9 +240,81 @@ defmodule ArbiterCli.Cmd.Init do
     end
   end
 
+  # ---- diff ---------------------------------------------------------------
+
+  # Compares the current template's rendered output against whatever's on
+  # disk at `path`, writing nothing. Returns `{:new, nil}` when the file
+  # doesn't exist locally yet, `{:unchanged, nil}` when the disk copy matches
+  # the current template exactly, or `{:diff, unified_diff_text}`.
+  #
+  # `.mcp.json` is never passed here: it holds a minted coordinator bearer
+  # token, so "template drift" isn't a meaningful concept for it (every
+  # install's token differs from the placeholder and from every other
+  # install's) and diffing it would print a live credential to stdout/JSON.
+  # Callers report it as `{:not_comparable, nil}` instead.
+  defp diff_file(path, rendered_contents) do
+    if File.exists?(path) do
+      local_contents = File.read!(path)
+
+      if local_contents == rendered_contents do
+        {:unchanged, nil}
+      else
+        {:diff, unified_diff(rendered_contents, local_contents)}
+      end
+    else
+      {:new, nil}
+    end
+  end
+
+  # Shells out to `diff -u` rather than reimplementing a unified-diff
+  # formatter. `System.cmd/3` has no stdin-piping option, so both sides get
+  # scratch files even though the local copy is already on disk. The scratch
+  # dir is mode 0700 (not the shared, world-readable `/tmp` default) since a
+  # diffed file's on-disk contents may include local secrets, and the files
+  # are always cleaned up — even if `diff` itself is missing from `PATH` or
+  # `System.cmd/3` otherwise raises.
+  defp unified_diff(rendered_contents, local_contents) do
+    unique = Integer.to_string(System.unique_integer([:positive]))
+    scratch_dir = Path.join(System.tmp_dir!(), "arb_init_diff_" <> unique)
+    rendered_path = Path.join(scratch_dir, "template")
+    local_path = Path.join(scratch_dir, "local")
+
+    File.mkdir_p!(scratch_dir)
+    File.chmod!(scratch_dir, 0o700)
+    File.write!(rendered_path, rendered_contents)
+    File.write!(local_path, local_contents)
+    File.chmod!(rendered_path, 0o600)
+    File.chmod!(local_path, 0o600)
+
+    try do
+      {out, _status} =
+        System.cmd(
+          "diff",
+          ["-u", "--label", "template", "--label", "local", rendered_path, local_path],
+          stderr_to_stdout: true
+        )
+
+      out
+    rescue
+      e in ErlangError ->
+        File.rm_rf(scratch_dir)
+
+        if e.original == :enoent do
+          Output.die("`diff` is required for `arb init --diff` but was not found on PATH.")
+        else
+          Output.die("Failed to run `diff`: #{Exception.message(e)}")
+        end
+    after
+      File.rm_rf(scratch_dir)
+    end
+  end
+
   # ---- runtime values ----------------------------------------------------
 
-  defp build_assigns(dev_mode) do
+  # `diff_mode?` skips minting a real coordinator token: `--diff` is a
+  # read-only report and must not mutate server state (or produce a diff
+  # on .mcp.json that's just token churn from run to run).
+  defp build_assigns(dev_mode, diff_mode?) do
     {domain_name, domain_prefix} = resolve_domain()
     base_url = Client.base_url()
     mcp_url = base_url <> "/mcp"
@@ -236,7 +344,8 @@ defmodule ArbiterCli.Cmd.Init do
       domain_prefix: domain_prefix,
       install_path: install_hint(),
       mcp_url: mcp_url,
-      coordinator_token: mint_coordinator_token()
+      coordinator_token:
+        if(diff_mode?, do: "REPLACE_WITH_COORDINATOR_TOKEN", else: mint_coordinator_token())
     }
   end
 
@@ -325,6 +434,53 @@ defmodule ArbiterCli.Cmd.Init do
       domain: %{name: assigns.domain_name, prefix: assigns.domain_prefix},
       host: assigns.host,
       files: Enum.map(results, fn {rel, status} -> %{path: rel, status: status} end)
+    }
+
+    IO.puts(Jason.encode!(payload))
+  end
+
+  defp emit_diff_text(dir, results) do
+    IO.puts("arb init --diff — comparing current templates against #{dir}")
+    IO.puts("")
+
+    Enum.each(results, fn
+      {rel, {:new, nil}} ->
+        IO.puts("#{rel}: new upstream file, not present locally")
+        IO.puts("")
+
+      {rel, {:diff, diff_text}} ->
+        IO.puts("#{rel}:")
+        IO.puts(diff_text)
+        IO.puts("")
+
+      {_rel, {:unchanged, nil}} ->
+        :ok
+
+      {rel, {:not_comparable, nil}} ->
+        IO.puts("#{rel}: not compared (install-local credential config)")
+        IO.puts("")
+    end)
+
+    if Enum.all?(results, fn {_, {status, _}} -> status in [:unchanged, :not_comparable] end) do
+      IO.puts("no template drift.")
+    end
+  end
+
+  defp emit_diff_json(dir, assigns, results) do
+    payload = %{
+      dir: dir,
+      terms: %{
+        coordinator: assigns.coordinator,
+        worker: assigns.worker,
+        issue: assigns.issue,
+        workspace: assigns.workspace
+      },
+      domain: %{name: assigns.domain_name, prefix: assigns.domain_prefix},
+      host: assigns.host,
+      files:
+        Enum.map(results, fn {rel, {status, diff_text}} ->
+          %{path: rel, status: to_string(status), diff: diff_text}
+        end)
     }
 
     IO.puts(Jason.encode!(payload))

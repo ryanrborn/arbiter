@@ -158,10 +158,11 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
          %{arbiter_home: arbiter_home} do
       record_cmds()
 
+      prior_path = System.get_env("PATH")
       System.put_env("PATH", "/custom/bin:/usr/bin")
 
       on_exit(fn ->
-        System.delete_env("PATH")
+        if prior_path, do: System.put_env("PATH", prior_path), else: System.delete_env("PATH")
       end)
 
       {_out, _err, code} = capture(fn -> InstallService.run([]) end)
@@ -179,6 +180,12 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     } do
       record_cmds()
 
+      prior_path = System.get_env("PATH")
+
+      on_exit(fn ->
+        if prior_path, do: System.put_env("PATH", prior_path), else: System.delete_env("PATH")
+      end)
+
       System.put_env("PATH", "/first/path:/usr/bin")
 
       {_o1, _e1, c1} = capture(fn -> InstallService.run([]) end)
@@ -186,10 +193,6 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       System.put_env("PATH", "/second/path:/usr/bin")
 
       {_o2, _e2, c2} = capture(fn -> InstallService.run([]) end)
-
-      on_exit(fn ->
-        System.delete_env("PATH")
-      end)
 
       assert c1 == 0
       assert c2 == 0
