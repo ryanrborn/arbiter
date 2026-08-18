@@ -1601,11 +1601,11 @@ defmodule ArbiterWeb.DashboardLive do
                       from <code class="font-mono">{m.from_ref || "?"}</code>
                     </span>
                     <.link
-                      :if={m.task_ref}
-                      navigate={~p"/tasks/#{m.task_ref}"}
+                      :if={Arbiter.Messages.Message.task_ref(m)}
+                      navigate={~p"/tasks/#{Arbiter.Messages.Message.task_ref(m)}"}
                       class="text-xs link link-hover text-base-content/50"
                     >
-                      [<code class="font-mono">{m.task_ref}</code>]
+                      [<code class="font-mono">{Arbiter.Messages.Message.task_ref(m)}</code>]
                     </.link>
                     <span :if={m.subject} class="text-sm font-medium truncate">{m.subject}</span>
                   </div>
@@ -1975,11 +1975,11 @@ defmodule ArbiterWeb.DashboardLive do
                         {escalation_verdict_label(e.subject)}
                       </span>
                       <.link
-                        :if={e.task_ref}
-                        navigate={~p"/tasks/#{e.task_ref}"}
+                        :if={Arbiter.Messages.Message.task_ref(e)}
+                        navigate={~p"/tasks/#{Arbiter.Messages.Message.task_ref(e)}"}
                         class="text-xs link link-hover font-mono text-base-content/60"
                       >
-                        {e.task_ref}
+                        {Arbiter.Messages.Message.task_ref(e)}
                       </.link>
                       <span :if={e.subject} class="text-sm truncate">{e.subject}</span>
                     </div>
