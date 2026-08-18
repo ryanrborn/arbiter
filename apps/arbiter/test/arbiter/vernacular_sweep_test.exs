@@ -153,7 +153,6 @@ defmodule Arbiter.VernacularSweepTest do
              "Should have 'the merge queue' instead of 'the Refinery'"
     end
 
-
     test "all target files compile without errors" do
       # This is a basic sanity check — the actual compilation is done by mix test
       # but we can at least verify the files exist and are readable
@@ -185,7 +184,10 @@ defmodule Arbiter.VernacularSweepTest do
     end
 
     test "merge_queue files: 'the Refinery' replaced with 'the merge queue'" do
-      for file <- ["lib/arbiter/workflows/merge_queue.ex", "../arbiter_web/lib/arbiter_web/live/merge_queue_index_live.ex"] do
+      for file <- [
+            "lib/arbiter/workflows/merge_queue.ex",
+            "../arbiter_web/lib/arbiter_web/live/merge_queue_index_live.ex"
+          ] do
         content = read_file(file)
 
         refute content =~ "the Refinery",
