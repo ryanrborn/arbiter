@@ -9,7 +9,7 @@ defmodule Arbiter.Workflows.PatrolRepoScope do
 
     * **qualified** `"owner/repo#N"` (optionally `"github:owner/repo#N"`) — the
       multi-repo shape, where the workspace's merge config pins only an `owner`
-      and each repo is derived per-rig. The repo is embedded in the ref.
+      and each repo is derived independently. The repo is embedded in the ref.
 
     * **bare** `"#N"` — the single-repo shape, used when `merge.config.repo` is
       set. GitLab refs (`"!<iid>"`) are likewise single-project/bare.
