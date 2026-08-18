@@ -217,6 +217,62 @@ defmodule Arbiter.VernacularSweepTest do
              "main.ex: Found 'arb sling' backwards-compat alias — should be removed as it is unused Gas Town terminology"
     end
 
+    test "rig->repo (bd-9q0ntu): fully in-scope files have zero bare 'rig' identifiers/comments" do
+      # These files carry no Tier-2 (--rig flag / rig_standing_orders JSON key)
+      # surface at all, so every "rig" occurrence here would be a plain miss.
+      files = [
+        "lib/arbiter/worker/dispatch.ex",
+        "lib/arbiter/worker/review_automation.ex",
+        "lib/arbiter/mergers/github/config.ex",
+        "lib/arbiter/workflows/pr_patrol_supervisor.ex",
+        "lib/arbiter/workflows/review_patrol.ex",
+        "lib/arbiter/workflows/review_patrol_supervisor.ex",
+        "lib/arbiter/workflows/merged_pr_finalizer_supervisor.ex",
+        "../arbiter_web/lib/arbiter_web/live/dashboard_live.ex",
+        "../../docs/design/review-worker-lifecycle.md"
+      ]
+
+      for file <- files do
+        content = read_file(file)
+
+        refute content =~ ~r/\brigs?\b|rig_|_rig/i,
+               "File #{file}: Found bare 'rig' — should be 'repo' (bd-9q0ntu)"
+      end
+    end
+
+    test "rig->repo (bd-9q0ntu): partial files have no 'rig' outside the Tier-2-owned surface" do
+      # These files still carry the Tier-2 `--rig` CLI flag / `rig_standing_orders`
+      # JSON key / `"rig"` output key, which are explicitly out of scope for this
+      # (Tier 1) rename. Strip the known-allowed occurrences, then assert nothing
+      # else spelling "rig" survives.
+      allowed = [
+        ~r/--rig\b/,
+        ~r/<rig>/,
+        ~r/rig_standing_orders/,
+        ~r/"rig"/,
+        ~r/\brig:\s*:string/,
+        ~r/opts\[:rig\]/
+      ]
+
+      files = [
+        "../arbiter_cli/lib/arbiter_cli/cmd/workspace.ex",
+        "../arbiter_cli/lib/arbiter_cli/cmd/prime.ex"
+      ]
+
+      for file <- files do
+        content = read_file(file)
+
+        stripped =
+          Enum.reduce(allowed, content, fn pattern, acc -> Regex.replace(pattern, acc, "") end)
+
+        refute stripped =~ ~r/\brigs?\b|rig_|_rig/i,
+               "File #{file}: Found 'rig' outside the Tier-2-owned --rig/rig_standing_orders surface (bd-9q0ntu)"
+      end
+
+      # config_schema.ex's doc text describing --rig is entirely Tier-2-owned
+      # (issue: "update together with the flag itself") — not checked here.
+    end
+
     test "CLI help text: gte-NNN examples updated to current format" do
       dispatch_content = read_file("../arbiter_cli/lib/arbiter_cli/cmd/dispatch.ex")
       show_content = read_file("../arbiter_cli/lib/arbiter_cli/cmd/show.ex")

@@ -12,8 +12,8 @@ defmodule ArbiterCli.Cmd.Prime do
        a. Workspace header — name, prefix, id, tracker, security posture.
        b. Standing Orders — the domain's operating disciplines, sourced from
           `config.standing_orders`. Omitted when empty.
-       c. Per-rig Standing Orders — one section per rig carrying orders in
-          `config.repo_paths.<rig>.standing_orders`. Omitted per rig when
+       c. Per-repo Standing Orders — one section per repo carrying orders in
+          `config.repo_paths.<rig>.standing_orders`. Omitted per repo when
           empty.
        d. Active workers — task_id, status, current_step, runtime, scoped to
           this workspace.
@@ -86,7 +86,7 @@ defmodule ArbiterCli.Cmd.Prime do
     %{
       workspace: ws_section.workspace,
       standing_orders: unwrap(ws_section.standing_orders),
-      rig_standing_orders: Map.new(ws_section.rig_standing_orders),
+      rig_standing_orders: Map.new(ws_section.repo_standing_orders),
       workers: unwrap(ws_section.workers),
       ready: unwrap(ws_section.ready),
       coordinator_inbox: unwrap(ws_section.coordinator_inbox)
@@ -129,7 +129,7 @@ defmodule ArbiterCli.Cmd.Prime do
     %{
       workspace: ws,
       standing_orders: gather_standing_orders(ws),
-      rig_standing_orders: gather_rig_standing_orders(ws),
+      repo_standing_orders: gather_repo_standing_orders(ws),
       workers: gather_workers(ws_id),
       ready: gather_ready(ws_id),
       coordinator_inbox: gather_coordinator_inbox(ws_id)
@@ -145,23 +145,23 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp gather_standing_orders(_), do: {:ok, []}
 
-  # Rig-scoped standing orders live alongside the path/target_branch overrides
+  # Repo-scoped standing orders live alongside the path/target_branch overrides
   # in `config.repo_paths.<rig>.standing_orders` — same place as
-  # `arb workspace standing-order add --rig`. Only rigs that carry at least
-  # one order are returned, in `[{rig, orders}]` form so text rendering can
+  # `arb workspace standing-order add --rig`. Only repos that carry at least
+  # one order are returned, in `[{repo, orders}]` form so text rendering can
   # walk it in order and JSON can turn it into a map.
-  defp gather_rig_standing_orders(%{"config" => config}) when is_map(config) do
+  defp gather_repo_standing_orders(%{"config" => config}) when is_map(config) do
     repo_paths = config["repo_paths"] || %{}
 
     repo_paths
-    |> Enum.map(fn {rig, entry} -> {rig, rig_standing_orders(entry)} end)
-    |> Enum.reject(fn {_rig, orders} -> orders == [] end)
+    |> Enum.map(fn {repo, entry} -> {repo, repo_standing_orders(entry)} end)
+    |> Enum.reject(fn {_repo, orders} -> orders == [] end)
   end
 
-  defp gather_rig_standing_orders(_), do: []
+  defp gather_repo_standing_orders(_), do: []
 
-  defp rig_standing_orders(%{"standing_orders" => orders}) when is_list(orders), do: orders
-  defp rig_standing_orders(_), do: []
+  defp repo_standing_orders(%{"standing_orders" => orders}) when is_list(orders), do: orders
+  defp repo_standing_orders(_), do: []
 
   # Up to 5 most recent unread messages addressed to the coordinator. The REST
   # index already sorts newest-first, so a take/2 gives "most recent".
@@ -218,7 +218,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("")
 
     maybe_emit_standing_orders_section(ws_section.standing_orders)
-    emit_rig_standing_orders_sections(ws_section.rig_standing_orders)
+    emit_repo_standing_orders_sections(ws_section.repo_standing_orders)
     emit_workers_section(ws_section.workers, "worker")
     IO.puts("")
     emit_ready_section(ws_section.ready, "issue")
@@ -243,11 +243,11 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp maybe_emit_standing_orders_section(_), do: :ok
 
-  # One section per rig that carries at least one order — omitted entirely
-  # when no rig in this workspace has any.
-  defp emit_rig_standing_orders_sections(rig_orders) do
-    Enum.each(rig_orders, fn {rig, orders} ->
-      IO.puts("== Standing Orders — #{rig} ==")
+  # One section per repo that carries at least one order — omitted entirely
+  # when no repo in this workspace has any.
+  defp emit_repo_standing_orders_sections(repo_orders) do
+    Enum.each(repo_orders, fn {repo, orders} ->
+      IO.puts("== Standing Orders — #{repo} ==")
       Enum.each(orders, fn o -> IO.puts("  " <> standing_order_line(o)) end)
       IO.puts("")
     end)

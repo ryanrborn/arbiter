@@ -121,7 +121,7 @@ defmodule Arbiter.Mergers do
   slug — used by `Arbiter.Workflows.PRPatrol` so each per-repo patrol
   instance seeds `list_open/0` with the correct repo, even when the
   workspace's merge config omits `repo` (multi-repo workspace shape where
-  repo is derived per-rig from the rig's git remote at open time).
+  repo is derived per-repo from that repo's git remote at open time).
 
   For `:gitlab`, overrides `project_id` (and any other merge-config key) from
   `config["merge"]["config"]["repos"][repo]` — used when a workspace's repos

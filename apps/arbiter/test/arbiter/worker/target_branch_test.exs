@@ -25,7 +25,7 @@ defmodule Arbiter.Worker.TargetBranchTest do
 
   describe "resolve/2 precedence chain" do
     test "explicit :base_branch override wins over everything" do
-      ws = workspace(%{"repo_paths" => %{"r" => %{"target_branch" => "rigbr"}}})
+      ws = workspace(%{"repo_paths" => %{"r" => %{"target_branch" => "repobr"}}})
       b = task(ws, %{target_branch: "taskbr"})
 
       assert "override" =
@@ -35,7 +35,7 @@ defmodule Arbiter.Worker.TargetBranchTest do
     test "per-task target_branch beats repo, workspace_base and merge.base" do
       ws =
         workspace(%{
-          "repo_paths" => %{"r" => %{"target_branch" => "rigbr"}},
+          "repo_paths" => %{"r" => %{"target_branch" => "repobr"}},
           "merge" => %{"base" => "mergebr"}
         })
 
@@ -47,14 +47,14 @@ defmodule Arbiter.Worker.TargetBranchTest do
     test "per-repo target_branch applies when the task has none" do
       ws =
         workspace(%{
-          "repo_paths" => %{"r" => %{"path" => "/tmp", "target_branch" => "rigbr"}},
+          "repo_paths" => %{"r" => %{"path" => "/tmp", "target_branch" => "repobr"}},
           "merge" => %{"base" => "mergebr"}
         })
 
       b = task(ws)
 
       # Repo beats the workspace merge.base and the queue-level base.
-      assert "rigbr" = TargetBranch.resolve(b, repo: "r", workspace_base: "queuebr")
+      assert "repobr" = TargetBranch.resolve(b, repo: "r", workspace_base: "queuebr")
     end
 
     test "string-form repo_paths entry has no target_branch; falls through" do
@@ -89,13 +89,13 @@ defmodule Arbiter.Worker.TargetBranchTest do
     end
 
     test "nil repo means the per-repo default never applies" do
-      ws = workspace(%{"repo_paths" => %{"r" => %{"target_branch" => "rigbr"}}})
+      ws = workspace(%{"repo_paths" => %{"r" => %{"target_branch" => "repobr"}}})
       b = task(ws)
 
       assert "main" = TargetBranch.resolve(b, repo: nil)
     end
 
-    test "forge-qualified slug repo matches a repo_paths entry keyed by bare rig name (bd-c5f0n5)" do
+    test "forge-qualified slug repo matches a repo_paths entry keyed by bare repo name (bd-c5f0n5)" do
       ws =
         workspace(%{
           "repo_paths" => %{"repo-a" => %{"path" => "/tmp/repo-a", "target_branch" => "alpha"}},
@@ -105,7 +105,7 @@ defmodule Arbiter.Worker.TargetBranchTest do
       b = task(ws)
 
       # PRPatrol dispatches with the forge-qualified slug ("org/repo-a"), not
-      # the bare rig name the config is keyed by. The per-repo override must
+      # the bare repo name the config is keyed by. The per-repo override must
       # still be found rather than silently falling through to merge.base.
       assert "alpha" = TargetBranch.resolve(b, repo: "some-org/repo-a")
     end

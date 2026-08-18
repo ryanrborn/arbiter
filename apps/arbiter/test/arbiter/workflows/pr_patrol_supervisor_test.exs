@@ -45,7 +45,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
   # A bare git checkout with an `origin` remote, so RepoResolver.from_remote/1
   # (which shells out to `git -C <path> remote get-url origin`) resolves a slug.
   defp git_repo_with_origin(remote_url) do
-    dir = Path.join(System.tmp_dir!(), "prpatrol-rig-#{System.unique_integer([:positive])}")
+    dir = Path.join(System.tmp_dir!(), "prpatrol-repo-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     {_, 0} = System.cmd("git", ["-C", dir, "init", "-q"], stderr_to_stdout: true)
 
@@ -123,11 +123,11 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
   end
 
   describe "start_patrol/2 — multi-repo workspace (leotech shape)" do
-    test "starts one patrol per rig, keyed by workspace_id:owner/repo" do
-      # owner is set but repo is absent — the per-rig repo is derived from each
-      # rig checkout's origin remote, exactly the leotech jira+github shape.
-      rig_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      rig_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+    test "starts one patrol per repo, keyed by workspace_id:owner/repo" do
+      # owner is set but repo is absent — the per-repo repo is derived from each
+      # repo checkout's origin remote, exactly the leotech jira+github shape.
+      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
+      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -141,7 +141,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
                 "credentials_ref" => "env:GITHUB_TOKEN"
               }
             },
-            "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
+            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
           }
         })
 
@@ -163,9 +163,9 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       assert PRPatrol.state(pid_b).repo == "leo-technologies-llc/verus_web"
     end
 
-    test "rigs that resolve to the same repo collapse to a single patrol" do
-      rig_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      rig_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_server.git")
+    test "repos that resolve to the same repo collapse to a single patrol" do
+      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
+      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_server.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -173,7 +173,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           prefix: "dd#{System.unique_integer([:positive])}",
           config: %{
             "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo-technologies-llc"}},
-            "repo_paths" => %{"a" => rig_a, "b" => rig_b}
+            "repo_paths" => %{"a" => repo_a, "b" => repo_b}
           }
         })
 
@@ -247,8 +247,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
     end
 
     test "returns all pids for a multi-repo workspace" do
-      rig_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      rig_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
+      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -259,7 +259,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
               "strategy" => "github",
               "config" => %{"owner" => "leo-technologies-llc"}
             },
-            "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
+            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
           }
         })
 
@@ -317,8 +317,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
     end
 
     test "in a multi-repo workspace starts only the repo(s) with an open fleet PR" do
-      rig_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
-      rig_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+      repo_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
+      repo_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -326,7 +326,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           prefix: "lm#{System.unique_integer([:positive])}",
           config: %{
             "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo-technologies-llc"}},
-            "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
+            "repo_paths" => %{"verus_server" => repo_a, "verus_web" => repo_b}
           }
         })
 
@@ -418,8 +418,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
 
   describe "start_patrol/2 — stale registration reconciliation" do
     test "N→1: stops the old composite-keyed patrols when repo count drops to one" do
-      rig_a = git_repo_with_origin("git@github.com:acme/alpha.git")
-      rig_b = git_repo_with_origin("https://github.com/acme/beta.git")
+      repo_a = git_repo_with_origin("git@github.com:acme/alpha.git")
+      repo_b = git_repo_with_origin("https://github.com/acme/beta.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -427,7 +427,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           prefix: "rn#{System.unique_integer([:positive])}",
           config: %{
             "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme"}},
-            "repo_paths" => %{"alpha" => rig_a, "beta" => rig_b}
+            "repo_paths" => %{"alpha" => repo_a, "beta" => repo_b}
           }
         })
 
@@ -438,8 +438,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       assert {:ok, _} = start(ws)
       assert length(keys_for_workspace(ws.id)) == 2
 
-      # Simulate dropping to one rig (rebuild workspace with single repo_paths entry)
-      single_repo_ws = %{ws | config: Map.put(ws.config, "repo_paths", %{"alpha" => rig_a})}
+      # Simulate dropping to one repo (rebuild workspace with single repo_paths entry)
+      single_repo_ws = %{ws | config: Map.put(ws.config, "repo_paths", %{"alpha" => repo_a})}
 
       assert {:ok, _} = PRPatrolSupervisor.start_patrol(single_repo_ws, interval_ms: 600_000)
 
@@ -448,8 +448,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
     end
 
     test "1→N: stops the old bare-keyed patrol when repo count grows to more than one" do
-      rig_a = git_repo_with_origin("git@github.com:acme/alpha.git")
-      rig_b = git_repo_with_origin("https://github.com/acme/beta.git")
+      repo_a = git_repo_with_origin("git@github.com:acme/alpha.git")
+      repo_b = git_repo_with_origin("https://github.com/acme/beta.git")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -457,7 +457,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           prefix: "ro#{System.unique_integer([:positive])}",
           config: %{
             "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme"}},
-            "repo_paths" => %{"alpha" => rig_a}
+            "repo_paths" => %{"alpha" => repo_a}
           }
         })
 
@@ -468,10 +468,10 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       assert {:ok, _} = start(ws)
       assert keys_for_workspace(ws.id) == [ws.id]
 
-      # Simulate gaining a second rig
+      # Simulate gaining a second repo
       two_repo_ws = %{
         ws
-        | config: Map.put(ws.config, "repo_paths", %{"alpha" => rig_a, "beta" => rig_b})
+        | config: Map.put(ws.config, "repo_paths", %{"alpha" => repo_a, "beta" => repo_b})
       }
 
       assert {:ok, _} = PRPatrolSupervisor.start_patrol(two_repo_ws, interval_ms: 600_000)

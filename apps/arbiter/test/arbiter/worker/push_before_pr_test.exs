@@ -18,7 +18,7 @@ defmodule Arbiter.Worker.PushBeforePRTest do
   defp git(args, repo),
     do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
-  defp init_rig(tmp) do
+  defp init_repo(tmp) do
     bare = Path.join(tmp, "origin.git")
     work = Path.join(tmp, "repo")
     File.mkdir_p!(work)
@@ -65,7 +65,7 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       Path.join(System.tmp_dir!(), "push-before-pr-#{:erlang.unique_integer([:positive])}")
 
     File.mkdir_p!(tmp)
-    rig = init_rig(tmp)
+    repo = init_repo(tmp)
     on_exit(fn -> File.rm_rf!(tmp) end)
 
     task_id = "test-#{System.unique_integer([:positive])}"
@@ -74,13 +74,13 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       Worker.start(
         task_id: task_id,
         repo: "stub/repo",
-        meta: %{worktree_path: rig.worktree}
+        meta: %{worktree_path: repo.worktree}
       )
 
     :ok = Worker.advance(pid, :implement)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
-    %{pid: pid, task_id: task_id, rig: rig}
+    %{pid: pid, task_id: task_id, repo: repo}
   end
 
   defp branch_on_origin(bare, branch) do
@@ -96,9 +96,9 @@ defmodule Arbiter.Worker.PushBeforePRTest do
     # strategy: :github so the push gate fires — the push is real, but the
     # open/4 is stubbed.
 
-    test "branch is pushed to origin before open/4 is called", %{pid: pid, rig: rig} do
+    test "branch is pushed to origin before open/4 is called", %{pid: pid, repo: repo} do
       # Feature branch NOT on origin yet
-      refute branch_on_origin(rig.bare, "feature/abc")
+      refute branch_on_origin(repo.bare, "feature/abc")
 
       assert {:ok, _ref} =
                Worker.open_mr(pid, "feature/abc", "Add abc", "body", %{
@@ -110,17 +110,17 @@ defmodule Arbiter.Worker.PushBeforePRTest do
                })
 
       # open/4 succeeded → branch must now be on origin
-      assert branch_on_origin(rig.bare, "feature/abc")
+      assert branch_on_origin(repo.bare, "feature/abc")
 
       # And the StubMerger did receive the open call
       assert StubMerger.last_open() != nil
     end
 
     test "push failure aborts with {:error, {:push_failed, _}} and does NOT call open/4",
-         %{pid: pid, rig: rig} do
+         %{pid: pid, repo: repo} do
       # Remove the origin remote from the worktree so push fails
       {_, 0} =
-        System.cmd("git", ["-C", rig.worktree, "remote", "remove", "origin"],
+        System.cmd("git", ["-C", repo.worktree, "remote", "remove", "origin"],
           stderr_to_stdout: true
         )
 
@@ -157,19 +157,19 @@ defmodule Arbiter.Worker.PushBeforePRTest do
     # task. The push path must now reconcile (rebase onto origin) instead of
     # failing, preserving both commits and never force-pushing.
     test "reconciles with origin instead of failing non-fast-forward; both commits survive",
-         %{pid: pid, rig: rig} do
+         %{pid: pid, repo: repo} do
       # Put the feature branch on origin first, at the same point the
       # worktree's "work" commit sits on top of — mirrors a branch that
       # already had a pre-review PR open.
       {_, 0} =
-        System.cmd("git", ["-C", rig.worktree, "push", "-q", "-u", "origin", "feature/abc"],
+        System.cmd("git", ["-C", repo.worktree, "push", "-q", "-u", "origin", "feature/abc"],
           stderr_to_stdout: true
         )
 
       # ReviewGate implementer round: a separate clone pushes a fix commit
       # straight to origin/feature/abc. This worktree never sees it.
-      other = Path.join(Path.dirname(rig.worktree), "implementer-clone")
-      {_, 0} = System.cmd("git", ["clone", "-q", rig.bare, other])
+      other = Path.join(Path.dirname(repo.worktree), "implementer-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", repo.bare, other])
       {_, 0} = System.cmd("git", ["-C", other, "checkout", "-q", "feature/abc"])
       {_, 0} = System.cmd("git", ["-C", other, "config", "user.email", "impl@example.com"])
       {_, 0} = System.cmd("git", ["-C", other, "config", "user.name", "Implementer"])
@@ -181,15 +181,15 @@ defmodule Arbiter.Worker.PushBeforePRTest do
 
       # Meanwhile the main worker's own worktree makes its own local commit —
       # genuinely diverged from origin now, not merely behind.
-      File.write!(Path.join(rig.worktree, "main_worker_fix.txt"), "main worker fix\n")
+      File.write!(Path.join(repo.worktree, "main_worker_fix.txt"), "main worker fix\n")
 
       {_, 0} =
-        System.cmd("git", ["-C", rig.worktree, "add", "main_worker_fix.txt"],
+        System.cmd("git", ["-C", repo.worktree, "add", "main_worker_fix.txt"],
           stderr_to_stdout: true
         )
 
       {_, 0} =
-        System.cmd("git", ["-C", rig.worktree, "commit", "-q", "-m", "main worker fix"],
+        System.cmd("git", ["-C", repo.worktree, "commit", "-q", "-m", "main worker fix"],
           stderr_to_stdout: true
         )
 
@@ -208,14 +208,14 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       # implementer's work nor the main worker's own commit was dropped, and
       # nothing was force-pushed over the other.
       {out1, 0} =
-        System.cmd("git", ["-C", rig.bare, "show", "feature/abc:implementer_fix.txt"],
+        System.cmd("git", ["-C", repo.bare, "show", "feature/abc:implementer_fix.txt"],
           stderr_to_stdout: true
         )
 
       assert out1 == "implementer fix\n"
 
       {out2, 0} =
-        System.cmd("git", ["-C", rig.bare, "show", "feature/abc:main_worker_fix.txt"],
+        System.cmd("git", ["-C", repo.bare, "show", "feature/abc:main_worker_fix.txt"],
           stderr_to_stdout: true
         )
 

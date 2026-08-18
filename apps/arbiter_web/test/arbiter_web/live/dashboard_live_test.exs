@@ -174,7 +174,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "renders without error when a workspace repo_paths entry is in object form",
          %{conn: conn, ws: ws} do
       # Regression for bd-bkkvbe: a `repo_paths` value of
-      # `%{"path" => ..., "target_branch" => ...}` crashed refresh_rigs/1 with
+      # `%{"path" => ..., "target_branch" => ...}` crashed refresh_repos/1 with
       # a CaseClauseError because the path was stored unnormalized.
       {:ok, _ws2} =
         Ash.update(ws, %{
@@ -204,10 +204,10 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "(unconfigured)"
     end
 
-    test "does not show (unconfigured) for a worker whose repo matches a rig's git remote",
+    test "does not show (unconfigured) for a worker whose repo matches a repo's git remote",
          %{conn: conn, ws: ws} do
       # Regression for bd-342xlj: PRPatrol workers carry "owner/repo" as their
-      # repo field, but configured rigs are keyed by short alias. Set up a
+      # repo field, but configured repos are keyed by short alias. Set up a
       # temp git repo whose remote is "git@github.com:test-org/remote-rig.git",
       # configure it as alias "remote-alias", and start a worker with
       # repo "test-org/remote-rig". The panel should NOT show "(unconfigured)".

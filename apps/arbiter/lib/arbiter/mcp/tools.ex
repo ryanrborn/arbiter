@@ -1375,42 +1375,42 @@ defmodule Arbiter.MCP.Tools do
   #   4. No config → :flag (conservative: never auto-post unless explicitly trusted).
   defp guard_review_automation(scope, args, force) do
     pr_author = fetch_string(args, "pr_author")
-    rig_name = fetch_string(args, "repo")
+    repo_name = fetch_string(args, "repo")
     ws_config = load_workspace_config(scope.workspace_id)
     explicit = fetch_string(args, "automation")
 
     {mode, source} =
-      ReviewAutomation.resolve_with_source(ws_config, pr_author, rig_name, explicit)
+      ReviewAutomation.resolve_with_source(ws_config, pr_author, repo_name, explicit)
 
     Logger.info(
       "worker_review(task_id): resolved review_automation=#{mode} (source: #{source})" <>
-        if(rig_name, do: " [#{rig_name}]", else: "")
+        if(repo_name, do: " [#{repo_name}]", else: "")
     )
 
     cond do
       mode != :off -> {:ok, mode}
       force -> {:ok, mode}
-      true -> {:error, {:invalid, automation_off_message(rig_name, source)}}
+      true -> {:error, {:invalid, automation_off_message(repo_name, source)}}
     end
   end
 
-  defp automation_off_message(rig_name, :repo_override) when is_binary(rig_name) do
-    "review_automation is \"off\" for #{rig_name} " <>
-      "(review_automation.repo_overrides[#{inspect(rig_name)}]); refusing to dispatch a " <>
+  defp automation_off_message(repo_name, :repo_override) when is_binary(repo_name) do
+    "review_automation is \"off\" for #{repo_name} " <>
+      "(review_automation.repo_overrides[#{inspect(repo_name)}]); refusing to dispatch a " <>
       "reviewer — pass force: true to override"
   end
 
-  defp automation_off_message(rig_name, :explicit) do
-    "review_automation was explicitly set to \"off\" for #{rig_name || "this task"} " <>
+  defp automation_off_message(repo_name, :explicit) do
+    "review_automation was explicitly set to \"off\" for #{repo_name || "this task"} " <>
       "(the automation argument); refusing to dispatch a reviewer — pass force: true to override"
   end
 
-  defp automation_off_message(rig_name, :default) when is_binary(rig_name) do
-    "review_automation is \"off\" by default for #{rig_name} (review_automation.default); " <>
+  defp automation_off_message(repo_name, :default) when is_binary(repo_name) do
+    "review_automation is \"off\" by default for #{repo_name} (review_automation.default); " <>
       "refusing to dispatch a reviewer — pass force: true to override"
   end
 
-  defp automation_off_message(_rig_name, :default) do
+  defp automation_off_message(_repo_name, :default) do
     "review_automation is \"off\" by default for this workspace (review_automation.default); " <>
       "refusing to dispatch a reviewer — pass force: true to override"
   end

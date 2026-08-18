@@ -19,13 +19,13 @@ defmodule Arbiter.Worker.CompletionMergeTest do
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
-  defp init_rig(dir) do
+  defp init_repo(dir) do
     repo = Path.join(dir, "repo")
     bare = Path.join(dir, "origin.git")
     File.mkdir_p!(repo)
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
     {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
-    {_, 0} = git(["config", "user.name", "Rig"], repo)
+    {_, 0} = git(["config", "user.name", "Repo"], repo)
     {_, 0} = git(["config", "commit.gpgsign", "false"], repo)
     File.write!(Path.join(repo, "README.md"), "seed\n")
     {_, 0} = git(["add", "README.md"], repo)
@@ -59,7 +59,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
   setup do
     tmp = Path.join(System.tmp_dir!(), "completion-merge-#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
-    repo = init_rig(tmp)
+    repo = init_repo(tmp)
 
     put_app_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
     put_app_env(:arbiter, :repo_paths, %{"merge/repo" => repo})

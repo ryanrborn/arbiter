@@ -84,7 +84,7 @@ defmodule Arbiter.Worker.DivergedPushEscalationTest do
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
-  defp init_rig(tmp, branch) do
+  defp init_repo(tmp, branch) do
     bare = Path.join(tmp, "origin.git")
     work = Path.join(tmp, "repo")
     File.mkdir_p!(work)
@@ -127,12 +127,12 @@ defmodule Arbiter.Worker.DivergedPushEscalationTest do
 
     File.mkdir_p!(tmp)
     on_exit(fn -> File.rm_rf!(tmp) end)
-    rig = init_rig(tmp, branch)
+    repo = init_repo(tmp, branch)
 
     # ReviewGate implementer round: a separate clone edits shared.txt and
     # pushes straight to origin/<branch>. This worktree never sees it.
     other = Path.join(tmp, "implementer-clone")
-    {_, 0} = System.cmd("git", ["clone", "-q", rig.bare, other])
+    {_, 0} = System.cmd("git", ["clone", "-q", repo.bare, other])
     {_, 0} = System.cmd("git", ["-C", other, "checkout", "-q", branch])
     {_, 0} = System.cmd("git", ["-C", other, "config", "user.email", "impl@example.com"])
     {_, 0} = System.cmd("git", ["-C", other, "config", "user.name", "Implementer"])
@@ -145,15 +145,15 @@ defmodule Arbiter.Worker.DivergedPushEscalationTest do
     # The main worker's own worktree edits the SAME file differently and
     # never sees the implementer's commit — a real conflict on rebase, not
     # just divergence.
-    File.write!(Path.join(rig.worktree, "shared.txt"), "main worker version\n")
-    {_, 0} = System.cmd("git", ["-C", rig.worktree, "add", "shared.txt"])
-    {_, 0} = System.cmd("git", ["-C", rig.worktree, "commit", "-q", "-m", "main worker fix"])
+    File.write!(Path.join(repo.worktree, "shared.txt"), "main worker version\n")
+    {_, 0} = System.cmd("git", ["-C", repo.worktree, "add", "shared.txt"])
+    {_, 0} = System.cmd("git", ["-C", repo.worktree, "commit", "-q", "-m", "main worker fix"])
 
     meta = %{
       branch: branch,
       target_branch: "main",
       merge_title: "Merge #{task.id}",
-      worktree_path: rig.worktree
+      worktree_path: repo.worktree
     }
 
     {:ok, pid} = Worker.start(task_id: task.id, repo: "widget", workspace_id: ws.id, meta: meta)
