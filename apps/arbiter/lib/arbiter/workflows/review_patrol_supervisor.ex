@@ -63,7 +63,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
         Logger.info(
           "ReviewPatrolSupervisor: skip workspace #{workspace.id} (#{workspace.name}) — " <>
             "no repos resolvable (set merge.config.repo, or a repo_paths " <>
-            "map whose rigs have a github origin remote)"
+            "map whose repos have a github origin remote)"
         )
 
         :skip
@@ -167,7 +167,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
     result
   end
 
-  # A repo whose LIVE `review_automation.repo_overrides[rig_name]` (or,
+  # A repo whose LIVE `review_automation.repo_overrides[repo_name]` (or,
   # absent an override, `review_automation.default`) resolves to `:off` has no
   # reviewer we'd ever dispatch against it — ReviewPatrol's own tick logic
   # already downgrades an in-flight engagement to no-dispatch behavior in this
@@ -179,9 +179,9 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   # Checked at author-independent granularity (`repo_override_mode/2`, no PR
   # author needed), same as ReviewPatrol's own live re-check.
   defp off_mode?(%Workspace{} = workspace, repo) do
-    rig_name = ReviewPatrol.rig_name_for_repo(workspace, repo)
+    repo_name = ReviewPatrol.repo_name_for_repo(workspace, repo)
 
-    case ReviewAutomation.repo_override_mode(workspace.config, rig_name) do
+    case ReviewAutomation.repo_override_mode(workspace.config, repo_name) do
       :off -> true
       nil -> default_off?(workspace.config)
       _ -> false
@@ -351,7 +351,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
   # Derive the list of "owner/repo" strings to patrol for this workspace, exactly
   # as PRPatrolSupervisor does: single-repo (merge.config.repo set) or multi-repo
-  # (one per rig, repo derived from each rig's origin remote).
+  # (one per repo, repo derived from each repo's origin remote).
   defp patrol_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
 
@@ -373,8 +373,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
   defp repos_from_repo_paths(config) do
     case Map.get(config, "repo_paths") do
-      rig_map when is_map(rig_map) ->
-        rig_map
+      repo_map when is_map(repo_map) ->
+        repo_map
         |> Map.values()
         |> Enum.map(&RepoConfig.repo_path_from_config/1)
         |> Enum.reject(&is_nil/1)
@@ -385,7 +385,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
             {:error, err} ->
               Logger.info(
-                "ReviewPatrolSupervisor: could not derive repo for rig path #{path} " <>
+                "ReviewPatrolSupervisor: could not derive repo for repo path #{path} " <>
                   "(skipping): #{inspect(err)}"
               )
 

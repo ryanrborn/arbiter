@@ -215,13 +215,13 @@ defmodule Arbiter.Worker.DispatchTest do
 
   # bd-49ajyt: PRPatrol/ReviewPatrol dispatch a follow-up with the PR's GitHub
   # "owner/repo" slug as the :repo opt, but a multi-repo workspace's
-  # repo_paths map is keyed by *rig name* (e.g. "client"), not by
-  # slug. The direct + normalized key lookup misses (a rig name never
+  # repo_paths map is keyed by *repo name* (e.g. "client"), not by
+  # slug. The direct + normalized key lookup misses (a repo name never
   # normalizes to an owner/repo slug), so dispatch used to fail
   # {:repo_not_found}, spinning PRPatrol in a 1/min escalation loop. Dispatch
   # must resolve the slug the same way PRPatrolSupervisor derives patrol repos:
-  # by reading each registered rig's `origin` remote.
-  describe "owner/repo slug resolves against a rig-name-keyed registry (bd-49ajyt)" do
+  # by reading each registered repo's `origin` remote.
+  describe "owner/repo slug resolves against a repo-name-keyed registry (bd-49ajyt)" do
     # Init a git repo whose `origin` remote is a GitHub slug (SSH form). Not
     # fetched here (provision_worktree: false), so the remote need not exist.
     defp seed_repo_with_github_origin!(tmp, sub, slug) do
@@ -240,17 +240,17 @@ defmodule Arbiter.Worker.DispatchTest do
       File.mkdir_p!(tmp)
       on_exit(fn -> File.rm_rf(tmp) end)
 
-      # Registry keyed by rig NAME "client"; the rig's origin resolves to the
+      # Registry keyed by repo NAME "client"; the repo's origin resolves to the
       # differently-named slug "leo-technologies-llc/verus-client".
-      rig_path = seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
+      repo_path = seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
 
       {:ok, ws} =
-        Ash.update(ws, %{config: %{"repo_paths" => %{"client" => rig_path}}}, action: :update)
+        Ash.update(ws, %{config: %{"repo_paths" => %{"client" => repo_path}}}, action: :update)
 
       {:ok, ws: ws, tmp: tmp}
     end
 
-    test "a slug whose rig name differs resolves + dispatches (not {:repo_not_found})",
+    test "a slug whose repo name differs resolves + dispatches (not {:repo_not_found})",
          %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "slug dispatch", workspace_id: ws.id})
 
@@ -623,7 +623,7 @@ defmodule Arbiter.Worker.DispatchTest do
     # repo's working tree.
     test "review dispatch does not write .mcp.json into the shared repo checkout",
          %{ws: ws, tmp: tmp} do
-      repo = seed_repo!(tmp, "reviewrig")
+      repo = seed_repo!(tmp, "reviewrepo")
 
       put_app_env(:arbiter, :repo_paths, %{"rv/repo" => repo})
       enable_mcp_injection!()
@@ -916,7 +916,7 @@ defmodule Arbiter.Worker.DispatchTest do
     # inside its own isolated worktree, never the repo.
     test "work dispatch writes .mcp.json into its isolated worktree (not the repo)",
          %{ws: ws, tmp: tmp} do
-      repo = seed_repo!(tmp, "workrig")
+      repo = seed_repo!(tmp, "workrepo")
 
       put_app_env(:arbiter, :worktree_root, Path.join(tmp, "work-wt"))
       put_app_env(:arbiter, :repo_paths, %{"work/repo" => repo})
@@ -1821,7 +1821,7 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     test "fetch failure aborts the dispatch with a clear error", %{ws: ws, tmp: tmp} do
-      # Rig with a broken `origin` (points at a nonexistent path): the fetch
+      # Repo with a broken `origin` (points at a nonexistent path): the fetch
       # must fail and the dispatch abort with a structured error rather than
       # silently falling back to the stale local base.
       broken = Path.join(tmp, "broken-origin")

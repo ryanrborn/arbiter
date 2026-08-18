@@ -991,18 +991,18 @@ defmodule Arbiter.Worker.Dispatch do
 
   # Reverse resolution (bd-49ajyt): PRPatrol/ReviewPatrol dispatch a follow-up
   # with the PR's GitHub `owner/repo` slug as the `:repo` opt, but a multi-repo
-  # workspace's `repo_paths` map is keyed by *rig name* (e.g.
+  # workspace's `repo_paths` map is keyed by *repo name* (e.g.
   # "client"), not by slug — so the direct + normalized key lookups above miss
-  # (a rig name never normalizes to an `owner/repo` slug) and dispatch used to
+  # (a repo name never normalizes to an `owner/repo` slug) and dispatch used to
   # fail `{:repo_not_found}`, spinning PRPatrol in a 1/min escalation loop.
   #
   # When the requested repo looks like an `owner/repo` slug that no key
   # matched, resolve it the same way `PRPatrolSupervisor` derives its patrol
-  # repos: read each registered rig's `origin` remote and match its derived
+  # repos: read each registered repo's `origin` remote and match its derived
   # slug. This only runs on the miss path (both direct lookups returned nil)
-  # and only for slug-shaped repos, so a normal rig-name dispatch never pays
+  # and only for slug-shaped repos, so a normal repo-name dispatch never pays
   # the git cost. Covers client↔verus-client, server↔verus_server, and the
-  # other leotech rigs where rig name ≠ slug.
+  # other leotech repos where repo name ≠ slug.
   defp slug_repo_path(_ws_id, repo) when not is_binary(repo), do: nil
 
   defp slug_repo_path(ws_id, repo) do
@@ -1023,7 +1023,7 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # All locally-checked-out rig paths registered for this workspace (config
+  # All locally-checked-out repo paths registered for this workspace (config
   # `repo_paths`) plus the global Application `:repo_paths`, deduplicated.
   # The values are paths to git checkouts whose `origin` remote
   # `slug_repo_path/2` can resolve.

@@ -30,11 +30,11 @@ defmodule Arbiter.Mergers.Github.Config do
       }
 
   Both `owner` and `repo` are optional: a workspace can omit both and let the
-  adapter derive them per-rig from the rig's `origin` remote via
+  adapter derive them per repo from each repo's `origin` remote via
   `Arbiter.Mergers.Github.RepoResolver` (the leotech workspace does this for
-  all four of its `leo-technologies-llc/*` rigs). A single-repo workspace may
+  all four of its `leo-technologies-llc/*` repos). A single-repo workspace may
   still pin `repo` here for the legacy bare-ref shape, but this is deprecated —
-  repo is a rig-level concern.
+  repo is a per-repo concern.
 
   `credentials_ref` is a small DSL: `"env:NAME"` looks up `System.get_env/1`.
   A bare string (no prefix) is treated as a literal token, but this should be
@@ -106,7 +106,7 @@ defmodule Arbiter.Mergers.Github.Config do
 
   Used by `Arbiter.Workflows.PRPatrol` to seed the per-patrol repo before
   calling `list_open/0`. Multi-repo workspaces omit `repo` from their merge
-  config (the per-rig repo is derived from the rig's git remote at open time),
+  config (the owner/repo slug is derived per repo from its git remote at open time),
   so each PRPatrol instance calls this with its own `"owner/repo"` slug to make
   `list_open/0` resolve the correct REST endpoint.
 
