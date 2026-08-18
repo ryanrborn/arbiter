@@ -296,8 +296,14 @@ defmodule ArbiterCli.Cmd.Init do
 
       out
     rescue
-      ErlangError ->
-        Output.die("`diff` is required for `arb init --diff` but was not found on PATH.")
+      e in ErlangError ->
+        File.rm_rf(scratch_dir)
+
+        if e.original == :enoent do
+          Output.die("`diff` is required for `arb init --diff` but was not found on PATH.")
+        else
+          Output.die("Failed to run `diff`: #{Exception.message(e)}")
+        end
     after
       File.rm_rf(scratch_dir)
     end
@@ -450,12 +456,13 @@ defmodule ArbiterCli.Cmd.Init do
       {_rel, {:unchanged, nil}} ->
         :ok
 
-      {_rel, {:not_comparable, nil}} ->
-        :ok
+      {rel, {:not_comparable, nil}} ->
+        IO.puts("#{rel}: not compared (install-local credential config)")
+        IO.puts("")
     end)
 
     if Enum.all?(results, fn {_, {status, _}} -> status in [:unchanged, :not_comparable] end) do
-      IO.puts("no drift — every local file matches the current template.")
+      IO.puts("no template drift.")
     end
   end
 

@@ -457,9 +457,12 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 
+      prior_path = System.get_env("PATH")
       System.put_env("PATH", "/deploy/shell/bin:/usr/bin")
 
-      on_exit(fn -> System.delete_env("PATH") end)
+      on_exit(fn ->
+        if prior_path, do: System.put_env("PATH", prior_path), else: System.delete_env("PATH")
+      end)
 
       {_out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
 
@@ -484,9 +487,12 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       stub_release(@vsn, tarball, sha)
       stub_cmds()
 
+      prior_path = System.get_env("PATH")
       System.put_env("PATH", "/correct/bin:/usr/local/bin:/usr/bin")
 
-      on_exit(fn -> System.delete_env("PATH") end)
+      on_exit(fn ->
+        if prior_path, do: System.put_env("PATH", prior_path), else: System.delete_env("PATH")
+      end)
 
       {_out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
 

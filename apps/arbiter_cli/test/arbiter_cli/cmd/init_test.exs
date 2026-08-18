@@ -424,7 +424,8 @@ defmodule ArbiterCli.Cmd.InitTest do
       {text_out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
       assert exit_code == 0
       refute text_out =~ "REAL-LIVE-TOKEN-abc123"
-      assert text_out =~ "no drift — every local file matches the current template."
+      assert text_out =~ ".mcp.json: not compared (install-local credential config)"
+      assert text_out =~ "no template drift."
 
       {json_out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff", "--json"]) end)
       assert exit_code == 0
