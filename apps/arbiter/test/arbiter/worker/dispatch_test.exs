@@ -242,7 +242,8 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # Registry keyed by repo NAME "client"; the repo's origin resolves to the
       # differently-named slug "leo-technologies-llc/verus-client".
-      repo_path = seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
+      repo_path =
+        seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
 
       {:ok, ws} =
         Ash.update(ws, %{config: %{"repo_paths" => %{"client" => repo_path}}}, action: :update)

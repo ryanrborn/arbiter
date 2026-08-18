@@ -385,7 +385,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
             {:error, err} ->
               Logger.info(
-                "ReviewPatrolSupervisor: could not derive repo for repo path #{path} " <>
+                "ReviewPatrolSupervisor: could not derive repo for path #{path} " <>
                   "(skipping): #{inspect(err)}"
               )
 

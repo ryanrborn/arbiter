@@ -738,7 +738,13 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # SHA and stop. If the head advanced, consider a new-commit re-review under the
   # spam guards (task D). Otherwise (head unchanged — no new commits this tick)
   # check our review threads for author replies to answer / escalate (task G).
-  defp handle_open_pr(%Issue{last_reviewed_sha: nil} = engagement, pr, _adapter, _workspace, _repo_name) do
+  defp handle_open_pr(
+         %Issue{last_reviewed_sha: nil} = engagement,
+         pr,
+         _adapter,
+         _workspace,
+         _repo_name
+       ) do
     maybe_record_head_sha(engagement, pr)
     nil
   end
