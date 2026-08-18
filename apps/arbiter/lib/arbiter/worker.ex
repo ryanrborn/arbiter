@@ -888,7 +888,7 @@ defmodule Arbiter.Worker do
       to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: "system",
       workspace_id: workspace_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: "#{task_id} — transcript capture failed for run #{run_id}",
       body:
         "Arbiter.Worker.OutputLog.open/1 failed for run #{run_id} (#{inspect(reason)}). " <>
@@ -3415,7 +3415,7 @@ defmodule Arbiter.Worker do
       to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: "Commit gate: #{subject} (#{task_id})",
       body: summary
     })
@@ -3491,7 +3491,7 @@ defmodule Arbiter.Worker do
       to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: "Notes gate: blank findings on task-type directive (#{task_id})",
       body: summary
     })
@@ -3641,7 +3641,7 @@ defmodule Arbiter.Worker do
       to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: "Merge conflict: #{task_id} aborted, needs rebase",
       body: merge_conflict_body(branch, detail)
     })
@@ -3673,7 +3673,7 @@ defmodule Arbiter.Worker do
       to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: merge_failure_subject(task_id, reason),
       body: merge_failure_body(state, branch, reason)
     })
@@ -4105,7 +4105,7 @@ defmodule Arbiter.Worker do
       to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: subject,
       body: findings
     })
@@ -4829,7 +4829,7 @@ defmodule Arbiter.Worker do
       to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: "Watchdog startup failed: #{task_id} MR orphaned",
       body:
         "The Watchdog process failed to start after MR #{mr_info} was opened for task #{task_id}. " <>

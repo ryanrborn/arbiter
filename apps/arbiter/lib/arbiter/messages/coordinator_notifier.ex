@@ -36,14 +36,14 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   or a failed pre-flight auth probe is not just dashboard noise — it needs the
   operator to *act* (re-authenticate, top up credits, re-dispatch). Those go out as
   addressed `:escalation` **mailbox** messages (`to_ref: "coordinator"`,
-  `directive_ref: <task>`) so they land in `arb inbox` rather than scrolling off
+  `task_ref: <task>`) so they land in `arb inbox` rather than scrolling off
   the broadcast feed. The classified cause + remediation
   (`Arbiter.Worker.StopReason`) is baked into the subject/body. See bd-awi4nw.
 
   ## Reconciliation with the task spec
 
   The originating task (bd-25ftl0) imagined dedicated `:completion` / `:failure`
-  kinds and a `to="coordinator"` / `directive_ref=task_id` shape. The Message
+  kinds and a `to="coordinator"` / `task_ref=task_id` shape. The Message
   resource that actually shipped (bd-bduz2k) settled on a leaner taxonomy:
   broadcast `:notification`s (the coordinator feed) vs. addressed mailbox kinds.
   We honour the realised design — every lifecycle auto-post is a
@@ -256,7 +256,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: subject,
       body: body
     })
@@ -307,7 +307,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: subject,
       body: body
     })
@@ -389,7 +389,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         to_ref: Message.coordinator_ref(),
         from_ref: task_id,
         workspace_id: ws_id,
-        directive_ref: task_id,
+        task_ref: task_id,
         subject: subject,
         body: body
       })
@@ -446,7 +446,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: Map.get(snapshot, :task_id),
+      task_ref: Map.get(snapshot, :task_id),
       subject: subject,
       body: body
     })
@@ -503,7 +503,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: subject,
       body: body
     })
@@ -575,7 +575,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: subject,
       body: body
     })
@@ -627,7 +627,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # Fails open: an unreadable mailbox must never swallow a genuine escalation.
   defp duplicate_block_escalation?(ws_id, task_id, reason) do
     subjects = Enum.map(block_family(reason), &block_subject(task_id, &1))
-    scope = [workspace_id: ws_id, directive_ref: task_id]
+    scope = [workspace_id: ws_id, task_ref: task_id]
     coordinator = Message.coordinator_ref()
 
     cond do
@@ -848,7 +848,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       to_ref: Message.coordinator_ref(),
       from_ref: Map.get(snapshot, :task_id, "system"),
       workspace_id: ws_id,
-      directive_ref: Map.get(snapshot, :task_id),
+      task_ref: Map.get(snapshot, :task_id),
       subject: subject,
       body: body
     })

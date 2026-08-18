@@ -334,7 +334,7 @@ defmodule Arbiter.Workers.Reconciler do
       to_ref: Message.coordinator_ref(),
       from_ref: "system",
       workspace_id: workspace_id,
-      directive_ref: task_id,
+      task_ref: task_id,
       subject: subject,
       body: body
     })

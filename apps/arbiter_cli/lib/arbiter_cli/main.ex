@@ -59,7 +59,8 @@ defmodule ArbiterCli.Main do
       arb workspace show  <id>
 
       arb message inbox   [--all | read <id> | clear | <task-id>]
-      arb message send    <recipient> <body> [--subject ...] [--directive bd-x] [--kind ...]
+      arb message send    <recipient> <body> [--subject ...] [--task bd-x] [--kind ...]
+                                  (--directive is a deprecated alias for --task)
       arb message notify  [--limit N]
 
       arb usage show      [--by day|task|epic|workspace|repo|model|step|provider]

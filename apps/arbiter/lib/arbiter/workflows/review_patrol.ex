@@ -644,7 +644,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: ref,
           workspace_id: ws_id,
-          directive_ref: ref,
+          task_ref: ref,
           subject: "ReviewPatrol paused — forge rate limit",
           body: body
         })
@@ -924,7 +924,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: engagement.id,
           workspace_id: ws_id,
-          directive_ref: engagement.id,
+          task_ref: engagement.id,
           subject: "PR ##{engagement.source_pr} hit the ReviewPatrol review cap",
           body: body
         })
@@ -1275,7 +1275,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: engagement.id,
           workspace_id: ws_id,
-          directive_ref: engagement.id,
+          task_ref: engagement.id,
           subject:
             "Report-only re-review: PR #{engagement.source_pr} — #{length(proposed)} proposed comment(s)",
           body: body
@@ -1299,7 +1299,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           from_ref: engagement.id,
           to_ref: engagement.id,
           workspace_id: ws_id,
-          directive_ref: engagement.id,
+          task_ref: engagement.id,
           subject: "New commits on PR ##{engagement.source_pr} touch flagged areas",
           body:
             "ReviewPatrol detected new commits (head #{head}) on the source PR that touch a file " <>
@@ -1488,7 +1488,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: engagement.id,
           workspace_id: ws_id,
-          directive_ref: engagement.id,
+          task_ref: engagement.id,
           subject: "PR ##{engagement.source_pr} (author @#{author}) replied — awaiting direction",
           body: body
         })

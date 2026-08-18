@@ -32,7 +32,7 @@ defmodule ArbiterCli.Cmd.MessageSendTest do
       assert sent["from_ref"] == "cli"
     end
 
-    test "carries --kind, --subject and --directive" do
+    test "carries --kind, --subject and --task" do
       echo_create()
 
       {out, _err, code} =
@@ -45,7 +45,7 @@ defmodule ArbiterCli.Cmd.MessageSendTest do
             "completion",
             "--subject",
             "bd-soren done",
-            "--directive",
+            "--task",
             "bd-soren",
             "--json"
           ])
@@ -55,7 +55,27 @@ defmodule ArbiterCli.Cmd.MessageSendTest do
       sent = Jason.decode!(out)
       assert sent["kind"] == "completion"
       assert sent["subject"] == "bd-soren done"
-      assert sent["directive_ref"] == "bd-soren"
+      assert sent["task_ref"] == "bd-soren"
+    end
+
+    test "--directive is a deprecated alias for --task" do
+      echo_create()
+
+      {out, _err, code} =
+        capture(fn ->
+          Message.run([
+            "send",
+            "coordinator",
+            "GitLab adapter complete",
+            "--directive",
+            "bd-soren",
+            "--json"
+          ])
+        end)
+
+      assert code == 0
+      sent = Jason.decode!(out)
+      assert sent["task_ref"] == "bd-soren"
     end
 
     test "from identity comes from ARB_FROM when set" do

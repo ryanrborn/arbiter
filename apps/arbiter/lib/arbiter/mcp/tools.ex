@@ -1177,7 +1177,10 @@ defmodule Arbiter.MCP.Tools do
         |> message_envelope(ws_id, to_ref, kind)
         |> Map.put(:body, body)
         |> maybe_put(:subject, fetch_string(args, "subject"))
-        |> maybe_put(:directive_ref, fetch_string(args, "directive_ref"))
+        |> maybe_put(
+          :task_ref,
+          fetch_string(args, "task_ref") || fetch_string(args, "directive_ref")
+        )
 
       case Message.send_mail(attrs) do
         {:ok, message} -> {:ok, serialize_message(message)}
@@ -1207,7 +1210,7 @@ defmodule Arbiter.MCP.Tools do
       workspace_id: ws_id,
       from_ref: "coordinator",
       to_ref: to_ref,
-      directive_ref: to_ref
+      task_ref: to_ref
     }
   end
 
@@ -1217,7 +1220,7 @@ defmodule Arbiter.MCP.Tools do
       workspace_id: ws_id,
       from_ref: "coordinator",
       to_ref: to_ref,
-      directive_ref: to_ref
+      task_ref: to_ref
     }
   end
 
@@ -1227,7 +1230,7 @@ defmodule Arbiter.MCP.Tools do
       workspace_id: ws_id,
       from_ref: task_id,
       to_ref: to_ref,
-      directive_ref: to_ref
+      task_ref: to_ref
     }
   end
 
@@ -1238,7 +1241,7 @@ defmodule Arbiter.MCP.Tools do
       workspace_id: ws_id,
       from_ref: task_id,
       to_ref: to_ref,
-      directive_ref: to_ref
+      task_ref: to_ref
     }
   end
 
@@ -3659,6 +3662,7 @@ defmodule Arbiter.MCP.Tools do
       to_ref: m.to_ref,
       subject: m.subject,
       body: m.body,
+      task_ref: m.task_ref,
       directive_ref: m.directive_ref,
       read_at: iso(m.read_at),
       cleared_at: iso(m.cleared_at),
