@@ -728,13 +728,16 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "List active workers in the workspace: task_id, registry_key, role, status, repo, " <>
-          "started_at, activity, model (short display name e.g. \"Sonnet\"), and cost_usd (sum " <>
-          "of all ledger entries for the task). A task may have TWO rows: its own worker " <>
-          "(registry_key == task_id, role null) plus a merge-queue subordinate pass " <>
-          "(registry_key `<task_id>:fixpass` / `<task_id>:conflict`, role `fix_pass` / " <>
-          "`conflict_resolver`) running while the primary is parked awaiting its merge. " <>
-          "Never stop/resume the task on account of a subordinate row — the merge queue " <>
-          "owns those passes.",
+          "started_at, activity, model (short display name e.g. \"Sonnet\"), cost_usd (sum " <>
+          "of all ledger entries for the task), resumable (boolean: whether the task can be " <>
+          "safely resumed), and blocked_reason (string or nil: human-readable reason if " <>
+          "resumable is false). A task may have TWO rows: its own worker (registry_key == " <>
+          "task_id, role null) plus a merge-queue subordinate pass (registry_key " <>
+          "`<task_id>:fixpass` / `<task_id>:conflict`, role `fix_pass` / `conflict_resolver`) " <>
+          "running while the primary is parked awaiting its merge. Check resumable before " <>
+          "attempting to stop/resume: false indicates the task is blocked (e.g. awaiting " <>
+          "merge queue or review gate) and cannot be safely touched. Never operate on a " <>
+          "subordinate row (role is not null) — the merge queue owns those passes.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.worker_list/2
     },

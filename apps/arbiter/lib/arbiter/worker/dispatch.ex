@@ -377,6 +377,29 @@ defmodule Arbiter.Worker.Dispatch do
   def worker_active_message(status, _task_id),
     do: "a worker is still active for this task (#{status}); stop it before resuming"
 
+  @doc """
+  Check if a task can be safely resumed. Returns a tuple of {resumable, blocked_reason}.
+  resumable is true if the worker can be resumed (no live worker, or worker in terminal state).
+  blocked_reason is a human-readable string if resumable is false, nil otherwise.
+  """
+  def resumable_status(task_id) do
+    case Worker.whereis(task_id) do
+      nil ->
+        {true, nil}
+
+      pid ->
+        case safe_worker_status(pid) do
+          status ->
+            if resumable_pid_status?(status) do
+              {true, nil}
+            else
+              reason = worker_active_message(status, task_id)
+              {false, reason}
+            end
+        end
+    end
+  end
+
   # Resume only applies to a stopped/failed/dead worker. If a worker is still
   # live in a working state, refuse rather than stomp in-flight work — the
   # operator should `arb worker stop` it first. A :failed (the stopped state)
@@ -388,11 +411,13 @@ defmodule Arbiter.Worker.Dispatch do
 
       pid ->
         case safe_worker_status(pid) do
-          status when status in [:failed, :completed, nil] -> :ok
-          status -> {:error, {:worker_active, status}}
+          status ->
+            if resumable_pid_status?(status), do: :ok, else: {:error, {:worker_active, status}}
         end
     end
   end
+
+  defp resumable_pid_status?(status), do: status in [:failed, :completed, nil]
 
   defp safe_worker_status(pid) do
     case Worker.state(pid) do
