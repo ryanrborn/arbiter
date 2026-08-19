@@ -756,6 +756,11 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" => "Task whose worker to inspect (required)."
+          },
+          "lines" => %{
+            "type" => "integer",
+            "description" =>
+              "Optional: return only the last N output lines instead of the full history."
           }
         },
         "required" => ["task_id"],

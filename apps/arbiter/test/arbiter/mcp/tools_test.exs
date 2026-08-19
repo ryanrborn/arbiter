@@ -2149,6 +2149,42 @@ defmodule Arbiter.MCP.ToolsTest do
       assert entry.resumable == true
       assert entry.blocked_reason == nil
     end
+
+    test "returns only the tail of output_lines when lines parameter is provided (live worker)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "show-tail-live", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      lines = ["line 1", "line 2", "line 3", "line 4", "line 5"]
+      :ok = Worker.report(pid, :output_lines, lines)
+
+      assert {:ok, snap} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => task.id, "lines" => 2})
+
+      assert snap.output_lines == ["line 4", "line 5"]
+    end
+
+    test "returns only the tail of output_lines when lines parameter is provided (historical run)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "show-tail-hist", workspace_id: ctx.ws.id})
+
+      {:ok, _run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now(),
+          output_lines: ["line 1", "line 2", "line 3", "line 4", "line 5"]
+        })
+
+      assert {:ok, snap} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => task.id, "lines" => 2})
+
+      assert snap.output_lines == ["line 4", "line 5"]
+    end
   end
 
   describe "worker_runs/2" do
