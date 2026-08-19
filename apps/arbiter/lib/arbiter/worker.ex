@@ -4037,8 +4037,9 @@ defmodule Arbiter.Worker do
 
   # Reject path: record findings, escalate to the coordinator, and park the worker
   # at :failed WITHOUT merging. failure_reason stays a short atom; the full
-  # findings live in meta + task notes + the escalation message (well under the
-  # Run.failure_reason length cap).
+  # findings live in meta + the escalation message + `Arbiter.ReviewGate.Round`
+  # (queryable via review_gate_rounds_list) — task notes only get a short
+  # summary line (bd-dp7hiw).
   defp park_rejected(%State{} = state, verdict, findings) do
     record_review_gate_outcome(state, verdict, findings)
     escalate_review_gate(state, verdict, findings)
@@ -4054,7 +4055,7 @@ defmodule Arbiter.Worker do
   defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
   defp fail_reason_for(_), do: :review_gate_rejected
 
-  # Append the verdict + findings to the task's notes so it surfaces in
+  # Append a short verdict summary line to the task's notes so it surfaces in
   # `arb show` / the UI. Best-effort: a DB hiccup is logged, never fatal.
   defp record_review_gate_outcome(%State{task_id: task_id, meta: meta}, verdict, findings) do
     rounds = Map.get(meta || %{}, :review_gate_rounds)
@@ -4077,7 +4078,12 @@ defmodule Arbiter.Worker do
     e -> log_review_gate_warning(task_id, e)
   end
 
-  defp format_review_gate_note(verdict, findings, rounds) do
+  # bd-dp7hiw: a short summary line, NOT the full findings/transcript text.
+  # The structured detail (findings, per-round verdicts, cost, convergence)
+  # already lives in `Arbiter.ReviewGate.Round` and is queryable in full via
+  # the `review_gate_rounds_list` MCP tool — duplicating it into `notes` on
+  # every round made the field grow unbounded across resumes.
+  defp format_review_gate_note(verdict, _findings, rounds) do
     header =
       case verdict do
         :approve -> "ReviewGate verdict: APPROVE"
@@ -4086,8 +4092,8 @@ defmodule Arbiter.Worker do
       end
 
     stamp = DateTime.utc_now() |> DateTime.to_iso8601()
-    rounds_line = if rounds, do: "\nrounds: #{rounds}", else: ""
-    "## #{header} (#{stamp})#{rounds_line}\n\n#{findings}"
+    rounds_line = if rounds, do: " — rounds: #{rounds}", else: ""
+    "#{header} (#{stamp})#{rounds_line} — see review_gate_rounds_list for full findings"
   end
 
   # On a non-approve verdict, raise an escalation to the coordinator's mailbox with

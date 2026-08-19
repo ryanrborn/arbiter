@@ -425,11 +425,13 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.review_gate_verdict == :request_changes
       assert snap.meta.review_gate_findings =~ "needs a guard"
 
-      # Task parked (still in_progress, not closed) with findings in its notes.
+      # Task parked (still in_progress, not closed) with a short verdict
+      # summary on its notes (bd-dp7hiw) — the full findings text lives in
+      # `Arbiter.ReviewGate.Round`, not duplicated into notes.
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
       assert reloaded.notes =~ "ReviewGate verdict: REQUEST_CHANGES"
-      assert reloaded.notes =~ "needs a guard"
+      refute reloaded.notes =~ "needs a guard"
 
       # The Coordinator was escalated.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
@@ -2351,11 +2353,14 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert notification.body =~ "ReviewGate did not converge"
       assert notification.body =~ "2 round"
 
-      # The same transcript is on the task notes (visible via arb show), including
-      # the round count so operators can see it ran the full 2-round cap.
+      # A short verdict summary lands on the task notes (bd-dp7hiw) — enough
+      # for a human skimming to see it ran the full 2-round cap — but NOT the
+      # full transcript, which stays queryable via `review_gate_rounds_list`
+      # instead of being duplicated here.
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.notes =~ "REQUEST_CHANGES"
       assert reloaded.notes =~ "rounds: 2"
+      refute reloaded.notes =~ "transcript"
 
       # The full thread persisted as durable mailbox rows: r1 findings, r1
       # response, r2 findings — three :flag entries, oldest first.

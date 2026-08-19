@@ -3188,6 +3188,65 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{rounds: [], count: 0}} =
                Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => "no-such-task"})
     end
+
+    test "limit caps the returned rows to the most recent N, oldest-first (bd-dp7hiw)", ctx do
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Arbiter.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, count: 2, total_count: 3}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "limit" => 2
+               })
+
+      assert [round2, round3] = rounds
+      assert round2.round == 2
+      assert round3.round == 3
+    end
+
+    test "omitting limit preserves full-history behavior (bd-dp7hiw)", ctx do
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Arbiter.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, count: 3, total_count: 3}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert Enum.map(rounds, & &1.round) == [1, 2, 3]
+    end
+
+    test "limit rejects a non-positive value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "limit" => 0
+               })
+
+      assert msg =~ "limit"
+    end
   end
 
   describe "workspace-agnostic coordinator" do

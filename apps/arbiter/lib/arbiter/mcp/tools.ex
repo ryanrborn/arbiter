@@ -1979,24 +1979,48 @@ defmodule Arbiter.MCP.Tools do
   collapsed into the task's terminal outcome. Coordinator only. Requires
   `task_id`. Backfill is out of scope — rows only exist for ReviewGate runs
   from 2026-07-28 onward.
+
+  Optional `limit` (bd-dp7hiw) caps the response to the most recent N rounds
+  (still returned oldest-first) so a task with many rounds/resumes doesn't
+  force pulling the entire history just to see the latest one or two.
+  Omitting it preserves the original full-history behavior; `total_count`
+  always reports how many rounds exist regardless of `limit`.
   """
   @spec review_gate_rounds_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def review_gate_rounds_list(%Scope{} = _scope, args) do
     require Ash.Query
     alias Arbiter.ReviewGate.Round
 
-    with {:ok, task_id} <- require_string(args, "task_id") do
-      rounds =
+    with {:ok, task_id} <- require_string(args, "task_id"),
+         {:ok, limit} <- optional_positive_integer(args, "limit") do
+      all_rounds =
         Round
         |> Ash.Query.filter(task_id == ^task_id)
         |> Ash.Query.sort(round: :asc, inserted_at: :asc)
         |> Ash.read!()
+
+      rounds =
+        all_rounds
+        |> take_last(limit)
         |> Enum.map(&serialize_review_gate_round/1)
 
-      {:ok, %{rounds: rounds, count: length(rounds)}}
+      {:ok, %{rounds: rounds, count: length(rounds), total_count: length(all_rounds)}}
     end
   rescue
     e -> {:error, {:internal, "review_gate_rounds_list failed: #{Exception.message(e)}"}}
+  end
+
+  defp take_last(list, nil), do: list
+  defp take_last(list, n), do: Enum.take(list, -n)
+
+  defp optional_positive_integer(args, key) do
+    with {:ok, n} <- optional_integer(args, key) do
+      cond do
+        is_nil(n) -> {:ok, nil}
+        n > 0 -> {:ok, n}
+        true -> {:error, {:invalid, "`#{key}` must be a positive integer"}}
+      end
+    end
   end
 
   defp serialize_review_gate_round(%Arbiter.ReviewGate.Round{} = r) do

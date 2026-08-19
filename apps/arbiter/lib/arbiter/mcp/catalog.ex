@@ -974,6 +974,13 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" => "Task whose ReviewGate rounds to list (required)."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "description" =>
+              "Cap the response to the most recent N rounds, still returned oldest-first " <>
+                "(optional; omit for full history). `total_count` in the response always " <>
+                "reports how many rounds exist."
           }
         },
         "required" => ["task_id"],
