@@ -1570,24 +1570,26 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec worker_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_show(%Scope{} = scope, args) do
+    lines = Map.get(args, "lines")
+
     with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- fetch_task(scope, args, task_id) do
       case Worker.whereis(task_id) do
         nil ->
-          worker_show_historical(task_id)
+          worker_show_historical(task_id, lines)
 
         pid ->
           case Worker.state(pid) do
-            %{} = snap -> {:ok, serialize_worker_snapshot(Map.put(snap, :pid, pid))}
-            _ -> worker_show_historical(task_id)
+            %{} = snap -> {:ok, serialize_worker_snapshot(Map.put(snap, :pid, pid), lines)}
+            _ -> worker_show_historical(task_id, lines)
           end
       end
     end
   end
 
-  defp worker_show_historical(task_id) do
+  defp worker_show_historical(task_id, lines \\ nil) do
     case latest_run(task_id) do
-      %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_run(run)}
+      %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_run(run, lines)}
       nil -> {:error, {:not_found, "no worker found for task #{task_id}"}}
     end
   end
@@ -3601,9 +3603,12 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp serialize_worker_snapshot(snap) do
+  defp serialize_worker_snapshot(snap, lines \\ nil) do
     meta = Map.get(snap, :meta, %{}) || %{}
     {resumable, blocked_reason} = Dispatch.resumable_status(snap.task_id)
+
+    output_lines = Map.get(meta, :output_lines, [])
+    output_lines = if lines, do: Enum.take(output_lines, -lines), else: output_lines
 
     %{
       source: "live",
@@ -3625,7 +3630,7 @@ defmodule Arbiter.MCP.Tools do
       last_merger_status: Map.get(meta, :last_merger_status),
       last_checked_at: iso(Map.get(meta, :last_checked_at)),
       pid: inspect(snap.pid),
-      output_lines: Map.get(meta, :output_lines, []),
+      output_lines: output_lines,
       exit_status: Map.get(meta, :exit_status),
       exited_at: iso(Map.get(meta, :exited_at)),
       result: Map.get(meta, :result),
@@ -3635,7 +3640,10 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp serialize_worker_run(%Arbiter.Workers.Run{} = run) do
+  defp serialize_worker_run(%Arbiter.Workers.Run{} = run, lines \\ nil) do
+    output_lines = run.output_lines || []
+    output_lines = if lines, do: Enum.take(output_lines, -lines), else: output_lines
+
     %{
       source: "history",
       task_id: run.task_id,
@@ -3651,7 +3659,7 @@ defmodule Arbiter.MCP.Tools do
       started_at: iso(run.started_at),
       completed_at: iso(run.completed_at),
       exit_status: run.exit_code,
-      output_lines: run.output_lines || [],
+      output_lines: output_lines,
       failure_reason: run.failure_reason
     }
   end
