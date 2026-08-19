@@ -1570,10 +1570,10 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec worker_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_show(%Scope{} = scope, args) do
-    lines = Map.get(args, "lines")
-
     with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id) do
+         {:ok, _task} <- fetch_task(scope, args, task_id),
+         {:ok, lines} <- optional_integer(args, "lines"),
+         {:ok, lines} <- validate_positive_integer(lines, "lines") do
       case Worker.whereis(task_id) do
         nil ->
           worker_show_historical(task_id, lines)
@@ -1587,7 +1587,7 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp worker_show_historical(task_id, lines \\ nil) do
+  defp worker_show_historical(task_id, lines) do
     case latest_run(task_id) do
       %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_run(run, lines)}
       nil -> {:error, {:not_found, "no worker found for task #{task_id}"}}
@@ -3051,6 +3051,18 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  defp validate_positive_integer(nil, _key) do
+    {:ok, nil}
+  end
+
+  defp validate_positive_integer(value, _key) when is_integer(value) and value > 0 do
+    {:ok, value}
+  end
+
+  defp validate_positive_integer(_value, key) do
+    {:error, {:invalid, "`#{key}` must be a positive integer"}}
+  end
+
   defp optional_datetime(args, key) do
     case fetch_string(args, key) do
       nil ->
@@ -3603,7 +3615,7 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp serialize_worker_snapshot(snap, lines \\ nil) do
+  defp serialize_worker_snapshot(snap, lines) do
     meta = Map.get(snap, :meta, %{}) || %{}
     {resumable, blocked_reason} = Dispatch.resumable_status(snap.task_id)
 
@@ -3640,7 +3652,7 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp serialize_worker_run(%Arbiter.Workers.Run{} = run, lines \\ nil) do
+  defp serialize_worker_run(%Arbiter.Workers.Run{} = run, lines) do
     output_lines = run.output_lines || []
     output_lines = if lines, do: Enum.take(output_lines, -lines), else: output_lines
 
