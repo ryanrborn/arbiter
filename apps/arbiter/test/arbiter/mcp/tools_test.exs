@@ -2099,6 +2099,56 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:not_found, _}} =
                Tools.worker_show(ctx.coordinator, %{"task_id" => foreign.id})
     end
+
+    test "surfaces resumable/blocked_reason for a live worker", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "resumable-test", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      # Worker in :failed status should be resumable
+      :ok = Worker.fail(pid)
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.resumable == true
+      assert snap.blocked_reason == nil
+    end
+
+    test "surfaces blocked_reason for a worker in awaiting_review status", ctx do
+      alias Arbiter.Test.StubMerger
+
+      {:ok, task} = Ash.create(Issue, %{title: "awaiting-review-test", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      :ok = Worker.advance(pid, :implement)
+      StubMerger.next_open_ref("!test")
+
+      open_opts = %{
+        adapter: StubMerger,
+        workspace: nil,
+        interval_ms: 1_000_000,
+        initial_delay_ms: 1_000_000
+      }
+
+      assert {:ok, "!test"} = Worker.open_mr(pid, "feature/guard", "Test", "", open_opts)
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.resumable == false
+      assert is_binary(snap.blocked_reason)
+      assert String.contains?(snap.blocked_reason, "awaiting_review")
+    end
+
+    test "surfaces resumable/blocked_reason for worker_list", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "list-resumable-test", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      # Worker in :failed status should be resumable
+      :ok = Worker.fail(pid)
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      entry = Enum.find(workers, &(&1.task_id == task.id))
+      assert entry.resumable == true
+      assert entry.blocked_reason == nil
+    end
   end
 
   describe "worker_runs/2" do

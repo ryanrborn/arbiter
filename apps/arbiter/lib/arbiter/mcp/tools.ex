@@ -3578,6 +3578,7 @@ defmodule Arbiter.MCP.Tools do
     meta = Map.get(snap, :meta, %{}) || %{}
     routing = Map.get(meta, :routing_config) || %{}
     model_id = Map.get(meta, :model) || Map.get(routing, :model)
+    {resumable, blocked_reason} = Dispatch.resumable_status(snap.task_id)
 
     %{
       task_id: snap.task_id,
@@ -3594,12 +3595,15 @@ defmodule Arbiter.MCP.Tools do
       activity: Map.get(meta, :activity),
       provider: Map.get(meta, :provider) || Map.get(routing, :provider),
       model: Arbiter.Worker.Stats.short_model_name(model_id),
-      cost_usd: cost_usd
+      cost_usd: cost_usd,
+      resumable: resumable,
+      blocked_reason: blocked_reason
     }
   end
 
   defp serialize_worker_snapshot(snap) do
     meta = Map.get(snap, :meta, %{}) || %{}
+    {resumable, blocked_reason} = Dispatch.resumable_status(snap.task_id)
 
     %{
       source: "live",
@@ -3625,7 +3629,9 @@ defmodule Arbiter.MCP.Tools do
       exit_status: Map.get(meta, :exit_status),
       exited_at: iso(Map.get(meta, :exited_at)),
       result: Map.get(meta, :result),
-      failure_reason: stringify_reason(Map.get(meta, :failure_reason))
+      failure_reason: stringify_reason(Map.get(meta, :failure_reason)),
+      resumable: resumable,
+      blocked_reason: blocked_reason
     }
   end
 
