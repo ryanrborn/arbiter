@@ -4083,17 +4083,31 @@ defmodule Arbiter.Worker do
   # already lives in `Arbiter.ReviewGate.Round` and is queryable in full via
   # the `review_gate_rounds_list` MCP tool — duplicating it into `notes` on
   # every round made the field grow unbounded across resumes.
+  #
+  # `:no_verdict` is the one case that does NOT always get a `Round` row: a
+  # malformed/re-prompted pass that never reaches a genuine outcome is
+  # deliberately not persisted there (see `Arbiter.ReviewGate.Round`'s
+  # moduledoc), so pointing at `review_gate_rounds_list` for it can resolve to
+  # nothing. Point at the coordinator escalation mail instead, which is
+  # always sent alongside a non-approve verdict (`escalate_review_gate/3`).
   defp format_review_gate_note(verdict, _findings, rounds) do
-    header =
+    {header, pointer} =
       case verdict do
-        :approve -> "ReviewGate verdict: APPROVE"
-        :request_changes -> "ReviewGate verdict: REQUEST_CHANGES"
-        :no_verdict -> "ReviewGate verdict: INCONCLUSIVE (no verdict)"
+        :approve ->
+          {"ReviewGate verdict: APPROVE", "see review_gate_rounds_list for full findings"}
+
+        :request_changes ->
+          {"ReviewGate verdict: REQUEST_CHANGES",
+           "see review_gate_rounds_list for full findings"}
+
+        :no_verdict ->
+          {"ReviewGate verdict: INCONCLUSIVE (no verdict)",
+           "see the coordinator escalation mail for details"}
       end
 
     stamp = DateTime.utc_now() |> DateTime.to_iso8601()
     rounds_line = if rounds, do: " — rounds: #{rounds}", else: ""
-    "#{header} (#{stamp})#{rounds_line} — see review_gate_rounds_list for full findings"
+    "#{header} (#{stamp})#{rounds_line} — #{pointer}"
   end
 
   # On a non-approve verdict, raise an escalation to the coordinator's mailbox with

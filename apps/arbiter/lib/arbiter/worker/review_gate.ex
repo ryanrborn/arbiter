@@ -1584,6 +1584,13 @@ defmodule Arbiter.Worker.ReviewGate do
 
     payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
 
+    # bd-dp7hiw: this reports as a REQUEST_CHANGES, and worker.ex's note-writer
+    # points to `review_gate_rounds_list` for the full findings — so, unlike
+    # the malformed/re-prompted passes round.ex deliberately skips, record a
+    # row for THIS round too, or that pointer resolves to nothing for a task
+    # that timed out on round 1.
+    record_round(state, :review, :request_changes, payload, converged: false)
+
     report(state, {:request_changes, payload})
     {:stop, :normal, %{state | reported?: true}}
   end

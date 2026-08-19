@@ -1176,13 +1176,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp review_gate_sentence(:rejected, snapshot) do
     "ReviewGate did not converge#{rounds_suffix(snapshot)} — the implementer and reviewer " <>
-      "did not reach agreement and it needs your judgement (see the task notes for the " <>
-      "full argument)."
+      "did not reach agreement and it needs your judgement (see review_gate_rounds_list or " <>
+      "your inbox escalation for the full argument)."
   end
 
   defp review_gate_sentence(:inconclusive, snapshot) do
     "ReviewGate produced no parseable verdict#{rounds_suffix(snapshot)} and needs your " <>
-      "judgement (see the task notes for details)."
+      "judgement (see your inbox escalation for details)."
   end
 
   defp rounds_suffix(%{meta: meta}) when is_map(meta) do

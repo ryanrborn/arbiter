@@ -613,6 +613,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.failure_reason == :review_gate_rejected
       assert snap.meta.review_gate_findings =~ "timed out"
       assert merge_commit_count(repo) == 0
+
+      # bd-dp7hiw: a timeout still reports as REQUEST_CHANGES and the task
+      # note points at `review_gate_rounds_list` for the full findings — so a
+      # round row must exist for THIS round, or that pointer would resolve to
+      # nothing for a task that timed out on its very first round.
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert round.role == :review
+      assert round.verdict == :request_changes
+      assert round.findings =~ "timed out"
     end
 
     test "a reviewer requests changes → no merge, task parked + escalated",
