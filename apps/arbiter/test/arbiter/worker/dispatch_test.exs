@@ -1,6 +1,7 @@
 defmodule Arbiter.Worker.DispatchTest do
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
@@ -1915,15 +1916,31 @@ defmodule Arbiter.Worker.DispatchTest do
   end
 
   describe "work prompt fix-pass sections (bd-bw93c3)" do
-    test "includes prior review findings when task has notes", %{ws: ws} do
+    test "includes prior review findings from the latest ReviewGate.Round (bd-dp7hiw)", %{
+      ws: ws
+    } do
       {:ok, task} = Ash.create(Issue, %{title: "fix pass task", workspace_id: ws.id})
 
+      # As of bd-dp7hiw, `task.notes` only carries a short summary line — the
+      # actual findings live in `Arbiter.ReviewGate.Round`, which is what
+      # `prior_review_findings_section/1` now reads from.
       {:ok, task} =
         Ash.update(
           task,
-          %{notes: "## ReviewGate verdict: REQUEST_CHANGES\n\nFix the null guard."},
+          %{notes: "ReviewGate verdict: REQUEST_CHANGES (2026-01-01T00:00:00Z) — rounds: 1"},
           action: :update
         )
+
+      {:ok, _round} =
+        Ash.create(Round, %{
+          task_id: task.id,
+          round: 1,
+          role: :review,
+          verdict: :request_changes,
+          findings: "VERDICT: REQUEST_CHANGES\n\nFix the null guard.",
+          finding_count: 1,
+          converged: false
+        })
 
       prompt = Dispatch.prompt_for_task(task, [])
 
@@ -1931,7 +1948,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert prompt =~ "Fix the null guard."
     end
 
-    test "omits prior review findings section when task has no notes", %{ws: ws} do
+    test "omits prior review findings section when task has no ReviewGate rounds", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "fresh task", workspace_id: ws.id})
 
       prompt = Dispatch.prompt_for_task(task, [])

@@ -425,11 +425,13 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.review_gate_verdict == :request_changes
       assert snap.meta.review_gate_findings =~ "needs a guard"
 
-      # Task parked (still in_progress, not closed) with findings in its notes.
+      # Task parked (still in_progress, not closed) with a short verdict
+      # summary on its notes (bd-dp7hiw) — the full findings text lives in
+      # `Arbiter.ReviewGate.Round`, not duplicated into notes.
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
       assert reloaded.notes =~ "ReviewGate verdict: REQUEST_CHANGES"
-      assert reloaded.notes =~ "needs a guard"
+      refute reloaded.notes =~ "needs a guard"
 
       # The Coordinator was escalated.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
@@ -611,6 +613,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.failure_reason == :review_gate_rejected
       assert snap.meta.review_gate_findings =~ "timed out"
       assert merge_commit_count(repo) == 0
+
+      # bd-dp7hiw: a timeout still reports as REQUEST_CHANGES and the task
+      # note points at `review_gate_rounds_list` for the full findings — so a
+      # round row must exist for THIS round, or that pointer would resolve to
+      # nothing for a task that timed out on its very first round.
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert round.role == :review
+      assert round.verdict == :request_changes
+      assert round.findings =~ "timed out"
     end
 
     test "a reviewer requests changes → no merge, task parked + escalated",
@@ -2351,11 +2368,14 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert notification.body =~ "ReviewGate did not converge"
       assert notification.body =~ "2 round"
 
-      # The same transcript is on the task notes (visible via arb show), including
-      # the round count so operators can see it ran the full 2-round cap.
+      # A short verdict summary lands on the task notes (bd-dp7hiw) — enough
+      # for a human skimming to see it ran the full 2-round cap — but NOT the
+      # full transcript, which stays queryable via `review_gate_rounds_list`
+      # instead of being duplicated here.
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.notes =~ "REQUEST_CHANGES"
       assert reloaded.notes =~ "rounds: 2"
+      refute reloaded.notes =~ "transcript"
 
       # The full thread persisted as durable mailbox rows: r1 findings, r1
       # response, r2 findings — three :flag entries, oldest first.
@@ -2627,6 +2647,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.review_gate_findings =~ "no commits ahead"
       # The branch was NOT merged.
       assert merge_commit_count(repo) == 0
+
+      # bd-dp7hiw: a no-commits escalation reports as REQUEST_CHANGES and the
+      # task note points at `review_gate_rounds_list` for the full findings —
+      # so a round row must exist for THIS pre-review escalation too, or that
+      # pointer resolves to nothing for a task rejected before a reviewer ever ran.
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert round.role == :review
+      assert round.verdict == :request_changes
+      assert round.findings =~ "no commits ahead"
     end
   end
 
@@ -2745,6 +2780,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == review_id)),
              "the reviewer must NOT run when the branch conflicts with its target"
+
+      # bd-dp7hiw: a conflict escalation reports as REQUEST_CHANGES and the
+      # task note points at `review_gate_rounds_list` for the full findings —
+      # so a round row must exist for THIS pre-review escalation too, or that
+      # pointer resolves to nothing for a task rejected before a reviewer ever ran.
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert round.role == :review
+      assert round.verdict == :request_changes
+      assert round.findings =~ "conflicts with its target"
     end
   end
 

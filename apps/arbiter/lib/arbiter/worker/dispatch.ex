@@ -55,6 +55,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -2276,25 +2277,50 @@ defmodule Arbiter.Worker.Dispatch do
     """
   end
 
-  # When a prior review_gate pass escalated with REQUEST_CHANGES, the reviewer's
-  # findings are stored in task.notes by record_review_gate_outcome/3 in Worker.
-  # Surface them here so the re-slunged worker sees them immediately in its
-  # prompt without having to call task_show or gh pr view first.
-  defp prior_review_findings_section(%Issue{notes: notes})
-       when is_binary(notes) and notes != "" do
-    """
+  # bd-dp7hiw: `task.notes` only carries a short per-round summary now (see
+  # `Worker.format_review_gate_note/3`) — the actual findings text live in
+  # `Arbiter.ReviewGate.Round`, one row per reviewer pass. Read the most
+  # recent `role: :review` row directly (this worker tier can query the Ash
+  # resource even though `review_gate_rounds_list` itself is coordinator-only)
+  # and surface its findings here, so the re-dispatched worker sees them
+  # immediately in its prompt without having to call task_show or gh pr view
+  # first.
+  defp prior_review_findings_section(%Issue{id: task_id}) when is_binary(task_id) do
+    case latest_review_round_findings(task_id) do
+      findings when is_binary(findings) and findings != "" ->
+        """
 
-    Prior review findings (address these before starting new work):
-    #{notes}
-    """
+        Prior review findings (address these before starting new work):
+        #{findings}
+        """
+
+      _ ->
+        ""
+    end
   end
 
   defp prior_review_findings_section(_task), do: ""
 
+  defp latest_review_round_findings(task_id) do
+    Round
+    |> Ash.Query.filter(task_id == ^task_id and role == :review)
+    |> Ash.Query.sort(round: :desc, inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %Round{findings: findings} -> findings
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
   # When a PR is already open for this task, the re-slunged worker must read
-  # the PR review comments to find what changed. The findings in task.notes
-  # (above) are the primary source, but the PR reviews are the canonical record
-  # — fetching them explicitly guards against notes being stale or missing.
+  # the PR review comments to find what changed. The `Round`-derived findings
+  # (above) are the primary source, but the PR reviews are the canonical
+  # record — fetching them explicitly guards against a `Round` row being
+  # stale or missing.
   defp pr_review_instruction(%Issue{pr_ref: pr_ref})
        when is_binary(pr_ref) and pr_ref != "" do
     """
