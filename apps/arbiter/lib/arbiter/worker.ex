@@ -4097,8 +4097,7 @@ defmodule Arbiter.Worker do
           {"ReviewGate verdict: APPROVE", "see review_gate_rounds_list for full findings"}
 
         :request_changes ->
-          {"ReviewGate verdict: REQUEST_CHANGES",
-           "see review_gate_rounds_list for full findings"}
+          {"ReviewGate verdict: REQUEST_CHANGES", "see review_gate_rounds_list for full findings"}
 
         :no_verdict ->
           {"ReviewGate verdict: INCONCLUSIVE (no verdict)",
