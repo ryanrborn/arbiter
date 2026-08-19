@@ -459,8 +459,7 @@ defmodule Arbiter.Worker.ReviewGate do
             "for task=#{state.task_id}; escalating instead of reviewing a stale base"
         )
 
-        report(state, {:request_changes, escalation})
-        {:stop, :normal, %{state | reported?: true}}
+        escalate_pre_review(state, escalation)
 
       {:ok, state} ->
         spawn_reviewer_after_update(state)
@@ -479,8 +478,7 @@ defmodule Arbiter.Worker.ReviewGate do
       {:error, reason} ->
         Logger.warning("ReviewGate: branch has no commits for task=#{state.task_id}: #{reason}")
 
-        report(state, {:request_changes, reason})
-        {:stop, :normal, %{state | reported?: true}}
+        escalate_pre_review(state, reason)
 
       {:ok, head_sha} ->
         state = %{state | head_sha: head_sha}
@@ -499,8 +497,7 @@ defmodule Arbiter.Worker.ReviewGate do
               "ReviewGate: empty diff range detected for task=#{state.task_id}: #{reason}"
             )
 
-            report(state, {:request_changes, reason})
-            {:stop, :normal, %{state | reported?: true}}
+            escalate_pre_review(state, reason)
 
           :ok ->
             case launch_worker(
@@ -518,12 +515,10 @@ defmodule Arbiter.Worker.ReviewGate do
                   "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
                 )
 
-                report(
+                escalate_pre_review(
                   state,
-                  {:request_changes, "ReviewGate could not spawn a reviewer: #{inspect(reason)}"}
+                  "ReviewGate could not spawn a reviewer: #{inspect(reason)}"
                 )
-
-                {:stop, :normal, %{state | reported?: true}}
             end
         end
     end
@@ -1573,6 +1568,20 @@ defmodule Arbiter.Worker.ReviewGate do
     do: {:no_verdict, "Reviewer produced no parseable VERDICT line."}
 
   defp normalize_verdict({:no_verdict, _findings} = v), do: v
+
+  # bd-dp7hiw: shared by the four pre-review escalation paths (branch conflict,
+  # no commits, empty diff, reviewer spawn failure) that never reach a reviewer
+  # pass, and so never go through handle_reject/2's record_round call. Without
+  # a row here, worker.ex's note-writer points `review_gate_rounds_list` at
+  # an empty history and dispatch.ex's prior_review_findings_section/1 (which
+  # sources findings only from `Round`, not `notes`) sees nothing on a
+  # re-dispatched fix-pass — a real data-loss regression, not just a dangling
+  # pointer.
+  defp escalate_pre_review(state, reason) do
+    record_round(state, :review, :request_changes, reason, converged: false)
+    report(state, {:request_changes, reason})
+    {:stop, :normal, %{state | reported?: true}}
+  end
 
   # Escalate the current pass as timed-out: report a REQUEST_CHANGES carrying the
   # timeout note plus (when a thread exists) the full escalation payload, and

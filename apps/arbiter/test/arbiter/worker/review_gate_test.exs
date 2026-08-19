@@ -2647,6 +2647,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.review_gate_findings =~ "no commits ahead"
       # The branch was NOT merged.
       assert merge_commit_count(repo) == 0
+
+      # bd-dp7hiw: a no-commits escalation reports as REQUEST_CHANGES and the
+      # task note points at `review_gate_rounds_list` for the full findings —
+      # so a round row must exist for THIS pre-review escalation too, or that
+      # pointer resolves to nothing for a task rejected before a reviewer ever ran.
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert round.role == :review
+      assert round.verdict == :request_changes
+      assert round.findings =~ "no commits ahead"
     end
   end
 
@@ -2765,6 +2780,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == review_id)),
              "the reviewer must NOT run when the branch conflicts with its target"
+
+      # bd-dp7hiw: a conflict escalation reports as REQUEST_CHANGES and the
+      # task note points at `review_gate_rounds_list` for the full findings —
+      # so a round row must exist for THIS pre-review escalation too, or that
+      # pointer resolves to nothing for a task rejected before a reviewer ever ran.
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert round.role == :review
+      assert round.verdict == :request_changes
+      assert round.findings =~ "conflicts with its target"
     end
   end
 
