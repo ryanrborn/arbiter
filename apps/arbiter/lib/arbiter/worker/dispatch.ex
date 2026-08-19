@@ -389,12 +389,13 @@ defmodule Arbiter.Worker.Dispatch do
 
       pid ->
         case safe_worker_status(pid) do
-          status when status in [:failed, :completed, nil] ->
-            {true, nil}
-
           status ->
-            reason = worker_active_message(status, task_id)
-            {false, reason}
+            if resumable_pid_status?(status) do
+              {true, nil}
+            else
+              reason = worker_active_message(status, task_id)
+              {false, reason}
+            end
         end
     end
   end
@@ -410,11 +411,13 @@ defmodule Arbiter.Worker.Dispatch do
 
       pid ->
         case safe_worker_status(pid) do
-          status when status in [:failed, :completed, nil] -> :ok
-          status -> {:error, {:worker_active, status}}
+          status ->
+            if resumable_pid_status?(status), do: :ok, else: {:error, {:worker_active, status}}
         end
     end
   end
+
+  defp resumable_pid_status?(status), do: status in [:failed, :completed, nil]
 
   defp safe_worker_status(pid) do
     case Worker.state(pid) do
