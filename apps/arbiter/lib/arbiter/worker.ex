@@ -4090,7 +4090,7 @@ defmodule Arbiter.Worker do
   # moduledoc), so pointing at `review_gate_rounds_list` for it can resolve to
   # nothing. Point at the coordinator escalation mail instead, which is
   # always sent alongside a non-approve verdict (`escalate_review_gate/3`).
-  defp format_review_gate_note(verdict, _findings, rounds) do
+  defp format_review_gate_note(verdict, findings, rounds) do
     {header, pointer} =
       case verdict do
         :approve ->
@@ -4106,7 +4106,17 @@ defmodule Arbiter.Worker do
 
     stamp = DateTime.utc_now() |> DateTime.to_iso8601()
     rounds_line = if rounds, do: " — rounds: #{rounds}", else: ""
-    "#{header} (#{stamp})#{rounds_line} — #{pointer}"
+
+    # bd-1j5x6u: the reviewer disclosed VERIFICATION: PARTIAL, so this verdict
+    # was issued without full test/build verification. That must stay visible
+    # even in the short summary line — losing it here would let an unverified
+    # verdict blend in with a normal one on `arb show` / the UI.
+    warning_line =
+      if ReviewVerification.partial?(findings),
+        do: " — #{ReviewVerification.banner_text()}",
+        else: ""
+
+    "#{header} (#{stamp})#{rounds_line} — #{pointer}#{warning_line}"
   end
 
   # On a non-approve verdict, raise an escalation to the coordinator's mailbox with
