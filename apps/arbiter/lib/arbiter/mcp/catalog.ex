@@ -759,7 +759,8 @@ defmodule Arbiter.MCP.Catalog do
           },
           "lines" => %{
             "type" => "integer",
-            "description" => "Optional: return only the last N output lines instead of the full history."
+            "description" =>
+              "Optional: return only the last N output lines instead of the full history."
           }
         },
         "required" => ["task_id"],
