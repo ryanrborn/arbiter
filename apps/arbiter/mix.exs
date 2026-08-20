@@ -94,7 +94,17 @@ defmodule Arbiter.MixProject do
       setup: ["deps.get", "ash.setup", "run priv/repo/seeds.exs"],
       "ecto.setup": ["ecto.create", "ecto.migrate", "run #{__DIR__}/priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: ["ash.setup --quiet", "test"]
+      # bd-2xvwew: `ash.setup` only actually runs migrations when invoked
+      # from within this app's own directory — from the umbrella root (where
+      # `mix test` normally runs) it silently creates an empty database file
+      # and stops, without migrating it. That was invisible as long as every
+      # worktree shared one already-migrated scratch database (config/test.exs
+      # used a single hardcoded path), but now that each worktree gets its
+      # own isolated database file (see config/support/test_db_partition.ex),
+      # a fresh file needs to actually be migrated. `ecto.create` +
+      # `ecto.migrate` are what CI already runs explicitly before `mix test`
+      # (.github/workflows/ci.yml) and both work correctly from the root.
+      test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"]
     ]
   end
 end

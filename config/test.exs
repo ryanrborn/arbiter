@@ -1,11 +1,25 @@
 import Config
 config :ash, policies: [show_policy_breakdowns?: true], disable_async?: true
 
+Code.require_file("support/test_db_partition.ex", __DIR__)
+
+# bd-2xvwew: `MIX_TEST_PARTITION` is only set when the caller explicitly
+# shards a single run via `mix test --partitions N` (each shard already wants
+# its own file, by design). It is NOT set for the common case of several
+# `mix test` invocations running concurrently from different worktrees on the
+# same host, so fall back to a cwd-derived suffix — every worktree gets an
+# isolated database file with no coordination required from the caller. See
+# Arbiter.TestDbPartition for why this matters (it's not just about avoiding
+# slow queueing — concurrent invocations sharing a file corrupt each other's
+# schema).
+test_db_partition =
+  System.get_env("MIX_TEST_PARTITION") || Arbiter.TestDbPartition.suffix()
+
 config :arbiter, Arbiter.Repo,
   database:
     Path.join(
       System.tmp_dir!(),
-      "arbiter_test#{System.get_env("MIX_TEST_PARTITION", "")}.sqlite3"
+      "arbiter_test_#{test_db_partition}.sqlite3"
     ),
   journal_mode: :wal,
   # SQLite allows only one writer at a time, and a *second* class of failure
@@ -28,7 +42,22 @@ config :arbiter, Arbiter.Repo,
   # instead of racing each other's WAL snapshots.
   busy_timeout: 60_000,
   pool: Ecto.Adapters.SQL.Sandbox,
-  pool_size: 1
+  pool_size: 1,
+  # bd-2xvwew: with `pool_size: 1`, the whole async suite serializes through
+  # one connection — fine under light load, but DBConnection's queue sheds
+  # load *before* the nominal checkout timeout once the queue's average wait
+  # exceeds `:queue_target` within `:queue_interval` (defaults: 50ms/1000ms).
+  # Several `mix test` invocations genuinely competing for CPU (e.g. one per
+  # concurrently-dispatched worker, each in its own worktree) legitimately
+  # pushes the single connection's queue past that default in bursts, and
+  # DBConnection was failing checkouts after 2-4s with `:queue_timeout` on
+  # tests that never touched the code under test (the exact failure mode this
+  # config predicted when pool_size was first dropped to 1 — see bd-9j4znl).
+  # Raising these gives the queue room to drain a legitimate burst instead of
+  # rejecting it; it does NOT add a second live connection, so it can't
+  # reintroduce the SQLITE_BUSY_SNAPSHOT race pool_size: 1 exists to prevent.
+  queue_target: 5_000,
+  queue_interval: 15_000
 
 config :arbiter_web, ArbiterWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
