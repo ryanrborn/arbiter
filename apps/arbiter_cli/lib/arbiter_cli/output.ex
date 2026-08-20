@@ -53,6 +53,14 @@ defmodule ArbiterCli.Output do
 
   # ----- emit -----
 
+  @doc """
+  Print any JSON-encodable term as a single line. The generic `:json`-mode
+  emit helper for commands whose payload doesn't fit one of the
+  resource-specific `emit_*` helpers below.
+  """
+  @spec emit_json(term()) :: :ok
+  def emit_json(term), do: IO.puts(Jason.encode!(term))
+
   @doc "Print a single issue or other resource map. Mode-aware."
   @spec emit_issue(map(), :text | :json) :: :ok
   def emit_issue(issue, :json), do: IO.puts(Jason.encode!(issue))

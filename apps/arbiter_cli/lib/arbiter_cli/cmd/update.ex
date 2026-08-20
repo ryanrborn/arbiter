@@ -70,7 +70,9 @@ defmodule ArbiterCli.Cmd.Update do
       Phoenix not coming back green after the restart.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.ArgParser
+  alias ArbiterCli.Cmd.Update.{Formatter, Git}
+  alias ArbiterCli.{Client, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
   # branch (`main`); a deploy is always a pull of merged work into it.
@@ -130,19 +132,15 @@ defmodule ArbiterCli.Cmd.Update do
   # ---- deploy mode -------------------------------------------------------
 
   defp do_deploy(argv) do
-    {opts, _rest, invalid} = OptionParser.parse(argv, strict: @deploy_switches)
-
-    if invalid != [] do
-      [{flag, _} | _] = invalid
-
-      Output.die(
-        "unknown option #{flag} for `arb update`",
-        "To deploy, run `arb update` with no issue id. To edit an issue, " <>
-          "name it: `arb update <id> #{flag} …`."
+    {opts, _rest, mode} =
+      ArgParser.parse_strict!(argv, "arb update",
+        strict: @deploy_switches,
+        hint: fn flag ->
+          "To deploy, run `arb update` with no issue id. To edit an issue, " <>
+            "name it: `arb update <id> #{flag} …`."
+        end
       )
-    end
 
-    mode = if opts[:json], do: :json, else: :text
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
     force = opts[:force] || false
 
@@ -158,19 +156,19 @@ defmodule ArbiterCli.Cmd.Update do
           )
       end
 
-    ensure_on_integration_branch(root)
-    ensure_clean_tree(root)
+    Git.ensure_on_integration_branch(root, @integration_branch)
+    Git.ensure_clean_tree(root)
     Restart.guard_worker_session!()
     Restart.guard_active_workers!(force)
 
-    before_sha = head_sha(root)
-    git_pull(root)
-    after_sha = head_sha(root)
+    before_sha = Git.head_sha(root)
+    Git.pull(root, @integration_branch)
+    after_sha = Git.head_sha(root)
 
     if before_sha == after_sha do
-      emit_up_to_date(mode)
+      Formatter.emit_up_to_date(mode, @integration_branch)
     else
-      commits = short_log(root, before_sha, after_sha)
+      commits = Git.short_log(root, before_sha, after_sha)
       Start.log_text("Pulled #{length(commits)} new commit(s); deploying…")
 
       # Run migrations as an explicit step
@@ -184,12 +182,13 @@ defmodule ArbiterCli.Cmd.Update do
 
       # Check if CLI changed and rebuild/install if needed
       cli_changed =
-        files_in_diff(root, before_sha, after_sha)
+        root
+        |> Git.files_in_diff(before_sha, after_sha)
         |> Enum.any?(&String.starts_with?(&1, "apps/arbiter_cli"))
 
       cli_built =
         if cli_changed do
-          build_and_install_cli(root)
+          Git.build_and_install_cli(root)
           true
         else
           false
@@ -198,8 +197,9 @@ defmodule ArbiterCli.Cmd.Update do
       # Finally restart Phoenix to load the new code
       case Restart.perform(root, timeout_ms) do
         {:ok, actions, was_running} ->
-          emit_deployed(
+          Formatter.emit_deployed(
             mode,
+            @integration_branch,
             before_sha,
             after_sha,
             commits,
@@ -210,8 +210,9 @@ defmodule ArbiterCli.Cmd.Update do
           )
 
         {:timeout, actions, _was_running} ->
-          emit_deploy_timeout(
+          Formatter.emit_deploy_timeout(
             mode,
+            @integration_branch,
             before_sha,
             after_sha,
             commits,
@@ -224,341 +225,10 @@ defmodule ArbiterCli.Cmd.Update do
     end
   end
 
-  # ---- git ---------------------------------------------------------------
-
-  defp ensure_on_integration_branch(root) do
-    case git(root, ["rev-parse", "--abbrev-ref", "HEAD"]) do
-      {out, 0} ->
-        branch = String.trim(out)
-
-        unless branch == @integration_branch do
-          Output.die(
-            "the checkout is on `#{branch}`, not the integration branch `#{@integration_branch}`",
-            "`arb update` fast-forwards `#{@integration_branch}`. " <>
-              "Switch with `git checkout #{@integration_branch}` first."
-          )
-        end
-
-      {out, _code} ->
-        Output.die(
-          "could not determine the current git branch",
-          "Is #{root} a git checkout? Output:\n" <> String.trim_trailing(out)
-        )
-    end
-  end
-
-  defp ensure_clean_tree(root) do
-    case git(root, ["status", "--porcelain"]) do
-      {"", 0} ->
-        :ok
-
-      {out, 0} ->
-        # `??` lines are untracked files — safe to ignore for a fast-forward
-        # deploy. Only tracked modifications (staged or unstaged) block the update.
-        tracked =
-          out
-          |> String.split("\n", trim: true)
-          |> Enum.reject(&String.starts_with?(&1, "??"))
-
-        if tracked == [] do
-          :ok
-        else
-          Output.die(
-            "the working tree has uncommitted changes",
-            "Commit or stash them before `arb update`:\n" <> Enum.join(tracked, "\n")
-          )
-        end
-
-      {out, _code} ->
-        Output.die(
-          "could not read git status",
-          "Output:\n" <> String.trim_trailing(out)
-        )
-    end
-  end
-
-  defp head_sha(root) do
-    case git(root, ["rev-parse", "HEAD"]) do
-      {out, 0} ->
-        String.trim(out)
-
-      {out, _code} ->
-        Output.die(
-          "could not read HEAD",
-          "Output:\n" <> String.trim_trailing(out)
-        )
-    end
-  end
-
-  defp git_pull(root) do
-    Start.log_text("Pulling #{@integration_branch} (git pull --ff-only)…")
-
-    case git(root, ["pull", "--ff-only"]) do
-      {_out, 0} ->
-        :ok
-
-      {out, code} ->
-        Output.die(
-          "git pull --ff-only failed (exit #{code})",
-          "The branch may have diverged from its upstream (a non-fast-forward). " <>
-            "Resolve it manually. Output:\n" <> String.trim_trailing(out)
-        )
-    end
-  end
-
-  # `git log --oneline old..new` → a list of {sha, subject} for the new commits.
-  defp short_log(root, before_sha, after_sha) do
-    case git(root, ["log", "--oneline", "--no-decorate", "#{before_sha}..#{after_sha}"]) do
-      {out, 0} ->
-        out
-        |> String.split("\n", trim: true)
-        |> Enum.map(fn line ->
-          case String.split(line, " ", parts: 2) do
-            [sha, subject] -> %{sha: sha, subject: subject}
-            [sha] -> %{sha: sha, subject: ""}
-          end
-        end)
-
-      {_out, _code} ->
-        # The pull already succeeded; a log failure shouldn't abort the deploy.
-        []
-    end
-  end
-
-  # Get the list of files that changed between two commits
-  defp files_in_diff(root, before_sha, after_sha) do
-    case git(root, ["diff", "--name-only", "#{before_sha}..#{after_sha}"]) do
-      {out, 0} ->
-        out
-        |> String.split("\n", trim: true)
-
-      {_out, _code} ->
-        # The pull already succeeded; a diff failure shouldn't abort the deploy.
-        []
-    end
-  end
-
-  # Build the CLI escript and install it to ~/.local/bin/arb
-  defp build_and_install_cli(root) do
-    cli_dir = Path.join(root, "apps/arbiter_cli")
-
-    Start.log_text("Building CLI escript (mix escript.build)…")
-
-    case Start.run_cmd("mix", ["escript.build"], cd: cli_dir, stderr_to_stdout: true) do
-      {_out, 0} ->
-        escript_path = Path.join(cli_dir, "arb")
-        install_path = Path.join(System.user_home!(), ".local/bin/arb")
-
-        # Ensure ~/.local/bin exists
-        install_dir = Path.dirname(install_path)
-        File.mkdir_p!(install_dir)
-
-        # Copy the escript to ~/.local/bin/arb
-        case File.copy(escript_path, install_path) do
-          {:ok, _} ->
-            # Make it executable
-            File.chmod!(install_path, 0o755)
-            Start.log_text("Installed CLI escript to #{install_path}")
-
-          {:error, reason} ->
-            Output.die(
-              "failed to install CLI escript",
-              "Could not copy escript to #{install_path}: #{inspect(reason)}"
-            )
-        end
-
-      {out, code} ->
-        Output.die(
-          "failed to build CLI escript (exit #{code})",
-          "Output:\n" <> String.trim_trailing(out)
-        )
-    end
-  rescue
-    e in ErlangError ->
-      Output.die(
-        "could not run mix: #{inspect(e.original)}",
-        "Ensure Elixir/`mix` is installed and on your PATH."
-      )
-  end
-
-  # `git`, routed through `arb start`'s `:bd2_cmd_runner` seam so one test stub
-  # covers the pull and the reused restart. Always run inside `root`.
-  defp git(root, args) do
-    Start.run_cmd("git", args, cd: root, stderr_to_stdout: true)
-  rescue
-    e in ErlangError ->
-      Output.die(
-        "could not run git: #{inspect(e.original)}",
-        "Ensure git is installed and on your PATH."
-      )
-  end
-
-  # ---- deploy output -----------------------------------------------------
-
-  defp emit_up_to_date(:json) do
-    IO.puts(
-      Jason.encode!(%{
-        branch: @integration_branch,
-        pulled: false,
-        up_to_date: true,
-        restarted: false,
-        commits: [],
-        ok: true
-      })
-    )
-  end
-
-  defp emit_up_to_date(:text) do
-    IO.puts("Already up to date on #{@integration_branch} — nothing to deploy.")
-    IO.puts("(Run `arb restart` if you want to bounce Phoenix anyway.)")
-  end
-
-  defp emit_deployed(
-         :json,
-         before_sha,
-         after_sha,
-         commits,
-         actions,
-         was_running,
-         migrations_applied,
-         cli_built
-       ) do
-    IO.puts(
-      Jason.encode!(%{
-        branch: @integration_branch,
-        pulled: true,
-        up_to_date: false,
-        restarted: true,
-        was_running: was_running,
-        old_sha: before_sha,
-        new_sha: after_sha,
-        commits: commits,
-        actions: action_payload(actions),
-        migrations_applied: migrations_applied,
-        cli_rebuilt: cli_built,
-        base_url: Client.base_url(),
-        checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
-        ok: Doctor.green?()
-      })
-    )
-  end
-
-  defp emit_deployed(
-         :text,
-         _before,
-         _after,
-         commits,
-         _actions,
-         _was_running,
-         migrations_applied,
-         cli_built
-       ) do
-    IO.puts("")
-    IO.puts("Pulled #{length(commits)} new commit(s) onto #{@integration_branch}:")
-    print_commits(commits)
-    IO.puts("")
-
-    if migrations_applied > 0 do
-      IO.puts("Applied #{migrations_applied} migration(s)")
-    else
-      IO.puts("Database schema already current (no migrations to apply)")
-    end
-
-    if cli_built do
-      IO.puts("Rebuilt and installed CLI escript")
-    end
-
-    IO.puts("")
-    IO.puts("Arbiter Phoenix restarted at #{Client.base_url()}")
-    IO.puts("")
-    Doctor.report()
-  end
-
-  defp emit_deploy_timeout(
-         :json,
-         before_sha,
-         after_sha,
-         commits,
-         actions,
-         timeout_ms,
-         migrations_applied,
-         cli_built
-       ) do
-    IO.puts(
-      Jason.encode!(%{
-        branch: @integration_branch,
-        pulled: true,
-        up_to_date: false,
-        restarted: false,
-        old_sha: before_sha,
-        new_sha: after_sha,
-        commits: commits,
-        actions: action_payload(actions),
-        migrations_applied: migrations_applied,
-        cli_rebuilt: cli_built,
-        base_url: Client.base_url(),
-        checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
-        ok: false,
-        timed_out_after_s: div(timeout_ms, 1000)
-      })
-    )
-
-    Output.halt(1)
-  end
-
-  defp emit_deploy_timeout(
-         :text,
-         _before,
-         _after,
-         commits,
-         _actions,
-         timeout_ms,
-         migrations_applied,
-         cli_built
-       ) do
-    IO.puts("")
-    IO.puts("Pulled #{length(commits)} new commit(s) onto #{@integration_branch}:")
-    print_commits(commits)
-    IO.puts("")
-
-    if migrations_applied > 0 do
-      IO.puts("Applied #{migrations_applied} migration(s)")
-    else
-      IO.puts("Database schema already current (no migrations to apply)")
-    end
-
-    if cli_built do
-      IO.puts("Rebuilt and installed CLI escript")
-    end
-
-    IO.puts("")
-    IO.puts("…but Phoenix did not come back up within #{div(timeout_ms, 1000)}s.")
-    IO.puts("Last status:")
-    IO.puts("")
-    Doctor.report()
-    IO.puts("")
-    IO.puts("hint: tail #{Start.phoenix_log_path()} for Phoenix startup output.")
-    Output.halt(1)
-  end
-
-  defp print_commits(commits) do
-    Enum.each(commits, fn %{sha: sha, subject: subject} ->
-      IO.puts("  #{sha}  #{subject}")
-    end)
-  end
-
-  defp action_payload(actions) do
-    Enum.map(actions, fn {component, status, detail} ->
-      base = %{component: to_string(component), status: to_string(status)}
-      if is_list(detail), do: Map.put(base, :pids, detail), else: base
-    end)
-  end
-
   # ---- issue-edit mode ---------------------------------------------------
 
   defp do_edit_issue(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @edit_switches)
-    mode = if opts[:json], do: :json, else: :text
+    {opts, rest, mode} = ArgParser.parse(argv, switches: @edit_switches)
 
     id =
       case rest do
