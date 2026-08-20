@@ -19,41 +19,30 @@ defmodule Arbiter.Worker.Stats do
 
   def task_costs_usd([]), do: %{}
 
-  # bd-cryhwk: ReviewGate reviewer/implementer passes write their
-  # `Arbiter.Usage.Event` rows under a synthetic, `#`-suffixed task id
-  # (`Arbiter.Worker.ReviewGate.reviewer_task_id/1`,
-  # `implementer_task_id/2` — e.g. "<base>#review", "<base>#review#impl1")
-  # so the row is still attributable to the pass that earned it. Filtering
-  # on exact `task_id` equality against the base ids silently dropped every
-  # review/impl row, so the reported total could be (and was observed to be)
-  # *less* than a single ReviewGate round for the same task.
-  #
-  # Every id in `task_ids` gets its own key in the result: a bare id (no
-  # `#`) rolls up its own rows plus every synthetic id built from it; an
-  # already-synthetic id (the caller asked for a specific ReviewGate pass)
-  # is matched exactly, not rolled up again. Narrowed at the DB with an
-  # exact-or-prefix filter (still index-friendly on `[:task_id,
-  # :occurred_at]` for the exact leg) and a column select, so this no
-  # longer pulls the whole `usage_events` table — including the `:raw`
-  # per-row CLI payload — into memory on every `worker_list` call.
+  # bd-5fhyry: task cost aggregation now uses explicit base_task_id/role
+  # columns instead of suffix stripping. Each id in `task_ids` gets its own
+  # key in the result: a base id (derived from an already-synthetic id by
+  # stripping suffixes) rolls up all events for that base plus any review/impl
+  # passes; an already-synthetic id is matched exactly against the task_id
+  # column (exact match, no rollup).
   def task_costs_usd(task_ids) when is_list(task_ids) do
-    filter = task_id_filter(task_ids)
-
     events =
       Arbiter.Usage.Event
-      |> Ash.Query.do_filter(filter)
-      |> Ash.Query.select([:task_id, :cost_usd])
+      |> Ash.Query.do_filter(task_id_or_base_task_id_filter(task_ids))
+      |> Ash.Query.select([:task_id, :base_task_id, :cost_usd])
       |> Ash.read!()
 
-    by_exact_id = Enum.group_by(events, & &1.task_id)
-    by_base_id = Enum.group_by(events, &Arbiter.Worker.ReviewGate.base_task_id(&1.task_id))
+    by_exact_task_id = Enum.group_by(events, & &1.task_id)
+    by_base_task_id = Enum.group_by(events, & &1.base_task_id)
 
     Map.new(task_ids, fn id ->
+      base_id = Arbiter.Worker.ReviewGate.base_task_id(id)
+
       rows =
-        if id == Arbiter.Worker.ReviewGate.base_task_id(id) do
-          Map.get(by_base_id, id, [])
+        if id == base_id do
+          Map.get(by_base_task_id, id, [])
         else
-          Map.get(by_exact_id, id, [])
+          Map.get(by_exact_task_id, id, [])
         end
 
       {id, Enum.reduce(rows, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)}
@@ -62,9 +51,19 @@ defmodule Arbiter.Worker.Stats do
     _ -> %{}
   end
 
-  defp task_id_filter(task_ids) do
+  # Filter by exact task_id match or by base_task_id (to capture all review/impl
+  # passes under a base task). Uses the task_id_or_base_task_id index for speed.
+  defp task_id_or_base_task_id_filter(task_ids) do
     Enum.reduce(task_ids, nil, fn id, acc ->
-      condition = Ash.Expr.expr(task_id == ^id or string_starts_with(task_id, ^(id <> "#")))
+      base_id = Arbiter.Worker.ReviewGate.base_task_id(id)
+
+      condition =
+        if id == base_id do
+          Ash.Expr.expr(base_task_id == ^id)
+        else
+          Ash.Expr.expr(task_id == ^id)
+        end
+
       if is_nil(acc), do: condition, else: Ash.Expr.expr(^acc or ^condition)
     end)
   end

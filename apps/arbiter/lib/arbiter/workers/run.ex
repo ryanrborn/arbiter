@@ -95,7 +95,9 @@ defmodule Arbiter.Workers.Run do
         :standing_orders_digest,
         :routing_policy,
         :model_tier,
-        :thinking
+        :thinking,
+        :base_task_id,
+        :role
       ]
     end
 
@@ -123,7 +125,9 @@ defmodule Arbiter.Workers.Run do
         :prompt_sha256,
         :result_subtype,
         :result_is_error,
-        :result_message
+        :result_message,
+        :base_task_id,
+        :role
       ]
     end
   end
@@ -364,6 +368,30 @@ defmodule Arbiter.Workers.Run do
       description "The terminal event's final assistant-facing text, redacted the same as " <>
                     "transcript lines. Truncated at 20,000 chars to keep the row bounded — " <>
                     "the full, untruncated transcript remains the audit source of record."
+    end
+
+    # ---- Parent/role hierarchy (bd-5fhyry) ----------------------------------
+    #
+    # Replace suffix-encoded task-id hierarchy (`<base>#review`, `<base>#review#impl1`)
+    # with real columns: `base_task_id` (the root task) plus `role` (denoting the
+    # run's purpose: base/review/impl/etc), so hierarchy stops being string surgery
+    # that a `WHERE task_id = ...` silently drops.
+    attribute :base_task_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "The root task id this run is part of (for ReviewGate review/impl " <>
+                    "passes, this is the base task; for base runs, it equals task_id). " <>
+                    "Nullable for now; populated for new runs and backfills."
+    end
+
+    attribute :role, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "The role this worker played in the task's lifecycle: 'base' for the " <>
+                    "main authoring run, 'review' for review-gate reviewer, 'impl' for " <>
+                    "review-gate implementer, etc. Replaces suffix-encoded task_id hierarchy."
     end
 
     create_timestamp :inserted_at

@@ -1,6 +1,8 @@
 defmodule Arbiter.Worker.StatsTest do
   use Arbiter.DataCase, async: true
 
+  require Ash.Expr
+
   alias Arbiter.Usage.Event
   alias Arbiter.Worker.Stats
 
@@ -23,8 +25,22 @@ defmodule Arbiter.Worker.StatsTest do
 
     test "sums a task's own :work rows" do
       task_id = "bd-stats-#{System.unique_integer([:positive])}"
-      create_event!(%{task_id: task_id, step: :work, cost_usd: 0.5})
-      create_event!(%{task_id: task_id, step: :work, cost_usd: 0.25})
+
+      create_event!(%{
+        task_id: task_id,
+        step: :work,
+        cost_usd: 0.5,
+        base_task_id: task_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: task_id,
+        step: :work,
+        cost_usd: 0.25,
+        base_task_id: task_id,
+        role: "base"
+      })
 
       assert Stats.task_costs_usd([task_id]) == %{task_id => 0.75}
     end
@@ -40,10 +56,37 @@ defmodule Arbiter.Worker.StatsTest do
     test "rolls up ReviewGate reviewer/implementer rows under the base task id" do
       task_id = "bd-stats-#{System.unique_integer([:positive])}"
 
-      create_event!(%{task_id: task_id, step: :work, cost_usd: 0.741102})
-      create_event!(%{task_id: "#{task_id}#review", step: :review, cost_usd: 0.6449235})
-      create_event!(%{task_id: "#{task_id}#review#impl1", step: :impl, cost_usd: 0.0833313})
-      create_event!(%{task_id: "#{task_id}#r2", step: :review, cost_usd: 0.4209582})
+      create_event!(%{
+        task_id: task_id,
+        step: :work,
+        cost_usd: 0.741102,
+        base_task_id: task_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: "#{task_id}#review",
+        step: :review,
+        cost_usd: 0.6449235,
+        base_task_id: task_id,
+        role: "review"
+      })
+
+      create_event!(%{
+        task_id: "#{task_id}#review#impl1",
+        step: :impl,
+        cost_usd: 0.0833313,
+        base_task_id: task_id,
+        role: "impl"
+      })
+
+      create_event!(%{
+        task_id: "#{task_id}#r2",
+        step: :review,
+        cost_usd: 0.4209582,
+        base_task_id: task_id,
+        role: "review"
+      })
 
       assert %{^task_id => total} = Stats.task_costs_usd([task_id])
       assert_in_delta total, 1.890315, 0.000001
@@ -53,8 +96,21 @@ defmodule Arbiter.Worker.StatsTest do
       task_a = "bd-stats-a-#{System.unique_integer([:positive])}"
       task_b = "bd-stats-b-#{System.unique_integer([:positive])}"
 
-      create_event!(%{task_id: task_a, step: :work, cost_usd: 1.0})
-      create_event!(%{task_id: "#{task_b}#review", step: :review, cost_usd: 2.0})
+      create_event!(%{
+        task_id: task_a,
+        step: :work,
+        cost_usd: 1.0,
+        base_task_id: task_a,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: "#{task_b}#review",
+        step: :review,
+        cost_usd: 2.0,
+        base_task_id: task_b,
+        role: "review"
+      })
 
       assert Stats.task_costs_usd([task_a]) == %{task_a => 1.0}
     end
@@ -69,8 +125,21 @@ defmodule Arbiter.Worker.StatsTest do
       base_id = "bd-stats-#{System.unique_integer([:positive])}"
       review_id = "#{base_id}#review"
 
-      create_event!(%{task_id: base_id, step: :work, cost_usd: 1.0})
-      create_event!(%{task_id: review_id, step: :review, cost_usd: 2.0})
+      create_event!(%{
+        task_id: base_id,
+        step: :work,
+        cost_usd: 1.0,
+        base_task_id: base_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: review_id,
+        step: :review,
+        cost_usd: 2.0,
+        base_task_id: base_id,
+        role: "review"
+      })
 
       assert Stats.task_costs_usd([review_id]) == %{review_id => 2.0}
     end
@@ -84,14 +153,146 @@ defmodule Arbiter.Worker.StatsTest do
       review_id = "#{base_id}#review"
       untouched_id = "bd-stats-untouched-#{System.unique_integer([:positive])}"
 
-      create_event!(%{task_id: base_id, step: :work, cost_usd: 1.0})
-      create_event!(%{task_id: review_id, step: :review, cost_usd: 2.0})
+      create_event!(%{
+        task_id: base_id,
+        step: :work,
+        cost_usd: 1.0,
+        base_task_id: base_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: review_id,
+        step: :review,
+        cost_usd: 2.0,
+        base_task_id: base_id,
+        role: "review"
+      })
 
       assert Stats.task_costs_usd([base_id, review_id, untouched_id]) == %{
                base_id => 3.0,
                review_id => 2.0,
                untouched_id => 0.0
              }
+    end
+  end
+
+  describe "base_task_id/role columns enable cost aggregation without suffix stripping" do
+    test "task_costs_usd/1 uses base_task_id to sum all review/impl events under a base task" do
+      base_id = "bd-stats-#{System.unique_integer([:positive])}"
+      review_id = "#{base_id}#review"
+      impl_id = "#{base_id}#review#impl1"
+
+      create_event!(%{
+        task_id: base_id,
+        step: :work,
+        cost_usd: 0.5,
+        base_task_id: base_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: review_id,
+        step: :review,
+        cost_usd: 0.3,
+        base_task_id: base_id,
+        role: "review"
+      })
+
+      create_event!(%{
+        task_id: impl_id,
+        step: :impl,
+        cost_usd: 0.2,
+        base_task_id: base_id,
+        role: "impl"
+      })
+
+      assert %{^base_id => total} = Stats.task_costs_usd([base_id])
+      assert_in_delta total, 1.0, 0.000001
+    end
+
+    test "task_costs_usd/1 resolves synthetic task_id to its own row, not the base rollup" do
+      base_id = "bd-stats-#{System.unique_integer([:positive])}"
+      review_id = "#{base_id}#review"
+
+      create_event!(%{
+        task_id: base_id,
+        step: :work,
+        cost_usd: 1.0,
+        base_task_id: base_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: review_id,
+        step: :review,
+        cost_usd: 2.0,
+        base_task_id: base_id,
+        role: "review"
+      })
+
+      assert Stats.task_costs_usd([review_id]) == %{review_id => 2.0}
+    end
+
+    test "task_costs_usd/1 with mixed base and synthetic ids resolves each independently" do
+      base_id = "bd-stats-#{System.unique_integer([:positive])}"
+      review_id = "#{base_id}#review"
+      untouched_id = "bd-stats-untouched-#{System.unique_integer([:positive])}"
+
+      create_event!(%{
+        task_id: base_id,
+        step: :work,
+        cost_usd: 1.0,
+        base_task_id: base_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: review_id,
+        step: :review,
+        cost_usd: 2.0,
+        base_task_id: base_id,
+        role: "review"
+      })
+
+      assert Stats.task_costs_usd([base_id, review_id, untouched_id]) == %{
+               base_id => 3.0,
+               review_id => 2.0,
+               untouched_id => 0.0
+             }
+    end
+
+    test "resumed_from_run_id lineage: full spend aggregates across initial and resumed runs" do
+      base_id = "bd-stats-#{System.unique_integer([:positive])}"
+
+      # Create events for the initial run
+      create_event!(%{
+        task_id: base_id,
+        step: :work,
+        cost_usd: 0.5,
+        base_task_id: base_id,
+        role: "base"
+      })
+
+      create_event!(%{
+        task_id: "#{base_id}#review",
+        step: :review,
+        cost_usd: 0.3,
+        base_task_id: base_id,
+        role: "review"
+      })
+
+      # Create events for the resumed run (same base_task_id)
+      create_event!(%{
+        task_id: base_id,
+        step: :work,
+        cost_usd: 0.2,
+        base_task_id: base_id,
+        role: "base"
+      })
+
+      assert %{^base_id => total} = Stats.task_costs_usd([base_id])
+      assert_in_delta total, 1.0, 0.000001
     end
   end
 end
