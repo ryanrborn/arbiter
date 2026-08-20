@@ -65,7 +65,7 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 
 **Escalation mailbox** — the coordinator's inbox for anything that needs a human or coordinator ruling (e.g. a ReviewGate escalation, a worker failure). Read it via `arb message inbox` or the `inbox_check` / `notify_list` MCP tools.
 
-**`/events`** — a server-push event stream (`GET /events`) for the coordinator: newline-delimited JSON, one event per line, for topics like `inbox`, `review_gate`, `worker_failed`, `worker_done`, and (opt-in) `task_state` / `external_review`.
+**`/events`** — a server-push event stream (`GET /events`) for the coordinator: newline-delimited JSON, one event per line, for topics like `inbox`, `review_gate`, `worker_failed`, `worker_done`, and (opt-in) `task_state` / `external_review`. Every event carries a `"cursor"`; pass `since=<cursor|timestamp>` to replay what was missed since a disconnect before rejoining the live stream (see `ArbiterWeb.Api.EventController` moduledoc).
 
 ## Coordinating via MCP
 

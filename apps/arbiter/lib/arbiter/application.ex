@@ -77,6 +77,10 @@ defmodule Arbiter.Application do
       # workspace that has not set `loop.autonomous_routing_enabled`, which is
       # all of them by default.
       Arbiter.Loop.CanaryTicker,
+      # Prunes `Arbiter.Events.Record` rows past the retention window
+      # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
+      # grow without bound. See `Arbiter.Events.Retention` for config.
+      Arbiter.Events.Retention,
       # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
       # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
       # it starts without error but never reaches the MCP server — so a worker
