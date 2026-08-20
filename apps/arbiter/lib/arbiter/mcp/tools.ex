@@ -28,6 +28,27 @@ defmodule Arbiter.MCP.Tools do
   Tier-level visibility (which tier may call which tool) is enforced upstream in
   `Arbiter.MCP.Catalog`; these handlers enforce the *data-level* rules —
   own-task and workspace isolation — via `Arbiter.MCP.Scope`.
+
+  Most handlers live directly on this module, but six tool groups are split into
+  submodules to keep this file a manageable size — this module `defdelegate`s
+  their public functions so `Arbiter.MCP.Catalog`'s `&Tools.function/2` captures
+  and every existing caller keep working unchanged:
+
+    * `Arbiter.MCP.Tools.Skills` — `skill_*`
+    * `Arbiter.MCP.Tools.LoopPending` — `loop_pending_*`
+    * `Arbiter.MCP.Tools.Task` — `task_show` / `task_ready` / `task_update_progress` /
+      `task_create` / `task_update` / `task_close` / `task_reopen` /
+      `task_sync_upstream_close` / `dep_add` / `dep_remove`
+    * `Arbiter.MCP.Tools.Workspace` — `workspace_show` / `workspace_config_*` /
+      `installation_config_*`
+    * `Arbiter.MCP.Tools.Messaging` — `inbox_check` / `coordinator_inbox` /
+      `message_send` / `notify_list`
+    * `Arbiter.MCP.Tools.Worker` — the `worker_*` lifecycle family, `run_log_list`,
+      `transcript_capture_stats`
+
+  This module still owns the generic arg/serialization helpers those submodules
+  call back into (`fetch_string`, `authorized_workspace`, `serialize_task_summary`,
+  etc), plus every tool group not split out above.
   """
 
   alias Arbiter.Agents.SecurityPolicy
@@ -37,13 +58,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Tasks.GraphMember
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.MCP
   alias Arbiter.MCP.Scope
-  alias Arbiter.Messages.Message
-  alias Arbiter.Worker
-  alias Arbiter.Worker.Dispatch
-  alias Arbiter.Worker.ReviewAutomation
-  alias Arbiter.Worker.ReviewGate
   alias Arbiter.Trackers
   alias Arbiter.Usage
   alias Arbiter.Workflows.Conductor
@@ -51,888 +66,6 @@ defmodule Arbiter.MCP.Tools do
 
   require Ash.Query
   require Logger
-
-  @progress_fields ~w(notes qa_notes deployment_notes pr_body)
-  @message_kinds_mcp ~w(notification completion failure escalation info)a
-
-  # ---- task_show ----------------------------------------------------------
-
-  @doc "Read a single task. Worker: its own task only. Coordinator: any in its workspace."
-  @spec task_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_show(%Scope{} = scope, args) do
-    full = Map.get(args, "full") == true
-
-    with {:ok, id} <- resolve_task_id(scope, args),
-         {:ok, issue} <- fetch_task(scope, args, id) do
-      loaded = load_progress(issue)
-      result = if(full, do: serialize_task(loaded), else: serialize_task_slim(loaded))
-      # Strip pr_body from coordinator full-view (bandwidth; coordinators don't
-      # need the body they didn't write). Worker full-view retains it so the
-      # worker can verify its own authored body (bd-53xrmi).
-      result =
-        if full and scope.tier == :coordinator,
-          do: Map.delete(result, :pr_body),
-          else: result
-
-      {:ok, result}
-    end
-  end
-
-  # ---- task_ready ---------------------------------------------------------
-
-  @doc """
-  List ready (unblocked, open) tasks in a workspace. Coordinator only. The
-  workspace is resolved from the optional `workspace` arg, else the scope's bound
-  workspace, else the installation default.
-  """
-  @spec task_ready(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_ready(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      tasks =
-        [workspace_id: ws_id]
-        |> Issue.ready()
-        |> Enum.map(&serialize_task_summary/1)
-
-      {:ok, %{tasks: tasks, count: length(tasks)}}
-    end
-  end
-
-  # ---- inbox_check --------------------------------------------------------
-
-  @doc """
-  The mailbox for a task — the structured replacement for `arb inbox <task>`.
-  Worker: its own task. Coordinator: the `task_id` argument, within its workspace.
-
-  Two states:
-  - `state: "unread"` (default): unread messages, marked read on return.
-  - `state: "outstanding"`: read-but-uncleared messages; pure read, no mutations.
-  """
-  @spec inbox_check(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def inbox_check(%Scope{} = scope, args) do
-    state = fetch_string(args, "state") || "unread"
-
-    with :ok <- validate_state(state),
-         {:ok, to_ref} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, task} <- fetch_task(scope, args, to_ref) do
-      case state do
-        "unread" ->
-          messages = Message.inbox(to_ref, workspace_id: task.workspace_id)
-          _ = Enum.each(messages, &Message.mark_read/1)
-
-          {:ok,
-           %{
-             task_id: to_ref,
-             messages: Enum.map(messages, &serialize_message/1),
-             count: length(messages)
-           }}
-
-        "outstanding" ->
-          messages = Message.outstanding(to_ref, workspace_id: task.workspace_id)
-
-          {:ok,
-           %{
-             task_id: to_ref,
-             messages: Enum.map(messages, &serialize_message/1),
-             count: length(messages)
-           }}
-      end
-    end
-  end
-
-  # ---- coordinator_inbox --------------------------------------------------
-
-  @doc """
-  The coordinator escalation mailbox for the bound workspace — the structured
-  replacement for `arb message inbox` / `arb inbox`. Coordinator only; the
-  worker tier is denied at the catalog level.
-
-  Lists messages where `to_ref == "coordinator"` in the workspace. Two states:
-  - `state: "unread"` (default): unread messages, marks them read on return,
-    and optionally soft-clears the outstanding tail (mirrors `arb inbox clear`).
-  - `state: "outstanding"`: read-but-uncleared messages; pure read, no mutations.
-
-  `state: "outstanding"` and `clear: true` are mutually exclusive and will
-  return an error.
-  """
-  @spec coordinator_inbox(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def coordinator_inbox(%Scope{} = scope, args) do
-    state = fetch_string(args, "state") || "unread"
-
-    with :ok <- validate_state(state),
-         {:ok, clear} <- fetch_bool(args, "clear", false),
-         :ok <- validate_state_and_clear_combo(state, clear),
-         {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      ref = Message.coordinator_ref()
-
-      case state do
-        "unread" ->
-          messages = Message.inbox(ref, workspace_id: ws_id)
-          _ = Enum.each(messages, &Message.mark_read/1)
-
-          {deleted_read, deleted_unread, remaining_unread} =
-            if clear do
-              {:ok, dr, du, ru} = Message.clear_read(ref, workspace_id: ws_id)
-              {dr, du, ru}
-            else
-              {0, 0, 0}
-            end
-
-          {:ok,
-           %{
-             messages: Enum.map(messages, &serialize_message/1),
-             count: length(messages),
-             deleted_read: deleted_read,
-             deleted_unread: deleted_unread,
-             remaining_unread: remaining_unread
-           }}
-
-        "outstanding" ->
-          messages = Message.outstanding(ref, workspace_id: ws_id)
-
-          {:ok,
-           %{
-             messages: Enum.map(messages, &serialize_message/1),
-             count: length(messages)
-           }}
-      end
-    end
-  end
-
-  defp validate_state(state) when state in ["unread", "outstanding"] do
-    :ok
-  end
-
-  defp validate_state(state) do
-    {:error, {:invalid_args, "state must be \"unread\" or \"outstanding\", got \"#{state}\""}}
-  end
-
-  defp validate_state_and_clear_combo("outstanding", true) do
-    {:error, {:invalid_args, "clear: true cannot be combined with state: \"outstanding\""}}
-  end
-
-  defp validate_state_and_clear_combo(_state, _clear) do
-    :ok
-  end
-
-  # ---- workspace_show -----------------------------------------------------
-
-  @doc """
-  A workspace: config and the resolved worker security posture.
-  Resolved from the optional `workspace` arg (name or id), else the scope's bound
-  workspace, else the installation default. A workspace-bound scope (worker) can
-  only ever inspect its own workspace.
-  """
-  @spec workspace_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def workspace_show(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      case Ash.get(Workspace, ws_id) do
-        {:ok, %Workspace{} = ws} -> {:ok, serialize_workspace(ws)}
-        _ -> {:error, {:not_found, "workspace #{ws_id} not found"}}
-      end
-    end
-  end
-
-  # ---- workspace_config_get ----------------------------------------------
-
-  @doc """
-  Read the full workspace config or a single dotted.key. Secret values are
-  never returned — only secret_keys (the names of configured secrets) and any
-  `credentials_ref` pointers already embedded in the config JSON.
-  Resolved from the optional `workspace` arg, else the scope's bound workspace,
-  else the installation default.
-  """
-  @spec workspace_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def workspace_config_get(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, ws} <- fetch_workspace(ws_id) do
-      config = ws.config || %{}
-      key = fetch_string(args, "key")
-
-      value =
-        if key do
-          config_get_in_path(config, String.split(key, "."))
-        else
-          config
-        end
-
-      if key != nil and value == nil do
-        {:error, {:not_found, "config key not found: #{key}"}}
-      else
-        {:ok,
-         %{
-           workspace: ws.name,
-           key: key,
-           value: value,
-           secret_keys: workspace_secret_keys(ws)
-         }}
-      end
-    end
-  end
-
-  # ---- workspace_config_overview ------------------------------------------
-
-  @doc """
-  A grouped summary of the workspace config: tracker, merge, agent,
-  review_agent, routing, review, review_gate, standing_orders, and the names
-  of configured secrets (values never exposed). Mirrors `arb config overview`.
-  Resolved from the optional `workspace` arg like `workspace_show`.
-  """
-  @spec workspace_config_overview(Scope.t(), map()) ::
-          {:ok, map()} | {:error, {atom(), String.t()}}
-  def workspace_config_overview(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, ws} <- fetch_workspace(ws_id) do
-      config = ws.config || %{}
-
-      {:ok,
-       %{
-         workspace: %{id: ws.id, name: ws.name, prefix: ws.prefix},
-         tracker: Map.get(config, "tracker", %{}),
-         merge: Map.get(config, "merge", %{}),
-         agent: Map.get(config, "agent", %{}),
-         review_agent: Map.get(config, "review_agent", %{}),
-         routing: Map.get(config, "routing", %{}),
-         review: Map.get(config, "review", %{}),
-         review_gate: Map.get(config, "review_gate", %{}),
-         standing_orders: Map.get(config, "standing_orders", []),
-         secret_keys: workspace_secret_keys(ws)
-       }}
-    end
-  end
-
-  # ---- workspace_config_set -----------------------------------------------
-
-  @doc """
-  Set a single dotted.key to a value via the deep-merge config endpoint.
-  Coordinator only (enforced in `Arbiter.MCP.Catalog`). Sibling keys are
-  preserved — this uses `PATCH /api/workspaces/:id/config`, not the
-  whole-map replace path. Secret / credential top-level key prefixes are
-  blocked; route those through `arb workspace secret`.
-  Returns the workspace identity, the full updated config, and secret_keys.
-  """
-  @spec workspace_config_set(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def workspace_config_set(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, key} <- require_string(args, "key"),
-         {:ok, value} <- require_config_value(args),
-         :ok <- deny_secret_path(key),
-         {:ok, ws} <- fetch_workspace(ws_id) do
-      patch = config_put_in_path(%{}, String.split(key, "."), value)
-
-      case Ash.update(ws, %{patch: patch, unset_paths: []}, action: :patch_config) do
-        {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- workspace_config_unset ---------------------------------------------
-
-  @doc """
-  Remove a single dotted.key from the config via the deep-merge endpoint.
-  Coordinator only (enforced in `Arbiter.MCP.Catalog`). Sibling keys are
-  preserved. Returns the workspace identity, the full updated config, and
-  secret_keys. Errors if the key does not exist in the current config.
-  """
-  @spec workspace_config_unset(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def workspace_config_unset(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, key} <- require_string(args, "key"),
-         :ok <- deny_secret_path(key),
-         {:ok, ws} <- fetch_workspace(ws_id) do
-      config = ws.config || %{}
-      path = String.split(key, ".")
-
-      if config_get_in_path(config, path) == nil do
-        {:error, {:invalid, "config key not found: #{key}"}}
-      else
-        case Ash.update(ws, %{patch: %{}, unset_paths: [key]}, action: :patch_config) do
-          {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
-          {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-        end
-      end
-    end
-  end
-
-  # ---- installation_config_get --------------------------------------------
-
-  @install_settings_keys ~w(
-    conductor_system_max_concurrent
-    credential_watchdog_adapters
-    credential_watchdog_interval_ms
-    credential_watchdog_recovery_interval_ms
-  )
-
-  @doc """
-  Read an install-wide runtime setting (bd-2ogep0) — the Conductor's system-wide
-  concurrency ceiling and the `Arbiter.Agents.CredentialWatchdog` knobs
-  (bd-ajgve2). Returns the full settings map when `key` is omitted. Available to
-  both tiers (read-only, no workspace scoping — this is installation-wide).
-  """
-  @spec installation_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def installation_config_get(%Scope{} = _scope, args) do
-    settings = %{
-      conductor_system_max_concurrent: Arbiter.Settings.conductor_system_max_concurrent(),
-      credential_watchdog_adapters: Arbiter.Settings.credential_watchdog_adapters(),
-      credential_watchdog_interval_ms: Arbiter.Settings.credential_watchdog_interval_ms(),
-      credential_watchdog_recovery_interval_ms:
-        Arbiter.Settings.credential_watchdog_recovery_interval_ms()
-    }
-
-    case fetch_string(args, "key") do
-      nil ->
-        {:ok, %{key: nil, value: settings, settings: settings}}
-
-      key when key in @install_settings_keys ->
-        {:ok,
-         %{key: key, value: Map.get(settings, String.to_existing_atom(key)), settings: settings}}
-
-      key ->
-        {:error, {:not_found, "unknown installation setting: #{key}"}}
-    end
-  end
-
-  # ---- installation_config_set --------------------------------------------
-
-  @doc """
-  Set an install-wide runtime setting (bd-2ogep0). Coordinator only (enforced
-  in `Arbiter.MCP.Catalog`). `null` always clears an override, falling back to
-  the application env / hardcoded default. Settable keys:
-
-    * `conductor_system_max_concurrent` — positive integer. Takes effect on the
-      next Conductor drain cycle across every running graph.
-    * `credential_watchdog_adapters` — list of agent-type names
-      (`Arbiter.Agents.valid_agent_types/0`) the Watchdog should probe; `[]`
-      probes nothing.
-    * `credential_watchdog_interval_ms` / `credential_watchdog_recovery_interval_ms`
-      — positive integers.
-
-  The Watchdog keys take effect on its next poll cycle (bd-ajgve2). No restart
-  is required for any of them.
-  """
-  @spec installation_config_set(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def installation_config_set(%Scope{} = _scope, args) do
-    with {:ok, key} <- require_string(args, "key"),
-         :ok <- validate_install_key(key),
-         {:ok, value} <- require_install_value(key, args),
-         {:ok, updated} <- put_install_setting(key, value) do
-      {:ok, %{key: key, value: updated}}
-    end
-  end
-
-  defp validate_install_key(key) when key in @install_settings_keys, do: :ok
-  defp validate_install_key(key), do: {:error, {:invalid, "unknown installation setting: #{key}"}}
-
-  defp require_install_value("credential_watchdog_adapters", args) do
-    valid = Arbiter.Agents.valid_agent_types()
-
-    case Map.fetch(args, "value") do
-      {:ok, nil} ->
-        {:ok, nil}
-
-      {:ok, names} when is_list(names) ->
-        if Enum.all?(names, &(is_binary(&1) and &1 in valid)) do
-          {:ok, names}
-        else
-          {:error,
-           {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
-        end
-
-      {:ok, other} ->
-        # Attempt to unwrap stringified JSON before failing validation
-        unwrapped = unwrap_stringified_json(other, [:list])
-
-        if is_list(unwrapped) and Enum.all?(unwrapped, &(is_binary(&1) and &1 in valid)) do
-          {:ok, unwrapped}
-        else
-          {:error, {:invalid, "value must be a list of agent type strings or null"}}
-        end
-
-      :error ->
-        {:error, {:invalid, "value is required"}}
-    end
-  end
-
-  defp require_install_value(_key, args) do
-    case Map.fetch(args, "value") do
-      {:ok, nil} ->
-        {:ok, nil}
-
-      {:ok, n} when is_integer(n) and n > 0 ->
-        {:ok, n}
-
-      {:ok, other} ->
-        # Attempt to unwrap stringified JSON before failing validation
-        unwrapped = unwrap_stringified_json(other, [:integer])
-
-        if is_integer(unwrapped) and unwrapped > 0 do
-          {:ok, unwrapped}
-        else
-          {:error, {:invalid, "value must be a positive integer or null"}}
-        end
-
-      :error ->
-        {:error, {:invalid, "value is required"}}
-    end
-  end
-
-  defp put_install_setting(key, value) do
-    result =
-      case key do
-        "conductor_system_max_concurrent" ->
-          Arbiter.Settings.set_conductor_system_max_concurrent(value)
-
-        "credential_watchdog_adapters" ->
-          Arbiter.Settings.set_credential_watchdog_adapters(value)
-
-        "credential_watchdog_interval_ms" ->
-          Arbiter.Settings.set_credential_watchdog_interval_ms(value)
-
-        "credential_watchdog_recovery_interval_ms" ->
-          Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(value)
-      end
-
-    case result do
-      {:ok, updated} -> {:ok, updated}
-      {:error, reason} -> {:error, {:invalid, inspect(reason)}}
-    end
-  end
-
-  # ---- skill_create -------------------------------------------------------
-
-  @doc """
-  Create a system-wide skill (bd-cj6i08). Coordinator only (enforced in
-  `Arbiter.MCP.Catalog`). Requires `name` (unique, kebab-case) and `body`
-  (markdown); optional `metadata` (object). The registry is NOT
-  workspace-scoped — one definition is shared across the whole system.
-
-  A `warning` is returned (non-fatal) when the name collides with a bundled
-  skill; the create still succeeds.
-  """
-  @spec skill_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def skill_create(%Scope{} = scope, args) do
-    with {:ok, name} <- require_string(args, "name"),
-         {:ok, body} <- require_string(args, "body"),
-         {:ok, code_only} <- fetch_optional_bool(args, "code_only"),
-         {:ok, workspace_id} <- skill_write_scope(scope, args) do
-      attrs =
-        %{"name" => name, "body" => body}
-        |> maybe_put("metadata", fetch_map(args, "metadata"))
-        |> maybe_put("activation_mode", fetch_string(args, "activation_mode"))
-        |> maybe_put("code_only", code_only)
-        |> maybe_put("workspace_id", workspace_id)
-
-      case Arbiter.Skills.create_skill(attrs, actor: Arbiter.PaperTrail.actor_label(scope)) do
-        {:ok, skill} ->
-          Logger.info(
-            "[skill_create] skill #{skill.id} (#{skill.name}) created" <>
-              scope_suffix(skill.workspace_id)
-          )
-
-          {:ok, skill |> serialize_skill() |> with_bundled_warning(skill.name)}
-
-        {:error, err} ->
-          {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # READ scope for skill_list / skill_get, honouring isolation:
-  #   * a `workspace` arg (id or name) → that workspace (a worker may only name
-  #     its own; a coordinator may name any).
-  #   * no arg → the scope's bound workspace (worker) or `nil` (a
-  #     workspace-agnostic coordinator sees every skill).
-  # Returns `{:ok, ws_id | nil}` or `{:error, {:unauthorized, _}}`.
-  defp skill_scope(%Scope{} = scope, args), do: authorized_workspace(scope, args)
-
-  # WRITE scope for skill_create / skill_update. A skill is GLOBAL by default
-  # (preserving prior behaviour); scoping is opt-in via an explicit `workspace`
-  # arg. So a workspace-bound coordinator does not silently scope every skill it
-  # authors to its own workspace — it must ask. Authorisation of the named
-  # workspace still runs (a worker could only ever name its own).
-  defp skill_write_scope(%Scope{} = scope, args) do
-    case fetch_string(args, "workspace") do
-      nil -> {:ok, nil}
-      _ref -> authorized_workspace(scope, args)
-    end
-  end
-
-  defp scope_suffix(nil), do: " [global]"
-  defp scope_suffix(ws_id), do: " [workspace #{ws_id}]"
-
-  # ---- skill_update -------------------------------------------------------
-
-  @doc """
-  Update a system-wide skill by `skill` (id or name). Coordinator only. Any
-  subset of `name` / `body` / `metadata` may be supplied. Returns the updated
-  skill, with a non-fatal bundled-collision `warning` when the (new) name
-  collides with a bundled skill.
-  """
-  @spec skill_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def skill_update(%Scope{} = scope, args) do
-    with {:ok, ref} <- require_string(args, "skill"),
-         {:ok, workspace_id} <- skill_write_scope(scope, args),
-         {:ok, skill} <- fetch_skill_in_scope(ref, workspace_id),
-         {:ok, code_only} <- fetch_optional_bool(args, "code_only") do
-      attrs =
-        %{}
-        |> maybe_put("name", fetch_string(args, "name"))
-        |> maybe_put("body", fetch_string(args, "body"))
-        |> maybe_put("metadata", fetch_map(args, "metadata"))
-        |> maybe_put("activation_mode", fetch_string(args, "activation_mode"))
-        |> maybe_put("code_only", code_only)
-
-      case Arbiter.Skills.update_skill(skill, attrs, actor: Arbiter.PaperTrail.actor_label(scope)) do
-        {:ok, updated} ->
-          Logger.info("[skill_update] skill #{updated.id} (#{updated.name}) updated")
-          {:ok, updated |> serialize_skill() |> with_bundled_warning(updated.name)}
-
-        {:error, err} ->
-          {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- skill_delete -------------------------------------------------------
-
-  @doc """
-  Delete a system-wide skill by `skill` (id or name). Coordinator only.
-  Returns `{deleted: true, id, name}`.
-  """
-  @spec skill_delete(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def skill_delete(%Scope{} = _scope, args) do
-    with {:ok, ref} <- require_string(args, "skill"),
-         {:ok, skill} <- fetch_skill(ref) do
-      case Arbiter.Skills.delete_skill(skill) do
-        :ok ->
-          Logger.info("[skill_delete] skill #{skill.id} (#{skill.name}) deleted")
-          {:ok, %{deleted: true, id: skill.id, name: skill.name}}
-
-        {:error, err} ->
-          {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  defp fetch_skill(ref) do
-    case Arbiter.Skills.get_skill(ref) do
-      {:ok, skill} -> {:ok, skill}
-      {:error, :not_found} -> {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
-    end
-  end
-
-  # Scope-aware fetch for the read/write skill tools. A UUID ref is looked up
-  # directly, then checked against the caller's workspace scope; a name ref
-  # resolves with shadowing precedence within that scope
-  # (`Arbiter.Skills.resolve_skill/2`). `workspace_id` nil = global scope
-  # (a workspace-agnostic coordinator sees every skill).
-  defp fetch_skill_in_scope(ref, workspace_id) do
-    cond do
-      uuid_ref?(ref) ->
-        with {:ok, skill} <- fetch_skill(ref) do
-          if skill_visible?(skill, workspace_id),
-            do: {:ok, skill},
-            else: {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
-        end
-
-      true ->
-        case Arbiter.Skills.resolve_skill(ref, workspace_id) do
-          {:ok, skill} -> {:ok, skill}
-          {:error, :not_found} -> {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
-        end
-    end
-  end
-
-  # A global skill is visible in any scope; a scoped skill only in its own
-  # workspace. A `nil` caller scope (workspace-agnostic coordinator) sees all.
-  defp skill_visible?(_skill, nil), do: true
-  defp skill_visible?(%Arbiter.Skills.Skill{workspace_id: nil}, _ws_id), do: true
-  defp skill_visible?(%Arbiter.Skills.Skill{workspace_id: ws}, ws_id), do: ws == ws_id
-
-  defp uuid_ref?(ref) do
-    Regex.match?(
-      ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-      ref
-    )
-  end
-
-  # ---- skill_list -----------------------------------------------------------
-
-  @doc """
-  List all system-wide skills (names + metadata, no `body`), ordered by name.
-  Available to both tiers — a coordinator or any worker can discover what's
-  in the registry on demand, the same source of truth as worktree
-  materialization.
-  """
-  @spec skill_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def skill_list(%Scope{} = scope, args) do
-    with {:ok, workspace_id} <- skill_scope(scope, args) do
-      # A concrete workspace id → the effective (shadowed) set for it: globals
-      # overlaid by that workspace's scoped skills. `nil` (a workspace-agnostic
-      # coordinator with no filter) → every skill across all scopes. A worker's
-      # scope is always workspace-bound, so it can only ever see its own
-      # workspace's effective set — never the whole registry (bd-9j6is7 auth).
-      skills =
-        case workspace_id do
-          nil -> Arbiter.Skills.list_skills()
-          ws_id -> Arbiter.Skills.list_skills(workspace_id: ws_id)
-        end
-        |> Enum.map(&serialize_skill_summary/1)
-
-      {:ok, %{skills: skills, count: length(skills)}}
-    end
-  end
-
-  # ---- skill_get ------------------------------------------------------------
-
-  @doc """
-  Fetch one system-wide skill's full markdown body by `skill` (id or name).
-  Available to both tiers, so the coordinator (which is not worktree-isolated
-  and can't rely on materialization) or any agent can pull a skill body on
-  demand from the same registry workers are materialized from.
-  """
-  @spec skill_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def skill_get(%Scope{} = scope, args) do
-    with {:ok, ref} <- require_string(args, "skill"),
-         {:ok, workspace_id} <- skill_scope(scope, args),
-         {:ok, skill} <- fetch_skill_in_scope(ref, workspace_id) do
-      {:ok, serialize_skill(skill)}
-    end
-  end
-
-  defp serialize_skill_summary(%Arbiter.Skills.Skill{} = skill) do
-    %{
-      id: skill.id,
-      name: skill.name,
-      workspace_id: skill.workspace_id,
-      scope: skill_scope_label(skill),
-      metadata: skill.metadata || %{},
-      activation_mode: skill.activation_mode,
-      code_only: skill.code_only,
-      created_at: iso(skill.created_at),
-      updated_at: iso(skill.updated_at)
-    }
-  end
-
-  defp serialize_skill(%Arbiter.Skills.Skill{} = skill) do
-    %{
-      id: skill.id,
-      name: skill.name,
-      workspace_id: skill.workspace_id,
-      scope: skill_scope_label(skill),
-      body: skill.body,
-      metadata: skill.metadata || %{},
-      activation_mode: skill.activation_mode,
-      code_only: skill.code_only,
-      created_at: iso(skill.created_at),
-      updated_at: iso(skill.updated_at)
-    }
-  end
-
-  defp skill_scope_label(%Arbiter.Skills.Skill{workspace_id: nil}), do: "global"
-  defp skill_scope_label(%Arbiter.Skills.Skill{}), do: "workspace"
-
-  # Attach a non-fatal bundled-skill collision warning to a serialized skill,
-  # or leave it untouched when there is no collision.
-  defp with_bundled_warning(map, name) do
-    case Arbiter.Skills.bundled_collision(name) do
-      nil -> map
-      warning -> Map.put(map, :warning, warning)
-    end
-  end
-
-  # ---- loop_pending_* -----------------------------------------------------
-  #
-  # The Stage 2 loop-proposal queue (bd-9j2g3x). Every tool here is
-  # coordinator-only in the catalog: a fleet-wide skill patch or a config change
-  # is not a worker's decision to make, and a worker bound to one task has no
-  # business applying a write that lands on every other task. There is no
-  # auto-apply at any evidence level — these tools exist so a human (or the
-  # coordinator acting for one) can read the diff first.
-
-  @loop_states ~w(proposed hypothesis applied rejected superseded)a
-  @loop_kinds ~w(skill_patch skill_create difficulty_override config_set repo_doc_patch)a
-
-  @doc """
-  List queued loop proposals. Coordinator only. Optional `state` (one name or a
-  list; defaults to the live states `hypothesis` + `proposed`), `kind`,
-  `workspace`, `limit`. Returns summaries plus the workspace's evidence bar, so
-  the caller can see how far a `hypothesis` still has to go.
-  """
-  @spec loop_pending_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def loop_pending_list(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- authorized_workspace(scope, args),
-         {:ok, states} <- loop_states(args),
-         {:ok, kind} <- optional_enum(args, "kind", @loop_kinds),
-         {:ok, limit} <- optional_integer(args, "limit") do
-      rows =
-        [state: states || Arbiter.Loop.live_states()]
-        |> maybe_put_kw(:kind, kind)
-        |> maybe_put_kw(:workspace_id, ws_id)
-        |> maybe_put_kw(:limit, limit)
-        |> Arbiter.Loop.list_pending()
-
-      {:ok,
-       %{
-         pending: Enum.map(rows, &serialize_pending_summary/1),
-         count: length(rows),
-         evidence_bar: Arbiter.Loop.evidence_bar(ws_id)
-       }}
-    end
-  end
-
-  @doc """
-  One queued loop proposal in full, including its unified `diff` and — when it
-  is not applicable yet — the reason why. Coordinator only.
-  """
-  @spec loop_pending_diff(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def loop_pending_diff(%Scope{} = scope, args) do
-    with {:ok, row} <- fetch_pending(scope, args) do
-      {:ok, serialize_pending(row)}
-    end
-  end
-
-  @doc """
-  Apply a queued loop proposal. Coordinator only. Dispatches on `kind` to the
-  same public domain API a human would call, so the write lands with a normal
-  paper-trail version attributed to the proposal id. Refuses anything that is
-  not `proposed` — a `hypothesis` reply names its current evidence and what is
-  still missing.
-  """
-  @spec loop_pending_apply(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def loop_pending_apply(%Scope{} = scope, args) do
-    with {:ok, row} <- fetch_pending(scope, args) do
-      case Arbiter.Loop.apply_pending(row, actor: Arbiter.PaperTrail.actor_label(scope)) do
-        {:ok, applied} ->
-          Logger.info("[loop_pending_apply] proposal #{applied.id} (#{applied.kind}) applied")
-          {:ok, applied |> serialize_pending() |> Map.put(:applied, true)}
-
-        {:error, reason} ->
-          {:error, loop_error(reason)}
-      end
-    end
-  end
-
-  @doc """
-  Soft-reject a queued loop proposal with an optional `reason`. Coordinator
-  only. The row persists as `rejected` (never deleted), so later windows
-  reinforce its evidence in place instead of re-proposing it from scratch.
-  """
-  @spec loop_pending_reject(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def loop_pending_reject(%Scope{} = scope, args) do
-    with {:ok, row} <- fetch_pending(scope, args) do
-      opts =
-        [actor: Arbiter.PaperTrail.actor_label(scope)]
-        |> maybe_put_kw(:reason, fetch_string(args, "reason"))
-
-      case Arbiter.Loop.reject_pending(row, opts) do
-        {:ok, rejected} ->
-          {:ok, rejected |> serialize_pending() |> Map.put(:rejected, true)}
-
-        {:error, reason} ->
-          {:error, loop_error(reason)}
-      end
-    end
-  end
-
-  # `state` accepts a single name or a list. Some clients JSON-encode the list
-  # into a string despite the schema, so unwrap that shape first (bd-1dtufq).
-  defp loop_states(args) do
-    case unwrap_stringified_json(Map.get(args, "state"), [:list]) do
-      nil ->
-        {:ok, nil}
-
-      "" ->
-        {:ok, nil}
-
-      raw when is_binary(raw) ->
-        with {:ok, state} <- enum_or_error(raw, "state", @loop_states), do: {:ok, [state]}
-
-      raw when is_list(raw) ->
-        Enum.reduce_while(raw, {:ok, []}, fn v, {:ok, acc} ->
-          case enum_or_error(v, "state", @loop_states) do
-            {:ok, state} -> {:cont, {:ok, acc ++ [state]}}
-            {:error, _} = err -> {:halt, err}
-          end
-        end)
-
-      other ->
-        {:error,
-         {:invalid, "`state` must be a string or a list of strings, got #{inspect(other)}"}}
-    end
-  end
-
-  # A proposal the caller's scope is allowed to see. A workspace-bound scope may
-  # only reach rows in its own workspace (or an unscoped, fleet-global row);
-  # never one belonging to a different workspace.
-  defp fetch_pending(%Scope{} = scope, args) do
-    with {:ok, id} <- require_string(args, "id"),
-         {:ok, ws_id} <- authorized_workspace(scope, args) do
-      case Arbiter.Loop.get_pending(id) do
-        {:ok, row} ->
-          if pending_visible?(row, ws_id),
-            do: {:ok, row},
-            else: {:error, {:not_found, "no loop proposal matching #{inspect(id)}"}}
-
-        {:error, :not_found} ->
-          {:error, {:not_found, "no loop proposal matching #{inspect(id)}"}}
-      end
-    end
-  end
-
-  defp pending_visible?(_row, nil), do: true
-  defp pending_visible?(%{workspace_id: nil}, _ws_id), do: true
-  defp pending_visible?(%{workspace_id: ws}, ws_id), do: ws == ws_id
-
-  defp loop_error(:not_found), do: {:not_found, "no loop proposal matching that id"}
-
-  defp loop_error({code, message}) when is_atom(code) and is_binary(message),
-    do: {loop_error_code(code), message}
-
-  defp loop_error(other), do: {:invalid, inspect(other)}
-
-  # `:not_applicable` / `:unmapped` are the queue's own refusals; both are
-  # caller errors rather than server faults, so they surface as `:invalid`.
-  defp loop_error_code(:not_found), do: :not_found
-  defp loop_error_code(_other), do: :invalid
-
-  defp serialize_pending_summary(row) do
-    %{
-      id: row.id,
-      kind: row.kind,
-      state: row.state,
-      scope: row.scope,
-      gist: row.gist,
-      evidence_count: row.evidence_count,
-      distinct_tasks: row.distinct_tasks,
-      context_cost_tokens: row.context_cost_tokens,
-      target: row.target,
-      category: row.category,
-      applicable: Arbiter.Loop.applicable?(row),
-      created_at: iso(row.created_at),
-      updated_at: iso(row.updated_at)
-    }
-  end
-
-  defp serialize_pending(row) do
-    row
-    |> serialize_pending_summary()
-    |> Map.merge(%{
-      diff: row.diff,
-      payload: row.payload || %{},
-      target_metric: row.target_metric,
-      baseline: row.baseline,
-      incident_refs: row.incident_refs,
-      task_refs: row.task_refs,
-      fingerprint: row.fingerprint,
-      origin: row.origin,
-      workspace_id: row.workspace_id,
-      applied_at: iso(row.applied_at),
-      escalated_at: iso(row.escalated_at),
-      rejection_reason: row.rejection_reason,
-      inapplicable_reason: Arbiter.Loop.inapplicable_reason(row)
-    })
-  end
 
   # ---- quota_get ----------------------------------------------------------
 
@@ -968,945 +101,6 @@ defmodule Arbiter.MCP.Tools do
          antigravity: Arbiter.Quota.CloudCode.serialize_latest(ws_id, "antigravity")
        }}
     end
-  end
-
-  # ---- task_update_progress ----------------------------------------------
-
-  @doc """
-  The worker's one write: record `notes` / `qa_notes` / `deployment_notes` /
-  `pr_body` on its own task (the structured replacement for `arb issue update
-  <id> --qa-notes …`). It cannot flip status, reprioritize, or touch another
-  task. Coordinator: the same narrow write against any task in its workspace.
-  """
-  @spec task_update_progress(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_update_progress(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_task_id(scope, args),
-         {:ok, issue} <- fetch_task(scope, args, id),
-         {:ok, attrs} <- progress_attrs(args) do
-      case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, serialize_task_summary(updated)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ======================================================================
-  # Phase 2 — coordinator-only mutating tools (docs/mcp-server-design.md §8)
-  # ======================================================================
-
-  # ---- task_create --------------------------------------------------------
-
-  @doc """
-  Create a task in a workspace. Coordinator only. The target workspace is
-  resolved from the optional `workspace` arg (name or id), else the scope's bound
-  workspace, else the installation default — and `workspace_id` is then forced
-  onto the task. Backs onto `Ash.create(Issue, …)` (the same path `arb create` /
-  the REST `POST /api/issues` take), so a workspace with a tracker configured
-  still mirrors the new task upstream.
-  """
-  @spec task_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_create(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, title} <- require_string(args, "title"),
-         {:ok, attrs} <- collect_attrs(args, task_create_spec()) do
-      attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
-
-      case Ash.create(Issue, attrs) do
-        {:ok, issue} -> {:ok, serialize_task_summary(issue)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- task_update --------------------------------------------------------
-
-  @doc """
-  Update a task in the scope's workspace (status / priority / title / …).
-  Coordinator only. The `:closed` status is rejected here — closing goes through
-  `task_close`, which runs the close FSM + teardown. Backs onto the task's
-  `:update` action.
-  """
-  @spec task_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_update(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_task_id(scope, args),
-         {:ok, issue} <- fetch_task(scope, args, id),
-         {:ok, attrs} <- collect_attrs(args, task_update_spec()),
-         :ok <- require_some(attrs, "provide at least one field to update") do
-      case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, serialize_task_summary(updated)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- task_close ---------------------------------------------------------
-
-  @doc """
-  Close a task in the scope's workspace via the `:close` action (sets status,
-  runs the worker/worktree teardown, and syncs the close upstream by default
-  when the task carries a `tracker_ref`). Pass `close_upstream: false` to leave
-  the linked tracker issue open. Coordinator only.
-  """
-  @spec task_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_close(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_task_id(scope, args),
-         {:ok, issue} <- fetch_task(scope, args, id),
-         {:ok, close_upstream} <- fetch_bool(args, "close_upstream", true) do
-      attrs =
-        %{close_upstream: close_upstream}
-        |> maybe_put(:reason, fetch_string(args, "reason"))
-
-      case Ash.update(issue, attrs, action: :close) do
-        {:ok, closed} -> {:ok, serialize_task_summary(closed)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- task_reopen --------------------------------------------------------
-
-  @doc """
-  Reopen a closed task in the scope's workspace via the `:reopen` action (clears
-  `closed_at`, returns it to `:open` and the ready queue, and best-effort
-  reopens the linked tracker issue). Coordinator only. Reopening is the only
-  supported path out of `:closed` — the `:update` FSM rejects that transition —
-  so a non-closed task is reported as an operational error.
-  """
-  @spec task_reopen(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_reopen(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_task_id(scope, args),
-         {:ok, issue} <- fetch_task(scope, args, id) do
-      case Ash.update(issue, %{}, action: :reopen) do
-        {:ok, reopened} -> {:ok, serialize_task_summary(reopened)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- task_sync_upstream_close --------------------------------------------
-
-  @doc """
-  Push a close to the linked tracker for a task that's already `:closed`
-  locally but never synced upstream. Coordinator only. Backs onto the
-  `:sync_upstream_close` action, which requires the task to already be
-  `:closed` — a non-closed task is reported as an operational error — and
-  makes no local status/closed_at change or close-time side effect (no
-  StopWorker/CleanupWorktree/parent rollup).
-  """
-  @spec task_sync_upstream_close(Scope.t(), map()) ::
-          {:ok, map()} | {:error, {atom(), String.t()}}
-  def task_sync_upstream_close(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_task_id(scope, args),
-         {:ok, issue} <- fetch_task(scope, args, id) do
-      case Ash.update(issue, %{}, action: :sync_upstream_close) do
-        {:ok, synced} -> {:ok, serialize_task_summary(synced)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- dep_add ------------------------------------------------------------
-
-  @doc """
-  Add a dependency edge between two tasks in the scope's workspace. Coordinator
-  only. Both endpoints must resolve inside the workspace (a cross-workspace id is
-  reported not-found). Backs onto `Ash.create(Dependency, …)`.
-  """
-  @spec dep_add(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def dep_add(%Scope{} = scope, args) do
-    with {:ok, from} <- require_string(args, "from_issue_id"),
-         {:ok, to} <- require_string(args, "to_issue_id"),
-         {:ok, type} <- require_enum(args, "type", Dependency.types()),
-         {:ok, from_task} <- fetch_task(scope, args, from),
-         {:ok, _to_task} <- fetch_task_in_workspace(from_task.workspace_id, to) do
-      attrs =
-        %{"from_issue_id" => from, "to_issue_id" => to, "type" => type}
-        |> maybe_put("notes", fetch_string(args, "notes"))
-        |> maybe_put("created_by", fetch_string(args, "created_by"))
-
-      case Ash.create(Dependency, attrs) do
-        {:ok, dep} -> {:ok, serialize_dependency(dep)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- dep_remove ---------------------------------------------------------
-
-  @doc """
-  Remove dependency edges between two tasks in the scope's workspace. Coordinator
-  only. With no `type` every edge between the pair is removed; with a `type`
-  only that edge. Idempotent — removing an absent edge reports `removed: 0`.
-  """
-  @spec dep_remove(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def dep_remove(%Scope{} = scope, args) do
-    with {:ok, from} <- require_string(args, "from_issue_id"),
-         {:ok, to} <- require_string(args, "to_issue_id"),
-         {:ok, type} <- optional_enum(args, "type", Dependency.types()),
-         {:ok, from_task} <- fetch_task(scope, args, from),
-         {:ok, _to_task} <- fetch_task_in_workspace(from_task.workspace_id, to) do
-      edges = find_dep_edges(from, to, type)
-      _ = Enum.each(edges, &Ash.destroy!/1)
-      {:ok, %{from_issue_id: from, to_issue_id: to, removed: length(edges)}}
-    end
-  end
-
-  # ---- message_send -------------------------------------------------------
-
-  @doc """
-  Send a message to a task's mailbox — the structured replacement for
-  `arb message <task> <text>`. Available to **both** tiers, with the envelope
-  set from the scope so the sender identity cannot be spoofed:
-
-    * a **coordinator** sends a `:direction` from `"coordinator"` down to any
-      task in its workspace;
-    * a **worker** raises a `:flag` from its own bound task to a sibling.
-
-  `workspace_id` is pinned to the recipient task's own workspace (a worker to
-  its bound workspace), so a message can only ever be created alongside its
-  recipient. Backs onto `Messages.send_mail/1`.
-  """
-  @spec message_send(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def message_send(%Scope{} = scope, args) do
-    with {:ok, to_ref} <- require_string(args, "task_id"),
-         {:ok, body} <- require_string(args, "body"),
-         {:ok, ws_id} <- message_workspace(scope, args, to_ref),
-         {:ok, kind} <- validate_message_kind(fetch_string(args, "kind")) do
-      attrs =
-        scope
-        |> message_envelope(ws_id, to_ref, kind)
-        |> Map.put(:body, body)
-        |> maybe_put(:subject, fetch_string(args, "subject"))
-        |> maybe_put(
-          :task_ref,
-          fetch_string(args, "task_ref") || fetch_string(args, "directive_ref")
-        )
-
-      case Message.send_mail(attrs) do
-        {:ok, message} -> {:ok, serialize_message(message)}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # The workspace a message lands in. A worker is pinned to its bound workspace.
-  # A coordinator infers it from the recipient task itself (entity inference,
-  # honoring an explicit `workspace` arg), which also validates the recipient
-  # exists and is reachable by the scope.
-  defp message_workspace(%Scope{tier: :worker, workspace_id: ws_id}, _args, _to_ref),
-    do: {:ok, ws_id}
-
-  defp message_workspace(%Scope{tier: :coordinator} = scope, args, to_ref) do
-    with {:ok, task} <- fetch_task(scope, args, to_ref), do: {:ok, task.workspace_id}
-  end
-
-  # The sender identity + kind are derived from the scope, never the client: a
-  # coordinator directs (`from: "coordinator"`); a worker flags from its own
-  # bound task. Both are pinned to the resolved workspace. When kind is
-  # explicitly provided, it overrides the auto-derived default.
-  defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref, nil) do
-    %{
-      kind: :direction,
-      workspace_id: ws_id,
-      from_ref: "coordinator",
-      to_ref: to_ref,
-      task_ref: to_ref
-    }
-  end
-
-  defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref, kind) when is_atom(kind) do
-    %{
-      kind: kind,
-      workspace_id: ws_id,
-      from_ref: "coordinator",
-      to_ref: to_ref,
-      task_ref: to_ref
-    }
-  end
-
-  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref, nil) do
-    %{
-      kind: :flag,
-      workspace_id: ws_id,
-      from_ref: task_id,
-      to_ref: to_ref,
-      task_ref: to_ref
-    }
-  end
-
-  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref, kind)
-       when is_atom(kind) do
-    %{
-      kind: kind,
-      workspace_id: ws_id,
-      from_ref: task_id,
-      to_ref: to_ref,
-      task_ref: to_ref
-    }
-  end
-
-  # Validate and convert message kind from string to atom. Returns {:ok, nil}
-  # if not specified (use auto-derived kind), or {:ok, atom} if valid, or
-  # {:error, {_, msg}} if invalid.
-  defp validate_message_kind(nil), do: {:ok, nil}
-
-  defp validate_message_kind(kind_str) when is_binary(kind_str) do
-    case to_allowed_atom(kind_str, @message_kinds_mcp) do
-      {:ok, atom} -> {:ok, atom}
-      :error -> {:error, {:invalid, "invalid kind #{inspect(kind_str)}"}}
-    end
-  end
-
-  # ---- worker_dispatch ------------------------------------------------------
-
-  @doc """
-  Dispatch a worker to work a task in the scope's workspace. **Coordinator only,
-  and the strongest-gated tool.** It enforces the dispatch-recursion guardrail
-  (`docs/mcp-server-design.md` §4.3):
-
-    1. The scope must carry `can_dispatch` — a coordinator minted without it (and
-       every worker, which never carries it) is refused.
-    2. The scope's `depth` must be below the configured `Arbiter.MCP.max_depth/0`
-       — cheap insurance against a misconfigured coordinator fan-out.
-
-  The slung worker's own scope token is minted one level deeper (`depth + 1`),
-  so a chain of dispatches is tracked. When `provider` is omitted, the workspace's
-  `agent.type` config is consulted and the first healthy provider is selected via
-  `ProviderPool` — identical to the REST dispatch default. Pass an explicit
-  `provider` (`"claude"` | `"gemini"`, or the deprecated `with_claude: true` alias)
-  to override. Set `no_agent: true` to park the task `:in_progress` without
-  spawning a worker (hand-off / manual-attach path).
-  Backs onto `Arbiter.Worker.Dispatch.dispatch/2`.
-  """
-  @spec worker_dispatch(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_dispatch(%Scope{} = scope, args) do
-    with :ok <- ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
-         {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id),
-         {:ok, opts} <- worker_dispatch_opts(scope, args) do
-      case Dispatch.dispatch(task_id, opts) do
-        {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
-      end
-    end
-  end
-
-  # ---- worker_resume -----------------------------------------------------
-
-  @doc """
-  Re-attach a fresh worker to a task's **preserved** worktree
-  (`arb resume`). Coordinator only, and — like `worker_dispatch` — gated by the
-  dispatch-recursion guardrail (`can_dispatch` + `depth`): resume spawns a worker, so
-  the same recursion concerns apply. The child worker's scope is minted one
-  level deeper. Backs onto `Arbiter.Worker.Dispatch.resume/2`.
-  """
-  @spec worker_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_resume(%Scope{} = scope, args) do
-    with :ok <- ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
-         {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id) do
-      case Dispatch.resume(task_id, dispatch_opts(scope, args)) do
-        {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
-      end
-    end
-  end
-
-  # ---- worker_review -----------------------------------------------------
-
-  @doc """
-  Dispatch a **review-only** worker (`arb review`): no worktree, no per-task
-  branch, no route through the merge queue/merger. Coordinator only, and gated
-  by the dispatch-recursion guardrail (`can_dispatch` + `depth`) — a review
-  spawns an agent.
-
-  Two shapes:
-
-    * `task_id` → review the PR/MR linked to a task. Backs onto
-      `Arbiter.Worker.Dispatch.dispatch/2` with `review: true`; the child
-      worker's scope is minted one level deeper.
-    * `pr` (URL or number, + optional `repo`/`workspace`) → review an
-      **external / non-arbiter PR** through the MR adapter
-      (`Arbiter.Reviews.ExternalReview`): no task, no branch. Findings + a
-      verdict are posted to the PR.
-  """
-  @spec worker_review(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_review(%Scope{} = scope, args) do
-    case fetch_string(args, "pr") do
-      pr when is_binary(pr) -> worker_review_external(scope, args, pr)
-      _ -> worker_review_task(scope, args)
-    end
-  end
-
-  defp worker_review_task(%Scope{} = scope, args) do
-    with :ok <- ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
-         {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, task} <- fetch_task(scope, args, task_id),
-         {:ok, task} <- maybe_set_tracker_context(task, args),
-         {:ok, force} <- fetch_bool(args, "force", false),
-         {:ok, mode} <- guard_review_automation(scope, args, force),
-         {:ok, _} <- persist_review_automation(task, mode) do
-      opts =
-        scope
-        |> dispatch_opts(args)
-        |> Keyword.put(:review, true)
-        |> review_claude_flag(args)
-
-      case Dispatch.dispatch(task_id, opts) do
-        {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason, task_id)}}
-      end
-    end
-  end
-
-  # Resolve the review_automation mode (+ its source, logged for visibility —
-  # bd-7opdaf) and refuse the dispatch outright when it resolves to `:off`,
-  # UNLESS `force: true` is passed — mirrors the external (`pr:`) path's
-  # `guard_automation_off/2` in `Arbiter.Reviews.ExternalReview`. No task is
-  # touched and no worker is spawned when this refuses.
-  #
-  # Resolution order (most-specific wins):
-  #   1. An explicit `automation` arg passed to `worker_review` — hard override.
-  #   2. The workspace's `review_automation.repo_overrides[repo]` — per-repo hard gate.
-  #   3. The workspace's `review_automation.auto_authors` list, then `default`.
-  #   4. No config → :flag (conservative: never auto-post unless explicitly trusted).
-  defp guard_review_automation(scope, args, force) do
-    pr_author = fetch_string(args, "pr_author")
-    repo_name = fetch_string(args, "repo")
-    ws_config = load_workspace_config(scope.workspace_id)
-    explicit = fetch_string(args, "automation")
-
-    {mode, source} =
-      ReviewAutomation.resolve_with_source(ws_config, pr_author, repo_name, explicit)
-
-    Logger.info(
-      "worker_review(task_id): resolved review_automation=#{mode} (source: #{source})" <>
-        if(repo_name, do: " [#{repo_name}]", else: "")
-    )
-
-    cond do
-      mode != :off -> {:ok, mode}
-      force -> {:ok, mode}
-      true -> {:error, {:invalid, automation_off_message(repo_name, source)}}
-    end
-  end
-
-  defp automation_off_message(repo_name, :repo_override) when is_binary(repo_name) do
-    "review_automation is \"off\" for #{repo_name} " <>
-      "(review_automation.repo_overrides[#{inspect(repo_name)}]); refusing to dispatch a " <>
-      "reviewer — pass force: true to override"
-  end
-
-  defp automation_off_message(repo_name, :explicit) do
-    "review_automation was explicitly set to \"off\" for #{repo_name || "this task"} " <>
-      "(the automation argument); refusing to dispatch a reviewer — pass force: true to override"
-  end
-
-  defp automation_off_message(repo_name, :default) when is_binary(repo_name) do
-    "review_automation is \"off\" by default for #{repo_name} (review_automation.default); " <>
-      "refusing to dispatch a reviewer — pass force: true to override"
-  end
-
-  defp automation_off_message(_repo_name, :default) do
-    "review_automation is \"off\" by default for this workspace (review_automation.default); " <>
-      "refusing to dispatch a reviewer — pass force: true to override"
-  end
-
-  # Persist the (already-guarded) review_automation mode on the engagement
-  # task, so the ReviewPatrol poller can read it from the task without
-  # re-loading workspace config on each cycle.
-  defp persist_review_automation(task, mode) do
-    case Ash.update(task, %{review_automation: mode}) do
-      {:ok, updated} -> {:ok, updated}
-      {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-    end
-  end
-
-  defp load_workspace_config(nil), do: nil
-
-  defp load_workspace_config(ws_id) do
-    case Ash.get(Arbiter.Tasks.Workspace, ws_id) do
-      {:ok, %{config: config}} -> config
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  # If `tracker_context_ref` is provided in args, persist it (and optionally
-  # `tracker_context_type`) on the task before dispatch so the review prompt
-  # can fetch the ticket's acceptance criteria. When `tracker_context_type` is
-  # omitted, the workspace's default tracker type is used as the fallback —
-  # the most common case (reviewee and reviewer share the same tracker).
-  defp maybe_set_tracker_context(task, args) do
-    case fetch_string(args, "tracker_context_ref") do
-      ref when is_binary(ref) and ref != "" ->
-        context_type =
-          case fetch_string(args, "tracker_context_type") do
-            t when is_binary(t) and t != "" ->
-              try do
-                String.to_existing_atom(t)
-              rescue
-                ArgumentError -> nil
-              end
-
-            _ ->
-              case fetch_workspace(task.workspace_id) do
-                {:ok, ws} -> Trackers.workspace_type(ws)
-                _ -> nil
-              end
-          end
-
-        attrs =
-          %{"tracker_context_ref" => ref}
-          |> then(fn m ->
-            if context_type, do: Map.put(m, "tracker_context_type", context_type), else: m
-          end)
-
-        case Ash.update(task, attrs, action: :update) do
-          {:ok, updated} -> {:ok, updated}
-          {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-        end
-
-      _ ->
-        {:ok, task}
-    end
-  end
-
-  # External PR review: same dispatch gating (it spawns a reviewer), but resolves
-  # the MR provider from the (scope-bound or named) workspace rather than a task.
-  #
-  # `follow_up` (Option A, bd-2ovun1) makes the review adopt the PR into
-  # ReviewPatrol by opening a review_only engagement after the verdict posts.
-  # When the arg is omitted, ExternalReview engages by default only if the
-  # workspace has a ReviewPatrol running. `automation` / `tracker_context_*`
-  # mirror the task-review path and are carried onto that engagement.
-  defp worker_review_external(%Scope{} = scope, args, pr) do
-    with :ok <- ensure_can_dispatch(scope),
-         :ok <- ensure_dispatch_depth(scope),
-         {:ok, ws_ref} <- authorized_workspace(scope, args),
-         {:ok, follow_up} <- fetch_optional_bool(args, "follow_up"),
-         {:ok, force} <- fetch_optional_bool(args, "force") do
-      opts =
-        [
-          pr: pr,
-          repo: fetch_string(args, "repo"),
-          workspace: ws_ref,
-          automation: fetch_string(args, "automation"),
-          tracker_context_ref: fetch_string(args, "tracker_context_ref"),
-          tracker_context_type: fetch_string(args, "tracker_context_type"),
-          dispatched_by: "mcp"
-        ]
-        |> maybe_put_kw(:follow_up, follow_up)
-        |> maybe_put_kw(:force, force)
-        |> maybe_put_kw(:scope, fetch_string(args, "scope"))
-
-      case Arbiter.Reviews.ExternalReview.dispatch(opts) do
-        {:ok, ack} ->
-          {:ok, ack}
-
-        {:error, reason} ->
-          {:error, {:invalid, Arbiter.Reviews.ExternalReview.describe_error(reason)}}
-      end
-    end
-  end
-
-  # ---- worker_stop -------------------------------------------------------
-
-  @doc """
-  Stop the worker currently working a task (`arb worker stop`). Coordinator
-  only. The task is resolved through `fetch_task`, so a coordinator can only
-  stop workers for tasks in its own workspace; a task with no live worker is
-  reported as not-found. Stopping is teardown — it never spawns — so it does not
-  require `can_dispatch`. Backs onto `Arbiter.Worker.stop/2`.
-  """
-  @spec worker_stop(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_stop(%Scope{} = scope, args) do
-    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id) do
-      case Worker.stop(task_id, :normal) do
-        :ok -> {:ok, %{task_id: task_id, stopped: true}}
-        {:error, :not_found} -> {:error, {:not_found, "no running worker for task #{task_id}"}}
-      end
-    end
-  end
-
-  # ---- worker_list -------------------------------------------------------
-
-  @doc """
-  List active workers in the scope's workspace. Coordinator only. Backs onto
-  `Arbiter.Worker.list_children/0`, filtered to the scope's workspace_id so a
-  coordinator never sees workers running in other workspaces.
-  """
-  @spec worker_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_list(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      children =
-        Arbiter.Worker.list_children()
-        |> Enum.filter(&(&1.workspace_id == ws_id))
-
-      task_ids = Enum.map(children, & &1.task_id)
-      costs = Arbiter.Worker.Stats.task_costs_usd(task_ids)
-
-      workers =
-        Enum.map(children, &serialize_worker_summary(&1, Map.get(costs, &1.task_id, 0.0)))
-
-      {:ok, %{workers: workers, count: length(workers)}}
-    end
-  end
-
-  # ---- worker_show --------------------------------------------------------
-
-  @doc """
-  Full snapshot for a single task's worker (`arb worker show <task-id>`).
-  When a worker is currently live, returns its in-memory state (status,
-  activity, recent output lines, etc). Otherwise falls back to the most
-  recent durable `Arbiter.Workers.Run` row so a finished/exited run stays
-  inspectable. Not-found only when neither a live worker nor any run has
-  ever been recorded for the task.
-  """
-  @spec worker_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_show(%Scope{} = scope, args) do
-    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id),
-         {:ok, lines} <- optional_integer(args, "lines"),
-         {:ok, lines} <- validate_positive_integer(lines, "lines") do
-      case Worker.whereis(task_id) do
-        nil ->
-          worker_show_historical(task_id, lines)
-
-        pid ->
-          case Worker.state(pid) do
-            %{} = snap -> {:ok, serialize_worker_snapshot(Map.put(snap, :pid, pid), lines)}
-            _ -> worker_show_historical(task_id, lines)
-          end
-      end
-    end
-  end
-
-  defp worker_show_historical(task_id, lines) do
-    case latest_run(task_id) do
-      %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_run(run, lines)}
-      nil -> {:error, {:not_found, "no worker found for task #{task_id}"}}
-    end
-  end
-
-  defp latest_run(task_id) do
-    Arbiter.Workers.Run
-    |> Ash.Query.filter(task_id == ^task_id)
-    |> Ash.Query.sort(started_at: :desc)
-    |> Ash.Query.limit(1)
-    |> Ash.read!()
-    |> List.first()
-  rescue
-    _ -> nil
-  end
-
-  # ---- worker_runs ----------------------------------------------------------
-
-  @doc """
-  List every historical `Arbiter.Workers.Run` recorded for a task, newest
-  first (`arb worker runs <task-id>`). Mirrors `GET /api/workers/history?task_id=`:
-  each entry is a run summary (no `output_lines` — fetch a single run's full
-  output via `worker_log` for the transcript). Optional `limit` (default 20,
-  max 200).
-
-  `task_id` may be a synthetic ReviewGate id (`<base>#review`, `#r<N>`,
-  `#impl<N>`, `#v<N>`, `#t<N>`) — those are not `issues` rows, so the
-  authorization check resolves to the base task while the run lookup keeps
-  the full synthetic id, surfacing the reviewer/re-prompt corpus.
-  """
-  @spec worker_runs(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_runs(%Scope{} = scope, args) do
-    require Ash.Query
-
-    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)),
-         {:ok, limit} <- parse_bounded_limit(args, "limit", 20, 200) do
-      runs =
-        Arbiter.Workers.Run
-        |> Ash.Query.filter(task_id == ^task_id)
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
-
-      {:ok, %{runs: Enum.map(runs, &serialize_worker_run_summary/1)}}
-    end
-  end
-
-  # ---- worker_log ------------------------------------------------------------
-
-  @doc """
-  Full, uncapped durable transcript of one run — the audit source of record,
-  retaining every line however long the run. Two ways to select the run:
-
-    * `run_id:` — that exact run, independent of which run is latest for its
-      task. This is the only way to reach a superseded/failed attempt once a
-      later run exists for the same task.
-    * `task_id:` (no `run_id`) — the task's most recent run (`arb worker log
-      <task-id>`), unchanged from prior behaviour. `task_id` may be a
-      synthetic ReviewGate id (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`,
-      `#t<N>`); the authorization check resolves it to the base task while
-      the run lookup keeps the full synthetic id.
-
-  `exists` distinguishes "no file yet / never captured" (false, empty
-  `lines`) from "captured but empty" (true, empty `lines`). Not-found when no
-  matching run exists (or, for `run_id`, when it belongs to another workspace).
-  """
-  @spec worker_log(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_log(%Scope{} = scope, args) do
-    case fetch_string(args, "run_id") do
-      nil -> worker_log_by_task(scope, args)
-      run_id -> worker_log_by_run_id(scope, args, run_id)
-    end
-  end
-
-  defp worker_log_by_task(scope, args) do
-    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)) do
-      case latest_run(task_id) do
-        %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_log(run)}
-        nil -> {:error, {:not_found, "no worker run found for task #{task_id}"}}
-      end
-    end
-  end
-
-  defp worker_log_by_run_id(scope, args, run_id) do
-    with {:ok, run} <- fetch_run(scope, args, run_id) do
-      {:ok, serialize_worker_log(run)}
-    end
-  end
-
-  defp serialize_worker_log(%Arbiter.Workers.Run{} = run) do
-    {exists, lines} =
-      case Arbiter.Worker.OutputLog.read_lines(run.id) do
-        {:ok, lines} -> {true, lines}
-        {:error, _} -> {false, []}
-      end
-
-    %{
-      task_id: run.task_id,
-      run_id: run.id,
-      path: Arbiter.Worker.OutputLog.path_for(run.id),
-      exists: exists,
-      line_count: length(lines),
-      lines: lines
-    }
-  end
-
-  # Fetch a single `Arbiter.Workers.Run` by id, enforcing workspace isolation
-  # the same way `fetch_task/3` does for `issues` rows. Not-found (rather than
-  # unauthorized) on a cross-workspace hit so existence doesn't leak.
-  defp fetch_run(scope, args, run_id) do
-    with {:ok, target_ws} <- authorized_workspace(scope, args) do
-      case Ash.get(Arbiter.Workers.Run, run_id) do
-        {:ok, %Arbiter.Workers.Run{} = run} ->
-          if workspace_match?(run.workspace_id, target_ws),
-            do: {:ok, run},
-            else: {:error, {:not_found, "run #{run_id} not found"}}
-
-        _ ->
-          {:error, {:not_found, "run #{run_id} not found"}}
-      end
-    end
-  end
-
-  defp serialize_worker_run_summary(%Arbiter.Workers.Run{} = run) do
-    %{
-      id: run.id,
-      task_id: run.task_id,
-      task_title: run.task_title,
-      repo: run.repo,
-      workspace_id: run.workspace_id,
-      worker_type: to_str(run.worker_type),
-      status: to_str(run.status),
-      model: run.model,
-      started_at: iso(run.started_at),
-      completed_at: iso(run.completed_at),
-      exit_code: run.exit_code,
-      failure_reason: run.failure_reason,
-      resolved_skills: run.resolved_skills || [],
-      standing_orders_digest: run.standing_orders_digest,
-      routing_policy: run.routing_policy,
-      model_tier: run.model_tier,
-      thinking: run.thinking,
-      difficulty_at_dispatch: run.difficulty_at_dispatch
-    }
-  end
-
-  # ---- worker_prompt ----------------------------------------------------
-
-  @doc """
-  The composed prompt one run was spawned with (bd-9rdwe4, #1017 gap G5),
-  redacted through the same choke-point as transcript lines. Sibling of
-  `worker_log/2` — same `run_id`/`task_id` selection rule, same
-  synthetic-id-aware task resolution.
-
-  `exists` distinguishes "no prompt was ever persisted for this run" (false,
-  `prompt` nil) from a captured one — including a run whose prompt redacted
-  down to something shorter than what was typed, which is still "exists".
-  """
-  @spec worker_prompt(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def worker_prompt(%Scope{} = scope, args) do
-    case fetch_string(args, "run_id") do
-      nil -> worker_prompt_by_task(scope, args)
-      run_id -> worker_prompt_by_run_id(scope, args, run_id)
-    end
-  end
-
-  defp worker_prompt_by_task(scope, args) do
-    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)) do
-      case latest_run(task_id) do
-        %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_prompt(run)}
-        nil -> {:error, {:not_found, "no worker run found for task #{task_id}"}}
-      end
-    end
-  end
-
-  defp worker_prompt_by_run_id(scope, args, run_id) do
-    with {:ok, run} <- fetch_run(scope, args, run_id) do
-      {:ok, serialize_worker_prompt(run)}
-    end
-  end
-
-  defp serialize_worker_prompt(%Arbiter.Workers.Run{} = run) do
-    {exists, prompt} =
-      case Arbiter.Worker.PromptLog.read(run.id) do
-        {:ok, content} -> {true, content}
-        {:error, _} -> {false, nil}
-      end
-
-    %{
-      task_id: run.task_id,
-      run_id: run.id,
-      path: Arbiter.Worker.PromptLog.path_for(run.id),
-      exists: exists,
-      prompt: prompt,
-      prompt_sha256: run.prompt_sha256
-    }
-  end
-
-  # ---- run_log_list -----------------------------------------------------
-
-  @doc """
-  Enumerate every run recorded for a task **and its ReviewGate synthetic
-  children** (`<task_id>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`),
-  newest first — the whole retrievable transcript corpus for a task in one
-  call. Unlike `worker_runs` (exact `task_id` match only), this matches the
-  task id itself plus anything prefixed `<task_id>#`, so a single call
-  surfaces the reviewer/re-prompt corpus alongside the author's own runs.
-
-  Each entry reports `transcript_exists` so a missing durable log is
-  distinguishable from an empty one without a separate `worker_log` call.
-  `task_id` must be the base task (a plain `issues` id) — pass it
-  un-suffixed even to reach synthetic runs.
-  """
-  @spec run_log_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def run_log_list(%Scope{} = scope, args) do
-    require Ash.Query
-
-    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)),
-         {:ok, limit} <- parse_bounded_limit(args, "limit", 200, 1000) do
-      prefix = task_id <> "#"
-
-      runs =
-        Arbiter.Workers.Run
-        |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(limit)
-        |> Ash.read!()
-
-      {:ok, %{runs: Enum.map(runs, &serialize_run_log_entry/1)}}
-    end
-  end
-
-  defp serialize_run_log_entry(%Arbiter.Workers.Run{} = run) do
-    %{
-      run_id: run.id,
-      task_id: run.task_id,
-      worker_type: to_str(run.worker_type),
-      status: to_str(run.status),
-      model: run.model,
-      started_at: iso(run.started_at),
-      transcript_exists: File.regular?(Arbiter.Worker.OutputLog.path_for(run.id)),
-      line_count: run.id |> Arbiter.Worker.OutputLog.read_lines() |> line_count_of()
-    }
-  end
-
-  defp line_count_of({:ok, lines}), do: length(lines)
-  defp line_count_of({:error, _}), do: 0
-
-  # ---- transcript_capture_stats -------------------------------------------
-
-  # 2026-06-19 rename (commit 8181cfc) moved the durable-transcript root from
-  # the retired `arbiter-polecat-logs` to `arbiter-worker-logs`; `path_for/1`
-  # only ever looks in the current root. That's an accepted loss (bd-9wotbo,
-  # operator decision 2026-07-28) — no migration, no legacy-root fallback — so
-  # every run before this date is definitionally unreachable and must be
-  # excluded from the denominator rather than counted as a capture failure.
-  @corpus_start_date ~U[2026-06-20 00:00:00Z]
-
-  @doc """
-  Transcript-capture health for a workspace (bd-9wotbo, gap G4): what fraction
-  of Claude-driven runs actually produced a durable transcript, scoped to
-  `started_at >= #{@corpus_start_date}` (the `arbiter-worker-logs` corpus
-  start date — see the module note on `@corpus_start_date` and
-  `Arbiter.Worker.OutputLog`'s moduledoc for the accepted pre-rename loss).
-
-  A workflow-mode (bookkeeping-only) run never opens a Claude session — see
-  `Arbiter.Worker.Driver`'s "workflow mode" — so it carries no `session_id`
-  and, by design, no transcript. Counting those as capture failures would
-  make the rate look broken when nothing is wrong, so they're reported
-  separately as `workflow_only_runs` and excluded from `claude_sessions` /
-  `capture_rate_pct`. `capture_rate_pct` is `nil` when there are no
-  Claude-driven runs in the window (avoids a divide-by-zero misread as 0%).
-
-  Coordinator only. Optional `workspace` (resolved the same way as
-  `worker_list` / `task_ready`).
-  """
-  @spec transcript_capture_stats(Scope.t(), map()) ::
-          {:ok, map()} | {:error, {atom(), String.t()}}
-  def transcript_capture_stats(%Scope{} = scope, args) do
-    require Ash.Query
-
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      runs =
-        Arbiter.Workers.Run
-        |> Ash.Query.filter(workspace_id == ^ws_id and started_at >= ^@corpus_start_date)
-        |> Ash.read!()
-
-      {claude_sessions, workflow_only} =
-        Enum.split_with(runs, &(&1.session_id not in [nil, ""]))
-
-      missing =
-        Enum.count(claude_sessions, fn run ->
-          not File.regular?(Arbiter.Worker.OutputLog.path_for(run.id))
-        end)
-
-      {:ok,
-       %{
-         corpus_start_date: Date.to_iso8601(DateTime.to_date(@corpus_start_date)),
-         total_runs: length(runs),
-         claude_sessions: length(claude_sessions),
-         transcript_missing: missing,
-         workflow_only_runs: length(workflow_only),
-         capture_rate_pct: capture_rate_pct(claude_sessions, missing)
-       }}
-    end
-  rescue
-    e -> {:error, {:internal, "transcript_capture_stats failed: #{Exception.message(e)}"}}
-  end
-
-  defp capture_rate_pct([], _missing), do: nil
-
-  defp capture_rate_pct(claude_sessions, missing) do
-    total = length(claude_sessions)
-    Float.round((total - missing) / total * 100, 1)
   end
 
   # ---- external_review_list -----------------------------------------------
@@ -2142,7 +336,8 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp parse_bounded_limit(args, key, default, max) do
+  # internal — shared by Arbiter.MCP.Tools.Worker (also used by external_review_list)
+  def parse_bounded_limit(args, key, default, max) do
     case Map.get(args, key) do
       nil -> {:ok, default}
       n when is_integer(n) and n > 0 -> {:ok, min(n, max)}
@@ -2243,27 +438,6 @@ defmodule Arbiter.MCP.Tools do
   defp zero_token_warning(%{provider: provider, rows: rows}) do
     "⚠ #{provider}: all #{rows} usage_events row(s) in this window carry zero tokens — " <>
       "likely a stream parser silently dropping usage rather than a genuinely free provider."
-  end
-
-  # ---- notify_list --------------------------------------------------------
-
-  @doc """
-  The most recent notifications (broadcast events: completions, milestones,
-  system events) for the scope's workspace. Available to both tiers and always
-  scoped to the bound workspace. Read-only — notifications are never consumed.
-  Optional `limit` (default 20). Backs onto `Messages.recent_notifications/2`.
-  """
-  @spec notify_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def notify_list(%Scope{} = scope, args) do
-    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, limit} <- optional_integer(args, "limit") do
-      notifications =
-        (limit || 20)
-        |> Message.recent_notifications(workspace_id: ws_id)
-        |> Enum.map(&serialize_message/1)
-
-      {:ok, %{notifications: notifications, count: length(notifications)}}
-    end
   end
 
   # ---- tracker_claim ------------------------------------------------------
@@ -2787,7 +961,7 @@ defmodule Arbiter.MCP.Tools do
 
   # Resolve + authorize the target task id for this scope from the named arg
   # (default "id"). Worker: own task only; coordinator: id required.
-  defp resolve_task_id(scope, args, key \\ "id") do
+  def resolve_task_id(scope, args, key \\ "id") do
     case Scope.own_task(scope, fetch_string(args, key)) do
       {:ok, id} ->
         {:ok, id}
@@ -2842,7 +1016,7 @@ defmodule Arbiter.MCP.Tools do
   # workspace or, with no arg, infers it from the task itself (entity inference).
   # A task outside the resolved workspace is reported not-found so existence does
   # not leak across workspaces.
-  defp fetch_task(scope, args, id) do
+  def fetch_task(scope, args, id) do
     with {:ok, target_ws} <- authorized_workspace(scope, args) do
       case Ash.get(Issue, id) do
         {:ok, %Issue{} = issue} ->
@@ -2859,7 +1033,7 @@ defmodule Arbiter.MCP.Tools do
   # Fetch a task and require it to live in `ws_id` exactly — the second-endpoint
   # check for dependency tools, so both endpoints of an edge stay in one
   # workspace even for a workspace-agnostic coordinator inferring from the first.
-  defp fetch_task_in_workspace(ws_id, id) do
+  def fetch_task_in_workspace(ws_id, id) do
     case Ash.get(Issue, id) do
       {:ok, %Issue{workspace_id: ^ws_id} = issue} -> {:ok, issue}
       _ -> {:error, {:not_found, "task #{id} not found"}}
@@ -2868,9 +1042,9 @@ defmodule Arbiter.MCP.Tools do
 
   # A `nil` target means "any workspace" (a workspace-agnostic coordinator that
   # named no workspace — the task's own workspace stands).
-  defp workspace_match?(_ws, nil), do: true
-  defp workspace_match?(ws, ws), do: true
-  defp workspace_match?(_ws, _target), do: false
+  def workspace_match?(_ws, nil), do: true
+  def workspace_match?(ws, ws), do: true
+  def workspace_match?(_ws, _target), do: false
 
   # The workspace this call is authorized to operate in, honoring an optional
   # `workspace` arg (name or id). Returns `{:ok, ws_id}` where `ws_id` may be
@@ -2880,7 +1054,7 @@ defmodule Arbiter.MCP.Tools do
   # A scope bound to one workspace (every worker; a legacy workspace-bound
   # coordinator) may only ever resolve to its own workspace — naming a different
   # one is `{:error, {:unauthorized, …}}`.
-  defp authorized_workspace(%Scope{} = scope, args) do
+  def authorized_workspace(%Scope{} = scope, args) do
     case fetch_string(args, "workspace") do
       nil ->
         {:ok, scope.workspace_id}
@@ -2899,7 +1073,7 @@ defmodule Arbiter.MCP.Tools do
   # A *concrete* workspace id for tools that operate within one workspace
   # (create + enumerate). Resolution order: explicit `workspace` arg → the
   # scope's bound workspace → the installation default workspace.
-  defp resolve_workspace_id(%Scope{} = scope, args) do
+  def resolve_workspace_id(%Scope{} = scope, args) do
     with {:ok, ws_id} <- authorized_workspace(scope, args) do
       if is_binary(ws_id), do: {:ok, ws_id}, else: default_workspace_id()
     end
@@ -2954,35 +1128,12 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Load the child-progress rollup calcs for a task so the serializer can emit
-  # `child_total` / `child_closed`. Best-effort: on any load error the task is
-  # returned unchanged (the serializer then omits the progress fields).
-  defp load_progress(%Issue{} = issue) do
-    Ash.load!(issue, [:child_total, :child_closed])
-  rescue
-    _ -> issue
-  end
-
-  # Keep only the three allowed progress fields; require at least one.
-  defp progress_attrs(args) do
-    attrs =
-      for field <- @progress_fields, (val = fetch_string(args, field)) != nil, into: %{} do
-        {String.to_existing_atom(field), val}
-      end
-
-    if map_size(attrs) == 0 do
-      {:error, {:invalid, "provide at least one of: #{Enum.join(@progress_fields, ", ")}"}}
-    else
-      {:ok, attrs}
-    end
-  end
-
   # ---- Phase 2 arg coercion + validation ---------------------------------
 
   # Build a string-keyed attrs map from `args`, taking only the keys in `spec`
   # and coercing each to its declared type. Returns `{:ok, map}` or
   # `{:error, {:invalid, msg}}` on the first bad value. Absent keys are skipped.
-  defp collect_attrs(args, spec) when is_map(args) do
+  def collect_attrs(args, spec) when is_map(args) do
     Enum.reduce_while(spec, {:ok, %{}}, fn {key, type}, {:ok, acc} ->
       case Map.fetch(args, key) do
         :error ->
@@ -2997,28 +1148,28 @@ defmodule Arbiter.MCP.Tools do
     end)
   end
 
-  defp collect_attrs(_args, _spec), do: {:ok, %{}}
+  def collect_attrs(_args, _spec), do: {:ok, %{}}
 
-  defp coerce_field(:string, v) when is_binary(v), do: {:ok, v}
-  defp coerce_field(:string, _), do: {:error, "must be a string"}
+  def coerce_field(:string, v) when is_binary(v), do: {:ok, v}
+  def coerce_field(:string, _), do: {:error, "must be a string"}
 
-  defp coerce_field(:integer, v) when is_integer(v), do: {:ok, v}
+  def coerce_field(:integer, v) when is_integer(v), do: {:ok, v}
 
-  defp coerce_field(:integer, v) when is_binary(v) do
+  def coerce_field(:integer, v) when is_binary(v) do
     case Integer.parse(v) do
       {n, ""} -> {:ok, n}
       _ -> {:error, "must be an integer"}
     end
   end
 
-  defp coerce_field(:integer, _), do: {:error, "must be an integer"}
+  def coerce_field(:integer, _), do: {:error, "must be an integer"}
 
-  defp coerce_field(:boolean, v) when is_boolean(v), do: {:ok, v}
-  defp coerce_field(:boolean, "true"), do: {:ok, true}
-  defp coerce_field(:boolean, "false"), do: {:ok, false}
-  defp coerce_field(:boolean, _), do: {:error, "must be a boolean"}
+  def coerce_field(:boolean, v) when is_boolean(v), do: {:ok, v}
+  def coerce_field(:boolean, "true"), do: {:ok, true}
+  def coerce_field(:boolean, "false"), do: {:ok, false}
+  def coerce_field(:boolean, _), do: {:error, "must be a boolean"}
 
-  defp coerce_field({:enum, allowed}, v) do
+  def coerce_field({:enum, allowed}, v) do
     case to_allowed_atom(v, allowed) do
       {:ok, atom} -> {:ok, atom}
       :error -> {:error, "must be one of: #{allowed_list(allowed)}"}
@@ -3026,7 +1177,8 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # A required non-empty string argument.
-  defp require_string(args, key) do
+  # internal — shared: a required non-empty string argument
+  def require_string(args, key) do
     case fetch_string(args, key) do
       nil -> {:error, {:invalid, "`#{key}` is required"}}
       s -> {:ok, s}
@@ -3034,7 +1186,7 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # A required enum argument coerced against `allowed`.
-  defp require_enum(args, key, allowed) do
+  def require_enum(args, key, allowed) do
     case fetch_string(args, key) do
       nil -> {:error, {:invalid, "`#{key}` is required"}}
       raw -> enum_or_error(raw, key, allowed)
@@ -3042,21 +1194,23 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # An optional enum argument; `{:ok, nil}` when absent.
-  defp optional_enum(args, key, allowed) do
+  def optional_enum(args, key, allowed) do
     case fetch_string(args, key) do
       nil -> {:ok, nil}
       raw -> enum_or_error(raw, key, allowed)
     end
   end
 
-  defp enum_or_error(raw, key, allowed) do
+  # internal — shared
+  def enum_or_error(raw, key, allowed) do
     case to_allowed_atom(raw, allowed) do
       {:ok, atom} -> {:ok, atom}
       :error -> {:error, {:invalid, "`#{key}` must be one of: #{allowed_list(allowed)}"}}
     end
   end
 
-  defp optional_integer(args, key) do
+  # internal — shared
+  def optional_integer(args, key) do
     case Map.get(args, key) do
       nil ->
         {:ok, nil}
@@ -3075,19 +1229,7 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp validate_positive_integer(nil, _key) do
-    {:ok, nil}
-  end
-
-  defp validate_positive_integer(value, _key) when is_integer(value) and value > 0 do
-    {:ok, value}
-  end
-
-  defp validate_positive_integer(_value, key) do
-    {:error, {:invalid, "`#{key}` must be a positive integer"}}
-  end
-
-  defp optional_datetime(args, key) do
+  def optional_datetime(args, key) do
     case fetch_string(args, key) do
       nil ->
         {:ok, nil}
@@ -3100,7 +1242,8 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp fetch_bool(args, key, default) do
+  # internal — shared
+  def fetch_bool(args, key, default) do
     case Map.get(args, key) do
       nil -> {:ok, default}
       v when is_boolean(v) -> {:ok, v}
@@ -3112,7 +1255,7 @@ defmodule Arbiter.MCP.Tools do
 
   # Tri-state bool: `{:ok, nil}` when the key is absent (so the callee can apply
   # its own default), `{:ok, true|false}` when present, error on a bad value.
-  defp fetch_optional_bool(args, key) do
+  def fetch_optional_bool(args, key) do
     case Map.get(args, key) do
       nil -> {:ok, nil}
       v when is_boolean(v) -> {:ok, v}
@@ -3122,227 +1265,44 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp require_some(attrs, msg) do
+  # internal — shared
+  def require_some(attrs, msg) do
     if map_size(attrs) == 0, do: {:error, {:invalid, msg}}, else: :ok
   end
 
-  defp to_allowed_atom(v, allowed) when is_binary(v) do
+  # internal — shared
+  def to_allowed_atom(v, allowed) when is_binary(v) do
     atom = String.to_existing_atom(v)
     if atom in allowed, do: {:ok, atom}, else: :error
   rescue
     ArgumentError -> :error
   end
 
-  defp to_allowed_atom(_v, _allowed), do: :error
+  def to_allowed_atom(_v, _allowed), do: :error
 
-  defp allowed_list(allowed), do: Enum.map_join(allowed, ", ", &Atom.to_string/1)
+  # internal — shared
+  def allowed_list(allowed), do: Enum.map_join(allowed, ", ", &Atom.to_string/1)
 
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+  # internal — shared
+  def maybe_put(map, _key, nil), do: map
+  def maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  defp maybe_put_kw(kw, _key, nil), do: kw
-  defp maybe_put_kw(kw, key, value), do: Keyword.put(kw, key, value)
-
-  # ---- Phase 2 field specs (arg key → coercion type) ---------------------
-
-  defp task_create_spec do
-    [
-      {"description", :string},
-      {"acceptance", :string},
-      {"notes", :string},
-      {"qa_notes", :string},
-      {"deployment_notes", :string},
-      {"priority", :integer},
-      {"difficulty", :integer},
-      {"issue_type", {:enum, Issue.issue_types()}},
-      {"auto_close", :boolean},
-      {"tracker_type", {:enum, Issue.tracker_types()}},
-      {"assignee", :string},
-      {"tracker_ref", :string},
-      {"tracker_context_type", {:enum, Issue.tracker_types()}},
-      {"tracker_context_ref", :string},
-      {"target_branch", :string}
-    ]
-  end
-
-  defp task_update_spec do
-    [
-      {"title", :string},
-      {"description", :string},
-      {"acceptance", :string},
-      {"notes", :string},
-      {"qa_notes", :string},
-      {"deployment_notes", :string},
-      {"status", {:enum, Issue.statuses()}},
-      {"priority", :integer},
-      {"difficulty", :integer},
-      {"issue_type", {:enum, Issue.issue_types()}},
-      {"auto_close", :boolean},
-      {"tracker_type", {:enum, Issue.tracker_types()}},
-      {"assignee", :string},
-      {"tracker_ref", :string},
-      {"tracker_context_type", {:enum, Issue.tracker_types()}},
-      {"tracker_context_ref", :string},
-      {"pr_ref", :string},
-      {"target_branch", :string}
-    ]
-  end
+  # internal — shared
+  def maybe_put_kw(kw, _key, nil), do: kw
+  def maybe_put_kw(kw, key, value), do: Keyword.put(kw, key, value)
 
   # ---- Phase 2 dispatch guardrail + opts (docs/mcp-server-design.md §4.3) ----
 
-  defp ensure_can_dispatch(%Scope{can_dispatch: true}), do: :ok
+  # internal — shared by Arbiter.MCP.Tools.Worker
+  def ensure_can_dispatch(%Scope{can_dispatch: true}), do: :ok
 
-  defp ensure_can_dispatch(%Scope{}),
+  def ensure_can_dispatch(%Scope{}),
     do: {:error, {:unauthorized, "this scope may not dispatch (can_dispatch is not set)"}}
-
-  defp ensure_dispatch_depth(%Scope{depth: depth}) do
-    max = MCP.max_depth()
-
-    if depth < max,
-      do: :ok,
-      else: {:error, {:unauthorized, "dispatch depth limit (#{max}) reached"}}
-  end
-
-  # The opts common to every worker-dispatch tool (dispatch / resume / review):
-  # the optional `repo` / `model` overrides plus the child scope depth, minted
-  # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
-  defp dispatch_opts(%Scope{depth: depth}, args) do
-    [depth: depth + 1]
-    |> maybe_put_kw(:repo, fetch_string(args, "repo"))
-    |> maybe_put_kw(:model, fetch_string(args, "model"))
-  end
-
-  # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the
-  # REST `POST /api/workers/dispatch` contract: an explicit `provider` (or deprecated
-  # `with_claude`) forces that agent via `agent_type`; `no_agent: true` parks the
-  # task `:in_progress` (hand-off path); otherwise the workspace's `agent.type`
-  # config is used to pick the first healthy provider.
-  defp worker_dispatch_opts(scope, args) do
-    base = dispatch_opts(scope, args)
-
-    case dispatch_provider(args) do
-      {:error, {:unknown_provider, value}} ->
-        # bd-dcvo3n: an explicit but unrecognized `provider` must fail LOUDLY.
-        # Falling through to the workspace default here is what silently spawned
-        # Claude when `provider: "codex"` hit a server too old to know the value
-        # — a substitution the caller had no signal for. Reject it instead.
-        {:error,
-         {:invalid,
-          "unknown provider #{inspect(value)}; valid providers: " <>
-            Enum.join(Arbiter.Agents.valid_agent_types(), ", ")}}
-
-      :park ->
-        {:ok, Keyword.put(base, :start_driver, false)}
-
-      nil ->
-        # No provider specified — resolve from workspace `agent.type` config.
-        {:ok, Keyword.put(base, :start_claude, true)}
-
-      type when is_atom(type) ->
-        {:ok, base |> Keyword.put(:start_claude, true) |> Keyword.put(:agent_type, type)}
-    end
-  end
-
-  # Resolve the worker provider from `worker_dispatch` args. Returns `:park` for
-  # an explicit `no_agent` opt-in, a provider atom when specified via `provider`
-  # or the deprecated `with_claude`, `{:error, {:unknown_provider, value}}` when
-  # `provider` is present but unrecognized, or `nil` to signal "use the workspace
-  # default" (only when no provider was named at all).
-  defp dispatch_provider(args) do
-    cond do
-      Map.get(args, "no_agent") in [true, "true"] ->
-        :park
-
-      provider_given?(args) ->
-        provider_atom(Map.get(args, "provider"))
-
-      Map.get(args, "with_claude") in [true, "true"] ->
-        :claude
-
-      true ->
-        nil
-    end
-  end
-
-  # A `provider` arg is "given" only when it's a non-blank string. An absent key
-  # or an empty/whitespace value means "use the workspace default" (→ `nil`),
-  # never an error.
-  defp provider_given?(args) do
-    case Map.get(args, "provider") do
-      p when is_binary(p) -> String.trim(p) != ""
-      _ -> false
-    end
-  end
-
-  # Map an explicit provider string to its atom. An unrecognized (but non-blank)
-  # value is a hard error, not a silent fallback to the workspace default.
-  defp provider_atom(provider) do
-    trimmed = String.trim(provider)
-
-    if trimmed in Arbiter.Agents.valid_agent_types() do
-      String.to_existing_atom(trimmed)
-    else
-      {:error, {:unknown_provider, provider}}
-    end
-  end
-
-  # `worker_review` is claude-driven by default (a reviewer with no agent has
-  # nothing to do), mirroring `POST /api/workers/review`. `with_claude: false`
-  # dispatches the review without spawning an agent (the test affordance).
-  defp review_claude_flag(opts, args) do
-    case Map.get(args, "with_claude") do
-      v when v in [false, "false"] -> Keyword.put(opts, :start_claude, false)
-      _ -> Keyword.put(opts, :start_claude, true)
-    end
-  end
-
-  defp dispatch_error_message({:task_closed, id}),
-    do: "task #{id} is closed; reopen it before dispatching"
-
-  defp dispatch_error_message(:no_repo_configured), do: "no repos configured for this workspace"
-
-  defp dispatch_error_message({:repo_not_found, repo}),
-    do: "repo #{inspect(repo)} is not configured"
-
-  defp dispatch_error_message({:ambiguous_repo, repos}),
-    do: "multiple repos available (#{Enum.join(repos, ", ")}); pass `repo` explicitly"
-
-  defp dispatch_error_message({:task_awaiting_review, id}),
-    do: "task #{id} is already awaiting review"
-
-  # Resume-specific (`Dispatch.resume/2`).
-  defp dispatch_error_message(:no_outpost),
-    do: "no preserved worktree for this task — nothing to resume; dispatch it fresh instead"
-
-  defp dispatch_error_message(:repo_unknown),
-    do: "could not resolve the repo for this task; pass `repo` explicitly"
-
-  defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
-
-  # bd-8lq2g7: `{:worker_active, …}` is rendered from the /2 arity so the message
-  # can name the parked worker and its subordinate passes, rather than issuing
-  # the generic (and, at a review park, destructive) "stop it before resuming".
-  defp dispatch_error_message({:worker_active, status}, task_id),
-    do: Dispatch.worker_active_message(status, task_id)
-
-  defp dispatch_error_message(other, _task_id), do: dispatch_error_message(other)
 
   # ---- Phase 2 fetch helpers ---------------------------------------------
 
-  defp find_dep_edges(from, to, nil) do
-    Dependency
-    |> Ash.Query.filter(from_issue_id == ^from and to_issue_id == ^to)
-    |> Ash.read!()
-  end
-
-  defp find_dep_edges(from, to, type) do
-    Dependency
-    |> Ash.Query.filter(from_issue_id == ^from and to_issue_id == ^to and type == ^type)
-    |> Ash.read!()
-  end
-
   # The scope's own workspace, loaded for the tracker bridge tools.
-  defp fetch_workspace(ws_id) do
+  def fetch_workspace(ws_id) do
     case Ash.get(Workspace, ws_id) do
       {:ok, %Workspace{} = ws} -> {:ok, ws}
       _ -> {:error, {:not_found, "workspace #{ws_id} not found"}}
@@ -3377,59 +1337,25 @@ defmodule Arbiter.MCP.Tools do
 
   defp claim_error_message(other), do: inspect(other)
 
-  defp fetch_string(args, key) when is_map(args) do
+  # internal — shared
+  def fetch_string(args, key) when is_map(args) do
     case Map.get(args, key) do
       s when is_binary(s) and s != "" -> s
       _ -> nil
     end
   end
 
-  defp fetch_string(_args, _key), do: nil
+  def fetch_string(_args, _key), do: nil
 
   # An optional map argument; nil when absent or not a map.
-  defp fetch_map(args, key) when is_map(args) do
+  def fetch_map(args, key) when is_map(args) do
     case Map.get(args, key) do
       m when is_map(m) -> m
       _ -> nil
     end
   end
 
-  defp fetch_map(_args, _key), do: nil
-
-  # ---- workspace_config helpers -------------------------------------------
-
-  # Sorted names of the workspace's configured secrets; values are never
-  # returned. Mirrors ArbiterWeb.Api.WorkspaceJSON.secret_key_names/1.
-  defp workspace_secret_keys(%Workspace{} = ws) do
-    ws |> Workspace.secrets_map() |> Map.keys() |> Enum.sort()
-  end
-
-  # Top-level config key prefixes that the MCP write tools refuse to set.
-  # Secrets live in the encrypted `secrets` column, not the config JSON;
-  # routing them here would silently store a plaintext ref with no effect.
-  defp deny_secret_path(key) when is_binary(key) do
-    blocked = ~w(secret secrets credentials)
-    prefix = key |> String.split(".") |> List.first() |> String.downcase()
-
-    if prefix in blocked do
-      {:error,
-       {:unauthorized,
-        "cannot set #{inspect(key)} via config tools — use `arb workspace secret` for secrets"}}
-    else
-      :ok
-    end
-  end
-
-  # Fetch the `value` argument; accepts any JSON-decoded type (boolean,
-  # integer, string, object, array, or null). Distinguishing absent from null
-  # requires Map.fetch rather than Map.get.
-  defp require_config_value(args) do
-    case Map.fetch(args, "value") do
-      :error -> {:error, {:invalid, "`value` is required"}}
-      {:ok, v} -> {:ok, unwrap_stringified_json(v, [:list, :map])}
-    end
-  end
-
+  def fetch_map(_args, _key), do: nil
   # Some MCP tool-calling clients serialize arguments into JSON-encoded strings
   # before sending them (bd-1dtufq) rather than native JSON values, even though
   # the tool's input_schema advertises the correct types. Detect that shape and
@@ -3438,7 +1364,7 @@ defmodule Arbiter.MCP.Tools do
   # as-is to preserve legitimate string values. workspace_config_set's schema
   # explicitly allows strings, so a client sending "5" as a config value should
   # not have it reinterpreted as the integer 5.
-  defp unwrap_stringified_json(v, allowed_types) when is_binary(v) do
+  def unwrap_stringified_json(v, allowed_types) when is_binary(v) do
     trimmed = String.trim(v)
 
     # Only attempt JSON decode if this looks like a JSON value (starts with
@@ -3468,46 +1394,24 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp unwrap_stringified_json(v, _allowed_types), do: v
+  def unwrap_stringified_json(v, _allowed_types), do: v
+  # ---- serializers (JSON-friendly, mirroring the REST shapes) -------------
 
-  # Build a nested map from a dotted-path segment list and a leaf value.
-  defp config_put_in_path(map, [k], value) when is_map(map), do: Map.put(map, k, value)
-
-  defp config_put_in_path(map, [k | rest], value) when is_map(map) do
-    sub =
-      case Map.get(map, k) do
-        %{} = s -> s
-        _ -> %{}
-      end
-
-    Map.put(map, k, config_put_in_path(sub, rest, value))
-  end
-
-  # Navigate a nested config map by path segments; nil if any segment is missing.
-  defp config_get_in_path(value, []), do: value
-
-  defp config_get_in_path(map, [k | rest]) when is_map(map) do
-    case Map.get(map, k) do
-      nil -> nil
-      sub -> config_get_in_path(sub, rest)
-    end
-  end
-
-  defp config_get_in_path(_, _), do: nil
-
-  # The standard config result: workspace identity, full (secret-safe) config,
-  # and the names of configured secrets so the caller can confirm the merge.
-  defp serialize_workspace_config(%Workspace{} = ws) do
+  def serialize_task_summary(%Issue{} = i) do
     %{
-      workspace: %{id: ws.id, name: ws.name, prefix: ws.prefix},
-      config: ws.config || %{},
-      secret_keys: workspace_secret_keys(ws)
+      id: i.id,
+      title: i.title,
+      status: to_str(i.status),
+      priority: i.priority,
+      difficulty: i.difficulty,
+      issue_type: to_str(i.issue_type),
+      workspace_id: i.workspace_id
     }
   end
 
-  # ---- serializers (JSON-friendly, mirroring the REST shapes) -------------
-
-  defp serialize_task(%Issue{} = i) do
+  # internal — shared by Arbiter.MCP.Tools.Task (task_show's full view) and
+  # tracker_claim below
+  def serialize_task(%Issue{} = i) do
     %{
       id: i.id,
       title: i.title,
@@ -3537,42 +1441,14 @@ defmodule Arbiter.MCP.Tools do
     |> put_progress(i)
   end
 
-  # Slim serializer for worker task_show (full: false). Omits review/human
-  # fields that bloat worker context without aiding task execution.
-  defp serialize_task_slim(%Issue{} = i) do
-    %{
-      id: i.id,
-      title: i.title,
-      description: i.description,
-      acceptance: i.acceptance,
-      status: to_str(i.status),
-      priority: i.priority,
-      difficulty: i.difficulty,
-      issue_type: to_str(i.issue_type)
-    }
-    |> put_progress(i)
-  end
-
-  # Include the child-progress rollup when the calcs are loaded (task_show loads
-  # them). Omitted when not loaded so other serialize paths stay cheap.
-  defp put_progress(map, %Issue{child_total: t, child_closed: c})
-       when is_integer(t) and is_integer(c) do
+  # internal — shared: the child-progress rollup, appended by both
+  # serialize_task and Arbiter.MCP.Tools.Task's serialize_task_slim
+  def put_progress(map, %Issue{child_total: t, child_closed: c})
+      when is_integer(t) and is_integer(c) do
     Map.merge(map, %{child_total: t, child_closed: c, child_open: max(t - c, 0)})
   end
 
-  defp put_progress(map, _i), do: map
-
-  defp serialize_task_summary(%Issue{} = i) do
-    %{
-      id: i.id,
-      title: i.title,
-      status: to_str(i.status),
-      priority: i.priority,
-      difficulty: i.difficulty,
-      issue_type: to_str(i.issue_type),
-      workspace_id: i.workspace_id
-    }
-  end
+  def put_progress(map, _i), do: map
 
   defp serialize_graph(%Graph{} = g) do
     %{
@@ -3586,7 +1462,7 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp serialize_dependency(%Dependency{} = d) do
+  def serialize_dependency(%Dependency{} = d) do
     %{
       id: d.id,
       from_issue_id: d.from_issue_id,
@@ -3598,129 +1474,7 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  # The dispatch result carries live pids/ports; render the JSON-safe subset (pids
-  # inspected to strings), mirroring `ArbiterWeb.Api.WorkerJSON.dispatch/1`. `depth`
-  # is the slung worker's scope depth (parent + 1).
-  defp serialize_dispatch(result, depth) do
-    %{
-      task: serialize_task_summary(result.task),
-      worker: %{task_id: result.task.id, pid: inspect(result.worker_pid)},
-      machine: %{id: result.machine_id, pid: inspect(result.machine_pid)},
-      worktree_path: result.worktree_path,
-      claude_started: not is_nil(result.claude_port),
-      depth: depth
-    }
-  end
-
-  defp serialize_worker_summary(snap, cost_usd) do
-    meta = Map.get(snap, :meta, %{}) || %{}
-    routing = Map.get(meta, :routing_config) || %{}
-    model_id = Map.get(meta, :model) || Map.get(routing, :model)
-    {resumable, blocked_reason} = Dispatch.resumable_status(snap.task_id)
-
-    %{
-      task_id: snap.task_id,
-      # bd-8lq2g7: a task can legitimately have TWO live rows — its primary
-      # worker plus a merge-queue subordinate pass registered under
-      # `<task_id>:fixpass` / `:conflict`. Without these two fields the rows are
-      # indistinguishable, which is what made a dead fix pass look like the
-      # task's own worker having gone stale.
-      registry_key: Map.get(snap, :registry_key) || snap.task_id,
-      role: to_str(Map.get(snap, :role)),
-      status: to_str(snap.status),
-      repo: snap.repo,
-      started_at: iso(snap.started_at),
-      activity: Map.get(meta, :activity),
-      provider: Map.get(meta, :provider) || Map.get(routing, :provider),
-      model: Arbiter.Worker.Stats.short_model_name(model_id),
-      cost_usd: cost_usd,
-      resumable: resumable,
-      blocked_reason: blocked_reason
-    }
-  end
-
-  defp serialize_worker_snapshot(snap, lines) do
-    meta = Map.get(snap, :meta, %{}) || %{}
-    {resumable, blocked_reason} = Dispatch.resumable_status(snap.task_id)
-
-    output_lines = Map.get(meta, :output_lines, [])
-    output_lines = if lines, do: Enum.take(output_lines, -lines), else: output_lines
-
-    %{
-      source: "live",
-      task_id: snap.task_id,
-      # See serialize_worker_summary/2 — a subordinate pass shares the task's id
-      # and is only distinguishable by its registry key + role (bd-8lq2g7).
-      registry_key: Map.get(snap, :registry_key) || snap.task_id,
-      role: to_str(Map.get(snap, :role)),
-      workspace_id: snap.workspace_id,
-      repo: snap.repo,
-      current_step: snap.current_step,
-      claude_session: Map.get(meta, :claude_session, false),
-      activity: Map.get(meta, :activity),
-      status: to_str(snap.status),
-      started_at: iso(snap.started_at),
-      step_started_at: iso(Map.get(snap, :step_started_at)),
-      mr_ref: Map.get(snap, :mr_ref),
-      merger_url: Map.get(snap, :merger_url),
-      last_merger_status: Map.get(meta, :last_merger_status),
-      last_checked_at: iso(Map.get(meta, :last_checked_at)),
-      pid: inspect(snap.pid),
-      output_lines: output_lines,
-      exit_status: Map.get(meta, :exit_status),
-      exited_at: iso(Map.get(meta, :exited_at)),
-      result: Map.get(meta, :result),
-      failure_reason: stringify_reason(Map.get(meta, :failure_reason)),
-      resumable: resumable,
-      blocked_reason: blocked_reason
-    }
-  end
-
-  defp serialize_worker_run(%Arbiter.Workers.Run{} = run, lines) do
-    output_lines = run.output_lines || []
-    output_lines = if lines, do: Enum.take(output_lines, -lines), else: output_lines
-
-    %{
-      source: "history",
-      task_id: run.task_id,
-      task_title: run.task_title,
-      workspace_id: run.workspace_id,
-      repo: run.repo,
-      worker_type: to_str(run.worker_type),
-      current_step: nil,
-      claude_session: false,
-      activity: nil,
-      status: to_str(run.status),
-      model: run.model,
-      started_at: iso(run.started_at),
-      completed_at: iso(run.completed_at),
-      exit_status: run.exit_code,
-      output_lines: output_lines,
-      failure_reason: run.failure_reason
-    }
-  end
-
-  defp stringify_reason(nil), do: nil
-  defp stringify_reason(v) when is_binary(v), do: v
-  defp stringify_reason(v), do: inspect(v)
-
-  defp serialize_message(%Message{} = m) do
-    %{
-      id: m.id,
-      kind: to_str(m.kind),
-      from_ref: m.from_ref,
-      to_ref: m.to_ref,
-      subject: m.subject,
-      body: m.body,
-      task_ref: m.task_ref,
-      directive_ref: m.directive_ref,
-      read_at: iso(m.read_at),
-      cleared_at: iso(m.cleared_at),
-      inserted_at: iso(m.inserted_at)
-    }
-  end
-
-  defp serialize_workspace(%Workspace{} = ws) do
+  def serialize_workspace(%Workspace{} = ws) do
     %{
       id: ws.id,
       name: ws.name,
@@ -3765,19 +1519,76 @@ defmodule Arbiter.MCP.Tools do
   defp serialize_claim_result({:error, action, reason}),
     do: %{outcome: "error", action: serialize_claim_action(action), reason: inspect(reason)}
 
-  defp to_str(nil), do: nil
-  defp to_str(a) when is_atom(a), do: Atom.to_string(a)
-  defp to_str(s) when is_binary(s), do: s
+  # internal — shared
+  def to_str(nil), do: nil
+  def to_str(a) when is_atom(a), do: Atom.to_string(a)
+  def to_str(s) when is_binary(s), do: s
 
-  defp iso(nil), do: nil
-  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp iso(%NaiveDateTime{} = dt), do: NaiveDateTime.to_iso8601(dt)
+  # internal — shared
+  def iso(nil), do: nil
+  def iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  def iso(%NaiveDateTime{} = dt), do: NaiveDateTime.to_iso8601(dt)
 
-  defp ash_error_message(%{__struct__: _} = err) do
+  # internal — shared
+  def ash_error_message(%{__struct__: _} = err) do
     if is_exception(err), do: Exception.message(err), else: inspect(err)
   rescue
     _ -> "update failed"
   end
 
-  defp ash_error_message(err), do: inspect(err)
+  def ash_error_message(err), do: inspect(err)
+
+  # ---- delegation to split-out submodules ---------------------------------
+  #
+  # Implementation for these tool groups lives in the submodules below (see
+  # the moduledoc); delegating keeps `&Tools.function/2` captures in
+  # `Arbiter.MCP.Catalog` and every existing `Tools.function(...)` call site
+  # working unchanged.
+
+  defdelegate skill_create(scope, args), to: Arbiter.MCP.Tools.Skills
+  defdelegate skill_update(scope, args), to: Arbiter.MCP.Tools.Skills
+  defdelegate skill_delete(scope, args), to: Arbiter.MCP.Tools.Skills
+  defdelegate skill_list(scope, args), to: Arbiter.MCP.Tools.Skills
+  defdelegate skill_get(scope, args), to: Arbiter.MCP.Tools.Skills
+
+  defdelegate loop_pending_list(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_pending_diff(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_pending_apply(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_pending_reject(scope, args), to: Arbiter.MCP.Tools.LoopPending
+
+  defdelegate task_show(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_ready(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_update_progress(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_create(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_update(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_close(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_reopen(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task
+
+  defdelegate workspace_show(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate workspace_config_get(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate workspace_config_overview(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate workspace_config_set(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate workspace_config_unset(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate installation_config_get(scope, args), to: Arbiter.MCP.Tools.Workspace
+  defdelegate installation_config_set(scope, args), to: Arbiter.MCP.Tools.Workspace
+
+  defdelegate inbox_check(scope, args), to: Arbiter.MCP.Tools.Messaging
+  defdelegate coordinator_inbox(scope, args), to: Arbiter.MCP.Tools.Messaging
+  defdelegate message_send(scope, args), to: Arbiter.MCP.Tools.Messaging
+  defdelegate notify_list(scope, args), to: Arbiter.MCP.Tools.Messaging
+
+  defdelegate worker_dispatch(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_resume(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_review(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_stop(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_list(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_show(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_runs(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_log(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate worker_prompt(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate run_log_list(scope, args), to: Arbiter.MCP.Tools.Worker
+  defdelegate transcript_capture_stats(scope, args), to: Arbiter.MCP.Tools.Worker
 end

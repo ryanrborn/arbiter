@@ -11,6 +11,12 @@ defmodule Arbiter.VernacularSweepBah63uTest do
   @target_files ~w(
     lib/arbiter/mcp/catalog.ex
     lib/arbiter/mcp/tools.ex
+    lib/arbiter/mcp/tools/loop_pending.ex
+    lib/arbiter/mcp/tools/messaging.ex
+    lib/arbiter/mcp/tools/skills.ex
+    lib/arbiter/mcp/tools/task.ex
+    lib/arbiter/mcp/tools/worker.ex
+    lib/arbiter/mcp/tools/workspace.ex
     lib/arbiter/worker/watchdog.ex
     lib/arbiter/worker/dispatch.ex
     lib/arbiter/worker/run_provenance.ex
@@ -106,11 +112,11 @@ defmodule Arbiter.VernacularSweepBah63uTest do
              "catalog.ex resume_paused_branch description should say 'coordinator inbox'"
     end
 
-    test "tools.ex: coordinator_inbox doc uses coordinator, not Admiral" do
-      content = read_file("lib/arbiter/mcp/tools.ex")
+    test "tools/messaging.ex: coordinator_inbox doc uses coordinator, not Admiral" do
+      content = read_file("lib/arbiter/mcp/tools/messaging.ex")
 
       assert content =~ "The coordinator escalation mailbox for the bound workspace",
-             "tools.ex @doc for coordinator_inbox should say 'coordinator escalation mailbox'"
+             "tools/messaging.ex @doc for coordinator_inbox should say 'coordinator escalation mailbox'"
     end
   end
 

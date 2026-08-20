@@ -576,6 +576,17 @@ defmodule Arbiter.MCP.ToolsTest do
       assert data.priority == 0
     end
 
+    test "persists pr_ref", ctx do
+      assert {:ok, _data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "pr_ref" => "owner/repo#1"
+               })
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.pr_ref == "owner/repo#1"
+    end
+
     test "cannot close a task through task_update (closed status rejected)", ctx do
       assert {:error, {:invalid, _}} =
                Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id, "status" => "closed"})
