@@ -40,6 +40,8 @@ defmodule ArbiterWeb.DashboardLive do
 
   use ArbiterWeb, :live_view
 
+  import ArbiterWeb.StatusHelpers
+
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Reviews.PrState
@@ -808,43 +810,6 @@ defmodule ArbiterWeb.DashboardLive do
   defp difficulty_label(d) when is_integer(d) and d in 0..4, do: "D#{d}"
   defp difficulty_label(_), do: "—"
 
-  defp difficulty_badge_class(nil), do: "badge-ghost"
-  defp difficulty_badge_class(0), do: "badge-success"
-  defp difficulty_badge_class(1), do: "badge-info"
-  defp difficulty_badge_class(2), do: "badge-secondary"
-  defp difficulty_badge_class(3), do: "badge-warning"
-  defp difficulty_badge_class(4), do: "badge-error"
-  defp difficulty_badge_class(_), do: "badge-ghost"
-
-  defp worker_status_class(:idle), do: "badge-ghost"
-  defp worker_status_class(:resuming), do: "badge-info"
-  defp worker_status_class(:running), do: "badge-info"
-  defp worker_status_class(:awaiting), do: "badge-warning"
-  defp worker_status_class(:awaiting_review_gate), do: "badge-warning"
-  defp worker_status_class(:awaiting_review), do: "badge-warning"
-  defp worker_status_class(:completed), do: "badge-success"
-  defp worker_status_class(:failed), do: "badge-error"
-  defp worker_status_class(_), do: ""
-
-  defp worker_status_label(:idle), do: "Idle"
-  defp worker_status_label(:resuming), do: "Resuming"
-  defp worker_status_label(:running), do: "Running"
-  defp worker_status_label(:awaiting), do: "Awaiting"
-  defp worker_status_label(:awaiting_review_gate), do: "In review_gate"
-  defp worker_status_label(:awaiting_review), do: "Awaiting review"
-  defp worker_status_label(:completed), do: "Completed"
-  defp worker_status_label(:failed), do: "Failed"
-
-  defp worker_status_label(other) when is_atom(other),
-    do: other |> Atom.to_string() |> String.capitalize()
-
-  defp worker_status_label(other), do: to_string(other)
-
-  defp run_status_class(:completed), do: "badge-success"
-  defp run_status_class(:failed), do: "badge-error"
-  defp run_status_class(:running), do: "badge-info"
-  defp run_status_class(_), do: "badge-ghost"
-
   # Human label for the resolved merger strategy atom.
   defp merger_type_label(:direct), do: "Direct"
   defp merger_type_label(:gitlab), do: "GitLab"
@@ -944,18 +909,6 @@ defmodule ArbiterWeb.DashboardLive do
 
   defp humanize_duration(_, _), do: "—"
 
-  defp kind_badge_class(:notification), do: "badge-info"
-  defp kind_badge_class(:direction), do: "badge-warning"
-  defp kind_badge_class(:flag), do: "badge-accent"
-  defp kind_badge_class(:escalation), do: "badge-error"
-  defp kind_badge_class(:failure), do: "badge-error"
-  defp kind_badge_class(:completion), do: "badge-success"
-  defp kind_badge_class(:info), do: "badge-info"
-  defp kind_badge_class(_), do: "badge-ghost"
-
-  defp format_ts(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
-  defp format_ts(_), do: ""
-
   # Compact relative timestamp for the notifications feed. Stays live because
   # the caller passes @now, which the :tick handler advances each second.
   defp relative_time(%DateTime{} = ts, %DateTime{} = now) do
@@ -980,26 +933,6 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   defp mr_ref(_), do: nil
-
-  # Ordered worker lifecycle for the inline step indicator. :failed is handled
-  # separately in the template (it doesn't belong on the happy-path track).
-  @worker_flow [:idle, :running, :awaiting, :completed]
-
-  defp worker_flow, do: @worker_flow
-
-  # Returns :done | :current | :todo for a step relative to the worker's
-  # current status, so the template can color the inline step track.
-  defp flow_state(step, status) do
-    step_idx = Enum.find_index(@worker_flow, &(&1 == step))
-    status_idx = Enum.find_index(@worker_flow, &(&1 == status))
-
-    cond do
-      is_nil(step_idx) or is_nil(status_idx) -> :todo
-      step_idx < status_idx -> :done
-      step_idx == status_idx -> :current
-      true -> :todo
-    end
-  end
 
   # A claude-driven worker — a streaming Claude subprocess does the real work
   # and its workflow Machine is never ticked, so current_step sits frozen. Show
@@ -1496,7 +1429,7 @@ defmodule ArbiterWeb.DashboardLive do
                     <td class="text-xs tabular-nums">
                       {if r.finding_count, do: r.finding_count, else: "—"}
                     </td>
-                    <td class="text-xs whitespace-nowrap">{format_ts(r.started_at)}</td>
+                    <td class="text-xs whitespace-nowrap">{format_ts_short(r.started_at)}</td>
                     <td class="text-xs text-right font-mono tabular-nums whitespace-nowrap">
                       {humanize_duration(r.started_at, r.completed_at || @now)}
                     </td>
@@ -1612,7 +1545,7 @@ defmodule ArbiterWeb.DashboardLive do
                   <div class="flex items-center gap-2 shrink-0">
                     <span
                       class="text-xs text-base-content/50 whitespace-nowrap"
-                      title={format_ts(m.inserted_at)}
+                      title={format_ts_short(m.inserted_at)}
                     >
                       {relative_time(m.inserted_at, @now)}
                     </span>
@@ -1764,7 +1697,7 @@ defmodule ArbiterWeb.DashboardLive do
                     <td>
                       <span class={["badge badge-sm", run_status_class(r.status)]}>{r.status}</span>
                     </td>
-                    <td class="text-xs whitespace-nowrap">{format_ts(r.started_at)}</td>
+                    <td class="text-xs whitespace-nowrap">{format_ts_short(r.started_at)}</td>
                     <td class="text-xs text-right font-mono tabular-nums whitespace-nowrap">
                       {humanize_duration(r.started_at, r.completed_at)}
                     </td>
@@ -1985,7 +1918,7 @@ defmodule ArbiterWeb.DashboardLive do
                     </div>
                     <span
                       class="text-xs text-base-content/50 whitespace-nowrap shrink-0"
-                      title={format_ts(e.inserted_at)}
+                      title={format_ts_short(e.inserted_at)}
                     >
                       {relative_time(e.inserted_at, @now)}
                     </span>
@@ -2013,13 +1946,6 @@ defmodule ArbiterWeb.DashboardLive do
   defp open_issue_total(workspaces) do
     Enum.reduce(workspaces, 0, fn ws, acc -> acc + Map.get(ws, :open, 0) end)
   end
-
-  # Solid status dot color for the active-worker rows (mirrors the badge palette).
-  defp status_dot_class(:running), do: "bg-info"
-  defp status_dot_class(:awaiting), do: "bg-warning"
-  defp status_dot_class(:completed), do: "bg-success"
-  defp status_dot_class(:failed), do: "bg-error"
-  defp status_dot_class(_), do: "bg-base-content/30"
 
   # Inline lifecycle-track segment color, given a step's state vs current status.
   defp flow_bar_class(:done), do: "bg-success"
