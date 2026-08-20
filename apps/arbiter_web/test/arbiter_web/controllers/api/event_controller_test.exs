@@ -62,6 +62,43 @@ defmodule ArbiterWeb.Api.EventControllerTest do
     end
   end
 
+  # ---- since= validation ---------------------------------------------------
+
+  describe "GET /events — since validation" do
+    setup %{ws: ws} do
+      {:ok, token: Scope.mint_coordinator(ws.id)}
+    end
+
+    test "returns 400 for a since value that is neither an integer cursor nor an ISO-8601 timestamp",
+         %{conn: conn, token: token} do
+      conn = get(conn, "/events?token=#{token}&since=not-a-cursor")
+      body = json_response(conn, 400)
+      assert body["error"] =~ "invalid since"
+    end
+
+    test "enters the stream for a valid integer cursor", %{token: token} do
+      task =
+        Task.async(fn ->
+          get(Phoenix.ConnTest.build_conn(), "/events?token=#{token}&since=0")
+        end)
+
+      assert nil == Task.yield(task, 100)
+      Task.shutdown(task, :brutal_kill)
+    end
+
+    test "enters the stream for a valid ISO-8601 timestamp", %{token: token} do
+      since = DateTime.utc_now() |> DateTime.to_iso8601() |> URI.encode_www_form()
+
+      task =
+        Task.async(fn ->
+          get(Phoenix.ConnTest.build_conn(), "/events?token=#{token}&since=#{since}")
+        end)
+
+      assert nil == Task.yield(task, 100)
+      Task.shutdown(task, :brutal_kill)
+    end
+  end
+
   # ---- streaming happy path -----------------------------------------------
   # Testing an infinite chunked stream synchronously is impractical in
   # Phoenix.ConnTest (get/2 blocks until the handler returns, which it never

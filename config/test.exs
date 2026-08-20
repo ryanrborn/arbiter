@@ -126,6 +126,11 @@ config :arbiter, :pr_state_poller, enabled: false
 # `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.
 config :arbiter, :loop_canary_ticker, enabled: false
 
+# Disable the durable events retention sweeper in test — it would otherwise
+# delete rows on a timer off the sandbox connection. Tests drive
+# `Arbiter.Events.Retention.sweep/1` synchronously.
+config :arbiter, :events_retention, enabled: false
+
 # Disable the Codex / Gemini CLI / Antigravity refresh probe in test — there are
 # no real CLIs or endpoints to hit. Tests that exercise the prober inject a
 # :refresh_fun stub and enable explicitly.
