@@ -17,5 +17,6 @@ defmodule Arbiter.Workers do
 
   resources do
     resource Arbiter.Workers.Run
+    resource Arbiter.Workers.RunStep
   end
 end
