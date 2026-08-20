@@ -432,59 +432,64 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp do_enqueue(state, task_id) do
     case Ash.get(Issue, task_id) do
-      {:ok, task} ->
-        # Reload workspace to pick up the merge config block. Issue belongs_to
-        # workspace but the relationship isn't always loaded.
-        {:ok, task} = Ash.load(task, [:workspace])
-
-        # Re-seed the adapter's per-process config from the latest workspace
-        # state — including a per-repo override for multi-GitLab-project
-        # workspaces (bd-c9vb0r) — then resolve the adapter module.
-        repo = resolve_task_repo(task)
-        Mergers.prepare_with_repo(task.workspace, repo)
-        adapter = Mergers.for_workspace(task.workspace)
-        state = %{state | adapter: adapter, workspace: task.workspace}
-
-        strategy = Atom.to_string(Workspace.merger_strategy(task.workspace))
-
-        cond do
-          already_queued?(state, task_id) ->
-            {{:ok, :already_queued}, state}
-
-          strategy == "direct" ->
-            # direct: never call MR/PR APIs. The worker owned the push + merge;
-            # we just transition the task. This is the explicit escape hatch
-            # for personal projects that don't use the PR/MR workflow. Still
-            # carry repo/base through so `safe_sync_primary_checkout/2` can
-            # resolve the primary checkout the same as every other strategy
-            # (bd-bqqnin finding 2 — direct was silently dead here).
-            item =
-              new_item(task_id, strategy,
-                status: :done,
-                repo: repo,
-                base: resolve_base(state, task)
-              )
-
-            state = %{state | items: [item | state.items]}
-            state = close_task_and_finalize(state, item)
-            {:ok, state}
-
-          existing_mr_ref(task) ->
-            # bd-auma3z: the task already has an open MR/PR (e.g. a prior worker
-            # opened one before it stopped, and was then resumed). Adopt that MR
-            # into the queue and poll it to completion rather than calling
-            # `adapter.open` again — that would create a DUPLICATE for the same
-            # branch. The resumed worker's work lands on the same branch the MR
-            # already tracks.
-            adopt_existing_mr(state, task, strategy, repo)
-
-          true ->
-            open_mr_for(state, task, strategy, repo)
-        end
-
-      {:error, _} = err ->
-        {err, state}
+      {:ok, task} -> enqueue_task(state, task_id, task)
+      {:error, _} = err -> {err, state}
     end
+  end
+
+  defp enqueue_task(state, task_id, task) do
+    # Reload workspace to pick up the merge config block. Issue belongs_to
+    # workspace but the relationship isn't always loaded.
+    {:ok, task} = Ash.load(task, [:workspace])
+
+    # Re-seed the adapter's per-process config from the latest workspace
+    # state — including a per-repo override for multi-GitLab-project
+    # workspaces (bd-c9vb0r) — then resolve the adapter module.
+    repo = resolve_task_repo(task)
+    Mergers.prepare_with_repo(task.workspace, repo)
+    adapter = Mergers.for_workspace(task.workspace)
+    state = %{state | adapter: adapter, workspace: task.workspace}
+
+    strategy = Atom.to_string(Workspace.merger_strategy(task.workspace))
+
+    cond do
+      already_queued?(state, task_id) ->
+        {{:ok, :already_queued}, state}
+
+      strategy == "direct" ->
+        enqueue_direct(state, task_id, task, strategy, repo)
+
+      existing_mr_ref(task) ->
+        # bd-auma3z: the task already has an open MR/PR (e.g. a prior worker
+        # opened one before it stopped, and was then resumed). Adopt that MR
+        # into the queue and poll it to completion rather than calling
+        # `adapter.open` again — that would create a DUPLICATE for the same
+        # branch. The resumed worker's work lands on the same branch the MR
+        # already tracks.
+        adopt_existing_mr(state, task, strategy, repo)
+
+      true ->
+        open_mr_for(state, task, strategy, repo)
+    end
+  end
+
+  # direct: never call MR/PR APIs. The worker owned the push + merge;
+  # we just transition the task. This is the explicit escape hatch
+  # for personal projects that don't use the PR/MR workflow. Still
+  # carry repo/base through so `safe_sync_primary_checkout/2` can
+  # resolve the primary checkout the same as every other strategy
+  # (bd-bqqnin finding 2 — direct was silently dead here).
+  defp enqueue_direct(state, task_id, task, strategy, repo) do
+    item =
+      new_item(task_id, strategy,
+        status: :done,
+        repo: repo,
+        base: resolve_base(state, task)
+      )
+
+    state = %{state | items: [item | state.items]}
+    state = close_task_and_finalize(state, item)
+    {:ok, state}
   end
 
   # The task's recorded MR ref, if any — set by `maybe_record_mr_ref/2` when
@@ -779,63 +784,67 @@ defmodule Arbiter.Workflows.MergeQueue do
     # override immediately before each adapter call so it always targets the
     # project the item's task actually merges into.
     Mergers.prepare_with_repo(state.workspace, item.repo)
+    log_first_poll(item)
 
-    # bd-6w7j8h: log on an item's very first poll, unconditionally — the total
-    # absence of log lines is what let a stranded item hide for 20 hours. An
-    # item adopted via adopt_existing_mr/4 is planted in the tightest possible
-    # race window right after an external merge, exactly when the forge API is
-    # most likely to still be transiently inconsistent for that ref — so this
-    # first-poll marker exists regardless of whether the call below succeeds.
+    case state.adapter.get(item.mr_ref) do
+      {:ok, mr_state} -> advance_status(state, item, mr_state)
+      {:error, reason} -> handle_poll_error(state, item, reason)
+    end
+  end
+
+  # bd-6w7j8h: log on an item's very first poll, unconditionally — the total
+  # absence of log lines is what let a stranded item hide for 20 hours. An
+  # item adopted via adopt_existing_mr/4 is planted in the tightest possible
+  # race window right after an external merge, exactly when the forge API is
+  # most likely to still be transiently inconsistent for that ref — so this
+  # first-poll marker exists regardless of whether the call below succeeds.
+  defp log_first_poll(item) do
     if is_nil(item.last_polled_at) do
       Logger.info(
         "MergeQueue: first poll for task=#{item.task_id} mr_ref=#{item.mr_ref} " <>
           "status=#{item.status}"
       )
     end
+  end
 
-    case state.adapter.get(item.mr_ref) do
-      {:ok, mr_state} ->
-        advance_status(state, item, mr_state)
+  # bd-6w7j8h: a poll error used to mark the item :failed permanently and
+  # silently — poll_item/2's :failed clause never re-polls a failed item,
+  # so a single transient forge hiccup (most likely to hit exactly here,
+  # in the adopt path's race window against an external merge) stranded
+  # the task forever with zero log trace. Log it, and leave the item's
+  # status alone so the next tick gets a real chance to retry — a
+  # genuinely permanent error just keeps logging every tick instead of
+  # vanishing.
+  #
+  # bd-bvxdy9: when the error carries a rate-limit retry hint, don't
+  # just retry on the next fixed tick — that used to burn a call every
+  # 30s against a limit the forge told us wouldn't clear for minutes.
+  # Park the item until `retry_not_before` instead.
+  defp handle_poll_error(state, item, reason) do
+    retry_after_ms = rate_limited_retry_after_ms(reason)
+    capped_retry_after_ms = retry_after_ms && min(retry_after_ms, @max_rate_limit_park_ms)
 
-      {:error, reason} ->
-        # bd-6w7j8h: a poll error used to mark the item :failed permanently and
-        # silently — poll_item/2's :failed clause never re-polls a failed item,
-        # so a single transient forge hiccup (most likely to hit exactly here,
-        # in the adopt path's race window against an external merge) stranded
-        # the task forever with zero log trace. Log it, and leave the item's
-        # status alone so the next tick gets a real chance to retry — a
-        # genuinely permanent error just keeps logging every tick instead of
-        # vanishing.
-        #
-        # bd-bvxdy9: when the error carries a rate-limit retry hint, don't
-        # just retry on the next fixed tick — that used to burn a call every
-        # 30s against a limit the forge told us wouldn't clear for minutes.
-        # Park the item until `retry_not_before` instead.
-        retry_after_ms = rate_limited_retry_after_ms(reason)
-        capped_retry_after_ms = retry_after_ms && min(retry_after_ms, @max_rate_limit_park_ms)
+    retry_not_before =
+      capped_retry_after_ms && DateTime.add(now(), capped_retry_after_ms, :millisecond)
 
-        retry_not_before =
-          capped_retry_after_ms && DateTime.add(now(), capped_retry_after_ms, :millisecond)
-
-        Logger.warning(
-          "MergeQueue: poll failed for task=#{item.task_id} mr_ref=#{item.mr_ref}: " <>
-            "#{inspect(reason)} — " <>
-            if(retry_not_before,
-              do: "rate-limited, will retry in #{capped_retry_after_ms}ms",
-              else: "will retry next tick"
-            )
+    Logger.warning(
+      "MergeQueue: poll failed for task=#{item.task_id} mr_ref=#{item.mr_ref}: " <>
+        "#{inspect(reason)} — " <>
+        if(retry_not_before,
+          do: "rate-limited, will retry in #{capped_retry_after_ms}ms",
+          else: "will retry next tick"
         )
+    )
 
-        {
-          %{
-            item
-            | last_error: reason,
-              last_polled_at: DateTime.utc_now(),
-              retry_not_before: retry_not_before
-          },
-          state
-        }
-    end
+    {
+      %{
+        item
+        | last_error: reason,
+          last_polled_at: DateTime.utc_now(),
+          retry_not_before: retry_not_before
+      },
+      state
+    }
   end
 
   # Only a rate-limited error with a positive retry hint changes scheduling —
@@ -867,8 +876,7 @@ defmodule Arbiter.Workflows.MergeQueue do
       # Once the conflict clears (conflicting: false on a later tick) restore
       # the item to its prior status so the normal advancement resumes.
       item.status == :conflict_resolving ->
-        restored = restore_after_resolution(state, item)
-        advance_status(state, restored, mr_state)
+        resume_after_conflict_resolution(state, item, mr_state)
 
       # A revise pass was dispatched on a prior tick; the worker is addressing
       # the feedback asynchronously on the same branch. Return the item to
@@ -886,9 +894,7 @@ defmodule Arbiter.Workflows.MergeQueue do
       # before the changes-requested branch so a merged PR never triggers a
       # revise on a stale review.
       mr_state.status == :merged ->
-        item = %{item | status: :done}
-        state = close_task_and_finalize(state, item)
-        {item, state}
+        finish_merged_externally(state, item)
 
       # A reviewer requested changes with a review we haven't actioned yet:
       # dispatch exactly one revise pass on the existing worktree. Debounced on
@@ -910,14 +916,36 @@ defmodule Arbiter.Workflows.MergeQueue do
       # Caught up after a base update (no longer :behind_base): rejoin the normal
       # ladder and re-evaluate against the current MR state.
       item.status == :updating_base ->
-        advance_status(
-          state,
-          %{item | status: :awaiting_approval, base_updated_at: nil},
-          mr_state
-        )
+        resume_after_base_update(state, item, mr_state)
 
-      # Merge-ready rungs PARK at :ready_to_merge; the actual merge is admitted
-      # one-at-a-time by admit_one_merge/2 (Phase 3) so the queue serializes.
+      true ->
+        advance_ready_ladder(state, item, mr_state)
+    end
+  end
+
+  defp resume_after_conflict_resolution(state, item, mr_state) do
+    restored = restore_after_resolution(state, item)
+    advance_status(state, restored, mr_state)
+  end
+
+  defp finish_merged_externally(state, item) do
+    item = %{item | status: :done}
+    state = close_task_and_finalize(state, item)
+    {item, state}
+  end
+
+  defp resume_after_base_update(state, item, mr_state) do
+    advance_status(
+      state,
+      %{item | status: :awaiting_approval, base_updated_at: nil},
+      mr_state
+    )
+  end
+
+  # Merge-ready rungs PARK at :ready_to_merge; the actual merge is admitted
+  # one-at-a-time by admit_one_merge/2 (Phase 3) so the queue serializes.
+  defp advance_ready_ladder(state, item, mr_state) do
+    cond do
       item.status == :awaiting_approval and mr_state.approved and mr_state.ci_clean ->
         {%{item | status: :ready_to_merge}, state}
 
