@@ -93,6 +93,9 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Workers.RunStep
+
+  require Logger
 
   @line_cap 1000
   # bd-7a0pi8: anchor the marker to end-of-line. `\barb done` still rejects the
@@ -383,6 +386,7 @@ defmodule Arbiter.Worker.ClaudeSession do
         session =
           session
           |> absorb_usage(event)
+          |> capture_steps(event)
           |> scan_split_done(event)
           |> buffer_gemini_display(event)
 
@@ -640,6 +644,137 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp number(n) when is_integer(n), do: n
   defp number(n) when is_float(n), do: n
   defp number(_), do: nil
+
+  # ---- typed step capture (bd-7xftps / bd-apwfmy Phase 1) ---------------
+  #
+  # Promote tool_use/tool_result block pairs out of rendered transcript prose
+  # into a queryable `Arbiter.Workers.RunStep` row, without disturbing the
+  # display-line formatting that `assistant_block_lines/1` /
+  # `tool_result_lines/1` already do for the exact same blocks (the "byte
+  # identical" acceptance bar). A `tool_use` block stashes what it knows
+  # (name, redacted input) on the session under `:pending_tool_calls`, keyed
+  # by the block's `id`; the matching `tool_result` block (correlated by
+  # `tool_use_id`) pops that entry, computes `duration_ms`, and issues the
+  # (best-effort) DB write. A `tool_use` with no matching result — the
+  # session was killed mid-call — leaves its pending entry stranded and never
+  # writes a row: absent, not garbage.
+  #
+  # Deliberately Claude-only: Gemini/Codex speak different stream-json
+  # shapes (see their own `Stream.format_event/1` modules) and are routed
+  # around here explicitly rather than relying on the shape match to miss,
+  # so the "rows absent for non-Claude runs" property is asserted, not
+  # accidental.
+  defp capture_steps(%{provider: provider} = session, _event)
+       when provider in ["gemini", "codex"],
+       do: session
+
+  defp capture_steps(session, %{"type" => "assistant", "message" => %{"content" => content}})
+       when is_list(content) do
+    Enum.reduce(content, session, &remember_tool_use/2)
+  end
+
+  defp capture_steps(session, %{"type" => "user", "message" => %{"content" => content}})
+       when is_list(content) do
+    Enum.reduce(content, session, &record_tool_result/2)
+  end
+
+  defp capture_steps(session, _event), do: session
+
+  defp remember_tool_use(%{"type" => "tool_use", "id" => id, "name" => name} = block, session)
+       when is_binary(id) do
+    input = Map.get(block, "input")
+
+    entry = %{
+      name: name,
+      input_summary: redact_line(session, summarize_tool_input(input)),
+      input_digest: input_digest(session, input),
+      started_at: System.monotonic_time(:millisecond)
+    }
+
+    pending = Map.get(session, :pending_tool_calls, %{})
+    Map.put(session, :pending_tool_calls, Map.put(pending, id, entry))
+  end
+
+  defp remember_tool_use(_block, session), do: session
+
+  defp record_tool_result(%{"type" => "tool_result", "tool_use_id" => id} = block, session)
+       when is_binary(id) do
+    pending = Map.get(session, :pending_tool_calls, %{})
+    {call, pending} = Map.pop(pending, id)
+    session = Map.put(session, :pending_tool_calls, pending)
+
+    duration_ms =
+      case call do
+        %{started_at: started_at} -> System.monotonic_time(:millisecond) - started_at
+        nil -> nil
+      end
+
+    output_summary =
+      block
+      |> Map.get("content")
+      |> tool_result_content_text()
+      |> then(&redact_line(session, &1))
+      |> truncate(2000)
+
+    write_step(session, %{
+      run_id: Map.get(session, :run_id),
+      task_id: Map.get(session, :task_id),
+      tool_use_id: id,
+      name: call && call.name,
+      is_error: !!Map.get(block, "is_error"),
+      duration_ms: duration_ms,
+      input_digest: call && call.input_digest,
+      input_summary: call && call.input_summary,
+      output_summary: output_summary,
+      occurred_at: DateTime.utc_now()
+    })
+
+    session
+  end
+
+  defp record_tool_result(_block, session), do: session
+
+  # sha256 (hex) of the redacted, JSON-encoded input — cheap "same call
+  # again" comparison without re-parsing JSON. Never raises: an input that
+  # somehow fails to encode (it was decoded from valid JSON moments earlier,
+  # so this is a defensive backstop, not an expected path) just yields no
+  # digest rather than losing the row.
+  defp input_digest(_session, nil), do: nil
+
+  defp input_digest(session, input) do
+    input
+    |> Jason.encode!()
+    |> then(&redact_line(session, &1))
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  rescue
+    _ -> nil
+  end
+
+  # Best-effort, like `record_usage_event/3` in `Arbiter.Worker`: a DB hiccup
+  # logs a warning and never fails the run. Written from inside the emit path
+  # (unlike the usage ledger, which batches at session exit) so `duration_ms`
+  # and the tool_use_id correlation are captured while still fresh.
+  defp write_step(session, attrs) do
+    case Ash.create(RunStep, attrs) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "ClaudeSession.write_step/2 swallowed for task=#{Map.get(session, :task_id)}: #{inspect(reason)}"
+        )
+
+        :error
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ClaudeSession.write_step/2 raised for task=#{Map.get(session, :task_id)}: #{Exception.message(e)}"
+      )
+
+      :error
+  end
 
   @doc """
   Read the accumulated structured usage off a session map.
