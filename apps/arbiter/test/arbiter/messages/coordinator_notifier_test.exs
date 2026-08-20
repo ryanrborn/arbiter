@@ -767,4 +767,202 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       assert escalation.body =~ "Refused to dispatch"
     end
   end
+
+  describe "spawn_failed/2 (bd-bi5pn0)" do
+    alias Arbiter.Worker.StopReason
+
+    test "raises a 'spawn failed' escalation with a re-dispatch hint" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      reason = StopReason.classify(1, ["boom"])
+
+      assert :ok =
+               CoordinatorNotifier.spawn_failed(
+                 %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
+                 reason
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "coordinator"
+      assert escalation.directive_ref == task_id
+      assert escalation.subject =~ "spawn failed"
+      assert escalation.body =~ "failed to spawn"
+      assert escalation.body =~ "arb dispatch #{task_id}"
+    end
+
+    test "a spawn failure with no workspace posts nothing" do
+      reason = StopReason.classify(1, ["boom"])
+
+      assert :ok =
+               CoordinatorNotifier.spawn_failed(
+                 %{task_id: "bd-noworkspace", workspace_id: nil, repo: "r", meta: %{}},
+                 reason
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
+
+  describe "credential_expired/3 (bd-5wchp1)" do
+    alias Arbiter.Worker.StopReason
+
+    test "raises an escalation naming the adapter and suspending new dispatches" do
+      ws = uniq("ws")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: ws},
+                 Arbiter.Agents.Claude,
+                 reason
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "coordinator"
+      assert escalation.subject =~ "Claude"
+      assert escalation.subject =~ "credentials expired"
+      assert escalation.body =~ "Proactive"
+      assert escalation.body =~ "suspended"
+    end
+
+    test "a credential expiry with no workspace posts nothing" do
+      reason = StopReason.classify(1, ["boom"])
+
+      assert :ok =
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: nil},
+                 Arbiter.Agents.Claude,
+                 reason
+               )
+
+      assert Message.inbox("admiral") == []
+    end
+  end
+
+  describe "auto_merge_stalled/4 (bd-6gxosc)" do
+    test "raises an escalation naming the attempt count and last error" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.auto_merge_stalled(
+                 %{task_id: task_id, workspace_id: ws},
+                 "!99",
+                 3,
+                 :timeout
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "coordinator"
+      assert escalation.directive_ref == task_id
+      assert escalation.subject =~ "auto-merge stalled (3 consecutive failures)"
+      assert escalation.body =~ "PR/MR: !99"
+      assert escalation.body =~ "Last error: :timeout"
+      assert escalation.body =~ "still retrying"
+    end
+
+    test "an auto-merge stall with no workspace posts nothing" do
+      assert :ok =
+               CoordinatorNotifier.auto_merge_stalled(
+                 %{task_id: "bd-noworkspace", workspace_id: nil},
+                 "!1",
+                 2,
+                 :timeout
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
+
+  describe "overage_alert/3 (bd-7cd38f)" do
+    test "raises an informational escalation naming the spend and threshold" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.overage_alert(
+                 %{task_id: task_id, workspace_id: ws},
+                 12.5,
+                 10.0
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "coordinator"
+      # task_ref is the raw snapshot task_id, not the "system" fallback.
+      assert escalation.directive_ref == task_id
+      assert escalation.from_ref == task_id
+      assert escalation.subject =~ "$10.00"
+      assert escalation.subject =~ "12.50"
+      assert escalation.body =~ "has NOT stopped"
+      assert escalation.body =~ "Workspace: #{ws}"
+    end
+
+    test "with no task_id in the snapshot, the escalation has no task_ref" do
+      ws = uniq("ws")
+
+      assert :ok = CoordinatorNotifier.overage_alert(%{workspace_id: ws}, 5.0, 5.0)
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.directive_ref == nil
+      assert escalation.from_ref == "system"
+    end
+
+    test "an overage alert with no workspace posts nothing" do
+      assert :ok = CoordinatorNotifier.overage_alert(%{workspace_id: nil}, 5.0, 5.0)
+
+      assert Message.inbox("admiral") == []
+    end
+  end
+
+  describe "pipeline_failed/2" do
+    test "names the MR ref when present" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.pipeline_failed(
+                 %{task_id: task_id, workspace_id: ws, started_at: started_ago(10), meta: %{}},
+                 "!7"
+               )
+
+      notification = only_notification(ws)
+      assert notification.subject == "#{task_id} CI pipeline failed"
+
+      assert notification.body ==
+               "#{task_id} MR !7 — CI pipeline failed (parked; human action required)"
+    end
+
+    test "falls back gracefully when no MR ref is recorded" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.pipeline_failed(%{
+                 task_id: task_id,
+                 workspace_id: ws,
+                 started_at: started_ago(10),
+                 meta: %{}
+               })
+
+      assert only_notification(ws).body ==
+               "#{task_id} — CI pipeline failed (parked; human action required)"
+    end
+
+    test "a pipeline failure with no workspace posts nothing" do
+      assert :ok =
+               CoordinatorNotifier.pipeline_failed(%{
+                 task_id: "bd-noworkspace",
+                 workspace_id: nil,
+                 started_at: started_ago(10),
+                 meta: %{}
+               })
+
+      assert Message.recent_notifications(10)
+             |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
 end

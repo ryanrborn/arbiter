@@ -232,45 +232,27 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   the adapter's error term.
   """
   @spec tracker_sync_failed(map(), atom(), term()) :: :ok
-  def tracker_sync_failed(%{workspace_id: ws_id} = snapshot, event, reason)
-      when is_binary(ws_id) do
-    task_id = Map.get(snapshot, :task_id, "system")
-    tracker = Map.get(snapshot, :tracker_type)
-    ref = Map.get(snapshot, :tracker_ref)
+  def tracker_sync_failed(snapshot, event, reason) do
+    escalate_event("tracker_sync_failed/3", snapshot, fn task_id ->
+      tracker = Map.get(snapshot, :tracker_type)
+      ref = Map.get(snapshot, :tracker_ref)
 
-    subject = "#{task_id} tracker sync failed — #{event}"
+      subject = "#{task_id} tracker sync failed — #{event}"
 
-    body =
-      [
-        "Failed to sync #{title_for(task_id)} to its external tracker on the " <>
-          "`#{event}` lifecycle event.",
-        tracker && "Tracker: #{tracker}#{ref && " #{ref}"}",
-        "Error: #{describe_reason(reason)}",
-        sync_hint(reason)
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n")
+      body =
+        [
+          "Failed to sync #{title_for(task_id)} to its external tracker on the " <>
+            "`#{event}` lifecycle event.",
+          tracker && "Tracker: #{tracker}#{ref && " #{ref}"}",
+          "Error: #{describe_reason(reason)}",
+          sync_hint(reason)
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: task_id,
-      workspace_id: ws_id,
-      task_ref: task_id,
-      subject: subject,
-      body: body
-    })
-
-    :ok
-  rescue
-    e ->
-      Logger.debug("CoordinatorNotifier.tracker_sync_failed/3 swallowed: #{Exception.message(e)}")
-      :ok
-  catch
-    :exit, _ -> :ok
+      {subject, body}
+    end)
   end
-
-  def tracker_sync_failed(_snapshot, _event, _reason), do: :ok
 
   @doc """
   Escalate a stalled auto-merge to the coordinator (bd-6gxosc).
@@ -284,44 +266,25 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   last error from the merger adapter. Best-effort, returns `:ok`.
   """
   @spec auto_merge_stalled(map(), String.t() | nil, non_neg_integer(), term()) :: :ok
-  def auto_merge_stalled(%{workspace_id: ws_id} = snapshot, mr_ref, attempts, reason)
-      when is_binary(ws_id) and is_integer(attempts) do
-    task_id = Map.get(snapshot, :task_id, "system")
+  def auto_merge_stalled(snapshot, mr_ref, attempts, reason) do
+    escalate_event("auto_merge_stalled/4", snapshot, fn task_id ->
+      subject = "#{task_id} auto-merge stalled (#{attempts} consecutive failures)"
 
-    subject = "#{task_id} auto-merge stalled (#{attempts} consecutive failures)"
+      body =
+        [
+          "#{title_for(task_id)} is approved but auto-merge has failed #{attempts} consecutive time(s).",
+          mr_ref && "PR/MR: #{mr_ref}",
+          "Last error: #{describe_reason(reason)}",
+          "The Watchdog is still retrying — you can wait for it to resolve (e.g. once " <>
+            "the forge finishes computing `mergeable_state`) or merge manually. " <>
+            "No action is required if the next poll succeeds."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
 
-    body =
-      [
-        "#{title_for(task_id)} is approved but auto-merge has failed #{attempts} consecutive time(s).",
-        mr_ref && "PR/MR: #{mr_ref}",
-        "Last error: #{describe_reason(reason)}",
-        "The Watchdog is still retrying — you can wait for it to resolve (e.g. once " <>
-          "the forge finishes computing `mergeable_state`) or merge manually. " <>
-          "No action is required if the next poll succeeds."
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n")
-
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: task_id,
-      workspace_id: ws_id,
-      task_ref: task_id,
-      subject: subject,
-      body: body
-    })
-
-    :ok
-  rescue
-    e ->
-      Logger.debug("CoordinatorNotifier.auto_merge_stalled/4 swallowed: #{Exception.message(e)}")
-      :ok
-  catch
-    :exit, _ -> :ok
+      {subject, body}
+    end)
   end
-
-  def auto_merge_stalled(_snapshot, _mr_ref, _attempts, _reason), do: :ok
 
   @doc """
   Escalate a blocked merge to the coordinator (#354, Phase 1).
@@ -357,54 +320,39 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   family and still pages immediately.
   """
   @spec merge_blocked(map(), String.t() | nil, atom()) :: :ok
-  def merge_blocked(%{workspace_id: ws_id} = snapshot, mr_ref, reason)
-      when is_binary(ws_id) and is_atom(reason) do
-    task_id = Map.get(snapshot, :task_id, "system")
+  def merge_blocked(snapshot, mr_ref, reason) do
+    escalate_event("merge_blocked/3", snapshot, fn task_id ->
+      ws_id = snapshot.workspace_id
 
-    subject = block_subject(task_id, reason)
+      if duplicate_block_escalation?(ws_id, task_id, reason) do
+        Logger.debug(
+          "CoordinatorNotifier.merge_blocked/3 suppressed duplicate escalation " <>
+            "task=#{task_id} reason=#{reason} (bd-brwx7w)"
+        )
 
-    if duplicate_block_escalation?(ws_id, task_id, reason) do
-      Logger.debug(
-        "CoordinatorNotifier.merge_blocked/3 suppressed duplicate escalation " <>
-          "task=#{task_id} reason=#{reason} (bd-brwx7w)"
-      )
-    else
-      body =
-        [
-          "#{title_for(task_id)} cannot merge: #{block_label(reason)}.",
-          mr_ref && "PR/MR: #{mr_ref}",
-          "Reason: #{reason}",
-          "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
-          "The Watchdog detected this on its merge poll and parked the PR rather " <>
-            "than failing it — resolve the block (or force-merge) and the next " <>
-            "poll will pick it up.",
-          "This escalation is raised once per block episode — it will not repeat " <>
-            "while it is outstanding in the inbox."
-        ]
-        |> Enum.reject(&is_nil/1)
-        |> Enum.join("\n")
+        :skip
+      else
+        subject = block_subject(task_id, reason)
 
-      Message.send_mail(%{
-        kind: :escalation,
-        to_ref: Message.coordinator_ref(),
-        from_ref: task_id,
-        workspace_id: ws_id,
-        task_ref: task_id,
-        subject: subject,
-        body: body
-      })
-    end
+        body =
+          [
+            "#{title_for(task_id)} cannot merge: #{block_label(reason)}.",
+            mr_ref && "PR/MR: #{mr_ref}",
+            "Reason: #{reason}",
+            "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
+            "The Watchdog detected this on its merge poll and parked the PR rather " <>
+              "than failing it — resolve the block (or force-merge) and the next " <>
+              "poll will pick it up.",
+            "This escalation is raised once per block episode — it will not repeat " <>
+              "while it is outstanding in the inbox."
+          ]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.join("\n")
 
-    :ok
-  rescue
-    e ->
-      Logger.debug("CoordinatorNotifier.merge_blocked/3 swallowed: #{Exception.message(e)}")
-      :ok
-  catch
-    :exit, _ -> :ok
+        {subject, body}
+      end
+    end)
   end
-
-  def merge_blocked(_snapshot, _mr_ref, _reason), do: :ok
 
   @doc """
   Escalate a quota-overage spend crossing to the coordinator (bd-7cd38f).
@@ -421,46 +369,34 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   Best-effort, returns `:ok`.
   """
   @spec overage_alert(map(), number(), number()) :: :ok
-  def overage_alert(%{workspace_id: ws_id} = snapshot, spend_usd, threshold_usd)
-      when is_binary(ws_id) and is_number(spend_usd) and is_number(threshold_usd) do
-    task_id = Map.get(snapshot, :task_id, "system")
+  def overage_alert(snapshot, spend_usd, threshold_usd) do
+    escalate_event(
+      "overage_alert/3",
+      snapshot,
+      [task_ref: Map.get(snapshot, :task_id)],
+      fn _task_id ->
+        ws_id = snapshot.workspace_id
 
-    subject =
-      "quota overage spend crossed $#{fmt_usd(threshold_usd)} — #{fmt_usd(spend_usd)} so far"
+        subject =
+          "quota overage spend crossed $#{fmt_usd(threshold_usd)} — #{fmt_usd(spend_usd)} so far"
 
-    body =
-      [
-        "This workspace is dispatching past the Anthropic plan cap in `:continue` " <>
-          "mode and has now spent about $#{fmt_usd(spend_usd)} in paid overage this " <>
-          "5h window — crossing the $#{fmt_usd(threshold_usd)} alert threshold.",
-        "Dispatch has NOT stopped. This is an informational alert (cap + alert, " <>
-          "not auto-stop): switch this workspace to `:throttle`, raise " <>
-          "`quota.overage_alert_usd`, or let it ride — your call.",
-        "Workspace: #{ws_id}"
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n")
+        body =
+          [
+            "This workspace is dispatching past the Anthropic plan cap in `:continue` " <>
+              "mode and has now spent about $#{fmt_usd(spend_usd)} in paid overage this " <>
+              "5h window — crossing the $#{fmt_usd(threshold_usd)} alert threshold.",
+            "Dispatch has NOT stopped. This is an informational alert (cap + alert, " <>
+              "not auto-stop): switch this workspace to `:throttle`, raise " <>
+              "`quota.overage_alert_usd`, or let it ride — your call.",
+            "Workspace: #{ws_id}"
+          ]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.join("\n")
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: task_id,
-      workspace_id: ws_id,
-      task_ref: Map.get(snapshot, :task_id),
-      subject: subject,
-      body: body
-    })
-
-    :ok
-  rescue
-    e ->
-      Logger.debug("CoordinatorNotifier.overage_alert/3 swallowed: #{Exception.message(e)}")
-      :ok
-  catch
-    :exit, _ -> :ok
+        {subject, body}
+      end
+    )
   end
-
-  def overage_alert(_snapshot, _spend, _threshold), do: :ok
 
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 
@@ -477,50 +413,30 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   shape. Best-effort, returns `:ok`.
   """
   @spec merge_block_unresolved(map(), String.t() | nil, atom(), non_neg_integer()) :: :ok
-  def merge_block_unresolved(%{workspace_id: ws_id} = snapshot, mr_ref, reason, attempts)
-      when is_binary(ws_id) and is_atom(reason) and is_integer(attempts) do
-    task_id = Map.get(snapshot, :task_id, "system")
+  def merge_block_unresolved(snapshot, mr_ref, reason, attempts) do
+    escalate_event("merge_block_unresolved/4", snapshot, fn task_id ->
+      ws_id = snapshot.workspace_id
 
-    subject = "#{task_id} auto-resolve exhausted (#{attempts}×) — #{block_label(reason)}"
+      subject = "#{task_id} auto-resolve exhausted (#{attempts}×) — #{block_label(reason)}"
 
-    body =
-      [
-        "#{title_for(task_id)} still cannot merge after #{attempts} auto-resolve " <>
-          "attempt(s): #{block_label(reason)}.",
-        mr_ref && "PR/MR: #{mr_ref}",
-        "Reason: #{reason}",
-        "Auto-resolve attempts: #{attempts}",
-        "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
-        "The Watchdog auto-resolved this block #{attempts} time(s) without success " <>
-          "and has stopped retrying. Resolve it manually (or force-merge) and the " <>
-          "next poll will pick it up."
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n")
+      body =
+        [
+          "#{title_for(task_id)} still cannot merge after #{attempts} auto-resolve " <>
+            "attempt(s): #{block_label(reason)}.",
+          mr_ref && "PR/MR: #{mr_ref}",
+          "Reason: #{reason}",
+          "Auto-resolve attempts: #{attempts}",
+          "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
+          "The Watchdog auto-resolved this block #{attempts} time(s) without success " <>
+            "and has stopped retrying. Resolve it manually (or force-merge) and the " <>
+            "next poll will pick it up."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: task_id,
-      workspace_id: ws_id,
-      task_ref: task_id,
-      subject: subject,
-      body: body
-    })
-
-    :ok
-  rescue
-    e ->
-      Logger.debug(
-        "CoordinatorNotifier.merge_block_unresolved/4 swallowed: #{Exception.message(e)}"
-      )
-
-      :ok
-  catch
-    :exit, _ -> :ok
+      {subject, body}
+    end)
   end
-
-  def merge_block_unresolved(_snapshot, _mr_ref, _reason, _attempts), do: :ok
 
   @doc """
   Escalate an approved-but-parked PR awaiting a manual merge (bd-b4pwxa).
@@ -543,56 +459,34 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   returns `:ok`.
   """
   @spec approved_awaiting_merge(map(), String.t() | nil, boolean()) :: :ok
-  def approved_awaiting_merge(%{workspace_id: ws_id} = snapshot, mr_ref, via_review_gate)
-      when is_binary(ws_id) and is_boolean(via_review_gate) do
-    task_id = Map.get(snapshot, :task_id, "system")
+  def approved_awaiting_merge(snapshot, mr_ref, via_review_gate) do
+    escalate_event("approved_awaiting_merge/3", snapshot, fn task_id ->
+      subject = "#{task_id} approved — awaiting manual merge (auto_merge off)"
 
-    subject = "#{task_id} approved — awaiting manual merge (auto_merge off)"
+      approval_line =
+        if via_review_gate do
+          "The ReviewGate approved this PR in-process and no merge block remains."
+        else
+          "This PR is approved and no merge block remains."
+        end
 
-    approval_line =
-      if via_review_gate do
-        "The ReviewGate approved this PR in-process and no merge block remains."
-      else
-        "This PR is approved and no merge block remains."
-      end
+      body =
+        [
+          "#{title_for(task_id)} is approved and ready to merge, but this workspace " <>
+            "has `merge.auto_merge` disabled — so the fleet will not merge it " <>
+            "automatically and it is parked awaiting a human decision.",
+          mr_ref && "PR/MR: #{mr_ref}",
+          approval_line,
+          "Merge it now (or set `merge.auto_merge` to true for this workspace) and " <>
+            "the Watchdog will complete the task on its next poll. Until then the PR " <>
+            "stays open and the Watchdog keeps watching — no work is lost."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
 
-    body =
-      [
-        "#{title_for(task_id)} is approved and ready to merge, but this workspace " <>
-          "has `merge.auto_merge` disabled — so the fleet will not merge it " <>
-          "automatically and it is parked awaiting a human decision.",
-        mr_ref && "PR/MR: #{mr_ref}",
-        approval_line,
-        "Merge it now (or set `merge.auto_merge` to true for this workspace) and " <>
-          "the Watchdog will complete the task on its next poll. Until then the PR " <>
-          "stays open and the Watchdog keeps watching — no work is lost."
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n")
-
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: task_id,
-      workspace_id: ws_id,
-      task_ref: task_id,
-      subject: subject,
-      body: body
-    })
-
-    :ok
-  rescue
-    e ->
-      Logger.debug(
-        "CoordinatorNotifier.approved_awaiting_merge/3 swallowed: #{Exception.message(e)}"
-      )
-
-      :ok
-  catch
-    :exit, _ -> :ok
+      {subject, body}
+    end)
   end
-
-  def approved_awaiting_merge(_snapshot, _mr_ref, _via_review_gate), do: :ok
 
   defp block_subject(task_id, reason), do: "#{task_id} merge blocked — #{block_label(reason)}"
 
@@ -863,6 +757,50 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   defp escalate(_event, _snapshot, _reason), do: :ok
+
+  # Shared plumbing for the direct-`Message.send_mail`-style escalations above
+  # (`tracker_sync_failed/3` .. `approved_awaiting_merge/3`): guard on a binary
+  # `workspace_id`, resolve `task_id`, hand both to `build_fun`, and post the
+  # `{subject, body}` it returns as the standard `:escalation` envelope —
+  # swallowing any failure so a notification bug never disrupts the caller's
+  # real work. `build_fun` may return `:skip` instead of `{subject, body}` to
+  # suppress sending without erroring (used by `merge_blocked/3`'s dedupe).
+  # `opts[:task_ref]` overrides the default `task_ref: task_id` — needed by
+  # `overage_alert/3`, whose `task_ref` is the raw (possibly-nil) snapshot
+  # `:task_id` rather than the "system"-defaulted one used for `subject`/`body`.
+  defp escalate_event(label, snapshot, build_fun),
+    do: escalate_event(label, snapshot, [], build_fun)
+
+  defp escalate_event(label, %{workspace_id: ws_id} = snapshot, opts, build_fun)
+       when is_binary(ws_id) do
+    task_id = Map.get(snapshot, :task_id, "system")
+
+    case build_fun.(task_id) do
+      :skip ->
+        :ok
+
+      {subject, body} ->
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: Message.coordinator_ref(),
+          from_ref: task_id,
+          workspace_id: ws_id,
+          task_ref: Keyword.get(opts, :task_ref, task_id),
+          subject: subject,
+          body: body
+        })
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.debug("CoordinatorNotifier.#{label} swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_event(_label, _snapshot, _opts, _build_fun), do: :ok
 
   defp escalation_payload(:credential_expired, snapshot, %StopReason{} = reason) do
     adapter = Map.get(snapshot, :adapter)
