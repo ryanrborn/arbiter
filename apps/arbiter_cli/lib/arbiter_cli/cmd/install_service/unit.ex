@@ -9,6 +9,30 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
 
   @run_server_script_name ".run-server.sh"
 
+  @unit_name "arbiter.service"
+  @logrotate_timer_name "arbiter-logrotate.timer"
+
+  @doc "The systemd unit file name, shared across install/uninstall/status/logs."
+  @spec unit_name() :: String.t()
+  def unit_name, do: @unit_name
+
+  @doc "The logrotate timer unit name."
+  @spec logrotate_timer_name() :: String.t()
+  def logrotate_timer_name, do: @logrotate_timer_name
+
+  @doc """
+  The arbiter data home directory. Defaults to `~/.arbiter`; tests override
+  via the `:bd2_arbiter_home` process-dict seam so they write to a tmp dir
+  rather than the real `~/.arbiter/arbiter.env`.
+  """
+  @spec arbiter_home_path() :: String.t()
+  def arbiter_home_path do
+    case Process.get(:bd2_arbiter_home) do
+      dir when is_binary(dir) -> dir
+      _ -> Path.join(System.user_home!(), ".arbiter")
+    end
+  end
+
   @doc """
   The systemd unit file content for `scope`. Pure (given the environment and
   filesystem) so it's easy to assert on in tests.

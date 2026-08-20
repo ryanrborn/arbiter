@@ -89,9 +89,7 @@ defmodule ArbiterCli.Cmd.InstallService do
 
   @switches [system: :boolean, uninstall: :boolean, json: :boolean, force: :boolean]
 
-  @unit_name "arbiter.service"
   @logrotate_service_name "arbiter-logrotate.service"
-  @logrotate_timer_name "arbiter-logrotate.timer"
 
   def run(argv) do
     ArgParser.unless_help(argv, @moduledoc, fn ->
@@ -115,7 +113,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     root = resolve_root()
     # Persist the root so `arb start/restart/update` resolve it from any cwd.
     Start.record_home(root)
-    arbiter_home = arbiter_home_path()
+    arbiter_home = Unit.arbiter_home_path()
     path = unit_path(scope)
     if Unit.dev_checkout?(root), do: Unit.ensure_run_server_script(root)
     contents = Unit.unit_contents(scope, arbiter_home, root)
@@ -162,7 +160,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     # Write logrotate service + timer units so daemon-reload picks them up in
     # the same cycle as the main arbiter.service unit.
     svc_path = Path.join(unit_dir(:user), @logrotate_service_name)
-    timer_path = Path.join(unit_dir(:user), @logrotate_timer_name)
+    timer_path = Path.join(unit_dir(:user), Unit.logrotate_timer_name())
     Unit.write_unit(svc_path, logrotate_service_contents(config_path, state_file))
     Unit.write_unit(timer_path, logrotate_timer_contents())
 
@@ -197,13 +195,13 @@ defmodule ArbiterCli.Cmd.InstallService do
   # Enable the daily logrotate timer for user installs. Non-fatal if logrotate
   # is missing — the log file still works, just won't auto-rotate.
   defp enable_logrotate_timer do
-    case Systemctl.systemctl(:user, ["enable", "--now", @logrotate_timer_name]) do
+    case Systemctl.systemctl(:user, ["enable", "--now", Unit.logrotate_timer_name()]) do
       {_out, 0} ->
         :ok
 
       {out, code} ->
         Start.log_text(
-          "warning: could not enable #{@logrotate_timer_name} (exit #{code}): #{String.trim(out)}"
+          "warning: could not enable #{Unit.logrotate_timer_name()} (exit #{code}): #{String.trim(out)}"
         )
     end
   end
@@ -218,8 +216,8 @@ defmodule ArbiterCli.Cmd.InstallService do
     disabled? = Systemctl.disable_now(scope)
 
     if scope == :user do
-      Systemctl.systemctl(:user, ["disable", "--now", @logrotate_timer_name])
-      Unit.remove_unit(Path.join(unit_dir(:user), @logrotate_timer_name))
+      Systemctl.systemctl(:user, ["disable", "--now", Unit.logrotate_timer_name()])
+      Unit.remove_unit(Path.join(unit_dir(:user), Unit.logrotate_timer_name()))
       Unit.remove_unit(Path.join(unit_dir(:user), @logrotate_service_name))
     end
 
@@ -261,19 +259,6 @@ defmodule ArbiterCli.Cmd.InstallService do
   end
 
   @doc """
-  The arbiter data home directory. Defaults to `~/.arbiter`; tests override
-  via the `:bd2_arbiter_home` process-dict seam so they write to a tmp dir
-  rather than the real `~/.arbiter/arbiter.env`.
-  """
-  @spec arbiter_home_path() :: String.t()
-  def arbiter_home_path do
-    case Process.get(:bd2_arbiter_home) do
-      dir when is_binary(dir) -> dir
-      _ -> Path.join(System.user_home!(), ".arbiter")
-    end
-  end
-
-  @doc """
   Directory the unit is written to for `scope`. Tests override via the
   `:bd2_unit_dir` process-dict seam so they can write to a tmp dir without
   touching the real systemd locations.
@@ -289,5 +274,5 @@ defmodule ArbiterCli.Cmd.InstallService do
   defp default_unit_dir(:user), do: Path.join([System.user_home!(), ".config", "systemd", "user"])
   defp default_unit_dir(:system), do: "/etc/systemd/system"
 
-  defp unit_path(scope), do: Path.join(unit_dir(scope), @unit_name)
+  defp unit_path(scope), do: Path.join(unit_dir(scope), Unit.unit_name())
 end

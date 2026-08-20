@@ -4,11 +4,8 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
   """
 
   alias ArbiterCli.Client
-  alias ArbiterCli.Cmd.InstallService.Systemctl
+  alias ArbiterCli.Cmd.InstallService.{Systemctl, Unit}
   alias ArbiterCli.Output
-
-  @unit_name "arbiter.service"
-  @logrotate_timer_name "arbiter-logrotate.timer"
 
   def emit_installed(:json, scope, path, root, linger, secrets, log_paths) do
     {env_path, captured} =
@@ -20,7 +17,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
     base = %{
       action: "install",
       scope: to_string(scope),
-      unit: @unit_name,
+      unit: Unit.unit_name(),
       unit_path: path,
       root: root,
       linger: to_string(linger),
@@ -37,7 +34,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
         {config_path, state_file} = log_paths
 
         Map.merge(base, %{
-          logrotate_timer: @logrotate_timer_name,
+          logrotate_timer: Unit.logrotate_timer_name(),
           logrotate_config: config_path,
           logrotate_state: state_file
         })
@@ -49,7 +46,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
   end
 
   def emit_installed(:text, scope, path, arbiter_home, linger, secrets, log_paths) do
-    IO.puts("Installed #{@unit_name} (#{scope} scope).")
+    IO.puts("Installed #{Unit.unit_name()} (#{scope} scope).")
     IO.puts("  unit:   #{path}")
     IO.puts("  starts: #{Client.base_url()} at boot")
     IO.puts(secrets_note(secrets))
@@ -63,7 +60,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
       {config_path, state_file} = log_paths
       IO.puts("")
       IO.puts("Logs are written to #{Path.join([arbiter_home, "log", "arbiter.log"])}.")
-      IO.puts("A daily systemd timer (#{@logrotate_timer_name}) rotates logs automatically.")
+      IO.puts("A daily systemd timer (#{Unit.logrotate_timer_name()}) rotates logs automatically.")
       IO.puts("Rotate manually with:")
       IO.puts("  logrotate --state #{state_file} #{config_path}")
     end
@@ -79,7 +76,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
     Output.emit_json(%{
       action: "uninstall",
       scope: to_string(scope),
-      unit: @unit_name,
+      unit: Unit.unit_name(),
       unit_path: path,
       disabled: disabled?,
       removed: removed?,
@@ -88,7 +85,7 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
   end
 
   def emit_uninstalled(:text, scope, path, disabled?, removed?) do
-    IO.puts("Uninstalled #{@unit_name} (#{scope} scope).")
+    IO.puts("Uninstalled #{Unit.unit_name()} (#{scope} scope).")
     IO.puts("  disabled: #{if disabled?, do: "yes", else: "was not enabled"}")
     IO.puts("  removed:  #{if removed?, do: path, else: "no unit file at #{path}"}")
 

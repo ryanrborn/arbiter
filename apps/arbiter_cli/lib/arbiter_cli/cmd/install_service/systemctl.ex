@@ -5,10 +5,9 @@ defmodule ArbiterCli.Cmd.InstallService.Systemctl do
   inspection commands echoed back in success/error output.
   """
 
+  alias ArbiterCli.Cmd.InstallService.Unit
   alias ArbiterCli.Cmd.Start
   alias ArbiterCli.Output
-
-  @unit_name "arbiter.service"
 
   def daemon_reload(scope) do
     case systemctl(scope, ["daemon-reload"]) do
@@ -24,15 +23,15 @@ defmodule ArbiterCli.Cmd.InstallService.Systemctl do
   end
 
   def enable_now(scope) do
-    Start.log_text("Enabling and starting #{@unit_name}…")
+    Start.log_text("Enabling and starting #{Unit.unit_name()}…")
 
-    case systemctl(scope, ["enable", "--now", @unit_name]) do
+    case systemctl(scope, ["enable", "--now", Unit.unit_name()]) do
       {_out, 0} ->
         :ok
 
       {out, code} ->
         Output.die(
-          "systemctl enable --now #{@unit_name} failed (exit #{code})",
+          "systemctl enable --now #{Unit.unit_name()} failed (exit #{code})",
           "Inspect it with `#{status_cmd(scope)}` and `#{logs_cmd(scope)}`. Output:\n" <>
             String.trim_trailing(out)
         )
@@ -42,7 +41,7 @@ defmodule ArbiterCli.Cmd.InstallService.Systemctl do
   # Idempotent stop+disable. Returns whether the unit was actually disabled (a
   # non-zero exit means it wasn't installed / already disabled — not fatal).
   def disable_now(scope) do
-    case systemctl(scope, ["disable", "--now", @unit_name]) do
+    case systemctl(scope, ["disable", "--now", Unit.unit_name()]) do
       {_out, 0} -> true
       {_out, _nonzero} -> false
     end
@@ -83,17 +82,15 @@ defmodule ArbiterCli.Cmd.InstallService.Systemctl do
   defp run_cmd(cmd, args, opts), do: Start.run_cmd(cmd, args, opts)
 
   # Scope-aware inspection commands echoed in the success/error output.
-  def status_cmd(:user), do: "systemctl --user status #{@unit_name}"
-  def status_cmd(:system), do: "systemctl status #{@unit_name}"
+  def status_cmd(:user), do: "systemctl --user status #{Unit.unit_name()}"
+  def status_cmd(:system), do: "systemctl status #{Unit.unit_name()}"
 
   # User services write to a file (no journald permissions needed); system
   # installs have root so journalctl works directly.
   def logs_cmd(:user) do
-    log_file =
-      Path.join([ArbiterCli.Cmd.InstallService.arbiter_home_path(), "log", "arbiter.log"])
-
+    log_file = Path.join([Unit.arbiter_home_path(), "log", "arbiter.log"])
     "tail -f #{log_file}"
   end
 
-  def logs_cmd(:system), do: "journalctl -u #{@unit_name} -f"
+  def logs_cmd(:system), do: "journalctl -u #{Unit.unit_name()} -f"
 end

@@ -116,7 +116,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
 
   def emit_deploy_timeout(
         :text,
-        _integration_branch,
+        integration_branch,
         _before,
         _after,
         commits,
@@ -126,7 +126,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
         cli_built
       ) do
     IO.puts("")
-    IO.puts("Pulled #{length(commits)} new commit(s):")
+    IO.puts("Pulled #{length(commits)} new commit(s) onto #{integration_branch}:")
     print_commits(commits)
     IO.puts("")
 

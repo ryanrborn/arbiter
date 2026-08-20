@@ -28,12 +28,32 @@ defmodule ArbiterCli.ArgParserTest do
       assert opts[:reason] == "because"
     end
 
-    test "honors an explicit :strict switches list (rejects unknown flags)" do
+    test "honors an explicit :strict switches list for declared flags" do
       {opts, rest, _mode} =
         ArgParser.parse(["foo", "--reason", "because"], strict: [reason: :string, json: :boolean])
 
       assert opts[:reason] == "because"
       assert rest == ["foo"]
+    end
+
+    test "silently drops unknown flags under :strict (use parse_strict! to reject them)" do
+      {opts, rest, _mode} =
+        ArgParser.parse(["foo", "--bogus", "value"], strict: [reason: :string, json: :boolean])
+
+      assert opts[:reason] == nil
+      assert rest == ["foo"]
+    end
+  end
+
+  describe "parse_strict!/3" do
+    test "dies via Output.die/1 on an unknown flag" do
+      Process.put(:bd2_halt_strategy, :raise)
+
+      assert_raise ArbiterCli.Output.Halt, fn ->
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
+          ArgParser.parse_strict!(["--bogus"], "arb test", strict: [reason: :string])
+        end)
+      end
     end
   end
 
