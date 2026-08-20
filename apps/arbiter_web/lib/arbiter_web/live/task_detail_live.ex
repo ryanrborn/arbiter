@@ -29,6 +29,8 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   use ArbiterWeb, :live_view
 
+  import ArbiterWeb.StatusHelpers
+
   alias Arbiter.Agents
   alias Arbiter.Mergers
   alias Arbiter.Tasks.Dependency
@@ -1423,31 +1425,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp present?(v) when is_binary(v), do: String.trim(v) != ""
   defp present?(_), do: false
 
-  defp worker_status_class(:idle), do: "badge-ghost"
-  defp worker_status_class(:running), do: "badge-info"
-  defp worker_status_class(:awaiting), do: "badge-warning"
-  defp worker_status_class(:completed), do: "badge-success"
-  defp worker_status_class(:failed), do: "badge-error"
-  defp worker_status_class(_), do: ""
-
-  # Solid status dot color for the linked-worker panel (mirrors the badge palette).
-  defp status_dot_class(:running), do: "bg-info"
-  defp status_dot_class(:awaiting), do: "bg-warning"
-  defp status_dot_class(:completed), do: "bg-success"
-  defp status_dot_class(:failed), do: "bg-error"
-  defp status_dot_class(_), do: "bg-base-content/30"
-
   defp difficulty_label(nil), do: "—"
   defp difficulty_label(d) when is_integer(d) and d in 0..4, do: "D#{d}"
   defp difficulty_label(_), do: "—"
-
-  defp difficulty_badge_class(nil), do: "badge-ghost"
-  defp difficulty_badge_class(0), do: "badge-success"
-  defp difficulty_badge_class(1), do: "badge-info"
-  defp difficulty_badge_class(2), do: "badge-secondary"
-  defp difficulty_badge_class(3), do: "badge-warning"
-  defp difficulty_badge_class(4), do: "badge-error"
-  defp difficulty_badge_class(_), do: "badge-ghost"
 
   # Canonical audit-action mapping (matches AuditLogLive + doctrine).
   defp action_badge_class(:create), do: "badge badge-success"
@@ -1490,11 +1470,6 @@ defmodule ArbiterWeb.TaskDetailLive do
       _ -> "working"
     end
   end
-
-  defp run_status_class(:completed), do: "badge-success"
-  defp run_status_class(:failed), do: "badge-error"
-  defp run_status_class(:running), do: "badge-info"
-  defp run_status_class(_), do: "badge-ghost"
 
   defp run_step_label(%UsageEvent{step: :review}, _), do: "review"
   defp run_step_label(%UsageEvent{step: :other}, _), do: "other"
