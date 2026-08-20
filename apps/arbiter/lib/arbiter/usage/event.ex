@@ -56,6 +56,7 @@ defmodule Arbiter.Usage.Event do
       # Arbiter.Usage.summarize/1.
       index [:workspace_id, :occurred_at]
       index [:task_id, :occurred_at]
+      index [:base_task_id, :occurred_at]
     end
   end
 
@@ -83,7 +84,9 @@ defmodule Arbiter.Usage.Event do
         :occurred_at,
         :session_id,
         :raw,
-        :cost_note
+        :cost_note,
+        :base_task_id,
+        :role
       ]
     end
   end
@@ -185,6 +188,24 @@ defmodule Arbiter.Usage.Event do
       public? true
 
       description "Original CLI usage payload (the parsed `result` event). Kept for forensic debugging; never queried."
+    end
+
+    attribute :base_task_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "The root task id this event is part of (bd-5fhyry). For ReviewGate " <>
+                    "review/impl events, this is the base task; for base events, it equals " <>
+                    "task_id. Nullable for backfill purposes."
+    end
+
+    attribute :role, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "The role this session played: 'base' for main authoring, 'review' for " <>
+                    "review-gate reviewer, 'impl' for review-gate implementer, etc. Replaces " <>
+                    "suffix-encoded task_id hierarchy."
     end
 
     create_timestamp :inserted_at
