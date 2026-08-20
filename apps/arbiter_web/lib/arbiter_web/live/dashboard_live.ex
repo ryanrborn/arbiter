@@ -40,8 +40,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   use ArbiterWeb, :live_view
 
-  import ArbiterWeb.StatusHelpers,
-    except: [worker_status_class: 1, worker_status_label: 1, kind_badge_class: 1]
+  import ArbiterWeb.StatusHelpers
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.GitHub.Limiter
@@ -1977,46 +1976,6 @@ defmodule ArbiterWeb.DashboardLive do
   defp external_review_verdict_label(:approve), do: "Approve"
   defp external_review_verdict_label(:request_changes), do: "Changes"
   defp external_review_verdict_label(_), do: "—"
-
-  # Dashboard-specific status badge overrides. These extend the shared StatusHelpers
-  # versions to include dashboard-only status cases. The shared versions handle the
-  # common cases across all LiveViews; dashboard adds support for :resuming,
-  # :awaiting_review_gate, :awaiting_review to maintain the original per-file behavior.
-  defp worker_status_class(:idle), do: "badge-ghost"
-  defp worker_status_class(:resuming), do: "badge-info"
-  defp worker_status_class(:running), do: "badge-info"
-  defp worker_status_class(:awaiting), do: "badge-warning"
-  defp worker_status_class(:awaiting_review_gate), do: "badge-warning"
-  defp worker_status_class(:awaiting_review), do: "badge-warning"
-  defp worker_status_class(:completed), do: "badge-success"
-  defp worker_status_class(:failed), do: "badge-error"
-  defp worker_status_class(_), do: ""
-
-  defp worker_status_label(:idle), do: "Idle"
-  defp worker_status_label(:resuming), do: "Resuming"
-  defp worker_status_label(:running), do: "Running"
-  defp worker_status_label(:awaiting), do: "Awaiting"
-  defp worker_status_label(:awaiting_review_gate), do: "In review_gate"
-  defp worker_status_label(:awaiting_review), do: "Awaiting review"
-  defp worker_status_label(:completed), do: "Completed"
-  defp worker_status_label(:failed), do: "Failed"
-
-  defp worker_status_label(other) when is_atom(other),
-    do: other |> Atom.to_string() |> String.capitalize()
-
-  defp worker_status_label(other), do: to_string(other)
-
-  # Dashboard-specific mailbox kind badge overrides. These extend the shared
-  # StatusHelpers versions to include dashboard-only kind cases. Maintains the
-  # original per-file behavior where dashboard shows more granular coloring.
-  defp kind_badge_class(:notification), do: "badge-info"
-  defp kind_badge_class(:direction), do: "badge-warning"
-  defp kind_badge_class(:flag), do: "badge-accent"
-  defp kind_badge_class(:escalation), do: "badge-error"
-  defp kind_badge_class(:failure), do: "badge-error"
-  defp kind_badge_class(:completion), do: "badge-success"
-  defp kind_badge_class(:info), do: "badge-info"
-  defp kind_badge_class(_), do: "badge-ghost"
 
   # Left-accent border per notification kind, matching kind_badge_class/1.
   defp kind_border_class(:notification), do: "border-info"
