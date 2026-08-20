@@ -60,6 +60,8 @@ defmodule Arbiter.Mergers.Gitlab do
 
   require Logger
 
+  alias Arbiter.Http.Client
+  alias Arbiter.Http.Error, as: ErrorSpec
   alias Arbiter.Mergers.Gitlab.{Config, Error}
 
   @stub_name Arbiter.Mergers.Gitlab.HTTP
@@ -747,17 +749,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # yields nil so the caller falls back to the generic block reason. Reached only
   # in the narrow `not_approved` branch, not on every poll.
   defp authenticated_username(cfg) do
-    opts =
-      [
-        method: :get,
-        url: "https://#{cfg.host}/api/v4/user",
-        headers: headers(cfg),
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(stub_opts())
-
-    case Req.request(opts) do
+    case Client.request(root_client(cfg), :get, "/user", []) do
       {:ok, %Req.Response{status: status, body: %{"username" => name}}}
       when status in 200..299 and is_binary(name) and name != "" ->
         name
@@ -870,20 +862,9 @@ defmodule Arbiter.Mergers.Gitlab do
     if len > limit, do: "…" <> String.slice(text, len - limit, limit), else: text
   end
 
-  defp handle_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
+  defp handle_ok(result), do: Client.expect_ok(error_spec(), result)
 
-  defp handle_ok({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
-
-  defp handle_ok({:error, exception}), do: {:error, transport_error(exception)}
-
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,
-    do: {:ok, body}
-
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
-
-  defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
 
   # POST `/unapprove` is idempotent in spirit but GitLab returns 401/404
   # depending on whether the caller was the original approver. Treat any
@@ -1026,22 +1007,35 @@ defmodule Arbiter.Mergers.Gitlab do
 
   # ---- Internals: HTTP ----------------------------------------------------
 
-  defp request(cfg, method, path, req_opts) do
-    url = "https://#{cfg.host}/api/v4/projects/#{cfg.project_id}" <> path
+  # Project-scoped client: prepends /api/v4/projects/:project_id to `path`.
+  defp client(cfg),
+    do: build_client(cfg, "https://#{cfg.host}/api/v4/projects/#{cfg.project_id}")
 
-    full_opts =
-      [
-        method: method,
-        url: url,
-        headers: headers(cfg),
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(req_opts)
-      |> Keyword.merge(stub_opts())
+  # Root client: prepends /api/v4 to `path` (for `GET /user`, which is not
+  # scoped to a project).
+  defp root_client(cfg), do: build_client(cfg, "https://#{cfg.host}/api/v4")
 
-    Req.request(full_opts)
+  defp build_client(cfg, base_url) do
+    Client.new(
+      base_url: base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:gitlab_http_stub, @stub_name}
+    )
   end
+
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: fn status, _body -> kind_for_status(status) end,
+      error_message: &error_message/2
+    )
+  end
+
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
 
   defp headers(%{token: token}) do
     [
@@ -1052,14 +1046,7 @@ defmodule Arbiter.Mergers.Gitlab do
     ]
   end
 
-  defp http_error(status, body) do
-    %Error{
-      kind: kind_for_status(status),
-      status: status,
-      message: error_message(body, status),
-      raw: body
-    }
-  end
+  defp http_error(status, body), do: Client.http_error(error_spec(), status, body)
 
   defp kind_for_status(400), do: :validation_failed
   defp kind_for_status(401), do: :unauthenticated
@@ -1078,28 +1065,5 @@ defmodule Arbiter.Mergers.Gitlab do
   defp error_message(%{"error" => msg}, _) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
 
-  defp transport_error(%{reason: reason} = exception) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message:
-        case exception do
-          %{__exception__: true} -> Exception.message(exception)
-          _ -> inspect(reason)
-        end,
-      raw: exception
-    }
-  end
-
-  defp transport_error(other) do
-    %Error{kind: :network, status: nil, message: inspect(other), raw: other}
-  end
-
-  defp stub_opts do
-    if Application.get_env(:arbiter, :gitlab_http_stub, false) do
-      [plug: {Req.Test, @stub_name}]
-    else
-      []
-    end
-  end
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
 end

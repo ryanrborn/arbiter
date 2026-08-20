@@ -71,6 +71,9 @@ defmodule Arbiter.Mergers.Github do
   require Logger
 
   alias Arbiter.GitHub.Limiter
+  alias Arbiter.Http.Client
+  alias Arbiter.Http.Error, as: ErrorSpec
+  alias Arbiter.Http.RateLimit
   alias Arbiter.Mergers.{Merger, Github.Config, Github.Error, Github.RepoResolver}
 
   @stub_name Arbiter.Mergers.Github.HTTP
@@ -1772,8 +1775,6 @@ defmodule Arbiter.Mergers.Github do
   # response body is a string, not JSON. Stub plugs see the same path; tests
   # can stub-text-body the response.
   defp request_diff(cfg, path) do
-    url = cfg.base_url <> path
-
     diff_headers = [
       {"authorization", "Bearer " <> cfg.token},
       {"accept", "application/vnd.github.v3.diff"},
@@ -1781,17 +1782,7 @@ defmodule Arbiter.Mergers.Github do
       {"user-agent", "arbiter"}
     ]
 
-    full_opts =
-      [
-        method: :get,
-        url: url,
-        headers: diff_headers,
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(stub_opts())
-
-    case perform_request(cfg.token, full_opts, 0) do
+    case Client.request(client(cfg), :get, path, headers: diff_headers) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, to_string(body)}
 
@@ -1815,61 +1806,63 @@ defmodule Arbiter.Mergers.Github do
   @base_backoff_ms 250
   @max_backoff_ms 5_000
 
-  defp request(cfg, method, path, req_opts) do
-    url = cfg.base_url <> path
-
-    full_opts =
-      [
-        method: method,
-        url: url,
-        headers: headers(cfg),
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(req_opts)
-      |> Keyword.merge(stub_opts())
-
-    perform_request(cfg.token, full_opts, 0)
-  end
-
   # Every real HTTP request passes through the shared priority-aware GitHub
   # budget (bd-3p5vqc): background patrol traffic may be withheld here so it can
   # never starve foreground work (PR open/merge/finalize, deploys), and the
   # limiter observes each response to drive its headroom + secondary-limit
   # accounting.
   #
-  # bd-8y1i58: the gate is *inside* the retry loop, not around it. With the loop
-  # inside a single gate, one acquire could issue up to three real requests —
-  # the limiter's counters (what an operator reads when the account is
-  # exhausted) undercounted by up to 3x, and a background retry storm could not
-  # be shed once it had started. Gating per attempt also means the first 403
-  # arms the secondary backoff before the retry is decided, so background retry
-  # traffic — the thing that *sustains* a secondary limit — is withheld.
-  defp perform_request(token, full_opts, attempt) do
-    case Limiter.gate(token, fn -> Req.request(full_opts) end) do
-      {:ok, %Req.Response{status: status} = resp} = result when status in [403, 429] ->
-        if attempt < @max_secondary_retries and secondary_rate_limited?(resp) do
+  # bd-8y1i58: the gate is *inside* the retry loop, not around it (see
+  # `Arbiter.Http.Client`). With the loop inside a single gate, one acquire
+  # could issue up to three real requests — the limiter's counters (what an
+  # operator reads when the account is exhausted) undercounted by up to 3x, and
+  # a background retry storm could not be shed once it had started. Gating per
+  # attempt also means the first 403 arms the secondary backoff before the
+  # retry is decided, so background retry traffic — the thing that *sustains* a
+  # secondary limit — is withheld.
+  defp client(cfg) do
+    Client.new(
+      base_url: cfg.base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:github_http_stub, @stub_name},
+      gate: fn fun -> Limiter.gate(cfg.token, fun) end,
+      retry: %{
+        max: @max_secondary_retries,
+        retry?: fn %Req.Response{status: status} = resp ->
+          status in [403, 429] and secondary_rate_limited?(resp)
+        end,
+        delay: &retry_delay_ms/2,
+        sleep: &sleep/1,
+        on_retry: fn _resp, attempt ->
           Logger.info(
             "GitHub: secondary rate limit hit (attempt #{attempt + 1}); backing off before retry"
           )
-
-          wait_before_retry(resp, attempt)
-          perform_request(token, full_opts, attempt + 1)
-        else
-          result
         end
-
-      other ->
-        other
-    end
+      }
+    )
   end
+
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: &classify_kind/2,
+      error_message: &error_message/2,
+      retry_after_ms: &RateLimit.retry_after_ms/2
+    )
+  end
+
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
 
   # GitHub's secondary/abuse limit is a 403 whose body names it explicitly, or
   # (per GitHub's docs) may carry a `Retry-After` header — unlike a primary
   # quota 403, which never does. Either signal is enough to treat it as
   # transient rather than a hard auth/permissions failure.
   defp secondary_rate_limited?(%Req.Response{} = resp) do
-    retry_after_seconds(resp) != nil or secondary_limit_message?(resp.body)
+    RateLimit.retry_after_seconds(resp) != nil or secondary_limit_message?(resp.body)
   end
 
   defp secondary_limit_message?(%{"message" => msg}) when is_binary(msg) do
@@ -1879,26 +1872,12 @@ defmodule Arbiter.Mergers.Github do
 
   defp secondary_limit_message?(_), do: false
 
-  defp wait_before_retry(resp, attempt) do
-    ms =
-      case retry_after_seconds(resp) do
-        nil -> backoff_ms(attempt)
-        seconds -> min(seconds * 1_000, @max_backoff_ms)
-      end
-
-    sleep(ms)
-  end
-
-  defp retry_after_seconds(%Req.Response{} = resp) do
-    case Req.Response.get_header(resp, "retry-after") do
-      [v | _] ->
-        case Integer.parse(v) do
-          {n, _} when n >= 0 -> n
-          _ -> nil
-        end
-
-      _ ->
-        nil
+  # Honor GitHub's own Retry-After when it sends one (capped), else back off
+  # exponentially.
+  defp retry_delay_ms(resp, attempt) do
+    case RateLimit.retry_after_seconds(resp) do
+      nil -> backoff_ms(attempt)
+      seconds -> min(seconds * 1_000, @max_backoff_ms)
     end
   end
 
@@ -1919,21 +1898,10 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,
-    do: {:ok, body}
-
-  defp handle_json({:ok, %Req.Response{status: status, body: body} = resp}),
-    do: {:error, http_error(status, body, resp)}
-
-  defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
 
   # For callbacks that only care about success vs failure (merge/close/comment).
-  defp expect_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
-
-  defp expect_ok({:ok, %Req.Response{status: status, body: body} = resp}),
-    do: {:error, http_error(status, body, resp)}
-
-  defp expect_ok({:error, exception}), do: {:error, transport_error(exception)}
+  defp expect_ok(result), do: Client.expect_ok(error_spec(), result)
 
   defp headers(%{token: token}) do
     [
@@ -1947,15 +1915,8 @@ defmodule Arbiter.Mergers.Github do
   # `resp` is the full `%Req.Response{}` when available (so rate-limit headers
   # can be read) — omitted at call sites that only destructured status/body
   # before GitHub's rate-limit shape mattered there (bd-1m8k7d).
-  defp http_error(status, body, resp \\ nil) do
-    %Error{
-      kind: classify_kind(status, body),
-      status: status,
-      message: error_message(body, status),
-      raw: body,
-      retry_after_ms: rate_limit_retry_after_ms(status, resp)
-    }
-  end
+  defp http_error(status, body, resp \\ nil),
+    do: Client.http_error(error_spec(), status, body, resp)
 
   # A 429 is always a rate limit. A 403 is a rate limit only when the body
   # says so — otherwise it's a scope/permission `:forbidden` (bad credentials,
@@ -1990,58 +1951,5 @@ defmodule Arbiter.Mergers.Github do
   defp error_message(%{"message" => msg}, _status) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
 
-  # How long to wait before the next rate-limited request, per GitHub's own
-  # headers rather than a guess: `Retry-After` (seconds) when present — GitHub
-  # sends this on the secondary/abuse limit — else `x-ratelimit-reset` (unix
-  # epoch seconds), which the primary quota limit always sends instead. `resp`
-  # is `nil` at call sites that never captured the full response; those simply
-  # get no retry hint (the caller falls back to its own backoff policy).
-  defp rate_limit_retry_after_ms(status, %Req.Response{} = resp) when status in [403, 429] do
-    case retry_after_seconds(resp) do
-      seconds when is_integer(seconds) -> seconds * 1_000
-      nil -> reset_retry_after_ms(resp)
-    end
-  end
-
-  defp rate_limit_retry_after_ms(_status, _resp), do: nil
-
-  defp reset_retry_after_ms(%Req.Response{} = resp) do
-    with [v | _] <- Req.Response.get_header(resp, "x-ratelimit-reset"),
-         {epoch, _} <- Integer.parse(v) do
-      ms = (epoch - System.os_time(:second)) * 1_000
-      if ms > 0, do: ms, else: nil
-    else
-      _ -> nil
-    end
-  end
-
-  defp transport_error(%{reason: reason} = exception) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message:
-        case exception do
-          %{__exception__: true} -> Exception.message(exception)
-          _ -> inspect(reason)
-        end,
-      raw: exception
-    }
-  end
-
-  defp transport_error(other) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message: inspect(other),
-      raw: other
-    }
-  end
-
-  defp stub_opts do
-    if Application.get_env(:arbiter, :github_http_stub, false) do
-      [plug: {Req.Test, @stub_name}]
-    else
-      []
-    end
-  end
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
 end

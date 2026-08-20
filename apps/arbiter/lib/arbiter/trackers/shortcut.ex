@@ -47,6 +47,8 @@ defmodule Arbiter.Trackers.Shortcut do
 
   @behaviour Arbiter.Trackers.Tracker
 
+  alias Arbiter.Http.Client
+  alias Arbiter.Http.Error, as: ErrorSpec
   alias Arbiter.Trackers.Shortcut.{Config, Error}
 
   @base_url "https://api.app.shortcut.com/api/v3"
@@ -644,29 +646,29 @@ defmodule Arbiter.Trackers.Shortcut do
 
   # ---- Internals: HTTP ----------------------------------------------------
 
-  defp request(cfg, method, path, req_opts) do
-    full_opts =
-      [
-        method: method,
-        url: @base_url <> path,
-        headers: headers(cfg),
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(req_opts)
-      |> Keyword.merge(stub_opts())
-
-    Req.request(full_opts)
+  defp client(cfg) do
+    Client.new(
+      base_url: @base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:shortcut_http_stub, @stub_name}
+    )
   end
 
-  defp handle_json({:ok, %Req.Response{status: status_code, body: body}})
-       when status_code in 200..299,
-       do: {:ok, body}
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: fn status_code, _body -> kind_for_status(status_code) end,
+      error_message: &error_message/2
+    )
+  end
 
-  defp handle_json({:ok, %Req.Response{status: status_code, body: body}}),
-    do: {:error, http_error(status_code, body)}
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
 
-  defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
 
   defp headers(%{token: token}) do
     [
@@ -677,14 +679,8 @@ defmodule Arbiter.Trackers.Shortcut do
     ]
   end
 
-  defp http_error(status_code, body) do
-    %Error{
-      kind: kind_for_status(status_code),
-      status: status_code,
-      message: error_message(body, status_code),
-      raw: body
-    }
-  end
+  defp http_error(status_code, body),
+    do: Client.http_error(error_spec(), status_code, body)
 
   defp kind_for_status(400), do: :validation_failed
   defp kind_for_status(401), do: :unauthenticated
@@ -701,35 +697,7 @@ defmodule Arbiter.Trackers.Shortcut do
 
   defp error_message(_, status_code), do: "HTTP #{status_code}"
 
-  defp transport_error(%{reason: reason} = exception) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message:
-        case exception do
-          %{__exception__: true} -> Exception.message(exception)
-          _ -> inspect(reason)
-        end,
-      raw: exception
-    }
-  end
-
-  defp transport_error(other) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message: inspect(other),
-      raw: other
-    }
-  end
-
-  defp stub_opts do
-    if Application.get_env(:arbiter, :shortcut_http_stub, false) do
-      [plug: {Req.Test, @stub_name}]
-    else
-      []
-    end
-  end
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
 
   defp points_to_difficulty(buckets, pts) do
     case Enum.find(buckets, fn {max, _} -> pts <= max end) do

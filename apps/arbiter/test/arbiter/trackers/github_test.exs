@@ -110,6 +110,57 @@ defmodule Arbiter.Trackers.GitHubTest do
     end
   end
 
+  # The tracker and merger adapters used to each parse GitHub's rate-limit
+  # headers themselves; both now share `Arbiter.Http.RateLimit`. These mirror
+  # the merger's retry_after_ms tests so the tracker's half of that parity is
+  # pinned too.
+  describe "retry_after_ms on a rate-limited fetch" do
+    defp rate_limited(headers) do
+      stub(fn conn ->
+        conn =
+          Enum.reduce(headers, conn, fn {k, v}, acc ->
+            Plug.Conn.put_resp_header(acc, k, v)
+          end)
+
+        conn
+        |> Plug.Conn.put_status(429)
+        |> Req.Test.json(%{"message" => "API rate limit exceeded"})
+      end)
+
+      GitHub.fetch(@ref)
+    end
+
+    test "is populated from the Retry-After header (seconds -> ms)" do
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: 5_000}} =
+               rate_limited([{"retry-after", "5"}])
+    end
+
+    test "falls back to x-ratelimit-reset (epoch seconds -> ms until then)" do
+      reset = System.os_time(:second) + 30
+
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: ms}} =
+               rate_limited([{"x-ratelimit-reset", to_string(reset)}])
+
+      assert is_integer(ms) and ms > 20_000 and ms <= 30_000
+    end
+
+    test "is nil when neither header is present" do
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: nil}} = rate_limited([])
+    end
+
+    # bd-1r2kkg: the tracker's old copy accepted a negative Retry-After and
+    # handed the caller a negative backoff. The shared helper (the merger's
+    # stricter guard) rejects it and falls through to x-ratelimit-reset.
+    test "a negative Retry-After is ignored in favor of x-ratelimit-reset" do
+      reset = System.os_time(:second) + 30
+
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: ms}} =
+               rate_limited([{"retry-after", "-5"}, {"x-ratelimit-reset", to_string(reset)}])
+
+      assert is_integer(ms) and ms > 20_000 and ms <= 30_000
+    end
+  end
+
   describe "transition/2" do
     test "to :closed PATCHes state=closed and strips managed labels, keeping others" do
       stub(fn conn ->

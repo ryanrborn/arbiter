@@ -75,6 +75,8 @@ defmodule Arbiter.Trackers.Gitlab do
 
   @behaviour Arbiter.Trackers.Tracker
 
+  alias Arbiter.Http.Client
+  alias Arbiter.Http.Error, as: ErrorSpec
   alias Arbiter.Trackers.Gitlab.{Config, Error}
 
   @stub_name Arbiter.Trackers.Gitlab.HTTP
@@ -600,41 +602,20 @@ defmodule Arbiter.Trackers.Gitlab do
   @max_pages 50
 
   defp paginate(cfg, path, req_opts) do
-    do_paginate(cfg, path, req_opts, [], @max_pages)
-  end
-
-  defp do_paginate(_cfg, _path, _req_opts, acc, 0),
-    do: {:ok, acc |> Enum.reverse() |> List.flatten()}
-
-  defp do_paginate(cfg, path, req_opts, acc, pages_left) do
-    case request(cfg, :get, path, req_opts) do
-      {:ok, %Req.Response{status: status, body: body, headers: headers}}
-      when status in 200..299 ->
-        page = if is_list(body), do: body, else: []
-
-        case next_page(headers, req_opts) do
-          nil ->
-            {:ok, Enum.reverse([page | acc]) |> List.flatten()}
-
-          next_req_opts ->
-            do_paginate(cfg, path, next_req_opts, [page | acc], pages_left - 1)
-        end
-
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, http_error(status, body)}
-
-      {:error, exception} ->
-        {:error, transport_error(exception)}
-    end
+    Client.paginate(project_client(cfg), path, req_opts,
+      max_pages: @max_pages,
+      next_page: &next_page/3
+    )
   end
 
   # GitLab paginates with an `x-next-page` header carrying the next page number
-  # (empty when there is no next page). We thread it back into the same params.
-  defp next_page(headers, req_opts) do
+  # (empty when there is no next page). We thread it back into the same params
+  # on the same path.
+  defp next_page(headers, path, req_opts) do
     case header_value(headers, "x-next-page") do
       v when is_binary(v) and v != "" ->
         params = Keyword.get(req_opts, :params, [])
-        [params: Keyword.put(params, :page, v)]
+        {path, [params: Keyword.put(params, :page, v)]}
 
       _ ->
         nil
@@ -818,49 +799,43 @@ defmodule Arbiter.Trackers.Gitlab do
 
   # ---- Internals: HTTP ----------------------------------------------------
 
-  # Project-scoped request: prepends /api/v4/projects/:project_id to `path`.
-  defp request(cfg, method, path, req_opts) do
-    url = "https://#{cfg.host}/api/v4/projects/#{cfg.project_id}" <> path
-    do_request(cfg, method, url, req_opts)
+  # Project-scoped client: prepends /api/v4/projects/:project_id to `path`.
+  defp project_client(cfg),
+    do: build_client(cfg, "https://#{cfg.host}/api/v4/projects/#{cfg.project_id}")
+
+  # Root client: prepends /api/v4 to `path` (for /user, /users — not scoped to
+  # a project).
+  defp root_client(cfg), do: build_client(cfg, "https://#{cfg.host}/api/v4")
+
+  defp build_client(cfg, base_url) do
+    Client.new(
+      base_url: base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:gitlab_http_stub, @stub_name}
+    )
   end
 
-  # Root request: prepends /api/v4 to `path` (for /user, /users — not scoped
-  # to a project).
-  defp root_request(cfg, method, path, req_opts) do
-    url = "https://#{cfg.host}/api/v4" <> path
-    do_request(cfg, method, url, req_opts)
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: fn status, _body -> kind_for_status(status) end,
+      error_message: &error_message/2
+    )
   end
 
-  defp do_request(cfg, method, url, req_opts) do
-    full_opts =
-      [
-        method: method,
-        url: url,
-        headers: headers(cfg),
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(req_opts)
-      |> Keyword.merge(stub_opts())
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(project_client(cfg), method, path, req_opts)
 
-    Req.request(full_opts)
-  end
+  defp root_request(cfg, method, path, req_opts),
+    do: Client.request(root_client(cfg), method, path, req_opts)
 
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,
-    do: {:ok, body}
-
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
-
-  defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
 
   # For callbacks that only care about success vs failure (transition/update).
-  defp expect_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
-
-  defp expect_ok({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
-
-  defp expect_ok({:error, exception}), do: {:error, transport_error(exception)}
+  defp expect_ok(result), do: Client.expect_ok(error_spec(), result)
 
   defp headers(%{token: token}) do
     [
@@ -871,14 +846,7 @@ defmodule Arbiter.Trackers.Gitlab do
     ]
   end
 
-  defp http_error(status, body) do
-    %Error{
-      kind: kind_for_status(status),
-      status: status,
-      message: error_message(body, status),
-      raw: body
-    }
-  end
+  defp http_error(status, body), do: Client.http_error(error_spec(), status, body)
 
   defp kind_for_status(400), do: :validation_failed
   defp kind_for_status(401), do: :unauthenticated
@@ -894,33 +862,5 @@ defmodule Arbiter.Trackers.Gitlab do
   defp error_message(%{"error" => msg}, _) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
 
-  defp transport_error(%{reason: reason} = exception) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message:
-        case exception do
-          %{__exception__: true} -> Exception.message(exception)
-          _ -> inspect(reason)
-        end,
-      raw: exception
-    }
-  end
-
-  defp transport_error(other) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message: inspect(other),
-      raw: other
-    }
-  end
-
-  defp stub_opts do
-    if Application.get_env(:arbiter, :gitlab_http_stub, false) do
-      [plug: {Req.Test, @stub_name}]
-    else
-      []
-    end
-  end
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
 end
