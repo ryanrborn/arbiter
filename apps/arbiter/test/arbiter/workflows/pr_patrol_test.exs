@@ -701,8 +701,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
 
     # Regression for bd-ag9pq3. `Arbiter.MCP.Tools.task_update`'s spec never
-    # carries a `source_pr` key (verified: `task_update_spec/0` at
-    # `mcp/tools.ex:2351` has no such entry, so `collect_attrs/2` can never put
+    # carries a `source_pr` key (verified: `task_update_spec/0` in
+    # `mcp/tools/task.ex` has no such entry, so `collect_attrs/2` can never put
     # one in the attrs it hands to `Ash.update/3`) — so that path was never the
     # nulling mechanism. The mechanism that *can* reach `action: :update` with
     # an explicit `source_pr` key is `ArbiterWeb.Api.IssueController.update/2`
