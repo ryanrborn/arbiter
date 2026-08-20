@@ -40,7 +40,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   use ArbiterWeb, :live_view
 
-  import ArbiterWeb.StatusHelpers
+  import ArbiterWeb.StatusHelpers, except: [worker_status_class: 1, kind_badge_class: 1]
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.GitHub.Limiter
@@ -1976,6 +1976,32 @@ defmodule ArbiterWeb.DashboardLive do
   defp external_review_verdict_label(:approve), do: "Approve"
   defp external_review_verdict_label(:request_changes), do: "Changes"
   defp external_review_verdict_label(_), do: "—"
+
+  # Dashboard-specific status badge overrides. These extend the shared StatusHelpers
+  # versions to include dashboard-only status cases. The shared versions handle the
+  # common cases across all LiveViews; dashboard adds support for :resuming,
+  # :awaiting_review_gate, :awaiting_review to maintain the original per-file behavior.
+  defp worker_status_class(:idle), do: "badge-ghost"
+  defp worker_status_class(:resuming), do: "badge-info"
+  defp worker_status_class(:running), do: "badge-info"
+  defp worker_status_class(:awaiting), do: "badge-warning"
+  defp worker_status_class(:awaiting_review_gate), do: "badge-warning"
+  defp worker_status_class(:awaiting_review), do: "badge-warning"
+  defp worker_status_class(:completed), do: "badge-success"
+  defp worker_status_class(:failed), do: "badge-error"
+  defp worker_status_class(_), do: ""
+
+  # Dashboard-specific mailbox kind badge overrides. These extend the shared
+  # StatusHelpers versions to include dashboard-only kind cases. Maintains the
+  # original per-file behavior where dashboard shows more granular coloring.
+  defp kind_badge_class(:notification), do: "badge-info"
+  defp kind_badge_class(:direction), do: "badge-warning"
+  defp kind_badge_class(:flag), do: "badge-accent"
+  defp kind_badge_class(:escalation), do: "badge-error"
+  defp kind_badge_class(:failure), do: "badge-error"
+  defp kind_badge_class(:completion), do: "badge-success"
+  defp kind_badge_class(:info), do: "badge-info"
+  defp kind_badge_class(_), do: "badge-ghost"
 
   # Left-accent border per notification kind, matching kind_badge_class/1.
   defp kind_border_class(:notification), do: "border-info"

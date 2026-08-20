@@ -23,21 +23,15 @@ defmodule ArbiterWeb.StatusHelpers do
   def difficulty_badge_class(_), do: "badge-ghost"
 
   def worker_status_class(:idle), do: "badge-ghost"
-  def worker_status_class(:resuming), do: "badge-info"
   def worker_status_class(:running), do: "badge-info"
   def worker_status_class(:awaiting), do: "badge-warning"
-  def worker_status_class(:awaiting_review_gate), do: "badge-warning"
-  def worker_status_class(:awaiting_review), do: "badge-warning"
   def worker_status_class(:completed), do: "badge-success"
   def worker_status_class(:failed), do: "badge-error"
   def worker_status_class(_), do: ""
 
   def worker_status_label(:idle), do: "Idle"
-  def worker_status_label(:resuming), do: "Resuming"
   def worker_status_label(:running), do: "Running"
   def worker_status_label(:awaiting), do: "Awaiting"
-  def worker_status_label(:awaiting_review_gate), do: "In review_gate"
-  def worker_status_label(:awaiting_review), do: "Awaiting review"
   def worker_status_label(:completed), do: "Completed"
   def worker_status_label(:failed), do: "Failed"
 
@@ -54,10 +48,6 @@ defmodule ArbiterWeb.StatusHelpers do
   def kind_badge_class(:notification), do: "badge-info"
   def kind_badge_class(:direction), do: "badge-warning"
   def kind_badge_class(:flag), do: "badge-accent"
-  def kind_badge_class(:escalation), do: "badge-error"
-  def kind_badge_class(:failure), do: "badge-error"
-  def kind_badge_class(:completion), do: "badge-success"
-  def kind_badge_class(:info), do: "badge-info"
   def kind_badge_class(_), do: "badge-ghost"
 
   def status_dot_class(:running), do: "bg-info"

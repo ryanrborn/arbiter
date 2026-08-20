@@ -6,11 +6,8 @@ defmodule ArbiterWeb.StatusHelpersTest do
   describe "worker_status_class/1" do
     test "returns correct badge class for each status" do
       assert StatusHelpers.worker_status_class(:idle) == "badge-ghost"
-      assert StatusHelpers.worker_status_class(:resuming) == "badge-info"
       assert StatusHelpers.worker_status_class(:running) == "badge-info"
       assert StatusHelpers.worker_status_class(:awaiting) == "badge-warning"
-      assert StatusHelpers.worker_status_class(:awaiting_review_gate) == "badge-warning"
-      assert StatusHelpers.worker_status_class(:awaiting_review) == "badge-warning"
       assert StatusHelpers.worker_status_class(:completed) == "badge-success"
       assert StatusHelpers.worker_status_class(:failed) == "badge-error"
       assert StatusHelpers.worker_status_class(:unknown) == ""
@@ -20,11 +17,8 @@ defmodule ArbiterWeb.StatusHelpersTest do
   describe "worker_status_label/1" do
     test "returns correct label for each status" do
       assert StatusHelpers.worker_status_label(:idle) == "Idle"
-      assert StatusHelpers.worker_status_label(:resuming) == "Resuming"
       assert StatusHelpers.worker_status_label(:running) == "Running"
       assert StatusHelpers.worker_status_label(:awaiting) == "Awaiting"
-      assert StatusHelpers.worker_status_label(:awaiting_review_gate) == "In review_gate"
-      assert StatusHelpers.worker_status_label(:awaiting_review) == "Awaiting review"
       assert StatusHelpers.worker_status_label(:completed) == "Completed"
       assert StatusHelpers.worker_status_label(:failed) == "Failed"
     end
@@ -64,10 +58,6 @@ defmodule ArbiterWeb.StatusHelpersTest do
       assert StatusHelpers.kind_badge_class(:notification) == "badge-info"
       assert StatusHelpers.kind_badge_class(:direction) == "badge-warning"
       assert StatusHelpers.kind_badge_class(:flag) == "badge-accent"
-      assert StatusHelpers.kind_badge_class(:escalation) == "badge-error"
-      assert StatusHelpers.kind_badge_class(:failure) == "badge-error"
-      assert StatusHelpers.kind_badge_class(:completion) == "badge-success"
-      assert StatusHelpers.kind_badge_class(:info) == "badge-info"
       assert StatusHelpers.kind_badge_class(:unknown) == "badge-ghost"
     end
   end
