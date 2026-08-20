@@ -795,6 +795,14 @@ defmodule Arbiter.Worker do
   defp worker_type_to_role(:fix_pass), do: "fix_pass"
   defp worker_type_to_role(:conflict), do: "conflict"
 
+  # Convert meta.role (from ReviewGate spawn context) to Usage.Event role string.
+  # Mirrors worker_type classification: reviewer → "review", implementer → "impl", etc.
+  defp role_to_usage_step(:reviewer), do: "review"
+  defp role_to_usage_step(:implementer), do: "impl"
+  defp role_to_usage_step(:fix_pass), do: "fix_pass"
+  defp role_to_usage_step(:conflict_resolver), do: "conflict"
+  defp role_to_usage_step(_), do: "base"
+
   # Best-effort: stamp the terminal status / output / exit fields onto the
   # Run row created at init. No-op (with a debug breadcrumb) when run_id is
   # nil — the original create failed, so there's nothing to update and the
@@ -1036,7 +1044,9 @@ defmodule Arbiter.Worker do
       worker_run_id: state.run_id,
       session_id: Map.get(usage, :session_id),
       occurred_at: DateTime.utc_now(),
-      raw: Map.get(usage, :raw)
+      raw: Map.get(usage, :raw),
+      base_task_id: Arbiter.Worker.ReviewGate.base_task_id(state.task_id),
+      role: role_to_usage_step(role)
     }
 
     case Ash.create(Arbiter.Usage.Event, attrs) do
