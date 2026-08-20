@@ -28,6 +28,12 @@ defmodule Arbiter.Events.Record do
       # scoped to a workspace (or unscoped for a workspace-agnostic
       # coordinator token)".
       index [:workspace_id, :seq]
+
+      # Powers `Arbiter.Events.Retention.sweep/1`'s once-per-sweep cutoff
+      # lookup ("highest seq among rows with occurred_at < cutoff") and
+      # `Arbiter.Events.replay/3`'s `{:timestamp, _}` mode. Both filter on
+      # this column so both get the same clock and the same index.
+      index [:occurred_at]
     end
   end
 

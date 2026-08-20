@@ -24,6 +24,30 @@ defmodule Arbiter.Events do
   `broadcast/3` treats it as infallible. The live *broadcast* keeps its
   original swallow-on-failure behavior.
 
+  The insert in `persist/3` is **synchronous** — `broadcast/3` blocks its
+  caller on it before either PubSub send. This is a deliberate deviation
+  from the async/batched ingestion shape referenced when this was scoped
+  (Langfuse's "never silently dropped" pattern): synchronous insert is what
+  makes "the cursor is stamped before either PubSub send" true without a
+  separate coordination step, which is a real simplification. The tradeoff
+  is that every broadcast call now blocks on a write behind SQLite's
+  single-writer lock. If this shows up as latency on a hot path, batching
+  the insert (buffer + periodic flush, assigning `seq` at flush time) is the
+  next step — but it adds a window where a `broadcast/3` caller returns
+  before its event is durable.
+
+  `persist/3` also runs on whatever connection/transaction its caller is in.
+  Most call sites (see below) call `broadcast/3` from inside an Ash
+  `after_action` hook, which runs inside the enclosing action's transaction.
+  If that transaction later rolls back, the `events` row it wrote
+  disappears — but the PubSub broadcast, which already fired, reached
+  subscribers before the rollback could happen. This narrowly violates "every
+  broadcast that reaches a subscriber is also persisted" for that one row.
+  It's harmless for cursor monotonicity (SQLite's `AUTOINCREMENT` just
+  leaves a gap, and every consumer already tolerates gaps in `seq`), so it's
+  left as a known, accepted caveat rather than moved to an
+  `after_transaction` hook.
+
   Retention is enforced by `Arbiter.Events.Retention`.
 
   ## Topic registry
@@ -156,6 +180,20 @@ defmodule Arbiter.Events do
   @typedoc "A replay cursor: an opaque integer `seq`, or a timestamp to replay everything after."
   @type since :: {:cursor, integer()} | {:timestamp, DateTime.t()}
 
+  # Bounds how much of the log a single reconnect materializes at once. A
+  # coordinator reconnecting with `since=0` (or a very old timestamp) could
+  # otherwise pull the whole retention window into memory before the first
+  # chunk is written, blocking the live handoff. `replay/3` reports whether
+  # this limit was hit (see `replay_result/0`) so the caller can make the
+  # truncation visible rather than silently returning a partial gap.
+  @replay_limit 5_000
+
+  @doc "The max number of rows `replay/3` returns in one call."
+  def replay_limit, do: @replay_limit
+
+  @typedoc "`events` is oldest-first and JSON-ready; `truncated?` is true when more rows exist past `replay_limit/0`."
+  @type replay_result :: %{events: [map()], truncated?: boolean()}
+
   @doc """
   Replay persisted events after `since`, restricted to `topics`, oldest first.
 
@@ -163,20 +201,57 @@ defmodule Arbiter.Events do
   across all workspaces (mirrors the workspace-agnostic coordinator token —
   see `pubsub_topic/1`).
 
-  Returns a list of JSON-ready maps (string keys), each carrying `"cursor"`
-  — the same cursor space as the `:cursor` key `broadcast/3` stamps onto the
+  Capped at `replay_limit/0` rows. Returns `%{events: [...], truncated?:
+  bool}` — each event is a JSON-ready map (string keys) carrying `"cursor"`,
+  the same cursor space as the `:cursor` key `broadcast/3` stamps onto the
   live event, so a caller can uniformly track "highest cursor delivered so
-  far" across replay and live events without double-delivery.
+  far" across replay and live events without double-delivery. `truncated?:
+  true` means the log has more rows after the last one returned — the
+  caller should surface that so the client knows to reconnect with
+  `since=<last cursor>` rather than assume it's caught up.
   """
-  @spec replay(String.t() | nil, [String.t()], since()) :: [map()]
+  @spec replay(String.t() | nil, [String.t()], since()) :: replay_result()
   def replay(workspace_id, topics, since) when is_list(topics) do
+    records =
+      Record
+      |> Ash.Query.filter(topic in ^topics)
+      |> since_filter(since)
+      |> workspace_filter(workspace_id)
+      |> Ash.Query.sort(seq: :asc)
+      |> Ash.Query.limit(@replay_limit + 1)
+      |> Ash.read!()
+
+    {records, truncated?} =
+      if length(records) > @replay_limit do
+        {Enum.take(records, @replay_limit), true}
+      else
+        {records, false}
+      end
+
+    %{events: Enum.map(records, &record_to_event/1), truncated?: truncated?}
+  end
+
+  @doc """
+  The highest `seq` currently in the log, or `0` if it's empty.
+
+  `seq` is a single global autoincrement counter (not scoped per workspace
+  or topic), so this is the log's true high-water mark regardless of any
+  filtering a caller might otherwise apply. Used by the controller to clamp
+  a client-supplied `since=` cursor that has run ahead of the table (e.g.
+  after a DB reset) — without the clamp, replay legitimately returns zero
+  rows and the caller has no way to distinguish "nothing happened" from
+  "your cursor is bogus".
+  """
+  @spec max_cursor() :: non_neg_integer()
+  def max_cursor do
     Record
-    |> Ash.Query.filter(topic in ^topics)
-    |> since_filter(since)
-    |> workspace_filter(workspace_id)
-    |> Ash.Query.sort(seq: :asc)
+    |> Ash.Query.sort(seq: :desc)
+    |> Ash.Query.limit(1)
     |> Ash.read!()
-    |> Enum.map(&record_to_event/1)
+    |> case do
+      [%Record{seq: seq}] -> seq
+      [] -> 0
+    end
   end
 
   defp since_filter(query, {:cursor, cursor}), do: Ash.Query.filter(query, seq > ^cursor)

@@ -42,6 +42,16 @@ defmodule Arbiter.Events.Retention do
   Delete every `Record` row older than `:retention_days` (default from
   config, overridable via opts — mainly for tests). Best-effort: a delete
   failure is logged and swallowed rather than crashing the caller.
+
+  Prunes by `seq`, not `inserted_at`: the only index on this table is
+  `[:workspace_id, :seq]` (see `Arbiter.Events.Record`), so filtering on
+  `inserted_at` directly would full-scan every sweep. Instead the cutoff
+  timestamp is resolved to a `seq` once (via the highest-`seq` row still
+  older than the cutoff), then rows are pruned with `seq <= cutoff_seq`,
+  which reuses the primary key. Resolving against `occurred_at` — the same
+  clock `Arbiter.Events.replay/3` filters on for its `{:timestamp, _}` mode
+  — also removes the clock skew that existed between retention and replay
+  when retention pruned by `inserted_at` instead.
   """
   @spec sweep(keyword()) :: :ok
   def sweep(opts \\ []) do
@@ -50,15 +60,34 @@ defmodule Arbiter.Events.Retention do
 
     cutoff = DateTime.add(DateTime.utc_now(), -retention_days, :day)
 
-    Record
-    |> Ash.Query.filter(inserted_at < ^cutoff)
-    |> Ash.bulk_destroy!(:destroy, %{}, return_errors?: false)
+    case cutoff_seq(cutoff) do
+      nil ->
+        :ok
 
-    :ok
+      cutoff_seq ->
+        Record
+        |> Ash.Query.filter(seq <= ^cutoff_seq)
+        |> Ash.bulk_destroy!(:destroy, %{}, return_errors?: false)
+
+        :ok
+    end
   rescue
     e ->
       Logger.error("Arbiter.Events.Retention sweep failed: #{Exception.message(e)}")
       :ok
+  end
+
+  # The highest seq among rows at or before the cutoff, or nil if none exist.
+  defp cutoff_seq(cutoff) do
+    Record
+    |> Ash.Query.filter(occurred_at < ^cutoff)
+    |> Ash.Query.sort(seq: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Record{seq: seq}] -> seq
+      [] -> nil
+    end
   end
 
   # ---- GenServer callbacks -------------------------------------------------

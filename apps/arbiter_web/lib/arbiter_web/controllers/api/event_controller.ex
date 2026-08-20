@@ -42,6 +42,8 @@ defmodule ArbiterWeb.Api.EventController do
 
   use ArbiterWeb, :controller
 
+  require Logger
+
   alias Arbiter.Events
   alias Arbiter.MCP.Scope
 
@@ -154,7 +156,8 @@ defmodule ArbiterWeb.Api.EventController do
   defp replay(conn, _workspace_id, _topics, nil), do: {conn, nil}
 
   defp replay(conn, workspace_id, topics, since) do
-    events = Events.replay(workspace_id, MapSet.to_list(topics), since)
+    %{events: events, truncated?: truncated?} =
+      Events.replay(workspace_id, MapSet.to_list(topics), since)
 
     conn =
       Enum.reduce(events, conn, fn event, conn ->
@@ -170,14 +173,52 @@ defmodule ArbiterWeb.Api.EventController do
         %{"cursor" => cursor} -> cursor
       end
 
+    conn =
+      if truncated? do
+        chunk_truncation_notice(conn, last_cursor)
+      else
+        conn
+      end
+
     {conn, last_cursor}
   end
 
-  # No rows replayed: fall back to the requested cursor itself so
-  # event_loop/3 still filters out anything at or before it (relevant only
-  # for {:cursor, _} — a {:timestamp, _} since has no equivalent integer
-  # floor, so there's nothing to filter beyond "everything").
-  defp since_watermark({:cursor, cursor}), do: cursor
+  defp chunk_truncation_notice(conn, last_cursor) do
+    notice = %{
+      "topic" => "_replay_truncated",
+      "cursor" => last_cursor,
+      "note" =>
+        "replay hit Events.replay_limit/0 (#{Events.replay_limit()} rows); " <>
+          "reconnect with since=#{last_cursor} to continue"
+    }
+
+    case Plug.Conn.chunk(conn, Jason.encode!(notice) <> "\n") do
+      {:ok, conn} -> conn
+      {:error, _} -> conn
+    end
+  end
+
+  # No rows replayed: fall back to the requested cursor, clamped to the
+  # log's actual high-water mark. Without the clamp, a client-supplied
+  # cursor past the end of the table (e.g. after a DB reset, or a stale/
+  # hand-typed value) would make event_loop/3 drop every future live event
+  # for the life of the connection — indistinguishable from "fleet quiet".
+  # Clamping degrades that to "stream everything live" instead.
+  defp since_watermark({:cursor, cursor}) do
+    max_seq = Events.max_cursor()
+
+    if cursor > max_seq do
+      Logger.error(
+        "GET /events since=#{cursor} exceeds the log's high-water mark (#{max_seq}); " <>
+          "clamping — client cursor is likely stale or invalid"
+      )
+
+      max_seq
+    else
+      cursor
+    end
+  end
+
   defp since_watermark({:timestamp, _}), do: nil
 
   # ---- event loop ---------------------------------------------------------
@@ -185,48 +226,55 @@ defmodule ArbiterWeb.Api.EventController do
   # Tail-recursive receive loop. Waits up to @keepalive_ms for an event; on
   # timeout sends a bare newline keepalive to prevent proxy timeouts.
   #
-  # `last_cursor` is the highest event cursor already delivered (via replay
-  # or a prior live send), or `nil` if nothing has been filtered yet. An
-  # incoming event is skipped if its cursor is <= last_cursor — this is what
-  # makes the subscribe-before-replay race in stream/2 safe: an event that
-  # arrives both via the replay query and via a queued PubSub message is
-  # only ever sent once. An event with no cursor (persist failed) is always
-  # sent — it was never a replay candidate to begin with.
-  defp event_loop(conn, topics, last_cursor) do
+  # `watermark` is FROZEN at the replay high-water mark for the life of the
+  # connection — it is never advanced by live sends. It only exists to
+  # suppress events the replay query already returned (cursor <=
+  # watermark), which is what makes the subscribe-before-replay race in
+  # stream/2 safe: an event that arrives both via the replay query and via a
+  # queued PubSub message is only ever sent once. PubSub never redelivers a
+  # message, so advancing the watermark on every live send buys nothing —
+  # and it actively breaks delivery for concurrent broadcasters, since two
+  # events persisted close together can be broadcast out of cursor order
+  # (persist and PubSub broadcast aren't atomic across processes): if a
+  # higher-cursor event's PubSub message is scheduled first, advancing the
+  # watermark to it would cause the lower-cursor event that follows to be
+  # wrongly treated as already-delivered and silently dropped. An event with
+  # no cursor (persist failed) is always sent — it was never a replay
+  # candidate to begin with.
+  defp event_loop(conn, topics, watermark) do
     receive do
-      {:event, %{topic: event_topic} = event} ->
-        cond do
-          not MapSet.member?(topics, event_topic) ->
-            event_loop(conn, topics, last_cursor)
+      {:event, event} ->
+        if deliver?(event, topics, watermark) do
+          json_line = Jason.encode!(stringify_keys(event)) <> "\n"
 
-          already_delivered?(event, last_cursor) ->
-            event_loop(conn, topics, last_cursor)
-
-          true ->
-            json_line = Jason.encode!(stringify_keys(event)) <> "\n"
-
-            case Plug.Conn.chunk(conn, json_line) do
-              {:ok, conn} -> event_loop(conn, topics, next_cursor(event, last_cursor))
-              {:error, _} -> conn
-            end
+          case Plug.Conn.chunk(conn, json_line) do
+            {:ok, conn} -> event_loop(conn, topics, watermark)
+            {:error, _} -> conn
+          end
+        else
+          event_loop(conn, topics, watermark)
         end
     after
       @keepalive_ms ->
         case Plug.Conn.chunk(conn, "\n") do
-          {:ok, conn} -> event_loop(conn, topics, last_cursor)
+          {:ok, conn} -> event_loop(conn, topics, watermark)
           {:error, _} -> conn
         end
     end
   end
 
-  defp already_delivered?(%{cursor: cursor}, last_cursor)
-       when is_integer(cursor) and is_integer(last_cursor),
-       do: cursor <= last_cursor
+  @doc false
+  # Exposed for unit testing (finding #3): pure delivery decision, independent
+  # of the receive loop and the conn plumbing.
+  def deliver?(event, topics, watermark) do
+    MapSet.member?(topics, Map.get(event, :topic)) and not already_delivered?(event, watermark)
+  end
 
-  defp already_delivered?(_event, _last_cursor), do: false
+  defp already_delivered?(%{cursor: cursor}, watermark)
+       when is_integer(cursor) and is_integer(watermark),
+       do: cursor <= watermark
 
-  defp next_cursor(%{cursor: cursor}, _last_cursor) when is_integer(cursor), do: cursor
-  defp next_cursor(_event, last_cursor), do: last_cursor
+  defp already_delivered?(_event, _watermark), do: false
 
   # The event map uses atom keys internally; JSON encoding expects string keys
   # or structs — Jason handles atom keys fine, but to be explicit and safe we
