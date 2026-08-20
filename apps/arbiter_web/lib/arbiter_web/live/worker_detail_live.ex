@@ -14,6 +14,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   use ArbiterWeb, :live_view
 
+  import ArbiterWeb.StatusHelpers
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
@@ -499,8 +501,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
                   <.icon name="hero-flag" class="size-4" /> Lifecycle
                 </h2>
-                <span class={["badge badge-sm", status_class(@snapshot.status)]}>
-                  {status_label(@snapshot.status)}
+                <span class={["badge badge-sm", worker_status_class(@snapshot.status)]}>
+                  {worker_status_label(@snapshot.status)}
                 </span>
               </div>
 
@@ -567,8 +569,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
                   <dt class="font-medium text-base-content/60">Status:</dt>
                   <dd>
-                    <span class={["badge badge-sm", status_class(@snapshot.status)]}>
-                      {status_label(@snapshot.status)}
+                    <span class={["badge badge-sm", worker_status_class(@snapshot.status)]}>
+                      {worker_status_label(@snapshot.status)}
                     </span>
                   </dd>
                   <%= if claude_session?(@snapshot) do %>
@@ -607,7 +609,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                     <% end %>
                   </dd>
                   <dt class="font-medium text-base-content/60">Started:</dt>
-                  <dd class="font-mono text-xs tabular-nums">{format_ts(@snapshot.started_at)}</dd>
+                  <dd class="font-mono text-xs tabular-nums">{format_ts_long(@snapshot.started_at)}</dd>
                   <dt class="font-medium text-base-content/60">Elapsed:</dt>
                   <dd class="font-mono text-xs tabular-nums">
                     {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
@@ -783,7 +785,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <%= if @snapshot.step_started_at do %>
                     <dt class="font-medium text-base-content/60">Step started:</dt>
                     <dd class="font-mono text-xs tabular-nums">
-                      {format_ts(@snapshot.step_started_at)}
+                      {format_ts_long(@snapshot.step_started_at)}
                     </dd>
                   <% end %>
                   <%= if reason = Map.get(@snapshot.meta || %{}, :stop_reason) do %>
@@ -1111,30 +1113,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
     """
   end
 
-  defp status_class(:idle), do: "badge-ghost"
-  defp status_class(:resuming), do: "badge-info"
-  defp status_class(:running), do: "badge-info"
-  defp status_class(:awaiting), do: "badge-warning"
-  defp status_class(:awaiting_review_gate), do: "badge-warning"
-  defp status_class(:awaiting_review), do: "badge-warning"
-  defp status_class(:completed), do: "badge-success"
-  defp status_class(:failed), do: "badge-error"
-  defp status_class(_), do: ""
-
-  defp status_label(:idle), do: "Idle"
-  defp status_label(:resuming), do: "Resuming"
-  defp status_label(:running), do: "Running"
-  defp status_label(:awaiting), do: "Awaiting"
-  defp status_label(:awaiting_review_gate), do: "In review_gate"
-  defp status_label(:awaiting_review), do: "Awaiting review"
-  defp status_label(:completed), do: "Completed"
-  defp status_label(:failed), do: "Failed"
-
-  defp status_label(other) when is_atom(other),
-    do: other |> Atom.to_string() |> String.capitalize()
-
-  defp status_label(other), do: to_string(other)
-
   # Badge color + text for the last Mergers.get/1 result the Watchdog recorded.
   # An *approved* MR that still can't merge (#354, Phase 1) surfaces the *why*
   # ahead of the generic approval state. The block reason is read through
@@ -1246,9 +1224,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp humanize_seconds(s) when s < 3600, do: "#{div(s, 60)}m"
   defp humanize_seconds(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
 
-  defp format_ts(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S UTC")
-  defp format_ts(_), do: ""
-
   # An MR/PR ref is not currently persisted on the worker snapshot, so this
   # degrades to nil. When the dispatch flow starts stashing it in meta (under
   # :mr_ref or "mr_ref"), the awaiting-review link lights up automatically.
@@ -1257,47 +1232,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   defp mr_ref(_), do: nil
-
-  # Ordered worker lifecycle for the step progress stepper. :failed is handled
-  # separately in the template (it doesn't belong on the happy-path track).
-  @worker_flow [:idle, :running, :awaiting, :completed]
-
-  defp worker_flow, do: @worker_flow
-
-  # Returns :done | :current | :todo for a step relative to the worker's
-  # current status, so the template can mark the stepper.
-  defp flow_state(step, status) do
-    step_idx = Enum.find_index(@worker_flow, &(&1 == step))
-    status_idx = Enum.find_index(@worker_flow, &(&1 == status))
-
-    cond do
-      is_nil(step_idx) or is_nil(status_idx) -> :todo
-      step_idx < status_idx -> :done
-      step_idx == status_idx -> :current
-      true -> :todo
-    end
-  end
-
-  # DaisyUI `step` modifier per flow state. Done/current light up primary;
-  # todo stays neutral.
-  defp flow_step_class(:done), do: "step-primary"
-  defp flow_step_class(:current), do: "step-primary"
-  defp flow_step_class(:todo), do: ""
-
-  # Step marker glyph: a check for completed steps, otherwise the default index.
-  defp flow_step_marker(:done), do: "✓"
-  defp flow_step_marker(_), do: nil
-
-  defp flow_step_label(:idle), do: "Idle"
-  defp flow_step_label(:running), do: "Running"
-  defp flow_step_label(:awaiting), do: "Awaiting review"
-  defp flow_step_label(:completed), do: "Completed"
-
-  # Notification-kind palette, matching the dashboard's mappings.
-  defp kind_badge_class(:notification), do: "badge-info"
-  defp kind_badge_class(:direction), do: "badge-warning"
-  defp kind_badge_class(:flag), do: "badge-accent"
-  defp kind_badge_class(_), do: "badge-ghost"
 
   defp kind_border_class(:notification), do: "border-l-info"
   defp kind_border_class(:direction), do: "border-l-warning"
