@@ -62,6 +62,43 @@ defmodule ArbiterWeb.Api.EventControllerTest do
     end
   end
 
+  # ---- since= validation ---------------------------------------------------
+
+  describe "GET /events — since validation" do
+    setup %{ws: ws} do
+      {:ok, token: Scope.mint_coordinator(ws.id)}
+    end
+
+    test "returns 400 for a since value that is neither an integer cursor nor an ISO-8601 timestamp",
+         %{conn: conn, token: token} do
+      conn = get(conn, "/events?token=#{token}&since=not-a-cursor")
+      body = json_response(conn, 400)
+      assert body["error"] =~ "invalid since"
+    end
+
+    test "enters the stream for a valid integer cursor", %{token: token} do
+      task =
+        Task.async(fn ->
+          get(Phoenix.ConnTest.build_conn(), "/events?token=#{token}&since=0")
+        end)
+
+      assert nil == Task.yield(task, 100)
+      Task.shutdown(task, :brutal_kill)
+    end
+
+    test "enters the stream for a valid ISO-8601 timestamp", %{token: token} do
+      since = DateTime.utc_now() |> DateTime.to_iso8601() |> URI.encode_www_form()
+
+      task =
+        Task.async(fn ->
+          get(Phoenix.ConnTest.build_conn(), "/events?token=#{token}&since=#{since}")
+        end)
+
+      assert nil == Task.yield(task, 100)
+      Task.shutdown(task, :brutal_kill)
+    end
+  end
+
   # ---- streaming happy path -----------------------------------------------
   # Testing an infinite chunked stream synchronously is impractical in
   # Phoenix.ConnTest (get/2 blocks until the handler returns, which it never
@@ -107,6 +144,78 @@ defmodule ArbiterWeb.Api.EventControllerTest do
         assert nil == Task.yield(task, 100), "topic #{topic} should start streaming"
         Task.shutdown(task, :brutal_kill)
       end
+    end
+  end
+
+  # ---- replay -> live watermark stitching ----------------------------------
+  # The delivery decision is the only genuinely novel logic in this
+  # controller (replay/3 itself is tested at the domain level in
+  # events_test.exs). Exercised directly via the pure `deliver?/3` helper
+  # rather than through the receive loop, since the loop isn't independently
+  # drivable outside a live connection.
+
+  describe "ArbiterWeb.Api.EventController.deliver?/3" do
+    alias ArbiterWeb.Api.EventController
+
+    test "cursor at or below the watermark is not delivered (already replayed)" do
+      topics = MapSet.new(["worker_done"])
+      refute EventController.deliver?(%{topic: "worker_done", cursor: 5}, topics, 5)
+      refute EventController.deliver?(%{topic: "worker_done", cursor: 3}, topics, 5)
+    end
+
+    test "cursor above the watermark is delivered" do
+      topics = MapSet.new(["worker_done"])
+      assert EventController.deliver?(%{topic: "worker_done", cursor: 6}, topics, 5)
+    end
+
+    test "an out-of-order live arrival above the watermark is still delivered — regression for the frozen-watermark fix" do
+      # Two concurrent broadcasters can persist seq=10 then seq=11 but have
+      # their PubSub sends land out of order. The watermark must stay frozen
+      # at the replay high-water mark (not advance on every live send), or
+      # the lower-cursor event arriving after the higher one is wrongly
+      # treated as already-delivered.
+      topics = MapSet.new(["worker_done"])
+      watermark = 9
+
+      assert EventController.deliver?(%{topic: "worker_done", cursor: 11}, topics, watermark)
+      # watermark is NOT advanced to 11 here — it stays at the replay
+      # watermark for the life of the connection.
+      assert EventController.deliver?(%{topic: "worker_done", cursor: 10}, topics, watermark)
+    end
+
+    test "watermark clamped to the log's high-water mark when replay is empty — regression for the since=-ahead-of-DB fix" do
+      # A since= cursor past the end of the table degrades to "stream
+      # everything live" (watermark clamped to the actual max seq) rather
+      # than silently dropping every future live event.
+      topics = MapSet.new(["worker_done"])
+      clamped_watermark = 42
+
+      assert EventController.deliver?(
+               %{topic: "worker_done", cursor: 43},
+               topics,
+               clamped_watermark
+             )
+
+      refute EventController.deliver?(
+               %{topic: "worker_done", cursor: 42},
+               topics,
+               clamped_watermark
+             )
+    end
+
+    test "an event with no cursor is always delivered" do
+      topics = MapSet.new(["worker_done"])
+      assert EventController.deliver?(%{topic: "worker_done"}, topics, 100)
+    end
+
+    test "an event on an unsubscribed topic is never delivered" do
+      topics = MapSet.new(["worker_done"])
+      refute EventController.deliver?(%{topic: "inbox", cursor: 1}, topics, nil)
+    end
+
+    test "nil watermark (nothing replayed) delivers everything" do
+      topics = MapSet.new(["worker_done"])
+      assert EventController.deliver?(%{topic: "worker_done", cursor: 1}, topics, nil)
     end
   end
 
