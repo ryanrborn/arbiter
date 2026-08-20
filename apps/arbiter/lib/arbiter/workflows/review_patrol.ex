@@ -184,19 +184,26 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # because its repo has no open engagement left (bd-7tr11p) stays down — a
   # `:permanent` child would be restarted immediately by the DynamicSupervisor,
   # defeating the lazy-stop. A genuine crash still exits abnormally and restarts.
-  use GenServer, restart: :transient
+  #
+  # The start_link/tick/state/handle_call/handle_info/resolve_adapter/
+  # schedule_next scaffold is shared with PRPatrol via `PatrolServer`
+  # (bd-d825hp, resolving the duplication bd-4brb2j flagged) — see its
+  # moduledoc for the shape each patrol keeps.
+  use Arbiter.Workflows.PatrolServer,
+    priority_tag: :review_patrol,
+    log_label: "ReviewPatrol",
+    no_work_message: "no open engagement left to watch",
+    recheck_stop_message: "last watched engagement closed",
+    gate: :has_open_engagement?
 
   alias Arbiter.Agents
-  alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
-  alias Arbiter.Workflows.{CodeReview, PatrolPacing, PatrolRepoScope, ReviewReply}
+  alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewReply}
   alias Arbiter.{Mergers, Tasks.Workspace}
   require Ash.Query
   require Logger
-
-  @default_interval_ms 60_000
 
   # Default debounce window: at most one new-commit re-review per 5 minutes per
   # engagement. Overridable per-workspace (config["review_patrol"]["debounce_ms"])
@@ -226,161 +233,70 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   @rate_limit_base_backoff_ms 60_000
   @rate_limit_max_backoff_ms 30 * 60_000
 
-  # Ceiling for the idle-tick backoff (bd-4brb2j): a repo with no open
-  # engagements (or one where a tick produced no outcomes) for several
-  # consecutive ticks stretches its cadence out to at most this, instead of
-  # holding a fixed ~1/min poll forever. Distinct from the rate-limit circuit
-  # breaker above, which backs off for a different reason (GitHub is actively
-  # throttling us) and independently.
-  @idle_backoff_ceiling_ms 15 * 60_000
+  # Idle-tick backoff (bd-4brb2j — a repo with no open engagements, or one
+  # where a tick produced no outcomes, for several consecutive ticks
+  # stretches its cadence out instead of holding a fixed ~1/min poll forever)
+  # is handled by the shared `PatrolServer.schedule_next/1` scaffold, using
+  # its default ceiling. Distinct from the rate-limit circuit breaker below,
+  # which backs off for a different reason (GitHub is actively throttling
+  # us) and independently.
 
-  defstruct [
-    :repo,
-    :workspace_id,
-    :workspace,
-    :interval_ms,
-    :timer_ref,
-    ticks: 0,
-    # Consecutive ticks in a row that produced zero outcomes (no engagements
-    # open, or none needed action) — drives the idle backoff in
-    # `schedule_next/1` (bd-4brb2j). Reset to 0 the moment a tick does
-    # anything. Left untouched while the rate-limit circuit is open (a
-    # separate, already-backed-off state).
-    idle_ticks: 0,
-    last_terminated: [],
-    last_rereviewed: [],
-    last_reported: [],
-    last_flagged: [],
-    last_replied: [],
-    last_escalated: [],
-    last_declined: [],
-    last_tick_at: nil,
-    # Workspace/repo-scoped rate-limit circuit breaker state (bd-1m8k7d):
-    # %{paused_until: nil | DateTime.t(), backoff_level: non_neg_integer()}.
-    # While paused_until is in the future, do_tick/1 makes zero forge calls.
-    rate_limit: %{paused_until: nil, backoff_level: 0}
-  ]
-
-  # ---- public API ----
-
-  def start_link(opts) do
-    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
-  end
-
-  @doc "Synchronously force a patrol cycle. Returns :ok after the cycle completes."
-  def tick(server \\ __MODULE__), do: GenServer.call(server, :tick)
-
-  @doc "Snapshot of internal state."
-  def state(server \\ __MODULE__), do: GenServer.call(server, :state)
+  defstruct PatrolServer.common_fields() ++
+              [
+                last_terminated: [],
+                last_rereviewed: [],
+                last_reported: [],
+                last_flagged: [],
+                last_replied: [],
+                last_escalated: [],
+                last_declined: [],
+                # Workspace/repo-scoped rate-limit circuit breaker state
+                # (bd-1m8k7d): %{paused_until: nil | DateTime.t(),
+                # backoff_level: non_neg_integer()}. While paused_until is in
+                # the future, do_tick_body/1 makes zero forge calls.
+                rate_limit: %{paused_until: nil, backoff_level: 0}
+              ]
 
   # ---- GenServer callbacks ----
 
   @impl true
   def init(opts) do
-    repo = Keyword.fetch!(opts, :repo)
-    workspace_id = Keyword.fetch!(opts, :workspace_id)
-    interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)
+    base = PatrolServer.base_init_fields(opts)
+    {:ok, schedule_next(struct!(__MODULE__, base))}
+  end
 
-    workspace =
-      case Ash.get(Workspace, workspace_id) do
-        {:ok, ws} -> ws
-        _ -> nil
-      end
-
-    state = %__MODULE__{
-      repo: repo,
-      workspace_id: workspace_id,
-      workspace: workspace,
-      interval_ms: interval_ms
+  @impl true
+  def state_snapshot(state) do
+    %{
+      repo: state.repo,
+      workspace_id: state.workspace_id,
+      interval_ms: state.interval_ms,
+      ticks: state.ticks,
+      last_terminated: state.last_terminated,
+      last_rereviewed: state.last_rereviewed,
+      last_reported: state.last_reported,
+      last_flagged: state.last_flagged,
+      last_replied: state.last_replied,
+      last_escalated: state.last_escalated,
+      last_declined: state.last_declined,
+      last_tick_at: state.last_tick_at,
+      rate_limit_paused_until: state.rate_limit.paused_until,
+      idle_ticks: state.idle_ticks
     }
-
-    {:ok, schedule_next(state)}
-  end
-
-  @impl true
-  def handle_call(:tick, _from, state) do
-    new_state = do_tick(state)
-    {:reply, :ok, new_state}
-  end
-
-  def handle_call(:state, _from, state),
-    do:
-      {:reply,
-       %{
-         repo: state.repo,
-         workspace_id: state.workspace_id,
-         interval_ms: state.interval_ms,
-         ticks: state.ticks,
-         last_terminated: state.last_terminated,
-         last_rereviewed: state.last_rereviewed,
-         last_reported: state.last_reported,
-         last_flagged: state.last_flagged,
-         last_replied: state.last_replied,
-         last_escalated: state.last_escalated,
-         last_declined: state.last_declined,
-         last_tick_at: state.last_tick_at,
-         rate_limit_paused_until: state.rate_limit.paused_until,
-         idle_ticks: state.idle_ticks
-       }, state}
-
-  @impl true
-  def handle_info(:tick, state) do
-    # Lazy-stop gate (bd-7tr11p): re-check — with a cheap DB read, NOT a forge
-    # call — whether this repo still has an open engagement to watch. When it
-    # doesn't, terminate before touching GitHub, so an idle repo's patrol makes
-    # zero background requests on the tick that reaps it. `:transient` restart
-    # keeps it down; a crash still restarts (abnormal exit).
-    if has_open_engagement?(state.workspace_id, state.repo) do
-      new_state = do_tick(state) |> schedule_next()
-      {:noreply, new_state}
-    else
-      Logger.info(
-        "ReviewPatrol[#{state.repo}]: stopping — no open engagement left to watch " <>
-          "(workspace #{state.workspace_id})"
-      )
-
-      {:stop, :normal, state}
-    end
-  end
-
-  # Prompt lazy-stop nudge (bd-7tr11p): the PatrolLifecycle subscriber sends
-  # this when a watched item in this workspace closes, so the patrol re-checks
-  # and terminates immediately rather than waiting for its next (idle-backed-off)
-  # scheduled tick. No forge call — pure DB re-check. When an engagement remains,
-  # it's a no-op and the existing schedule is left untouched.
-  def handle_info(:recheck, state) do
-    if has_open_engagement?(state.workspace_id, state.repo) do
-      {:noreply, state}
-    else
-      Logger.info(
-        "ReviewPatrol[#{state.repo}]: stopping — last watched engagement closed " <>
-          "(workspace #{state.workspace_id})"
-      )
-
-      {:stop, :normal, state}
-    end
   end
 
   # ---- tick logic ----
 
   # Every forge call this tick makes is background (bd-3p5vqc): review polling
-  # must yield to foreground work and never starve it. `with_priority/3` tags
-  # the patrol process for the tick (and names it in the limiter report,
-  # bd-7qgxf9); the GitHub clients honour that class at
-  # their request seam (this runs synchronously in the patrol process).
-  defp do_tick(state) do
-    Limiter.with_priority(:background, :review_patrol, fn -> do_tick_body(state) end)
-  end
-
-  defp do_tick_body(state) do
+  # must yield to foreground work and never starve it. `PatrolServer.do_tick/3`
+  # tags the patrol process for the tick (and names it in the limiter report,
+  # bd-7qgxf9); the GitHub clients honour that class at their request seam
+  # (this runs synchronously in the patrol process).
+  @impl true
+  def do_tick_body(state) do
     # Re-fetch the workspace on every tick so config changes take effect
     # immediately without a GenServer restart (mirrors PRPatrol).
-    workspace =
-      case Ash.get(Workspace, state.workspace_id) do
-        {:ok, ws} -> ws
-        _ -> nil
-      end
+    workspace = PatrolServer.refetch_workspace(state.workspace_id)
 
     now = clock_now()
 
@@ -440,20 +356,6 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           idle_ticks: idle_ticks
       }
     end
-  end
-
-  defp resolve_adapter(workspace) do
-    adapter = Mergers.for_workspace(workspace)
-
-    # Force the adapter module to load before the `function_exported?/3` guard
-    # inspects it: the guard returns false for a not-yet-loaded module without
-    # triggering a load, so under interactive code loading (`mix test`) it would
-    # spuriously no-op the whole tick. Releases preload all modules, masking
-    # this — but the guard must not depend on prior load order. See bd-1hn1qw.
-    Code.ensure_loaded(adapter)
-    adapter
-  rescue
-    ArgumentError -> nil
   end
 
   @doc """
@@ -1815,23 +1717,5 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     _ -> :error
   catch
     :exit, _ -> :error
-  end
-
-  # Delay until the next tick: the idle-backed-off interval (bd-4brb2j — grows
-  # with consecutive outcome-free ticks, capped at @idle_backoff_ceiling_ms),
-  # then jittered +/- 15% so patrols started within milliseconds of each other
-  # at boot drift apart instead of ticking in lockstep forever. Independent of
-  # the rate-limit circuit breaker's own pause window (bd-1m8k7d), which
-  # already suppresses forge calls while open regardless of this schedule.
-  defp schedule_next(state) do
-    if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
-
-    delay =
-      state.idle_ticks
-      |> PatrolPacing.idle_backoff_ms(state.interval_ms, @idle_backoff_ceiling_ms)
-      |> PatrolPacing.jitter()
-
-    ref = Process.send_after(self(), :tick, delay)
-    %{state | timer_ref: ref}
   end
 end
