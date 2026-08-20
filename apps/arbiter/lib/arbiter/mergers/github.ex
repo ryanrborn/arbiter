@@ -70,11 +70,9 @@ defmodule Arbiter.Mergers.Github do
 
   require Logger
 
-  alias Arbiter.GitHub.Limiter
   alias Arbiter.Http.Client
-  alias Arbiter.Http.Error, as: ErrorSpec
-  alias Arbiter.Http.RateLimit
   alias Arbiter.Mergers.{Merger, Github.Config, Github.Error, Github.RepoResolver}
+  alias Arbiter.Providers.Github, as: Provider
 
   @stub_name Arbiter.Mergers.Github.HTTP
 
@@ -1796,160 +1794,45 @@ defmodule Arbiter.Mergers.Github do
 
   # ---- Internals: HTTP -----------------------------------------------------
 
-  # Bounded retries for GitHub's *secondary* (abuse) rate limit — a transient,
-  # burst-triggered 403/429 distinct from primary quota exhaustion (bd-1yva53,
-  # bd-2o4b8f). ReviewPatrol's per-tick poll of every open engagement is the
-  # main source of these bursts; retrying here (rather than in every caller)
-  # also covers mid-review adapter calls (get_diff, post_inline_comment, …) so
-  # a single secondary-limit 403/429 no longer fails an entire CodeReview run.
-  @max_secondary_retries 2
-  @base_backoff_ms 250
-  @max_backoff_ms 5_000
-
   # Every real HTTP request passes through the shared priority-aware GitHub
   # budget (bd-3p5vqc): background patrol traffic may be withheld here so it can
   # never starve foreground work (PR open/merge/finalize, deploys), and the
   # limiter observes each response to drive its headroom + secondary-limit
   # accounting.
   #
+  # `:retry` attaches bounded retries for GitHub's *secondary* (abuse) rate
+  # limit — a transient, burst-triggered 403/429 distinct from primary quota
+  # exhaustion (bd-1yva53, bd-2o4b8f). ReviewPatrol's per-tick poll of every
+  # open engagement is the main source of these bursts; retrying here (rather
+  # than in every caller) also covers mid-review adapter calls (get_diff,
+  # post_inline_comment, …) so a single secondary-limit 403/429 no longer
+  # fails an entire CodeReview run.
+  #
   # bd-8y1i58: the gate is *inside* the retry loop, not around it (see
-  # `Arbiter.Http.Client`). With the loop inside a single gate, one acquire
-  # could issue up to three real requests — the limiter's counters (what an
-  # operator reads when the account is exhausted) undercounted by up to 3x, and
-  # a background retry storm could not be shed once it had started. Gating per
-  # attempt also means the first 403 arms the secondary backoff before the
-  # retry is decided, so background retry traffic — the thing that *sustains* a
-  # secondary limit — is withheld.
-  defp client(cfg) do
-    Client.new(
-      base_url: cfg.base_url,
-      headers: headers(cfg),
-      errors: error_spec(),
-      stub: {:github_http_stub, @stub_name},
-      gate: fn fun -> Limiter.gate(cfg.token, fun) end,
-      retry: %{
-        max: @max_secondary_retries,
-        retry?: fn %Req.Response{status: status} = resp ->
-          status in [403, 429] and secondary_rate_limited?(resp)
-        end,
-        delay: &retry_delay_ms/2,
-        sleep: &sleep/1,
-        on_retry: fn _resp, attempt ->
-          Logger.info(
-            "GitHub: secondary rate limit hit (attempt #{attempt + 1}); backing off before retry"
-          )
-        end
-      }
-    )
-  end
-
-  # Classification needs no request config, so call sites holding only a
-  # response can build an error without re-resolving the client.
-  defp error_spec do
-    ErrorSpec.new(
-      module: Error,
-      classify_kind: &classify_kind/2,
-      error_message: &error_message/2,
-      retry_after_ms: &RateLimit.retry_after_ms/2
-    )
-  end
+  # `Arbiter.Providers.Github` / `Arbiter.Http.Client`). With the loop inside a
+  # single gate, one acquire could issue up to three real requests — the
+  # limiter's counters (what an operator reads when the account is exhausted)
+  # undercounted by up to 3x, and a background retry storm could not be shed
+  # once it had started. Gating per attempt also means the first 403 arms the
+  # secondary backoff before the retry is decided, so background retry
+  # traffic — the thing that *sustains* a secondary limit — is withheld.
+  defp client(cfg),
+    do: Provider.client(cfg, Error, stub_name: @stub_name, retry: :secondary_rate_limit)
 
   defp request(cfg, method, path, req_opts),
     do: Client.request(client(cfg), method, path, req_opts)
 
-  # GitHub's secondary/abuse limit is a 403 whose body names it explicitly, or
-  # (per GitHub's docs) may carry a `Retry-After` header — unlike a primary
-  # quota 403, which never does. Either signal is enough to treat it as
-  # transient rather than a hard auth/permissions failure.
-  defp secondary_rate_limited?(%Req.Response{} = resp) do
-    RateLimit.retry_after_seconds(resp) != nil or secondary_limit_message?(resp.body)
-  end
-
-  defp secondary_limit_message?(%{"message" => msg}) when is_binary(msg) do
-    msg = String.downcase(msg)
-    String.contains?(msg, "secondary rate limit") or String.contains?(msg, "abuse detection")
-  end
-
-  defp secondary_limit_message?(_), do: false
-
-  # Honor GitHub's own Retry-After when it sends one (capped), else back off
-  # exponentially.
-  defp retry_delay_ms(resp, attempt) do
-    case RateLimit.retry_after_seconds(resp) do
-      nil -> backoff_ms(attempt)
-      seconds -> min(seconds * 1_000, @max_backoff_ms)
-    end
-  end
-
-  # Exponential backoff with jitter, capped — used when GitHub gives no
-  # Retry-After header to honor directly.
-  defp backoff_ms(attempt) do
-    base = @base_backoff_ms * Integer.pow(2, attempt)
-    jitter = :rand.uniform(div(base, 2) + 1)
-    min(base + jitter, @max_backoff_ms)
-  end
-
-  # Overridable in tests (`Application.put_env(:arbiter, :github_retry_sleep_fun, fun)`)
-  # so retry backoff never actually blocks the test suite.
-  defp sleep(ms) do
-    case Application.get_env(:arbiter, :github_retry_sleep_fun) do
-      fun when is_function(fun, 1) -> fun.(ms)
-      _ -> Process.sleep(ms)
-    end
-  end
-
-  defp handle_json(result), do: Client.handle_json(error_spec(), result)
+  defp handle_json(result), do: Client.handle_json(Provider.error_spec(Error), result)
 
   # For callbacks that only care about success vs failure (merge/close/comment).
-  defp expect_ok(result), do: Client.expect_ok(error_spec(), result)
-
-  defp headers(%{token: token}) do
-    [
-      {"authorization", "Bearer " <> token},
-      {"accept", "application/vnd.github+json"},
-      {"x-github-api-version", "2022-11-28"},
-      {"user-agent", "arbiter"}
-    ]
-  end
+  defp expect_ok(result), do: Client.expect_ok(Provider.error_spec(Error), result)
 
   # `resp` is the full `%Req.Response{}` when available (so rate-limit headers
   # can be read) — omitted at call sites that only destructured status/body
   # before GitHub's rate-limit shape mattered there (bd-1m8k7d).
   defp http_error(status, body, resp \\ nil),
-    do: Client.http_error(error_spec(), status, body, resp)
+    do: Client.http_error(Provider.error_spec(Error), status, body, resp)
 
-  # A 429 is always a rate limit. A 403 is a rate limit only when the body
-  # says so — otherwise it's a scope/permission `:forbidden` (bad credentials,
-  # missing PR access, …). This distinguishes ReviewPatrol's target failure
-  # (primary quota exhaustion, "API rate limit exceeded for user ID …", and
-  # the secondary/abuse "you have exceeded a secondary rate limit…") from an
-  # ordinary auth failure that a workspace-level backoff would only delay
-  # surfacing (bd-1m8k7d).
-  defp classify_kind(429, _body), do: :rate_limited
-
-  defp classify_kind(403, body),
-    do: if(rate_limited_body?(body), do: :rate_limited, else: :forbidden)
-
-  defp classify_kind(status, _body), do: kind_for_status(status)
-
-  defp rate_limited_body?(%{"message" => msg}) when is_binary(msg) do
-    msg = String.downcase(msg)
-    String.contains?(msg, "rate limit") or String.contains?(msg, "abuse detection")
-  end
-
-  defp rate_limited_body?(_), do: false
-
-  defp kind_for_status(400), do: :validation_failed
-  defp kind_for_status(401), do: :unauthenticated
-  defp kind_for_status(404), do: :not_found
-  defp kind_for_status(405), do: :not_mergeable
-  defp kind_for_status(409), do: :conflict
-  defp kind_for_status(422), do: :validation_failed
-  defp kind_for_status(status) when status >= 500 and status < 600, do: :server_error
-  defp kind_for_status(_), do: :http
-
-  defp error_message(%{"message" => msg}, _status) when is_binary(msg), do: msg
-  defp error_message(_, status), do: "HTTP #{status}"
-
-  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
+  defp transport_error(exception),
+    do: Client.transport_error(Provider.error_spec(Error), exception)
 end
