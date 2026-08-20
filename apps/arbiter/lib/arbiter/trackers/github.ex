@@ -60,10 +60,8 @@ defmodule Arbiter.Trackers.GitHub do
 
   @behaviour Arbiter.Trackers.Tracker
 
-  alias Arbiter.GitHub.Limiter
   alias Arbiter.Http.Client
-  alias Arbiter.Http.Error, as: ErrorSpec
-  alias Arbiter.Http.RateLimit
+  alias Arbiter.Providers.Github, as: Provider
   alias Arbiter.Trackers.GitHub.{Config, Error}
 
   @stub_name Arbiter.Trackers.GitHub.HTTP
@@ -612,66 +610,10 @@ defmodule Arbiter.Trackers.GitHub do
   defp paginate(cfg, path, req_opts) do
     Client.paginate(client(cfg), path, req_opts,
       max_pages: @max_pages,
-      next_page: &next_page/3,
+      next_page: &Provider.next_page/3,
       # The issues feed includes pull requests; the tracker only wants issues.
       transform_page: fn page -> Enum.reject(page, &Map.has_key?(&1, "pull_request")) end
     )
-  end
-
-  # GitHub's Link header names an absolute next URL, so the next page moves to
-  # a new path with fresh params rather than reusing the current ones.
-  defp next_page(headers, _path, _req_opts) do
-    case next_page_url(headers) do
-      nil -> nil
-      {next_path, next_params} -> {next_path, [params: next_params]}
-    end
-  end
-
-  # Parses GitHub's RFC 5988 Link header. Returns the rel="next" URL split
-  # into its path-relative-to-base + query params, or nil if no next page.
-  defp next_page_url(headers) do
-    headers
-    |> link_header_value()
-    |> parse_next_link()
-  end
-
-  defp link_header_value(headers) when is_map(headers) do
-    case Map.get(headers, "link") || Map.get(headers, "Link") do
-      [v | _] when is_binary(v) -> v
-      v when is_binary(v) -> v
-      _ -> nil
-    end
-  end
-
-  defp link_header_value(headers) when is_list(headers) do
-    Enum.find_value(headers, fn
-      {"link", v} -> v
-      {"Link", v} -> v
-      _ -> nil
-    end)
-  end
-
-  defp link_header_value(_), do: nil
-
-  defp parse_next_link(nil), do: nil
-
-  defp parse_next_link(value) when is_binary(value) do
-    case Regex.run(~r/<([^>]+)>\s*;\s*rel="next"/, value) do
-      [_, url] -> split_url(url)
-      _ -> nil
-    end
-  end
-
-  defp split_url(url) do
-    uri = URI.parse(url)
-
-    params =
-      case uri.query do
-        nil -> []
-        q -> URI.decode_query(q) |> Enum.to_list()
-      end
-
-    {uri.path || "/", params}
   end
 
   # Normalizes a raw issue payload into a Tracker.summary.
@@ -816,81 +758,29 @@ defmodule Arbiter.Trackers.GitHub do
 
   # ---- Internals: HTTP ----------------------------------------------------
 
-  defp client(cfg) do
-    Client.new(
-      base_url: cfg.base_url,
-      headers: headers(cfg),
-      errors: error_spec(),
-      stub: {:github_http_stub, @stub_name},
-      # Gate through the shared priority-aware GitHub budget (bd-3p5vqc).
-      # Tracker transitions/updates are foreground (a task is actively waiting)
-      # and so are never withheld; the gate still feeds observed rate-limit
-      # headers back to the limiter to keep its numbers current.
-      gate: fn fun -> Limiter.gate(cfg.token, fun) end
-    )
-  end
-
-  # Classification needs no request config, so call sites holding only a
-  # response can build an error without re-resolving the client.
-  defp error_spec do
-    ErrorSpec.new(
-      module: Error,
-      classify_kind: &classify_kind/2,
-      error_message: &error_message/2,
-      retry_after_ms: &RateLimit.retry_after_ms/2
-    )
-  end
+  # Gate through the shared priority-aware GitHub budget (bd-3p5vqc). Tracker
+  # transitions/updates are foreground (a task is actively waiting) and so are
+  # never withheld; the gate still feeds observed rate-limit headers back to
+  # the limiter to keep its numbers current. No retry: unlike the merger, the
+  # tracker doesn't do write-heavy bursts that provoke GitHub's secondary
+  # rate limit.
+  defp client(cfg), do: Provider.client(cfg, Error, stub_name: @stub_name)
 
   defp request(cfg, method, path, req_opts),
     do: Client.request(client(cfg), method, path, req_opts)
 
-  defp handle_json(result), do: Client.handle_json(error_spec(), result)
+  defp handle_json(result), do: Client.handle_json(Provider.error_spec(Error), result)
 
   # For callbacks that only care about success vs failure (transition/update).
-  defp expect_ok(result), do: Client.expect_ok(error_spec(), result)
-
-  defp headers(%{token: token}) do
-    [
-      {"authorization", "Bearer " <> token},
-      {"accept", "application/vnd.github+json"},
-      {"x-github-api-version", "2022-11-28"},
-      {"user-agent", "arbiter"}
-    ]
-  end
+  defp expect_ok(result), do: Client.expect_ok(Provider.error_spec(Error), result)
 
   # `resp` is the full `%Req.Response{}` when available, so rate-limit headers
   # can be read to compute `retry_after_ms` (bd-2wilou — mirrors the same
   # classification `Arbiter.Mergers.Github.Error` already does for the merger
   # path, bd-1m8k7d).
   defp http_error(status, body, resp \\ nil),
-    do: Client.http_error(error_spec(), status, body, resp)
+    do: Client.http_error(Provider.error_spec(Error), status, body, resp)
 
-  # A 429 is always a rate limit. A 403 is a rate limit only when the body
-  # says so — otherwise it's an ordinary scope/permission `:forbidden`.
-  defp classify_kind(429, _body), do: :rate_limited
-
-  defp classify_kind(403, body),
-    do: if(rate_limited_body?(body), do: :rate_limited, else: :forbidden)
-
-  defp classify_kind(status, _body), do: kind_for_status(status)
-
-  defp rate_limited_body?(%{"message" => msg}) when is_binary(msg) do
-    msg = String.downcase(msg)
-    String.contains?(msg, "rate limit") or String.contains?(msg, "abuse detection")
-  end
-
-  defp rate_limited_body?(_), do: false
-
-  defp kind_for_status(400), do: :validation_failed
-  defp kind_for_status(401), do: :unauthenticated
-  defp kind_for_status(403), do: :forbidden
-  defp kind_for_status(404), do: :not_found
-  defp kind_for_status(422), do: :validation_failed
-  defp kind_for_status(status) when status >= 500 and status < 600, do: :server_error
-  defp kind_for_status(_), do: :http
-
-  defp error_message(%{"message" => msg}, _status) when is_binary(msg), do: msg
-  defp error_message(_, status), do: "HTTP #{status}"
-
-  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
+  defp transport_error(exception),
+    do: Client.transport_error(Provider.error_spec(Error), exception)
 end
