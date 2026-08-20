@@ -1367,6 +1367,7 @@ defmodule Arbiter.Worker do
         |> Map.put(:activity, "starting")
         |> Map.put(:activity_at, now)
         |> Map.put(:output_log, open_output_log(state))
+        |> Map.put(:run_id, state.run_id)
 
       sessions = Map.put(state.claude_sessions, port, session)
 
@@ -2729,6 +2730,7 @@ defmodule Arbiter.Worker do
         |> Map.put(:activity, "starting")
         |> Map.put(:activity_at, now)
         |> Map.put(:output_log, open_output_log(state))
+        |> Map.put(:run_id, state.run_id)
 
       new_meta =
         meta
@@ -3094,6 +3096,7 @@ defmodule Arbiter.Worker do
         |> Map.put(:activity, "resuming")
         |> Map.put(:activity_at, now)
         |> Map.put(:output_log, open_output_log(state))
+        |> Map.put(:run_id, state.run_id)
 
       new_meta =
         (meta || %{})
