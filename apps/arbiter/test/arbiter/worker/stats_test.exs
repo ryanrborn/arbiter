@@ -1,6 +1,8 @@
 defmodule Arbiter.Worker.StatsTest do
   use Arbiter.DataCase, async: true
 
+  require Ash.Expr
+
   alias Arbiter.Usage.Event
   alias Arbiter.Worker.Stats
 
@@ -92,6 +94,143 @@ defmodule Arbiter.Worker.StatsTest do
                review_id => 2.0,
                untouched_id => 0.0
              }
+    end
+  end
+
+  describe "worker_runs with base_task_id and role columns" do
+    test "creates worker runs with base_task_id and role" do
+      base_id = "bd-stats-#{System.unique_integer([:positive])}"
+      review_id = "#{base_id}#review"
+
+      {:ok, run1} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: base_id,
+          repo: "arbiter",
+          workspace_id: "ws-test",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          base_task_id: base_id,
+          role: "base"
+        })
+
+      {:ok, run2} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: "ws-test",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          base_task_id: base_id,
+          role: "review"
+        })
+
+      assert run1.base_task_id == base_id
+      assert run1.role == "base"
+      assert run2.base_task_id == base_id
+      assert run2.role == "review"
+    end
+
+    # Regression test: bd-cryhwk showed that querying for a task's full cost
+    # using suffix-encoded task_id strings would fail silently. The new
+    # base_task_id column makes it possible to query a task's complete spend
+    # (including all review/impl passes) without string surgery.
+    test "base_task_id enables single-query cost lookup for a task's full spend" do
+      base_id = "bd-stats-#{System.unique_integer([:positive])}"
+      review_id = "#{base_id}#review"
+      impl_id = "#{base_id}#review#impl1"
+
+      # Create runs for a task's lifecycle
+      {:ok, base_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: base_id,
+          repo: "arbiter",
+          workspace_id: "ws-test",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          base_task_id: base_id,
+          role: "base"
+        })
+
+      {:ok, review_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: "ws-test",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          base_task_id: base_id,
+          role: "review"
+        })
+
+      {:ok, impl_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: impl_id,
+          repo: "arbiter",
+          workspace_id: "ws-test",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          base_task_id: base_id,
+          role: "impl"
+        })
+
+      # Verify that all runs are linked to the same base task
+      runs =
+        Arbiter.Workers.Run
+        |> Ash.Query.do_filter(Ash.Expr.expr(base_task_id == ^base_id))
+        |> Ash.read!()
+
+      assert length(runs) == 3
+      assert Enum.all?(runs, &(&1.base_task_id == base_id))
+      assert Enum.map(runs, & &1.role) |> Enum.sort() == ["base", "impl", "review"]
+
+      # Verify the specific runs are present
+      assert base_run.id in Enum.map(runs, & &1.id)
+      assert review_run.id in Enum.map(runs, & &1.id)
+      assert impl_run.id in Enum.map(runs, & &1.id)
+    end
+
+    # Test resumed_from_run_id lineage composes with base_task_id grouping.
+    # A resumed task's full spend should be one number.
+    test "resumed_from_run_id and base_task_id work together for lineage tracking" do
+      base_id = "bd-stats-#{System.unique_integer([:positive])}"
+
+      {:ok, initial_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: base_id,
+          repo: "arbiter",
+          workspace_id: "ws-test",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          base_task_id: base_id,
+          role: "base"
+        })
+
+      # Create a resumed run linked to the initial one
+      {:ok, resumed_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: base_id,
+          repo: "arbiter",
+          workspace_id: "ws-test",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          base_task_id: base_id,
+          role: "base",
+          resumed_from_run_id: initial_run.id
+        })
+
+      # Both runs have the same base_task_id and role, but different resumed lineage
+      assert resumed_run.base_task_id == initial_run.base_task_id
+      assert resumed_run.role == initial_run.role
+      assert resumed_run.resumed_from_run_id == initial_run.id
+
+      # Query shows all runs for the base task
+      runs =
+        Arbiter.Workers.Run
+        |> Ash.Query.do_filter(Ash.Expr.expr(base_task_id == ^base_id))
+        |> Ash.read!()
+
+      assert length(runs) == 2
+      assert Enum.find(runs, &(&1.resumed_from_run_id == initial_run.id)).id == resumed_run.id
     end
   end
 end

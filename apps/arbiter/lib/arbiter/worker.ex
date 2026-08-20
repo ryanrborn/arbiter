@@ -710,12 +710,14 @@ defmodule Arbiter.Worker do
   # error, no sandbox checkout in a test) we log a warning and leave run_id
   # nil — subsequent terminal updates will no-op cleanly.
   defp record_run_started(%State{} = state) do
+    worker_type = worker_type_from_meta(state.meta)
+
     attrs = %{
       task_id: state.task_id,
       task_title: lookup_task_title(state.task_id),
       repo: state.repo,
       workspace_id: effective_workspace_id(state),
-      worker_type: worker_type_from_meta(state.meta),
+      worker_type: worker_type,
       status: :running,
       started_at: state.started_at,
       output_lines: [],
@@ -728,7 +730,12 @@ defmodule Arbiter.Worker do
       # fields below, which are resolved after spawn and backfilled). Captured
       # here — not read from `issues.difficulty` later — so a subsequent
       # difficulty edit never retroactively relabels this run's provenance.
-      difficulty_at_dispatch: difficulty_at_dispatch(state.meta)
+      difficulty_at_dispatch: difficulty_at_dispatch(state.meta),
+      # bd-5fhyry: real columns for parent/role hierarchy instead of suffix-encoded
+      # task_id strings. The base_task_id is the root task (strips #review/#impl etc),
+      # and role denotes the run's purpose (base/review/impl).
+      base_task_id: Arbiter.Worker.ReviewGate.base_task_id(state.task_id),
+      role: worker_type_to_role(worker_type)
     }
 
     case Ash.create(Arbiter.Workers.Run, attrs) do
@@ -779,6 +786,14 @@ defmodule Arbiter.Worker do
   end
 
   defp worker_type_from_meta(_), do: :main
+
+  # Convert worker_type atom to string role for storage in worker_runs.role column.
+  # bd-5fhyry: replacement for suffix-encoded task_id hierarchy.
+  defp worker_type_to_role(:main), do: "base"
+  defp worker_type_to_role(:review), do: "review"
+  defp worker_type_to_role(:impl), do: "impl"
+  defp worker_type_to_role(:fix_pass), do: "fix_pass"
+  defp worker_type_to_role(:conflict), do: "conflict"
 
   # Best-effort: stamp the terminal status / output / exit fields onto the
   # Run row created at init. No-op (with a debug breadcrumb) when run_id is
