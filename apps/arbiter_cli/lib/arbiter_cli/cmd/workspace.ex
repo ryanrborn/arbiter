@@ -48,7 +48,9 @@ defmodule ArbiterCli.Cmd.Workspace do
   valid values and defaults, see `arb config schema` (also appended below).
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.ArgParser
+  alias ArbiterCli.Cmd.Workspace.{Secrets, StandingOrders}
+  alias ArbiterCli.{Client, Output}
 
   # Mirrors Arbiter.Tasks.Workspace.valid_tracker_types/0 and
   # valid_merger_strategies/0 for friendly client-side errors on `create`. The
@@ -82,10 +84,10 @@ defmodule ArbiterCli.Cmd.Workspace do
         create(rest)
 
       ["standing-order" | rest] ->
-        standing_order(rest)
+        StandingOrders.run(rest, switches: @switches)
 
       ["secret" | rest] ->
-        secret(rest)
+        Secrets.run(rest, switches: @switches)
 
       ["--help" | _] ->
         print_help()
@@ -139,8 +141,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   # ----- create ----------------------------------------------------------
 
   defp create(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    {opts, rest, mode} = ArgParser.parse(argv, switches: @switches)
 
     name =
       case rest do
@@ -181,7 +182,7 @@ defmodule ArbiterCli.Cmd.Workspace do
     case Client.post("/api/workspaces", body) do
       {:ok, ws} ->
         case mode do
-          :json -> IO.puts(Jason.encode!(ws))
+          :json -> Output.emit_json(ws)
           :text -> IO.puts("created workspace #{ws["name"]} (#{ws["id"]}) prefix=#{ws["prefix"]}")
         end
 
@@ -194,365 +195,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   defp maybe_put(map, _key, ""), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  # ----- standing-order add / rm / ls ------------------------------------
-
-  defp standing_order(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    workspace_opt = opts[:workspace]
-    # --repo is canonical; --rig is a deprecated alias kept for existing
-    # scripts/muscle-memory (bd-1aw9dl). --repo wins if both are given.
-    repo_opt = opts[:repo] || opts[:rig]
-
-    case rest do
-      ["ls"] ->
-        standing_order_ls(workspace_opt, repo_opt, mode)
-
-      ["ls" | _] ->
-        Output.die("workspace standing-order ls takes no positional arguments")
-
-      ["add" | text] when text != [] ->
-        standing_order_add(workspace_opt, repo_opt, Enum.join(text, " "), mode)
-
-      ["add" | _] ->
-        Output.die("workspace standing-order add requires <text>")
-
-      ["rm", target] ->
-        standing_order_rm(workspace_opt, repo_opt, target, mode)
-
-      ["rm" | rest_args] when rest_args != [] ->
-        # Allow an unquoted multi-word text match as a convenience.
-        standing_order_rm(workspace_opt, repo_opt, Enum.join(rest_args, " "), mode)
-
-      ["rm" | _] ->
-        Output.die("workspace standing-order rm requires an <index|text>")
-
-      [] ->
-        Output.die("workspace standing-order requires a subcommand", "verbs: ls, add, rm")
-
-      [unknown | _] ->
-        Output.die(
-          "unknown workspace standing-order subcommand: #{unknown}",
-          "verbs: ls, add, rm"
-        )
-    end
-  end
-
-  defp standing_order_ls(workspace_opt, repo_opt, mode) do
-    ws = resolve_workspace!(workspace_opt)
-    orders = current_standing_orders(ws, repo_opt)
-
-    case mode do
-      :json ->
-        IO.puts(Jason.encode!(orders_json(orders, repo_opt)))
-
-      :text ->
-        if orders == [] do
-          IO.puts("(no standing orders#{repo_label(repo_opt)})")
-        else
-          IO.puts("Standing orders#{repo_label(repo_opt)} (#{length(orders)}):")
-
-          orders
-          |> Enum.with_index(1)
-          |> Enum.each(fn {o, i} -> IO.puts("  #{i}. #{order_text(o)}") end)
-        end
-    end
-  end
-
-  defp standing_order_add(workspace_opt, repo_opt, text, mode) do
-    text = String.trim(text)
-    if text == "", do: Output.die("workspace standing-order add: text must not be empty")
-
-    ws = resolve_workspace!(workspace_opt)
-    require_registered_repo!(ws, repo_opt, "add")
-    orders = current_standing_orders(ws, repo_opt)
-    patch_standing_orders(ws, repo_opt, orders ++ [text], mode)
-  end
-
-  defp standing_order_rm(workspace_opt, repo_opt, target, mode) do
-    ws = resolve_workspace!(workspace_opt)
-    require_registered_repo!(ws, repo_opt, "rm")
-    orders = current_standing_orders(ws, repo_opt)
-
-    if orders == [] do
-      Output.die(
-        "workspace standing-order rm: this workspace has no standing orders#{repo_label(repo_opt)}"
-      )
-    end
-
-    new_orders =
-      case Integer.parse(target) do
-        {n, ""} when n >= 1 and n <= length(orders) ->
-          List.delete_at(orders, n - 1)
-
-        {n, ""} when is_integer(n) ->
-          Output.die(
-            "workspace standing-order rm: index #{n} out of range (1..#{length(orders)})"
-          )
-
-        _ ->
-          # Text match against the human-readable form of each order.
-          case Enum.find_index(orders, &(order_text(&1) == target)) do
-            nil ->
-              Output.die("workspace standing-order rm: no order matching #{inspect(target)}")
-
-            idx ->
-              List.delete_at(orders, idx)
-          end
-      end
-
-    patch_standing_orders(ws, repo_opt, new_orders, mode)
-  end
-
-  # Patches `config.standing_orders` wholesale (a list patch replaces the list,
-  # never appends) while leaving sibling config keys untouched. With `--repo`,
-  # patches just that repo's `standing_orders` sub-key under `repo_paths`,
-  # preserving its `path`/`target_branch` siblings.
-  defp patch_standing_orders(%{} = ws, nil, orders, mode) do
-    payload = %{"patch" => %{"standing_orders" => orders}}
-    do_patch_standing_orders(ws, nil, payload, mode)
-  end
-
-  defp patch_standing_orders(%{} = ws, repo, orders, mode) do
-    {repo_paths_key, entry_key, entry} = resolve_repo(ws, repo)
-
-    entry_map =
-      case entry do
-        %{} = m -> m
-        p when is_binary(p) -> %{"path" => p}
-        _ -> %{}
-      end
-
-    new_entry = Map.put(entry_map, "standing_orders", orders)
-    payload = %{"patch" => %{repo_paths_key => %{entry_key => new_entry}}}
-    do_patch_standing_orders(ws, repo, payload, mode)
-  end
-
-  defp do_patch_standing_orders(%{} = ws, repo, payload, mode) do
-    case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
-      {:ok, updated} ->
-        new_orders = current_standing_orders(updated, repo)
-
-        case mode do
-          :json ->
-            IO.puts(Jason.encode!(orders_json(new_orders, repo)))
-
-          :text ->
-            IO.puts("ok — #{length(new_orders)} standing order(s)")
-
-            new_orders
-            |> Enum.with_index(1)
-            |> Enum.each(fn {o, i} -> IO.puts("  #{i}. #{order_text(o)}") end)
-        end
-
-      {:error, err} ->
-        Output.die(err)
-    end
-  end
-
-  defp orders_json(orders, nil), do: %{"standing_orders" => orders}
-
-  # "repo" is canonical; "rig" is dual-emitted alongside it as a deprecated
-  # legacy key so existing consumers keep working (bd-1aw9dl).
-  defp orders_json(orders, repo),
-    do: %{"standing_orders" => orders, "repo" => repo, "rig" => repo}
-
-  defp repo_label(nil), do: ""
-  defp repo_label(repo), do: " for repo #{repo}"
-
-  defp current_standing_orders(ws, nil) do
-    case get_in(ws, ["config", "standing_orders"]) do
-      orders when is_list(orders) -> orders
-      _ -> []
-    end
-  end
-
-  defp current_standing_orders(ws, repo) do
-    case resolve_repo(ws, repo) do
-      {_key, _entry_key, %{"standing_orders" => orders}} when is_list(orders) -> orders
-      _ -> []
-    end
-  end
-
-  # Requires `repo` (when given) to already be registered under
-  # `repo_paths` — a standing order scoped to an unregistered repo
-  # is almost always a typo, and silently creating a path-less repo entry would
-  # hide it.
-  defp require_registered_repo!(_ws, nil, _verb), do: :ok
-
-  defp require_registered_repo!(ws, repo, verb) do
-    case resolve_repo(ws, repo) do
-      {_key, _entry_key, nil} ->
-        Output.die(
-          "workspace standing-order #{verb}: no repo named #{inspect(repo)} registered",
-          "register its path first: arb config set repo_paths.#{repo}.path <path>"
-        )
-
-      _ ->
-        :ok
-    end
-  end
-
-  # Finds `repo`'s entry under `config.repo_paths`, matching loosely the way
-  # `Arbiter.Tasks.RepoConfig` does server-side (exact key, then normalized
-  # `_`/`-` match). Returns `{repo_paths_key, matched_entry_key,
-  # entry_or_nil}` — `repo_paths_key` is which top-level key to patch back
-  # into, and `matched_entry_key` is the literal key already used in config
-  # (so a normalized-match write lands on the existing entry instead of
-  # creating a sibling).
-  defp resolve_repo(ws, repo) do
-    repo_paths_key = "repo_paths"
-
-    map =
-      case get_in(ws, ["config", "repo_paths"]) do
-        m when is_map(m) -> m
-        _ -> %{}
-      end
-
-    case Map.fetch(map, repo) do
-      {:ok, entry} ->
-        {repo_paths_key, repo, entry}
-
-      :error ->
-        target = normalize_repo_slug(repo)
-
-        case Enum.find(map, fn {k, _v} -> normalize_repo_slug(k) == target end) do
-          {k, entry} -> {repo_paths_key, k, entry}
-          nil -> {repo_paths_key, repo, nil}
-        end
-    end
-  end
-
-  defp normalize_repo_slug(s), do: s |> String.downcase() |> String.replace("_", "-")
-
-  # A standing order is either a short imperative string or a {title, detail}
-  # object; render either to a single human-readable line (matches `arb prime`).
-  defp order_text(order) when is_binary(order), do: order
-
-  defp order_text(%{"title" => title} = order) do
-    case order["detail"] do
-      d when is_binary(d) and d != "" -> "#{title} — #{d}"
-      _ -> title
-    end
-  end
-
-  defp order_text(order), do: inspect(order)
-
-  # ----- secret set / rm / ls --------------------------------------------
-
-  defp secret(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    workspace_opt = opts[:workspace]
-
-    case rest do
-      ["set", key, value] ->
-        secret_set(workspace_opt, key, value, mode)
-
-      ["set", key | vrest] when vrest != [] ->
-        secret_set(workspace_opt, key, Enum.join(vrest, " "), mode)
-
-      ["set" | _] ->
-        Output.die("workspace secret set requires <key> <value>")
-
-      ["rm", key] ->
-        secret_rm(workspace_opt, key, mode)
-
-      ["rm" | _] ->
-        Output.die("workspace secret rm requires exactly one <key>")
-
-      ["ls"] ->
-        secret_ls(workspace_opt, mode)
-
-      ["ls" | _] ->
-        Output.die("workspace secret ls takes no positional arguments")
-
-      [] ->
-        Output.die("workspace secret requires a subcommand", "verbs: set, rm, ls")
-
-      [unknown | _] ->
-        Output.die("unknown workspace secret subcommand: #{unknown}", "verbs: set, rm, ls")
-    end
-  end
-
-  defp secret_set(workspace_opt, key, value, mode) do
-    if String.trim(key) == "", do: Output.die("workspace secret set: key must not be empty")
-    patch_secrets(workspace_opt, %{key => value}, "set secret #{key}", mode)
-  end
-
-  defp secret_rm(workspace_opt, key, mode) do
-    ws = resolve_workspace!(workspace_opt)
-
-    unless key in (ws["secret_keys"] || []) do
-      Output.die("workspace secret rm: no secret named #{inspect(key)}")
-    end
-
-    # A null value tells the server's merge-patch to remove the key.
-    patch_secrets(ws, %{key => nil}, "remove secret #{key}", mode)
-  end
-
-  defp secret_ls(workspace_opt, mode) do
-    ws = resolve_workspace!(workspace_opt)
-    keys = ws["secret_keys"] || []
-
-    case mode do
-      :json ->
-        IO.puts(Jason.encode!(%{"secret_keys" => keys}))
-
-      :text ->
-        if keys == [] do
-          IO.puts("(no secrets)")
-        else
-          IO.puts("Secrets (#{length(keys)}):")
-          Enum.each(keys, &IO.puts("  #{&1}"))
-        end
-    end
-  end
-
-  # Merge-patch the secrets map on the workspace via the update endpoint. The
-  # response never echoes secret values — re-fetch the (names-only) workspace.
-  defp patch_secrets(%{} = ws, secrets, _label, mode) when is_map_key(ws, "id") do
-    case Client.patch("/api/workspaces/" <> ws["id"], %{"secrets" => secrets}) do
-      {:ok, updated} -> emit_secret_result(updated, mode)
-      {:error, err} -> Output.die(err)
-    end
-  end
-
-  defp patch_secrets(workspace_opt, secrets, label, mode) do
-    patch_secrets(resolve_workspace!(workspace_opt), secrets, label, mode)
-  end
-
-  defp emit_secret_result(ws, :json),
-    do: IO.puts(Jason.encode!(%{"secret_keys" => ws["secret_keys"] || []}))
-
-  defp emit_secret_result(ws, :text) do
-    keys = ws["secret_keys"] || []
-    IO.puts("ok — secrets: #{if keys == [], do: "(none)", else: Enum.join(keys, ", ")}")
-  end
-
-  defp resolve_workspace!(%{} = ws) when is_map_key(ws, "id"), do: ws
-
-  defp resolve_workspace!(nil) do
-    case Workspace.resolve() do
-      {:ok, ws} -> ws
-      {:error, msg} -> Output.die(msg)
-    end
-  end
-
-  defp resolve_workspace!(name) when is_binary(name) do
-    case Client.get("/api/workspaces") do
-      {:ok, %{"data" => list}} ->
-        case Enum.find(list, &(&1["name"] == name)) do
-          nil -> Output.die("no workspace named #{inspect(name)}")
-          ws -> ws
-        end
-
-      {:error, err} ->
-        Output.die(err)
-    end
-  end
-
-  defp emit_list(list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
+  defp emit_list(list, :json), do: Output.emit_json(%{"data" => list})
 
   defp emit_list([], :text) do
     IO.puts("(no workspaces)")

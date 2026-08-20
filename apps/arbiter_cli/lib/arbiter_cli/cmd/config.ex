@@ -60,6 +60,8 @@ defmodule ArbiterCli.Cmd.Config do
   `--workspace <name>`.
   """
 
+  alias ArbiterCli.ArgParser
+  alias ArbiterCli.Cmd.Config.{Formatter, Value}
   alias ArbiterCli.{Client, Output, Workspace}
 
   @switches [workspace: :string, force: :boolean, json: :boolean]
@@ -70,8 +72,7 @@ defmodule ArbiterCli.Cmd.Config do
       IO.puts("")
       IO.puts(ArbiterCli.ConfigSchema.render())
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-      mode = if opts[:json], do: :json, else: :text
+      {opts, rest, mode} = ArgParser.parse(argv, switches: @switches)
       workspace_opt = opts[:workspace]
       force = opts[:force] || false
 
@@ -99,21 +100,11 @@ defmodule ArbiterCli.Cmd.Config do
 
     ws = resolve_workspace!(workspace_opt)
     config = ws["config"] || %{}
-    value = if path, do: get_in_path(config, split(path)), else: config
+    value = if path, do: Value.get_in_path(config, Value.split(path)), else: config
 
     case {mode, value} do
-      {:json, v} ->
-        IO.puts(Jason.encode!(v))
-
-      {:text, nil} ->
-        if path do
-          Output.die("config: key not found: #{path}")
-        else
-          IO.puts("(empty)")
-        end
-
-      {:text, v} ->
-        IO.puts(pretty(v))
+      {:json, v} -> Formatter.emit_get(:json, v)
+      {:text, v} -> Formatter.emit_get(:text, v, path)
     end
   end
 
@@ -122,169 +113,8 @@ defmodule ArbiterCli.Cmd.Config do
   defp overview(workspace_opt, mode) do
     ws = resolve_workspace!(workspace_opt)
     config = ws["config"] || %{}
-
-    case mode do
-      :json ->
-        IO.puts(Jason.encode!(overview_map(ws, config)))
-
-      :text ->
-        IO.puts(render_overview(ws, config))
-    end
+    Formatter.emit_overview(mode, ws, config)
   end
-
-  # Structured, secret-safe summary used by `--json`. Mirrors the text sections.
-  defp overview_map(ws, config) do
-    %{
-      "workspace" => %{
-        "id" => ws["id"],
-        "name" => ws["name"],
-        "prefix" => ws["prefix"]
-      },
-      "tracker" => Map.get(config, "tracker", %{}),
-      "merge" => Map.get(config, "merge", %{}),
-      "agent" => Map.get(config, "agent", %{}),
-      "review_agent" => Map.get(config, "review_agent", %{}),
-      "routing" => Map.get(config, "routing", %{}),
-      "review" => Map.get(config, "review", %{}),
-      "review_gate" => Map.get(config, "review_gate", %{}),
-      "standing_orders" => Map.get(config, "standing_orders", []),
-      "secret_keys" => ws["secret_keys"] || []
-    }
-  end
-
-  defp render_overview(ws, config) do
-    [
-      "Workspace: #{ws["name"]}  (#{ws["id"]})  prefix=#{ws["prefix"]}",
-      "",
-      section("Tracker", tracker_lines(Map.get(config, "tracker"))),
-      section("Merge", merge_lines(Map.get(config, "merge"))),
-      section("Agent", agent_lines(Map.get(config, "agent"))),
-      section("Review agent", agent_lines(Map.get(config, "review_agent"))),
-      section("Routing", routing_lines(Map.get(config, "routing"))),
-      section("Review", review_lines(config)),
-      section("Standing orders", standing_order_lines(Map.get(config, "standing_orders"))),
-      section("Secrets", secret_lines(ws["secret_keys"] || []))
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("\n")
-  end
-
-  defp section(_title, []), do: nil
-
-  defp section(title, lines) do
-    "== #{title} ==\n" <> Enum.map_join(lines, "\n", &("  " <> &1)) <> "\n"
-  end
-
-  defp tracker_lines(nil), do: ["type: none"]
-
-  defp tracker_lines(tracker) when is_map(tracker) do
-    type = Map.get(tracker, "type", "none")
-    ["type: #{type}"] ++ kv_lines(Map.get(tracker, "config", %{}))
-  end
-
-  defp tracker_lines(_), do: []
-
-  defp merge_lines(nil), do: ["strategy: direct"]
-
-  defp merge_lines(merge) when is_map(merge) do
-    ["strategy: #{Map.get(merge, "strategy", "direct")}"] ++
-      flag_line(merge, "auto_merge") ++
-      flag_line(merge, "watch_pipeline") ++
-      scalar_line(merge, "pr_title_format") ++
-      scalar_line(merge, "watchdog_max_polls") ++
-      kv_lines(Map.get(merge, "config", %{}))
-  end
-
-  defp merge_lines(_), do: []
-
-  defp agent_lines(nil), do: []
-
-  defp agent_lines(block) when is_map(block) do
-    type =
-      case Map.get(block, "type") do
-        t when is_binary(t) -> t
-        list when is_list(list) -> "pool: " <> Enum.join(list, ", ")
-        _ -> nil
-      end
-
-    if(type, do: ["type: #{type}"], else: []) ++ kv_lines(Map.get(block, "config", %{}))
-  end
-
-  defp agent_lines(_), do: []
-
-  defp routing_lines(nil), do: []
-  defp routing_lines(routing) when is_map(routing) and map_size(routing) == 0, do: []
-
-  defp routing_lines(routing) when is_map(routing) do
-    policy = Map.get(routing, "policy")
-    if policy, do: ["policy: #{policy}"], else: kv_lines(routing)
-  end
-
-  defp routing_lines(_), do: []
-
-  # Review config spans both the `review` block (required/rounds) and the
-  # `review_gate` block (max_rounds); summarise both under one heading.
-  defp review_lines(config) do
-    review = Map.get(config, "review", %{})
-    gate = Map.get(config, "review_gate", %{})
-
-    []
-    |> append_if(is_map(review), fn -> flag_line(review, "required") end)
-    |> append_if(is_map(review), fn -> scalar_line(review, "rounds") end)
-    |> append_if(is_map(gate), fn -> scalar_line(gate, "max_rounds") end)
-  end
-
-  defp standing_order_lines(orders) when is_list(orders) and orders != [] do
-    orders
-    |> Enum.with_index(1)
-    |> Enum.map(fn {o, i} -> "#{i}. #{order_text(o)}" end)
-  end
-
-  defp standing_order_lines(_), do: []
-
-  defp secret_lines([]), do: []
-  defp secret_lines(keys), do: Enum.map(keys, &"#{&1}  (value hidden)")
-
-  defp order_text(order) when is_binary(order), do: order
-
-  defp order_text(%{"title" => title} = order) do
-    case order["detail"] do
-      d when is_binary(d) and d != "" -> "#{title} — #{d}"
-      _ -> title
-    end
-  end
-
-  defp order_text(order), do: inspect(order)
-
-  # Render a sub-map as `key: value` lines, hiding nothing but never inventing
-  # secret values (configs only carry refs, not plaintext).
-  defp kv_lines(map) when is_map(map) and map_size(map) > 0 do
-    map
-    |> Enum.sort_by(fn {k, _} -> k end)
-    |> Enum.map(fn {k, v} -> "#{k}: #{scalarize(v)}" end)
-  end
-
-  defp kv_lines(_), do: []
-
-  defp flag_line(map, key) do
-    case Map.get(map, key) do
-      nil -> []
-      v -> ["#{key}: #{scalarize(v)}"]
-    end
-  end
-
-  defp scalar_line(map, key) do
-    case Map.get(map, key) do
-      nil -> []
-      v -> ["#{key}: #{scalarize(v)}"]
-    end
-  end
-
-  defp scalarize(v) when is_binary(v) or is_integer(v) or is_boolean(v), do: to_string(v)
-  defp scalarize(v), do: pretty_inline(v)
-
-  defp append_if(acc, false, _fun), do: acc
-  defp append_if(acc, true, fun), do: acc ++ fun.()
 
   # ----- set --------------------------------------------------------------
 
@@ -297,22 +127,22 @@ defmodule ArbiterCli.Cmd.Config do
         [] -> Output.die("config set requires <key> <value>")
       end
 
-    path = split(key)
+    path = Value.split(key)
     if path == [], do: Output.die("config set: key must not be empty")
 
-    value = parse_value(raw_value)
-    patch = put_in_path(%{}, path, value)
+    value = Value.parse_value(raw_value)
+    patch = Value.put_in_path(%{}, path, value)
 
     ws = resolve_workspace!(workspace_opt)
     existing = ws["config"] || %{}
-    new_config = deep_merge(existing, patch)
+    new_config = Value.deep_merge(existing, patch)
 
     confirm_or_die!(existing, new_config, force, "set #{key}")
 
     payload = %{"patch" => patch}
 
     case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
-      {:ok, updated} -> emit_workspace_config(updated, mode)
+      {:ok, updated} -> Formatter.emit_workspace_config(updated, mode)
       {:error, err} -> Output.die(err)
     end
   end
@@ -327,24 +157,24 @@ defmodule ArbiterCli.Cmd.Config do
         _ -> Output.die("config unset takes exactly one argument: the dotted key")
       end
 
-    path = split(key)
+    path = Value.split(key)
     if path == [], do: Output.die("config unset: key must not be empty")
 
     ws = resolve_workspace!(workspace_opt)
     existing = ws["config"] || %{}
 
-    if get_in_path(existing, path) == nil do
+    if Value.get_in_path(existing, path) == nil do
       Output.die("config unset: key not found: #{key}")
     end
 
-    new_config = drop_path(existing, path)
+    new_config = Value.drop_path(existing, path)
 
     confirm_or_die!(existing, new_config, force, "unset #{key}")
 
     payload = %{"unset_paths" => [key]}
 
     case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
-      {:ok, updated} -> emit_workspace_config(updated, mode)
+      {:ok, updated} -> Formatter.emit_workspace_config(updated, mode)
       {:error, err} -> Output.die(err)
     end
   end
@@ -371,140 +201,40 @@ defmodule ArbiterCli.Cmd.Config do
     end
   end
 
-  # ----- value parsing ----------------------------------------------------
+  # ----- value parsing (public for tests) ---------------------------------
 
   @doc false
-  def parse_value("true"), do: true
-  def parse_value("false"), do: false
-
-  def parse_value(raw) when is_binary(raw) do
-    cond do
-      String.match?(raw, ~r/^-?\d+$/) ->
-        String.to_integer(raw)
-
-      String.starts_with?(raw, "{") or String.starts_with?(raw, "[") ->
-        case Jason.decode(raw) do
-          {:ok, v} -> v
-          {:error, _} -> raw
-        end
-
-      raw == "null" ->
-        nil
-
-      true ->
-        raw
-    end
-  end
-
-  # ----- dotted-path helpers ---------------------------------------------
+  defdelegate parse_value(raw), to: Value
 
   @doc false
-  def split(path) when is_binary(path) do
-    path |> String.split(".") |> Enum.reject(&(&1 == ""))
-  end
+  defdelegate split(path), to: Value
 
   @doc false
-  def get_in_path(value, []), do: value
-
-  def get_in_path(map, [k | rest]) when is_map(map) do
-    case Map.get(map, k) do
-      nil -> nil
-      sub -> get_in_path(sub, rest)
-    end
-  end
-
-  def get_in_path(_, _), do: nil
+  defdelegate get_in_path(value, path), to: Value
 
   @doc false
-  def put_in_path(map, [k], value) when is_map(map), do: Map.put(map, k, value)
-
-  def put_in_path(map, [k | rest], value) when is_map(map) do
-    sub =
-      case Map.get(map, k) do
-        %{} = s -> s
-        _ -> %{}
-      end
-
-    Map.put(map, k, put_in_path(sub, rest, value))
-  end
+  defdelegate put_in_path(map, path, value), to: Value
 
   @doc false
-  def drop_path(map, [k]) when is_map(map), do: Map.delete(map, k)
-
-  def drop_path(map, [k | rest]) when is_map(map) do
-    case Map.get(map, k) do
-      %{} = sub -> Map.put(map, k, drop_path(sub, rest))
-      _ -> map
-    end
-  end
-
-  def drop_path(other, _), do: other
+  defdelegate drop_path(map, path), to: Value
 
   @doc false
-  def deep_merge(left, right) when is_map(left) and is_map(right) do
-    Map.merge(left, right, fn _k, l, r ->
-      if is_map(l) and is_map(r), do: deep_merge(l, r), else: r
-    end)
-  end
-
-  # ----- guardrails + diff -----------------------------------------------
+  defdelegate deep_merge(left, right), to: Value
 
   @doc """
   Returns `:ok` if the new config is "safe", or `{:unsafe, [reasons]}` if it
   drops a key the system relies on. Reasons mirror the task description.
   """
-  def safety_check(new_config) when is_map(new_config) do
-    reasons =
-      []
-      |> check_repo_paths(new_config)
-      |> check_tracker(new_config)
-      |> check_github_merge(new_config)
+  defdelegate safety_check(new_config), to: Value
 
-    case reasons do
-      [] -> :ok
-      list -> {:unsafe, Enum.reverse(list)}
-    end
-  end
-
-  defp check_repo_paths(reasons, config) do
-    case Map.fetch(config, "repo_paths") do
-      {:ok, m} when is_map(m) and map_size(m) == 0 ->
-        ["repo_paths is empty — worker dispatch cannot resolve a working dir" | reasons]
-
-      _ ->
-        reasons
-    end
-  end
-
-  defp check_tracker(reasons, config) do
-    case get_in_path(config, ["tracker"]) do
-      %{"type" => type} = tracker when is_binary(type) and type != "none" ->
-        case Map.get(tracker, "config") do
-          c when is_map(c) and map_size(c) > 0 ->
-            reasons
-
-          _ ->
-            ["tracker.type is #{inspect(type)} but tracker.config is missing/empty" | reasons]
-        end
-
-      _ ->
-        reasons
-    end
-  end
-
-  defp check_github_merge(reasons, _config) do
-    # owner and repo are both per-repo derivable from the repo's origin remote
-    # (Arbiter.Mergers.Github.RepoResolver). No static check needed here —
-    # the runtime raises a clear error if credentials are missing.
-    reasons
-  end
+  # ----- guardrails + diff -----------------------------------------------
 
   defp confirm_or_die!(before, after_, force, label) do
-    case safety_check(after_) do
+    case Value.safety_check(after_) do
       :ok ->
         if destructive?(before, after_) and not force do
           IO.puts(:stderr, "arb config #{label}:")
-          IO.puts(:stderr, diff(before, after_))
+          IO.puts(:stderr, Formatter.diff(before, after_))
           IO.puts(:stderr, "")
           IO.puts(:stderr, "this overwrites an existing value. Re-run with --force to apply.")
           Output.halt(1)
@@ -540,8 +270,8 @@ defmodule ArbiterCli.Cmd.Config do
     paths = collect_paths(before)
 
     Enum.any?(paths, fn p ->
-      old = get_in_path(before, p)
-      new = get_in_path(after_, p)
+      old = Value.get_in_path(before, p)
+      new = Value.get_in_path(after_, p)
 
       cond do
         old in [nil, "", %{}, []] -> false
@@ -568,31 +298,4 @@ defmodule ArbiterCli.Cmd.Config do
   end
 
   defp collect_paths(_, _), do: []
-
-  defp diff(before, after_) do
-    "  before: " <> pretty_inline(before) <> "\n" <> "  after:  " <> pretty_inline(after_)
-  end
-
-  # ----- output -----------------------------------------------------------
-
-  defp emit_workspace_config(updated, :json), do: IO.puts(Jason.encode!(updated["config"]))
-
-  defp emit_workspace_config(updated, :text) do
-    IO.puts("updated workspace " <> (updated["name"] || updated["id"]))
-    IO.puts(pretty(updated["config"] || %{}))
-  end
-
-  defp pretty(value) do
-    case Jason.encode(value, pretty: true) do
-      {:ok, s} -> s
-      {:error, _} -> inspect(value)
-    end
-  end
-
-  defp pretty_inline(value) do
-    case Jason.encode(value) do
-      {:ok, s} -> s
-      {:error, _} -> inspect(value)
-    end
-  end
 end

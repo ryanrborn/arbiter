@@ -3,6 +3,13 @@ defmodule ArbiterCli.OutputTest do
 
   alias ArbiterCli.Output
 
+  describe "emit_json/1" do
+    test "prints the term as a single line of JSON" do
+      out = ExUnit.CaptureIO.capture_io(fn -> Output.emit_json(%{"a" => 1}) end)
+      assert String.trim(out) == Jason.encode!(%{"a" => 1})
+    end
+  end
+
   describe "format_issue_line/1" do
     test "formats id, status, priority, title" do
       issue = %{"id" => "gte-006", "status" => "open", "priority" => 2, "title" => "CLI escript"}
