@@ -71,6 +71,8 @@ defmodule Arbiter.Trackers.Linear do
 
   @behaviour Arbiter.Trackers.Tracker
 
+  alias Arbiter.Http.Client
+  alias Arbiter.Http.Error, as: ErrorSpec
   alias Arbiter.Trackers.Linear.{Config, Error}
 
   @stub_name Arbiter.Trackers.Linear.HTTP
@@ -885,30 +887,34 @@ defmodule Arbiter.Trackers.Linear do
 
   # ---- Internals: HTTP / GraphQL ------------------------------------------
 
+  # Linear is a single GraphQL endpoint: every call is a POST to `base_url`
+  # with no path, so the shared client is configured with an empty path.
+  defp client(cfg) do
+    Client.new(
+      base_url: cfg.base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:linear_http_stub, @stub_name}
+    )
+  end
+
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: fn status, _body -> kind_for_status(status) end,
+      error_message: &error_message/2
+    )
+  end
+
   defp graphql(cfg, query, variables) do
     body = %{"query" => query, "variables" => variables}
 
-    full_opts =
-      [
-        method: :post,
-        url: cfg.base_url,
-        headers: headers(cfg),
-        json: body,
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(stub_opts())
-
-    case Req.request(full_opts) do
-      {:ok, %Req.Response{status: status, body: resp_body}} when status in 200..299 ->
-        {:ok, resp_body}
-
-      {:ok, %Req.Response{status: status, body: resp_body}} ->
-        {:error, http_error(status, resp_body)}
-
-      {:error, exception} ->
-        {:error, transport_error(exception)}
-    end
+    cfg
+    |> client()
+    |> Client.request(:post, "", json: body)
+    |> then(&Client.handle_json(error_spec(), &1))
   end
 
   # Unwrap a successful GraphQL response body along a key path, returning the
@@ -1012,15 +1018,6 @@ defmodule Arbiter.Trackers.Linear do
     %Error{kind: :graphql_error, status: nil, message: "GraphQL error", raw: errors}
   end
 
-  defp http_error(status, body) do
-    %Error{
-      kind: kind_for_status(status),
-      status: status,
-      message: error_message(body, status),
-      raw: body
-    }
-  end
-
   defp kind_for_status(400), do: :validation_failed
   defp kind_for_status(401), do: :unauthenticated
   defp kind_for_status(403), do: :forbidden
@@ -1032,31 +1029,6 @@ defmodule Arbiter.Trackers.Linear do
   defp error_message(%{"errors" => [%{"message" => msg} | _]}, _) when is_binary(msg), do: msg
   defp error_message(%{"message" => msg}, _) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
-
-  defp transport_error(%{reason: _reason} = exception) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message:
-        if(match?(%{__exception__: true}, exception),
-          do: Exception.message(exception),
-          else: inspect(exception)
-        ),
-      raw: exception
-    }
-  end
-
-  defp transport_error(other) do
-    %Error{kind: :network, status: nil, message: inspect(other), raw: other}
-  end
-
-  defp stub_opts do
-    if Application.get_env(:arbiter, :linear_http_stub, false) do
-      [plug: {Req.Test, @stub_name}]
-    else
-      []
-    end
-  end
 
   defp points_to_difficulty(buckets, pts) do
     case Enum.find(buckets, fn {max, _} -> pts <= max end) do
