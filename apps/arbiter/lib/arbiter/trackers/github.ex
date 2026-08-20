@@ -61,6 +61,9 @@ defmodule Arbiter.Trackers.GitHub do
   @behaviour Arbiter.Trackers.Tracker
 
   alias Arbiter.GitHub.Limiter
+  alias Arbiter.Http.Client
+  alias Arbiter.Http.Error, as: ErrorSpec
+  alias Arbiter.Http.RateLimit
   alias Arbiter.Trackers.GitHub.{Config, Error}
 
   @stub_name Arbiter.Trackers.GitHub.HTTP
@@ -607,31 +610,20 @@ defmodule Arbiter.Trackers.GitHub do
   @max_pages 50
 
   defp paginate(cfg, path, req_opts) do
-    do_paginate(cfg, path, req_opts, [], @max_pages)
+    Client.paginate(client(cfg), path, req_opts,
+      max_pages: @max_pages,
+      next_page: &next_page/3,
+      # The issues feed includes pull requests; the tracker only wants issues.
+      transform_page: fn page -> Enum.reject(page, &Map.has_key?(&1, "pull_request")) end
+    )
   end
 
-  defp do_paginate(_cfg, _path, _req_opts, acc, 0), do: {:ok, Enum.reverse(acc) |> List.flatten()}
-
-  defp do_paginate(cfg, path, req_opts, acc, pages_left) do
-    case request(cfg, :get, path, req_opts) do
-      {:ok, %Req.Response{status: status, body: body, headers: headers}}
-      when status in 200..299 ->
-        page = if is_list(body), do: body, else: []
-        filtered = Enum.reject(page, &Map.has_key?(&1, "pull_request"))
-
-        case next_page_url(headers) do
-          nil ->
-            {:ok, Enum.reverse([filtered | acc]) |> List.flatten()}
-
-          {next_path, next_params} ->
-            do_paginate(cfg, next_path, [params: next_params], [filtered | acc], pages_left - 1)
-        end
-
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, http_error(status, body)}
-
-      {:error, exception} ->
-        {:error, transport_error(exception)}
+  # GitHub's Link header names an absolute next URL, so the next page moves to
+  # a new path with fresh params rather than reusing the current ones.
+  defp next_page(headers, _path, _req_opts) do
+    case next_page_url(headers) do
+      nil -> nil
+      {next_path, next_params} -> {next_path, [params: next_params]}
     end
   end
 
@@ -824,40 +816,38 @@ defmodule Arbiter.Trackers.GitHub do
 
   # ---- Internals: HTTP ----------------------------------------------------
 
-  defp request(cfg, method, path, req_opts) do
-    full_opts =
-      [
-        method: method,
-        url: cfg.base_url <> path,
-        headers: headers(cfg),
-        receive_timeout: 15_000,
-        retry: false
-      ]
-      |> Keyword.merge(req_opts)
-      |> Keyword.merge(stub_opts())
-
-    # Gate through the shared priority-aware GitHub budget (bd-3p5vqc). Tracker
-    # transitions/updates are foreground (a task is actively waiting) and so are
-    # never withheld; the gate still feeds observed rate-limit headers back to
-    # the limiter to keep its numbers current.
-    Limiter.gate(cfg.token, fn -> Req.request(full_opts) end)
+  defp client(cfg) do
+    Client.new(
+      base_url: cfg.base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:github_http_stub, @stub_name},
+      # Gate through the shared priority-aware GitHub budget (bd-3p5vqc).
+      # Tracker transitions/updates are foreground (a task is actively waiting)
+      # and so are never withheld; the gate still feeds observed rate-limit
+      # headers back to the limiter to keep its numbers current.
+      gate: fn fun -> Limiter.gate(cfg.token, fun) end
+    )
   end
 
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,
-    do: {:ok, body}
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: &classify_kind/2,
+      error_message: &error_message/2,
+      retry_after_ms: &RateLimit.retry_after_ms/2
+    )
+  end
 
-  defp handle_json({:ok, %Req.Response{status: status, body: body} = resp}),
-    do: {:error, http_error(status, body, resp)}
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
 
-  defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
 
   # For callbacks that only care about success vs failure (transition/update).
-  defp expect_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
-
-  defp expect_ok({:ok, %Req.Response{status: status, body: body} = resp}),
-    do: {:error, http_error(status, body, resp)}
-
-  defp expect_ok({:error, exception}), do: {:error, transport_error(exception)}
+  defp expect_ok(result), do: Client.expect_ok(error_spec(), result)
 
   defp headers(%{token: token}) do
     [
@@ -872,15 +862,8 @@ defmodule Arbiter.Trackers.GitHub do
   # can be read to compute `retry_after_ms` (bd-2wilou — mirrors the same
   # classification `Arbiter.Mergers.Github.Error` already does for the merger
   # path, bd-1m8k7d).
-  defp http_error(status, body, resp \\ nil) do
-    %Error{
-      kind: classify_kind(status, body),
-      status: status,
-      message: error_message(body, status),
-      raw: body,
-      retry_after_ms: rate_limit_retry_after_ms(status, resp)
-    }
-  end
+  defp http_error(status, body, resp \\ nil),
+    do: Client.http_error(error_spec(), status, body, resp)
 
   # A 429 is always a rate limit. A 403 is a rate limit only when the body
   # says so — otherwise it's an ordinary scope/permission `:forbidden`.
@@ -909,68 +892,5 @@ defmodule Arbiter.Trackers.GitHub do
   defp error_message(%{"message" => msg}, _status) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
 
-  # `Retry-After` (seconds) when GitHub sends it (secondary/abuse limit), else
-  # `x-ratelimit-reset` (unix epoch seconds), which the primary quota limit
-  # always sends instead.
-  defp rate_limit_retry_after_ms(status, %Req.Response{} = resp) when status in [403, 429] do
-    case retry_after_seconds(resp) do
-      seconds when is_integer(seconds) -> seconds * 1_000
-      nil -> reset_retry_after_ms(resp)
-    end
-  end
-
-  defp rate_limit_retry_after_ms(_status, _resp), do: nil
-
-  defp retry_after_seconds(%Req.Response{} = resp) do
-    case Req.Response.get_header(resp, "retry-after") do
-      [v | _] ->
-        case Integer.parse(v) do
-          {seconds, _} -> seconds
-          :error -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp reset_retry_after_ms(%Req.Response{} = resp) do
-    with [v | _] <- Req.Response.get_header(resp, "x-ratelimit-reset"),
-         {epoch, _} <- Integer.parse(v) do
-      ms = (epoch - System.os_time(:second)) * 1_000
-      if ms > 0, do: ms, else: nil
-    else
-      _ -> nil
-    end
-  end
-
-  defp transport_error(%{reason: reason} = exception) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message:
-        case exception do
-          %{__exception__: true} -> Exception.message(exception)
-          _ -> inspect(reason)
-        end,
-      raw: exception
-    }
-  end
-
-  defp transport_error(other) do
-    %Error{
-      kind: :network,
-      status: nil,
-      message: inspect(other),
-      raw: other
-    }
-  end
-
-  defp stub_opts do
-    if Application.get_env(:arbiter, :github_http_stub, false) do
-      [plug: {Req.Test, @stub_name}]
-    else
-      []
-    end
-  end
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
 end
