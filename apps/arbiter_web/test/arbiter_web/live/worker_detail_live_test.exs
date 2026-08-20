@@ -100,6 +100,44 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute html =~ "Stop worker"
     end
 
+    test "status badge for :resuming is colored and labeled 'Resuming'",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-resuming", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", meta: %{resume: true})
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ "badge-info"
+      assert html =~ "Resuming"
+    end
+
+    test "status badge for :awaiting_review_gate is colored and labeled 'In review_gate'",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-review-gate", workspace_id: ws.id})
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: "feature/pd-review-gate",
+            review_required: true,
+            review_spawn: false
+          }
+        )
+
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ "badge-warning"
+      assert html =~ "In review_gate"
+    end
+
     test "renders the workflow step bar when a MachineState exists",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-wf", workspace_id: ws.id})

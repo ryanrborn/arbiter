@@ -76,15 +76,24 @@ defmodule Arbiter.Workflows.PRPatrol do
   # because its repo has no watched work (bd-7tr11p) stays down — a `:permanent`
   # child would be restarted immediately by the DynamicSupervisor, defeating the
   # whole lazy-stop. A genuine crash still exits abnormally and is restarted.
-  use GenServer, restart: :transient
+  #
+  # The start_link/tick/state/handle_call/handle_info/resolve_adapter/
+  # schedule_next scaffold is shared with ReviewPatrol via `PatrolServer`
+  # (bd-d825hp, resolving the duplication bd-4brb2j flagged) — see its
+  # moduledoc for the shape each patrol keeps.
+  use Arbiter.Workflows.PatrolServer,
+    priority_tag: :pr_patrol,
+    log_label: "PRPatrol",
+    no_work_message: "no open fleet-authored PR left to watch",
+    recheck_stop_message: "last watched item closed",
+    gate: :has_open_authored_pr?
 
-  alias Arbiter.GitHub.Limiter
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
-  alias Arbiter.Workflows.{CIFailureFollowUp, PatrolPacing, PatrolRepoScope, ReviewThreadFollowUp}
+  alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
   require Ash.Query
   require Logger
 
@@ -94,66 +103,41 @@ defmodule Arbiter.Workflows.PRPatrol do
   # eventually retries about once an hour instead of never (bd-49ajyt).
   @max_backoff_ms 60 * 60_000
 
-  # Ceiling for the idle-tick backoff (bd-4brb2j): a repo with no actionable
-  # PR for several consecutive ticks stretches its cadence out to at most this,
-  # instead of holding a fixed ~1/min poll forever regardless of activity.
-  @idle_backoff_ceiling_ms 15 * 60_000
-
   # A PR stuck in a persistent dispatch-failure streak re-escalates at most
   # this often, so a condition that outlives the original escalation (missed
   # notification, new failure mode) doesn't stay silent forever (bd-dtpjlf).
   @re_escalate_after_ms 60 * 60_000
 
-  defstruct [
-    :repo,
-    :workspace_id,
-    :workspace,
-    :interval_ms,
-    :timer_ref,
-    ticks: 0,
-    last_dispatched: %{},
-    last_tick_at: nil,
-    # Consecutive ticks in a row that found zero actionable PRs — drives the
-    # idle backoff in `schedule_next/1` (bd-4brb2j). Reset to 0 the moment a
-    # tick dispatches (or would have dispatched, see `maybe_dispatch/3`).
-    idle_ticks: 0,
-    # PR number => %{count: n, retry_at: DateTime, escalated_at: DateTime | nil}
-    # — tracks consecutive follow-up dispatch failures per PR so a persistent
-    # failure escalates and then exponential-backs-off, instead of re-filing +
-    # re-escalating every tick (bd-49ajyt). `escalated_at` is set ONLY when the
-    # coordinator message actually persisted (bd-dtpjlf) — a failed escalation
-    # write leaves it as it was, so the very next failure retries the
-    # escalation instead of being silently suppressed as "already escalated".
-    # Cleared as soon as a dispatch succeeds.
-    dispatch_failures: %{},
-    # How often (ms) a still-failing PR may re-escalate even after a prior
-    # escalation persisted (bd-dtpjlf) — test-only override; production
-    # defaults to @re_escalate_after_ms.
-    re_escalate_after_ms: @re_escalate_after_ms,
-    # Test-only escape hatch merged into the Dispatch.dispatch/2 opts (e.g.
-    # `claude_command:` to avoid spawning a real `claude` subprocess).
-    # Production never sets this — it always defaults to [].
-    dispatch_opts: [],
-    # Test-only escape hatch replacing the coordinator-escalation write
-    # (defaults to `Message.send_mail/1`). Lets tests simulate the write
-    # failing — e.g. a transient DB/PubSub error — so the "only suppress on a
-    # persisted escalation" logic (bd-dtpjlf) can be exercised without
-    # corrupting a real Ash changeset. Production never sets this.
-    escalate_send_fun: nil
-  ]
-
-  # ---- public API ----
-
-  def start_link(opts) do
-    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
-  end
-
-  @doc "Synchronously force a patrol cycle. Returns :ok after the cycle completes."
-  def tick(server \\ __MODULE__), do: GenServer.call(server, :tick)
-
-  @doc "Snapshot of internal state."
-  def state(server \\ __MODULE__), do: GenServer.call(server, :state)
+  defstruct PatrolServer.common_fields() ++
+              [
+                last_dispatched: %{},
+                # PR number => %{count: n, retry_at: DateTime, escalated_at: DateTime | nil}
+                # — tracks consecutive follow-up dispatch failures per PR so a
+                # persistent failure escalates and then exponential-backs-off,
+                # instead of re-filing + re-escalating every tick (bd-49ajyt).
+                # `escalated_at` is set ONLY when the coordinator message
+                # actually persisted (bd-dtpjlf) — a failed escalation write
+                # leaves it as it was, so the very next failure retries the
+                # escalation instead of being silently suppressed as "already
+                # escalated". Cleared as soon as a dispatch succeeds.
+                dispatch_failures: %{},
+                # How often (ms) a still-failing PR may re-escalate even after
+                # a prior escalation persisted (bd-dtpjlf) — test-only
+                # override; production defaults to @re_escalate_after_ms.
+                re_escalate_after_ms: @re_escalate_after_ms,
+                # Test-only escape hatch merged into the Dispatch.dispatch/2
+                # opts (e.g. `claude_command:` to avoid spawning a real
+                # `claude` subprocess). Production never sets this — it
+                # always defaults to [].
+                dispatch_opts: [],
+                # Test-only escape hatch replacing the coordinator-escalation
+                # write (defaults to `Message.send_mail/1`). Lets tests
+                # simulate the write failing — e.g. a transient DB/PubSub
+                # error — so the "only suppress on a persisted escalation"
+                # logic (bd-dtpjlf) can be exercised without corrupting a
+                # real Ash changeset. Production never sets this.
+                escalate_send_fun: nil
+              ]
 
   @doc """
   Whether `repo` (an `"owner/repo"` slug) has an open fleet-authored PR worth
@@ -184,109 +168,51 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   @impl true
   def init(opts) do
-    repo = Keyword.fetch!(opts, :repo)
-    workspace_id = Keyword.fetch!(opts, :workspace_id)
-    interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)
+    base = PatrolServer.base_init_fields(opts)
     dispatch_opts = Keyword.get(opts, :dispatch_opts, [])
     re_escalate_after_ms = Keyword.get(opts, :re_escalate_after_ms, @re_escalate_after_ms)
     escalate_send_fun = Keyword.get(opts, :escalate_send_fun, &Message.send_mail/1)
 
-    workspace =
-      case Ash.get(Workspace, workspace_id) do
-        {:ok, ws} -> ws
-        _ -> nil
-      end
-
-    state = %__MODULE__{
-      repo: repo,
-      workspace_id: workspace_id,
-      workspace: workspace,
-      interval_ms: interval_ms,
-      dispatch_opts: dispatch_opts,
-      re_escalate_after_ms: re_escalate_after_ms,
-      escalate_send_fun: escalate_send_fun
-    }
+    state =
+      struct!(
+        __MODULE__,
+        base ++
+          [
+            dispatch_opts: dispatch_opts,
+            re_escalate_after_ms: re_escalate_after_ms,
+            escalate_send_fun: escalate_send_fun
+          ]
+      )
 
     {:ok, schedule_next(state)}
   end
 
   @impl true
-  def handle_call(:tick, _from, state) do
-    new_state = do_tick(state)
-    {:reply, :ok, new_state}
-  end
-
-  def handle_call(:state, _from, state),
-    do:
-      {:reply,
-       %{
-         repo: state.repo,
-         workspace_id: state.workspace_id,
-         interval_ms: state.interval_ms,
-         ticks: state.ticks,
-         last_dispatched: state.last_dispatched,
-         last_tick_at: state.last_tick_at,
-         idle_ticks: state.idle_ticks
-       }, state}
-
-  @impl true
-  def handle_info(:tick, state) do
-    # Lazy-stop gate (bd-7tr11p): re-check — with a cheap DB read, NOT a forge
-    # call — whether this repo still has a fleet-authored PR to watch. When it
-    # doesn't, terminate before touching GitHub, so an idle repo's patrol makes
-    # zero background requests on the tick that reaps it. `:transient` restart
-    # keeps it down. A crash still restarts (abnormal exit).
-    if has_open_authored_pr?(state.workspace_id, state.repo) do
-      new_state = do_tick(state) |> schedule_next()
-      {:noreply, new_state}
-    else
-      Logger.info(
-        "PRPatrol[#{state.repo}]: stopping — no open fleet-authored PR left to watch " <>
-          "(workspace #{state.workspace_id})"
-      )
-
-      {:stop, :normal, state}
-    end
-  end
-
-  # Prompt lazy-stop nudge (bd-7tr11p): the PatrolLifecycle subscriber sends
-  # this when a watched item in this workspace closes, so the patrol re-checks
-  # and terminates immediately rather than waiting for its next (idle-backed-off)
-  # scheduled tick. No forge call — pure DB re-check. When work remains, it's a
-  # no-op and the existing schedule is left untouched.
-  def handle_info(:recheck, state) do
-    if has_open_authored_pr?(state.workspace_id, state.repo) do
-      {:noreply, state}
-    else
-      Logger.info(
-        "PRPatrol[#{state.repo}]: stopping — last watched item closed " <>
-          "(workspace #{state.workspace_id})"
-      )
-
-      {:stop, :normal, state}
-    end
+  def state_snapshot(state) do
+    %{
+      repo: state.repo,
+      workspace_id: state.workspace_id,
+      interval_ms: state.interval_ms,
+      ticks: state.ticks,
+      last_dispatched: state.last_dispatched,
+      last_tick_at: state.last_tick_at,
+      idle_ticks: state.idle_ticks
+    }
   end
 
   # ---- tick logic ----
 
   # All GitHub traffic this tick issues is background (bd-3p5vqc): the forge
   # polling here must yield to — and never starve — foreground work like a
-  # deploy or a PR merge. `with_priority/3` tags the current process for the
-  # duration of the tick (and names it in the limiter report, bd-7qgxf9); the
-  # GitHub clients read that ambient class at their request seam. Runs
-  # synchronously in the patrol process, so the tag applies.
-  defp do_tick(state) do
-    Limiter.with_priority(:background, :pr_patrol, fn -> do_tick_body(state) end)
-  end
-
-  defp do_tick_body(state) do
+  # deploy or a PR merge. `PatrolServer.do_tick/3` tags the current process
+  # for the duration of the tick (and names it in the limiter report,
+  # bd-7qgxf9); the GitHub clients read that ambient class at their request
+  # seam. Runs synchronously in the patrol process, so the tag applies.
+  @impl true
+  def do_tick_body(state) do
     # Re-fetch the workspace on every tick so config changes (author_logins,
     # merge settings, etc.) take effect immediately without a GenServer restart.
-    workspace =
-      case Ash.get(Workspace, state.workspace_id) do
-        {:ok, ws} -> ws
-        _ -> nil
-      end
+    workspace = PatrolServer.refetch_workspace(state.workspace_id)
 
     # Thread state through each PR so per-PR dispatch-failure backoff records
     # (bd-49ajyt) accumulate across the tick and survive into the next one.
@@ -344,24 +270,6 @@ defmodule Arbiter.Workflows.PRPatrol do
         workspace: workspace,
         idle_ticks: idle_ticks
     }
-  end
-
-  defp resolve_adapter(workspace) do
-    adapter = Mergers.for_workspace(workspace)
-
-    # Force the adapter module to load before any `function_exported?/3` guard
-    # inspects it (`:list_open` in `do_tick/1`, `:list_open_review_threads` in
-    # `open_review_thread_count/2`). `function_exported?/3` returns false for a
-    # module that has not been loaded yet and does NOT trigger loading — so under
-    # interactive code loading (as in `mix test`) the guard would spuriously fail
-    # whenever no prior call had loaded the adapter, no-op the whole tick, and
-    # dispatch nothing. Releases run in embedded mode (all modules preloaded),
-    # which masks this, but the guard must not depend on prior load order.
-    # See bd-1hn1qw.
-    Code.ensure_loaded(adapter)
-    adapter
-  rescue
-    ArgumentError -> nil
   end
 
   # The cheap, DB-only / in-memory gate deciding whether a PR is even worth a
@@ -858,22 +766,5 @@ defmodule Arbiter.Workflows.PRPatrol do
       })
 
     task
-  end
-
-  # Delay until the next tick: the idle-backed-off interval (bd-4brb2j — grows
-  # with consecutive idle ticks, capped at @idle_backoff_ceiling_ms), then
-  # jittered +/- 15% so N patrols started within milliseconds of each other at
-  # boot (18 patrols in ~22ms was the incident's synchronous restart burst)
-  # drift apart instead of ticking in lockstep forever.
-  defp schedule_next(state) do
-    if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
-
-    delay =
-      state.idle_ticks
-      |> PatrolPacing.idle_backoff_ms(state.interval_ms, @idle_backoff_ceiling_ms)
-      |> PatrolPacing.jitter()
-
-    ref = Process.send_after(self(), :tick, delay)
-    %{state | timer_ref: ref}
   end
 end
