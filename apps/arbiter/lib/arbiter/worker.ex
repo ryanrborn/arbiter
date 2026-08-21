@@ -839,6 +839,11 @@ defmodule Arbiter.Worker do
       |> maybe_put(:result_is_error, Map.get(meta, :result_is_error))
       |> maybe_put(:result_message, Map.get(meta, :result_message))
 
+    # bd-apwfmy: keep StopReason's typed category, not just the prose summary
+    # it renders into `failure_reason`. Same best-effort discipline — absent
+    # on any run that did not end in a classified subprocess stop.
+    attrs = maybe_put(attrs, :stop_category, stop_category(meta))
+
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
       # bd-61hnbb: Parse transcript for skill invocations and update usage counters.
@@ -849,6 +854,34 @@ defmodule Arbiter.Worker do
     end
   rescue
     e -> log_run_warning("update", state.task_id, e)
+  end
+
+  # The stop category as its plain atom name, for the `stop_category` column.
+  # Anything that isn't an atom category (an already-stringified map read back
+  # from somewhere, a malformed meta) is dropped rather than guessed at.
+  defp stop_category(meta) do
+    case Map.get(meta, :stop_reason) do
+      %{category: category} when is_atom(category) and not is_nil(category) ->
+        Atom.to_string(category)
+
+      _ ->
+        commit_gate_category(meta)
+    end
+  end
+
+  # A worker parked by the commit gate never had a subprocess `stop_reason` —
+  # the CLI exited fine, the *work* did not. The gate's own typed reason is
+  # the terminal cause, so it fills the same column, using the atom names
+  # already written into `failure_reason` (so a stored category and a prose
+  # label never disagree about what to call the same event).
+  @commit_gate_categories %{
+    uncommitted: "uncommitted_at_completion",
+    no_commits: "no_commits_at_completion",
+    secret_in_commit: "secret_in_commit"
+  }
+
+  defp commit_gate_category(meta) do
+    Map.get(@commit_gate_categories, Map.get(meta, :commit_gate_reason))
   end
 
   # Parse the full transcript for skill invocations and increment counters.

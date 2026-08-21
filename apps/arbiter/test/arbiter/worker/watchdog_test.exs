@@ -111,6 +111,17 @@ defmodule Arbiter.Worker.WatchdogTest do
     :ok
   end
 
+  # `Process.alive?/1` then `GenServer.stop/3` is a TOCTOU race: several of
+  # these tests drive the worker to a terminal state, so it may exit between
+  # the check and the stop, and the `on_exit` callback then fails a test that
+  # had already passed. Treat "already gone" as success.
+  defp stop_quietly(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
   defp new_task_id, do: "watchdog-test-#{System.unique_integer([:positive])}"
 
   # An unpersisted Workspace struct with an id — enough for the Watchdog, which
@@ -132,7 +143,7 @@ defmodule Arbiter.Worker.WatchdogTest do
     {:ok, pid} = Worker.start(Keyword.merge([task_id: task_id, repo: "arbiter"], opts))
     :ok = Worker.advance(pid, :implement)
 
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    on_exit(fn -> stop_quietly(pid) end)
     {pid, task_id}
   end
 
@@ -148,7 +159,7 @@ defmodule Arbiter.Worker.WatchdogTest do
     ]
 
     {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
-    on_exit(fn -> if Process.alive?(wpid), do: GenServer.stop(wpid, :normal) end)
+    on_exit(fn -> stop_quietly(wpid) end)
     wpid
   end
 

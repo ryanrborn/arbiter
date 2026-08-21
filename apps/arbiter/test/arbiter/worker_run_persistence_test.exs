@@ -436,6 +436,52 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.result_message == "all done, tests green"
   end
 
+  # bd-apwfmy (Definition of done, item 1): StopReason already classifies the
+  # death typed, with the whole captured output in hand, and Arbiter then kept
+  # only the English sentence it renders. Persist the category itself so the
+  # loop stops re-deriving it with a regex over the transcript tail.
+  test "a stopped worker's typed StopReason category lands on the Run row" do
+    task_id = "bd-runstop-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    :ok = Worker.advance(pid, :claude)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: System.tmp_dir!(),
+        command: ["sh", "-c", "echo 'API Error: 401 Invalid authentication credentials'; exit 1"]
+      )
+
+    :ok = wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 3_000)
+
+    [run] = runs_for(task_id)
+    assert run.status == :failed
+    assert run.stop_category == "auth_expired"
+    # The prose label is untouched — the typed column is additive.
+    assert is_binary(run.failure_reason)
+  end
+
+  test "a cleanly completed run records no stop_category" do
+    task_id = "bd-runnostop-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.complete(pid, :done)
+
+    [run] = runs_for(task_id)
+    assert run.status == :completed
+    assert run.stop_category == nil
+  end
+
   defp wait_until(fun, timeout_ms \\ 500, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)

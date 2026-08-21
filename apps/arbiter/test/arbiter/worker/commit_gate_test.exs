@@ -24,6 +24,8 @@ defmodule Arbiter.Worker.CommitGateTest do
 
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -237,6 +239,17 @@ defmodule Arbiter.Worker.CommitGateTest do
       refute snap.status == :completed
       assert snap.meta.failure_reason == :uncommitted_at_completion
       assert snap.meta.commit_gate_reason == :uncommitted
+
+      # bd-apwfmy: the gate's typed reason survives onto the Run row, so the
+      # loop analysis can classify this without pattern-matching prose.
+      run =
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.read!()
+        |> List.first()
+
+      assert run.stop_category == "uncommitted_at_completion"
 
       # The task is not closed; notes carry the gate diagnostic.
       {:ok, reloaded} = Ash.get(Issue, task.id)

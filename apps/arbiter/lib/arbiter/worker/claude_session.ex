@@ -93,6 +93,7 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.StepSummary
   alias Arbiter.Workers.RunStep
 
   require Logger
@@ -686,8 +687,8 @@ defmodule Arbiter.Worker.ClaudeSession do
 
     entry = %{
       name: name,
-      input_summary: redact_line(session, summarize_tool_input(input)),
-      input_digest: input_digest(session, input),
+      input_summary: StepSummary.input_summary(input, redact_values(session)),
+      input_digest: StepSummary.input_digest(input, redact_values(session)),
       started_at: System.monotonic_time(:millisecond)
     }
 
@@ -713,8 +714,7 @@ defmodule Arbiter.Worker.ClaudeSession do
       block
       |> Map.get("content")
       |> tool_result_content_text()
-      |> then(&redact_line(session, &1))
-      |> truncate(2000)
+      |> StepSummary.output_summary(redact_values(session))
 
     write_step(session, %{
       run_id: Map.get(session, :run_id),
@@ -733,23 +733,6 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   defp record_tool_result(_block, session), do: session
-
-  # sha256 (hex) of the redacted, JSON-encoded input — cheap "same call
-  # again" comparison without re-parsing JSON. Never raises: an input that
-  # somehow fails to encode (it was decoded from valid JSON moments earlier,
-  # so this is a defensive backstop, not an expected path) just yields no
-  # digest rather than losing the row.
-  defp input_digest(_session, nil), do: nil
-
-  defp input_digest(session, input) do
-    input
-    |> Jason.encode!()
-    |> then(&redact_line(session, &1))
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
-  rescue
-    _ -> nil
-  end
 
   # Best-effort, like `record_usage_event/3` in `Arbiter.Worker`: a DB hiccup
   # logs a warning and never fails the run. Written from inside the emit path
@@ -846,6 +829,13 @@ defmodule Arbiter.Worker.ClaudeSession do
   # in `start/1` from the workspace's secret-flagged worker env vars; sessions
   # without any (tests, workspace-less spawns) carry an empty list and pass the
   # line through untouched.
+  defp redact_values(session) do
+    case Map.get(session, :redact_values) do
+      [_ | _] = values -> values
+      _ -> []
+    end
+  end
+
   defp redact_line(session, line) do
     case Map.get(session, :redact_values) do
       [_ | _] = values -> Arbiter.Redaction.redact(line, values)
@@ -1096,23 +1086,10 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   defp tool_result_content_text(_), do: ""
 
-  defp summarize_tool_input(input) when is_map(input) do
-    cond do
-      is_binary(input["command"]) -> truncate(input["command"], 200)
-      is_binary(input["file_path"]) -> input["file_path"]
-      is_binary(input["path"]) -> input["path"]
-      is_binary(input["pattern"]) -> truncate(input["pattern"], 200)
-      is_binary(input["description"]) -> truncate(input["description"], 200)
-      # Skill tool: render the skill name directly rather than falling through
-      # to Jason.encode!/1, whose key-sort order can push "skill" past a
-      # length-based truncation cutoff when "args" is long. Also gives a more
-      # readable transcript line (`⏵ Skill(tdd)` vs raw JSON).
-      is_binary(input["skill"]) -> input["skill"]
-      true -> truncate(Jason.encode!(input), 200)
-    end
-  end
-
-  defp summarize_tool_input(_), do: ""
+  # Shared with `Arbiter.Workers.StepBackfill` via `StepSummary` — the step
+  # row's summaries and this transcript line must be the same string, and
+  # more importantly must pass through the same redaction choke-point.
+  defp summarize_tool_input(input), do: StepSummary.summarize_tool_input(input)
 
   defp init_summary(event) do
     model = event["model"] || "?"

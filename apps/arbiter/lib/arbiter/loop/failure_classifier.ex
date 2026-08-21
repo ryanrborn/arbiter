@@ -52,16 +52,42 @@ defmodule Arbiter.Loop.FailureClassifier do
   (`:agree | :disagree | :unavailable`) so the pass can report the
   label-vs-transcript **disagreement rate** as a first-class corpus-integrity
   finding rather than silently correcting it.
+
+  ## Structured evidence beats a tail regex (bd-apwfmy)
+
+  `context_exhaustion?/1` and friends are *re-derivations*.
+  `Arbiter.Worker.StopReason` already classified the death **typed**, at the
+  moment it happened, with the whole captured output in hand — and Arbiter
+  then kept only the English sentence it renders (`reason.summary` becomes
+  `failure_reason`). Persisting the typed `category` alongside it
+  (`worker_runs.stop_category`) turns the corroboration into a lookup instead
+  of a scan.
+
+  So `classify/3` takes an optional `:stop_category` and, when it is one of the
+  **unambiguous** categories in `@stop_category_map`, uses it directly and
+  reports `evidence: :stop_category` — no transcript needed. Categories that
+  genuinely carry no verdict (`:crashed`, `:stalled` — "non-zero exit, no
+  recognized signature") deliberately fall through to the transcript/label
+  path rather than manufacturing false precision.
+
+  `evidence` names which path produced the verdict (`:stop_category` /
+  `:transcript` / `:label`), so the pass can report how much of a window it
+  still had to text-mine. `corroborated` means "evidence beyond the label was
+  available" — now true for a structured verdict with no transcript at all, so
+  the disagreement rate keeps its denominator while the transcript reads go
+  away.
   """
 
   @type class :: :operational | :agent_quality | :excluded | :unknown
+  @type evidence :: :stop_category | :transcript | :label
   @type result :: %{
           class: class(),
           subcategory: atom(),
           label_class: class(),
           reclassified: boolean(),
           corroborated: boolean(),
-          corroboration: :agree | :disagree | :unavailable
+          corroboration: :agree | :disagree | :unavailable,
+          evidence: evidence()
         }
 
   # Operational allowlist: {matcher, subcategory}. A matcher is a substring
@@ -100,35 +126,117 @@ defmodule Arbiter.Loop.FailureClassifier do
     {":simulated_failure", :simulated_failure}
   ]
 
+  # Typed terminal causes that carry an unambiguous verdict, mapped to
+  # {class, subcategory}. Mostly `Arbiter.Worker.StopReason` categories, plus
+  # the commit-gate parks. Deliberately partial: `:crashed`
+  # ("non-zero exit, no recognized signature"), `:stalled` (no output, cause
+  # unknown) and `:missing_worktree` (needs a provisioning investigation, not
+  # a class) say nothing on their own, so they are absent here and fall
+  # through to the transcript/label path rather than being force-bucketed.
+  @stop_category_map %{
+    auth_expired: {:operational, :auth_failure},
+    quota_exhausted: {:operational, :quota_exhausted},
+    credit_exhausted: {:operational, :credit_exhausted},
+    rate_limited: {:operational, :rate_limited},
+    gateway_error: {:operational, :gateway_error},
+    stream_schema_drift: {:operational, :stream_schema_drift},
+    killed: {:operational, :killed},
+    spawn_exec_failed: {:operational, :spawn_failure},
+    spawn_failed: {:operational, :spawn_failure},
+    context_thrash: {:agent_quality, :context_exhaustion},
+    exited_without_done: {:agent_quality, :never_signalled_done},
+    # Commit-gate parks (bd-apwfmy). Not `StopReason` categories — the
+    # subprocess exited cleanly and the *work* is what failed — but they share
+    # the column because they are the run's typed terminal cause, and they are
+    # exactly the agent-quality cases the parent issue asked to classify
+    # without a regex.
+    uncommitted_at_completion: {:agent_quality, :uncommitted_at_completion},
+    no_commits_at_completion: {:agent_quality, :no_commits_at_completion},
+    secret_in_commit: {:agent_quality, :secret_in_commit}
+  }
+
+  @doc """
+  The `Arbiter.Worker.StopReason` categories `classify/3` will trust on their
+  own, as a `%{category => {class, subcategory}}` map. Exposed so callers
+  (notably `Arbiter.Loop.Corpus`) can tell in advance whether a run still
+  needs its transcript read.
+  """
+  @spec conclusive_stop_categories() :: %{atom() => {class(), atom()}}
+  def conclusive_stop_categories, do: @stop_category_map
+
   @doc """
   Classify a failed run from its `failure_reason` and the transcript's terminal
   lines (a list of strings — pass `[]` when no transcript is available).
   """
   @spec classify(String.t() | nil, [String.t()]) :: result()
-  def classify(failure_reason, transcript_lines) when is_list(transcript_lines) do
-    {label_class, label_sub} = label_of(failure_reason)
+  def classify(failure_reason, transcript_lines),
+    do: classify(failure_reason, transcript_lines, [])
 
-    context? = context_exhaustion?(transcript_lines)
-    api_error? = api_error_signal?(transcript_lines)
-    proxy_5xx? = proxy_5xx?(transcript_lines)
+  @doc """
+  Classify a failed run, preferring structured evidence over a transcript scan.
+
+  ## Options
+
+    * `:stop_category` — the run's typed `Arbiter.Worker.StopReason` category
+      (`worker_runs.stop_category`), as an atom or the string read back off the
+      column. When it is one of `conclusive_stop_categories/0` it decides the
+      verdict outright and no transcript is consulted. Anything else (nil, an
+      ambiguous category, a value from a newer/older Arbiter) is ignored and
+      the transcript/label path runs exactly as before.
+
+  """
+  @spec classify(String.t() | nil, [String.t()], keyword()) :: result()
+  def classify(failure_reason, transcript_lines, opts)
+      when is_list(transcript_lines) and is_list(opts) do
+    {label_class, label_sub} = label_of(failure_reason)
     have_transcript? = transcript_lines != []
 
-    cond do
-      # Transcript wins: a context-exhaustion thrash with no genuine API error
-      # is agent-quality no matter what the label claimed.
-      context? and not api_error? ->
-        final(:agent_quality, :context_exhaustion, label_class, have_transcript?)
+    case conclusive_stop_category(Keyword.get(opts, :stop_category)) do
+      {class, sub} ->
+        final(class, sub, label_class, :stop_category)
 
-      # Transcript wins: a proxy 5xx (infrastructure failure) overrides any label
-      # and classifies as operational, even if labelled as unknown.
-      proxy_5xx? ->
-        final(:operational, :proxy_5xx, label_class, have_transcript?)
+      nil ->
+        context? = context_exhaustion?(transcript_lines)
+        api_error? = api_error_signal?(transcript_lines)
+        proxy_5xx? = proxy_5xx?(transcript_lines)
 
-      true ->
-        # No transcript override — trust the allowlist label.
-        final(label_class, label_sub, label_class, have_transcript?)
+        cond do
+          # Transcript wins: a context-exhaustion thrash with no genuine API error
+          # is agent-quality no matter what the label claimed.
+          context? and not api_error? ->
+            final(:agent_quality, :context_exhaustion, label_class, :transcript)
+
+          # Transcript wins: a proxy 5xx (infrastructure failure) overrides any label
+          # and classifies as operational, even if labelled as unknown.
+          proxy_5xx? ->
+            final(:operational, :proxy_5xx, label_class, :transcript)
+
+          true ->
+            # No structured or transcript override — trust the allowlist label.
+            final(
+              label_class,
+              label_sub,
+              label_class,
+              if(have_transcript?, do: :transcript, else: :label)
+            )
+        end
     end
   end
+
+  # Accepts the atom or the string the SQLite column hands back. Never
+  # `String.to_atom/1` on it — an unrecognised value is simply not conclusive.
+  defp conclusive_stop_category(nil), do: nil
+
+  defp conclusive_stop_category(category) when is_atom(category),
+    do: Map.get(@stop_category_map, category)
+
+  defp conclusive_stop_category(category) when is_binary(category) do
+    Enum.find_value(@stop_category_map, fn {known, verdict} ->
+      if Atom.to_string(known) == category, do: verdict
+    end)
+  end
+
+  defp conclusive_stop_category(_other), do: nil
 
   @doc """
   True when the transcript's terminal lines show a context-exhaustion death —
@@ -209,12 +317,17 @@ defmodule Arbiter.Loop.FailureClassifier do
 
   # --- internals ---------------------------------------------------------
 
-  defp final(final_class, subcategory, label_class, have_transcript?) do
+  # `evidence` is what actually decided the verdict. Anything other than
+  # `:label` means we had corroborating evidence, which is what gives the
+  # disagreement rate its denominator — a structured verdict counts even
+  # though it read no transcript.
+  defp final(final_class, subcategory, label_class, evidence) do
     reclassified = final_class != label_class
+    corroborated = evidence != :label
 
     corroboration =
       cond do
-        not have_transcript? -> :unavailable
+        not corroborated -> :unavailable
         reclassified -> :disagree
         true -> :agree
       end
@@ -224,8 +337,9 @@ defmodule Arbiter.Loop.FailureClassifier do
       subcategory: subcategory,
       label_class: label_class,
       reclassified: reclassified,
-      corroborated: have_transcript?,
-      corroboration: corroboration
+      corroborated: corroborated,
+      corroboration: corroboration,
+      evidence: evidence
     }
   end
 

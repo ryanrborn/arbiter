@@ -279,6 +279,121 @@ defmodule Arbiter.Loop.FailureClassifierTest do
     end
   end
 
+  # bd-apwfmy (Definition of done, item 1): classify from the TYPED stop
+  # category `Arbiter.Worker.StopReason` already computed at the moment of
+  # death, instead of re-deriving it with a regex over the transcript tail.
+  # The regex path stays as the fallback for runs recorded before the column
+  # existed, and the label-vs-evidence disagreement rate keeps being reported.
+  describe "typed stop_category (structured evidence)" do
+    test "context_thrash classifies as agent-quality context exhaustion with NO transcript" do
+      r =
+        FC.classify("agent was rate-limited / the API was overloaded", [],
+          stop_category: :context_thrash
+        )
+
+      assert r.class == :agent_quality
+      assert r.subcategory == :context_exhaustion
+      assert r.label_class == :operational
+      assert r.reclassified
+      assert r.evidence == :stop_category
+      # The whole point: this verdict needed no transcript at all, yet it still
+      # counts as corroborated so the disagreement rate has a denominator.
+      assert r.corroborated
+      assert r.corroboration == :disagree
+    end
+
+    test "exited_without_done classifies as agent-quality with NO transcript" do
+      r = FC.classify(nil, [], stop_category: :exited_without_done)
+
+      assert r.class == :agent_quality
+      assert r.subcategory == :never_signalled_done
+      assert r.evidence == :stop_category
+    end
+
+    test "a string category (as read back off the DB column) is accepted" do
+      r = FC.classify("server restarted", [], stop_category: "context_thrash")
+      assert r.class == :agent_quality
+      assert r.evidence == :stop_category
+    end
+
+    test "an agreeing category reports :agree, not :disagree" do
+      r = FC.classify("agent could not authenticate", [], stop_category: :auth_expired)
+
+      assert r.class == :operational
+      assert r.subcategory == :auth_failure
+      refute r.reclassified
+      assert r.corroboration == :agree
+      assert r.evidence == :stop_category
+    end
+
+    test "an ambiguous category (:crashed) falls through to the label/transcript path" do
+      r = FC.classify("server restarted", [], stop_category: :crashed)
+
+      assert r.class == :operational
+      assert r.subcategory == :server_restart
+      assert r.evidence == :label
+    end
+
+    test "an unknown/garbage category is ignored rather than trusted" do
+      r = FC.classify("server restarted", [], stop_category: "no_such_category")
+      assert r.class == :operational
+      assert r.evidence == :label
+    end
+
+    test "no stop_category keeps the regex fallback working unchanged" do
+      r = FC.classify("agent was rate-limited / the API was overloaded", [@autocompact])
+
+      assert r.class == :agent_quality
+      assert r.subcategory == :context_exhaustion
+      assert r.evidence == :transcript
+      assert r.corroboration == :disagree
+    end
+
+    test "label-only, no evidence at all, reports :unavailable" do
+      r = FC.classify("server restarted", [])
+      assert r.evidence == :label
+      refute r.corroborated
+      assert r.corroboration == :unavailable
+    end
+
+    test "classify/2 remains available for callers with no structured evidence" do
+      assert FC.classify("server restarted", []).class == :operational
+    end
+  end
+
+  describe "commit-gate categories (bd-apwfmy)" do
+    test "an uncommitted-at-completion park classifies with no transcript at all" do
+      r = FC.classify(nil, [], stop_category: "uncommitted_at_completion")
+
+      assert r.class == :agent_quality
+      assert r.subcategory == :uncommitted_at_completion
+      assert r.evidence == :stop_category
+    end
+
+    test "no-commits and secret-in-commit are conclusive too" do
+      for {category, sub} <- [
+            {"no_commits_at_completion", :no_commits_at_completion},
+            {"secret_in_commit", :secret_in_commit}
+          ] do
+        r = FC.classify(nil, [], stop_category: category)
+        assert r.class == :agent_quality
+        assert r.subcategory == sub
+      end
+    end
+
+    test "the stored category and the prose label agree, so corroboration is :agree" do
+      r =
+        FC.classify(
+          "Worker failed: :uncommitted_at_completion",
+          [],
+          stop_category: "uncommitted_at_completion"
+        )
+
+      assert r.corroboration == :agree
+      refute r.reclassified
+    end
+  end
+
   describe "helpers" do
     test "context_exhaustion?/1 keys on the autocompact fingerprint, not a bare session error" do
       assert FC.context_exhaustion?([@autocompact])

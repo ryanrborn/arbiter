@@ -1652,13 +1652,22 @@ defmodule Arbiter.Worker.Dispatch do
   # detect. Look at the most recent *:failed* run instead.
   defp thrashed_last_run?(task_id) do
     case latest_failed_run(task_id) do
-      %Run{} = run ->
-        StopReason.classify(run.exit_code, run.output_lines || []).category == :context_thrash
-
-      nil ->
-        false
+      %Run{} = run -> thrashed?(run)
+      nil -> false
     end
   end
+
+  # bd-apwfmy: the run already classified itself the moment it died and stored
+  # the answer in `stop_category`. Prefer it. Re-deriving from `output_lines`
+  # is not merely redundant — those lines are capped, so on a long run the
+  # thrash banner has scrolled out of the window and the re-derivation quietly
+  # returns "not thrash", losing the escalation. The scan stays only as the
+  # fallback for runs that predate the column.
+  defp thrashed?(%Run{stop_category: "context_thrash"}), do: true
+  defp thrashed?(%Run{stop_category: category}) when is_binary(category), do: false
+
+  defp thrashed?(%Run{} = run),
+    do: StopReason.classify(run.exit_code, run.output_lines || []).category == :context_thrash
 
   defp latest_failed_run(task_id) when is_binary(task_id) do
     Run

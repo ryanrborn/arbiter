@@ -25,10 +25,50 @@ defmodule Arbiter.Loop.AnalysisTest do
         rejected?: false,
         converged?: true,
         findings: [],
-        terminal_lines: []
+        terminal_lines: [],
+        stop_category: nil
       },
       attrs
     )
+  end
+
+  # bd-apwfmy: the same c88c77b0 verdict, reached from the typed
+  # `worker_runs.stop_category` with an EMPTY transcript. This is the
+  # definition-of-done case — no tail regex, and the misclassification rate
+  # still counts the run.
+  describe "structured stop_category (no transcript)" do
+    test "a context_thrash category reclassifies a rate-limited label with no transcript" do
+      report =
+        Analysis.build_report(
+          [
+            row(%{
+              run_id: "run-typed",
+              status: :failed,
+              failure_reason: "agent was rate-limited / the API was overloaded",
+              stop_category: "context_thrash",
+              terminal_lines: []
+            })
+          ],
+          label: "test"
+        )
+
+      seg = Enum.find(report.segmentation, fn s -> "run-typed" in s.run_ids end)
+      assert seg.class == :agent_quality
+      assert seg.subcategory == :context_exhaustion
+
+      assert report.misclassification.corroborated == 1
+      assert report.misclassification.reclassified == 1
+    end
+
+    test "a row with no stop_category key at all still classifies (older corpus shape)" do
+      bare =
+        row(%{status: :failed, failure_reason: "server restarted"}) |> Map.delete(:stop_category)
+
+      report = Analysis.build_report([bare], label: "test")
+      seg = hd(report.segmentation)
+      assert seg.class == :operational
+      assert seg.subcategory == :server_restart
+    end
   end
 
   # ---- the c88c77b0 validation -------------------------------------------
