@@ -60,7 +60,11 @@ defmodule ArbiterCli.Cmd.InstallService.Formatter do
       {config_path, state_file} = log_paths
       IO.puts("")
       IO.puts("Logs are written to #{Path.join([arbiter_home, "log", "arbiter.log"])}.")
-      IO.puts("A daily systemd timer (#{Unit.logrotate_timer_name()}) rotates logs automatically.")
+
+      IO.puts(
+        "A daily systemd timer (#{Unit.logrotate_timer_name()}) rotates logs automatically."
+      )
+
       IO.puts("Rotate manually with:")
       IO.puts("  logrotate --state #{state_file} #{config_path}")
     end

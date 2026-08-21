@@ -1766,6 +1766,70 @@ defmodule Arbiter.Worker.ReviewGateTest do
              "expected a distinct re-prompt reviewer run row"
     end
 
+    # bd-6coisl: the record-vs-route split is the one guard difference the
+    # table-driven dispatcher encodes as data (`record: :raw` vs `:banner`), so
+    # a flip of that one atom silently changes what lands in
+    # `review_gate_rounds`. Lock it end-to-end: the fail-closed round records
+    # the reviewer's UNTOUCHED findings — so `criteria_total`/`criteria_unmet`
+    # keep describing what the reviewer actually said — while only the payload
+    # routed onward carries the banner.
+    test "the fail-closed round records the reviewer's raw findings; only the routed payload is bannered",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws, %{acceptance: @acceptance})
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@unmet_criteria, "UNMET"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+
+      require Ash.Query
+
+      approve =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+        |> Enum.find(&(&1.role == :review and &1.verdict == :approve))
+
+      assert approve, "expected the fail-closed APPROVE round to be recorded honestly"
+      assert approve.converged == false
+
+      # Parsed off the RAW breakdown the reviewer emitted (1 of 2 [NOT MET]).
+      assert approve.criteria_total == 2
+      assert approve.criteria_unmet == 1
+
+      # `record: :raw` — the recorded text is the reviewer's own output. If the
+      # dispatcher recorded the bannered payload instead, this round would
+      # attribute Arbiter's warning to the reviewer.
+      refute approve.findings =~ "ACCEPTANCE CRITERIA NOT MET",
+             "expected the recorded round to hold the reviewer's raw findings, not the banner"
+
+      assert approve.findings =~ "- [NOT MET] Criterion two"
+
+      # ...and the banner still reaches the durable thread on the routed payload.
+      thread = Message.thread(task.id, workspace_id: ws.id)
+
+      assert Enum.any?(thread, &(&1.body =~ "ACCEPTANCE CRITERIA NOT MET")),
+             "expected the unmet-criteria banner in the durable thread"
+    end
+
     test "an APPROVE with an unmet criterion that becomes all-MET on re-prompt merges",
          %{repo: repo, ws: ws} do
       task = new_task(ws, %{acceptance: @acceptance})

@@ -774,10 +774,10 @@ defmodule Arbiter.Worker.ReviewGate do
         # when the task HAS acceptance criteria (Option B): a task with no stated
         # criteria has nothing to break down, so its APPROVE finalizes as before.
         # Two failure modes are caught, both routed away from a clean merge:
-        #   * the breakdown admits a `[NOT MET]` criterion  → handle_unmet_criteria
+        #   * the breakdown admits a `[NOT MET]` criterion  → the :unmet_criteria guard
         #   * NO CRITERIA breakdown at all (a bare holistic APPROVE that judges
         #     code quality, not criteria satisfaction — the original bug's exact
-        #     shape) → handle_missing_criteria
+        #     shape) → the :missing_criteria guard
         # Enforcing the breakdown only via prompt text left the gate itself open:
         # a reviewer that ignored the instruction reproduced occurrences #1/#2.
         # bd-6r8caj: FIRST, before any criteria question, ask whether this round
@@ -795,13 +795,13 @@ defmodule Arbiter.Worker.ReviewGate do
 
         cond do
           ReviewFindings.gap?(gap) ->
-            handle_unaddressed_findings(state, findings, gap)
+            run_verdict_guard(:unaddressed_findings, state, findings, gap)
 
           has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
-            handle_unmet_criteria(state, findings)
+            run_verdict_guard(:unmet_criteria, state, findings)
 
           has_acceptance_criteria?(state) and not ReviewVerification.criteria_present?(findings) ->
-            handle_missing_criteria(state, findings)
+            run_verdict_guard(:missing_criteria, state, findings)
 
           true ->
             record_round(state, :review, :approve, findings, converged: true)
@@ -819,7 +819,7 @@ defmodule Arbiter.Worker.ReviewGate do
             maybe_reprompt(state, :empty_findings)
 
           partial_verification?(findings) ->
-            handle_partial_verification(state, findings)
+            run_verdict_guard(:partial_verification, state, findings)
 
           true ->
             handle_reject(state, findings)
@@ -1160,16 +1160,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp maybe_reprompt(%{retries_left: budget} = state, reason) when budget > 0 do
     stop_worker(state)
 
-    # For round > 1, the reprompt should be based on the round-specific review_id
-    # (bd-bgeo6i). For round 1, use the base review_id.
-    review_id_for_reprompt =
-      if state.round > 1 do
-        reviewer_round_id(state.review_id, state.round)
-      else
-        state.review_id
-      end
-
-    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
+    retry_id = reprompt_retry_id(state)
 
     # A content-free REQUEST_CHANGES is a malformed verdict — the reviewer did
     # not produce a legitimate review result for this round. Extend the round cap
@@ -1225,75 +1216,251 @@ defmodule Arbiter.Worker.ReviewGate do
      )}
   end
 
-  # ---- partial-verification guard (bd-4te55l) ------------------------------
+  # ---- verdict guards (bd-4te55l / bd-6r8caj / bd-4yhv4x) ------------------
 
-  # A REQUEST_CHANGES verdict disclosed `VERIFICATION: PARTIAL`: the reviewer
-  # itself says it did not finish confirming its findings against the current
-  # diff/tests before finalizing. Give it one more chance (shares the same
-  # verdict-retry budget as the no-verdict/empty-findings re-prompts) to
-  # actually complete verification with a fresh mind and fresh context. If the
-  # budget is exhausted (or the retry can't be spawned), do NOT silently accept
-  # the unverified findings at face value — proceed into the normal
-  # accept/escalate path, but with a loud warning banner prepended so the
-  # thread, the revise prompt, and any escalation payload all surface that this
-  # verdict was issued without full verification (satisfies acceptance option
-  # (b): the coordinator/implementer can weight it accordingly).
-  defp handle_partial_verification(%{retries_left: budget} = state, findings) when budget > 0 do
+  # Four distinct malformed-APPROVE/REQUEST_CHANGES shapes reach this gate, and
+  # all four are handled the same way: spend one retry from the SHARED
+  # verdict-retry budget on a fresh reviewer mind, and if that budget is spent
+  # (or the retry can't be spawned) fail closed — record the honest round and
+  # route the findings down the reject path behind a loud banner, rather than
+  # accepting the verdict at face value.
+  #
+  # They used to be four hand-copied `retries_left > 0` triads. Each one traces
+  # back to a real production bug, so the shape must not drift between them when
+  # retry-budget semantics change; it now lives once, in `run_verdict_guard/4`,
+  # and only the per-guard differences live in `verdict_guard_spec/2`:
+  #
+  #   guard                  reason                verdict          records
+  #   ---------------------- --------------------- ---------------- --------
+  #   :partial_verification  :unverified           :request_changes  banner
+  #   :unaddressed_findings  :unaddressed_findings :approve          raw
+  #   :unmet_criteria        :unmet_criteria       :approve          raw
+  #   :missing_criteria      :missing_criteria     :approve          raw
+  #
+  # `records` is load-bearing, not cosmetic: `record_round/5` re-parses the
+  # findings text for criteria counts, finding ids and dispositions. The
+  # partial-verification guard is a REQUEST_CHANGES being carried forward, so it
+  # records the bannered payload (what `handle_reject/2` did); the three APPROVE
+  # guards record the reviewer's UNTOUCHED findings so those parsed columns still
+  # describe what the reviewer actually said, and only the routed payload carries
+  # the banner.
+  @verdict_guards [
+    :partial_verification,
+    :unaddressed_findings,
+    :unmet_criteria,
+    :missing_criteria
+  ]
+
+  @doc false
+  # Exposed for the parity harness in `review_gate_verdict_guards_test.exs`.
+  @spec verdict_guard_names() :: [atom()]
+  def verdict_guard_names, do: @verdict_guards
+
+  # The shared retry-vs-fail-closed dispatcher. `ctx` is the guard's extra
+  # payload (the approval gap, for `:unaddressed_findings`); the spec's closures
+  # capture it so the dispatcher itself stays guard-agnostic.
+  defp run_verdict_guard(name, state, findings, ctx \\ nil)
+
+  defp run_verdict_guard(name, %{retries_left: budget} = state, findings, ctx)
+       when budget > 0 do
+    spec = verdict_guard_spec(name, ctx)
     stop_worker(state)
 
-    review_id_for_reprompt =
+    case launch_worker(
+           %{state | retries_left: budget - 1},
+           reprompt_retry_id(state),
+           :reviewer,
+           verdict_reprompt_prompt(state, spec.reason),
+           state.command
+         ) do
+      {:ok, state} ->
+        Logger.info(spec.logs.retry.(state))
+        {:reprompt, state}
+
+      {:error, spawn_error} ->
+        # NOTE: `state` here is the pre-launch state — a retry that never
+        # spawned does not consume the budget.
+        Logger.warning(spec.logs.spawn_error.(state, spawn_error))
+        fail_closed(spec, state, findings)
+    end
+  end
+
+  defp run_verdict_guard(name, state, findings, ctx) do
+    spec = verdict_guard_spec(name, ctx)
+    Logger.warning(spec.logs.exhausted.(state))
+    fail_closed(spec, state, findings)
+  end
+
+  # Terminal handling shared by all four guards: record the HONEST round —
+  # `converged: false`, with the guard's own verdict — so "approved without
+  # accounting for finding X" / "APPROVE with N criteria unmet" is literally
+  # queryable in `review_gate_rounds`, then route the banner-prefixed payload
+  # down the shared reject path (escalate if the round budget is spent, else back
+  # to the implementer).
+  defp fail_closed(spec, state, findings) do
+    bannered = spec.banner.(findings)
+    recorded = if spec.record == :banner, do: bannered, else: findings
+
+    record_round(state, :review, spec.verdict, recorded, converged: false)
+    route_after_reject(state, bannered)
+  end
+
+  # The re-prompt's task id. For round > 1 it must be based on the round-specific
+  # review_id (bd-bgeo6i); round 1 uses the base review_id. Shared with
+  # `maybe_reprompt/2`, which spends the same budget.
+  defp reprompt_retry_id(state) do
+    review_id =
       if state.round > 1 do
         reviewer_round_id(state.review_id, state.round)
       else
         state.review_id
       end
 
-    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
-
-    case launch_worker(
-           %{state | retries_left: budget - 1},
-           retry_id,
-           :reviewer,
-           verdict_reprompt_prompt(state, :unverified),
-           state.command
-         ) do
-      {:ok, state} ->
-        Logger.info(
-          "ReviewGate: reviewer for task=#{state.task_id} disclosed partial verification; " <>
-            "re-prompting for a fully-verified pass (attempt #{state.attempt})"
-        )
-
-        {:reprompt, state}
-
-      {:error, spawn_error} ->
-        Logger.warning(
-          "ReviewGate: partial-verification re-prompt failed to spawn for task=#{state.task_id}: " <>
-            "#{inspect(spawn_error)}; proceeding with the unverified findings, clearly marked"
-        )
-
-        handle_reject(state, unverified_banner(findings))
-    end
+    reprompt_task_id(review_id, state.attempt)
   end
 
-  defp handle_partial_verification(state, findings) do
-    Logger.warning(
-      "ReviewGate: reviewer for task=#{state.task_id} disclosed partial verification and the " <>
-        "re-prompt budget is exhausted; proceeding with the unverified findings, clearly marked"
+  @doc false
+  # The per-guard table. Public only so the parity harness can assert each
+  # guard's row directly; a missing name raises rather than defaulting, so a new
+  # guard cannot half-exist.
+  @spec verdict_guard_spec(atom(), term()) :: map()
+
+  # bd-4te55l: a REQUEST_CHANGES verdict disclosed `VERIFICATION: PARTIAL` — the
+  # reviewer itself says it did not finish confirming its findings against the
+  # current diff/tests before finalizing. One more chance with a fresh mind and
+  # fresh context; failing that, do NOT silently accept the unverified findings
+  # at face value — proceed into the normal accept/escalate path, but with a loud
+  # warning banner prepended so the thread, the revise prompt, and any escalation
+  # payload all surface that this verdict was issued without full verification.
+  def verdict_guard_spec(:partial_verification, _ctx) do
+    guard_spec(
+      reason: :unverified,
+      verdict: :request_changes,
+      record: :banner,
+      banner: &ReviewVerification.prepend_banner/1,
+      label: "partial-verification",
+      situation: "disclosed partial verification",
+      detail: " for a fully-verified pass",
+      consequence: "proceeding with the unverified findings, clearly marked"
     )
-
-    handle_reject(state, unverified_banner(findings))
   end
 
-  # Prepend a warning banner to the findings, right after the `VERDICT:` line
-  # (always first, per `findings_from/2`), so it travels with the findings into
-  # the durable thread, the implementer's revise prompt, and any escalation
-  # payload — impossible to miss, unlike a verdict accepted silently at face
-  # value.
-  defp unverified_banner(findings) when is_binary(findings) do
-    ReviewVerification.prepend_banner(findings)
+  # bd-6r8caj: an APPROVE that did not account for every Medium-or-higher open
+  # finding. A fresh reviewer mind is handed the open findings, their ids, and
+  # the diff the implementer actually produced, and told to disposition each one.
+  # If the budget is spent the approval is NOT accepted at face value: the honest
+  # `:approve` round is recorded and the payload is routed down the reject path
+  # behind a banner naming the findings it skipped.
+  def verdict_guard_spec(:unaddressed_findings, gap) do
+    skipped = ReviewFindings.gap_findings(gap)
+
+    guard_spec(
+      reason: :unaddressed_findings,
+      verdict: :approve,
+      record: :raw,
+      banner: &ReviewFindings.prepend_disposition_banner(&1, gap),
+      label: "unaddressed-findings",
+      # The only guard whose two `reviewer for task=...` lines differ: the retry
+      # line reports how many findings were skipped, the terminal line names them.
+      situation: "approved without dispositioning #{length(skipped)} open finding(s)",
+      final_situation:
+        "approved without dispositioning open finding(s) " <>
+          Enum.map_join(skipped, ", ", & &1.id),
+      consequence: "rejecting the approval, clearly marked"
+    )
   end
 
-  # ---- prior-finding disposition guard (bd-6r8caj) --------------------------
+  # bd-4yhv4x: an APPROVE whose own CRITERIA breakdown marks a stated acceptance
+  # criterion `[NOT MET]` — the reviewer judged code quality but the work does
+  # not satisfy the task as stated. One more chance to re-review each criterion
+  # against the current diff with a fresh mind; failing that, record the honest
+  # outcome and route it down the reject path with a loud banner carrying the
+  # unmet-criteria reason and count.
+  def verdict_guard_spec(:unmet_criteria, _ctx) do
+    guard_spec(
+      reason: :unmet_criteria,
+      verdict: :approve,
+      record: :raw,
+      banner: &unmet_criteria_banner/1,
+      label: "unmet-criteria",
+      situation: "approved with unmet acceptance criteria",
+      detail: " for a per-criterion re-review",
+      consequence: "rejecting the approval, clearly marked"
+    )
+  end
+
+  # bd-4yhv4x: an APPROVE on a criteria-bearing task that carries NO CRITERIA
+  # breakdown at all — a bare holistic verdict that judged the diff without
+  # accounting for a single acceptance criterion. This is the original bug's
+  # exact shape (occurrences #1/#2), so it gets the same fail-closed treatment as
+  # an admitted `[NOT MET]`: one more chance to re-review WITH the per-criterion
+  # breakdown, then reject the approval rather than clean-merge it.
+  #
+  # Its fail-closed round is distinguishable from both a clean approve and an
+  # admitted-unmet approve: `converged: false` with nil criteria counts — i.e.
+  # "approved without a breakdown" (bd-4yhv4x AC7). That only holds because
+  # `record: :raw` keeps the banner out of the recorded text.
+  def verdict_guard_spec(:missing_criteria, _ctx) do
+    guard_spec(
+      reason: :missing_criteria,
+      verdict: :approve,
+      record: :raw,
+      banner: &ReviewVerification.prepend_missing_criteria_banner/1,
+      label: "missing-criteria",
+      situation: "approved a criteria-bearing task with no CRITERIA breakdown",
+      detail: " for a per-criterion review",
+      consequence: "rejecting the approval, clearly marked"
+    )
+  end
+
+  # Build one row. The three log lines a guard emits are one sentence with four
+  # holes, so the rows below supply the holes instead of hand-writing twelve
+  # near-identical strings that can drift apart:
+  #
+  #   retry        ReviewGate: reviewer for task=ID <situation>; re-prompting<detail> (attempt N)
+  #   spawn_error  ReviewGate: <label> re-prompt failed to spawn for task=ID: <error>; <consequence>
+  #   exhausted    ReviewGate: reviewer for task=ID <final_situation> and the re-prompt budget
+  #                is exhausted; <consequence>
+  #
+  # `final_situation` defaults to `situation`; `detail` defaults to empty.
+  defp guard_spec(row) do
+    label = Keyword.fetch!(row, :label)
+    situation = Keyword.fetch!(row, :situation)
+    consequence = Keyword.fetch!(row, :consequence)
+    detail = Keyword.get(row, :detail, "")
+    final_situation = Keyword.get(row, :final_situation, situation)
+
+    %{
+      reason: Keyword.fetch!(row, :reason),
+      verdict: Keyword.fetch!(row, :verdict),
+      record: Keyword.fetch!(row, :record),
+      banner: Keyword.fetch!(row, :banner),
+      logs: %{
+        retry: fn state ->
+          "ReviewGate: reviewer for task=#{state.task_id} #{situation}; " <>
+            "re-prompting#{detail} (attempt #{state.attempt})"
+        end,
+        spawn_error: fn state, error ->
+          "ReviewGate: #{label} re-prompt failed to spawn for task=#{state.task_id}: " <>
+            "#{inspect(error)}; #{consequence}"
+        end,
+        exhausted: fn state ->
+          "ReviewGate: reviewer for task=#{state.task_id} #{final_situation} and the re-prompt " <>
+            "budget is exhausted; #{consequence}"
+        end
+      }
+    }
+  end
+
+  # Prepend the unmet-criteria warning banner (with the [NOT MET] count) right
+  # after the `VERDICT:` line. Only reached once `unmet_criteria?/1` is true, so
+  # the breakdown is present and `criteria_counts/1` returns integer counts.
+  defp unmet_criteria_banner(findings) when is_binary(findings) do
+    {total, unmet} = ReviewVerification.criteria_counts(findings)
+    ReviewVerification.prepend_criteria_banner(findings, unmet, total)
+  end
+
+  # ---- verdict-guard predicates -------------------------------------------
 
   # What this approving round failed to establish about the findings still open
   # against the work. Pure — reads the carried-forward findings, the round's own
@@ -1305,76 +1472,6 @@ defmodule Arbiter.Worker.ReviewGate do
       Map.get(state, :revise_touched_files)
     )
   end
-
-  # An APPROVE that did not account for every Medium-or-higher open finding.
-  # Mirrors the unmet-criteria guard exactly: one more chance on the shared
-  # verdict-retry budget — a fresh reviewer mind, handed the open findings, their
-  # ids, and the diff the implementer actually produced, and told to disposition
-  # each one. If the budget is spent (or the retry can't spawn) the approval is
-  # NOT accepted at face value: the honest round is recorded and the payload is
-  # routed down the reject path behind a banner naming the findings it skipped.
-  defp handle_unaddressed_findings(%{retries_left: budget} = state, findings, gap)
-       when budget > 0 do
-    stop_worker(state)
-
-    review_id_for_reprompt =
-      if state.round > 1 do
-        reviewer_round_id(state.review_id, state.round)
-      else
-        state.review_id
-      end
-
-    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
-
-    case launch_worker(
-           %{state | retries_left: budget - 1},
-           retry_id,
-           :reviewer,
-           verdict_reprompt_prompt(state, :unaddressed_findings),
-           state.command
-         ) do
-      {:ok, state} ->
-        Logger.info(
-          "ReviewGate: reviewer for task=#{state.task_id} approved without dispositioning " <>
-            "#{length(ReviewFindings.gap_findings(gap))} open finding(s); re-prompting " <>
-            "(attempt #{state.attempt})"
-        )
-
-        {:reprompt, state}
-
-      {:error, spawn_error} ->
-        Logger.warning(
-          "ReviewGate: unaddressed-findings re-prompt failed to spawn for task=#{state.task_id}: " <>
-            "#{inspect(spawn_error)}; rejecting the approval, clearly marked"
-        )
-
-        reject_unaddressed_findings(state, findings, gap)
-    end
-  end
-
-  defp handle_unaddressed_findings(state, findings, gap) do
-    Logger.warning(
-      "ReviewGate: reviewer for task=#{state.task_id} approved without dispositioning open " <>
-        "finding(s) #{Enum.map_join(ReviewFindings.gap_findings(gap), ", ", & &1.id)} and the " <>
-        "re-prompt budget is exhausted; rejecting the approval, clearly marked"
-    )
-
-    reject_unaddressed_findings(state, findings, gap)
-  end
-
-  # Terminal handling for an APPROVE that skipped its dispositions. Record the
-  # HONEST round — verdict `:approve`, `converged: false`, with the per-finding
-  # dispositions and the undispositioned count — so "approved without accounting
-  # for finding X" is literally queryable in `review_gate_rounds`, then route the
-  # banner-prefixed payload down the shared reject path (escalate if the round
-  # budget is spent, else back to the implementer). Not `handle_reject/2`, which
-  # would mislabel the round as `:request_changes`.
-  defp reject_unaddressed_findings(state, findings, gap) do
-    record_round(state, :review, :approve, findings, converged: false)
-    route_after_reject(state, ReviewFindings.prepend_disposition_banner(findings, gap))
-  end
-
-  # ---- unmet-criteria guard (bd-4yhv4x) ------------------------------------
 
   # Whether the task under review actually carries stated acceptance criteria.
   # `state` does not cache the task's acceptance text, so load it on demand.
@@ -1393,153 +1490,6 @@ defmodule Arbiter.Worker.ReviewGate do
   # counts as having criteria.
   defp acceptance_present?(acceptance) do
     is_binary(acceptance) and String.trim(acceptance) not in ["", "(none)"]
-  end
-
-  # An APPROVE whose own CRITERIA breakdown marks a stated acceptance criterion
-  # `[NOT MET]`: the reviewer judged code quality but the work does not satisfy
-  # the task as stated (bd-4yhv4x). Mirror the partial-verification guard — give
-  # it one more chance (shared verdict-retry budget) to re-review each criterion
-  # against the current diff with a fresh mind. If the budget is exhausted (or
-  # the retry can't be spawned), do NOT accept the approval at face value:
-  # record the honest outcome and route it down the reject path with a loud
-  # banner, so the thread, revise prompt, and any escalation all carry the
-  # unmet-criteria reason and count.
-  defp handle_unmet_criteria(%{retries_left: budget} = state, findings) when budget > 0 do
-    stop_worker(state)
-
-    review_id_for_reprompt =
-      if state.round > 1 do
-        reviewer_round_id(state.review_id, state.round)
-      else
-        state.review_id
-      end
-
-    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
-
-    case launch_worker(
-           %{state | retries_left: budget - 1},
-           retry_id,
-           :reviewer,
-           verdict_reprompt_prompt(state, :unmet_criteria),
-           state.command
-         ) do
-      {:ok, state} ->
-        Logger.info(
-          "ReviewGate: reviewer for task=#{state.task_id} approved with unmet acceptance " <>
-            "criteria; re-prompting for a per-criterion re-review (attempt #{state.attempt})"
-        )
-
-        {:reprompt, state}
-
-      {:error, spawn_error} ->
-        Logger.warning(
-          "ReviewGate: unmet-criteria re-prompt failed to spawn for task=#{state.task_id}: " <>
-            "#{inspect(spawn_error)}; rejecting the approval, clearly marked"
-        )
-
-        reject_unmet_criteria(state, findings)
-    end
-  end
-
-  defp handle_unmet_criteria(state, findings) do
-    Logger.warning(
-      "ReviewGate: reviewer for task=#{state.task_id} approved with unmet acceptance criteria " <>
-        "and the re-prompt budget is exhausted; rejecting the approval, clearly marked"
-    )
-
-    reject_unmet_criteria(state, findings)
-  end
-
-  # Terminal handling for an APPROVE that admits unmet criteria: record the
-  # HONEST round — verdict `:approve`, `converged: false` — so "APPROVE with N
-  # criteria unmet" is literally queryable in `review_gate_rounds` (bd-4yhv4x
-  # AC7), then route the banner-prefixed findings down the shared reject path
-  # (escalate if the round budget is spent, else back to the implementer). Not
-  # `handle_reject/2`, which would mislabel the round as `:request_changes`.
-  defp reject_unmet_criteria(state, findings) do
-    record_round(state, :review, :approve, findings, converged: false)
-    route_after_reject(state, unmet_criteria_banner(findings))
-  end
-
-  # Prepend the unmet-criteria warning banner (with the [NOT MET] count) right
-  # after the `VERDICT:` line. Only reached once `unmet_criteria?/1` is true, so
-  # the breakdown is present and `criteria_counts/1` returns integer counts.
-  defp unmet_criteria_banner(findings) when is_binary(findings) do
-    {total, unmet} = ReviewVerification.criteria_counts(findings)
-    ReviewVerification.prepend_criteria_banner(findings, unmet, total)
-  end
-
-  # bd-4yhv4x: an APPROVE on a criteria-bearing task that carries NO CRITERIA
-  # breakdown at all — a bare holistic verdict that judged the diff without
-  # accounting for a single acceptance criterion. This is the original bug's
-  # exact shape (occurrences #1/#2), so it gets the same fail-closed treatment
-  # as an admitted `[NOT MET]`: one more chance (shared verdict-retry budget) to
-  # re-review WITH the per-criterion breakdown, then — if the budget is spent or
-  # the retry can't spawn — reject the approval rather than clean-merge it.
-  defp handle_missing_criteria(%{retries_left: budget} = state, findings) when budget > 0 do
-    stop_worker(state)
-
-    review_id_for_reprompt =
-      if state.round > 1 do
-        reviewer_round_id(state.review_id, state.round)
-      else
-        state.review_id
-      end
-
-    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
-
-    case launch_worker(
-           %{state | retries_left: budget - 1},
-           retry_id,
-           :reviewer,
-           verdict_reprompt_prompt(state, :missing_criteria),
-           state.command
-         ) do
-      {:ok, state} ->
-        Logger.info(
-          "ReviewGate: reviewer for task=#{state.task_id} approved a criteria-bearing task " <>
-            "with no CRITERIA breakdown; re-prompting for a per-criterion review (attempt #{state.attempt})"
-        )
-
-        {:reprompt, state}
-
-      {:error, spawn_error} ->
-        Logger.warning(
-          "ReviewGate: missing-criteria re-prompt failed to spawn for task=#{state.task_id}: " <>
-            "#{inspect(spawn_error)}; rejecting the approval, clearly marked"
-        )
-
-        reject_missing_criteria(state, findings)
-    end
-  end
-
-  defp handle_missing_criteria(state, findings) do
-    Logger.warning(
-      "ReviewGate: reviewer for task=#{state.task_id} approved a criteria-bearing task with no " <>
-        "CRITERIA breakdown and the re-prompt budget is exhausted; rejecting the approval, clearly marked"
-    )
-
-    reject_missing_criteria(state, findings)
-  end
-
-  # Terminal handling for a bare APPROVE on a criteria-bearing task. Record the
-  # HONEST round — verdict `:approve`, `converged: false` — so a criteria-bearing
-  # APPROVE that never addressed the criteria is queryable in `review_gate_rounds`
-  # (bd-4yhv4x AC7): unlike a legitimately criteria-free task's APPROVE (which
-  # records `converged: true`), this row carries `converged: false` with nil
-  # criteria counts — i.e. "approved without a breakdown", distinct from both a
-  # clean approve and an admitted-unmet approve. Then route the banner-prefixed
-  # findings down the shared reject path.
-  defp reject_missing_criteria(state, findings) do
-    record_round(state, :review, :approve, findings, converged: false)
-    route_after_reject(state, missing_criteria_banner(findings))
-  end
-
-  # Prepend the missing-criteria warning banner right after the `VERDICT:` line,
-  # so the reject payload carries the reason into the thread, the revise prompt,
-  # and any escalation.
-  defp missing_criteria_banner(findings) when is_binary(findings) do
-    ReviewVerification.prepend_missing_criteria_banner(findings)
   end
 
   # ---- reporting ----------------------------------------------------------
