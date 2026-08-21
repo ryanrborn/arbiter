@@ -32,6 +32,15 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     }
   }
 
+  # The precedence-list buttons live in the policy LiveComponent, so they are
+  # clicked through the DOM (which also pins the binding) rather than
+  # addressed to the LiveView by event name.
+  defp click_agent_type(view, event, role, type) do
+    view
+    |> element(~s(button[phx-click=#{event}][phx-value-role=#{role}][phx-value-type=#{type}]))
+    |> render_click()
+  end
+
   defp security_params(overrides) do
     merged =
       Map.merge(@security_baseline, overrides, fn
@@ -138,7 +147,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert reloaded.config["standing_orders"] == ["Review the diff twice"]
 
-      render_click(view, "rm_order", %{"index" => "0"})
+      view |> element(~s(button[phx-click=rm_order][phx-value-index="0"])) |> render_click()
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert reloaded.config["standing_orders"] == []
@@ -1309,13 +1318,17 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
 
       html =
-        render_submit(view, "save_security", security_params(%{"mode" => "yolo"}))
+        view
+        |> element("form[phx-submit=save_security]")
+        |> render_submit(security_params(%{"mode" => "yolo"}))
 
       assert html =~ "Unknown permission mode"
       refute has_element?(view, "#security-confirm-modal")
 
       html =
-        render_submit(view, "save_security", security_params(%{"sandbox_filesystem" => "/"}))
+        view
+        |> element("form[phx-submit=save_security]")
+        |> render_submit(security_params(%{"sandbox_filesystem" => "/"}))
 
       assert html =~ "Unknown filesystem scope"
       refute has_element?(view, "#security-confirm-modal")
@@ -1441,19 +1454,23 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
 
-      render_click(view, "add_agent_type", %{"role" => "agent", "type" => "gemini"})
-      render_click(view, "add_agent_type", %{"role" => "agent", "type" => "codex"})
+      click_agent_type(view, "add_agent_type", "agent", "gemini")
+      click_agent_type(view, "add_agent_type", "agent", "codex")
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert reloaded.config["agent"]["type"] == ["gemini", "codex"]
 
       # Move codex to the front.
-      render_click(view, "move_agent_type", %{"role" => "agent", "type" => "codex", "dir" => "up"})
+      view
+      |> element(
+        ~s(button[phx-click=move_agent_type][phx-value-role=agent][phx-value-type=codex][phx-value-dir=up])
+      )
+      |> render_click()
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert reloaded.config["agent"]["type"] == ["codex", "gemini"]
 
-      render_click(view, "remove_agent_type", %{"role" => "agent", "type" => "codex"})
+      click_agent_type(view, "remove_agent_type", "agent", "codex")
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert reloaded.config["agent"]["type"] == "gemini"
@@ -1472,8 +1489,8 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
 
-      render_click(view, "remove_agent_type", %{"role" => "agent", "type" => "gemini"})
-      render_click(view, "remove_agent_type", %{"role" => "review_agent", "type" => "gemini"})
+      click_agent_type(view, "remove_agent_type", "agent", "gemini")
+      click_agent_type(view, "remove_agent_type", "review_agent", "gemini")
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert reloaded.config["agent"]["type"] == "claude"
@@ -1485,7 +1502,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
 
-      render_click(view, "open_secret_modal", %{})
+      view |> element("button[phx-click=open_secret_modal]") |> render_click()
 
       html =
         view
@@ -1500,7 +1517,9 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert Workspace.secrets_map(reloaded) == %{"tracker_token" => "super-secret-value"}
 
-      render_click(view, "rm_secret", %{"key" => "tracker_token"})
+      view
+      |> element(~s(button[phx-click=rm_secret][phx-value-key=tracker_token]))
+      |> render_click()
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert Workspace.secrets_map(reloaded) == %{}
@@ -1511,7 +1530,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
 
-      render_click(view, "open_worker_env_modal", %{})
+      view |> element("button[phx-click=open_worker_env_modal]") |> render_click()
 
       html =
         view
@@ -1534,17 +1553,27 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert Workspace.worker_env_keys(reloaded) == [%{name: "API_TOKEN", secret?: true}]
 
       # Explicit reveal shows the decrypted value.
-      html = render_click(view, "reveal_worker_env", %{"key" => "API_TOKEN"})
+      html =
+        view
+        |> element(~s(button[phx-click=reveal_worker_env][phx-value-key=API_TOKEN]))
+        |> render_click()
+
       assert html =~ "tok-supersecret"
 
       # Toggling to plain flips the flag without touching the value...
-      render_click(view, "toggle_worker_env_secret", %{"key" => "API_TOKEN"})
+      view
+      |> element(~s(button[phx-click=toggle_worker_env_secret][phx-value-key=API_TOKEN]))
+      |> render_click()
+
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert Workspace.worker_env_keys(reloaded) == [%{name: "API_TOKEN", secret?: false}]
       assert Workspace.worker_env_map(reloaded) == %{"API_TOKEN" => "tok-supersecret"}
 
       # ...and removal clears it.
-      render_click(view, "rm_worker_env", %{"key" => "API_TOKEN"})
+      view
+      |> element(~s(button[phx-click=rm_worker_env][phx-value-key=API_TOKEN]))
+      |> render_click()
+
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert Workspace.worker_env_map(reloaded) == %{}
       assert Workspace.worker_env_keys(reloaded) == []
@@ -1554,7 +1583,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       ws = new_workspace()
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
 
-      render_click(view, "open_worker_env_modal", %{})
+      view |> element("button[phx-click=open_worker_env_modal]") |> render_click()
 
       html =
         view
