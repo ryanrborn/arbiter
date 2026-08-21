@@ -874,6 +874,15 @@ defmodule Arbiter.Worker.Dispatch do
         # worker's first spawn opens with `claude --print --resume <id>`. nil on
         # a fresh dispatch or the bd-auma3z fresh-agent resume.
         |> put_if_present(:resume_session_id, Keyword.get(opts, :resume_session_id))
+        # bd-8eheb6: how many times the Watchdog has auto-resumed this task out
+        # of an `{:awaiting_review_timeout, _}`. Each auto-resume mints a fresh
+        # worker AND a fresh Watchdog, so the counter has to ride the worker's
+        # meta to survive the handoff — otherwise the next Watchdog starts from
+        # 0 and the retry cap never binds. Absent on every other resume path.
+        |> put_if_present(
+          :awaiting_review_resume_attempts,
+          Keyword.get(opts, :awaiting_review_resume_attempts)
+        )
 
       _ ->
         base
