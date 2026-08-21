@@ -37,8 +37,15 @@ defmodule ArbiterCli.ArgParserTest do
     end
 
     test "silently drops unknown flags under :strict (use parse_strict! to reject them)" do
+      # No trailing value after `--bogus`: OptionParser's strict mode only
+      # guarantees an unrecognized flag is kept out of `opts`. Whether a
+      # token *after* it gets swallowed as that flag's value depends on
+      # whether `:bogus` already exists in the atom table (OptionParser
+      # tries `String.to_existing_atom/1` on the flag name), which varies
+      # with whatever else has run earlier in the same VM. Keeping this argv
+      # free of a trailing value sidesteps that nondeterminism.
       {opts, rest, _mode} =
-        ArgParser.parse(["foo", "--bogus", "value"], strict: [reason: :string, json: :boolean])
+        ArgParser.parse(["foo", "--bogus"], strict: [reason: :string, json: :boolean])
 
       assert opts[:reason] == nil
       assert rest == ["foo"]
