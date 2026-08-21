@@ -20,7 +20,22 @@ defmodule Arbiter.Loop.Corpus do
   of doing the fetch in Elixir is that the operator's context never sees the
   raw corpus, only the shaped report.
 
-  A failed run's `terminal_lines` is the union of two bounded reads
+  ## Structured first, transcript only as fallback (bd-apwfmy)
+
+  A failed run whose typed `stop_category` already decides its classification
+  (see `Arbiter.Loop.FailureClassifier.conclusive_stop_categories/0`) gets **no
+  transcript read at all** — `terminal_lines` stays `[]` and the classifier
+  works off the column. Only runs with no category, or an inconclusive one
+  (`:crashed`, `:stalled`), fall back to the bounded read below. `meta`
+  reports `failed_runs` and `transcript_reads` so a window says out loud how
+  much of itself still had to be text-mined.
+
+  `transcript_reads` counts the *fallback decision*, carried on each row as
+  `transcript_read?` — not the reads that happened to return lines. A run
+  whose output log was reaped still had to fall back; scoring it as zero
+  reads would report a blind window as a fully-structured one.
+
+  A fallback run's `terminal_lines` is the union of two bounded reads
   (`OutputLog.tail_lines/2` + `OutputLog.scan_for/2`), not a raw transcript
   read — see bd-3ozmaj (#1159) and the "bounded scan" note in
   `docs/loop-review.md`:
@@ -58,7 +73,9 @@ defmodule Arbiter.Loop.Corpus do
           label: String.t(),
           since: DateTime.t(),
           until: DateTime.t(),
-          workspace_id: term()
+          workspace_id: term(),
+          failed_runs: non_neg_integer(),
+          transcript_reads: non_neg_integer()
         }
 
   @doc """
@@ -92,6 +109,7 @@ defmodule Arbiter.Loop.Corpus do
         task_id = r["task_id"]
         base = base_task_id(task_id)
         status = to_atom(r["status"])
+        {read?, lines} = terminal_lines(status, r["stop_category"], run_id)
 
         %{
           run_id: run_id,
@@ -105,24 +123,58 @@ defmodule Arbiter.Loop.Corpus do
           difficulty: Map.get(difficulty_by_task, base),
           difficulty_source: :issue,
           failure_reason: r["failure_reason"],
+          stop_category: r["stop_category"],
           cost_usd: Map.get(cost_by_run, run_id, 0.0),
           max_round: Map.get(round_by_task, base, 1),
           rejected?: r["failure_reason"] == ":review_gate_rejected",
           converged?: status == :completed,
           findings: Map.get(findings_by_task, base, []),
-          terminal_lines: if(status == :failed, do: tail(run_id), else: [])
+          transcript_read?: read?,
+          terminal_lines: lines
         }
       end)
+
+    failed = Enum.count(rows, &(&1.status == :failed))
+    reads = Enum.count(rows, & &1.transcript_read?)
 
     meta = %{
       label: label,
       since: since,
       until: until,
-      workspace_id: Keyword.get(opts, :workspace_id)
+      workspace_id: Keyword.get(opts, :workspace_id),
+      failed_runs: failed,
+      transcript_reads: reads
     }
 
     {:ok, rows, meta}
   end
+
+  @doc """
+  True when a run's typed `stop_category` decides its classification on its
+  own, so the transcript never needs opening. Delegates the list of
+  conclusive categories to `Arbiter.Loop.FailureClassifier` rather than
+  keeping a second copy here.
+  """
+  @spec conclusive_stop_category?(String.t() | nil) :: boolean()
+  def conclusive_stop_category?(nil), do: false
+
+  def conclusive_stop_category?(category) when is_binary(category) do
+    FailureClassifier.conclusive_stop_categories()
+    |> Enum.any?(fn {known, _verdict} -> Atom.to_string(known) == category end)
+  end
+
+  def conclusive_stop_category?(_other), do: false
+
+  # Only a failed run with no conclusive typed category costs a transcript
+  # read. Returns `{read_attempted?, lines}` — the flag, not the lines, is what
+  # `meta.transcript_reads` counts. A reaped output log yields no lines but the
+  # run still fell back to text-mining, and a window reporting that as zero
+  # reads would be indistinguishable from one with full structured coverage.
+  defp terminal_lines(:failed, stop_category, run_id) do
+    if conclusive_stop_category?(stop_category), do: {false, []}, else: {true, tail(run_id)}
+  end
+
+  defp terminal_lines(_status, _stop_category, _run_id), do: {false, []}
 
   @doc """
   Record the pass's own cost as a single `usage_events` row (step `:other`,
@@ -165,7 +217,8 @@ defmodule Arbiter.Loop.Corpus do
 
     query(
       """
-      SELECT id AS run_id, task_id, repo, task_title, worker_type, status, model, failure_reason
+      SELECT id AS run_id, task_id, repo, task_title, worker_type, status, model,
+             failure_reason, stop_category
       FROM worker_runs
       WHERE started_at >= ?1 AND started_at < ?2
       ORDER BY started_at DESC

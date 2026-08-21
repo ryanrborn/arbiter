@@ -1471,6 +1471,47 @@ defmodule Arbiter.Worker.DispatchTest do
       assert "claude-sonnet-5[1m]" in args
     end
 
+    test "the escalation reads the typed stop_category, with no output_lines to scan (bd-apwfmy)",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "thrash-typed-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "twt"))
+      put_app_env(:arbiter, :repo_paths, %{"t/repo" => repo})
+
+      {:ok, task} = Ash.create(Issue, %{title: "typed thrash", workspace_id: ws.id})
+
+      # The prior run recorded WHAT killed it at the moment it died. Its
+      # capped `output_lines` are empty — on a long run the thrash banner has
+      # long since scrolled out of the cap, which is exactly the failure mode
+      # re-deriving from prose has.
+      {:ok, _prior_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "t/repo",
+          workspace_id: ws.id,
+          status: :failed,
+          started_at: DateTime.utc_now(),
+          exit_code: 1,
+          output_lines: [],
+          stop_category: "context_thrash"
+        })
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          repo: "t/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      args = wait_for_argv!(argv_file)
+      assert "--model" in args
+      assert "claude-sonnet-5[1m]" in args
+    end
+
     test "a clean prior run does NOT auto-escalate the model (bd-8cn795)",
          %{ws: ws, tmp: tmp} do
       argv_file = Path.join(tmp, "argv.txt")

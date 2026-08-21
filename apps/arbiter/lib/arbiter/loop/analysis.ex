@@ -142,10 +142,16 @@ defmodule Arbiter.Loop.Analysis do
   # ---- classification -----------------------------------------------------
 
   defp classify_row(row) do
-    Map.put(
-      row,
-      :classification,
-      FailureClassifier.classify(row.failure_reason, row.terminal_lines)
+    Map.put(row, :classification, classification_for(row))
+  end
+
+  # bd-apwfmy: prefer the run's typed `stop_category` (structured, recorded at
+  # the moment of death) over the transcript scan. `Map.get/3` rather than a
+  # struct field — a corpus row assembled before the column existed simply
+  # carries no key, and the classifier ignores a nil category.
+  defp classification_for(row) do
+    FailureClassifier.classify(row.failure_reason, row.terminal_lines,
+      stop_category: Map.get(row, :stop_category)
     )
   end
 
@@ -312,9 +318,7 @@ defmodule Arbiter.Loop.Analysis do
       quality_failure? =
         Enum.any?(task_rows, fn r ->
           r.status == :failed and
-            quality_misestimate_signal?(
-              FailureClassifier.classify(r.failure_reason, r.terminal_lines)
-            )
+            quality_misestimate_signal?(classification_for(r))
         end)
 
       %{

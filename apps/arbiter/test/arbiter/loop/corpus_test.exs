@@ -81,6 +81,145 @@ defmodule Arbiter.Loop.CorpusTest do
     end
   end
 
+  # bd-apwfmy (Definition of done, item 2): a failed run whose typed
+  # `stop_category` already decides the classification must not have its
+  # transcript read at all. The bounded-read discipline stays for everything
+  # else, and the meta reports how much of the window still needed it.
+  describe "fetch/1 — structured stop_category replaces the transcript read" do
+    setup do
+      prev = Application.get_env(:arbiter, :output_log_root)
+      root = Path.join(System.tmp_dir!(), "corpus-steps-#{System.unique_integer([:positive])}")
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev do
+          Application.put_env(:arbiter, :output_log_root, prev)
+        else
+          Application.delete_env(:arbiter, :output_log_root)
+        end
+      end)
+
+      :ok
+    end
+
+    defp failed_run(task_id, attrs) do
+      {:ok, run} =
+        Ash.create(
+          Run,
+          Map.merge(
+            %{
+              task_id: task_id,
+              repo: "arbiter",
+              status: :failed,
+              started_at: DateTime.utc_now()
+            },
+            attrs
+          )
+        )
+
+      run
+    end
+
+    defp write_log(run_id, lines) do
+      {:ok, handle} = OutputLog.open(run_id)
+      Enum.each(lines, &OutputLog.append(handle, &1))
+      OutputLog.close(handle)
+    end
+
+    defp window do
+      [
+        since: DateTime.add(DateTime.utc_now(), -3600, :second),
+        until: DateTime.add(DateTime.utc_now(), 3600, :second)
+      ]
+    end
+
+    test "a conclusive stop_category skips the transcript read entirely" do
+      run =
+        failed_run("bd-corpus-typed", %{
+          failure_reason: "agent was rate-limited / the API was overloaded",
+          stop_category: "context_thrash"
+        })
+
+      write_log(run.id, ["should not be read", "Autocompact is thrashing"])
+
+      assert {:ok, [row], meta} = Corpus.fetch(window())
+
+      assert row.stop_category == "context_thrash"
+      assert row.terminal_lines == []
+      refute row.transcript_read?
+      assert meta.transcript_reads == 0
+      assert meta.failed_runs == 1
+
+      # And the classification is still correct without any transcript.
+      result =
+        Arbiter.Loop.FailureClassifier.classify(row.failure_reason, row.terminal_lines,
+          stop_category: row.stop_category
+        )
+
+      assert result.class == :agent_quality
+      assert result.subcategory == :context_exhaustion
+      assert result.evidence == :stop_category
+    end
+
+    test "a run with no stop_category still gets its bounded transcript read" do
+      run = failed_run("bd-corpus-untyped", %{failure_reason: "claude session error"})
+      write_log(run.id, ["Autocompact is thrashing"])
+
+      assert {:ok, [row], meta} = Corpus.fetch(window())
+
+      assert row.stop_category == nil
+      assert Enum.any?(row.terminal_lines, &String.contains?(&1, "Autocompact"))
+      assert meta.transcript_reads == 1
+    end
+
+    test "an inconclusive stop_category (:crashed) still gets its transcript read" do
+      run =
+        failed_run("bd-corpus-crashed", %{
+          failure_reason: "agent subprocess crashed (exit code 1)",
+          stop_category: "crashed"
+        })
+
+      write_log(run.id, ["** (DBConnection.ConnectionError) boom"])
+
+      assert {:ok, [row], meta} = Corpus.fetch(window())
+
+      assert Enum.any?(row.terminal_lines, &String.contains?(&1, "DBConnection"))
+      assert meta.transcript_reads == 1
+    end
+
+    # `transcript_reads` is documented as "how much of itself still had to be
+    # text-mined". Counting rows whose read *returned lines* scores a blind
+    # window (output log reaped) identically to a fully-structured one.
+    test "a reaped output log still counts as a transcript read" do
+      _run = failed_run("bd-corpus-reaped", %{failure_reason: "claude session error"})
+      # No write_log/2 — the log is gone, so the bounded read returns nothing.
+
+      assert {:ok, [row], meta} = Corpus.fetch(window())
+
+      assert row.terminal_lines == []
+      assert row.transcript_read?
+      assert meta.transcript_reads == 1
+      assert meta.failed_runs == 1
+    end
+
+    test "a completed run is never read and never counted" do
+      {:ok, _run} =
+        Ash.create(Run, %{
+          task_id: "bd-corpus-ok",
+          repo: "arbiter",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, [row], meta} = Corpus.fetch(window())
+      assert row.terminal_lines == []
+      assert meta.failed_runs == 0
+      assert meta.transcript_reads == 0
+    end
+  end
+
   describe "record_pass_cost/1 — the pass's single ledger write" do
     test "inserts one usage_events row for the pass itself (step :other)" do
       before = count_events()
