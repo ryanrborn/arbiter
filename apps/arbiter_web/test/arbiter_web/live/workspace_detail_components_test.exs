@@ -341,6 +341,29 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
       refute html =~ "Configuration saved."
       assert render(view) =~ "Configuration saved."
     end
+
+    test "a section's failure flash reaches the page too", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      # A click can name a key the server no longer has — the row was removed
+      # in another tab, or by another operator, between render and click. The
+      # section refuses it rather than coercing the missing key into a flag,
+      # and reports through the same `notify_flash/2` channel a success uses.
+      # `put_flash/3` on the component socket would be swallowed here exactly
+      # as it would on the success path.
+      html =
+        view
+        |> with_target("#worker-env-section")
+        |> render_click("toggle_worker_env_secret", %{"key" => "GONE"})
+
+      refute html =~ "Worker env var GONE no longer exists."
+      assert render(view) =~ "Worker env var GONE no longer exists."
+
+      # A no-op, not a write: the registry is untouched.
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert Workspace.worker_env_keys(reloaded) == []
+    end
   end
 
   describe "a section reflects its own write" do
