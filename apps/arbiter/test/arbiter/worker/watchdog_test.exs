@@ -7,6 +7,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Test.StubMerger
   alias Arbiter.Test.StubFixPassDispatcher
+  alias Arbiter.Test.StubAutoResumeDispatcher
 
   # A stand-in for the resolver's `Arbiter.Worker` GenServer. The REAL resolver
   # worker does NOT exit when its rebase worker finishes — it lingers in a
@@ -106,6 +107,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   setup do
     StubMerger.reset()
     StubFixPassDispatcher.reset()
+    StubAutoResumeDispatcher.reset()
     :ok
   end
 
@@ -122,10 +124,12 @@ defmodule Arbiter.Worker.WatchdogTest do
     }
   end
 
-  # A :running worker the Watchdog can drive to a terminal state.
-  defp running_worker do
+  # A :running worker the Watchdog can drive to a terminal state. `opts` are
+  # merged into `Worker.start/1` — the auto-resume cases pass `:meta` to seed a
+  # prior `:awaiting_review_resume_attempts` count (bd-8eheb6).
+  defp running_worker(opts \\ []) do
     task_id = new_task_id()
-    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter")
+    {:ok, pid} = Worker.start(Keyword.merge([task_id: task_id, repo: "arbiter"], opts))
     :ok = Worker.advance(pid, :implement)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
@@ -890,6 +894,151 @@ defmodule Arbiter.Worker.WatchdogTest do
 
       wait_until(fn -> Worker.state(pid).status == :completed end)
       refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
+    end
+  end
+
+  # bd-8eheb6 / #1287. `{:awaiting_review_timeout, N}` is a distinct failure
+  # reason: exit_status 0, always safe to resume, functionally different from a
+  # genuine failure needing triage. The Watchdog auto-resumes it itself, up to a
+  # bounded cap, instead of parking a "failed but resumable" worker nobody is
+  # watching.
+  describe "awaiting_review_timeout auto-resume (bd-8eheb6)" do
+    defp start_timeout_watchdog(pid, task_id, mr_ref, opts \\ []) do
+      base = [
+        interval_ms: 10,
+        initial_delay_ms: 0,
+        max_polls: 2,
+        auto_merge: true,
+        workspace: test_workspace(),
+        auto_resume_dispatcher: StubAutoResumeDispatcher
+      ]
+
+      start_watchdog(pid, task_id, mr_ref, Keyword.merge(base, opts))
+    end
+
+    # resume/1 and escalate_exhausted/4 both land AFTER Worker.fail, so waiting
+    # on :failed alone races the stub.
+    defp wait_for_decisions(n) do
+      wait_until(
+        fn ->
+          StubAutoResumeDispatcher.resume_count() +
+            length(StubAutoResumeDispatcher.escalations()) >= n
+        end,
+        2_000
+      )
+    end
+
+    test "auto-resumes the worker instead of parking it for a coordinator to find" do
+      {pid, task_id} = running_worker()
+
+      start_timeout_watchdog(pid, task_id, "!arr1")
+
+      wait_until(fn -> Worker.state(pid).status == :failed end, 2_000)
+      # The failure reason is still registered — the run really did time out,
+      # and worker_show/the event feed must still say so.
+      assert Worker.state(pid).meta.failure_reason == {:awaiting_review_timeout, 2}
+
+      # ...but the Watchdog resumed it itself rather than paging the coordinator.
+      wait_for_decisions(1)
+
+      assert [%{task_id: ^task_id, attempt: 1, mr_ref: "!arr1"}] =
+               StubAutoResumeDispatcher.resumes()
+
+      assert StubAutoResumeDispatcher.escalations() == []
+    end
+
+    test "auto-resumes up to the cap, then escalates instead of looping forever" do
+      cap = 3
+
+      # One Watchdog episode per prior-attempt count. 0/1/2 prior attempts must
+      # auto-resume (the 1st, 2nd and 3rd auto-resume); at 3 the budget is spent
+      # and the coordinator must be paged instead of a 4th resume firing.
+      for prior <- 0..cap do
+        {pid, task_id} = running_worker(meta: %{awaiting_review_resume_attempts: prior})
+
+        start_timeout_watchdog(pid, task_id, "!arr-#{prior}", max_auto_resumes: cap)
+
+        wait_until(fn -> Worker.state(pid).status == :failed end, 2_000)
+        wait_for_decisions(prior + 1)
+      end
+
+      # Exactly `cap` auto-resumes, numbered 1..cap — never a 4th.
+      assert Enum.map(StubAutoResumeDispatcher.resumes(), & &1.attempt) == [1, 2, 3]
+
+      # ...and then one escalation carrying the exhausted attempt count, so the
+      # coordinator does not have to re-derive it via worker_show.
+      assert [{_task_id, _ws_id, "!arr-3", 3, :budget_exhausted}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+
+    test "escalates (does not silently swallow) when the auto-resume itself fails" do
+      StubAutoResumeDispatcher.arm_resume_error(:no_outpost)
+      {pid, task_id} = running_worker()
+
+      start_timeout_watchdog(pid, task_id, "!arr-err")
+
+      wait_for_decisions(1)
+      wait_until(fn -> length(StubAutoResumeDispatcher.escalations()) >= 1 end, 2_000)
+
+      assert StubAutoResumeDispatcher.resume_count() == 1
+      # Still in budget — the resume itself could not run, which is a different
+      # coordinator problem than a review that refuses to converge.
+      assert [{^task_id, _ws_id, "!arr-err", 0, {:resume_failed, :no_outpost}}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+
+    test "max_auto_resumes: 0 keeps the pre-bd-8eheb6 behaviour (escalate, never resume)" do
+      {pid, task_id} = running_worker()
+
+      start_timeout_watchdog(pid, task_id, "!arr-off", max_auto_resumes: 0)
+
+      wait_until(fn -> Worker.state(pid).status == :failed end, 2_000)
+      wait_for_decisions(1)
+
+      assert StubAutoResumeDispatcher.resume_count() == 0
+
+      assert [{^task_id, _ws_id, "!arr-off", 0, :budget_exhausted}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+
+    test "the cap is workspace-configurable" do
+      {pid, task_id} = running_worker(meta: %{awaiting_review_resume_attempts: 1})
+
+      ws = test_workspace(%{"merge" => %{"max_awaiting_review_resumes" => 1}})
+      start_timeout_watchdog(pid, task_id, "!arr-ws", workspace: ws)
+
+      wait_until(fn -> Worker.state(pid).status == :failed end, 2_000)
+      wait_for_decisions(1)
+
+      # 1 prior attempt already spends a cap of 1 — escalate, do not resume.
+      assert StubAutoResumeDispatcher.resume_count() == 0
+
+      assert [{^task_id, _ws_id, "!arr-ws", 1, :budget_exhausted}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+
+    test "a genuine (non-timeout) failure still escalates immediately, never auto-resumes" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!arr-closed", [%{status: :closed}])
+
+      start_timeout_watchdog(pid, task_id, "!arr-closed")
+
+      wait_until(fn -> Worker.state(pid).status == :failed end, 2_000)
+      assert match?({:mr_closed, _}, Worker.state(pid).meta.failure_reason)
+
+      assert StubAutoResumeDispatcher.resume_count() == 0
+      assert StubAutoResumeDispatcher.escalations() == []
+    end
+
+    test "a manual-merge lane still parks (no fail, no auto-resume)" do
+      {pid, task_id} = running_worker()
+
+      wpid = start_timeout_watchdog(pid, task_id, "!arr-manual", auto_merge: false)
+      wref = Process.monitor(wpid)
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 2_000
+      refute Worker.state(pid).status == :failed
+      assert StubAutoResumeDispatcher.resume_count() == 0
     end
   end
 

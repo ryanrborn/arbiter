@@ -2373,6 +2373,38 @@ defmodule Arbiter.Worker.DispatchTest do
       assert new_run.resumed_from_run_id == prior_run.id
     end
 
+    # bd-8eheb6: the Watchdog's auto-resume budget is enforced from a counter on
+    # the WORKER's meta, because every auto-resume mints a fresh worker and a
+    # fresh Watchdog. If resume/2 didn't re-stamp it, the next Watchdog would
+    # read 0, the cap would never bind, and a never-converging review would
+    # auto-resume forever — the exact loop the cap exists to prevent.
+    test "resume/2 re-stamps the awaiting_review auto-resume attempt count", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "auto-resume counter", workspace_id: ws.id})
+      _first = stop_worker_with_outpost(task.id)
+
+      {:ok, result} =
+        Dispatch.resume(task.id,
+          start_driver: false,
+          claude_command: ["sleep", "2"],
+          awaiting_review_resume_attempts: 2
+        )
+
+      assert Worker.state(result.worker_pid).meta[:awaiting_review_resume_attempts] == 2
+    end
+
+    test "a resume without the opt leaves the auto-resume counter absent", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no auto-resume counter", workspace_id: ws.id})
+      _first = stop_worker_with_outpost(task.id)
+
+      {:ok, result} =
+        Dispatch.resume(task.id, start_driver: false, claude_command: ["sleep", "2"])
+
+      refute Map.has_key?(
+               Worker.state(result.worker_pid).meta,
+               :awaiting_review_resume_attempts
+             )
+    end
+
     test "the resumed worker's prompt is briefed with the prior work", %{ws: ws, repo: repo} do
       {:ok, task} = Ash.create(Issue, %{title: "briefed resume", workspace_id: ws.id})
       first = stop_worker_with_outpost(task.id)

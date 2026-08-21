@@ -62,6 +62,31 @@ defmodule Arbiter.Worker.Watchdog do
   ceiling to `:infinity`, handing off to indefinite watching so a later human
   approval auto-merges. No failed worker, on any forge.
 
+  ## Auto-resuming an awaiting_review timeout (bd-8eheb6)
+
+  Hitting `max_polls` on an `auto_merge` lane fails the worker with
+  `{:awaiting_review_timeout, N}` — exit_status 0, worktree preserved, MR
+  usually still mergeable. That is a *cleanly resumable* run, not a crash, and
+  the coordinator's remedy has always been a plain `worker_resume`. So the
+  Watchdog now does it itself: `handle_review_timeout/2` still registers the
+  failure reason (the timeout is real and must stay visible), then calls
+  `Arbiter.Workflows.MergeQueue.AutoResumeDispatcher` — swappable via the
+  `:auto_resume_dispatcher` opt — instead of leaving a "failed but resumable"
+  worker for a human to spot on the dashboard.
+
+  The budget is bounded by `:max_auto_resumes` (default 3; workspace key
+  `merge.max_awaiting_review_resumes`; `0` disables it and restores the old
+  escalate-and-park behaviour). The attempt counter lives on the *worker's*
+  `meta[:awaiting_review_resume_attempts]`, not in Watchdog state, because each
+  auto-resume mints a brand-new worker *and* a brand-new Watchdog — a
+  per-Watchdog counter would reset every round and the cap would never bind.
+  `Arbiter.Worker.Dispatch` re-stamps it onto each resumed run.
+
+  Once the budget is spent the coordinator gets an addressed escalation reading
+  "auto-resume exhausted after N attempts", deliberately distinct from a
+  first-time genuine failure. Non-timeout failures (`:mr_closed`, a real crash)
+  are untouched — they escalate immediately, exactly as before.
+
   ### Webhook upgrade (design only — not implemented here)
 
   Polling is the shipped mechanism. A future push path would add
@@ -140,6 +165,18 @@ defmodule Arbiter.Worker.Watchdog do
   # don't clear the conflict it is almost certainly semantic and needs a human.
   @default_max_conflict_attempts 2
 
+  # Bounded auto-resumes of an `{:awaiting_review_timeout, _}` failure before the
+  # Watchdog stops self-healing and pages the coordinator (bd-8eheb6). Override
+  # via opt `:max_auto_resumes` or workspace
+  # config["merge"]["max_awaiting_review_resumes"]. 0 disables auto-resume and
+  # restores the pre-bd-8eheb6 "escalate + park failed" behaviour.
+  @default_max_auto_resumes 3
+
+  # The dispatcher the Watchdog uses to auto-resume an awaiting_review timeout
+  # (and to page the coordinator once the budget is spent). Swappable via the
+  # `:auto_resume_dispatcher` opt (tests stub it).
+  @default_auto_resume_dispatcher Arbiter.Workflows.MergeQueue.AutoResumeDispatcher
+
   # The resolver that dispatches a rebase-resolve worker against the task's
   # existing worktree. Injectable via the `:conflict_resolver` opt (tests pass a
   # stub). The default is the same module the MergeQueue uses, so the Watchdog-
@@ -163,6 +200,8 @@ defmodule Arbiter.Worker.Watchdog do
           | {:auto_resolve_conflict, boolean()}
           | {:max_conflict_attempts, pos_integer()}
           | {:conflict_resolver, module()}
+          | {:max_auto_resumes, non_neg_integer()}
+          | {:auto_resume_dispatcher, module()}
           | {:merge_fail_notify_threshold, pos_integer()}
 
   @type opts :: [opt()]
@@ -372,6 +411,7 @@ defmodule Arbiter.Worker.Watchdog do
 
         auto_resolve_conflict = resolve_auto_resolve_conflict(opts, workspace)
         max_conflict_attempts = resolve_max_conflict_attempts(opts, workspace)
+        max_auto_resumes = resolve_max_auto_resumes(opts, workspace)
 
         state = %{
           task_id: task_id,
@@ -454,6 +494,20 @@ defmodule Arbiter.Worker.Watchdog do
           conflict_resolver_pid: nil,
           conflict_branch: nil,
           conflict_escalated: false,
+          # Bounded self-healing of `{:awaiting_review_timeout, _}` (bd-8eheb6).
+          #   max_auto_resumes        — auto-resume budget for this task; 0 = off.
+          #   auto_resume_dispatcher  — module that re-attaches the worker and,
+          #                             once the budget is spent, pages the
+          #                             coordinator. The attempt counter itself
+          #                             lives on the WORKER's meta
+          #                             (`:awaiting_review_resume_attempts`), not
+          #                             here: each auto-resume mints a brand-new
+          #                             worker + Watchdog, so a per-Watchdog
+          #                             counter would reset to 0 every round and
+          #                             the cap would never bind.
+          max_auto_resumes: max_auto_resumes,
+          auto_resume_dispatcher:
+            Keyword.get(opts, :auto_resume_dispatcher, @default_auto_resume_dispatcher),
           # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
           # a notification fires once when the count first hits the threshold, then
           # is suppressed until the counter resets and re-hits the threshold.
@@ -1474,11 +1528,11 @@ defmodule Arbiter.Worker.Watchdog do
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
-        "#{cap} polls without a terminal outcome; escalating + failing"
+        "#{cap} polls without a terminal outcome; failing (see the next line for " <>
+        "whether it was auto-resumed or escalated)"
     )
 
-    escalate_watchdog(state)
-    safe(fn -> Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}) end)
+    handle_review_timeout(state, cap)
     {:stop, :normal, %{state | poll_count: count + 1}}
   end
 
@@ -1497,6 +1551,136 @@ defmodule Arbiter.Worker.Watchdog do
     schedule(self(), state.interval_ms)
     {:noreply, %{state | poll_count: state.poll_count + 1}}
   end
+
+  # bd-8eheb6 / #1287. An awaiting_review timeout on an auto_merge lane is a
+  # *distinct* failure: exit_status 0, worktree preserved, MR usually mergeable
+  # — the run is cleanly resumable, and the coordinator's remedy has always been
+  # a plain `worker_resume`. So do it here instead of parking a "failed but
+  # resumable" worker that only a `worker_failed` event or the dashboard's
+  # active-worker count would ever surface.
+  #
+  # The worker is failed either way: the run really did time out and
+  # worker_show/the event feed must keep saying so (and `Dispatch.resume`
+  # requires the prior worker to be in a terminal state before it re-attaches).
+  # What changes is what happens next — a bounded auto-resume, or, once that
+  # budget is spent, an escalation that names the spent budget explicitly.
+  defp handle_review_timeout(state, cap) do
+    snap = snapshot(state)
+    attempts = awaiting_review_resume_attempts(snap)
+
+    safe(fn -> Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}) end)
+
+    if attempts < state.max_auto_resumes do
+      auto_resume(state, attempts + 1)
+    else
+      escalate_auto_resume_give_up(state, snap, attempts, :budget_exhausted)
+    end
+  end
+
+  # One auto-resume round. On success the task is healing, so we deliberately do
+  # NOT page the coordinator — that is the whole point. A resume that can't run
+  # (typically `:no_outpost`: the worktree was cleaned up, so there is nothing to
+  # re-attach to) is not self-healing, so it falls back to the escalation path
+  # rather than dropping the task on the floor.
+  defp auto_resume(state, attempt) do
+    args = %{
+      task_id: state.task_id,
+      attempt: attempt,
+      workspace_id: workspace_id(state),
+      mr_ref: state.mr_ref
+    }
+
+    case safe_resume(state, args) do
+      {:ok, _} ->
+        Logger.warning(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} timed out at " <>
+            ":awaiting_review; auto-resumed (attempt #{attempt}/#{state.max_auto_resumes})"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} auto-resume " <>
+            "attempt #{attempt} failed (#{inspect(reason)}); escalating instead"
+        )
+
+        escalate_auto_resume_give_up(
+          state,
+          snapshot(state),
+          attempt - 1,
+          {:resume_failed, reason}
+        )
+    end
+  end
+
+  defp safe_resume(state, args) do
+    state.auto_resume_dispatcher.resume(args)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # Budget spent (or auto-resume off / unable to run): page the coordinator the
+  # way this always did, PLUS an addressed mailbox escalation that names the
+  # attempt count and why we stopped, so "we already tried resuming N times"
+  # doesn't have to be re-derived from `worker_show`.
+  defp escalate_auto_resume_give_up(state, snap, attempts, reason) do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} not auto-resumed " <>
+        "(#{inspect(reason)}, #{attempts}/#{state.max_auto_resumes} attempts used); " <>
+        "escalating to the coordinator"
+    )
+
+    escalate_watchdog(state)
+
+    safe(fn ->
+      state.auto_resume_dispatcher.escalate_exhausted(
+        state.task_id,
+        Map.get(snap, :workspace_id) || workspace_id(state),
+        state.mr_ref,
+        attempts,
+        reason
+      )
+    end)
+
+    :ok
+  end
+
+  # How many times this task has ALREADY been auto-resumed out of an
+  # awaiting_review timeout. Carried on the worker's `meta` and re-stamped onto
+  # each resumed run by `Arbiter.Worker.Dispatch` (see `maybe_put_resume_meta/2`).
+  # No Watchdog survives an auto-resume round — a fresh worker mints a fresh
+  # Watchdog — but the counter has to survive all of them, so the worker's meta
+  # is where it lives.
+  defp awaiting_review_resume_attempts(%{meta: %{} = meta}) do
+    case Map.get(meta, :awaiting_review_resume_attempts) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 0
+    end
+  end
+
+  defp awaiting_review_resume_attempts(_), do: 0
+
+  # Auto-resume budget. Opt wins; else workspace config
+  # (`merge.max_awaiting_review_resumes`); else the module default. 0 is a valid
+  # value (auto-resume off), so `>= 0` rather than `> 0`.
+  defp resolve_max_auto_resumes(opts, workspace) do
+    case Keyword.get(opts, :max_auto_resumes) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> max_auto_resumes_from_workspace(workspace)
+    end
+  end
+
+  defp max_auto_resumes_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
+    case get_in(config, ["merge", "max_awaiting_review_resumes"]) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_max_auto_resumes
+    end
+  end
+
+  defp max_auto_resumes_from_workspace(_), do: @default_max_auto_resumes
 
   defp escalate_watchdog(state) do
     snap =
