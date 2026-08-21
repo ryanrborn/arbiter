@@ -63,6 +63,10 @@ defmodule Arbiter.Workers.Run do
       # Powers "all runs for task T, newest first" — the per-task history list
       # surfaced by `GET /api/workers/history?task_id=…` and `arb worker runs`.
       index [:task_id, :started_at]
+
+      # Powers "how did runs die, grouped by typed category" without a scan
+      # (bd-apwfmy).
+      index [:stop_category]
     end
   end
 
@@ -96,6 +100,7 @@ defmodule Arbiter.Workers.Run do
         :routing_policy,
         :model_tier,
         :thinking,
+        :stop_category,
         :base_task_id,
         :role
       ]
@@ -126,6 +131,7 @@ defmodule Arbiter.Workers.Run do
         :result_subtype,
         :result_is_error,
         :result_message,
+        :stop_category,
         :base_task_id,
         :role
       ]
@@ -368,6 +374,25 @@ defmodule Arbiter.Workers.Run do
       description "The terminal event's final assistant-facing text, redacted the same as " <>
                     "transcript lines. Truncated at 20,000 chars to keep the row bounded — " <>
                     "the full, untruncated transcript remains the audit source of record."
+    end
+
+    # bd-apwfmy: `failure_reason` above is `StopReason.summary` — the English
+    # sentence. `Arbiter.Worker.StopReason.classify/2` computed a typed
+    # `category` alongside it, at the moment of death and with the whole
+    # captured output in hand, and Arbiter then threw the type away and made
+    # every later consumer (`Loop.FailureClassifier`, `Worker.Dispatch`'s
+    # context-thrash resume guard) re-derive it with a regex over transcript
+    # prose. Keep the type. Nil on runs that ended any other way (a clean
+    # completion, a review-gate rejection) and on runs predating the column.
+    attribute :stop_category, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "The run's typed terminal cause, stored as an atom name: an " <>
+                    "Arbiter.Worker.StopReason category (\"auth_expired\", \"context_thrash\", " <>
+                    "\"exited_without_done\", ...) or, for a worker parked by the commit gate, " <>
+                    "that gate's reason (\"uncommitted_at_completion\", ...). The structured " <>
+                    "twin of failure_reason's prose; nil when the run ended in neither."
     end
 
     # ---- Parent/role hierarchy (bd-5fhyry) ----------------------------------

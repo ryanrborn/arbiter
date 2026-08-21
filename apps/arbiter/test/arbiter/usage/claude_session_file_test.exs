@@ -214,4 +214,118 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
     on_exit(fn -> File.rm_rf(path) end)
     path
   end
+
+  # bd-apwfmy Phase 2: the same on-disk file that answers "how many tokens"
+  # also holds every tool_use/tool_result pair, which is the only retroactive
+  # source of typed steps for runs that finished before live capture shipped.
+  describe "read_steps/2" do
+    @step_lines [
+      ~s({"type":"system","subtype":"init","session_id":"SID"}),
+      ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.000Z","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"mix test"}}]}}),
+      # Streaming re-emit of the SAME turn: naive parsing counts this call twice.
+      ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.400Z","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"mix test"}}]}}),
+      ~s({"type":"user","timestamp":"2026-07-01T20:50:02.500Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":false,"content":"1 test, 0 failures"}]}}),
+      ~s({"type":"assistant","timestamp":"2026-07-01T20:50:03.000Z","message":{"id":"m-2","content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/tmp/x.ex"}}]}}),
+      ~s({"type":"user","timestamp":"2026-07-01T20:50:03.250Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":[{"type":"text","text":"File does not exist"}]}]}}),
+      # A tool_use the session died before answering: no row, not a garbage row.
+      ~s({"type":"assistant","timestamp":"2026-07-01T20:50:04.000Z","message":{"id":"m-3","content":[{"type":"tool_use","id":"toolu_orphan","name":"Bash","input":{"command":"sleep 99"}}]}}),
+      ~s(not json at all),
+      ~s({"type":"result","subtype":"success"})
+    ]
+
+    defp step_file(lines) do
+      path = Path.join(System.tmp_dir!(), "steps-#{System.unique_integer([:positive])}.jsonl")
+      File.write!(path, Enum.join(lines, "\n") <> "\n")
+      on_exit(fn -> File.rm(path) end)
+      path
+    end
+
+    test "pairs tool_use with tool_result, once per call, with line-timestamp timing" do
+      {:ok, steps} = SessionFile.read_steps(step_file(@step_lines))
+
+      assert length(steps) == 2
+
+      [bash, read] = steps
+
+      assert bash.tool_use_id == "toolu_1"
+      assert bash.name == "Bash"
+      assert bash.input == %{"command" => "mix test"}
+      assert bash.output_text =~ "1 test, 0 failures"
+      assert bash.is_error == false
+      # 20:50:00.000 -> 20:50:02.500, measured from the FIRST emit of the turn.
+      assert bash.duration_ms == 2500
+      assert DateTime.to_iso8601(bash.occurred_at) =~ "20:50:02"
+
+      assert read.tool_use_id == "toolu_2"
+      assert read.name == "Read"
+      assert read.is_error == true
+      # tool_result content arrives as a content-block list too, not only a string.
+      assert read.output_text =~ "File does not exist"
+      assert read.duration_ms == 250
+    end
+
+    test "finds a tool_use split onto its own line under a shared message.id" do
+      # The real on-disk shape, confirmed against a live session file: Claude
+      # Code writes ONE LINE PER CONTENT BLOCK, and every block of a turn
+      # repeats that turn's `message.id`. A keep-first-by-message.id rule
+      # (which is right for token usage, where the whole turn is re-emitted)
+      # would discard the tool_use line here and leave the result unmatched.
+      # The dedupe key that actually holds is the tool_use id.
+      lines = [
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.000Z","message":{"id":"m-1","content":[{"type":"thinking","thinking":"weighing options"}]}}),
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.100Z","message":{"id":"m-1","content":[{"type":"text","text":"Running the tests."}]}}),
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.200Z","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_split","name":"Bash","input":{"command":"mix test"}}]}}),
+        ~s({"type":"user","timestamp":"2026-07-01T20:50:01.200Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_split","content":"ok"}]}})
+      ]
+
+      {:ok, [step]} = SessionFile.read_steps(step_file(lines))
+
+      assert step.name == "Bash"
+      assert step.input == %{"command" => "mix test"}
+      assert step.duration_ms == 1000
+    end
+
+    test "a re-emitted tool_use keeps the first sighting, so timing is not compressed" do
+      lines = [
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.000Z","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_r","name":"Bash","input":{"command":"mix test"}}]}}),
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:01.900Z","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_r","name":"Bash","input":{"command":"mix test"}}]}}),
+        ~s({"type":"user","timestamp":"2026-07-01T20:50:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_r","content":"ok"}]}}),
+        # A repeated result for the same call must not write a second step.
+        ~s({"type":"user","timestamp":"2026-07-01T20:50:02.400Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_r","content":"ok"}]}})
+      ]
+
+      {:ok, [step]} = SessionFile.read_steps(step_file(lines))
+
+      assert step.duration_ms == 2000
+    end
+
+    test "an unanswered tool_use yields no step" do
+      {:ok, steps} = SessionFile.read_steps(step_file(@step_lines))
+      refute Enum.any?(steps, &(&1.tool_use_id == "toolu_orphan"))
+    end
+
+    test ":since drops calls that belong to an earlier run sharing the file" do
+      since = ~U[2026-07-01 20:50:02.900Z]
+      {:ok, steps} = SessionFile.read_steps(step_file(@step_lines), since: since)
+
+      assert Enum.map(steps, & &1.tool_use_id) == ["toolu_2"]
+    end
+
+    test "a tool_result with no parseable timestamp reports nil timing rather than zero" do
+      lines = [
+        ~s({"type":"assistant","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_x","name":"Bash","input":{"command":"ls"}}]}}),
+        ~s({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_x","content":"ok"}]}})
+      ]
+
+      {:ok, [step]} = SessionFile.read_steps(step_file(lines))
+
+      assert step.duration_ms == nil
+      assert step.occurred_at == nil
+      assert step.is_error == false
+    end
+
+    test "a missing file is an error, not a crash" do
+      assert {:error, :enoent} = SessionFile.read_steps("/nope/does/not/exist.jsonl")
+    end
+  end
 end

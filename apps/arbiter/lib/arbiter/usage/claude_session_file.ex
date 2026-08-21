@@ -169,6 +169,75 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
     end
   end
 
+  @typedoc """
+  One reconstructed tool call from a session JSONL: the `tool_use` block's
+  name/input paired with its `tool_result` block's error flag and content.
+  `occurred_at` / `duration_ms` are nil when the relevant lines carried no
+  parseable `timestamp` — an honest gap, not a zero.
+  """
+  @type step_event :: %{
+          tool_use_id: String.t(),
+          name: String.t() | nil,
+          input: map() | nil,
+          output_text: String.t(),
+          is_error: boolean(),
+          occurred_at: DateTime.t() | nil,
+          duration_ms: non_neg_integer() | nil
+        }
+
+  @doc """
+  Parse a session JSONL at `path` into the tool calls it records (bd-apwfmy
+  Phase 2).
+
+  The same file that answers "how many tokens" also holds every
+  `tool_use`/`tool_result` block pair, which makes it the only retroactive
+  source of typed steps for runs that finished before live capture shipped.
+  Returns `{:ok, steps}` in file order, or `{:error, reason}`.
+
+  Mirrors `read_totals/2`'s parsing discipline:
+
+    * **Keep-first per `tool_use` id**, *not* per `message.id`. The dedupe key
+      matters here in a way it does not for tokens: on disk, Claude Code
+      writes one line per *content block*, and every block of a turn repeats
+      that turn's `message.id` — a `thinking` line, then a `text` line, then
+      the `tool_use` line. Keeping only the first line per `message.id` (the
+      right rule for `read_totals/2`, where the whole turn is re-emitted)
+      therefore throws the tool call away and leaves its result unmatched.
+      A `tool_use` id is unique within a session, so keying on it dedupes
+      streaming re-emits without discarding split blocks — and keeping the
+      *first* sighting is what makes `duration_ms` the real elapsed time
+      rather than ~0. Repeated `tool_result`s for an id already resolved are
+      likewise ignored.
+    * **A `tool_use` with no `tool_result` yields no step.** The session was
+      killed mid-call; absent beats a row with invented timing.
+    * **Torn/non-JSON lines are skipped**, not fatal.
+
+  ## Options
+
+    * `:since` — a `DateTime` (or ISO8601 string) cutoff, applied to the
+      *result* line's timestamp, so a `--resume`-shared file doesn't
+      attribute the previous run's tool calls to this one. A step whose
+      timestamp is unparseable is dropped when a cutoff is given (same
+      under-report-rather-than-misattribute rule as `read_totals/2`).
+
+  """
+  @spec read_steps(String.t(), keyword()) :: {:ok, [step_event()]} | {:error, term()}
+  def read_steps(path, opts \\ []) when is_binary(path) and is_list(opts) do
+    since = normalize_since(Keyword.get(opts, :since))
+
+    case File.open(path, [:read, :binary]) do
+      {:ok, io} ->
+        try do
+          {:ok, collect_steps(io, since)}
+        after
+          File.close(io)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # ---- internals ---------------------------------------------------------
 
   # Fold the file's lines into {seen_message_ids, totals}. `seen` keeps the
@@ -277,4 +346,129 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
 
   defp int(n) when is_integer(n), do: n
   defp int(_), do: 0
+
+  # ---- step reconstruction (bd-apwfmy Phase 2) ---------------------------
+
+  # Fold the file into {resolved_tool_use_ids, pending_tool_uses, reversed_steps}.
+  defp collect_steps(io, since) do
+    io
+    |> IO.stream(:line)
+    |> Enum.reduce({MapSet.new(), %{}, []}, &absorb_step_line(&1, &2, since))
+    |> elem(2)
+    |> Enum.reverse()
+  end
+
+  defp absorb_step_line(line, acc, since) do
+    case decode(line) do
+      {:ok, event} -> absorb_step_event(event, acc, since)
+      _ -> acc
+    end
+  end
+
+  defp absorb_step_event(
+         %{"type" => "assistant", "message" => %{"content" => content}} = event,
+         {resolved, pending, steps},
+         _since
+       )
+       when is_list(content) do
+    ts = line_timestamp(event)
+    {resolved, Enum.reduce(content, pending, &remember_tool_use(&1, &2, ts)), steps}
+  end
+
+  defp absorb_step_event(
+         %{"type" => "user", "message" => %{"content" => content}} = event,
+         acc,
+         since
+       )
+       when is_list(content) do
+    ts = line_timestamp(event)
+    Enum.reduce(content, acc, &resolve_tool_result(&1, &2, ts, since))
+  end
+
+  defp absorb_step_event(_event, acc, _since), do: acc
+
+  # `put_new`: a streaming re-emit repeats the block verbatim, and the FIRST
+  # sighting is the one that carries the truthful start time.
+  defp remember_tool_use(%{"type" => "tool_use", "id" => id} = block, pending, ts)
+       when is_binary(id) do
+    Map.put_new(pending, id, %{
+      name: Map.get(block, "name"),
+      input: Map.get(block, "input"),
+      started_at: ts
+    })
+  end
+
+  defp remember_tool_use(_block, pending, _ts), do: pending
+
+  defp resolve_tool_result(
+         %{"type" => "tool_result", "tool_use_id" => id} = block,
+         {resolved, pending, steps} = acc,
+         ts,
+         since
+       )
+       when is_binary(id) do
+    if MapSet.member?(resolved, id) do
+      # A repeated result for a call already recorded. One call, one row.
+      acc
+    else
+      resolve_new_tool_result(block, id, {MapSet.put(resolved, id), pending, steps}, ts, since)
+    end
+  end
+
+  defp resolve_tool_result(_block, acc, _ts, _since), do: acc
+
+  defp resolve_new_tool_result(block, id, {resolved, pending, steps}, ts, since) do
+    {call, pending} = Map.pop(pending, id)
+
+    step = %{
+      tool_use_id: id,
+      name: call && call.name,
+      input: call && call.input,
+      output_text: tool_result_text(Map.get(block, "content")),
+      is_error: !!Map.get(block, "is_error"),
+      occurred_at: ts,
+      duration_ms: elapsed_ms(call, ts)
+    }
+
+    if keep_step?(step, since) do
+      {resolved, pending, [step | steps]}
+    else
+      {resolved, pending, steps}
+    end
+  end
+
+  defp keep_step?(_step, nil), do: true
+  defp keep_step?(%{occurred_at: nil}, %DateTime{}), do: false
+
+  defp keep_step?(%{occurred_at: %DateTime{} = at}, %DateTime{} = since),
+    do: DateTime.compare(at, since) != :lt
+
+  defp elapsed_ms(%{started_at: %DateTime{} = from}, %DateTime{} = to) do
+    max(DateTime.diff(to, from, :millisecond), 0)
+  end
+
+  defp elapsed_ms(_call, _ts), do: nil
+
+  defp line_timestamp(event) do
+    case parse_timestamp(Map.get(event, "timestamp")) do
+      {:ok, ts} -> ts
+      :error -> nil
+    end
+  end
+
+  # tool_result content is either a plain string or a list of content blocks.
+  defp tool_result_text(text) when is_binary(text), do: text
+
+  defp tool_result_text(blocks) when is_list(blocks) do
+    blocks
+    |> Enum.map(fn
+      %{"text" => text} when is_binary(text) -> text
+      text when is_binary(text) -> text
+      _ -> ""
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp tool_result_text(_other), do: ""
 end

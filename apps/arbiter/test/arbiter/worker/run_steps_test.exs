@@ -152,6 +152,20 @@ defmodule Arbiter.Worker.RunStepsTest do
     assert steps_for(task_id) == []
   end
 
+  test "a live-captured step records its provenance as source \"live\"" do
+    task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+    _session =
+      new_session(task_id)
+      |> feed([
+        assistant_tool_use("toolu_src1", "Bash", %{"command" => "mix test"}),
+        user_tool_result("toolu_src1", "ok")
+      ])
+
+    assert [step] = steps_for(task_id)
+    assert step.source == "live"
+  end
+
   test "gemini/codex provider events write no step rows" do
     task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
 

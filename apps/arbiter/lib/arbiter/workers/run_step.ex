@@ -38,6 +38,10 @@ defmodule Arbiter.Workers.RunStep do
       # Powers "tool error rate for tool T" / "p50/p95 duration for tool T"
       # rollups across runs.
       index [:name]
+
+      # Lets a rollup exclude (or isolate) backfilled rows, whose timing and
+      # redaction provenance differ from live capture. See `:source`.
+      index [:source]
     end
   end
 
@@ -57,7 +61,8 @@ defmodule Arbiter.Workers.RunStep do
         :input_digest,
         :input_summary,
         :output_summary,
-        :occurred_at
+        :occurred_at,
+        :source
       ]
     end
   end
@@ -129,6 +134,15 @@ defmodule Arbiter.Workers.RunStep do
       allow_nil? false
       public? true
       description "When the tool_result block was processed."
+    end
+
+    attribute :source, :string do
+      allow_nil? false
+      public? true
+      default "live"
+      constraints max_length: 16, trim?: true
+
+      description "How this row was captured: \"live\" (written by the ClaudeSession emit path as the run happened) or \"backfill\" (reconstructed by Arbiter.Workers.StepBackfill from the on-disk session JSONL). Backfilled rows carry line-timestamp timing rather than monotonic-clock timing, and were redacted against today's known secret values rather than the run's own — provenance worth being able to filter on."
     end
 
     create_timestamp :inserted_at
