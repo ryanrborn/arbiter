@@ -311,6 +311,36 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
       assert Enum.map(steps, & &1.tool_use_id) == ["toolu_2"]
     end
 
+    test ":until drops calls a resumed child run appended after this run died" do
+      # `--resume` appends to the same file, so the bound has to work in both
+      # directions: reading the PARENT without an upper bound absorbs every
+      # child call and files it under the parent's run id.
+      until = ~U[2026-07-01 20:50:02.900Z]
+      {:ok, steps} = SessionFile.read_steps(step_file(@step_lines), until: until)
+
+      assert Enum.map(steps, & &1.tool_use_id) == ["toolu_1"]
+    end
+
+    test ":since and :until together bound the read to one run's own window" do
+      {:ok, steps} =
+        SessionFile.read_steps(step_file(@step_lines),
+          since: ~U[2026-07-01 20:50:02.900Z],
+          until: ~U[2026-07-01 20:50:03.500Z]
+        )
+
+      assert Enum.map(steps, & &1.tool_use_id) == ["toolu_2"]
+    end
+
+    test "an undated call is dropped when an :until bound is given" do
+      lines = [
+        ~s({"type":"assistant","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_u","name":"Bash","input":{"command":"ls"}}]}}),
+        ~s({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_u","content":"ok"}]}})
+      ]
+
+      assert {:ok, []} =
+               SessionFile.read_steps(step_file(lines), until: ~U[2026-07-01 20:50:03.500Z])
+    end
+
     test "a tool_result with no parseable timestamp reports nil timing rather than zero" do
       lines = [
         ~s({"type":"assistant","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_x","name":"Bash","input":{"command":"ls"}}]}}),

@@ -30,6 +30,11 @@ defmodule Arbiter.Loop.Corpus do
   reports `failed_runs` and `transcript_reads` so a window says out loud how
   much of itself still had to be text-mined.
 
+  `transcript_reads` counts the *fallback decision*, carried on each row as
+  `transcript_read?` — not the reads that happened to return lines. A run
+  whose output log was reaped still had to fall back; scoring it as zero
+  reads would report a blind window as a fully-structured one.
+
   A fallback run's `terminal_lines` is the union of two bounded reads
   (`OutputLog.tail_lines/2` + `OutputLog.scan_for/2`), not a raw transcript
   read — see bd-3ozmaj (#1159) and the "bounded scan" note in
@@ -104,6 +109,7 @@ defmodule Arbiter.Loop.Corpus do
         task_id = r["task_id"]
         base = base_task_id(task_id)
         status = to_atom(r["status"])
+        {read?, lines} = terminal_lines(status, r["stop_category"], run_id)
 
         %{
           run_id: run_id,
@@ -123,12 +129,13 @@ defmodule Arbiter.Loop.Corpus do
           rejected?: r["failure_reason"] == ":review_gate_rejected",
           converged?: status == :completed,
           findings: Map.get(findings_by_task, base, []),
-          terminal_lines: terminal_lines(status, r["stop_category"], run_id)
+          transcript_read?: read?,
+          terminal_lines: lines
         }
       end)
 
     failed = Enum.count(rows, &(&1.status == :failed))
-    reads = Enum.count(rows, &(&1.terminal_lines != []))
+    reads = Enum.count(rows, & &1.transcript_read?)
 
     meta = %{
       label: label,
@@ -158,12 +165,16 @@ defmodule Arbiter.Loop.Corpus do
 
   def conclusive_stop_category?(_other), do: false
 
-  # Only a failed run with no conclusive typed category costs a transcript read.
+  # Only a failed run with no conclusive typed category costs a transcript
+  # read. Returns `{read_attempted?, lines}` — the flag, not the lines, is what
+  # `meta.transcript_reads` counts. A reaped output log yields no lines but the
+  # run still fell back to text-mining, and a window reporting that as zero
+  # reads would be indistinguishable from one with full structured coverage.
   defp terminal_lines(:failed, stop_category, run_id) do
-    if conclusive_stop_category?(stop_category), do: [], else: tail(run_id)
+    if conclusive_stop_category?(stop_category), do: {false, []}, else: {true, tail(run_id)}
   end
 
-  defp terminal_lines(_status, _stop_category, _run_id), do: []
+  defp terminal_lines(_status, _stop_category, _run_id), do: {false, []}
 
   @doc """
   Record the pass's own cost as a single `usage_events` row (step `:other`,

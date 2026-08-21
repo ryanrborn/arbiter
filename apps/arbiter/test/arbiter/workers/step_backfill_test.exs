@@ -6,6 +6,7 @@ defmodule Arbiter.Workers.StepBackfillTest do
   # when they are not sure it finished.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workers.{Run, RunStep, StepBackfill}
   require Ash.Query
 
@@ -161,6 +162,89 @@ defmodule Arbiter.Workers.StepBackfillTest do
       refute step.input_summary =~ secret
       refute step.output_summary =~ secret
       refute step.input_digest =~ secret
+      assert step.output_summary =~ "[REDACTED]"
+    end
+
+    # The reviewer's case: `Dispatch.resume_session/2` re-spawns with
+    # `--resume <sid>` and the CLI appends to the SAME `<sid>.jsonl`, so one
+    # file spans a parent run and its child. `:since` alone only bounds the
+    # read from below — backfilling the parent would read past its own death
+    # and file every child tool call under the parent's run_id, which
+    # `existing_tool_use_ids/1` (scoped per run) cannot catch and which makes
+    # `StepStats.tool_outcomes/1` count each of those calls twice.
+    test "a --resume-shared file gives each run only its own tool calls" do
+      lines = [
+        # Parent run: 20:50:00 → 20:50:02
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.000Z","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_parent","name":"Bash","input":{"command":"mix test"}}]}}),
+        ~s({"type":"user","timestamp":"2026-07-01T20:50:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_parent","content":"ok"}]}}),
+        # Parent dies at 20:51:00; the watchdog resumes into the same file.
+        ~s({"type":"assistant","timestamp":"2026-07-01T21:00:00.000Z","message":{"id":"m-2","content":[{"type":"tool_use","id":"toolu_child","name":"Read","input":{"file_path":"/tmp/x.ex"}}]}}),
+        ~s({"type":"user","timestamp":"2026-07-01T21:00:01.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_child","content":"ok"}]}})
+      ]
+
+      session_id = "sess-#{System.unique_integer([:positive])}"
+      config_dir = session_file!(session_id, lines)
+
+      parent =
+        run!(%{
+          session_id: session_id,
+          config_dir: config_dir,
+          status: :failed,
+          started_at: ~U[2026-07-01 20:49:00.000000Z],
+          completed_at: ~U[2026-07-01 20:51:00.000000Z]
+        })
+
+      child =
+        run!(%{
+          session_id: session_id,
+          config_dir: config_dir,
+          started_at: ~U[2026-07-01 20:59:00.000000Z],
+          completed_at: ~U[2026-07-01 21:01:00.000000Z],
+          resumed_from_run_id: parent.id
+        })
+
+      assert {:ok, %{inserted: 1}} = StepBackfill.backfill_run(parent, apply?: true)
+      assert {:ok, %{inserted: 1}} = StepBackfill.backfill_run(child, apply?: true)
+
+      assert ["toolu_parent"] == parent |> steps_for() |> Enum.map(& &1.tool_use_id)
+      assert ["toolu_child"] == child |> steps_for() |> Enum.map(& &1.tool_use_id)
+    end
+
+    test "a still-open run (no completed_at) keeps the unbounded-above read" do
+      run = run!(%{status: :running, completed_at: nil})
+
+      assert {:ok, %{inserted: 2}} = StepBackfill.backfill_run(run, apply?: true)
+    end
+
+    # The finding: the only operator entry point (`mix
+    # arbiter.backfill_run_steps --apply`) passes no `:redact_values`, so a
+    # default of `[]` persisted raw session-JSONL text into the table.
+    test "redaction is not opt-in: the run's own workspace secrets scrub by default" do
+      secret = "super-secret-token-value"
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "bf-#{System.unique_integer([:positive])}",
+          worker_env: %{"API_TOKEN" => %{"value" => secret, "secret" => true}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "backfill redaction", workspace_id: ws.id})
+
+      lines = [
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.000Z","message":{"id":"m-1","content":[{"type":"tool_use","id":"toolu_s","name":"Bash","input":{"command":"echo #{secret}"}}]}}),
+        ~s({"type":"user","timestamp":"2026-07-01T20:50:01.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_s","content":"#{secret}"}]}})
+      ]
+
+      session_id = "sess-#{System.unique_integer([:positive])}"
+      config_dir = session_file!(session_id, lines)
+      run = run!(%{task_id: task.id, session_id: session_id, config_dir: config_dir})
+
+      # No :redact_values — exactly what the mix task passes.
+      assert {:ok, %{inserted: 1}} = StepBackfill.backfill_run(run, apply?: true)
+
+      assert [step] = steps_for(run)
+      refute step.input_summary =~ secret
+      refute step.output_summary =~ secret
       assert step.output_summary =~ "[REDACTED]"
     end
 

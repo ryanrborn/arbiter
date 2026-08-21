@@ -32,13 +32,17 @@ defmodule Arbiter.Workers.StepBackfill do
 
   `duration_ms` comes from the difference between two line timestamps, not a
   monotonic clock, and is nil when either line was undated. An undated call
-  is dropped rather than guessed into this run: the run's `started_at` is
-  always the cutoff, and against a cutoff an undated line is ambiguous — the
-  same under-report-rather-than-misattribute rule the token reader uses for a
-  `--resume`-shared file. (`occurred_at` still falls back to the run's start
-  defensively, so a future caller that passes no cutoff cannot write a row
-  with no time at all.) Redaction ran against the secret values known
-  *now*, not the ones the run held. Every such row is tagged `source: "backfill"` so an analysis that
+  is dropped rather than guessed into this run: the read is bounded by the
+  run's `started_at` *and* its `completed_at`, and against a bound an undated
+  line is ambiguous — the same under-report-rather-than-misattribute rule the
+  token reader uses for a `--resume`-shared file. The upper bound matters as
+  much as the lower one: `--resume` appends to the parent's session file, so
+  reading a parent run without it walks past the parent's death and files the
+  child run's tool calls under the parent's `run_id`. (`occurred_at` still
+  falls back to the run's start defensively, so a future caller that passes no
+  bounds at all cannot write a row with no time.) Redaction defaults to the
+  run's workspace secrets as they stand *now*, not the ones the run held —
+  a since-rotated credential is no longer in the list to scrub. Every such row is tagged `source: "backfill"` so an analysis that
   cares can tell them apart from live capture.
   """
 
@@ -46,7 +50,7 @@ defmodule Arbiter.Workers.StepBackfill do
   require Logger
 
   alias Arbiter.Usage.ClaudeSessionFile
-  alias Arbiter.Worker.StepSummary
+  alias Arbiter.Worker.{StepSummary, WorkerEnv}
   alias Arbiter.Workers.{Run, RunStep}
 
   @type status :: :ok | :no_session_id | :no_session_file | :unreadable
@@ -81,8 +85,11 @@ defmodule Arbiter.Workers.StepBackfill do
     * `:repo` — restrict to one repo.
     * `:limit` — cap how many runs are visited (oldest first, so repeated
       capped passes make forward progress).
-    * `:redact_values` — secret values to scrub from summaries. See the
-      moduledoc on why this is weaker than the live path's.
+    * `:redact_values` — secret values to scrub from summaries. Defaults to
+      the run's own workspace secrets via
+      `Arbiter.Worker.WorkerEnv.secret_values/1`; pass an explicit list only
+      to override. See the moduledoc on why this is still weaker than the
+      live path's.
 
   """
   @spec backfill(keyword()) :: report()
@@ -110,8 +117,13 @@ defmodule Arbiter.Workers.StepBackfill do
 
   # ---- internals ---------------------------------------------------------
 
+  # Both bounds, always. A `--resume` chain shares one session file, so the
+  # parent's read has to stop at the parent's death or it files the child's
+  # tool calls under the parent's run id — the mirror image of the
+  # double-billing `:since` exists to prevent. A nil `completed_at` (run still
+  # open) leaves the read unbounded above, since there is no later run yet.
   defp backfill_from(run, path, opts) do
-    case ClaudeSessionFile.read_steps(path, since: run.started_at) do
+    case ClaudeSessionFile.read_steps(path, since: run.started_at, until: run.completed_at) do
       {:ok, steps} ->
         {:ok, insert_steps(run, steps, opts)}
 
@@ -126,7 +138,7 @@ defmodule Arbiter.Workers.StepBackfill do
 
   defp insert_steps(run, steps, opts) do
     apply? = Keyword.get(opts, :apply?, false)
-    redact_values = Keyword.get(opts, :redact_values, [])
+    redact_values = redact_values(run, opts)
     known = existing_tool_use_ids(run)
 
     {fresh, existing} = Enum.split_with(steps, &(not MapSet.member?(known, &1.tool_use_id)))
@@ -146,6 +158,18 @@ defmodule Arbiter.Workers.StepBackfill do
       existing: length(existing),
       failed: failed
     }
+  end
+
+  # Redaction is not opt-in. The operator entry point (`mix
+  # arbiter.backfill_run_steps`) has no flag for secret values and never will
+  # — a summary lifted raw out of a session JSONL is exactly the "secret
+  # escapes redaction on one surface but not another" failure the single
+  # choke-point exists to prevent. So the default is the run's *own*
+  # workspace secrets, resolved lazily (a DB read per run, and only when the
+  # caller didn't supply a list). `secret_values/1` is already best-effort and
+  # nil-safe, returning `[]` for an unknown task.
+  defp redact_values(run, opts) do
+    Keyword.get_lazy(opts, :redact_values, fn -> WorkerEnv.secret_values(run.task_id) end)
   end
 
   # A `tool_use_id` is unique within a session, so it is the natural

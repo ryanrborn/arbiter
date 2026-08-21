@@ -148,6 +148,7 @@ defmodule Arbiter.Loop.CorpusTest do
 
       assert row.stop_category == "context_thrash"
       assert row.terminal_lines == []
+      refute row.transcript_read?
       assert meta.transcript_reads == 0
       assert meta.failed_runs == 1
 
@@ -186,6 +187,21 @@ defmodule Arbiter.Loop.CorpusTest do
 
       assert Enum.any?(row.terminal_lines, &String.contains?(&1, "DBConnection"))
       assert meta.transcript_reads == 1
+    end
+
+    # `transcript_reads` is documented as "how much of itself still had to be
+    # text-mined". Counting rows whose read *returned lines* scores a blind
+    # window (output log reaped) identically to a fully-structured one.
+    test "a reaped output log still counts as a transcript read" do
+      _run = failed_run("bd-corpus-reaped", %{failure_reason: "claude session error"})
+      # No write_log/2 — the log is gone, so the bounded read returns nothing.
+
+      assert {:ok, [row], meta} = Corpus.fetch(window())
+
+      assert row.terminal_lines == []
+      assert row.transcript_read?
+      assert meta.transcript_reads == 1
+      assert meta.failed_runs == 1
     end
 
     test "a completed run is never read and never counted" do

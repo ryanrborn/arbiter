@@ -63,6 +63,12 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   no parseable `timestamp` are treated as out-of-window when `:since` is given
   — under-reporting is the safe direction here, double-billing is not.
 
+  `read_steps/2` needs the bound in *both* directions, and takes `:until` as
+  well. Tokens are read for the newest run in a chain, where "everything after
+  my start" is the right window; steps are backfilled for *every* run in the
+  chain, and reading a parent with no upper bound would read past its own
+  death and file the child's tool calls under the parent's run id.
+
   ## Cost
 
   The on-disk `assistant` lines carry token buckets but **no per-turn dollar
@@ -214,21 +220,32 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
 
   ## Options
 
-    * `:since` — a `DateTime` (or ISO8601 string) cutoff, applied to the
+    * `:since` — a `DateTime` (or ISO8601 string) lower bound, applied to the
       *result* line's timestamp, so a `--resume`-shared file doesn't
-      attribute the previous run's tool calls to this one. A step whose
-      timestamp is unparseable is dropped when a cutoff is given (same
-      under-report-rather-than-misattribute rule as `read_totals/2`).
+      attribute the previous run's tool calls to this one.
+    * `:until` — the matching *upper* bound. A `--resume` chain shares one
+      file in both directions: reading a parent run without an upper bound
+      absorbs every child run's calls that were appended after the parent
+      died. Callers pass the run's `completed_at`; a nil one keeps the read
+      unbounded above (the run is still open, so there is no later run).
+
+  A step whose result line carries no parseable timestamp is dropped when
+  *either* bound is given — the same under-report-rather-than-misattribute
+  rule `read_totals/2` uses, since against a bound an undated line is
+  ambiguous.
 
   """
   @spec read_steps(String.t(), keyword()) :: {:ok, [step_event()]} | {:error, term()}
   def read_steps(path, opts \\ []) when is_binary(path) and is_list(opts) do
-    since = normalize_since(Keyword.get(opts, :since))
+    window = {
+      normalize_bound(Keyword.get(opts, :since)),
+      normalize_bound(Keyword.get(opts, :until))
+    }
 
     case File.open(path, [:read, :binary]) do
       {:ok, io} ->
         try do
-          {:ok, collect_steps(io, since)}
+          {:ok, collect_steps(io, window)}
         after
           File.close(io)
         end
@@ -307,17 +324,19 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
 
   defp parse_timestamp(_ts), do: :error
 
-  defp normalize_since(nil), do: nil
-  defp normalize_since(%DateTime{} = dt), do: dt
+  defp normalize_since(value), do: normalize_bound(value)
 
-  defp normalize_since(ts) when is_binary(ts) do
+  defp normalize_bound(nil), do: nil
+  defp normalize_bound(%DateTime{} = dt), do: dt
+
+  defp normalize_bound(ts) when is_binary(ts) do
     case parse_timestamp(ts) do
       {:ok, dt} -> dt
       :error -> nil
     end
   end
 
-  defp normalize_since(_other), do: nil
+  defp normalize_bound(_other), do: nil
 
   defp add_usage(totals, usage, msg) do
     %{
@@ -350,17 +369,17 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   # ---- step reconstruction (bd-apwfmy Phase 2) ---------------------------
 
   # Fold the file into {resolved_tool_use_ids, pending_tool_uses, reversed_steps}.
-  defp collect_steps(io, since) do
+  defp collect_steps(io, window) do
     io
     |> IO.stream(:line)
-    |> Enum.reduce({MapSet.new(), %{}, []}, &absorb_step_line(&1, &2, since))
+    |> Enum.reduce({MapSet.new(), %{}, []}, &absorb_step_line(&1, &2, window))
     |> elem(2)
     |> Enum.reverse()
   end
 
-  defp absorb_step_line(line, acc, since) do
+  defp absorb_step_line(line, acc, window) do
     case decode(line) do
-      {:ok, event} -> absorb_step_event(event, acc, since)
+      {:ok, event} -> absorb_step_event(event, acc, window)
       _ -> acc
     end
   end
@@ -368,7 +387,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   defp absorb_step_event(
          %{"type" => "assistant", "message" => %{"content" => content}} = event,
          {resolved, pending, steps},
-         _since
+         _window
        )
        when is_list(content) do
     ts = line_timestamp(event)
@@ -378,14 +397,14 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   defp absorb_step_event(
          %{"type" => "user", "message" => %{"content" => content}} = event,
          acc,
-         since
+         window
        )
        when is_list(content) do
     ts = line_timestamp(event)
-    Enum.reduce(content, acc, &resolve_tool_result(&1, &2, ts, since))
+    Enum.reduce(content, acc, &resolve_tool_result(&1, &2, ts, window))
   end
 
-  defp absorb_step_event(_event, acc, _since), do: acc
+  defp absorb_step_event(_event, acc, _window), do: acc
 
   # `put_new`: a streaming re-emit repeats the block verbatim, and the FIRST
   # sighting is the one that carries the truthful start time.
@@ -404,20 +423,20 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
          %{"type" => "tool_result", "tool_use_id" => id} = block,
          {resolved, pending, steps} = acc,
          ts,
-         since
+         window
        )
        when is_binary(id) do
     if MapSet.member?(resolved, id) do
       # A repeated result for a call already recorded. One call, one row.
       acc
     else
-      resolve_new_tool_result(block, id, {MapSet.put(resolved, id), pending, steps}, ts, since)
+      resolve_new_tool_result(block, id, {MapSet.put(resolved, id), pending, steps}, ts, window)
     end
   end
 
-  defp resolve_tool_result(_block, acc, _ts, _since), do: acc
+  defp resolve_tool_result(_block, acc, _ts, _window), do: acc
 
-  defp resolve_new_tool_result(block, id, {resolved, pending, steps}, ts, since) do
+  defp resolve_new_tool_result(block, id, {resolved, pending, steps}, ts, window) do
     {call, pending} = Map.pop(pending, id)
 
     step = %{
@@ -430,18 +449,26 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       duration_ms: elapsed_ms(call, ts)
     }
 
-    if keep_step?(step, since) do
+    if keep_step?(step, window) do
       {resolved, pending, [step | steps]}
     else
       {resolved, pending, steps}
     end
   end
 
-  defp keep_step?(_step, nil), do: true
-  defp keep_step?(%{occurred_at: nil}, %DateTime{}), do: false
+  defp keep_step?(_step, {nil, nil}), do: true
+  # A bound is given but the result line was undated: ambiguous, so dropped.
+  defp keep_step?(%{occurred_at: nil}, _window), do: false
 
-  defp keep_step?(%{occurred_at: %DateTime{} = at}, %DateTime{} = since),
-    do: DateTime.compare(at, since) != :lt
+  defp keep_step?(%{occurred_at: %DateTime{} = at}, {since, until}) do
+    after_since?(at, since) and before_until?(at, until)
+  end
+
+  defp after_since?(_at, nil), do: true
+  defp after_since?(at, %DateTime{} = since), do: DateTime.compare(at, since) != :lt
+
+  defp before_until?(_at, nil), do: true
+  defp before_until?(at, %DateTime{} = until), do: DateTime.compare(at, until) != :gt
 
   defp elapsed_ms(%{started_at: %DateTime{} = from}, %DateTime{} = to) do
     max(DateTime.diff(to, from, :millisecond), 0)
