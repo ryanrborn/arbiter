@@ -33,15 +33,20 @@ defmodule Arbiter.Loop do
        `:patch_config`), so every apply produces a normal PaperTrail version
        attributed to `loop:proposal:<id>` — the queue never writes to those
        tables directly.
+
+  ## Where the work lives
+
+  This module is the queue's public API and its record/reinforce/promote path.
+  Applying a proposal is `Arbiter.Loop.Apply` (validate → side effect →
+  persist → notify, each step public and separately testable); fan-out is
+  `Arbiter.Loop.Notify`.
   """
 
   use Ash.Domain
 
-  alias Arbiter.Loop.{PendingWrite, RepoDocPatch}
-  alias Arbiter.Mergers
+  alias Arbiter.Loop.{Apply, Notify, PendingWrite}
   alias Arbiter.Messages.Message
-  alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
-  alias Arbiter.Worker.Worktree
+  alias Arbiter.Tasks.Workspace
 
   require Ash.Query
   require Logger
@@ -58,9 +63,6 @@ defmodule Arbiter.Loop do
   @default_evidence_bar %{min_incidents: 3, min_distinct_tasks: 2}
 
   @live_states [:hypothesis, :proposed]
-
-  # Internal fan-out for every queue state change. See `pubsub_topic/0`.
-  @pubsub_topic "loop_proposals"
 
   @doc "The built-in evidence bar, used when a workspace does not override it."
   @spec default_evidence_bar() :: %{
@@ -467,7 +469,7 @@ defmodule Arbiter.Loop do
   end
 
   defp post_escalation(%PendingWrite{} = row) do
-    case notify_workspace_id(row) do
+    case Notify.workspace_id(row) do
       nil ->
         Logger.debug("Arbiter.Loop escalation skipped: no workspace to post into")
         :skipped
@@ -510,58 +512,14 @@ defmodule Arbiter.Loop do
       :skipped
   end
 
-  # A fleet-wide proposal has no workspace of its own, but the coordinator
-  # mailbox and the `/events` stream are both workspace-keyed. `arb loop analyze
-  # --propose` without `--workspace` is the primary path, so falling back to the
-  # installation default workspace is what makes the escalation fire at all.
-  # `default_workspace_id/0` deliberately errors when the install is ambiguous
-  # (several workspaces, none named "default"), and there we stay silent rather
-  # than pick one.
-  defp notify_workspace_id(%PendingWrite{workspace_id: ws_id}) when is_binary(ws_id),
-    do: ws_id
-
-  defp notify_workspace_id(_row) do
-    case Arbiter.Quota.default_workspace_id() do
-      {:ok, ws_id} -> ws_id
-      _ -> nil
-    end
-  end
-
   @doc """
   PubSub topic the queue publishes every state change on, for in-process
-  subscribers (the `/loop` dashboard).
-
-  Distinct from the `/events` `loop_proposal` topic on purpose: `/events` is
-  keyed by workspace and can only carry a workspace-scoped row, while most
-  proposals are fleet-wide with no workspace at all.
+  subscribers (the `/loop` dashboard). See `Arbiter.Loop.Notify`.
   """
-  def pubsub_topic, do: @pubsub_topic
+  @spec pubsub_topic() :: String.t()
+  defdelegate pubsub_topic(), to: Notify, as: :topic
 
-  defp announce(%PendingWrite{} = row, event) do
-    payload = %{
-      event: event,
-      id: row.id,
-      kind: row.kind,
-      state: row.state,
-      scope: row.scope,
-      gist: row.gist,
-      evidence_count: row.evidence_count,
-      distinct_tasks: row.distinct_tasks
-    }
-
-    Phoenix.PubSub.broadcast(Arbiter.PubSub, @pubsub_topic, {:loop_proposal, event, row.id})
-
-    # `Arbiter.Events.broadcast/3` is workspace-keyed and no-ops on a nil id, and
-    # a fleet-wide proposal carries no workspace of its own — so it is published
-    # onto the installation default workspace's stream, the same fallback the
-    # escalation uses. Ambiguous installs resolve to nil and simply don't reach
-    # `/events`.
-    Arbiter.Events.broadcast(notify_workspace_id(row), "loop_proposal", payload)
-  rescue
-    e ->
-      Logger.debug("Arbiter.Loop announce swallowed: #{Exception.message(e)}")
-      :ok
-  end
+  defp announce(%PendingWrite{} = row, event), do: Notify.announce(row, event)
 
   # ---- reads --------------------------------------------------------------
 
@@ -651,6 +609,10 @@ defmodule Arbiter.Loop do
   Refuses anything that is not `:proposed`, naming the current evidence count
   and what is still needed. On success the row moves to `:applied` with
   `applied_at` stamped.
+
+  The pipeline itself lives in `Arbiter.Loop.Apply` as four independently
+  callable steps — `validate/1`, `side_effect/2`, `persist/2`, `notify/1` —
+  so the no-auto-apply discipline can be asserted on the guard alone.
   """
   @spec apply_pending(PendingWrite.t() | String.t(), keyword()) ::
           {:ok, PendingWrite.t()}
@@ -663,367 +625,8 @@ defmodule Arbiter.Loop do
   end
 
   def apply_pending(%PendingWrite{} = row, opts) do
-    operator = Keyword.get(opts, :actor, "operator")
-
-    case inapplicable_reason(row) do
-      nil ->
-        do_apply(row, operator)
-
-      reason ->
-        {:error, {:not_applicable, reason}}
-    end
+    Apply.run(row, Keyword.get(opts, :actor, "operator"))
   end
-
-  defp do_apply(row, operator) do
-    # The change is attributed to the proposal, not to the loop: reading the
-    # target's version history shows exactly which queued proposal moved it.
-    attribution = "loop:proposal:#{row.id}"
-
-    case dispatch_apply(row, attribution) do
-      :ok ->
-        with {:ok, applied} <-
-               Ash.update(row, %{state: :applied, actor: operator},
-                 action: :mark_applied,
-                 actor: operator
-               ) do
-          announce(applied, :applied)
-          {:ok, applied}
-        end
-
-      {:error, _} = err ->
-        err
-    end
-  end
-
-  defp dispatch_apply(%PendingWrite{kind: :difficulty_override, payload: payload}, attribution) do
-    with {:ok, task_id} <- payload_string(payload, "task_id"),
-         {:ok, difficulty} <- payload_integer(payload, "difficulty"),
-         {:ok, issue} <- fetch_issue(task_id) do
-      # `change_origin` is the Issue-side attribution hook: it lands in the
-      # version row's `version_action_inputs`, since Issue has no `actor`
-      # column to snapshot the way Skill / Workspace do.
-      case Ash.update(issue, %{difficulty: difficulty, change_origin: attribution},
-             action: :update,
-             actor: attribution
-           ) do
-        {:ok, _} -> :ok
-        {:error, err} -> {:error, {:invalid, ash_message(err)}}
-      end
-    end
-  end
-
-  defp dispatch_apply(%PendingWrite{kind: :skill_patch, payload: payload}, attribution) do
-    with {:ok, ref} <- payload_string(payload, "skill", skill_gap_message()),
-         {:ok, attrs} <- skill_attrs(payload) do
-      case Arbiter.Skills.update_skill(ref, attrs, actor: attribution) do
-        {:ok, _} -> :ok
-        {:error, :not_found} -> {:error, {:unmapped, "no skill named #{inspect(ref)}"}}
-        {:error, err} -> {:error, {:invalid, ash_message(err)}}
-      end
-    end
-  end
-
-  defp dispatch_apply(%PendingWrite{kind: :skill_create, payload: payload}, attribution) do
-    with {:ok, name} <- payload_string(payload, "name"),
-         {:ok, body} <- payload_string(payload, "body") do
-      attrs =
-        %{name: name, body: body}
-        |> maybe_put(:metadata, Map.get(payload, "metadata"))
-        |> maybe_put(:workspace_id, Map.get(payload, "workspace_id"))
-
-      case Arbiter.Skills.create_skill(attrs, actor: attribution) do
-        {:ok, _} -> :ok
-        {:error, err} -> {:error, {:invalid, ash_message(err)}}
-      end
-    end
-  end
-
-  # Invariant 4: config changes go through the deep-merge `:patch_config`
-  # action, never a raw overwrite of `config`.
-  defp dispatch_apply(%PendingWrite{kind: :config_set} = row, attribution) do
-    payload = row.payload
-
-    with {:ok, ws_id} <- config_workspace(payload, row.workspace_id),
-         {:ok, patch} <- payload_map(payload, "patch"),
-         {:ok, ws} <- fetch_workspace(ws_id) do
-      unset = Map.get(payload, "unset_paths") || []
-
-      case Ash.update(ws, %{patch: patch, unset_paths: unset},
-             action: :patch_config,
-             actor: attribution
-           ) do
-        {:ok, _} -> :ok
-        {:error, err} -> {:error, {:invalid, ash_message(err)}}
-      end
-    end
-  end
-
-  # Rung 2 of the destination ladder (Amendment D): a repo-scoped lesson lands
-  # as a patch to that repo's CLAUDE.md, applied through the normal PR path —
-  # not a direct table write, since the target is a file humans also edit.
-  # `Worktree.create/3` gives an isolated branch to commit into;
-  # `RepoDocPatch.upsert/4` owns the delimited managed section so a human edit
-  # and an Arbiter edit never clobber each other; `Mergers.for_workspace/1`
-  # opens the PR the same way any other change in that repo would be opened.
-  defp dispatch_apply(%PendingWrite{kind: :repo_doc_patch} = row, attribution) do
-    payload = row.payload
-
-    with {:ok, repo} <- repo_doc_repo(row),
-         {:ok, lesson} <- payload_string(payload, "lesson"),
-         {:ok, ws_id} <- config_workspace(payload, row.workspace_id),
-         {:ok, ws} <- fetch_workspace(ws_id),
-         {:ok, {repo_path, target_branch}} <- resolve_repo_doc_target(ws, repo) do
-      apply_repo_doc_patch(ws, repo, repo_path, target_branch, row, lesson, attribution)
-    end
-  end
-
-  defp repo_doc_repo(%PendingWrite{repo: repo}) when is_binary(repo) and repo != "",
-    do: {:ok, repo}
-
-  defp repo_doc_repo(_row) do
-    {:error,
-     {:unmapped,
-      "this proposal names no repo: CLAUDE.md needs a repo-scoped finding to know which " <>
-        "repo's file to patch — attribute the finding to a repo before proposing it"}}
-  end
-
-  defp resolve_repo_doc_target(%Workspace{config: config}, repo) do
-    paths = Map.get(config || %{}, "repo_paths") || %{}
-
-    case RepoConfig.find_entry(paths, repo) do
-      nil ->
-        {:error,
-         {:unmapped, "repo #{inspect(repo)} is not registered in this workspace's repo_paths"}}
-
-      entry ->
-        case RepoConfig.repo_path_from_config(entry) do
-          nil ->
-            {:error, {:unmapped, "repo #{inspect(repo)}'s repo_paths entry has no path"}}
-
-          path ->
-            {:ok, {path, RepoConfig.repo_target_from_config(entry) || "main"}}
-        end
-    end
-  end
-
-  defp apply_repo_doc_patch(ws, repo, repo_path, target_branch, row, lesson, attribution) do
-    branch = "loop/repo-doc-patch-#{row.id}"
-
-    case Worktree.create(repo_path, branch, target_branch) do
-      {:ok, worktree_path} ->
-        result =
-          write_repo_doc_patch(
-            ws,
-            repo,
-            repo_path,
-            target_branch,
-            worktree_path,
-            branch,
-            row,
-            lesson,
-            attribution
-          )
-
-        _ = Worktree.cleanup(worktree_path)
-        result
-
-      {:error, reason} ->
-        {:error,
-         {:invalid, "could not provision a worktree for #{repo_path}: #{inspect(reason)}"}}
-    end
-  end
-
-  defp write_repo_doc_patch(
-         ws,
-         repo,
-         repo_path,
-         target_branch,
-         worktree_path,
-         branch,
-         row,
-         lesson,
-         attribution
-       ) do
-    doc_path = repo_doc_path(row.payload)
-    file_path = Path.join(worktree_path, doc_path)
-    current = repo_doc_read(file_path)
-    cap_bytes = repo_doc_cap_bytes(row.payload)
-
-    with {:ok, %{content: new_content, removed: removed}} <-
-           RepoDocPatch.upsert(current, row.fingerprint, lesson, cap_bytes: cap_bytes),
-         :ok <- File.write(file_path, new_content),
-         :ok <-
-           repo_doc_commit(
-             worktree_path,
-             doc_path,
-             repo_doc_commit_message(row, removed, attribution)
-           ),
-         :ok <- Mergers.prepare_with_repo(ws, repo),
-         adapter <- Mergers.for_workspace(ws),
-         :ok <- repo_doc_maybe_push(adapter, worktree_path),
-         {:ok, _mr_ref} <-
-           Mergers.open_with_retry(
-             adapter,
-             branch,
-             row.gist,
-             repo_doc_pr_description(row, lesson, removed),
-             %{repo_path: repo_path, target_branch: target_branch}
-           ) do
-      :ok
-    else
-      {:error, {:entry_too_large, cap_bytes}} ->
-        {:error,
-         {:invalid,
-          "this lesson (#{byte_size(lesson)} bytes) alone exceeds the #{cap_bytes}-byte CLAUDE.md section cap"}}
-
-      {:error, :invalid_entry_text} ->
-        {:error,
-         {:invalid,
-          "this lesson must be a single line with no arbiter:begin/end markers " <>
-            "(CLAUDE.md entries are rendered one per line)"}}
-
-      {:error, reason} ->
-        {:error, {:invalid, inspect(reason)}}
-    end
-  end
-
-  # bd-1cusio: this write path is scoped to a repo's CLAUDE.md, not arbitrary
-  # files — any payload-supplied override is ignored so no proposal can steer
-  # `File.write/2` outside the file this feature exists to patch.
-  defp repo_doc_path(_payload), do: "CLAUDE.md"
-
-  defp repo_doc_cap_bytes(payload) do
-    case Map.get(payload, "cap_bytes") do
-      n when is_integer(n) and n > 0 -> n
-      _ -> 4_000
-    end
-  end
-
-  defp repo_doc_read(file_path) do
-    case File.read(file_path) do
-      {:ok, content} -> content
-      {:error, _} -> ""
-    end
-  end
-
-  defp repo_doc_commit(worktree_path, doc_path, message) do
-    with {_, 0} <- System.cmd("git", ["add", doc_path], cd: worktree_path, stderr_to_stdout: true),
-         {_, 0} <-
-           System.cmd("git", ["commit", "-m", message], cd: worktree_path, stderr_to_stdout: true) do
-      :ok
-    else
-      {output, _status} -> {:error, {:git_commit_failed, output}}
-    end
-  end
-
-  # `Direct` operates on the canonical repo's own refs (no remote), so pushing
-  # would just fail against whatever `origin` the local checkout has — or has
-  # none at all. Every remote-backed adapter needs the branch pushed first.
-  defp repo_doc_maybe_push(Mergers.Direct, _worktree_path), do: :ok
-
-  defp repo_doc_maybe_push(_adapter, worktree_path) do
-    case Worktree.push(worktree_path, set_upstream: true) do
-      {:ok, _output} -> :ok
-      {:error, reason} -> {:error, {:git_push_failed, reason}}
-    end
-  end
-
-  defp repo_doc_commit_message(row, [], attribution),
-    do: "#{row.gist}\n\nApplied-by: #{attribution}"
-
-  defp repo_doc_commit_message(row, removed, attribution) do
-    "#{row.gist}\n\n" <>
-      "Evicted (over the CLAUDE.md size cap): #{Enum.join(removed, ", ")}\n\n" <>
-      "Applied-by: #{attribution}"
-  end
-
-  defp repo_doc_pr_description(row, lesson, removed) do
-    base =
-      "Repo-scoped lesson from the loop pass (bd-9j2g3x), applied as proposal `#{row.id}`.\n\n#{lesson}"
-
-    case removed do
-      [] ->
-        base
-
-      _ ->
-        base <>
-          "\n\n**Evicted to stay under the CLAUDE.md size cap:** #{Enum.join(removed, ", ")}"
-    end
-  end
-
-  defp skill_gap_message do
-    "this proposal names no target skill: the loop does not yet map a finding " <>
-      "category to a skill (Stage 3 work), so the skill patch must be authored " <>
-      "by hand — reject this row once you have"
-  end
-
-  defp skill_attrs(payload) do
-    attrs =
-      %{}
-      |> maybe_put(:body, Map.get(payload, "body"))
-      |> maybe_put(:metadata, Map.get(payload, "metadata"))
-      |> maybe_put(:activation_mode, Map.get(payload, "activation_mode"))
-
-    if map_size(attrs) == 0 do
-      {:error, {:unmapped, "this proposal carries no skill patch content to apply"}}
-    else
-      {:ok, attrs}
-    end
-  end
-
-  defp config_workspace(payload, fallback) do
-    case Map.get(payload, "workspace_id") || fallback do
-      id when is_binary(id) -> {:ok, id}
-      _ -> {:error, {:unmapped, "this proposal names no workspace to configure"}}
-    end
-  end
-
-  defp fetch_issue(task_id) do
-    case Ash.get(Issue, task_id) do
-      {:ok, issue} -> {:ok, issue}
-      _ -> {:error, {:unmapped, "no task #{task_id}"}}
-    end
-  end
-
-  defp fetch_workspace(ws_id) do
-    case Ash.get(Workspace, ws_id) do
-      {:ok, ws} -> {:ok, ws}
-      _ -> {:error, {:unmapped, "no workspace #{ws_id}"}}
-    end
-  end
-
-  defp payload_string(payload, key, message \\ nil) do
-    case Map.get(payload, key) do
-      v when is_binary(v) and v != "" -> {:ok, v}
-      _ -> {:error, {:unmapped, message || "payload is missing #{inspect(key)}"}}
-    end
-  end
-
-  defp payload_integer(payload, key) do
-    case Map.get(payload, key) do
-      n when is_integer(n) ->
-        {:ok, n}
-
-      s when is_binary(s) ->
-        case Integer.parse(s) do
-          {n, ""} -> {:ok, n}
-          _ -> {:error, {:unmapped, "payload #{inspect(key)} is not an integer"}}
-        end
-
-      _ ->
-        {:error, {:unmapped, "payload is missing #{inspect(key)}"}}
-    end
-  end
-
-  defp payload_map(payload, key) do
-    case Map.get(payload, key) do
-      %{} = m when map_size(m) > 0 -> {:ok, m}
-      _ -> {:error, {:unmapped, "payload is missing a non-empty #{inspect(key)} map"}}
-    end
-  end
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # ---- reject -------------------------------------------------------------
 
@@ -1064,10 +667,4 @@ defmodule Arbiter.Loop do
   @doc "The states a proposal may be in while it is still awaiting a decision."
   @spec live_states() :: [atom()]
   def live_states, do: @live_states
-
-  defp ash_message(%Ash.Error.Invalid{errors: errors}),
-    do: errors |> Enum.map(&Exception.message/1) |> Enum.join("; ")
-
-  defp ash_message(err) when is_exception(err), do: Exception.message(err)
-  defp ash_message(err), do: inspect(err)
 end
