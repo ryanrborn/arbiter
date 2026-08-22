@@ -169,10 +169,15 @@ defmodule ArbiterWeb.CoreComponents.Data do
   @doc """
   Renders a generic data table from a list of rows and `:col` slots.
 
+  Columns without `width` share the remaining space equally (`minmax(0,1fr)`);
+  give the one free-text column (e.g. `title`) no width so it absorbs the rest.
+
   ## Examples
 
       <.data_table id="tasks" rows={@tasks}>
-        <:col :let={task} label="Title">{task.title}</:col>
+        <:col :let={task} label="task" width="84px">{task.id}</:col>
+        <:col :let={task} label="title" mono={false}>{task.title}</:col>
+        <:col :let={task} label="spend" width="60px" align="right">{task.cost}</:col>
       </.data_table>
   """
   attr :id, :string, required: true
@@ -181,22 +186,58 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
   slot :col, required: true do
     attr :label, :string
+    attr :width, :string, doc: ~s(CSS width, e.g. "84px" — omit for the flexible column)
+    attr :align, :string, doc: ~s(pass "right" for numeric columns; defaults left)
+    attr :mono, :boolean, doc: "defaults true — pass false for prose columns like title"
   end
 
   def data_table(assigns) do
+    assigns =
+      assign(assigns,
+        template_columns: Enum.map_join(assigns.col, " ", &(&1[:width] || "minmax(0,1fr)")),
+        last_index: length(assigns.rows) - 1
+      )
+
     ~H"""
-    <table id={@id} class={["table table-zebra", @class]}>
-      <thead>
-        <tr>
-          <th :for={col <- @col}>{col[:label]}</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr :for={row <- @rows}>
-          <td :for={col <- @col}>{render_slot(col, row)}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div id={@id} class={["w-full", @class]}>
+      <div
+        class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
+        style={"grid-template-columns: #{@template_columns};"}
+      >
+        <span
+          :for={col <- @col}
+          class={[
+            "text-[10.5px] uppercase tracking-[0.06em] font-[family-name:var(--font-mono)] text-[var(--text-label)]",
+            data_table_align_class(col)
+          ]}
+        >
+          {col[:label]}
+        </span>
+      </div>
+      <div
+        :for={{row, index} <- Enum.with_index(@rows)}
+        class={[
+          "grid items-center gap-3 min-h-[34px] px-[14px] hover:bg-[var(--arb-raised-hover)]",
+          index != @last_index && "border-b border-[var(--arb-line-soft)]"
+        ]}
+        style={"grid-template-columns: #{@template_columns};"}
+      >
+        <span
+          :for={col <- @col}
+          class={[
+            "text-[11.5px] truncate",
+            data_table_mono?(col) && "font-[family-name:var(--font-mono)] tabular-nums",
+            !data_table_mono?(col) && "text-[var(--text-body)]",
+            data_table_align_class(col)
+          ]}
+        >
+          {render_slot(col, row)}
+        </span>
+      </div>
+    </div>
     """
   end
+
+  defp data_table_align_class(col), do: if(col[:align] == "right", do: "text-right")
+  defp data_table_mono?(col), do: col[:mono] != false
 end
