@@ -182,6 +182,71 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
     end
   end
 
+  describe "create — CLI preview footer" do
+    test "shows the bare arb issue create command before anything is typed",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      html = view |> element(~s(button[phx-click="new"])) |> render_click()
+
+      assert html =~ ~s(id="task-create-cli-preview")
+      assert html =~ "arb issue create &quot;&quot;"
+    end
+
+    test "updates live as the title and other fields are typed", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      view |> element(~s(button[phx-click="new"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-create-form", %{
+          "task" => %{
+            "title" => "Fix the flaky merge queue test",
+            "issue_type" => "bug",
+            "priority" => "1",
+            "difficulty" => "3",
+            "description" => "context here"
+          }
+        })
+        |> render_change()
+
+      assert html =~
+               ~s(arb issue create &quot;Fix the flaky merge queue test&quot; --type bug --priority 1 --difficulty 3)
+
+      # Description has no CLI flag in arb issue create — it isn't reflected.
+      refute html =~ "--description"
+    end
+
+    test "defaults (feature type, priority 2, unset difficulty) are omitted from the preview",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      view |> element(~s(button[phx-click="new"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-create-form", %{
+          "task" => %{"title" => "plain title", "issue_type" => "feature", "priority" => "2"}
+        })
+        |> render_change()
+
+      assert html =~ ~s(arb issue create &quot;plain title&quot;)
+      refute html =~ "--type"
+      refute html =~ "--priority"
+      refute html =~ "--difficulty"
+    end
+
+    test "double quotes in the title are escaped in the preview", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      view |> element(~s(button[phx-click="new"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-create-form", %{"task" => %{"title" => ~s(say "hi")}})
+        |> render_change()
+
+      assert html =~ ~s(arb issue create &quot;say \\&quot;hi\\&quot;&quot;)
+    end
+  end
+
   describe "create — duplicate check" do
     test "an open issue with the same title is flagged instead of silently duplicated",
          %{conn: conn, ws: ws} do

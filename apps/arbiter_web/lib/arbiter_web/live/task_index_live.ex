@@ -113,6 +113,12 @@ defmodule ArbiterWeb.TaskIndexLive do
     {:noreply, submit_create(socket, socket.assigns.create_params, true)}
   end
 
+  # Keeps the footer's live `arb issue create` preview in sync as the operator
+  # types. No validation or I/O here — that's what "create" does on submit.
+  def handle_event("preview_new", %{"task" => params}, socket) do
+    {:noreply, assign(socket, :create_params, params)}
+  end
+
   # Validation that needs no I/O runs here, on the LiveView process; everything
   # that touches the DB or the tracker runs in the async task.
   defp submit_create(socket, params, force?) do
@@ -235,6 +241,37 @@ defmodule ArbiterWeb.TaskIndexLive do
     end
   end
 
+  # The footer's live equivalent of what's typed, as `arb issue create` would
+  # be invoked — the only cross-reference point between the dashboard and the
+  # CLI, so the flag mapping has to be exact. `workspace_id`/`acceptance` have
+  # no CLI flag (workspace is resolved from cwd, acceptance isn't exposed by
+  # `arb issue create`) and are deliberately absent. Flags whose typed value
+  # matches the server default are omitted so the command shown is the
+  # minimal one that reproduces the create.
+  defp cli_preview(params) do
+    title = TaskForm.trimmed(params["title"]) || ""
+
+    ["arb issue create", shell_quote(title)]
+    |> maybe_flag("--type", TaskForm.trimmed(params["issue_type"]), "feature")
+    |> maybe_flag("--priority", TaskForm.trimmed(params["priority"]), "2")
+    |> maybe_flag("--difficulty", TaskForm.trimmed(params["difficulty"]), nil)
+    |> Enum.join(" ")
+  end
+
+  defp maybe_flag(parts, _flag, value, default) when value == default or is_nil(value),
+    do: parts
+
+  defp maybe_flag(parts, flag, value, _default), do: parts ++ [flag, value]
+
+  defp shell_quote(value) do
+    escaped =
+      value
+      |> String.replace("\\", "\\\\")
+      |> String.replace("\"", "\\\"")
+
+    ~s("#{escaped}")
+  end
+
   defp load_workspaces(socket) do
     workspaces =
       Workspace
@@ -292,137 +329,140 @@ defmodule ArbiterWeb.TaskIndexLive do
           />
           <div class="flex items-center gap-2">
             <.live_badge live={@live} />
-            <.button
-              :if={!@creating}
-              phx-click="new"
-              variant="primary"
-              class="btn btn-sm btn-primary"
-            >
-              <.icon name="hero-plus" class="size-4" /> New {@issue_label}
-            </.button>
+            <ArbiterWeb.CoreComponents.Core.button :if={!@creating} phx-click="new" variant="primary">
+              <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-plus" size={13} /></:icon>
+              New {@issue_label}
+            </ArbiterWeb.CoreComponents.Core.button>
           </div>
         </div>
 
-        <section :if={@creating} class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-3">
-            <h2 class="font-semibold text-sm">Create an {@issue_label}</h2>
+        <.panel :if={@creating} title={"Create an #{@issue_label}"}>
+          <p :if={@workspaces == []} class="text-[12.5px] text-[var(--arb-fail-text)]">
+            No workspaces exist yet — create one first at <.link
+              navigate={~p"/workspaces"}
+              class="text-[var(--text-link)] underline"
+            >/workspaces</.link>.
+          </p>
 
-            <p :if={@workspaces == []} class="text-sm text-error">
-              No workspaces exist yet — create one first at <.link
-                navigate={~p"/workspaces"}
-                class="link"
-              >/workspaces</.link>.
+          <.form
+            :if={@workspaces != []}
+            for={%{}}
+            as={:task}
+            id="task-create-form"
+            phx-submit="create"
+            phx-change="preview_new"
+            class="grid sm:grid-cols-2 gap-x-4 gap-y-3"
+          >
+            <div class="sm:col-span-2">
+              <ArbiterWeb.CoreComponents.Forms.input
+                name="task[title]"
+                label="Title"
+                value={TaskForm.value(@create_params, "title")}
+                required
+                mono={false}
+                placeholder="Short imperative summary"
+              />
+            </div>
+            <ArbiterWeb.CoreComponents.Forms.select
+              name="task[workspace_id]"
+              label="Workspace"
+              options={Enum.map(@workspaces, &{"#{&1.name} (#{&1.prefix})", &1.id})}
+              value={TaskForm.value(@create_params, "workspace_id", List.first(@workspaces).id)}
+            />
+            <ArbiterWeb.CoreComponents.Forms.select
+              name="task[issue_type]"
+              label="Type"
+              options={@issue_type_options}
+              value={TaskForm.value(@create_params, "issue_type", "feature")}
+            />
+            <ArbiterWeb.CoreComponents.Forms.select
+              name="task[priority]"
+              label="Priority"
+              options={@priority_options}
+              value={TaskForm.value(@create_params, "priority", "2")}
+            />
+            <ArbiterWeb.CoreComponents.Forms.select
+              name="task[difficulty]"
+              label="Difficulty"
+              options={@difficulty_options}
+              value={TaskForm.value(@create_params, "difficulty")}
+            />
+            <div class="sm:col-span-2">
+              <ArbiterWeb.CoreComponents.Forms.textarea
+                name="task[description]"
+                label="Description (optional)"
+                value={TaskForm.value(@create_params, "description")}
+                rows={4}
+                placeholder="Context, scope, and anything a worker would otherwise have to guess."
+              />
+            </div>
+            <div class="sm:col-span-2">
+              <ArbiterWeb.CoreComponents.Forms.textarea
+                name="task[acceptance]"
+                label="Acceptance (optional)"
+                value={TaskForm.value(@create_params, "acceptance")}
+                rows={3}
+                placeholder="How we'll know it's done."
+              />
+            </div>
+            <p :if={@create_error} class="sm:col-span-2 text-[12.5px] text-[var(--arb-fail-text)]">
+              {@create_error}
             </p>
 
-            <.form
-              :if={@workspaces != []}
-              for={%{}}
-              as={:task}
-              id="task-create-form"
-              phx-submit="create"
-              class="grid sm:grid-cols-2 gap-x-4"
+            <%!-- Duplicate-title warning. Advisory, not fatal: the same rule
+                 the REST API answers with a 409, plus the dashboard's
+                 equivalent of `--force`. --%>
+            <div
+              :if={@create_dup}
+              id="task-create-dup"
+              role="alert"
+              class="sm:col-span-2 flex flex-col items-start gap-1 rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] px-[12px] py-[10px]"
             >
-              <div class="sm:col-span-2">
-                <.input
-                  name="task[title]"
-                  label="Title"
-                  value={TaskForm.value(@create_params, "title")}
-                  required
-                  placeholder="Short imperative summary"
-                />
-              </div>
-              <.input
-                type="select"
-                name="task[workspace_id]"
-                label="Workspace"
-                options={Enum.map(@workspaces, &{"#{&1.name} (#{&1.prefix})", &1.id})}
-                value={TaskForm.value(@create_params, "workspace_id", List.first(@workspaces).id)}
-              />
-              <.input
-                type="select"
-                name="task[issue_type]"
-                label="Type"
-                options={@issue_type_options}
-                value={TaskForm.value(@create_params, "issue_type", "feature")}
-              />
-              <.input
-                type="select"
-                name="task[priority]"
-                label="Priority"
-                options={@priority_options}
-                value={TaskForm.value(@create_params, "priority", "2")}
-              />
-              <.input
-                type="select"
-                name="task[difficulty]"
-                label="Difficulty"
-                options={@difficulty_options}
-                value={TaskForm.value(@create_params, "difficulty")}
-              />
-              <div class="sm:col-span-2">
-                <.input
-                  type="textarea"
-                  name="task[description]"
-                  label="Description (optional)"
-                  value={TaskForm.value(@create_params, "description")}
-                  rows="4"
-                  placeholder="Context, scope, and anything a worker would otherwise have to guess."
-                />
-              </div>
-              <div class="sm:col-span-2">
-                <.input
-                  type="textarea"
-                  name="task[acceptance]"
-                  label="Acceptance (optional)"
-                  value={TaskForm.value(@create_params, "acceptance")}
-                  rows="3"
-                  placeholder="How we'll know it's done."
-                />
-              </div>
-              <p :if={@create_error} class="sm:col-span-2 text-sm text-error">{@create_error}</p>
+              <span class="text-[12.5px] font-medium text-[var(--arb-text-body)]">
+                {Dedup.message(@create_dup)} — file it anyway?
+              </span>
+              <ul class="text-[11px] font-[family-name:var(--font-mono)] list-disc list-inside text-[var(--text-secondary)]">
+                <li :for={{ref, title} <- dup_matches(@create_dup)}>{ref} {title}</li>
+              </ul>
+            </div>
 
-              <%!-- Duplicate-title warning. Advisory, not fatal: the same rule
-                   the REST API answers with a 409, plus the dashboard's
-                   equivalent of `--force`. --%>
-              <div
-                :if={@create_dup}
-                id="task-create-dup"
-                role="alert"
-                class="sm:col-span-2 alert alert-warning py-2 mt-1 flex-col items-start gap-1"
+            <div class="sm:col-span-2 flex items-center gap-2 mt-1">
+              <ArbiterWeb.CoreComponents.Core.button
+                type="submit"
+                variant="primary"
+                disabled={@submitting}
               >
-                <span class="text-sm font-medium">
-                  {Dedup.message(@create_dup)} — file it anyway?
-                </span>
-                <ul class="text-xs font-mono list-disc list-inside">
-                  <li :for={{ref, title} <- dup_matches(@create_dup)}>{ref} {title}</li>
-                </ul>
-              </div>
+                {if @submitting, do: "Creating…", else: "Create"}
+              </ArbiterWeb.CoreComponents.Core.button>
+              <ArbiterWeb.CoreComponents.Core.button
+                :if={@create_dup}
+                type="button"
+                phx-click="create_force"
+                variant="attention"
+                disabled={@submitting}
+              >
+                Create anyway
+              </ArbiterWeb.CoreComponents.Core.button>
+              <ArbiterWeb.CoreComponents.Core.button
+                type="button"
+                phx-click="cancel_new"
+                variant="ghost"
+              >
+                Cancel
+              </ArbiterWeb.CoreComponents.Core.button>
+            </div>
 
-              <div class="sm:col-span-2 flex gap-2 mt-1">
-                <.button
-                  type="submit"
-                  variant="primary"
-                  class="btn btn-sm btn-primary"
-                  disabled={@submitting}
-                >
-                  {if @submitting, do: "Creating…", else: "Create"}
-                </.button>
-                <.button
-                  :if={@create_dup}
-                  type="button"
-                  phx-click="create_force"
-                  class="btn btn-sm btn-warning"
-                  disabled={@submitting}
-                >
-                  Create anyway
-                </.button>
-                <.button type="button" phx-click="cancel_new" class="btn btn-sm btn-ghost">
-                  Cancel
-                </.button>
-              </div>
-            </.form>
-          </div>
-        </section>
+            <%!-- Live equivalent of what's typed, run against the CLI directly.
+                 The only cross-reference point between the dashboard and
+                 `arb` — the flag mapping must match `arb issue create` exactly. --%>
+            <p
+              id="task-create-cli-preview"
+              class="sm:col-span-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)] truncate"
+            >
+              {cli_preview(@create_params)}
+            </p>
+          </.form>
+        </.panel>
 
         <.filter_tabs
           tabs={@filters}
