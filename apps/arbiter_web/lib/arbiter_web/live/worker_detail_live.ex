@@ -779,8 +779,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 rel="noopener"
                 class="inline-flex items-center gap-[7px] mt-2 rounded-[var(--radius-field)] border border-solid font-medium h-[var(--control-sm)] px-[10px] text-[11.5px] bg-[var(--arb-attention)] border-[var(--arb-attention)] text-[var(--arb-attention-ink)] hover:brightness-[1.06] transition-[background,border-color] duration-[var(--dur-hover)] ease-[var(--arb-ease-out)]"
               >
-                <Core.icon name="hero-arrow-top-right-on-square" size={14} />
-                Open {@pr_label} <code class="font-mono text-xs opacity-80">{ref}</code>
+                <Core.icon name="hero-arrow-top-right-on-square" size={14} /> Open {@pr_label}
+                <code class="font-mono text-xs opacity-80">{ref}</code>
               </a>
             <% else %>
               <p class="text-sm text-[var(--text-label)] italic flex items-center gap-1.5 mt-2">
