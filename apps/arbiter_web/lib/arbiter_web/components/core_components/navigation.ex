@@ -182,7 +182,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         type="button"
         phx-click={@event}
         phx-value-tab={filter_tab_value(tab)}
-        aria-pressed={filter_tab_active?(tab, @active)}
+        aria-pressed={to_string(filter_tab_active?(tab, @active))}
         class={filter_tab_class(tab, index, @active)}
       >
         {filter_tab_label(tab)}{filter_tab_count(tab)}
@@ -248,7 +248,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         type="button"
         phx-click={@event}
         phx-value-option={option}
-        aria-pressed={option == @value}
+        aria-pressed={to_string(option == @value)}
         class={[
           "cursor-pointer border-0 px-[10px] py-[5px] font-[family-name:var(--font-mono)] text-[11px] font-medium",
           index > 0 && "border-l border-solid border-[var(--arb-line)]",

@@ -144,6 +144,14 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
       assert html =~ ~s(data-phx-link="patch")
       refute html =~ "phx-click"
     end
+
+    test "exposes pressed state via aria-pressed on both active and inactive tabs" do
+      tabs = [%{label: "All", value: "all", count: 1}, %{label: "Open", value: "open", count: 1}]
+      html = render_component(&filter_tabs/1, %{tabs: tabs, active: "all"})
+
+      assert element_containing(html, "All") =~ ~s(aria-pressed="true")
+      assert element_containing(html, "Open") =~ ~s(aria-pressed="false")
+    end
   end
 
   describe "segmented_control/1" do
@@ -152,6 +160,13 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
 
       assert element_containing(html, "mine") =~ "var(--arb-raised-hover)"
       refute element_containing(html, "all") =~ "var(--arb-raised-hover)"
+    end
+
+    test "exposes pressed state via aria-pressed on both active and inactive options" do
+      html = render_component(&segmented_control/1, %{options: ["mine", "all"], value: "mine"})
+
+      assert element_containing(html, "mine") =~ ~s(aria-pressed="true")
+      assert element_containing(html, "all") =~ ~s(aria-pressed="false")
     end
 
     test "dispatches the configured event with the option on click" do
