@@ -387,8 +387,9 @@ defmodule ArbiterWeb.CoreComponents.Domain do
     <div
       class={
         [
-          # Only the chevron and the role tag are rigid. The outcome takes the
-          # slack, and the status track is a minmax rather than a fixed 92px:
+          # Only the chevron, the worker cell and the role tag are rigid; the
+          # outcome takes the slack. The status track is a minmax, not a fixed
+          # 92px:
           # "awaiting review" is 115px with its dot and overruns a fixed track
           # straight into the metrics cell.
           "grid grid-cols-[84px_48px_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]",
@@ -538,8 +539,8 @@ defmodule ArbiterWeb.CoreComponents.Domain do
         "text-[11.5px] leading-[var(--leading-log)] font-normal font-[family-name:var(--font-mono)]",
         !@bare &&
           "bg-[var(--surface-field)] border border-[var(--border-default)] rounded-[var(--radius-field)]",
-        @live && "overflow-x-hidden overflow-y-auto",
-        !@live && "overflow-hidden",
+        @max_height && "overflow-x-hidden overflow-y-auto",
+        is_nil(@max_height) && "overflow-hidden",
         @class
       ]}
       {@rest}
@@ -552,7 +553,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           "grid gap-3 px-3 py-1 min-h-[var(--row-log)] items-center",
           "border-b border-[var(--arb-line-soft)] last:border-b-0",
           "animate-[arb-fade-in_var(--dur-instant)_var(--arb-ease-out)]",
-          line.role == "tool" && "bg-[var(--arb-panel)]"
+          to_string(line.role) == "tool" && "bg-[var(--arb-panel)]"
         ]}
       >
         <span class="text-[var(--arb-text-ghost)] tabular-nums">{line.time}</span>

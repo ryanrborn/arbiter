@@ -399,6 +399,14 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
       assert html =~ "bg-[var(--arb-panel)]"
     end
 
+    test "an atom tool role gets the same tint as the string one" do
+      html =
+        render_component(&log_stream/1, id: "log", lines: [%{time: "t", role: :tool, text: "x"}])
+
+      assert html =~ "bg-[var(--arb-panel)]"
+      assert html =~ "text-[var(--arb-proposal)]"
+    end
+
     test "emphasis brightens the payload to body text" do
       html = render_component(&log_stream/1, id: "log", lines: @lines)
 
@@ -412,13 +420,26 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
     end
 
     test "a live stream sticks to the bottom; a static one does not" do
-      live = render_component(&log_stream/1, id: "log", lines: @lines, live: true)
-      static = render_component(&log_stream/1, id: "log", lines: @lines)
+      live =
+        render_component(&log_stream/1, id: "log", lines: @lines, live: true, max_height: "28rem")
+
+      static = render_component(&log_stream/1, id: "log", lines: @lines, max_height: "28rem")
 
       assert live =~ ~s(data-live="true")
       assert live =~ "phx-hook"
       assert live =~ "overflow-y-auto"
       assert static =~ ~s(data-live="false")
+    end
+
+    test "a capped pane scrolls even when the run is no longer live" do
+      capped = render_component(&log_stream/1, id: "log", lines: @lines, max_height: "28rem")
+      uncapped = render_component(&log_stream/1, id: "log", lines: @lines)
+
+      assert capped =~ "max-height: 28rem"
+      assert capped =~ "overflow-y-auto"
+      # the pane itself never scrolls uncapped (the line text keeps its own
+      # overflow-hidden, so assert on the scroll axis rather than the clip)
+      refute uncapped =~ "overflow-y-auto"
     end
 
     test "bare drops the frame for a full-bleed pane" do
