@@ -97,6 +97,10 @@ defmodule ArbiterWeb do
       # `ArbiterWeb.CoreComponents.Core.button/1` until a follow-up ticket
       # migrates call sites and retires the old ones.
       import ArbiterWeb.CoreComponents.Core, except: [icon: 1, button: 1]
+      # Form primitives (Input, Select, Textarea, Checkbox) — not imported directly
+      # to avoid shadowing the existing input/1, select/1, textarea/1, checkbox/1 in
+      # CoreComponents. Call them fully-qualified: ArbiterWeb.CoreComponents.Forms.input/1
+      # until the cleanup ticket (bd-3z2txy) drops the old versions.
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # Label pluralization (plural/1, cap_plural/1)
