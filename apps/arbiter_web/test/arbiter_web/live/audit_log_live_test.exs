@@ -75,7 +75,7 @@ defmodule ArbiterWeb.AuditLogLiveTest do
         })
 
       assert html =~ b1.id
-      refute html =~ "second"
+      refute html =~ b2.id
       _ = b2
     end
 

@@ -84,7 +84,10 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert rendered =~ ~s(id="live-indicator")
       assert rendered =~ "live"
       assert rendered =~ "badge-success"
-      refute rendered =~ "stale"
+      # The section's own indicator, not the global-chrome LiveBadge (which
+      # renders both "live" and "stale" text server-side and toggles
+      # visibility client-side via phx-connected/phx-disconnected).
+      refute rendered =~ "stale (refresh)"
     end
 
     test "initial static render (no WebSocket) shows the stale indicator", %{conn: conn} do
