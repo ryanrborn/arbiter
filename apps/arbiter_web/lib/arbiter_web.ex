@@ -109,6 +109,7 @@ defmodule ArbiterWeb do
       # ones.
       import ArbiterWeb.CoreComponents.Navigation,
         except: [filter_tabs: 1, pager: 1, see_all_link: 1, back_link: 1]
+
       # Form primitives (Input, Select, Textarea, Checkbox) — not imported directly
       # to avoid shadowing the existing input/1, select/1, textarea/1, checkbox/1 in
       # CoreComponents. Call them fully-qualified: ArbiterWeb.CoreComponents.Forms.input/1

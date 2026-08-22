@@ -87,6 +87,12 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
       assert html =~ "second-nav-mobile-menu&quot;,&quot;attr&quot;:&quot;open&quot;"
       refute html =~ "top-nav-mobile-menu"
     end
+
+    test "renders the id attr on the header itself" do
+      html = render_component(&top_nav/1, %{items: @items, current_path: "/", id: "second-nav"})
+
+      assert html =~ ~s(<header id="second-nav")
+    end
   end
 
   describe "filter_tabs/1" do

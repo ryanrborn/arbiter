@@ -59,6 +59,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
   def top_nav(assigns) do
     ~H"""
     <header
+      id={@id}
       class={[
         "flex items-center gap-[18px] h-[var(--nav-height)] px-4",
         "bg-[var(--surface-chrome)] border-b border-solid border-[var(--border-default)]",
