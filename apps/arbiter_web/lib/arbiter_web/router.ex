@@ -25,7 +25,7 @@ defmodule ArbiterWeb.Router do
         {ArbiterWeb.LiveHooks, :current_path},
         {ArbiterWeb.LiveHooks, :quota}
       ] do
-      live("/", DashboardLive)
+      live("/", BoardLive)
       live("/audit", AuditLogLive)
       live("/usage", UsageLive)
 

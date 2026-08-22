@@ -7,7 +7,8 @@ defmodule ArbiterWeb.Api.RepoController do
     * `GET /api/repos` — :index
 
   A "repo" is a named repository checkout. Repos are discovered from three
-  sources, mirroring `ArbiterWeb.DashboardLive.refresh_repos/1`:
+  sources (the rule the old dashboard's repo panel used, kept here after
+  bd-bqyeqa replaced that page with the board):
 
     * each workspace's `config["repo_paths"]` map,
     * the application-env `:arbiter, :repo_paths` fallback (`source: "(app)"`),
@@ -31,7 +32,7 @@ defmodule ArbiterWeb.Api.RepoController do
     render(conn, :index, repos: list_repos())
   end
 
-  # ---- repo aggregation (mirrors DashboardLive.refresh_repos/1) ----
+  # ---- repo aggregation ----
 
   defp list_repos do
     workspaces = load_workspaces()

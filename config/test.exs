@@ -193,3 +193,8 @@ config :arbiter, :antigravity_state_path, "/nonexistent/antigravity/state.vscdb"
 # probes from the app-started singleton (bd-ajgve2). Tests that need a polling
 # Watchdog start their own unnamed instance with `enabled: true`.
 config :arbiter, :credential_watchdog, enabled: false
+
+# The board's auto-dispatcher (bd-bqyeqa). Off and never ticking under test:
+# a test that resumes the scheduler is exercising the switch, not asking for a
+# real worker to be spawned fifteen seconds later.
+config :arbiter, :board_autopilot, enabled: false, interval_ms: :never

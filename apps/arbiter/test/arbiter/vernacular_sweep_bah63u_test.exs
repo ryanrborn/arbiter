@@ -39,7 +39,7 @@ defmodule Arbiter.VernacularSweepBah63uTest do
   )
 
   @web_target_files ~w(
-    lib/arbiter_web/live/dashboard_live.ex
+    lib/arbiter_web/live/board_live.ex
   )
 
   @cli_target_files ~w(
