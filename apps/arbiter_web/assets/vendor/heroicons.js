@@ -17,6 +17,7 @@ module.exports = plugin(function({matchComponents, theme}) {
       values[name] = {name, fullPath: path.join(iconsDir, dir, file)}
     })
   })
+
   matchComponents({
     "hero": ({name, fullPath}) => {
       let content = fs.readFileSync(fullPath).toString().replace(/\r?\n|\r/g, "")

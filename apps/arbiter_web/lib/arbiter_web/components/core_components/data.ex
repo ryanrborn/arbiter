@@ -34,6 +34,9 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("running"), do: "badge-info"
   defp status_chip_class("resuming"), do: "badge-info"
   defp status_chip_class("awaiting"), do: "badge-warning"
+  # The design handoff writes some statuses with spaces where the schema uses
+  # underscores ("awaiting review" on a RunRow). Same state, same badge.
+  defp status_chip_class("awaiting review"), do: "badge-warning"
   defp status_chip_class("awaiting_review"), do: "badge-warning"
   defp status_chip_class("awaiting_review_gate"), do: "badge-warning"
   defp status_chip_class("completed"), do: "badge-success"
