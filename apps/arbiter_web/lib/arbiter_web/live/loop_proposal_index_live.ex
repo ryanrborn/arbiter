@@ -23,12 +23,12 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   alias Arbiter.Loop
 
   @filters [
-    {"live (proposed + hypothesis)", "live"},
-    {"proposed", "proposed"},
-    {"hypothesis", "hypothesis"},
-    {"applied", "applied"},
-    {"rejected", "rejected"},
-    {"superseded", "superseded"}
+    {"Live", "live"},
+    {"Proposed", "proposed"},
+    {"Hypothesis", "hypothesis"},
+    {"Applied", "applied"},
+    {"Rejected", "rejected"},
+    {"Superseded", "superseded"}
   ]
 
   @impl true
@@ -53,8 +53,17 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   end
 
   @impl true
-  def handle_event("filter", %{"state" => filter}, socket) do
-    {:noreply, socket |> assign(:filter, normalize_filter(filter)) |> refresh()}
+  def handle_event("filter", %{"tab" => filter}, socket) do
+    # A decided row is only kept visible because it belongs to the filter it
+    # was decided under (see `with_decided_rows/2`); switching filters means
+    # a fresh query, so any decisions from the old view are dropped along
+    # with it rather than leaking into whichever filter comes next.
+    {:noreply,
+     socket
+     |> assign(:filter, normalize_filter(filter))
+     |> assign(:decisions, %{})
+     |> assign(:decision_toast, nil)
+     |> refresh()}
   end
 
   def handle_event("select", %{"id" => id}, socket) do
@@ -71,10 +80,9 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
         {:noreply, socket |> decide(row, :applied) |> refresh()}
 
       # A double-click race (or a second click before the row's own apply
-      # button disappears) hits the same proposal twice. The first click
-      # already got what this one wants, so it stays a no-op — not an error.
-      {:error, {:not_applicable, "state is applied" <> _}} ->
-        {:noreply, refresh(socket)}
+      # button disappears) hits the same proposal twice.
+      {:error, {:not_applicable, reason}} ->
+        {:noreply, handle_not_applicable(socket, id, :applied, reason)}
 
       {:error, reason} ->
         {:noreply, socket |> put_flash(:error, error_message(reason)) |> refresh()}
@@ -95,18 +103,23 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
       # Same idempotency as apply/2 above — rejecting an already-decided row
       # is a no-op, not an error.
-      {:error, {:not_applicable, "state is " <> _}} ->
-        {:noreply, refresh(socket)}
+      {:error, {:not_applicable, reason}} ->
+        {:noreply, handle_not_applicable(socket, id, [:applied, :rejected], reason)}
 
       {:error, reason} ->
         {:noreply, socket |> put_flash(:error, error_message(reason)) |> refresh()}
     end
   end
 
-  def handle_event("dismiss_decision", %{"id" => id}, socket) do
+  # Clears every decision from this session, not just the one whose toast is
+  # showing — `:decision_toast` only ever shows the most recent decision, but
+  # `:decisions` accumulates, so a per-id delete would leave earlier rows
+  # dimmed forever with no way to dismiss them. This control only hides
+  # decided rows from view; it never reverts the underlying apply/reject.
+  def handle_event("dismiss_decision", _params, socket) do
     {:noreply,
      socket
-     |> assign(:decisions, Map.delete(socket.assigns.decisions, id))
+     |> assign(:decisions, %{})
      |> assign(:decision_toast, nil)
      |> refresh()}
   end
@@ -117,13 +130,32 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
   # Records a just-made decision so `refresh/1` keeps the row in view (dimmed)
   # even once its new state falls outside the active filter, and arms the
-  # undo toast that lets the operator drop it from view immediately instead
-  # of waiting for the next natural refresh.
+  # dismiss toast that lets the operator drop decided rows from view
+  # immediately instead of waiting for the next natural refresh. This never
+  # reverts the write itself — see the `dismiss_decision` handler.
   defp decide(socket, row, state) do
     socket
     |> assign(:decisions, Map.put(socket.assigns.decisions, row.id, state))
     |> assign(:decision_toast, %{id: row.id, gist: row.gist, state: state})
   end
+
+  # Re-reads the proposal rather than trusting the domain's error message
+  # wording: `inapplicable_reason/1`'s prose is owned by `Arbiter.Loop`, not
+  # a stable contract this LiveView should pattern-match on. If the row's
+  # actual state already matches what this action wanted, the refusal was
+  # just a double-click race and stays a no-op; otherwise it's a real
+  # refusal and gets surfaced.
+  defp handle_not_applicable(socket, id, expected_state, reason) do
+    with {:ok, row} <- Loop.get_pending(id),
+         true <- already_decided_as?(row.state, expected_state) do
+      refresh(socket)
+    else
+      _ -> socket |> put_flash(:error, reason) |> refresh()
+    end
+  end
+
+  defp already_decided_as?(state, expected) when is_list(expected), do: state in expected
+  defp already_decided_as?(state, expected), do: state == expected
 
   defp refresh(socket) do
     rows = Loop.list_pending(state: states(socket.assigns.filter))
@@ -134,6 +166,9 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   # A row just decided in this session that the active filter's fresh query
   # would otherwise have dropped (e.g. an :applied row while filtering
   # "live") is fetched and appended so it stays visible until dismissed.
+  # Merged back in by `created_at` (descending, matching `list_pending/1`)
+  # rather than tacked on at the end, so it stays where it was instead of
+  # jumping to the bottom of the list.
   defp with_decided_rows(rows, decisions) do
     present = MapSet.new(rows, & &1.id)
 
@@ -148,13 +183,13 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
         end
       end)
 
-    rows ++ extra
+    (rows ++ extra) |> Enum.sort_by(& &1.created_at, {:desc, DateTime})
   end
 
   defp decided?(decisions, id), do: Map.has_key?(decisions, id)
 
-  # The `phx-change` payload is client-controlled, so a value outside the
-  # select's options is normalized back to "live" rather than reaching
+  # The `phx-click` payload is client-controlled, so a value outside the
+  # tabs' options is normalized back to "live" rather than reaching
   # `String.to_existing_atom/1` and killing the LiveView with an ArgumentError.
   @filter_values Enum.map(@filters, &elem(&1, 1))
 
@@ -179,12 +214,6 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   defp error_message({_code, message}) when is_binary(message), do: message
   defp error_message(other), do: "could not complete: #{inspect(other)}"
 
-  defp state_badge(:proposed), do: "badge-warning"
-  defp state_badge(:hypothesis), do: "badge-ghost"
-  defp state_badge(:applied), do: "badge-success"
-  defp state_badge(:rejected), do: "badge-error"
-  defp state_badge(_), do: "badge-neutral"
-
   # Amendment D: what applying this would add to every future dispatch, not what
   # it costs to apply once. Rendered next to the evidence counts so the standing
   # price is part of the same glance as the case for paying it.
@@ -194,6 +223,8 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   defp toast_verb(:applied), do: "Applied"
   defp toast_verb(:rejected), do: "Rejected"
 
+  defp filter_tabs, do: Enum.map(@filters, fn {label, value} -> %{label: label, value: value} end)
+
   @impl true
   def render(assigns) do
     assigns = assign(assigns, :selected, selected(assigns.rows, assigns.selected_id))
@@ -201,21 +232,20 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
-        <div :if={@decision_toast} class="fixed top-4 right-4 z-50 w-80 sm:w-96">
-          <.toast
+        <div :if={@decision_toast} class="fixed top-24 right-4 z-50 w-80 sm:w-96">
+          <ArbiterWeb.CoreComponents.Feedback.toast
             id="decision-toast"
             tone="info"
-            action="Undo"
+            action="Dismiss"
             dismiss_key=""
             phx-click="dismiss_decision"
-            phx-value-id={@decision_toast.id}
           >
             {toast_verb(@decision_toast.state)}:
             <span class="font-medium">{@decision_toast.gist}</span>
-          </.toast>
+          </ArbiterWeb.CoreComponents.Feedback.toast>
         </div>
 
-        <.index_header
+        <ArbiterWeb.CoreComponents.Domain.index_header
           icon="hero-beaker"
           title="Loop proposals"
           count={length(@rows)}
@@ -223,164 +253,169 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
         >
           <:actions>
             <div class="flex items-center gap-2">
-              <.live_badge live={@live} />
-              <form phx-change="filter">
-                <select name="state" class="select select-sm select-bordered">
-                  <option :for={{label, value} <- filters()} value={value} selected={@filter == value}>
-                    {label}
-                  </option>
-                </select>
-              </form>
+              <ArbiterWeb.CoreComponents.Feedback.live_badge live={@live} />
+              <ArbiterWeb.CoreComponents.Navigation.filter_tabs
+                tabs={filter_tabs()}
+                active={@filter}
+                event="filter"
+              />
             </div>
           </:actions>
-        </.index_header>
+        </ArbiterWeb.CoreComponents.Domain.index_header>
 
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-3">
-            <.empty_state :if={@rows == []} id="loop-proposals-empty" icon="hero-beaker">
+        <ArbiterWeb.CoreComponents.Core.panel padded={@rows != []}>
+          <div :if={@rows == []} id="loop-proposals-empty">
+            <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-beaker">
               Nothing queued in this view. The evidence bar is {@evidence_bar.min_incidents} incident(s) across {@evidence_bar.min_distinct_tasks} distinct task(s) — findings below it
               wait here as hypotheses until a later window reinforces them.
-            </.empty_state>
-
-            <ul :if={@rows != []} id="loop-proposals" class="flex flex-col gap-1.5">
-              <li
-                :for={row <- @rows}
-                data-decided={Map.get(@decisions, row.id)}
-                class={[
-                  "rounded-box border bg-base-100 px-3 py-2",
-                  if(row.id == @selected_id,
-                    do: "border-primary",
-                    else: "border-base-300"
-                  ),
-                  decided?(@decisions, row.id) && "opacity-60"
-                ]}
-              >
-                <div class="flex items-start justify-between gap-3">
-                  <div class="min-w-0 space-y-1">
-                    <p class="text-sm font-medium break-words">{row.gist}</p>
-                    <div class="flex flex-wrap items-center gap-1.5 text-xs">
-                      <span class={["badge badge-sm", state_badge(row.state)]}>{row.state}</span>
-                      <span class="badge badge-sm badge-outline">{row.kind}</span>
-                      <span class="badge badge-sm badge-outline">{row.scope}</span>
-                      <span
-                        class="font-mono text-base-content/60"
-                        title="incidents / distinct tasks"
-                      >
-                        {row.evidence_count}i/{row.distinct_tasks}t
-                      </span>
-                      <span
-                        class={[
-                          "font-mono",
-                          if(row.context_cost_tokens > 0,
-                            do: "text-warning",
-                            else: "text-base-content/40"
-                          )
-                        ]}
-                        title="recurring context added to every dispatch if applied"
-                      >
-                        {context_cost(row.context_cost_tokens)}
-                      </span>
-                      <span :if={row.target} class="text-base-content/50 truncate">
-                        {row.target}
-                      </span>
-                    </div>
-                  </div>
-                  <.button
-                    phx-click="select"
-                    phx-value-id={row.id}
-                    class="btn btn-xs btn-ghost shrink-0"
-                  >
-                    Review
-                  </.button>
-                </div>
-              </li>
-            </ul>
+            </ArbiterWeb.CoreComponents.Feedback.empty_state>
           </div>
-        </section>
 
-        <section
-          :if={@selected}
-          id="loop-proposal-detail"
-          class="card bg-base-200 border border-base-300 shadow-sm"
-        >
-          <div class="card-body p-4 gap-3">
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0">
-                <h2 class="font-semibold text-sm break-words">{@selected.gist}</h2>
-                <p class="text-xs text-base-content/50 font-mono mt-1 break-all">
-                  {@selected.id} · {@selected.fingerprint}
-                </p>
+          <ul :if={@rows != []} id="loop-proposals" class="flex flex-col gap-1.5">
+            <li
+              :for={row <- @rows}
+              data-decided={Map.get(@decisions, row.id)}
+              class={[
+                "rounded-[var(--radius-field)] border border-solid px-3 py-2",
+                "bg-[var(--surface-card)]",
+                if(row.id == @selected_id,
+                  do: "border-[var(--accent-primary)]",
+                  else: "border-[var(--border-default)]"
+                ),
+                decided?(@decisions, row.id) && "opacity-60"
+              ]}
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0 space-y-1">
+                  <p class="text-[12.5px] font-medium break-words text-[var(--text-title)]">
+                    {row.gist}
+                  </p>
+                  <div class="flex flex-wrap items-center gap-1.5 text-xs">
+                    <.status_chip status={row.state} />
+                    <.type_tag type={row.kind} />
+                    <.type_tag type={row.scope} />
+                    <span
+                      class="font-mono text-[11px] text-[var(--text-label)]"
+                      title="incidents / distinct tasks"
+                    >
+                      {row.evidence_count}i/{row.distinct_tasks}t
+                    </span>
+                    <span
+                      class={[
+                        "font-mono text-[11px]",
+                        if(row.context_cost_tokens > 0,
+                          do: "text-[var(--arb-attention)]",
+                          else: "text-[var(--text-label)]"
+                        )
+                      ]}
+                      title="recurring context added to every dispatch if applied"
+                    >
+                      {context_cost(row.context_cost_tokens)}
+                    </span>
+                    <span :if={row.target} class="text-[11px] text-[var(--text-label)] truncate">
+                      {row.target}
+                    </span>
+                  </div>
+                </div>
+                <ArbiterWeb.CoreComponents.Core.button
+                  phx-click="select"
+                  phx-value-id={row.id}
+                  variant="ghost"
+                  size="sm"
+                  class="shrink-0"
+                >
+                  Review
+                </ArbiterWeb.CoreComponents.Core.button>
               </div>
-              <.button phx-click="close" class="btn btn-xs btn-ghost shrink-0">Close</.button>
-            </div>
+            </li>
+          </ul>
+        </ArbiterWeb.CoreComponents.Core.panel>
+
+        <ArbiterWeb.CoreComponents.Core.panel :if={@selected} title={@selected.gist}>
+          <:actions>
+            <ArbiterWeb.CoreComponents.Core.button phx-click="close" variant="ghost" size="sm">
+              Close
+            </ArbiterWeb.CoreComponents.Core.button>
+          </:actions>
+
+          <div class="space-y-3">
+            <p class="text-[11px] text-[var(--text-label)] font-mono break-all">
+              {@selected.id} · {@selected.fingerprint}
+            </p>
 
             <dl class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
               <div>
-                <dt class="text-base-content/50">Evidence</dt>
-                <dd class="font-mono">
+                <dt class="text-[var(--text-label)]">Evidence</dt>
+                <dd class="font-mono text-[var(--text-secondary)]">
                   {@selected.evidence_count} incident(s) / {@selected.distinct_tasks} task(s)
                 </dd>
               </div>
               <div>
-                <dt class="text-base-content/50">Context cost</dt>
+                <dt class="text-[var(--text-label)]">Context cost</dt>
                 <dd class={[
                   "font-mono",
-                  if(@selected.context_cost_tokens > 0, do: "text-warning")
+                  if(@selected.context_cost_tokens > 0,
+                    do: "text-[var(--arb-attention)]",
+                    else: "text-[var(--text-secondary)]"
+                  )
                 ]}>
                   {context_cost(@selected.context_cost_tokens)}
                 </dd>
               </div>
               <div>
-                <dt class="text-base-content/50">Target metric</dt>
-                <dd class="font-mono">{@selected.target_metric || "—"}</dd>
+                <dt class="text-[var(--text-label)]">Target metric</dt>
+                <dd class="font-mono text-[var(--text-secondary)]">
+                  {@selected.target_metric || "—"}
+                </dd>
               </div>
               <div>
-                <dt class="text-base-content/50">Baseline</dt>
-                <dd class="font-mono">{@selected.baseline || "—"}</dd>
+                <dt class="text-[var(--text-label)]">Baseline</dt>
+                <dd class="font-mono text-[var(--text-secondary)]">{@selected.baseline || "—"}</dd>
               </div>
               <div>
-                <dt class="text-base-content/50">Origin</dt>
-                <dd class="font-mono break-all">{@selected.origin}</dd>
+                <dt class="text-[var(--text-label)]">Origin</dt>
+                <dd class="font-mono break-all text-[var(--text-secondary)]">{@selected.origin}</dd>
               </div>
             </dl>
 
             <p
               :if={Loop.inapplicable_reason(@selected)}
-              class="text-xs text-warning flex items-start gap-1"
+              class="text-xs text-[var(--arb-attention)] flex items-start gap-1"
             >
-              <.icon name="hero-exclamation-triangle" class="size-4 shrink-0" />
+              <ArbiterWeb.CoreComponents.Core.icon name="hero-exclamation-triangle" size={16} />
               <span>{Loop.inapplicable_reason(@selected)}</span>
             </p>
 
             <div>
-              <p class="text-xs text-base-content/50 mb-1">Unified diff</p>
+              <p class="text-xs text-[var(--text-label)] mb-1">Unified diff</p>
               <pre
                 :if={@selected.diff not in [nil, ""]}
-                class="text-xs bg-base-300/40 rounded-box p-3 overflow-x-auto whitespace-pre"
+                class="text-xs bg-[var(--arb-canvas-sunken)] rounded-[var(--radius-field)] p-3 overflow-x-auto whitespace-pre"
               ><code>{@selected.diff}</code></pre>
-              <p :if={@selected.diff in [nil, ""]} class="text-xs text-base-content/60">
+              <p :if={@selected.diff in [nil, ""]} class="text-xs text-[var(--text-secondary)]">
                 No diff — this proposal carries a payload, not a patch.
               </p>
             </div>
 
             <div :if={@selected.payload not in [nil, %{}]}>
-              <p class="text-xs text-base-content/50 mb-1">Payload</p>
-              <pre class="text-xs bg-base-300/40 rounded-box p-3 overflow-x-auto"><code>{inspect(@selected.payload, pretty: true)}</code></pre>
+              <p class="text-xs text-[var(--text-label)] mb-1">Payload</p>
+              <pre class="text-xs bg-[var(--arb-canvas-sunken)] rounded-[var(--radius-field)] p-3 overflow-x-auto"><code>{inspect(@selected.payload, pretty: true)}</code></pre>
             </div>
 
             <div
               :if={@selected.state not in [:applied, :rejected]}
-              class="flex flex-wrap items-end gap-2 border-t border-base-300 pt-3"
+              class="flex flex-wrap items-end gap-2 border-t border-[var(--border-default)] pt-3"
             >
-              <.button
+              <ArbiterWeb.CoreComponents.Core.button
                 :if={Loop.applicable?(@selected)}
                 phx-click="apply"
                 phx-value-id={@selected.id}
                 variant="primary"
-                class="btn btn-sm btn-primary"
+                size="sm"
               >
-                <.icon name="hero-check" class="size-4" /> Apply
-              </.button>
+                <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-check" size={16} /></:icon>
+                Apply
+              </ArbiterWeb.CoreComponents.Core.button>
 
               <%!-- The id rides on `phx-value-id` rather than a hidden input
               named "id", which would override the form element's own DOM id. --%>
@@ -393,23 +428,23 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
                   type="text"
                   name="reason"
                   placeholder="reason (optional)"
-                  class="input input-sm input-bordered grow"
+                  class="rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--surface-card)] px-2 py-1 text-xs grow"
                 />
-                <button type="submit" class="btn btn-sm btn-ghost">Reject</button>
+                <ArbiterWeb.CoreComponents.Core.button type="submit" variant="ghost" size="sm">
+                  Reject
+                </ArbiterWeb.CoreComponents.Core.button>
               </form>
             </div>
 
-            <p :if={@selected.rejection_reason} class="text-xs text-base-content/60">
+            <p :if={@selected.rejection_reason} class="text-xs text-[var(--text-secondary)]">
               Rejected: {@selected.rejection_reason}
             </p>
           </div>
-        </section>
+        </ArbiterWeb.CoreComponents.Core.panel>
 
-        <.back_link />
+        <ArbiterWeb.CoreComponents.Navigation.back_link />
       </div>
     </Layouts.app>
     """
   end
-
-  defp filters, do: @filters
 end
