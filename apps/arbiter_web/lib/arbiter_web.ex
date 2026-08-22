@@ -86,6 +86,8 @@ defmodule ArbiterWeb do
       import Phoenix.HTML
       # Core UI components
       import ArbiterWeb.CoreComponents
+      # Data-display primitives (tags, chips, meter, list/table)
+      import ArbiterWeb.CoreComponents.Data
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # Label pluralization (plural/1, cap_plural/1)
