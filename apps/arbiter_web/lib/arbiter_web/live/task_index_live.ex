@@ -307,7 +307,6 @@ defmodule ArbiterWeb.TaskIndexLive do
               type="button"
               variant="primary"
               size="sm"
-              key_hint="C"
               phx-click={JS.navigate(~p"/tasks/new")}
             >
               <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-plus" size={13} /></:icon>
@@ -443,10 +442,7 @@ defmodule ArbiterWeb.TaskIndexLive do
           tab_path={fn value -> task_path(String.to_existing_atom(value), 1) end}
         />
 
-        <ArbiterWeb.CoreComponents.Core.panel
-          padded={false}
-          body_class="px-[18px] py-[var(--space-4)] flex flex-col gap-4"
-        >
+        <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
           <div :if={@tasks == []} id="tasks-empty">
             <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-clipboard-document-list">
               No {plural(@issue_label)} match this filter.
@@ -498,13 +494,14 @@ defmodule ArbiterWeb.TaskIndexLive do
   defp issue_row_class(issue) do
     [
       "flex items-center gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid",
-      "bg-[var(--surface-card)] hover:bg-[var(--arb-raised-hover)] transition-colors duration-[var(--dur-hover)]",
+      "border-[var(--border-strong)] hover:bg-[var(--arb-raised-hover)]",
+      "transition-colors duration-[var(--dur-hover)]",
       if(issue.priority == 1,
         do: [
-          "border-[var(--border-strong)] border-l-[length:var(--border-accent-width)]",
-          "border-l-[color:var(--arb-fail)] bg-[var(--arb-fail-wash)]"
+          "bg-[var(--arb-fail-wash)]",
+          "border-l-[length:var(--border-accent-width)] border-l-[color:var(--arb-fail)]"
         ],
-        else: "border-[var(--border-strong)]"
+        else: "bg-[var(--surface-card)]"
       ),
       issue.status == :closed && "opacity-[0.62]"
     ]

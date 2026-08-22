@@ -70,6 +70,8 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       p1_row = row_html(html, p1.id)
       p2_row = row_html(html, p2.id)
 
+      assert p1_row =~ "bg-[var(--arb-fail-wash)]"
+      refute p1_row =~ "bg-[var(--surface-card)]"
       assert p1_row =~ "arb-fail"
       refute p2_row =~ "arb-fail"
     end
