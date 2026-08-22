@@ -16,7 +16,7 @@ defmodule ArbiterWeb.CoreComponents.Core do
   ## Examples
 
       <.button variant="primary" key_hint="C">
-        <:icon><.icon name="plus" size={13} /></:icon>
+        <:icon><.icon name="hero-plus" size={13} /></:icon>
         New issue
       </.button>
       <.button>Edit</.button>
@@ -97,20 +97,25 @@ defmodule ArbiterWeb.CoreComponents.Core do
   Arbiter; never hand-draw an SVG.
 
   Backed by the `hero-*` Tailwind classes the app already vendors from
-  `deps/heroicons` (see `assets/vendor/heroicons.js`), so unlike the design
-  handoff's CDN-fallback reference implementation, every Heroicon name works
-  offline.
+  `deps/heroicons` (see `assets/vendor/heroicons.js`). That plugin only
+  emits a CSS rule for a `hero-*` class when the *literal* string appears
+  somewhere in scanned source, so `name` must be passed as the full class
+  (e.g. `"hero-cpu-chip"`, `"hero-check-circle-micro"`) — the same
+  contract as `ArbiterWeb.CoreComponents.icon/1`. Building the class from a
+  bare slug plus a `variant` at runtime would produce a string the Tailwind
+  scanner never sees, and the icon would render with no glyph.
 
   ## Examples
 
       <.icon name="hero-plus" size={14} />
-      <.icon name="cpu-chip" />
-      <.icon name="check-circle" variant="micro" color="var(--arb-live)" />
+      <.icon name="hero-cpu-chip" />
+      <.icon name="hero-check-circle-micro" color="var(--arb-live)" />
 
-  Sets: `outline` (default, 16px), `solid`, `mini` (14px), `micro` (12px). A
-  `-solid`/`-mini`/`-micro` suffix on `name` wins over `variant`.
+  Sets: `outline` (default, 16px), `solid`, `mini` (14px), `micro` (12px),
+  selected by the `-solid`/`-mini`/`-micro` suffix on `name` (or by
+  `variant`, when `name` has no suffix).
   """
-  attr :name, :string, required: true, doc: ~s(Heroicon slug, e.g. "plus" or "hero-cpu-chip")
+  attr :name, :string, required: true, doc: ~s(full Heroicon class, e.g. "hero-cpu-chip")
   attr :variant, :string, values: ~w(outline solid mini micro), default: "outline"
   attr :size, :integer, default: nil, doc: "pixel size; defaults per variant"
   attr :color, :string, default: nil, doc: "mask fill; defaults to currentColor"
@@ -118,34 +123,19 @@ defmodule ArbiterWeb.CoreComponents.Core do
   attr :rest, :global
 
   def icon(assigns) do
-    %{hero_class: hero_class, size: px} = icon_info(assigns.name, assigns.variant, assigns.size)
-
-    assigns =
-      assigns
-      |> assign(:hero_class, hero_class)
-      |> assign(:icon_style, icon_style(px, assigns.color))
+    px = assigns.size || icon_default_size(assigns.name, assigns.variant)
+    assigns = assign(assigns, :icon_style, icon_style(px, assigns.color))
 
     ~H"""
-    <span aria-hidden="true" class={[@hero_class, @class]} style={@icon_style} {@rest} />
+    <span aria-hidden="true" class={[@name, @class]} style={@icon_style} {@rest} />
     """
   end
 
   @icon_default_size %{"outline" => 16, "solid" => 16, "mini" => 14, "micro" => 12}
 
-  defp icon_info(name, variant, size) do
-    raw = to_string(name)
-    suffix = Regex.run(~r/-(solid|mini|micro)$/, raw) |> icon_suffix()
-    set = suffix || to_string(variant)
-
-    slug =
-      raw |> String.replace_prefix("hero-", "") |> String.replace(~r/-(solid|mini|micro)$/, "")
-
-    class_suffix = if set in ~w(solid mini micro), do: "-#{set}", else: ""
-
-    %{
-      hero_class: "hero-#{slug}#{class_suffix}",
-      size: size || Map.get(@icon_default_size, set, 16)
-    }
+  defp icon_default_size(name, variant) do
+    suffix = Regex.run(~r/-(solid|mini|micro)$/, to_string(name)) |> icon_suffix()
+    Map.get(@icon_default_size, suffix || variant, 16)
   end
 
   defp icon_suffix([_, s]), do: s
@@ -176,6 +166,7 @@ defmodule ArbiterWeb.CoreComponents.Core do
       class={[
         "inline-flex items-center px-[4px] py-[1px] border rounded-[var(--radius-chip)]",
         "border-[var(--border-strong)] text-[var(--text-label)] font-medium text-[10px] leading-[1.4]",
+        "font-[family-name:var(--font-mono)]",
         @class
       ]}
       {@rest}
@@ -228,11 +219,21 @@ defmodule ArbiterWeb.CoreComponents.Core do
   attr :rest, :global
 
   defp toggle_switch(assigns) do
+    assigns = assign(assigns, :rest, if(assigns.disabled, do: %{}, else: assigns.rest))
+
     ~H"""
-    <span
+    <button
+      type="button"
       role="switch"
       aria-checked={to_string(@checked)}
-      class={[not @disabled && "cursor-pointer", @disabled && "cursor-not-allowed opacity-50", @class]}
+      aria-disabled={@disabled && "true"}
+      disabled={@disabled}
+      class={[
+        "appearance-none bg-transparent border-0 p-0",
+        not @disabled && "cursor-pointer",
+        @disabled && "cursor-not-allowed opacity-50",
+        @class
+      ]}
       {@rest}
     >
       <span class={[
@@ -247,7 +248,7 @@ defmodule ArbiterWeb.CoreComponents.Core do
           !@checked && "bg-[var(--text-secondary)]"
         ]} />
       </span>
-    </span>
+    </button>
     """
   end
 

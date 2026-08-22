@@ -61,29 +61,23 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
   end
 
   describe "icon/1" do
-    test "renders a hero class for the outline set by default with the 16px default size" do
-      html = render_component(&icon/1, %{name: "plus"})
+    test "renders the full hero class as passed, with the 16px outline default size" do
+      html = render_component(&icon/1, %{name: "hero-plus"})
 
       assert html =~ "hero-plus\""
       assert html =~ "width: 16px"
       assert html =~ "height: 16px"
     end
 
-    test "strips a hero- prefix" do
-      html = render_component(&icon/1, %{name: "hero-cpu-chip"})
-
-      assert html =~ "hero-cpu-chip\""
-    end
-
     test "a -solid/-mini/-micro suffix on name wins over the variant attr" do
-      html = render_component(&icon/1, %{name: "check-circle-micro", variant: "outline"})
+      html = render_component(&icon/1, %{name: "hero-check-circle-micro", variant: "outline"})
 
       assert html =~ "hero-check-circle-micro"
       assert html =~ "width: 12px"
     end
 
     test "explicit size overrides the variant default" do
-      html = render_component(&icon/1, %{name: "plus", size: 30})
+      html = render_component(&icon/1, %{name: "hero-plus", size: 30})
 
       assert html =~ "width: 30px"
     end
@@ -91,7 +85,7 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
     test "explicit color sets the mask background-color" do
       html =
         render_component(&icon/1, %{
-          name: "check-circle",
+          name: "hero-check-circle",
           variant: "micro",
           color: "var(--arb-live)"
         })
@@ -133,6 +127,24 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
 
       assert html =~ "aria-checked=\"true\""
       assert html =~ "var(--accent-primary)"
+    end
+
+    test "disabled toggle drops phx-click so it cannot fire its event" do
+      assigns = %{}
+
+      html =
+        render_component(
+          fn assigns ->
+            ~H"""
+            <.toggle checked={false} disabled phx-click="toggle" />
+            """
+          end,
+          assigns
+        )
+
+      assert html =~ "aria-disabled=\"true\""
+      assert html =~ "disabled"
+      refute html =~ "phx-click"
     end
 
     test "labeled toggle renders a full settings row with its consequence hint" do
@@ -243,7 +255,7 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
           <.panel title="Active workers" meta="4 running">
             <:actions><.button variant="ghost" size="sm">See all</.button></:actions>
             <.button variant="primary" key_hint="C">
-              <:icon><.icon name="plus" size={13} /></:icon>
+              <:icon><.icon name="hero-plus" size={13} /></:icon>
               New issue
             </.button>
             <.button variant="attention">Open review</.button>
