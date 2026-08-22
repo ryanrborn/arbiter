@@ -49,6 +49,15 @@ defmodule ArbiterWeb.TaskDetailLive do
   @tasks_topic "tasks"
   @workers_topic "workers"
 
+  # The expanded transcript of a *running* run cannot come from
+  # `Run.output_lines`: that column is written exactly twice — `[]` at run
+  # start and the captured tail at run finish — so mid-run it is always
+  # empty. While a running row is open the page follows that run's own
+  # `worker:<task_id>` topic, the same feed `/workers/:id` renders, and keeps
+  # the same 500-line tail the worker itself caps at.
+  @live_line_cap 500
+  @version_limit 20
+
   @impl true
   def mount(%{"id" => task_id}, _session, socket) do
     if connected?(socket) do
@@ -82,6 +91,9 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:provider_options, provider_options())
      |> assign(:run_filter, "all")
      |> assign(:expanded_run, nil)
+     |> assign(:live_run_id, nil)
+     |> assign(:live_run_topic, nil)
+     |> assign(:live_run_lines, [])
      |> refresh_all()}
   end
 
@@ -111,6 +123,20 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
+
+  # Output for the run whose row is open, straight into its transcript — no
+  # DB read, no GenServer hop. Runs other than the followed one broadcast on
+  # topics this page never subscribed to, so the guard is belt-and-braces.
+  def handle_info({:worker_output, worker_task_id, line}, socket)
+      when is_binary(worker_task_id) and is_binary(line) do
+    if socket.assigns[:live_run_topic] == output_topic(worker_task_id) do
+      lines = Enum.take((socket.assigns.live_run_lines || []) ++ [line], -@live_line_cap)
+      {:noreply, assign(socket, :live_run_lines, lines)}
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_info(_, socket), do: {:noreply, socket}
 
   # ---- run roster ----
@@ -129,7 +155,11 @@ defmodule ArbiterWeb.TaskDetailLive do
   # Clicking the open row closes it — the chevron is a disclosure, not a link.
   def handle_event("toggle_run", %{"run" => run_id}, socket) do
     expanded = if socket.assigns.expanded_run == run_id, do: nil, else: run_id
-    {:noreply, assign(socket, :expanded_run, expanded)}
+
+    {:noreply,
+     socket
+     |> assign(:expanded_run, expanded)
+     |> resync_live_run()}
   end
 
   # ---- acceptance criteria ----
@@ -528,18 +558,31 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   defp refresh_versions(socket) do
+    query = Ash.Query.filter(Version, version_source_id == ^socket.assigns.task_id)
+
     versions =
       try do
-        Version
-        |> Ash.Query.filter(version_source_id == ^socket.assigns.task_id)
+        query
         |> Ash.Query.sort(version_inserted_at: :desc)
-        |> Ash.Query.limit(20)
+        |> Ash.Query.limit(@version_limit)
         |> Ash.read!()
       rescue
         _ -> []
       end
 
-    assign(socket, :versions, versions)
+    # The stream is capped, so the panel meta has to say so — `20 transitions`
+    # on an issue with 60 of them reads as the whole story and hides the fact
+    # that `History →` is the only way to the rest.
+    total =
+      try do
+        Ash.count!(query)
+      rescue
+        _ -> length(versions)
+      end
+
+    socket
+    |> assign(:versions, versions)
+    |> assign(:version_total, total)
   end
 
   defp refresh_runs(socket) do
@@ -593,8 +636,86 @@ defmodule ArbiterWeb.TaskDetailLive do
     socket
     |> assign(:runs, runs)
     |> assign(:usage_by_run, usage_by_run)
+    |> assign(:issue_repo, issue_repo(runs, socket.assigns[:task]))
     |> assign(:prior_mr_refs, prior_mr_refs(runs, current_pr_ref(socket.assigns[:task])))
     |> derive_roster()
+    |> resync_live_run()
+  end
+
+  # §4's right rail leads with `repo`. An `Issue` carries no repo column — the
+  # checkout is chosen at dispatch — so the honest source is the most recent
+  # run that recorded one, falling back to the workspace's configured repo
+  # when there is exactly one and the answer is therefore unambiguous.
+  defp issue_repo(runs, %Issue{} = task) do
+    case Enum.find_value(runs, &(present?(&1.repo) && &1.repo)) do
+      repo when is_binary(repo) ->
+        repo
+
+      _ ->
+        case Dispatch.all_available_repos(task) do
+          [only] -> only
+          _ -> nil
+        end
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp issue_repo(_runs, _task), do: nil
+
+  defp output_topic(task_id), do: "worker:" <> task_id
+
+  # Keep the page subscribed to exactly one worker feed: the one behind the
+  # open row, and only while that run is still running with a live process.
+  # Called wherever `@expanded_run` or `@runs` can change, so a run finishing
+  # underneath an open row drops the follow and the row falls back to the
+  # persisted tail `record_run_finished/1` just wrote.
+  defp resync_live_run(socket) do
+    current = socket.assigns[:live_run_topic]
+
+    target =
+      case Enum.find(socket.assigns[:runs] || [], &(&1.id == socket.assigns[:expanded_run])) do
+        %Run{id: id, status: :running, task_id: task_id} when is_binary(task_id) ->
+          case Worker.whereis(task_id) do
+            pid when is_pid(pid) -> {id, output_topic(task_id), pid}
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+
+    case target do
+      nil ->
+        if current, do: Phoenix.PubSub.unsubscribe(Arbiter.PubSub, current)
+        assign(socket, live_run_id: nil, live_run_topic: nil, live_run_lines: [])
+
+      {run_id, topic, pid} ->
+        if socket.assigns.live and current != topic do
+          if current, do: Phoenix.PubSub.unsubscribe(Arbiter.PubSub, current)
+          Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+        end
+
+        # Seed from the worker's own snapshot so an opened row is full
+        # immediately rather than filling in one broadcast at a time.
+        assign(socket,
+          live_run_id: run_id,
+          live_run_topic: topic,
+          live_run_lines: snapshot_output_lines(pid)
+        )
+    end
+  end
+
+  # `meta.output_lines` is the worker's mirror of the session buffer, already
+  # oldest-first (`worker.ex` reverses it on the way in).
+  defp snapshot_output_lines(pid) do
+    case safe_state(pid) do
+      %{meta: meta} when is_map(meta) ->
+        Enum.take(Map.get(meta, :output_lines) || [], -@live_line_cap)
+
+      _ ->
+        []
+    end
   end
 
   # Role tabs and the visible slice are pure functions of the loaded runs and
@@ -870,7 +991,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     role={run_role(r)}
                     worker={run_worker_label(r)}
                     status={r.status}
-                    outcome={run_outcome(r)}
+                    outcome={run_outcome(r, @live_run_id, @live_run_lines)}
                     duration={humanize_run_duration(r.started_at, r.completed_at)}
                     cost={run_cost_label(Map.get(@usage_by_run, r.id))}
                     selected={@expanded_run == r.id}
@@ -885,6 +1006,9 @@ defmodule ArbiterWeb.TaskDetailLive do
                     :if={@expanded_run == r.id}
                     class="mt-1 border border-[var(--border-default)] rounded-[var(--radius-field)] overflow-hidden"
                   >
+                    <%!-- Live while the row is the followed one, the persisted
+                         tail once the run has ended. --%>
+                    <% lines = run_output_lines(r, @live_run_id, @live_run_lines) %>
                     <%!-- The facts the roster row deliberately drops (model,
                          session, exit code) live here, next to the output
                          they explain. --%>
@@ -892,21 +1016,24 @@ defmodule ArbiterWeb.TaskDetailLive do
                       <code class="text-[var(--text-secondary)]">{r.task_id}</code>
                       <span :if={present?(r.repo)}>{r.repo}</span>
                       <span :if={present?(r.model)}>{r.model}</span>
-                      <span>{length(r.output_lines || [])} lines</span>
+                      <span>{length(lines)} lines</span>
                       <span>started {format_started(r.started_at)}</span>
                       <span :if={run_failed?(r)} class="text-[var(--arb-fail-text)]">
                         {run_failure_line(r)}
                       </span>
                       <span class="flex-1"></span>
+                      <%!-- `@live_run_id` is set only when THIS run is still
+                           running and its own worker process answered, so the
+                           link can never point at a later run's session. --%>
                       <.link
-                        :if={live_session?(@worker, @task_id, r)}
+                        :if={@live_run_id == r.id}
                         navigate={~p"/workers/#{r.task_id}"}
                         class="hover:text-[var(--text-title)]"
                       >
                         Open session
                       </.link>
                       <span
-                        :if={!live_session?(@worker, @task_id, r)}
+                        :if={@live_run_id != r.id}
                         class="opacity-50 cursor-not-allowed"
                         title="This run has ended — its live session is gone"
                       >
@@ -920,17 +1047,16 @@ defmodule ArbiterWeb.TaskDetailLive do
                       </.link>
                     </div>
 
-                    <ArbiterWeb.CoreComponents.Feedback.empty_state
-                      :if={(r.output_lines || []) == []}
-                      icon={nil}
-                    >
-                      No output captured for this run.
+                    <ArbiterWeb.CoreComponents.Feedback.empty_state :if={lines == []} icon={nil}>
+                      {if r.status == :running,
+                        do: "Waiting for the first line of output…",
+                        else: "No output captured for this run."}
                     </ArbiterWeb.CoreComponents.Feedback.empty_state>
 
                     <.log_stream
-                      :if={(r.output_lines || []) != []}
+                      :if={lines != []}
                       id={"run-transcript-#{r.id}"}
-                      lines={transcript_lines(r)}
+                      lines={transcript_lines(lines)}
                       live={r.status == :running}
                       time_width={44}
                       role_width={40}
@@ -947,7 +1073,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                    link opens that page with the same filter applied. --%>
               <.panel
                 title="ACTIVITY"
-                meta={"#{length(@versions)} transitions"}
+                meta={activity_meta(@versions, @version_total)}
                 padded={false}
                 body_class="px-[18px] py-[var(--space-4)]"
               >
@@ -971,7 +1097,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                   :if={@versions != []}
                   id="task-activity"
                   lines={activity_lines(@versions)}
-                  time_width={104}
+                  time_width={78}
                   max_height="22rem"
                 />
               </.panel>
@@ -1026,6 +1152,9 @@ defmodule ArbiterWeb.TaskDetailLive do
 
               <.panel title="MACHINE STATE">
                 <.data_list class="text-[12px]">
+                  <:item :if={@issue_repo} label={String.capitalize(@rig_label)}>
+                    <code class="text-xs">{@issue_repo}</code>
+                  </:item>
                   <:item label="Status">
                     <.status_chip status={@task.status} class="badge-sm" />
                   </:item>
@@ -1602,27 +1731,32 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   # What the run produced, in the one column an operator scans. A failure
-  # says why; anything else says how much it wrote.
-  defp run_outcome(%Run{} = run) do
+  # says why; anything else says how much it wrote — counting the live buffer
+  # when this is the followed run, since a running row's persisted
+  # `output_lines` is still the empty list written at start.
+  defp run_outcome(%Run{} = run, live_run_id, live_lines) do
+    lines = run_output_lines(run, live_run_id, live_lines)
+
     cond do
       run_failed?(run) and run_failure_line(run) != "" -> run_failure_line(run)
-      true -> "#{length(run.output_lines || [])} lines"
+      lines == [] and run.status == :running -> "streaming…"
+      true -> "#{length(lines)} lines"
     end
   end
 
-  # Persisted output lines carry no per-line timestamps, so the time gutter
-  # numbers them instead — the same handle a `Full transcript` link uses.
-  defp transcript_lines(%Run{} = run) do
-    (run.output_lines || [])
+  # The one place that decides where a run's transcript comes from.
+  defp run_output_lines(%Run{id: id}, live_run_id, live_lines) when id == live_run_id,
+    do: live_lines
+
+  defp run_output_lines(%Run{output_lines: lines}, _live_run_id, _live_lines), do: lines || []
+
+  # Output lines carry no per-line timestamps, so the time gutter numbers them
+  # instead — the same handle a `Full transcript` link uses.
+  defp transcript_lines(lines) when is_list(lines) do
+    lines
     |> Enum.with_index(1)
     |> Enum.map(fn {line, number} -> %{time: to_string(number), role: "out", text: line} end)
   end
-
-  # A run's session is only reachable while its worker process is alive, and
-  # this page only ever knows about its own task's worker.
-  defp live_session?(nil, _task_id, _run), do: false
-  defp live_session?(_worker, task_id, %Run{task_id: task_id}), do: true
-  defp live_session?(_worker, _task_id, _run), do: false
 
   defp run_count_summary([]), do: "No runs on this issue yet."
   defp run_count_summary([_one]), do: "1 run on this issue"
@@ -1710,11 +1844,22 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp activity_lines(versions) do
     Enum.map(versions, fn v ->
       %{
-        time: Calendar.strftime(v.version_inserted_at, "%m-%d %H:%M:%S"),
+        # §4 asks for relative time here (`41m ago · gate · …`) — the same
+        # convention the header block above already uses.
+        time: relative_age(v.version_inserted_at),
         role: to_string(v.version_action_name),
         text: activity_text(v)
       }
     end)
+  end
+
+  # The stream is the latest `@version_limit` transitions, not all of them.
+  defp activity_meta(versions, total) do
+    shown = length(versions)
+
+    if is_integer(total) and total > shown,
+      do: "latest #{shown} of #{total} transitions",
+      else: "#{shown} transitions"
   end
 
   defp activity_text(v) do

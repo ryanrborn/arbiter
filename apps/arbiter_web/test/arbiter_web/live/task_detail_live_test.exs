@@ -7,6 +7,29 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
 
+  # A minimal real GenServer double for `Arbiter.Worker`, registered under the
+  # same registry key a live worker uses, answering the `:snapshot` call
+  # `Worker.state/1` makes. Enough for the page to see a run as live and to
+  # seed the expanded transcript from `meta.output_lines`.
+  defmodule FakeWorker do
+    use GenServer
+
+    def start_link(task_id, output_lines) do
+      GenServer.start_link(__MODULE__, output_lines,
+        name: Arbiter.Worker.Registry.via_tuple(task_id)
+      )
+    end
+
+    @impl true
+    def init(output_lines), do: {:ok, output_lines}
+
+    @impl true
+    def handle_call(:snapshot, _from, lines) do
+      {:reply, %{status: :running, started_at: DateTime.utc_now(), meta: %{output_lines: lines}},
+       lines}
+    end
+  end
+
   setup do
     for snap <- Worker.list_children() do
       Worker.stop(snap.task_id)
@@ -555,6 +578,63 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "Full transcript"
     end
 
+    test "a running run's transcript streams from the live worker, not output_lines",
+         %{conn: conn, task: task} do
+      # This is the exact shape `worker.ex` persists at run start: the column
+      # is written once as `[]` and not touched again until the run finishes.
+      {:ok, running} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :running,
+          started_at: ~U[2026-07-02 09:00:00.000000Z],
+          output_lines: []
+        })
+
+      start_supervised!(%{
+        id: :fake_worker,
+        start: {FakeWorker, :start_link, [task.id, ["seeded line from the snapshot"]]}
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      html = view |> element(~s([phx-value-run="#{running.id}"])) |> render_click()
+
+      # Seeded from the worker snapshot rather than the empty persisted column.
+      assert html =~ "seeded line from the snapshot"
+      refute html =~ "No output captured for this run."
+
+      # ... and subsequent output lands without a reload.
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "worker:" <> task.id,
+        {:worker_output, task.id, "a line broadcast mid-run"}
+      )
+
+      html = render(view)
+      assert html =~ "a line broadcast mid-run"
+      assert html =~ "2 lines"
+    end
+
+    test "an ended run's Open session link is disabled even while a worker is alive",
+         %{conn: conn, task: task, main: main} do
+      # A worker is running for this issue right now — but `main` completed
+      # yesterday, so its own session is gone and the link must not offer it.
+      start_supervised!(%{
+        id: :fake_worker,
+        start: {FakeWorker, :start_link, [task.id, []]}
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      html = view |> element(~s([phx-value-run="#{main.id}"])) |> render_click()
+
+      # The two branches are mutually exclusive, so the disabled span being
+      # rendered is exactly the assertion that the live link was not.
+      assert html =~ "This run has ended — its live session is gone"
+    end
+
     test "role tabs filter the roster by worker_type", %{conn: conn, task: task} do
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
 
@@ -655,6 +735,23 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "update"
       # Same transitions the /audit page shows, scoped to this subject.
       assert html =~ "/audit?entity_id=#{task.id}"
+      # README §4 asks for relative time in the gutter, not an absolute stamp.
+      assert html =~ ~r/\d+[smhd] ago/
+      assert html =~ "2 transitions"
+    end
+
+    test "the panel meta says so when the stream is truncated", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "chatty", workspace_id: ws.id})
+
+      # 1 create + 24 updates = 25 versions, past the 20-row query cap.
+      Enum.reduce(1..24, task, fn n, acc ->
+        {:ok, updated} = Ash.update(acc, %{title: "chatty #{n}"})
+        updated
+      end)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "latest 20 of 25 transitions"
     end
   end
 
@@ -711,6 +808,23 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ blocker.id
 
       assert html =~ "SKILLS"
+    end
+
+    test "machine state names the repo the issue runs against", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "checked out", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "acme/widgets",
+          status: :completed,
+          started_at: ~U[2026-07-01 10:00:00.000000Z]
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "MACHINE STATE"
+      assert html =~ "acme/widgets"
     end
 
     test "the skills rail lists the effective set a dispatch would carry", %{conn: conn} do
