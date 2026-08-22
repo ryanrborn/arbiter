@@ -3,23 +3,43 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   Index of every merge-queue entry at `/merge_queue` — the "See all" target for
   the dashboard's merge-queue section.
 
-  An entry is a worker parked at `:awaiting_review`: an open MR integrating
-  via `Arbiter.Mergers` (Direct/GitLab/GitHub), with the Watchdog's last poll
-  result. Sourced live from `Worker.list_children/0`, paged in memory,
-  ordered longest-waiting first. Each entry links to the worker detail page
-  — the worker IS the merge-queue entry, so its detail page is the entry's
-  detail page. Re-renders on `:worker_lifecycle` events and a 1s tick.
+  Three tabs, each its own slice of the merge lifecycle:
+
+    * **Queued** — a worker parked at `:awaiting_review`: an open MR
+      integrating via `Arbiter.Mergers` (Direct/GitLab/GitHub), with the
+      Watchdog's last poll result. Sourced live from `Worker.list_children/0`,
+      paged in memory, ordered longest-waiting first. Each row anatomy is
+      queue position / task id / title / PR link / check dots / time in
+      queue.
+    * **Landed today** — every `Arbiter.Workers.Run` that reached `:completed`
+      (its MR merged) since local midnight, rendered as a 3-column grid of
+      muted `TaskCard`s.
+    * **Rejected** — a rejected/closed MR never accumulates a list here: the
+      workflow reopens the task it belongs to, so it leaves the merge queue's
+      domain entirely. The tab is a single `EmptyState` explaining that.
+
+  Each entry links to the worker detail page — the worker IS the merge-queue
+  entry, so its detail page is the entry's detail page. Re-renders on
+  `:worker_lifecycle` events and a 1s tick.
   """
 
   use ArbiterWeb, :live_view
 
+  require Ash.Query
+
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
-  alias Arbiter.Workflows.MergeQueueSupervisor
+  alias Arbiter.Workers.Run
+  alias ArbiterWeb.CoreComponents.Domain
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Navigation
   alias ArbiterWeb.Paging
 
   @workers_topic "workers"
+  @tabs ~w(queued landed rejected)
+  @landed_page_size 24
 
   @impl true
   def mount(_params, _session, socket) do
@@ -40,6 +60,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   def handle_params(params, _uri, socket) do
     {:noreply,
      socket
+     |> assign(:tab, parse_tab(params))
      |> assign(:page, Paging.parse_page(params))
      |> refresh()}
   end
@@ -49,27 +70,52 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
+  defp parse_tab(%{"tab" => tab}) when tab in @tabs, do: tab
+  defp parse_tab(_params), do: "queued"
+
   defp refresh(socket) do
+    socket
+    |> assign(:queued_count, queued_count())
+    |> assign(:landed_today_count, landed_today_count())
+    |> refresh_tab()
+  end
+
+  defp refresh_tab(%{assigns: %{tab: "landed"}} = socket) do
+    result = Paging.paginate(landed_today_query(), socket.assigns.page, @landed_page_size)
+
+    socket
+    |> assign(:landed, Enum.map(result.entries, &landed_task_card_attrs/1))
+    |> assign(:page, result.page)
+    |> assign(:total_pages, result.total_pages)
+    |> assign(:total_count, result.total_count)
+  end
+
+  defp refresh_tab(%{assigns: %{tab: "rejected"}} = socket) do
+    socket
+    |> assign(:total_pages, 1)
+    |> assign(:total_count, 0)
+  end
+
+  defp refresh_tab(socket) do
     workspaces_by_id = index_workspaces()
 
     entries =
-      list_children()
-      |> Enum.filter(&(&1.status == :awaiting_review))
-      |> Enum.map(fn p ->
-        meta = p.meta || %{}
-
+      queued_workers()
+      |> Enum.sort_by(& &1.since, {:asc, DateTime})
+      |> Enum.with_index(1)
+      |> Enum.map(fn {p, position} ->
         %{
+          position: position,
           task_id: p.task_id,
+          title: p.title,
           workspace_name: workspace_name(workspaces_by_id, p.workspace_id),
           merger_type: merger_type(workspaces_by_id, p.workspace_id),
           mr_ref: p.mr_ref,
           merger_url: p.merger_url,
-          merger_status: Map.get(meta, :last_merger_status),
-          last_checked_at: Map.get(meta, :last_checked_at),
-          since: p.step_started_at || p.started_at
+          merger_status: p.merger_status,
+          since: p.since
         }
       end)
-      |> Enum.sort_by(& &1.since, {:asc, DateTime})
 
     result = Paging.paginate_list(entries, socket.assigns.page)
 
@@ -78,24 +124,41 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     |> assign(:page, result.page)
     |> assign(:total_pages, result.total_pages)
     |> assign(:total_count, result.total_count)
-    |> assign(:serialized_queue, serialized_queue_entries(workspaces_by_id))
   end
 
-  # The live, serialized, base-aware queue (#354, Phase 3): each running
-  # workspace MergeQueue's items, in merge-admission order. Distinct from the
-  # worker-based `entries` above (which list awaiting-review workers) — this is
-  # the merge queue's own view of the queue it is integrating one PR at a time.
-  # Best-effort: a failure to reach the queues yields an empty section.
-  defp serialized_queue_entries(workspaces_by_id) do
-    MergeQueueSupervisor.queue_views()
-    |> Enum.flat_map(fn {ws_id, items} ->
-      name = workspace_name(workspaces_by_id, ws_id)
-      Enum.map(items, &Map.put(&1, :workspace_name, name))
+  # ---- Queued ----
+
+  defp queued_workers do
+    workers = list_children() |> Enum.filter(&(&1.status == :awaiting_review))
+    titles_by_id = titles_for(Enum.map(workers, & &1.task_id))
+
+    Enum.map(workers, fn p ->
+      meta = p.meta || %{}
+
+      %{
+        task_id: p.task_id,
+        title: Map.get(titles_by_id, p.task_id, p.task_id),
+        workspace_id: p.workspace_id,
+        mr_ref: p.mr_ref,
+        merger_url: p.merger_url,
+        merger_status: Map.get(meta, :last_merger_status),
+        since: p.step_started_at || p.started_at
+      }
     end)
+  end
+
+  defp queued_count, do: list_children() |> Enum.count(&(&1.status == :awaiting_review))
+
+  defp titles_for([]), do: %{}
+
+  defp titles_for(task_ids) do
+    Issue
+    |> Ash.Query.filter(id in ^task_ids)
+    |> Ash.Query.select([:id, :title])
+    |> Ash.read!()
+    |> Map.new(&{&1.id, &1.title})
   rescue
-    _ -> []
-  catch
-    :exit, _ -> []
+    _ -> %{}
   end
 
   defp list_children do
@@ -130,89 +193,84 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     _ -> :direct
   end
 
-  defp merge_queue_path(page), do: ~p"/merge_queue?#{%{page: page}}"
+  # ---- Landed today ----
+
+  defp today_start_utc do
+    DateTime.new!(Date.utc_today(), ~T[00:00:00], "Etc/UTC")
+  end
+
+  defp landed_today_query do
+    today = today_start_utc()
+
+    Run
+    |> Ash.Query.filter(status == :completed and completed_at >= ^today)
+    |> Ash.Query.sort(completed_at: :desc)
+  end
+
+  defp landed_today_count do
+    landed_today_query() |> Ash.count!()
+  rescue
+    _ -> 0
+  catch
+    :exit, _ -> 0
+  end
+
+  defp landed_task_card_attrs(%Run{} = run) do
+    %{
+      id: run.task_id,
+      title: run.task_title || run.task_id,
+      footer: landed_footer(run)
+    }
+  end
+
+  defp landed_footer(%Run{completed_at: nil}), do: nil
+
+  defp landed_footer(%Run{completed_at: completed_at}) do
+    "merged #{Calendar.strftime(completed_at, "%H:%M")}"
+  end
+
+  # ---- view helpers ----
+
+  defp merge_queue_path(tab, page), do: ~p"/merge_queue?#{%{tab: tab, page: page}}"
+
+  defp tabs(queued_count, landed_today_count) do
+    [
+      %{label: "Queued", value: "queued", count: queued_count},
+      %{label: "Landed today", value: "landed", count: landed_today_count},
+      %{label: "Rejected", value: "rejected"}
+    ]
+  end
 
   @impl true
   def render(assigns) do
+    assigns = assign(assigns, :tab_defs, tabs(assigns.queued_count, assigns.landed_today_count))
+
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <div class="flex items-start justify-between gap-4">
-          <.index_header
+          <Domain.index_header
             icon="hero-arrow-path-rounded-square"
             title={cap_plural(@merge_queue_label)}
-            count={@total_count}
+            count={@queued_count}
             subtitle={"Every #{@pr_label} integrating now, longest-waiting first."}
           />
-          <.live_badge live={@live} />
+          <Feedback.live_badge live={@live} />
         </div>
 
-        <section
-          :if={@serialized_queue != []}
-          id="serialized-queue"
-          class="card bg-base-200 border border-base-300 shadow-sm"
-        >
-          <div class="card-body p-4 gap-3">
-            <div class="flex items-center gap-2">
-              <.icon name="hero-fire" class="size-4 text-warning" />
-              <h2 class="text-sm font-semibold tracking-tight">
-                Serialized merge order
-              </h2>
-              <span class="badge badge-sm badge-ghost">{length(@serialized_queue)}</span>
-            </div>
-            <p class="text-xs text-base-content/60 -mt-1">
-              Approved {plural(@pr_label)} are kept rebased on the moving base and merged one at a
-              time, front of queue first.
-            </p>
+        <Navigation.filter_tabs
+          tabs={@tab_defs}
+          active={@tab}
+          tab_path={fn value -> merge_queue_path(value, 1) end}
+        />
 
-            <ul id="serialized-queue-list" class="flex flex-col gap-2">
-              <li
-                :for={c <- @serialized_queue}
-                class="rounded-box bg-base-100 border border-base-300 p-2.5 flex items-center justify-between gap-2"
-              >
-                <div class="flex items-center gap-2 min-w-0">
-                  <span
-                    class="badge badge-sm badge-neutral font-mono tabular-nums shrink-0"
-                    title="Queue position"
-                  >
-                    {"##{c.position}"}
-                  </span>
-                  <.link navigate={~p"/workers/#{c.task_id}"} class="min-w-0 group">
-                    <code class="text-xs font-semibold group-hover:text-primary transition-colors truncate">
-                      {c.task_id}
-                    </code>
-                  </.link>
-                  <a
-                    :if={c.mr_ref && c.merger_url}
-                    href={c.merger_url}
-                    target="_blank"
-                    rel="noopener"
-                    class="link link-primary text-xs truncate shrink-0"
-                  >
-                    {c.mr_ref}
-                  </a>
-                  <code :if={c.mr_ref && !c.merger_url} class="text-xs text-base-content/60 truncate">
-                    {c.mr_ref}
-                  </code>
-                </div>
-                <div class="flex items-center gap-1.5 shrink-0">
-                  <span class="text-xs text-base-content/50 truncate hidden sm:inline">
-                    {c.workspace_name}
-                  </span>
-                  <span class={["badge badge-sm", serialized_queue_status_class(c.status)]}>
-                    {serialized_queue_status_label(c.status)}
-                  </span>
-                </div>
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
+        <section :if={@tab == "queued"} class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
-            <.empty_state :if={@entries == []} id="merge_queue-empty" icon="hero-inbox">
-              No {plural(@pr_label)} integrating right now.
-            </.empty_state>
+            <div :if={@entries == []} id="merge_queue-empty">
+              <Feedback.empty_state icon="hero-inbox">
+                No {plural(@pr_label)} integrating right now.
+              </Feedback.empty_state>
+            </div>
 
             <ul :if={@entries != []} id="merge_queue" class="flex flex-col gap-3">
               <li
@@ -220,26 +278,29 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
                 class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-primary/50"
               >
                 <div class="flex items-center justify-between gap-2">
-                  <.link
-                    navigate={~p"/workers/#{m.task_id}"}
-                    class="flex items-center gap-2 min-w-0 group"
-                  >
-                    <span class="relative flex h-2.5 w-2.5 shrink-0">
-                      <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-warning opacity-75">
-                      </span>
-                      <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-warning"></span>
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span
+                      class="badge badge-sm badge-neutral font-mono tabular-nums shrink-0"
+                      title="Queue position"
+                    >
+                      {"##{m.position}"}
                     </span>
-                    <code class="text-xs font-semibold group-hover:text-primary transition-colors truncate">
-                      {m.task_id}
-                    </code>
-                  </.link>
-                  <div class="flex items-center gap-1.5 shrink-0">
-                    <span class="badge badge-sm badge-ghost font-mono">
-                      {merger_type_label(m.merger_type)}
-                    </span>
-                    <span class={["badge badge-sm", merge_status_class(m.merger_status)]}>
-                      {merge_status_label(m.merger_status)}
-                    </span>
+                    <.link
+                      navigate={~p"/workers/#{m.task_id}"}
+                      class="flex items-center gap-2 min-w-0 group"
+                    >
+                      <code class="text-xs font-semibold group-hover:text-primary transition-colors truncate">
+                        {m.task_id}
+                      </code>
+                      <span class="text-xs text-base-content/70 truncate">{m.title}</span>
+                    </.link>
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0" title="CI / Approval / Mergeable">
+                    <span
+                      :for={{label, state} <- check_dots(m.merger_status)}
+                      class={["h-1.5 w-1.5 rounded-full shrink-0", check_dot_class(state)]}
+                      title={label}
+                    />
                   </div>
                 </div>
 
@@ -251,7 +312,11 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
                 </div>
 
                 <div :if={m.mr_ref} class="flex items-center gap-1 mt-1.5 text-xs min-w-0">
-                  <.icon name="hero-arrow-top-right-on-square" class="size-3 text-primary shrink-0" />
+                  <ArbiterWeb.CoreComponents.Core.icon
+                    name="hero-arrow-top-right-on-square"
+                    size={12}
+                    class="text-primary shrink-0"
+                  />
                   <a
                     :if={m.merger_url}
                     href={m.merger_url}
@@ -266,12 +331,56 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
               </li>
             </ul>
 
-            <.pager
+            <Navigation.pager
               page={@page}
               total_pages={@total_pages}
               total_count={@total_count}
-              page_path={&merge_queue_path/1}
+              page_path={fn page -> merge_queue_path(@tab, page) end}
             />
+          </div>
+        </section>
+
+        <section :if={@tab == "landed"} class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <div :if={@landed == []} id="merge_queue-landed-empty">
+              <Feedback.empty_state icon="hero-check-circle">
+                No {plural(@pr_label)} have landed today yet.
+              </Feedback.empty_state>
+            </div>
+
+            <div
+              :if={@landed != []}
+              id="merge_queue-landed"
+              class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
+            >
+              <Domain.task_card
+                :for={t <- @landed}
+                id={t.id}
+                title={t.title}
+                footer={t.footer}
+                muted
+              />
+            </div>
+
+            <Navigation.pager
+              page={@page}
+              total_pages={@total_pages}
+              total_count={@total_count}
+              page_path={fn page -> merge_queue_path(@tab, page) end}
+            />
+          </div>
+        </section>
+
+        <section :if={@tab == "rejected"} class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <div id="merge_queue-rejected-empty">
+              <Feedback.empty_state
+                icon="hero-arrow-uturn-left"
+                detail="A rejected or closed pull request reopens its task and sends it back to the board for another pass — nothing stays queued once that happens."
+              >
+                Rejected merges don't collect here.
+              </Feedback.empty_state>
+            </div>
           </div>
         </section>
 
@@ -281,7 +390,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     """
   end
 
-  # ---- view helpers ----
+  # ---- render helpers ----
 
   defp runtime_seconds(%DateTime{} = started_at, %DateTime{} = now),
     do: DateTime.diff(now, started_at, :second)
@@ -292,78 +401,40 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp humanize_seconds(s) when s < 3600, do: "#{div(s, 60)}m"
   defp humanize_seconds(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
 
-  defp merger_type_label(:direct), do: "Direct"
-  defp merger_type_label(:gitlab), do: "GitLab"
-  defp merger_type_label(:github), do: "GitHub"
-  defp merger_type_label(other), do: other |> to_string() |> String.capitalize()
+  # Three checks derived from the Watchdog's last poll result: CI, Approval,
+  # Mergeable. `nil` (no poll yet) renders all three unknown.
+  defp check_dots(nil), do: [{"CI", :unknown}, {"Approval", :unknown}, {"Mergeable", :unknown}]
 
-  defp merge_status_label(nil), do: "Awaiting first poll"
+  defp check_dots(status) when is_map(status) do
+    [
+      {"CI", check_ci_state(status)},
+      {"Approval", check_approval_state(status)},
+      {"Mergeable", check_mergeable_state(status)}
+    ]
+  end
 
-  defp merge_status_label(status) when is_map(status) do
-    case Watchdog.effective_block_reason(status) do
-      nil ->
-        case Watchdog.classify(status) do
-          :merged -> "Merged"
-          :approved -> "Approved"
-          :closed -> "Closed / rejected"
-          :pending -> "In review"
-        end
-
-      reason ->
-        block_reason_label(reason)
+  defp check_ci_state(status) do
+    cond do
+      Watchdog.ci_failed?(status) -> :fail
+      Watchdog.ci_pending?(status) -> :pending
+      true -> :pass
     end
   end
 
-  defp merge_status_class(nil), do: "badge-ghost"
-
-  defp merge_status_class(status) when is_map(status) do
-    case Watchdog.effective_block_reason(status) do
-      nil ->
-        case Watchdog.classify(status) do
-          :merged -> "badge-success"
-          :approved -> "badge-success"
-          :closed -> "badge-error"
-          :pending -> "badge-info"
-        end
-
-      _reason ->
-        "badge-error"
+  defp check_approval_state(status) do
+    cond do
+      Map.get(status, :approved) == true -> :pass
+      Watchdog.block_reason(status) in [:needs_approval, :needs_nonauthor_approval] -> :fail
+      true -> :pending
     end
   end
 
-  # Serialized-queue item status (#354, Phase 3) — the merge queue's own view of where each
-  # queued PR is in the serialized, base-aware merge pipeline.
-  defp serialized_queue_status_label(:opening), do: "Opening"
-  defp serialized_queue_status_label(:awaiting_approval), do: "In review"
-  defp serialized_queue_status_label(:ci_running), do: "CI running"
-  defp serialized_queue_status_label(:updating_base), do: "Rebasing onto base"
-  defp serialized_queue_status_label(:ready_to_merge), do: "Queued to merge"
-  defp serialized_queue_status_label(:merging), do: "Merging"
-  defp serialized_queue_status_label(:conflict_resolving), do: "Resolving conflict"
-  defp serialized_queue_status_label(:changes_requested), do: "Revising"
-  defp serialized_queue_status_label(:failed), do: "Failed"
-  defp serialized_queue_status_label(other), do: other |> to_string() |> String.capitalize()
+  defp check_mergeable_state(status) do
+    if Watchdog.block_reason(status) in [:conflict, :behind_base], do: :fail, else: :pass
+  end
 
-  defp serialized_queue_status_class(:ready_to_merge), do: "badge-success"
-  defp serialized_queue_status_class(:merging), do: "badge-success"
-  defp serialized_queue_status_class(:updating_base), do: "badge-info"
-  defp serialized_queue_status_class(:ci_running), do: "badge-info"
-  defp serialized_queue_status_class(:conflict_resolving), do: "badge-warning"
-  defp serialized_queue_status_class(:changes_requested), do: "badge-warning"
-  defp serialized_queue_status_class(:failed), do: "badge-error"
-  defp serialized_queue_status_class(_), do: "badge-ghost"
-
-  # A blocked merge surfaces the *why* (#354, Phase 1) so an unmergeable PR is
-  # never indistinguishable from one merely "in review".
-  defp block_reason_label(:conflict), do: "Blocked · conflict"
-  defp block_reason_label(:behind_base), do: "Blocked · behind base"
-  defp block_reason_label(:ci_failed), do: "Blocked · CI failed"
-  defp block_reason_label(:needs_approval), do: "Blocked · needs approval"
-
-  defp block_reason_label(:needs_nonauthor_approval),
-    do: "Parked · awaiting human reviewer"
-
-  defp block_reason_label(:draft), do: "Blocked · draft"
-  defp block_reason_label(:blocked_other), do: "Blocked"
-  defp block_reason_label(other), do: "Blocked · #{other}"
+  defp check_dot_class(:pass), do: "bg-success"
+  defp check_dot_class(:fail), do: "bg-error"
+  defp check_dot_class(:pending), do: "bg-warning"
+  defp check_dot_class(:unknown), do: "bg-base-300"
 end

@@ -32,6 +32,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   alias ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Workers.Run
 
   setup do
     for snap <- Worker.list_children(), do: Worker.stop(snap.task_id)
@@ -53,24 +54,110 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
     }
   end
 
-  test "empty state when nothing is integrating", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/merge_queue")
-    assert html =~ ~s(id="merge_queue-empty")
+  describe "Queued tab" do
+    test "empty state when nothing is integrating", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/merge_queue")
+      assert html =~ ~s(id="merge_queue-empty")
+      assert html =~ "integrating right now"
+    end
+
+    test "row anatomy: position, id, title, PR link, check dots, time-in-queue",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+
+      {:ok, _view, html} = live(conn, ~p"/merge_queue")
+
+      assert html =~ ~s(id="merge_queue")
+      # position badge
+      assert html =~ "#1"
+      assert html =~ task.id
+      assert html =~ "merging-now"
+      assert html =~ "!77"
+      assert html =~ "https://example.test/mr/77"
+      assert html =~ ~s(href="/workers/#{task.id}")
+      assert html =~ "in queue"
+      # check dots — three checks (CI / Approval / Mergeable) rendered as dots
+      assert html =~ "title=\"CI\""
+      assert html =~ "title=\"Approval\""
+      assert html =~ "title=\"Mergeable\""
+    end
+
+    test "Queued tab is the default and shows in the tab bar with a live count",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+
+      {:ok, _view, html} = live(conn, ~p"/merge_queue")
+      assert html =~ "Queued"
+      assert html =~ "Landed today"
+      assert html =~ "Rejected"
+    end
   end
 
-  test "an in-flight merge surfaces with its MR link and links to the worker detail",
-       %{conn: conn, ws: ws} do
-    {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-    :ok = Worker.advance(pid, :integrate)
-    {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+  describe "Landed today tab" do
+    test "shows a 3-col grid of muted TaskCards for runs completed today", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "shipped-thing", workspace_id: ws.id})
 
-    {:ok, _view, html} = live(conn, ~p"/merge_queue")
+      Ash.create!(Run, %{
+        task_id: task.id,
+        task_title: task.title,
+        repo: "test/repo",
+        workspace_id: ws.id,
+        status: :completed,
+        started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
+        completed_at: DateTime.utc_now(),
+        mr_ref: "!42"
+      })
 
-    assert html =~ ~s(id="merge_queue")
-    assert html =~ task.id
-    assert html =~ "!77"
-    assert html =~ "https://example.test/mr/77"
-    assert html =~ ~s(href="/workers/#{task.id}")
+      {:ok, _view, html} = live(conn, ~p"/merge_queue?tab=landed")
+
+      assert html =~ ~s(id="merge_queue-landed")
+      assert html =~ "grid-cols-1"
+      assert html =~ "lg:grid-cols-3"
+      assert html =~ task.id
+      assert html =~ "shipped-thing"
+      refute html =~ ~s(id="merge_queue-landed-empty")
+    end
+
+    test "empty state when nothing landed today", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/merge_queue?tab=landed")
+      assert html =~ ~s(id="merge_queue-landed-empty")
+      assert html =~ "landed today"
+    end
+
+    test "a run completed before today does not show up", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "old-news", workspace_id: ws.id})
+
+      Ash.create!(Run, %{
+        task_id: task.id,
+        task_title: task.title,
+        repo: "test/repo",
+        workspace_id: ws.id,
+        status: :completed,
+        started_at: DateTime.add(DateTime.utc_now(), -172_800, :second),
+        completed_at: DateTime.add(DateTime.utc_now(), -172_000, :second),
+        mr_ref: "!41"
+      })
+
+      {:ok, _view, html} = live(conn, ~p"/merge_queue?tab=landed")
+      assert html =~ ~s(id="merge_queue-landed-empty")
+      refute html =~ "old-news"
+    end
+  end
+
+  describe "Rejected tab" do
+    test "always shows the empty state explaining a rejected merge reopens its task",
+         %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/merge_queue?tab=rejected")
+
+      assert html =~ ~s(id="merge_queue-rejected-empty")
+      assert html =~ "don&#39;t collect here"
+      assert html =~ "reopens its task"
+    end
   end
 end
