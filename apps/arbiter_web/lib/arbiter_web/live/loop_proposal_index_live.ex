@@ -263,7 +263,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
           </:actions>
         </ArbiterWeb.CoreComponents.Domain.index_header>
 
-        <ArbiterWeb.CoreComponents.Core.panel padded={@rows != []}>
+        <ArbiterWeb.CoreComponents.Core.panel>
           <div :if={@rows == []} id="loop-proposals-empty">
             <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-beaker">
               Nothing queued in this view. The evidence bar is {@evidence_bar.min_incidents} incident(s) across {@evidence_bar.min_distinct_tasks} distinct task(s) — findings below it
@@ -424,11 +424,12 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
                 phx-value-id={@selected.id}
                 class="flex items-end gap-2 grow"
               >
-                <input
-                  type="text"
+                <ArbiterWeb.CoreComponents.Forms.input
                   name="reason"
                   placeholder="reason (optional)"
-                  class="rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--surface-card)] px-2 py-1 text-xs grow"
+                  size="sm"
+                  mono={false}
+                  class="grow"
                 />
                 <ArbiterWeb.CoreComponents.Core.button type="submit" variant="ghost" size="sm">
                   Reject
