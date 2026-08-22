@@ -35,6 +35,11 @@ defmodule ArbiterWeb.Layouts do
 
   attr(:quotas, :list, default: [], doc: "One AnthropicQuota struct per tracked provider")
 
+  attr(:quota_on_exhaustion, :any,
+    default: nil,
+    doc: "override for tests/specimens; real callers omit it and get the installation default"
+  )
+
   slot(:inner_block, required: true)
 
   def app(assigns) do
@@ -42,371 +47,78 @@ defmodule ArbiterWeb.Layouts do
     # `<Layouts.app quotas={@quotas} ...>` call site (bd-l4epbc) — the quota
     # bars only ever show the installation default workspace regardless of
     # which page is open, same as `@quotas` itself (`ArbiterWeb.LiveHooks`).
+    # `quota_on_exhaustion` defaults to nil via `attr/3`, so a real caller
+    # (who never passes it) still falls through to the DB-backed default;
+    # only tests/specimens override it to dodge the DB round-trip.
     assigns =
-      assign_new(assigns, :quota_on_exhaustion, fn ->
-        Arbiter.Quota.default_workspace_on_exhaustion()
-      end)
+      assign(
+        assigns,
+        :quota_on_exhaustion,
+        assigns.quota_on_exhaustion || Arbiter.Quota.default_workspace_on_exhaustion()
+      )
+
+    assigns = assign(assigns, :nav_items, nav_items())
 
     ~H"""
-    <header class="navbar bg-base-200 border-b border-base-300 px-4 sm:px-6 lg:px-8 min-h-12 py-1">
-      <div class="flex-1">
-        <.link navigate={~p"/"} class="flex items-center gap-2" aria-label="Arbiter">
-          <.brandmark form="wordmark" size={130} tone="accent" />
-        </.link>
-      </div>
-
-      <%!-- Desktop nav: lg and above --%>
-      <nav class="flex max-lg:hidden flex-none">
-        <ul class="menu menu-horizontal gap-1 text-sm p-0">
-          <li>
-            <.link navigate={~p"/"} class={nav_class(@current_path, "/")}>
-              Dashboard
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/tasks"} class={nav_class(@current_path, "/tasks")}>
-              {cap_plural("issue")}
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/workers"} class={nav_class(@current_path, "/workers")}>
-              {cap_plural("worker")}
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/merge_queue"} class={nav_class(@current_path, "/merge_queue")}>
-              {cap_plural("merge queue")}
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/workspaces"} class={nav_class(@current_path, "/workspaces")}>
-              {cap_plural("workspace")}
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/skills"} class={nav_class(@current_path, "/skills")}>
-              {cap_plural("skill")}
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/loop"} class={nav_class(@current_path, "/loop")}>
-              Loop queue
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/audit"} class={nav_class(@current_path, "/audit")}>
-              Audit log
-            </.link>
-          </li>
-          <li>
-            <.link navigate={~p"/usage"} class={nav_class(@current_path, "/usage")}>
-              Usage
-            </.link>
-          </li>
-          <li>
-            <.link href={~p"/about"} class={nav_class(@current_path, "/about")}>
-              About
-            </.link>
-          </li>
-        </ul>
-      </nav>
-      <%!-- Quota widget: lg+ topbar; compact version also shown in mobile hamburger --%>
-      <div
-        :for={quota <- @quotas}
-        class="flex max-lg:hidden flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2"
-        title={quota_provider_label(quota.provider)}
-      >
-        <span class="text-[9px] text-base-content/35 uppercase tracking-wide leading-none">
-          {quota_provider_label(quota.provider)}
-        </span>
-        <div class={[
-          "flex items-center gap-1.5",
-          quota_binding_class(quota.representative_claim, "five_hour")
-        ]}>
-          <span class="text-base-content/40 w-4 shrink-0">5h</span>
-          <div
-            class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
-            title={
-              quota_bar_title([
-                quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at),
-                quota_pace_ratio_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)
-              ])
-            }
-          >
-            <div
-              :if={quota.utilization_5h}
-              class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-              style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at, quota.overage_status)};"}
+    <.top_nav items={@nav_items} current_path={@current_path}>
+      <:right>
+        <div :for={quota <- @quotas} class="max-lg:hidden flex flex-col gap-[3px]">
+          <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+            {quota_provider_label(quota.provider)}
+          </span>
+          <div class="flex items-center gap-3">
+            <.quota_bar
+              provider={quota.provider}
+              show_label={false}
+              window="5h"
+              utilization={quota.utilization_5h}
+              reset_at={quota.reset_5h_at}
+              overage_status={quota.overage_status}
+              representative_claim={quota.representative_claim}
+              on_exhaustion={@quota_on_exhaustion}
             />
-            <.quota_marker
-              :if={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
-              pct={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
-              label={quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)}
-              compact
+            <.quota_bar
+              provider={quota.provider}
+              show_label={false}
+              window="7d"
+              utilization={quota.utilization_7d}
+              reset_at={quota.reset_7d_at}
+              overage_status={quota.overage_status}
+              representative_claim={quota.representative_claim}
+              on_exhaustion={@quota_on_exhaustion}
             />
           </div>
-          <span class="text-base-content/60 tabular-nums w-12">
-            {quota_pace_label_5h(
-              quota.provider,
-              quota.utilization_5h,
-              quota.reset_5h_at,
-              quota.overage_status,
-              @quota_on_exhaustion
-            ) || quota_reset_label(quota.reset_5h_at)}
-          </span>
         </div>
-        <div class={[
-          "flex items-center gap-1.5",
-          quota_binding_class(quota.representative_claim, "seven_day")
-        ]}>
-          <span class="text-base-content/40 w-4 shrink-0">7d</span>
-          <div
-            class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
-            title={
-              quota_bar_title([
-                quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at),
-                quota_pace_ratio_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)
-              ])
-            }
-          >
-            <div
-              :if={quota.utilization_7d}
-              class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-              style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at, quota.overage_status)};"}
-            />
-            <.quota_marker
-              :if={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
-              pct={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
-              label={quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)}
-              compact
-            />
-          </div>
-          <span class="text-base-content/60 tabular-nums w-12">
-            {quota_pace_label_7d(
-              quota.provider,
-              quota.utilization_7d,
-              quota.reset_7d_at,
-              quota.overage_status,
-              @quota_on_exhaustion
-            ) || quota_reset_label(quota.reset_7d_at)}
-          </span>
-        </div>
-      </div>
-
-      <div class="flex-none ml-2 flex items-center gap-2">
+        <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" />
         <.theme_toggle />
-
-        <%!-- Mobile hamburger: below lg --%>
-        <details id="mobile-nav" class="dropdown dropdown-end lg:hidden" phx-hook="DetailsPreserve">
-          <summary class="btn btn-ghost btn-sm px-2" aria-label="Open navigation">
-            <.icon name="hero-bars-3" class="size-5" />
-          </summary>
-          <ul class="dropdown-content menu bg-base-200 border border-base-300 rounded-box shadow-lg z-[100] w-48 p-2 gap-0.5 mt-1 text-sm">
-            <li>
-              <.link
-                navigate={~p"/"}
-                class={nav_class(@current_path, "/")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                Dashboard
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/tasks"}
-                class={nav_class(@current_path, "/tasks")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                {cap_plural("issue")}
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/workers"}
-                class={nav_class(@current_path, "/workers")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                {cap_plural("worker")}
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/merge_queue"}
-                class={nav_class(@current_path, "/merge_queue")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                {cap_plural("merge queue")}
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/workspaces"}
-                class={nav_class(@current_path, "/workspaces")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                {cap_plural("workspace")}
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/skills"}
-                class={nav_class(@current_path, "/skills")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                {cap_plural("skill")}
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/loop"}
-                class={nav_class(@current_path, "/loop")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                Loop queue
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/audit"}
-                class={nav_class(@current_path, "/audit")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                Audit log
-              </.link>
-            </li>
-            <li>
-              <.link
-                navigate={~p"/usage"}
-                class={nav_class(@current_path, "/usage")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                Usage
-              </.link>
-            </li>
-            <li>
-              <.link
-                href={~p"/about"}
-                class={nav_class(@current_path, "/about")}
-                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
-              >
-                About
-              </.link>
-            </li>
-            <li
-              :if={@quotas != []}
-              class="border-t border-base-300 mt-0.5 pt-0.5 pointer-events-none"
-            >
-              <div class="flex flex-col gap-1.5 px-2 py-1 text-xs font-mono select-none w-full items-stretch">
-                <div :for={quota <- @quotas} class="flex flex-col gap-0.5">
-                  <span class="text-[9px] text-base-content/35 uppercase tracking-wide leading-none">
-                    {quota_provider_label(quota.provider)}
-                  </span>
-                  <div class={[
-                    "flex items-center gap-1.5",
-                    quota_binding_class(quota.representative_claim, "five_hour")
-                  ]}>
-                    <span class="text-base-content/40 w-4 shrink-0">5h</span>
-                    <div
-                      class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
-                      title={
-                        quota_bar_title([
-                          quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at),
-                          quota_pace_ratio_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)
-                        ])
-                      }
-                    >
-                      <div
-                        :if={quota.utilization_5h}
-                        class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-                        style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at, quota.overage_status)};"}
-                      />
-                      <.quota_marker
-                        :if={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
-                        pct={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
-                        label={
-                          quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)
-                        }
-                        compact
-                      />
-                    </div>
-                    <span class="text-base-content/60 tabular-nums w-12 text-right">
-                      {quota_pace_label_5h(
-                        quota.provider,
-                        quota.utilization_5h,
-                        quota.reset_5h_at,
-                        quota.overage_status,
-                        @quota_on_exhaustion
-                      ) || quota_reset_label(quota.reset_5h_at)}
-                    </span>
-                  </div>
-                  <div class={[
-                    "flex items-center gap-1.5",
-                    quota_binding_class(quota.representative_claim, "seven_day")
-                  ]}>
-                    <span class="text-base-content/40 w-4 shrink-0">7d</span>
-                    <div
-                      class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
-                      title={
-                        quota_bar_title([
-                          quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at),
-                          quota_pace_ratio_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)
-                        ])
-                      }
-                    >
-                      <div
-                        :if={quota.utilization_7d}
-                        class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-                        style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at, quota.overage_status)};"}
-                      />
-                      <.quota_marker
-                        :if={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
-                        pct={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
-                        label={
-                          quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)
-                        }
-                        compact
-                      />
-                    </div>
-                    <span class="text-base-content/60 tabular-nums w-12 text-right">
-                      {quota_pace_label_7d(
-                        quota.provider,
-                        quota.utilization_7d,
-                        quota.reset_7d_at,
-                        quota.overage_status,
-                        @quota_on_exhaustion
-                      ) || quota_reset_label(quota.reset_7d_at)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </li>
-          </ul>
-        </details>
-      </div>
-    </header>
+      </:right>
+    </.top_nav>
 
     <main>
       {render_slot(@inner_block)}
     </main>
 
-    <.flash_group flash={@flash} />
+    <.toast_group flash={@flash} />
     """
   end
 
-  # Matches the current path against a nav target. The dashboard ("/") only
-  # matches exactly so it doesn't claim every page; other entries match the
-  # path prefix so sub-pages (e.g. /workspace/:id/settings/...) still light up
-  # the relevant top-level entry if we add one later.
-  defp nav_class(current, "/"), do: nav_class_for(current == "/")
-
-  defp nav_class(nil, _target), do: nav_class_for(false)
-
-  defp nav_class(current, target) do
-    nav_class_for(current == target or String.starts_with?(current, target <> "/"))
+  # Board/Issues/Workers/Merge queue/Workspaces/Skills/Loop/Usage/Audit — the
+  # global-chrome nav order (bd-53pfbg). Dashboard renamed to Board, "Loop
+  # queue" to Loop, "Audit log" to Audit; About drops out of the nav (it's
+  # still reachable at ~p"/about" directly).
+  defp nav_items do
+    [
+      %{label: "Board", href: ~p"/"},
+      %{label: cap_plural("issue"), href: ~p"/tasks"},
+      %{label: cap_plural("worker"), href: ~p"/workers"},
+      %{label: cap_plural("merge queue"), href: ~p"/merge_queue"},
+      %{label: cap_plural("workspace"), href: ~p"/workspaces"},
+      %{label: cap_plural("skill"), href: ~p"/skills"},
+      %{label: "Loop", href: ~p"/loop"},
+      %{label: "Usage", href: ~p"/usage"},
+      %{label: "Audit", href: ~p"/audit"}
+    ]
   end
-
-  defp nav_class_for(true), do: "menu-active font-semibold"
-  defp nav_class_for(false), do: ""
 
   @doc """
   Shows the flash group with standard titles and content.
@@ -458,31 +170,37 @@ defmodule ArbiterWeb.Layouts do
   """
   def theme_toggle(assigns) do
     ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 transition-[left]" />
+    <div class="relative flex items-center rounded-[var(--radius-pill)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]">
+      <div class="absolute inset-y-[2px] left-[2px] w-[calc(33.333%-2px)] rounded-[var(--radius-pill)] bg-[var(--surface-card)] transition-[left] duration-200 [[data-theme=light]_&]:left-[calc(33.333%+1px)] [[data-theme=dark]_&]:left-[calc(66.666%-1px)]" />
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="system"
+        aria-label="Match system theme"
       >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
+        <ArbiterWeb.CoreComponents.Core.icon
+          name="hero-computer-desktop-micro"
+          color="var(--text-secondary)"
+        />
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="light"
+        aria-label="Light theme"
       >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
+        <ArbiterWeb.CoreComponents.Core.icon name="hero-sun-micro" color="var(--text-secondary)" />
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="dark"
+        aria-label="Dark theme"
       >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
+        <ArbiterWeb.CoreComponents.Core.icon name="hero-moon-micro" color="var(--text-secondary)" />
       </button>
     </div>
     """
