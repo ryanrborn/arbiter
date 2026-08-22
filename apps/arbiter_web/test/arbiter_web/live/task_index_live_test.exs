@@ -189,7 +189,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       html = view |> element(~s(button[phx-click="new"])) |> render_click()
 
       assert html =~ ~s(id="task-create-cli-preview")
-      assert html =~ "arb issue create &quot;&quot;"
+      assert html =~ "arb issue create &#39;&#39;"
     end
 
     test "updates live as the title and other fields are typed", %{conn: conn} do
@@ -210,10 +210,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
         |> render_change()
 
       assert html =~
-               ~s(arb issue create &quot;Fix the flaky merge queue test&quot; --type bug --priority 1 --difficulty 3)
-
-      # Description has no CLI flag in arb issue create — it isn't reflected.
-      refute html =~ "--description"
+               ~s(arb issue create &#39;Fix the flaky merge queue test&#39; --type bug --priority 1 --difficulty 3 --description &#39;context here&#39;)
     end
 
     test "defaults (feature type, priority 2, unset difficulty) are omitted from the preview",
@@ -228,22 +225,36 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
         })
         |> render_change()
 
-      assert html =~ ~s(arb issue create &quot;plain title&quot;)
+      assert html =~ ~s(arb issue create &#39;plain title&#39;)
       refute html =~ "--type"
       refute html =~ "--priority"
       refute html =~ "--difficulty"
+      refute html =~ "--description"
     end
 
-    test "double quotes in the title are escaped in the preview", %{conn: conn} do
+    test "single quotes in the title are escaped in the preview", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/tasks")
       view |> element(~s(button[phx-click="new"])) |> render_click()
 
       html =
         view
-        |> form("#task-create-form", %{"task" => %{"title" => ~s(say "hi")}})
+        |> form("#task-create-form", %{"task" => %{"title" => ~s(say 'hi')}})
         |> render_change()
 
-      assert html =~ ~s(arb issue create &quot;say \\&quot;hi\\&quot;&quot;)
+      assert html =~ ~s(arb issue create &#39;say &#39;\\&#39;&#39;hi&#39;\\&#39;&#39;&#39;)
+    end
+
+    test "shell metacharacters in the title stay inert inside single quotes",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      view |> element(~s(button[phx-click="new"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-create-form", %{"task" => %{"title" => ~s(Bump $VERSION `date`)}})
+        |> render_change()
+
+      assert html =~ ~s(arb issue create &#39;Bump $VERSION `date`&#39;)
     end
   end
 

@@ -255,21 +255,25 @@ defmodule ArbiterWeb.TaskIndexLive do
     |> maybe_flag("--type", TaskForm.trimmed(params["issue_type"]), "feature")
     |> maybe_flag("--priority", TaskForm.trimmed(params["priority"]), "2")
     |> maybe_flag("--difficulty", TaskForm.trimmed(params["difficulty"]), nil)
+    |> maybe_flag("--description", TaskForm.trimmed(params["description"]), nil, quote?: true)
     |> Enum.join(" ")
   end
 
-  defp maybe_flag(parts, _flag, value, default) when value == default or is_nil(value),
+  defp maybe_flag(parts, _flag, value, default, _opts \\ [])
+
+  defp maybe_flag(parts, _flag, value, default, _opts) when value == default or is_nil(value),
     do: parts
 
-  defp maybe_flag(parts, flag, value, _default), do: parts ++ [flag, value]
+  defp maybe_flag(parts, flag, value, _default, opts) do
+    value = if opts[:quote?], do: shell_quote(value), else: value
+    parts ++ [flag, value]
+  end
 
+  # Single-quote the value POSIX-style: this string is meant to be copied
+  # straight into a shell, so `$` and backticks inside it must stay inert
+  # rather than expanding/executing on paste.
   defp shell_quote(value) do
-    escaped =
-      value
-      |> String.replace("\\", "\\\\")
-      |> String.replace("\"", "\\\"")
-
-    ~s("#{escaped}")
+    "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
 
   defp load_workspaces(socket) do
