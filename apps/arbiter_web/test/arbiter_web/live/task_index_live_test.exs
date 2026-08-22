@@ -58,6 +58,92 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
     assert render(view) =~ "freshly-minted"
   end
 
+  describe "row anatomy and design" do
+    test "a P1 issue row carries the red tint and left rule", %{conn: conn, ws: ws} do
+      {:ok, p1} =
+        Ash.create(Issue, %{title: "urgent-fix", workspace_id: ws.id, priority: 1})
+
+      {:ok, p2} = Ash.create(Issue, %{title: "normal-fix", workspace_id: ws.id, priority: 2})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks")
+
+      p1_row = row_html(html, p1.id)
+      p2_row = row_html(html, p2.id)
+
+      assert p1_row =~ "bg-[var(--arb-fail-wash)]"
+      refute p1_row =~ "bg-[var(--surface-card)]"
+      assert p1_row =~ "arb-fail"
+      refute p2_row =~ "arb-fail"
+    end
+
+    test "a closed issue row is rendered at reduced opacity", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "wraps-up", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks")
+
+      assert row_html(html, task.id) =~ "opacity-[0.62]"
+    end
+
+    test "a row shows the priority tag, difficulty meter, id, title, and status chip",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "full-anatomy",
+          workspace_id: ws.id,
+          priority: 3,
+          difficulty: 2
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks")
+      row = row_html(html, task.id)
+
+      assert row =~ "P3"
+      assert row =~ "Difficulty D2"
+      assert row =~ task.id
+      assert row =~ "full-anatomy"
+      assert row =~ "open"
+    end
+
+    defp row_html(html, id) do
+      link = ~s(href="/tasks/#{id}")
+      link_pos = :binary.match(html, link) |> elem(0)
+
+      li_start =
+        :binary.matches(html, "<li ")
+        |> Enum.map(&elem(&1, 0))
+        |> Enum.filter(&(&1 < link_pos))
+        |> List.last()
+
+      li_end =
+        :binary.match(html, "</li>", scope: {link_pos, byte_size(html) - link_pos}) |> elem(0)
+
+      binary_part(html, li_start, li_end - li_start)
+    end
+  end
+
+  describe "filter tabs" do
+    test "renders literal status values with human labels", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/tasks")
+
+      assert html =~ "All"
+      assert html =~ "Open"
+      assert html =~ "In progress"
+      assert html =~ "Closed"
+      assert html =~ ~r/href="\/tasks\?[^"]*status=in_progress/
+      assert html =~ ~r/href="\/tasks\?[^"]*status=closed/
+    end
+  end
+
+  describe "new issue navigation" do
+    test "the primary New issue action links to the Create screen", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/tasks")
+
+      assert html =~ "&quot;navigate&quot;"
+      assert html =~ "&quot;href&quot;:&quot;/tasks/new&quot;"
+    end
+  end
+
   describe "create" do
     test "the New button reveals the inline create form", %{conn: conn} do
       {:ok, view, html} = live(conn, ~p"/tasks")
