@@ -114,6 +114,14 @@ defmodule ArbiterWeb do
       # `ArbiterWeb.CoreComponents.Feedback.empty_state/1` until a follow-up
       # ticket migrates call sites and retires the old ones.
       import ArbiterWeb.CoreComponents.Feedback, except: [live_badge: 1, empty_state: 1]
+      # Design-handoff domain primitives (TaskCard, RunRow, LogStream, StatCard,
+      # IndexHeader). index_header/1 is excluded: ListComponents already
+      # defines one that every index page calls unqualified, and importing
+      # both would make `<.index_header>` ambiguous at every call site. Reach
+      # the handoff version as
+      # `ArbiterWeb.CoreComponents.Domain.index_header/1` until a follow-up
+      # ticket migrates those call sites and retires the old one.
+      import ArbiterWeb.CoreComponents.Domain, except: [index_header: 1]
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # Label pluralization (plural/1, cap_plural/1)
