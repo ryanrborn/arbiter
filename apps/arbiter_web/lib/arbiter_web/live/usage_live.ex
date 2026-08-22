@@ -1,135 +1,106 @@
 defmodule ArbiterWeb.UsageLive do
   @moduledoc """
-  LiveView at `/usage` — spend dashboard over the token-cost ledger.
+  LiveView at `/usage` — the operator-console redesign's spend dashboard
+  (design handoff README §9).
 
-  Renders per-day, per-provider, per-model, and per-step rollups sourced from
-  `Arbiter.Usage.summarize/1`. Also surfaces the top tasks by cost and the
-  rework signal (tasks with more than one `:work` row — re-dispatchs).
+  Renders the token-cost ledger rolled up three ways (by task, by model, by
+  repo) plus the rework signal: tasks that needed more than one `:work`
+  session, and what those extra sessions cost. Also surfaces the primary
+  provider's 5h/7d rate-limit windows, sourced the same way `Layouts.app`'s
+  nav quota bars are.
 
-  Refresh-on-load only for v1; PubSub live updates are a Phase 5 add-on once
-  spend events are broadcast.
+  Refresh-on-load only, same as the page it replaces (`live/usage_live.ex`
+  v1) — no PubSub subscription since spend events aren't broadcast yet.
+
+  Calls every redesigned component fully-qualified
+  (`ArbiterWeb.CoreComponents.{Core,Domain,Feedback,Navigation}`) rather than
+  through the bare `<.name>` tag: `ArbiterWeb.html_helpers/0` still imports
+  the pre-redesign `ArbiterWeb.CoreComponents`/`ArbiterWeb.ListComponents`
+  versions of `icon/1`, `button/1`, `index_header/1`, `live_badge/1`,
+  `empty_state/1`, `filter_tabs/1`, `pager/1`, `see_all_link/1`, and
+  `back_link/1` unqualified, so a bare call would silently render the old
+  component instead.
   """
 
   use ArbiterWeb, :live_view
   import ArbiterWeb.QuotaHelpers
 
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
+  alias ArbiterWeb.CoreComponents.{Data, Domain, Feedback, Navigation}
   require Ash.Query
 
-  @by_options ~w(day provider model step)a
-  @since_options [
-    {"7 days", 7},
-    {"30 days", 30},
-    {"90 days", 90},
-    {"All time", nil}
-  ]
+  @ranges ~w(7d 30d all)
+  @tabs ~w(by_task by_model by_repo)
 
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     |> assign(:by, :day)
-     |> assign(:since_days, 30)
-     |> assign(:by_options, @by_options)
-     |> assign(:since_options, @since_options)
+     |> assign(:range, "30d")
+     |> assign(:tab, "by_task")
      |> load_data()}
   end
 
   @impl true
-  def handle_event("set_by", %{"by" => by_str}, socket) do
-    by =
-      case by_str do
-        v when v in ~w(day provider model step) -> String.to_existing_atom(v)
-        _ -> :day
-      end
-
-    {:noreply, socket |> assign(:by, by) |> load_data()}
+  def handle_event("range", %{"option" => range}, socket) do
+    range = if range in @ranges, do: range, else: "30d"
+    {:noreply, socket |> assign(:range, range) |> load_data()}
   end
 
-  def handle_event("set_since", %{"since_days" => days_str}, socket) do
-    since_days =
-      case Integer.parse(days_str) do
-        {n, ""} when n > 0 -> n
-        _ -> nil
-      end
-
-    {:noreply, socket |> assign(:since_days, since_days) |> load_data()}
+  def handle_event("tab", %{"tab" => tab}, socket) do
+    tab = if tab in @tabs, do: tab, else: "by_task"
+    {:noreply, assign(socket, :tab, tab)}
   end
 
   # ---- data ----
 
   defp load_data(socket) do
-    by = socket.assigns.by
-    since_days = socket.assigns.since_days
-    since = since_dt(since_days)
+    since = since_for_range(socket.assigns.range)
 
-    main_rollup =
-      case Usage.summarize(by: by, since: since) do
-        {:ok, rows} -> rows
-        _ -> []
-      end
+    task_rollup = summarize!(by: :task, since: since)
+    model_rollup = summarize!(by: :model, since: since)
+    repo_rollup = summarize!(by: :repo, since: since)
+    work_sessions = load_work_sessions(since)
+    titles = load_titles(task_rollup)
 
-    top_tasks =
-      case Usage.summarize(by: :task, since: since, limit: 20) do
-        {:ok, rows} -> rows
-        _ -> []
-      end
+    grand_cost = sum_cost(task_rollup)
+    grand_tokens = sum_tokens(task_rollup)
+    total_sessions = sum_rows(task_rollup)
 
-    rework_tasks = load_rework_tasks(since)
+    rework_buckets = rework_buckets(task_rollup, work_sessions)
+    rework_task_count = rework_buckets.two + rework_buckets.three_plus
+    rework_extra_cost = rework_extra_cost(task_rollup, work_sessions)
 
     socket
-    |> assign(:main_rollup, main_rollup)
-    |> assign(:top_tasks, top_tasks)
-    |> assign(:rework_tasks, rework_tasks)
-    |> assign(:rework_cost, sum_cost(rework_tasks))
-    |> assign(:rework_extra_cost, sum_extra_cost(rework_tasks))
-    |> assign(:grand_cost, sum_cost(main_rollup))
-    |> assign(:grand_tokens, sum_tokens(main_rollup))
-    |> assign_overage()
+    |> assign(:grand_cost, grand_cost)
+    |> assign(:grand_tokens, grand_tokens)
+    |> assign(:total_sessions, total_sessions)
+    |> assign(:total_tasks, length(task_rollup))
+    |> assign(:rework_task_count, rework_task_count)
+    |> assign(:rework_extra_cost, rework_extra_cost)
+    |> assign(:rework_buckets, rework_buckets)
+    |> assign(:by_task_rows, build_by_task_rows(task_rollup, work_sessions, titles))
+    |> assign(:model_bars, bar_rows(model_rollup, grand_cost, &model_hue/2))
+    |> assign(:repo_bars, bar_rows(repo_rollup, grand_cost, &repo_hue/2))
   end
 
-  # Overage-spend indicator (bd-7cd38f): when the Claude quota snapshot shows the
-  # default workspace is dispatching past the plan cap (`:continue` mode), surface
-  # the windowed overage spend so the paid-overage burn is visible on the
-  # dashboard. `0.0` / not-in-overage otherwise. Sourced from the same windowed
-  # `Usage.summarize/1` sum the gate uses for the alert threshold.
-  #
-  # Overage tracking mirrors the dispatch gate, which only throttles on
-  # Claude's plan cap, so this looks up that one provider's entry rather than
-  # every tracked quota.
-  defp assign_overage(socket) do
-    quota = Enum.find(socket.assigns[:quotas] || [], &(&1.provider == "claude"))
-    ws_id = socket.assigns[:_quota_workspace_id]
-
-    {spend, in_overage?} =
-      case {quota, ws_id} do
-        {%{overage_status: "in_overage"} = q, ws} when is_binary(ws) ->
-          {Arbiter.Quota.Overage.windowed_spend(%{id: ws}, q), true}
-
-        _ ->
-          {0.0, false}
-      end
-
-    socket
-    |> assign(:overage_spend, spend)
-    |> assign(:in_overage, in_overage?)
+  defp summarize!(opts) do
+    case Usage.summarize(opts) do
+      {:ok, rows} -> rows
+      _ -> []
+    end
   end
 
-  defp since_dt(nil), do: nil
+  defp since_for_range("7d"), do: DateTime.add(DateTime.utc_now(), -7, :day)
+  defp since_for_range("30d"), do: DateTime.add(DateTime.utc_now(), -30, :day)
+  defp since_for_range(_), do: nil
 
-  defp since_dt(days) when is_integer(days) and days > 0 do
-    DateTime.utc_now() |> DateTime.add(-days * 86_400, :second)
-  end
-
-  # Tasks with more than one :work row — re-dispatchs, which is the rework story
-  # #77 was built to expose. Queries :work events directly rather than going
-  # through summarize/1 because summarize groups all steps together per task.
-  #
-  # extra_cost_usd = cost of sessions 2+ (by occurred_at), i.e. the spend that
-  # would have been zero if the first attempt had succeeded. This is a tighter
-  # "wasted spend" signal than total_cost_usd (which includes the first session).
-  defp load_rework_tasks(since) do
+  # Tasks with more than one `:work` row are re-dispatchs — the rework story.
+  # Queried directly (not via `Usage.summarize/1`, which lumps every step
+  # together per task) so the session count is `:work` sessions specifically.
+  defp load_work_sessions(since) do
     base_query = Ash.Query.filter(Event, step == :work)
 
     query =
@@ -140,494 +111,118 @@ defmodule ArbiterWeb.UsageLive do
 
     query
     |> Ash.read!()
-    |> Enum.group_by(fn ev ->
-      ev.task_id |> String.split("#", parts: 2) |> hd()
-    end)
-    |> Enum.filter(fn {_task_id, events} -> length(events) > 1 end)
-    |> Enum.map(fn {task_id, events} ->
+    |> Enum.group_by(&base_task_id/1)
+    |> Map.new(fn {task_id, events} ->
       sorted = Enum.sort_by(events, & &1.occurred_at, DateTime)
       total = Enum.reduce(sorted, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
       first_cost = hd(sorted).cost_usd || 0.0
 
+      {task_id, %{sessions: length(sorted), extra_cost: total - first_cost}}
+    end)
+  rescue
+    _ -> %{}
+  end
+
+  defp base_task_id(%{task_id: task_id}), do: base_task_id(task_id)
+
+  defp base_task_id(task_id) when is_binary(task_id),
+    do: task_id |> String.split("#", parts: 2) |> hd()
+
+  defp base_task_id(task_id), do: to_string(task_id)
+
+  defp load_titles(task_rollup) do
+    base_ids = task_rollup |> Enum.map(&base_task_id(&1.group)) |> Enum.uniq()
+
+    case base_ids do
+      [] ->
+        %{}
+
+      ids ->
+        Issue
+        |> Ash.Query.filter(id in ^ids)
+        |> Ash.read!()
+        |> Map.new(&{&1.id, &1.title})
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp build_by_task_rows(task_rollup, work_sessions, titles) do
+    task_rollup
+    |> Enum.take(20)
+    |> Enum.map(fn row ->
+      task_id = to_string(row.group)
+      base_id = base_task_id(task_id)
+      ws = Map.get(work_sessions, base_id, %{sessions: 0, extra_cost: 0.0})
+
       %{
         task_id: task_id,
-        work_sessions: length(sorted),
-        total_cost_usd: total,
-        extra_cost_usd: total - first_cost
+        title: Map.get(titles, base_id, "—"),
+        sessions: ws.sessions,
+        extra_cost: ws.extra_cost,
+        tokens: (row.tokens_in || 0) + (row.tokens_out || 0),
+        cost_usd: row.total_cost_usd
       }
     end)
-    |> Enum.sort_by(fn r -> -(r.extra_cost_usd || 0.0) end)
-  rescue
-    _ -> []
   end
 
-  defp sum_cost(rollup) do
-    Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+  defp rework_buckets(task_rollup, work_sessions) do
+    counts =
+      task_rollup
+      |> Enum.map(fn row ->
+        Map.get(work_sessions, base_task_id(row.group), %{sessions: 1}).sessions
+      end)
+      |> Enum.frequencies_by(fn
+        n when n <= 1 -> :one
+        2 -> :two
+        _ -> :three_plus
+      end)
+
+    %{
+      one: Map.get(counts, :one, 0),
+      two: Map.get(counts, :two, 0),
+      three_plus: Map.get(counts, :three_plus, 0)
+    }
   end
 
-  defp sum_extra_cost(rollup) do
-    Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.extra_cost_usd || 0.0) end)
+  defp rework_extra_cost(task_rollup, work_sessions) do
+    task_rollup
+    |> Enum.reduce(0.0, fn row, acc ->
+      acc + Map.get(work_sessions, base_task_id(row.group), %{extra_cost: 0.0}).extra_cost
+    end)
   end
 
-  defp sum_tokens(rollup) do
-    Enum.reduce(rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end)
+  defp bar_rows(rollup, total_cost, hue_fn) do
+    rollup
+    |> Enum.with_index()
+    |> Enum.map(fn {row, index} ->
+      pct = if total_cost > 0, do: round(row.total_cost_usd / total_cost * 100), else: 0
+
+      %{
+        label: to_string(row.group),
+        value: format_usd(row.total_cost_usd),
+        pct: pct,
+        hue: hue_fn.(row.group, index)
+      }
+    end)
   end
 
-  defp rework_pct(_rework, grand) when grand == 0.0 or is_nil(grand), do: 0
-  defp rework_pct(rework, grand), do: round(rework / grand * 100)
+  defp model_hue("sonnet", _index), do: "var(--arb-live)"
+  defp model_hue("opus", _index), do: "var(--arb-proposal)"
+  defp model_hue("haiku", _index), do: "var(--arb-info)"
+  defp model_hue(_model, _index), do: "var(--arb-done)"
 
-  # ---- render ----
+  defp repo_hue(_repo, 0), do: "var(--arb-live)"
+  defp repo_hue(_repo, 1), do: "var(--arb-info)"
+  defp repo_hue(_repo, _index), do: "var(--arb-done)"
 
-  @impl true
-  def render(assigns) do
-    ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
-      <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
-        <%!-- ── Header ───────────────────────────────────────────────── --%>
-        <div>
-          <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <.icon name="hero-banknotes" class="size-6 text-base-content/70" /> Usage &amp; Spend
-          </h1>
-          <p class="text-sm text-base-content/60 mt-1">
-            Token cost ledger — per-session spend rolled up from <code class="text-xs">Arbiter.Usage.Event</code>.
-            Multiple rows per task expose rework spend (re-dispatchs).
-          </p>
-        </div>
+  defp sum_cost(rollup),
+    do: Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
 
-        <%!-- ── Quota windows ──────────────────────────────────────── --%>
-        <div :for={quota <- @quotas} class="space-y-2">
-          <h2 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide flex items-center gap-2">
-            {quota_provider_label(quota.provider)}
-            <span
-              :if={quota[:cost_usd]}
-              class="badge badge-ghost badge-sm font-mono normal-case text-base-content/60"
-              title="Actual spend over the last 30 days from the usage ledger"
-            >
-              {format_usd(quota[:cost_usd])} · 30d
-            </span>
-          </h2>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <%!-- 5h card --%>
-            <div class="card bg-base-200 border border-base-300 shadow-sm">
-              <div class="card-body p-5 gap-3">
-                <div class="flex items-baseline justify-between">
-                  <h3 class="font-semibold">5-Hour Window</h3>
-                  <span class="text-xs text-base-content/40">
-                    {quota_reset_text(quota.reset_5h_at)}
-                  </span>
-                </div>
-                <div
-                  class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden"
-                  title={quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)}
-                >
-                  <div
-                    :if={quota.utilization_5h}
-                    class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
-                    style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at, quota.overage_status)};"}
-                  />
-                  <.quota_marker
-                    :if={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
-                    pct={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
-                    label={quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)}
-                  />
-                </div>
-                <div class="flex justify-center text-xs font-mono text-base-content/50">
-                  <span :if={quota.utilization_5h} class="font-semibold text-base-content/80">
-                    {quota_pct(quota.utilization_5h)}% utilized
-                  </span>
-                  <span :if={!quota.utilization_5h} class="text-base-content/30">
-                    —
-                  </span>
-                </div>
-              </div>
-            </div>
-            <%!-- 7d card --%>
-            <div class="card bg-base-200 border border-base-300 shadow-sm">
-              <div class="card-body p-5 gap-3">
-                <div class="flex items-baseline justify-between">
-                  <h3 class="font-semibold">7-Day Window</h3>
-                  <span class="text-xs text-base-content/40">
-                    {quota_reset_text(quota.reset_7d_at)}
-                  </span>
-                </div>
-                <div
-                  class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden"
-                  title={quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)}
-                >
-                  <div
-                    :if={quota.utilization_7d}
-                    class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
-                    style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at, quota.overage_status)};"}
-                  />
-                  <.quota_marker
-                    :if={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
-                    pct={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
-                    label={quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)}
-                  />
-                </div>
-                <div class="flex justify-center text-xs font-mono text-base-content/50">
-                  <span :if={quota.utilization_7d} class="font-semibold text-base-content/80">
-                    {quota_pct(quota.utilization_7d)}% utilized
-                  </span>
-                  <span :if={!quota.utilization_7d} class="text-base-content/30">
-                    —
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <p :if={@quotas == []} class="text-sm text-base-content/40">
-          No quota data captured yet.
-        </p>
-        <p class="text-xs text-base-content/40 -mt-2">
-          Data captured via local API proxies. Updates on each API request — not real-time.
-        </p>
+  defp sum_tokens(rollup),
+    do: Enum.reduce(rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end)
 
-        <%!-- ── Overage indicator (bd-7cd38f) ─────────────────────────── --%>
-        <div
-          :if={@in_overage}
-          id="overage-indicator"
-          class="alert alert-error/90 bg-error/10 border border-error/40 text-error-content"
-        >
-          <.icon name="hero-exclamation-triangle" class="size-5 text-error" />
-          <div>
-            <div class="font-semibold text-error">Paid overage active</div>
-            <div class="text-sm text-base-content/70">
-              Dispatching past the plan cap (<code class="text-xs">:continue</code> mode) — approximately
-              <span class="font-mono font-semibold text-error">{format_usd(@overage_spend)}</span>
-              spent this 5h window.
-            </div>
-          </div>
-        </div>
-
-        <%!-- ── Controls ─────────────────────────────────────────────── --%>
-        <div class="flex flex-wrap items-center gap-3">
-          <%!-- Since filter --%>
-          <div class="flex items-center gap-2">
-            <span class="text-sm text-base-content/60 font-medium">Since:</span>
-            <div class="join">
-              <button
-                :for={{label, days} <- @since_options}
-                phx-click="set_since"
-                phx-value-since_days={days || ""}
-                class={[
-                  "join-item btn btn-sm",
-                  if(@since_days == days, do: "btn-primary", else: "btn-ghost border border-base-300")
-                ]}
-              >
-                {label}
-              </button>
-            </div>
-          </div>
-
-          <div class="flex-1"></div>
-
-          <%!-- Grouping toggle --%>
-          <div class="flex items-center gap-2">
-            <span class="text-sm text-base-content/60 font-medium">Group by:</span>
-            <div class="join">
-              <button
-                :for={opt <- @by_options}
-                phx-click="set_by"
-                phx-value-by={opt}
-                class={[
-                  "join-item btn btn-sm",
-                  if(@by == opt, do: "btn-secondary", else: "btn-ghost border border-base-300")
-                ]}
-              >
-                {opt}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <%!-- ── Summary stats ──────────────────────────────────────────── --%>
-        <div class="stats stats-vertical lg:stats-horizontal w-full shadow bg-base-200 border border-base-300">
-          <div class="stat">
-            <div class="stat-figure text-primary">
-              <.icon name="hero-currency-dollar" class="size-7" />
-            </div>
-            <div class="stat-title">Total spend</div>
-            <div class="stat-value text-primary">{format_usd(@grand_cost)}</div>
-            <div class="stat-desc">{since_label(@since_days)}</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-figure text-base-content/70">
-              <.icon name="hero-cpu-chip" class="size-7" />
-            </div>
-            <div class="stat-title">Total tokens</div>
-            <div class="stat-value">{format_tokens(@grand_tokens)}</div>
-            <div class="stat-desc">input + output</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-figure text-base-content/70">
-              <.icon name="hero-table-cells" class="size-7" />
-            </div>
-            <div class="stat-title">Sessions</div>
-            <div class="stat-value">{sum_rows(@main_rollup)}</div>
-            <div class="stat-desc">usage events</div>
-          </div>
-
-          <div class="stat">
-            <div class={[
-              "stat-figure",
-              if(@rework_tasks == [], do: "text-base-content/40", else: "text-warning")
-            ]}>
-              <.icon name="hero-arrow-path" class="size-7" />
-            </div>
-            <div class="stat-title">Rework tasks</div>
-            <div class={[
-              "stat-value",
-              if(@rework_tasks == [], do: "text-base-content/40", else: "text-warning")
-            ]}>
-              {length(@rework_tasks)}
-            </div>
-            <div class="stat-desc">
-              {if @rework_tasks == [],
-                do: "none re-slung",
-                else:
-                  "#{format_usd(@rework_extra_cost)} extra · #{rework_pct(@rework_extra_cost, @grand_cost)}% of total"}
-            </div>
-          </div>
-        </div>
-
-        <%!-- ── Main rollup table ────────────────────────────────────── --%>
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-4">
-            <h2 class="text-lg font-semibold flex items-center gap-2">
-              <.icon name="hero-chart-bar" class="size-5 text-base-content/70" />
-              Spend by {to_string(@by)}
-              <span class="badge badge-ghost badge-sm font-normal">{length(@main_rollup)} rows</span>
-            </h2>
-
-            <div
-              :if={@main_rollup == []}
-              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-8 text-center"
-            >
-              <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
-              <p class="mt-2 text-sm text-base-content/60">
-                No usage events recorded yet {since_label_lower(@since_days)}.
-              </p>
-            </div>
-
-            <div :if={@main_rollup != []} class="overflow-x-auto">
-              <table class="table table-sm" id="main-rollup">
-                <thead>
-                  <tr class="text-base-content/60">
-                    <th class="capitalize">{to_string(@by)}</th>
-                    <th class="text-right">Cost (USD)</th>
-                    <th class="text-right">Tokens in</th>
-                    <th class="text-right">Tokens out</th>
-                    <th class="text-right">Sessions</th>
-                    <th class="text-right">Duration</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    :for={row <- @main_rollup}
-                    class="hover:bg-base-300/40 transition-colors"
-                  >
-                    <td class="font-mono text-xs max-w-xs truncate" title={to_string(row.group)}>
-                      {to_string(row.group)}
-                    </td>
-                    <td class="text-right font-mono tabular-nums text-xs">
-                      {format_usd(row.total_cost_usd)}
-                    </td>
-                    <td class="text-right font-mono tabular-nums text-xs">
-                      {format_tokens(row.tokens_in)}
-                    </td>
-                    <td class="text-right font-mono tabular-nums text-xs">
-                      {format_tokens(row.tokens_out)}
-                    </td>
-                    <td class="text-right text-xs">{row.rows}</td>
-                    <td class="text-right font-mono tabular-nums text-xs">
-                      {format_duration(row.duration_ms)}
-                    </td>
-                  </tr>
-                </tbody>
-                <tfoot>
-                  <tr class="font-semibold text-base-content/70 border-t border-base-300">
-                    <td>Total</td>
-                    <td class="text-right font-mono tabular-nums text-xs text-primary">
-                      {format_usd(@grand_cost)}
-                    </td>
-                    <td class="text-right font-mono tabular-nums text-xs">
-                      {format_tokens(
-                        Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) end)
-                      )}
-                    </td>
-                    <td class="text-right font-mono tabular-nums text-xs">
-                      {format_tokens(
-                        Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.tokens_out || 0) end)
-                      )}
-                    </td>
-                    <td class="text-right text-xs">{sum_rows(@main_rollup)}</td>
-                    <td class="text-right font-mono tabular-nums text-xs">
-                      {format_duration(
-                        Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.duration_ms || 0) end)
-                      )}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </div>
-        </section>
-
-        <%!-- ── Top tasks by cost + Rework ────────────────────────────── --%>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <%!-- Top tasks by cost --%>
-          <section class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-4 gap-4">
-              <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon name="hero-trophy" class="size-5 text-base-content/70" /> Top tasks by cost
-                <span class="badge badge-ghost badge-sm font-normal">
-                  top {length(@top_tasks)}
-                </span>
-              </h2>
-
-              <div
-                :if={@top_tasks == []}
-                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
-              >
-                <p class="text-sm text-base-content/60">
-                  No usage events {since_label_lower(@since_days)}.
-                </p>
-              </div>
-
-              <ul :if={@top_tasks != []} class="flex flex-col gap-1.5">
-                <li
-                  :for={{row, rank} <- Enum.with_index(@top_tasks, 1)}
-                  class="rounded-box bg-base-100 border border-base-300 px-3 py-2 transition-colors duration-150 hover:border-primary/40"
-                >
-                  <div class="flex items-center gap-2">
-                    <span class="text-xs text-base-content/40 tabular-nums w-5 shrink-0 text-right">
-                      {rank}.
-                    </span>
-                    <.link
-                      navigate={~p"/tasks/#{row.group}"}
-                      class="flex-1 min-w-0 group"
-                    >
-                      <code class="text-xs text-base-content/70 group-hover:text-primary transition-colors truncate block">
-                        {row.group}
-                      </code>
-                    </.link>
-                    <span class="badge badge-ghost badge-sm font-mono text-xs shrink-0">
-                      {row.rows} sessions
-                    </span>
-                    <span class="font-mono tabular-nums text-xs text-primary shrink-0 font-semibold">
-                      {format_usd(row.total_cost_usd)}
-                    </span>
-                  </div>
-                </li>
-              </ul>
-            </div>
-          </section>
-
-          <%!-- Rework signal --%>
-          <section class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-4 gap-4">
-              <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon
-                  name="hero-arrow-path"
-                  class={[
-                    "size-5",
-                    if(@rework_tasks == [], do: "text-base-content/40", else: "text-warning")
-                  ]}
-                /> Rework signal
-                <span class="text-sm font-normal text-base-content/50">
-                  — re-slung tasks
-                </span>
-                <span class={[
-                  "badge badge-sm font-normal",
-                  if(@rework_tasks == [], do: "badge-ghost", else: "badge-warning")
-                ]}>
-                  {length(@rework_tasks)}
-                </span>
-                <span
-                  :if={@rework_tasks != []}
-                  class="font-mono tabular-nums text-sm font-semibold text-warning"
-                  title={"Extra sessions cost (#{format_usd(@rework_cost)} total on rework tasks)"}
-                >
-                  {format_usd(@rework_extra_cost)} extra
-                </span>
-              </h2>
-
-              <div
-                :if={@rework_tasks == []}
-                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
-              >
-                <.icon name="hero-check-circle" class="size-8 mx-auto text-success/50" />
-                <p class="mt-2 text-sm text-base-content/60">
-                  No re-slung tasks {since_label_lower(@since_days)}.
-                </p>
-                <p class="text-xs text-base-content/40 mt-1">
-                  Tasks with more than one <code>:work</code> session appear here —
-                  each additional session is spend on rework.
-                </p>
-              </div>
-
-              <ul :if={@rework_tasks != []} class="flex flex-col gap-1.5">
-                <li
-                  :for={r <- @rework_tasks}
-                  class="rounded-box bg-base-100 border border-warning/30 border-l-4 px-3 py-2 transition-colors duration-150 hover:border-warning/60"
-                >
-                  <div class="flex items-center gap-2">
-                    <.link
-                      navigate={~p"/tasks/#{r.task_id}"}
-                      class="flex-1 min-w-0 group"
-                    >
-                      <code class="text-xs text-base-content/70 group-hover:text-warning transition-colors truncate block">
-                        {r.task_id}
-                      </code>
-                    </.link>
-                    <span
-                      class="badge badge-warning badge-sm gap-1 shrink-0"
-                      title="Number of :work sessions for this task"
-                    >
-                      <.icon name="hero-arrow-path" class="size-3" />
-                      {r.work_sessions}× work
-                    </span>
-                    <span
-                      class="font-mono tabular-nums text-xs text-warning/60 shrink-0"
-                      title={"Total cost across all #{r.work_sessions} sessions"}
-                    >
-                      {format_usd(r.total_cost_usd)}
-                    </span>
-                    <span
-                      class="font-mono tabular-nums text-xs text-warning shrink-0 font-semibold"
-                      title="Extra sessions cost (sessions beyond the first)"
-                    >
-                      +{format_usd(r.extra_cost_usd)} extra
-                    </span>
-                  </div>
-                </li>
-              </ul>
-            </div>
-          </section>
-        </div>
-      </div>
-    </Layouts.app>
-    """
-  end
-
-  # ---- view helpers ----
-
-  defp since_label(nil), do: "all time"
-  defp since_label(7), do: "last 7 days"
-  defp since_label(30), do: "last 30 days"
-  defp since_label(90), do: "last 90 days"
-  defp since_label(n), do: "last #{n} days"
-
-  defp since_label_lower(nil), do: "across all time"
-  defp since_label_lower(days), do: "in the #{since_label(days)}"
-
-  defp sum_rows(rollup) do
-    Enum.reduce(rollup, 0, fn r, acc -> acc + (r.rows || 0) end)
-  end
+  defp sum_rows(rollup), do: Enum.reduce(rollup, 0, fn r, acc -> acc + (r.rows || 0) end)
 
   defp format_usd(nil), do: "—"
 
@@ -643,26 +238,228 @@ defmodule ArbiterWeb.UsageLive do
   end
 
   defp format_tokens(nil), do: "—"
-  defp format_tokens(0), do: "0"
+  defp format_tokens(n) when n in [0, 0.0], do: "0"
 
-  defp format_tokens(n) when is_integer(n) do
-    n
-    |> Integer.to_string()
-    |> String.reverse()
-    |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
-    |> String.reverse()
+  defp format_tokens(n) when is_integer(n) and n >= 1_000_000 do
+    "#{Float.round(n / 1_000_000, 2)}M"
   end
 
-  defp format_duration(nil), do: "—"
-  defp format_duration(0), do: "0s"
-
-  defp format_duration(ms) when is_integer(ms) do
-    s = div(ms, 1000)
-
-    cond do
-      s < 60 -> "#{s}s"
-      s < 3600 -> "#{div(s, 60)}m #{rem(s, 60)}s"
-      true -> "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
-    end
+  defp format_tokens(n) when is_integer(n) and n >= 1_000 do
+    "#{Float.round(n / 1_000, 1)}k"
   end
+
+  defp format_tokens(n) when is_integer(n), do: Integer.to_string(n)
+
+  # ---- render ----
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+      <div class="p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-4">
+        <Domain.index_header
+          icon="hero-clock"
+          title="Usage"
+          subtitle="Actual spend over the last 30 days from the usage ledger. Rework is the number to watch — extra sessions on one task."
+        >
+          <:actions>
+            <div class="flex items-center gap-3">
+              <.segmented_control options={~w(7d 30d all)} value={@range} event="range" />
+              <Feedback.live_badge id="usage-live" />
+            </div>
+          </:actions>
+        </Domain.index_header>
+
+        <div class="grid grid-cols-4 gap-3">
+          <Domain.stat_card
+            label="Total spend"
+            value={format_usd(@grand_cost)}
+            tone="live"
+            note={since_label(@range)}
+          />
+          <Domain.stat_card label="Total tokens" value={format_tokens(@grand_tokens)} />
+          <Domain.stat_card
+            label="Sessions"
+            value={@total_sessions}
+            note={"#{@total_tasks} tasks"}
+          />
+          <Domain.stat_card
+            label="Rework tasks"
+            value={@rework_task_count}
+            tone="attention"
+            note="2+ sessions"
+          />
+        </div>
+
+        <div class="grid grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
+          <.panel title="Spend" meta="by task">
+            <Navigation.filter_tabs
+              tabs={[
+                %{label: "By task", value: "by_task"},
+                %{label: "By model", value: "by_model"},
+                %{label: "By repo", value: "by_repo"}
+              ]}
+              active={@tab}
+              event="tab"
+              class="mb-3"
+            />
+
+            <Data.data_table :if={@tab == "by_task"} id="usage-by-task" rows={@by_task_rows}>
+              <:col :let={row} label="task" width="84px">{row.task_id}</:col>
+              <:col :let={row} label="title" mono={false}>{row.title}</:col>
+              <:col :let={row} label="sessions" width="70px" align="right">
+                <span
+                  class={row.sessions > 1 && "text-[var(--arb-attention)]"}
+                  title="Number of :work sessions for this task"
+                >
+                  {row.sessions}
+                </span>
+              </:col>
+              <:col :let={row} label="rework" width="64px" align="right">
+                <span
+                  class={
+                    if row.extra_cost > 0,
+                      do: "text-[var(--arb-attention)]",
+                      else: "text-[var(--text-label)]"
+                  }
+                  title="Extra sessions cost (sessions beyond the first)"
+                >
+                  {if row.extra_cost > 0, do: format_usd(row.extra_cost), else: "—"}
+                </span>
+              </:col>
+              <:col :let={row} label="tokens" width="64px" align="right">
+                {format_tokens(row.tokens)}
+              </:col>
+              <:col :let={row} label="spend" width="60px" align="right">
+                {format_usd(row.cost_usd)}
+              </:col>
+            </Data.data_table>
+
+            <div :if={@tab == "by_model"} class="flex flex-col gap-[10px]">
+              <.usage_bar
+                :for={bar <- @model_bars}
+                label={bar.label}
+                value={bar.value}
+                pct={bar.pct}
+                hue={bar.hue}
+              />
+              <Feedback.empty_state :if={@model_bars == []} icon={nil}>
+                No usage events yet.
+              </Feedback.empty_state>
+            </div>
+
+            <div :if={@tab == "by_repo"} class="flex flex-col gap-[10px]">
+              <.usage_bar
+                :for={bar <- @repo_bars}
+                label={bar.label}
+                value={bar.value}
+                pct={bar.pct}
+                hue={bar.hue}
+              />
+              <Feedback.empty_state :if={@repo_bars == []} icon={nil}>
+                No usage events yet.
+              </Feedback.empty_state>
+            </div>
+          </.panel>
+
+          <div class="flex flex-col gap-4">
+            <.panel title="Rate limits" meta="live">
+              <div class="flex flex-col gap-3">
+                <div :for={quota <- @quotas} class="flex flex-col gap-[3px]">
+                  <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                    {quota_provider_label(quota.provider)}
+                  </span>
+                  <div class="flex flex-col gap-[6px]">
+                    <Feedback.quota_bar
+                      provider={quota.provider}
+                      show_label={false}
+                      window="5h"
+                      utilization={quota.utilization_5h}
+                      reset_at={quota.reset_5h_at}
+                      overage_status={quota.overage_status}
+                      representative_claim={quota.representative_claim}
+                      width={170}
+                    />
+                    <Feedback.quota_bar
+                      provider={quota.provider}
+                      show_label={false}
+                      window="7d"
+                      utilization={quota.utilization_7d}
+                      reset_at={quota.reset_7d_at}
+                      overage_status={quota.overage_status}
+                      representative_claim={quota.representative_claim}
+                      width={170}
+                    />
+                  </div>
+                </div>
+                <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
+                  The hairline is elapsed time. Bar past the line means you are burning faster than the window.
+                </p>
+              </div>
+            </.panel>
+
+            <.panel title="Rework" meta={"#{@rework_task_count} tasks"}>
+              <div class="flex flex-col gap-[10px]">
+                <.usage_bar
+                  label="1 session"
+                  value={"#{@rework_buckets.one} tasks"}
+                  pct={bucket_pct(@rework_buckets.one, @total_tasks)}
+                  hue="var(--arb-done)"
+                />
+                <.usage_bar
+                  label="2 sessions"
+                  value={"#{@rework_buckets.two} tasks"}
+                  pct={bucket_pct(@rework_buckets.two, @total_tasks)}
+                  hue="var(--arb-attention)"
+                />
+                <.usage_bar
+                  label="3+"
+                  value={"#{@rework_buckets.three_plus} tasks"}
+                  pct={bucket_pct(@rework_buckets.three_plus, @total_tasks)}
+                  hue="var(--arb-fail)"
+                />
+                <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
+                  Extra sessions cost {format_usd(@rework_extra_cost)} this month — the loop pass reads this to propose routing changes.
+                </p>
+              </div>
+            </.panel>
+          </div>
+        </div>
+
+        <Navigation.back_link />
+      </div>
+    </Layouts.app>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :value, :string, required: true
+  attr :pct, :integer, required: true
+  attr :hue, :string, required: true
+
+  defp usage_bar(assigns) do
+    ~H"""
+    <div class="flex items-center gap-[10px]">
+      <span class="w-[74px] shrink-0 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]">
+        {@label}
+      </span>
+      <span class="relative flex-1 h-[8px] rounded-[var(--radius-pill)] bg-[var(--arb-done-wash)] overflow-hidden">
+        <span
+          class="absolute inset-y-0 left-0 rounded-[var(--radius-pill)]"
+          style={"width: #{@pct}%; background-color: #{@hue};"}
+        />
+      </span>
+      <span class="w-[56px] shrink-0 text-right text-[11px] tabular-nums font-[family-name:var(--font-mono)] text-[var(--text-body)]">
+        {@value}
+      </span>
+    </div>
+    """
+  end
+
+  defp since_label("7d"), do: "last 7 days"
+  defp since_label("30d"), do: "last 30 days"
+  defp since_label(_), do: "all time"
+
+  defp bucket_pct(_count, 0), do: 0
+  defp bucket_pct(count, total), do: round(count / total * 100)
 end
