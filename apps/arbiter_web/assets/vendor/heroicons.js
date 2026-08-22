@@ -4,6 +4,7 @@ const path = require("path")
 
 module.exports = plugin(function({matchComponents, theme}) {
   let iconsDir = path.join(__dirname, "../../../../deps/heroicons/optimized")
+  let fallbackIconsDir = path.join(__dirname, "../../../../reference/assets/icons")
   let values = {}
   let icons = [
     ["", "/24/outline"],
@@ -17,6 +18,28 @@ module.exports = plugin(function({matchComponents, theme}) {
       values[name] = {name, fullPath: path.join(iconsDir, dir, file)}
     })
   })
+
+  // Add fallback icons from reference/assets/icons if the directory exists
+  if (fs.existsSync(fallbackIconsDir)) {
+    let fallbackIcons = [
+      ["", "/outline"],
+      ["-solid", "/solid"],
+      ["-mini", "/mini"],
+      ["-micro", "/micro"]
+    ]
+    fallbackIcons.forEach(([suffix, dir]) => {
+      let fallbackDir = path.join(fallbackIconsDir, dir)
+      if (fs.existsSync(fallbackDir)) {
+        fs.readdirSync(fallbackDir).forEach(file => {
+          let name = path.basename(file, ".svg") + suffix
+          // Only add if not already present in deps/heroicons
+          if (!values[name]) {
+            values[name] = {name, fullPath: path.join(fallbackDir, file)}
+          }
+        })
+      }
+    })
+  }
   matchComponents({
     "hero": ({name, fullPath}) => {
       let content = fs.readFileSync(fullPath).toString().replace(/\r?\n|\r/g, "")
