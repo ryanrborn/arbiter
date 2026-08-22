@@ -23,7 +23,11 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   attr :id, :string, default: nil
   attr :value, :any, default: nil
   attr :label, :string, default: nil, doc: "field label"
-  attr :hint, :string, default: nil, doc: "mono aside appended to the label, e.g. \"focus with /\""
+
+  attr :hint, :string,
+    default: nil,
+    doc: "mono aside appended to the label, e.g. \"focus with /\""
+
   attr :key_hint, :string, default: nil, doc: "shortcut chip pinned inside the field's right edge"
   attr :placeholder, :string, default: nil
   attr :mono, :boolean, default: true, doc: "machine values are mono; prose is not"
@@ -40,21 +44,23 @@ defmodule ArbiterWeb.CoreComponents.Forms do
     <label :if={@label || @hint || @error} class="flex flex-col gap-[6px]">
       <span :if={@label} class="font-medium text-[11.5px] text-[var(--arb-text-body)]">
         {@label}
-        <span :if={@hint} class="font-normal text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+        <span
+          :if={@hint}
+          class="font-normal text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+        >
           {" — "}{@hint}
         </span>
       </span>
-      <span
-        class={[
-          "inline-flex items-center gap-[8px] w-full rounded-[var(--radius-field)] border border-solid",
-          "bg-[var(--surface-field)] transition-[border-color] duration-[var(--dur-hover)]",
-          @error && "border-[var(--arb-fail-edge)]",
-          !@error && "border-[var(--border-strong)] has-[:focus]:border-[var(--accent-primary)] has-[:focus]:shadow-[var(--ring-focus)]",
-          @size == "sm" && "h-[var(--control-sm)] px-[10px]",
-          @size == "md" && "h-[var(--control-md)] px-[10px]",
-          @class
-        ]}
-      >
+      <span class={[
+        "inline-flex items-center gap-[8px] w-full rounded-[var(--radius-field)] border border-solid",
+        "bg-[var(--surface-field)] transition-[border-color] duration-[var(--dur-hover)]",
+        @error && "border-[var(--arb-fail-edge)]",
+        !@error &&
+          "border-[var(--border-strong)] has-[:focus]:border-[var(--accent-primary)] has-[:focus]:shadow-[var(--ring-focus)]",
+        @size == "sm" && "h-[var(--control-sm)] px-[10px]",
+        @size == "md" && "h-[var(--control-md)] px-[10px]",
+        @class
+      ]}>
         <span :if={@icon} class="inline-flex flex-none">{@icon}</span>
         <input
           type={@type}
@@ -84,7 +90,8 @@ defmodule ArbiterWeb.CoreComponents.Forms do
         "inline-flex items-center gap-[8px] w-full rounded-[var(--radius-field)] border border-solid",
         "bg-[var(--surface-field)] transition-[border-color] duration-[var(--dur-hover)]",
         @error && "border-[var(--arb-fail-edge)]",
-        !@error && "border-[var(--border-strong)] has-[:focus]:border-[var(--accent-primary)] has-[:focus]:shadow-[var(--ring-focus)]",
+        !@error &&
+          "border-[var(--border-strong)] has-[:focus]:border-[var(--accent-primary)] has-[:focus]:shadow-[var(--ring-focus)]",
         @size == "sm" && "h-[var(--control-sm)] px-[10px]",
         @size == "md" && "h-[var(--control-md)] px-[10px]",
         @class
@@ -111,7 +118,6 @@ defmodule ArbiterWeb.CoreComponents.Forms do
     </span>
     """
   end
-
 
   @doc """
   Select dropdown with options.
@@ -141,15 +147,13 @@ defmodule ArbiterWeb.CoreComponents.Forms do
     ~H"""
     <label :if={@label} class="flex flex-col gap-[6px]">
       <span class="font-medium text-[11.5px] text-[var(--arb-text-body)]">{@label}</span>
-      <span
-        class={[
-          "relative inline-flex items-center w-full rounded-[var(--radius-field)] border border-solid",
-          "bg-[var(--surface-card)] border-[var(--border-strong)]",
-          @size == "sm" && "h-[var(--control-sm)]",
-          @size == "md" && "h-[var(--control-md)]",
-          @class
-        ]}
-      >
+      <span class={[
+        "relative inline-flex items-center w-full rounded-[var(--radius-field)] border border-solid",
+        "bg-[var(--surface-card)] border-[var(--border-strong)]",
+        @size == "sm" && "h-[var(--control-sm)]",
+        @size == "md" && "h-[var(--control-md)]",
+        @class
+      ]}>
         <select
           name={@name}
           id={@id}
@@ -163,11 +167,20 @@ defmodule ArbiterWeb.CoreComponents.Forms do
           {@rest}
         >
           <option :if={@prompt} value="">{@prompt}</option>
-          <option :for={opt <- @options} value={option_value(opt)} selected={option_value(opt) == @value}>
+          <option
+            :for={opt <- @options}
+            value={option_value(opt)}
+            selected={option_value(opt) == @value}
+          >
             {option_label(opt)}
           </option>
         </select>
-        <ArbiterWeb.CoreComponents.Core.icon name="hero-chevron-down-micro" size={11} color="var(--text-label)" class="absolute right-[9px] pointer-events-none" />
+        <ArbiterWeb.CoreComponents.Core.icon
+          name="hero-chevron-down-micro"
+          size={11}
+          color="var(--text-label)"
+          class="absolute right-[9px] pointer-events-none"
+        />
       </span>
     </label>
     <span
@@ -193,11 +206,20 @@ defmodule ArbiterWeb.CoreComponents.Forms do
         {@rest}
       >
         <option :if={@prompt} value="">{@prompt}</option>
-        <option :for={opt <- @options} value={option_value(opt)} selected={option_value(opt) == @value}>
+        <option
+          :for={opt <- @options}
+          value={option_value(opt)}
+          selected={option_value(opt) == @value}
+        >
           {option_label(opt)}
         </option>
       </select>
-      <ArbiterWeb.CoreComponents.Core.icon name="hero-chevron-down-micro" size={11} color="var(--text-label)" class="absolute right-[9px] pointer-events-none" />
+      <ArbiterWeb.CoreComponents.Core.icon
+        name="hero-chevron-down-micro"
+        size={11}
+        color="var(--text-label)"
+        class="absolute right-[9px] pointer-events-none"
+      />
     </span>
     """
   end
@@ -289,7 +311,12 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   attr :name, :string, required: true
   attr :id, :string, default: nil
   attr :label, :string, default: nil, doc: "checkbox label"
-  attr :align, :string, values: ~w(center start), default: "center", doc: "alignment for multi-line labels"
+
+  attr :align, :string,
+    values: ~w(center start),
+    default: "center",
+    doc: "alignment for multi-line labels"
+
   attr :checked, :boolean, default: false
   attr :disabled, :boolean, default: false
   attr :required, :boolean, default: false
@@ -298,31 +325,13 @@ defmodule ArbiterWeb.CoreComponents.Forms do
 
   def checkbox(assigns) do
     ~H"""
-    <label
-      class={[
-        "flex gap-[9px] font-normal text-[12.5px] leading-[1.5] text-[var(--arb-text-body)] cursor-pointer",
-        @disabled && "cursor-not-allowed opacity-50",
-        @align == "start" && "items-start",
-        @align == "center" && "items-center",
-        @class
-      ]}
-    >
-      <span
-        class={[
-          "flex-none inline-flex items-center justify-center w-[14px] h-[14px] rounded-[var(--radius-chip)] border border-solid transition-all",
-          @align == "start" && "mt-[2px]",
-          @checked && "bg-[var(--accent-primary)] border-[var(--accent-primary)]",
-          !@checked && "bg-transparent border-[var(--border-strong)]",
-          "peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring-focus)] peer-focus-visible:ring-offset-2"
-        ]}
-      >
-        <span
-          :if={@checked}
-          class="text-[9px] font-[600] text-[var(--accent-primary-ink)] font-[family-name:var(--font-mono)]"
-        >
-          ✓
-        </span>
-      </span>
+    <label class={[
+      "flex gap-[9px] font-normal text-[12.5px] leading-[1.5] text-[var(--arb-text-body)] cursor-pointer",
+      @disabled && "cursor-not-allowed opacity-50",
+      @align == "start" && "items-start",
+      @align == "center" && "items-center",
+      @class
+    ]}>
       <input
         type="checkbox"
         name={@name}
@@ -333,6 +342,20 @@ defmodule ArbiterWeb.CoreComponents.Forms do
         class="sr-only peer"
         {@rest}
       />
+      <span class={[
+        "flex-none inline-flex items-center justify-center w-[14px] h-[14px] rounded-[var(--radius-chip)] border border-solid transition-all",
+        @align == "start" && "mt-[2px]",
+        @checked && "bg-[var(--accent-primary)] border-[var(--accent-primary)]",
+        !@checked && "bg-transparent border-[var(--border-strong)]",
+        "peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring-focus)] peer-focus-visible:ring-offset-2"
+      ]}>
+        <span
+          :if={@checked}
+          class="text-[9px] font-[600] text-[var(--accent-primary-ink)] font-[family-name:var(--font-mono)]"
+        >
+          ✓
+        </span>
+      </span>
       <span :if={@label}>{@label}</span>
     </label>
     """

@@ -14,19 +14,39 @@ defmodule ArbiterWeb.CoreComponents.FormsTest do
     end
 
     test "renders with custom class" do
-      html = render_component(&input/1, type: "text", name: "username", id: "user-input", class: "custom-class")
+      html =
+        render_component(&input/1,
+          type: "text",
+          name: "username",
+          id: "user-input",
+          class: "custom-class"
+        )
+
       assert html =~ "custom-class"
     end
 
     test "renders disabled state" do
-      html = render_component(&input/1, type: "text", name: "username", id: "user-input", disabled: true)
+      html =
+        render_component(&input/1,
+          type: "text",
+          name: "username",
+          id: "user-input",
+          disabled: true
+        )
+
       assert html =~ "disabled"
     end
   end
 
   describe "select/1" do
     test "renders a select element with options" do
-      html = render_component(&select/1, name: "status", id: "status-select", options: [{"Open", "open"}, {"Closed", "closed"}])
+      html =
+        render_component(&select/1,
+          name: "status",
+          id: "status-select",
+          options: [{"Open", "open"}, {"Closed", "closed"}]
+        )
+
       assert html =~ "<select"
       assert html =~ "name=\"status\""
       assert html =~ "id=\"status-select\""
@@ -35,12 +55,26 @@ defmodule ArbiterWeb.CoreComponents.FormsTest do
     end
 
     test "renders with a prompt" do
-      html = render_component(&select/1, name: "status", id: "status-select", options: [{"Open", "open"}], prompt: "Choose one...")
+      html =
+        render_component(&select/1,
+          name: "status",
+          id: "status-select",
+          options: [{"Open", "open"}],
+          prompt: "Choose one..."
+        )
+
       assert html =~ "Choose one..."
     end
 
     test "selects the correct value" do
-      html = render_component(&select/1, name: "status", id: "status-select", options: [{"Open", "open"}, {"Closed", "closed"}], value: "closed")
+      html =
+        render_component(&select/1,
+          name: "status",
+          id: "status-select",
+          options: [{"Open", "open"}, {"Closed", "closed"}],
+          value: "closed"
+        )
+
       assert html =~ "selected"
     end
   end
@@ -54,12 +88,20 @@ defmodule ArbiterWeb.CoreComponents.FormsTest do
     end
 
     test "renders with value" do
-      html = render_component(&textarea/1, name: "description", id: "desc-textarea", value: "Some text")
+      html =
+        render_component(&textarea/1,
+          name: "description",
+          id: "desc-textarea",
+          value: "Some text"
+        )
+
       assert html =~ "Some text"
     end
 
     test "renders disabled state" do
-      html = render_component(&textarea/1, name: "description", id: "desc-textarea", disabled: true)
+      html =
+        render_component(&textarea/1, name: "description", id: "desc-textarea", disabled: true)
+
       assert html =~ "disabled"
     end
   end
