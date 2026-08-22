@@ -140,6 +140,11 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   attr :width, :integer, default: 96
   attr :class, :any, default: nil
 
+  attr :show_label, :boolean,
+    default: true,
+    doc:
+      "set false to suppress the per-bar label — e.g. when a wrapper renders a single shared label above stacked 5h/7d bars"
+
   def quota_bar(assigns) do
     pct = quota_pct(assigns.utilization)
     elapsed_pct = quota_elapsed_pct(assigns)
@@ -161,7 +166,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
     ~H"""
     <div class={["flex flex-col gap-[3px]", @binding_class, @class]}>
       <span
-        :if={@provider}
+        :if={@provider && @show_label}
         class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]"
       >
         {@provider}
