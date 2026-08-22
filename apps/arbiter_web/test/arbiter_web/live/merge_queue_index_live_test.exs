@@ -22,6 +22,9 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger do
   def post_inline_comment(_ref, _finding, _opts), do: :ok
   @impl true
   def submit_review(_ref, _verdict, _body, _opts), do: :ok
+  @impl true
+  def list_review_feedback(_ref),
+    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
 end
 
 defmodule ArbiterWeb.MergeQueueIndexLiveTest do
