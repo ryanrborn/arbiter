@@ -44,7 +44,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
     socket =
       socket
       |> assign(:task_id, task_id)
-      |> assign(:live, connected?(socket))
       |> assign(:now, DateTime.utc_now())
       |> assign(:flash_message, nil)
       |> assign(:compose_body, "")
@@ -93,7 +92,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply, socket}
   end
 
-  def handle_info({:worker_lifecycle, _event, _snap}, socket) do
+  def handle_info(
+        {:worker_lifecycle, _event, %{task_id: task_id}},
+        %{assigns: %{task_id: task_id}} = socket
+      ) do
     socket = refresh_all(socket)
 
     socket =
@@ -109,6 +111,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
     {:noreply, socket}
   end
+
+  # A lifecycle event for some other worker on the shared "workers" topic —
+  # not ours, so it must not touch our snapshot/toast/flow state.
+  def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
 
   def handle_info({:worker_output, _task_id, line}, socket) do
     {:noreply, append_output_line(socket, line)}
@@ -594,7 +600,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-[14px]">
         <%= if @stop_notice do %>
-          <.toast id="stop-toast" tone="error" action="resume" action_click="open_retry">
+          <.toast
+            id="stop-toast"
+            tone="error"
+            action="resume"
+            action_click="open_retry"
+            dismiss_key=""
+          >
             {stop_notice_text(@task_id)}
           </.toast>
         <% end %>
@@ -765,12 +777,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 href={ref}
                 target="_blank"
                 rel="noopener"
-                class="inline-flex mt-2"
+                class="inline-flex items-center gap-[7px] mt-2 rounded-[var(--radius-field)] border border-solid font-medium h-[var(--control-sm)] px-[10px] text-[11.5px] bg-[var(--arb-attention)] border-[var(--arb-attention)] text-[var(--arb-attention-ink)] hover:brightness-[1.06] transition-[background,border-color] duration-[var(--dur-hover)] ease-[var(--arb-ease-out)]"
               >
-                <Core.button variant="attention" size="sm">
-                  <:icon><Core.icon name="hero-arrow-top-right-on-square" size={14} /></:icon>
-                  Open {@pr_label} <code class="font-mono text-xs opacity-80">{ref}</code>
-                </Core.button>
+                <Core.icon name="hero-arrow-top-right-on-square" size={14} />
+                Open {@pr_label} <code class="font-mono text-xs opacity-80">{ref}</code>
               </a>
             <% else %>
               <p class="text-sm text-[var(--text-label)] italic flex items-center gap-1.5 mt-2">

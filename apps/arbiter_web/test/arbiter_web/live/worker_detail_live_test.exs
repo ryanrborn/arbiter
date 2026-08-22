@@ -136,6 +136,32 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute has_element?(view, "#worker-toolbar-resume-btn")
     end
 
+    test "stop notice survives an unrelated worker's lifecycle events",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-stop-unrelated", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, other_task} = Ash.create(Issue, %{title: "pd-other", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = render_click(view, "stop")
+      assert html =~ "the worktree is left in place"
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+      assert html =~ ~s(badge-error)
+
+      # An unrelated worker starting (and later stopping) broadcasts on the
+      # same shared "workers" topic — it must not clobber our synthetic
+      # stopped snapshot/toast/chip/flow.
+      {:ok, _other_pid} = Worker.start(task_id: other_task.id, repo: "r")
+      Worker.stop(other_task.id)
+      Process.sleep(20)
+
+      html = render(view)
+      assert html =~ "the worktree is left in place"
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+      assert html =~ ~s(badge-error)
+    end
+
     test "no Stop button when the worker is :completed", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-done", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
@@ -363,6 +389,21 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
 
       refute has_element?(view, "a button")
+    end
+
+    test "awaiting-review panel's Open PR link is not a button nested in an anchor",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-awaiting-ref", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.advance(pid, :claude)
+      :ok = Worker.report(pid, :mr_ref, "https://github.com/org/repo/pull/42")
+      :ok = Worker.await(pid)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "a button")
+      assert has_element?(view, ~s(a[href="https://github.com/org/repo/pull/42"]))
+      assert html =~ "Open pull request"
     end
   end
 
