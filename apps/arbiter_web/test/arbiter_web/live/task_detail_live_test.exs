@@ -571,6 +571,75 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert html =~ "No runs of this kind on this issue yet."
     end
+
+    # The roster covers the review gate's `#review` runs as well as the
+    # issue's own, so it has to go live for both. A review worker broadcasts
+    # its lifecycle under `<id>#review`; matching only the bare id leaves the
+    # review half of the roster stale until a full page reload.
+    test "a review-gate run's lifecycle event refreshes the roster",
+         %{conn: conn, task: task} do
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ "later review run"
+
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#review",
+          repo: "test/repo",
+          worker_type: :review,
+          status: :running,
+          started_at: ~U[2026-07-01 12:00:00.000000Z],
+          output_lines: ["later review run"]
+        })
+
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "workers",
+        {:worker_lifecycle, :started, %{task_id: task.id <> "#review"}}
+      )
+
+      html = render(view)
+
+      assert html =~ "3 total"
+      assert html =~ "review 2"
+    end
+
+    # A revise round and a merge-queue fix pass run under deeper synthetic ids
+    # (`<id>#review#impl2`, `<id>#fix`), which is exactly what the run's own
+    # `base_task_id` column records. Scoping the roster to `[id, id#review]`
+    # alone leaves the `impl` and `fix pass` tabs permanently empty.
+    test "the roster covers revise-round and fix-pass runs by base_task_id",
+         %{conn: conn, task: task} do
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#review#impl2",
+          base_task_id: task.id,
+          repo: "test/repo",
+          worker_type: :impl,
+          status: :completed,
+          started_at: ~U[2026-07-01 11:30:00.000000Z],
+          completed_at: ~U[2026-07-01 11:40:00.000000Z],
+          output_lines: ["revise round transcript"]
+        })
+
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#fix",
+          base_task_id: task.id,
+          repo: "test/repo",
+          worker_type: :fix_pass,
+          status: :completed,
+          started_at: ~U[2026-07-01 12:30:00.000000Z],
+          completed_at: ~U[2026-07-01 12:35:00.000000Z],
+          output_lines: ["fix pass transcript"]
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "4 total"
+      assert html =~ "impl 1"
+      assert html =~ "fix pass 1"
+    end
   end
 
   describe "activity stream (the audit log folds in)" do

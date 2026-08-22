@@ -96,11 +96,18 @@ defmodule ArbiterWeb.TaskDetailLive do
     {:noreply, refresh_deps(socket)}
   end
 
-  def handle_info(
-        {:worker_lifecycle, _event, %{task_id: id}},
-        %{assigns: %{task_id: id}} = socket
-      ) do
-    {:noreply, socket |> refresh_worker() |> refresh_runs()}
+  # The roster covers every run of this issue, not just the one dispatched
+  # under its bare id — a reviewer broadcasts as `<id>#review`, a revise round
+  # as `<id>#review#impl2`. Matching the bare id alone left those rows frozen
+  # at whatever the last full page load saw. `base_task_id/1` strips any
+  # synthetic suffix back to the issue, so each of them lands here.
+  def handle_info({:worker_lifecycle, _event, %{task_id: worker_task_id}}, socket)
+      when is_binary(worker_task_id) do
+    if ReviewGate.base_task_id(worker_task_id) == socket.assigns.task_id do
+      {:noreply, socket |> refresh_worker() |> refresh_runs()}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
@@ -540,10 +547,16 @@ defmodule ArbiterWeb.TaskDetailLive do
     review_id = ReviewGate.reviewer_task_id(id)
     task_ids = [id, review_id]
 
+    # `base_task_id` is the run's own record of which issue it belongs to, and
+    # it is what reaches the deeper synthetic ids — a revise round runs as
+    # `<id>#review#impl2`, a merge-queue fix pass under its own id again. The
+    # literal `[id, <id>#review]` pair stays alongside it because the column is
+    # nullable: runs recorded before it existed only match by task_id, and
+    # dropping them would empty the roster for every historical issue.
     runs =
       try do
         Run
-        |> Ash.Query.filter(task_id in ^task_ids)
+        |> Ash.Query.filter(task_id in ^task_ids or base_task_id == ^id)
         |> Ash.Query.sort(started_at: :desc)
         |> Ash.read!()
       rescue
