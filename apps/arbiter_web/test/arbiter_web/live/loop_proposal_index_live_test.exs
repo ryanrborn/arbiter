@@ -199,4 +199,55 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       assert after_reject.rejection_reason == "handled in CLAUDE.md instead"
     end
   end
+
+  describe "decided rows stay visible, dimmed" do
+    test "an applied row stays in the live filter, dimmed, with an undo toast — until dismissed",
+         %{conn: conn} do
+      {:ok, skill} =
+        Skills.create_skill(%{
+          name: "loop-live-#{System.unique_integer([:positive])}",
+          body: "# before"
+        })
+
+      row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+      view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
+
+      html = view |> element("button[phx-click=apply]") |> render_click()
+
+      # The live filter excludes :applied rows from a fresh query — but this
+      # one was *just* decided in this session, so it must not vanish.
+      assert html =~ row.gist
+      assert html =~ ~s(data-decided="applied")
+      assert html =~ "Undo"
+
+      html = view |> element("[phx-click=dismiss_decision]") |> render_click()
+
+      refute html =~ row.gist
+    end
+
+    test "applying an already-applied proposal is a no-op, not an error", %{conn: conn} do
+      {:ok, skill} =
+        Skills.create_skill(%{
+          name: "loop-live-#{System.unique_integer([:positive])}",
+          body: "# before"
+        })
+
+      row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
+      {:ok, _already_applied} = Loop.apply_pending(row.id, actor: "test-setup")
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+
+      # Simulate a stray double-click race: the event fires even though the
+      # apply button for an already-decided row isn't normally reachable.
+      html = render_click(view, "apply", %{"id" => row.id})
+
+      refute html =~ "only a :proposed row can be applied"
+      assert Process.alive?(view.pid)
+
+      {:ok, unchanged} = Loop.get_pending(row.id)
+      assert unchanged.state == :applied
+    end
+  end
 end

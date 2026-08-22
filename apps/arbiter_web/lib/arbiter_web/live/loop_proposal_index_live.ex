@@ -44,6 +44,11 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
      |> assign(:filter, "live")
      |> assign(:selected_id, nil)
      |> assign(:evidence_bar, Loop.evidence_bar(nil))
+     # id => decided state (:applied | :rejected), for rows decided during
+     # this session — kept visible and dimmed instead of vanishing the
+     # instant a refresh would otherwise filter them out. See `decide/3`.
+     |> assign(:decisions, %{})
+     |> assign(:decision_toast, nil)
      |> refresh()}
   end
 
@@ -63,10 +68,13 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   def handle_event("apply", %{"id" => id}, socket) do
     case Loop.apply_pending(id, actor: "dashboard") do
       {:ok, row} ->
-        {:noreply,
-         socket
-         |> put_flash(:info, "Applied: #{row.gist}")
-         |> refresh()}
+        {:noreply, socket |> decide(row, :applied) |> refresh()}
+
+      # A double-click race (or a second click before the row's own apply
+      # button disappears) hits the same proposal twice. The first click
+      # already got what this one wants, so it stays a no-op — not an error.
+      {:error, {:not_applicable, "state is applied" <> _}} ->
+        {:noreply, refresh(socket)}
 
       {:error, reason} ->
         {:noreply, socket |> put_flash(:error, error_message(reason)) |> refresh()}
@@ -81,23 +89,69 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
       {:ok, row} ->
         {:noreply,
          socket
-         |> put_flash(:info, "Rejected: #{row.gist}")
+         |> decide(row, :rejected)
          |> assign(:selected_id, nil)
          |> refresh()}
+
+      # Same idempotency as apply/2 above — rejecting an already-decided row
+      # is a no-op, not an error.
+      {:error, {:not_applicable, "state is " <> _}} ->
+        {:noreply, refresh(socket)}
 
       {:error, reason} ->
         {:noreply, socket |> put_flash(:error, error_message(reason)) |> refresh()}
     end
   end
 
+  def handle_event("dismiss_decision", %{"id" => id}, socket) do
+    {:noreply,
+     socket
+     |> assign(:decisions, Map.delete(socket.assigns.decisions, id))
+     |> assign(:decision_toast, nil)
+     |> refresh()}
+  end
+
   @impl true
   def handle_info({:loop_proposal, _event, _id}, socket), do: {:noreply, refresh(socket)}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
+  # Records a just-made decision so `refresh/1` keeps the row in view (dimmed)
+  # even once its new state falls outside the active filter, and arms the
+  # undo toast that lets the operator drop it from view immediately instead
+  # of waiting for the next natural refresh.
+  defp decide(socket, row, state) do
+    socket
+    |> assign(:decisions, Map.put(socket.assigns.decisions, row.id, state))
+    |> assign(:decision_toast, %{id: row.id, gist: row.gist, state: state})
+  end
+
   defp refresh(socket) do
     rows = Loop.list_pending(state: states(socket.assigns.filter))
+    rows = with_decided_rows(rows, socket.assigns.decisions)
     assign(socket, :rows, rows)
   end
+
+  # A row just decided in this session that the active filter's fresh query
+  # would otherwise have dropped (e.g. an :applied row while filtering
+  # "live") is fetched and appended so it stays visible until dismissed.
+  defp with_decided_rows(rows, decisions) do
+    present = MapSet.new(rows, & &1.id)
+
+    extra =
+      decisions
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(present, &1))
+      |> Enum.flat_map(fn id ->
+        case Loop.get_pending(id) do
+          {:ok, row} -> [row]
+          {:error, _} -> []
+        end
+      end)
+
+    rows ++ extra
+  end
+
+  defp decided?(decisions, id), do: Map.has_key?(decisions, id)
 
   # The `phx-change` payload is client-controlled, so a value outside the
   # select's options is normalized back to "live" rather than reaching
@@ -137,6 +191,9 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   defp context_cost(tokens) when is_integer(tokens) and tokens > 0, do: "+#{tokens}ctx"
   defp context_cost(_), do: "free"
 
+  defp toast_verb(:applied), do: "Applied"
+  defp toast_verb(:rejected), do: "Rejected"
+
   @impl true
   def render(assigns) do
     assigns = assign(assigns, :selected, selected(assigns.rows, assigns.selected_id))
@@ -144,6 +201,20 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
+        <div :if={@decision_toast} class="fixed top-4 right-4 z-50 w-80 sm:w-96">
+          <.toast
+            id="decision-toast"
+            tone="info"
+            action="Undo"
+            dismiss_key=""
+            phx-click="dismiss_decision"
+            phx-value-id={@decision_toast.id}
+          >
+            {toast_verb(@decision_toast.state)}:
+            <span class="font-medium">{@decision_toast.gist}</span>
+          </.toast>
+        </div>
+
         <.index_header
           icon="hero-beaker"
           title="Loop proposals"
@@ -174,12 +245,14 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
             <ul :if={@rows != []} id="loop-proposals" class="flex flex-col gap-1.5">
               <li
                 :for={row <- @rows}
+                data-decided={Map.get(@decisions, row.id)}
                 class={[
                   "rounded-box border bg-base-100 px-3 py-2",
                   if(row.id == @selected_id,
                     do: "border-primary",
                     else: "border-base-300"
-                  )
+                  ),
+                  decided?(@decisions, row.id) && "opacity-60"
                 ]}
               >
                 <div class="flex items-start justify-between gap-3">
