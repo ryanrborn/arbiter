@@ -683,6 +683,11 @@ defmodule ArbiterWeb.TaskDetailLive do
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
               {difficulty_label(@task.difficulty)}
             </span>
+            <%!-- Age, not wall-clock: "opened 2d ago · updated 41m ago" is the
+                 question an operator actually asks of a header. --%>
+            <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)] tabular-nums">
+              opened {relative_age(@task.created_at)} · updated {relative_age(@task.updated_at)}
+            </span>
           </div>
         </div>
 
@@ -702,26 +707,20 @@ defmodule ArbiterWeb.TaskDetailLive do
                 title="ACCEPTANCE"
                 meta={acceptance_meta(@acceptance_items)}
               >
-                <ul class="flex flex-col gap-1.5">
-                  <li
-                    :for={item <- @acceptance_items}
-                    class="flex items-start gap-2 text-[12.5px] leading-snug"
-                  >
-                    <input
+                <ul class="flex flex-col gap-[7px]">
+                  <li :for={item <- @acceptance_items} class="text-[12.5px] leading-snug">
+                    <ArbiterWeb.CoreComponents.Forms.checkbox
                       :if={item.checkbox?}
-                      type="checkbox"
+                      name={"criterion-#{item.index}"}
+                      id={"criterion-#{item.index}"}
+                      label={item.text}
+                      align="start"
                       checked={item.checked}
+                      class={item.checked && "text-[var(--text-label)]"}
                       phx-click="toggle_criterion"
                       phx-value-criterion={item.index}
-                      class="checkbox checkbox-xs mt-0.5 shrink-0"
-                      aria-label={item.text}
                     />
-                    <span class={[
-                      "min-w-0",
-                      item.checkbox? && item.checked &&
-                        "line-through text-[var(--text-label)]",
-                      !item.checkbox? && "text-[var(--text-secondary)]"
-                    ]}>
+                    <span :if={!item.checkbox?} class="min-w-0 text-[var(--text-secondary)]">
                       {item.text}
                     </span>
                   </li>
@@ -825,7 +824,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                    full-page permalink. --%>
               <.panel
                 title="RUNS"
-                meta={"#{length(@runs)} total"}
+                meta={runs_meta(@runs, @usage_by_run)}
                 padded={false}
                 body_class="px-[18px] py-[var(--space-4)] flex flex-col gap-[10px]"
               >
@@ -1535,7 +1534,19 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   # Canonical tab order — `Arbiter.Workers.Run.worker_types/0` order, so a new
   # worker type shows up here as soon as it exists.
-  defp run_roles, do: Enum.map(Run.worker_types(), &Atom.to_string/1)
+  # Handoff order, which is the order a run actually happens in — the
+  # resource's own `worker_types` list is declaration order, not lifecycle
+  # order. Anything the resource grows that isn't listed here still gets a
+  # tab, appended after the known roles.
+  @role_order ~w(main impl review fix_pass conflict)
+
+  defp run_roles do
+    known = Enum.map(Run.worker_types(), &Atom.to_string/1)
+    @role_order ++ (known -- @role_order)
+  end
+
+  # `fix_pass` is a database value; the tab is prose.
+  defp run_role_label(role), do: String.replace(role, "_", " ")
 
   defp run_role(%Run{worker_type: type}) when is_atom(type) and not is_nil(type),
     do: Atom.to_string(type)
@@ -1551,7 +1562,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       Enum.flat_map(run_roles(), fn role ->
         case Map.get(counts, role) do
           nil -> []
-          count -> [%{label: role, value: role, count: count}]
+          count -> [%{label: run_role_label(role), value: role, count: count}]
         end
       end)
   end
@@ -1603,6 +1614,44 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp run_count_summary([]), do: "No runs on this issue yet."
   defp run_count_summary([_one]), do: "1 run on this issue"
   defp run_count_summary(runs), do: "#{length(runs)} runs on this issue"
+
+  # `9 total · 1 running · $3.42` — the three numbers that decide whether the
+  # roster is worth opening. Spend is only shown once something has cost
+  # something; a `$0.00` on an issue with no ledger rows reads as a fact.
+  defp runs_meta(runs, usage_by_run) do
+    running = Enum.count(runs, &(&1.status == :running))
+
+    spend =
+      runs
+      |> Enum.map(&Map.get(usage_by_run, &1.id))
+      |> Enum.map(fn
+        %UsageEvent{cost_usd: cost} when is_float(cost) -> cost
+        _ -> 0.0
+      end)
+      |> Enum.sum()
+
+    [
+      "#{length(runs)} total",
+      running > 0 && "#{running} running",
+      spend > 0.0 && "$#{:erlang.float_to_binary(spend, decimals: 2)}"
+    ]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.join(" · ")
+  end
+
+  # Relative age, coarsest unit that still says something: `41m ago`, `2d ago`.
+  defp relative_age(%DateTime{} = at) do
+    seconds = DateTime.diff(DateTime.utc_now(), at, :second)
+
+    cond do
+      seconds < 60 -> "#{max(seconds, 0)}s ago"
+      seconds < 3600 -> "#{div(seconds, 60)}m ago"
+      seconds < 86_400 -> "#{div(seconds, 3600)}h ago"
+      true -> "#{div(seconds, 86_400)}d ago"
+    end
+  end
+
+  defp relative_age(_), do: "—"
 
   defp run_role_breakdown([]), do: nil
 

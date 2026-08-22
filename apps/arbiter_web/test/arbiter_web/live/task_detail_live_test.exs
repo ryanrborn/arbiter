@@ -668,4 +668,117 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "always_on"
     end
   end
+
+  describe "handoff §4 detail" do
+    test "the title block dates the issue in relative time", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "dated", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # `opened 2d ago · updated 41m ago` — the operator reads age, not
+      # wall-clock stamps, in the header.
+      assert html =~ "opened "
+      assert html =~ "updated "
+      assert html =~ ~r/opened \d+[smhd] ago/
+      assert html =~ ~r/updated \d+[smhd] ago/
+    end
+
+    test "acceptance criteria use the handoff Checkbox, not the daisyUI one",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "handoff checkbox",
+          acceptance: "- [x] done one\n- [ ] pending two",
+          workspace_id: ws.id
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # The handoff Checkbox hides the native input and draws its own 14px
+      # box; the daisyUI one keeps the native control with `checkbox` classes.
+      refute html =~ "checkbox checkbox-xs"
+      assert html =~ "sr-only peer"
+      # Checked boxes carry the tick glyph.
+      assert html =~ "✓"
+    end
+
+    test "the runs header counts running rows and totals their spend",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "spendy", workspace_id: ws.id})
+
+      {:ok, done} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :completed,
+          started_at: ~U[2026-07-01 10:00:00.000000Z],
+          completed_at: ~U[2026-07-01 10:12:00.000000Z]
+        })
+
+      {:ok, _running} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :impl,
+          status: :running,
+          started_at: ~U[2026-07-01 11:00:00.000000Z]
+        })
+
+      {:ok, _usage} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: task.id,
+          worker_run_id: done.id,
+          step: :work,
+          provider: "anthropic",
+          model: "sonnet",
+          cost_usd: 3.42,
+          occurred_at: ~U[2026-07-01 10:12:00.000000Z]
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "2 total"
+      assert html =~ "1 running"
+      assert html =~ "$3.42"
+    end
+
+    test "role tabs follow the handoff order and label fix_pass as prose",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "roles", workspace_id: ws.id})
+
+      for {role, task_id} <- [
+            {:review, task.id <> "#review"},
+            {:conflict, task.id},
+            {:fix_pass, task.id},
+            {:impl, task.id},
+            {:main, task.id}
+          ] do
+        {:ok, _} =
+          Ash.create(Run, %{
+            task_id: task_id,
+            repo: "test/repo",
+            worker_type: role,
+            status: :completed,
+            started_at: ~U[2026-07-01 10:00:00.000000Z]
+          })
+      end
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "fix pass 1"
+      refute html =~ "fix_pass 1"
+
+      order = ~w(all main impl review fix_pass conflict)
+
+      positions =
+        Enum.map(order, fn value ->
+          {pos, _} = :binary.match(html, ~s(phx-value-tab="#{value}"))
+          pos
+        end)
+
+      assert positions == Enum.sort(positions),
+             "filter tabs are out of handoff order: #{inspect(Enum.zip(order, positions))}"
+    end
+  end
 end
