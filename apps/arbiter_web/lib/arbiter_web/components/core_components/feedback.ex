@@ -388,6 +388,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   attr :id, :string, default: nil
   attr :tone, :string, values: ~w(info error attention live), default: "info"
   attr :action, :string, default: nil, doc: "one inline action word, e.g. retry or undo"
+  attr :action_click, :any, default: nil, doc: "phx-click target bound to the action word only"
   attr :dismiss_key, :string, default: "esc", doc: "pass empty string to hide it"
   attr :rest, :global
   slot :inner_block, required: true
@@ -408,6 +409,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       </span>
       <span
         :if={@action}
+        phx-click={@action_click}
         class="text-[10.5px] font-medium text-[var(--text-link)] cursor-pointer font-[family-name:var(--font-mono)]"
       >
         {@action}

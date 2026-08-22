@@ -1,9 +1,9 @@
 defmodule ArbiterWeb.WorkerDetailLive do
   @moduledoc """
   Per-worker detail view at `/workers/:task_id`. The richest single
-  view of a worker: snapshot, captured Claude stdout (terminal-style
-  with auto-scroll), the paired workflow Machine's step progress, the
-  task's workspace context, and a Stop action.
+  view of a worker: snapshot, captured Claude stdout (a sticky-bottom
+  LogStream), the paired workflow Machine's step progress, the
+  task's workspace context, and a Stop/Resume action.
 
   Subscribes to:
     * `"workers"`          — lifecycle events (started / stopped).
@@ -15,6 +15,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
   use ArbiterWeb, :live_view
 
   import ArbiterWeb.StatusHelpers
+
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Navigation
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -40,7 +44,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
     socket =
       socket
       |> assign(:task_id, task_id)
-      |> assign(:live, connected?(socket))
       |> assign(:now, DateTime.utc_now())
       |> assign(:flash_message, nil)
       |> assign(:compose_body, "")
@@ -52,6 +55,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:retry_modal, false)
       |> assign(:retry_error, nil)
       |> assign(:retrying, false)
+      |> assign(:stop_notice, false)
+      |> assign(:stopped_flow_step, nil)
       |> refresh_all()
       |> seed_output_lines()
 
@@ -72,9 +77,44 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   @impl true
-  def handle_info({:worker_lifecycle, _event, _snap}, socket) do
-    {:noreply, refresh_all(socket)}
+  # A worker's own `terminate/2` broadcasts `:stopped` on the shared "workers"
+  # topic, and `Worker.stop/3` blocks until that broadcast has already landed
+  # in our own mailbox. Left unguarded, the very next receive loop after our
+  # `"stop"` handler would refresh straight over the synthetic stopped
+  # snapshot/flow position we just built (`Worker.whereis/1` is already `nil`
+  # by then) — flipping the toast/chip/flow back off before the operator ever
+  # sees them. Once we're showing the stop notice, drop this task's own
+  # `:stopped` echo; any other lifecycle event still refreshes normally.
+  def handle_info(
+        {:worker_lifecycle, :stopped, %{task_id: task_id}},
+        %{assigns: %{stop_notice: true, task_id: task_id}} = socket
+      ) do
+    {:noreply, socket}
   end
+
+  def handle_info(
+        {:worker_lifecycle, _event, %{task_id: task_id}},
+        %{assigns: %{task_id: task_id}} = socket
+      ) do
+    socket = refresh_all(socket)
+
+    socket =
+      case socket.assigns[:snapshot] do
+        %{status: status} ->
+          if active_status?(status),
+            do: assign(socket, stop_notice: false, stopped_flow_step: nil),
+            else: socket
+
+        _ ->
+          socket
+      end
+
+    {:noreply, socket}
+  end
+
+  # A lifecycle event for some other worker on the shared "workers" topic —
+  # not ours, so it must not touch our snapshot/toast/flow state.
+  def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
 
   def handle_info({:worker_output, _task_id, line}, socket) do
     {:noreply, append_output_line(socket, line)}
@@ -101,16 +141,21 @@ defmodule ArbiterWeb.WorkerDetailLive do
   def handle_info(_, socket), do: {:noreply, socket}
 
   @impl true
+  # Stays on the page rather than navigating away: the operator needs to see
+  # the flipped Resume action, the reddened flow node, and the toast
+  # confirming the worktree survives the stop. The pre-stop flow position is
+  # captured before the GenServer terminates, so the flow can keep pointing
+  # at the step the worker actually reached rather than a generic fallback.
   def handle_event("stop", _params, socket) do
+    flow_step = current_flow_step(socket.assigns[:snapshot])
+
     case Worker.stop(socket.assigns.task_id, :normal) do
       :ok ->
         {:noreply,
          socket
-         |> put_flash(
-           :info,
-           "Stopped worker for issue #{socket.assigns.task_id}."
-         )
-         |> push_navigate(to: ~p"/")}
+         |> assign(:stop_notice, true)
+         |> assign(:stopped_flow_step, flow_step)
+         |> assign(:snapshot, stopped_snapshot(socket.assigns[:snapshot]))}
 
       {:error, :not_found} ->
         {:noreply,
@@ -208,7 +253,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
   def handle_async(:retry, {:ok, {:ok, _result}}, socket) do
     {:noreply,
      socket
-     |> assign(retrying: false, retry_modal: false, retry_error: nil)
+     |> assign(
+       retrying: false,
+       retry_modal: false,
+       retry_error: nil,
+       stop_notice: false,
+       stopped_flow_step: nil
+     )
      |> put_flash(
        :info,
        "Resumed #{socket.assigns.task_id} with a fresh #{socket.assigns.worker_label}."
@@ -220,7 +271,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply,
      socket
      |> assign(:retrying, false)
-     |> assign(:retry_error, "Retry failed: #{resume_failure(reason)}")
+     |> assign(:retry_error, "Resume failed: #{resume_failure(reason)}")
      |> refresh_all()}
   end
 
@@ -228,7 +279,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply,
      socket
      |> assign(:retrying, false)
-     |> assign(:retry_error, "Retry crashed: #{inspect(reason)}")
+     |> assign(:retry_error, "Resume crashed: #{inspect(reason)}")
      |> refresh_all()}
   end
 
@@ -311,9 +362,11 @@ defmodule ArbiterWeb.WorkerDetailLive do
     :awaiting_review
   ]
 
-  # Retry is offered when the task exists and no worker is actively working it
-  # — a failed/stopped snapshot, or no snapshot at all (the node restarted, but
-  # the worktree may well still be on disk).
+  # Resume is offered when the task exists and no worker is actively working
+  # it — a failed/stopped snapshot, or no snapshot at all (the node restarted,
+  # but the worktree may well still be on disk).
+  defp active_status?(status), do: status in @active_statuses
+
   defp retryable?(nil, _snapshot), do: false
   defp retryable?(%Issue{status: :closed}, _snapshot), do: false
   defp retryable?(%Issue{}, nil), do: true
@@ -437,589 +490,557 @@ defmodule ArbiterWeb.WorkerDetailLive do
     assign(socket, :output_lines, lines)
   end
 
+  # Adapts the plain-string stdout buffer to LogStream's `%{time:, role:,
+  # text:}` line shape. Captured lines carry no per-line timestamp/role of
+  # their own, so every line is tagged a generic "output" role.
+  defp log_stream_lines(lines) do
+    Enum.map(lines, &%{time: "", role: "output", text: &1})
+  end
+
+  # ---- flow / stop-notice helpers ----
+
+  # Maps a live worker status onto one of the four canonical
+  # `StatusHelpers.worker_flow/0` steps `<.worker_flow>` understands —
+  # it has no catch-all clause for statuses like `:resuming` or
+  # `:awaiting_review_gate`.
+  defp normalize_flow_status(:idle), do: :idle
+  defp normalize_flow_status(:resuming), do: :running
+  defp normalize_flow_status(:running), do: :running
+  defp normalize_flow_status(:awaiting), do: :awaiting
+  defp normalize_flow_status(:awaiting_review_gate), do: :awaiting
+  defp normalize_flow_status(:awaiting_review), do: :awaiting
+  defp normalize_flow_status(:completed), do: :completed
+  defp normalize_flow_status(:failed), do: :running
+  defp normalize_flow_status(_), do: :idle
+
+  defp current_flow_step(nil), do: :idle
+  defp current_flow_step(%{status: status}), do: normalize_flow_status(status)
+
+  # The flow step to render: the precise step the worker had reached before
+  # a user-initiated stop, when we have one, otherwise derived from the live
+  # snapshot's status.
+  defp flow_status(%{stopped_flow_step: step}) when not is_nil(step), do: step
+  defp flow_status(%{snapshot: snapshot}), do: current_flow_step(snapshot)
+
+  defp flow_failed?(%{snapshot: %{status: :failed}}), do: true
+  defp flow_failed?(_), do: false
+
+  # `Worker.stop/3` genuinely leaves the worktree in place — it only tears
+  # down the GenServer, never touches disk. Keep this claim true if that ever
+  # changes.
+  defp stop_notice_text(task_id),
+    do: "Stop signalled to #{task_id} — the worktree is left in place"
+
+  defp stopped_snapshot(nil), do: nil
+  defp stopped_snapshot(snapshot), do: Map.put(snapshot, :status, :failed)
+
+  # ---- toolbar / rail summary helpers ----
+
+  defp snapshot_branch(%{meta: meta}) when is_map(meta), do: Map.get(meta, :branch)
+  defp snapshot_branch(_), do: nil
+
+  # "repo · workspace · branch", skipping any part that isn't known yet.
+  defp toolbar_context(snapshot, workspace) do
+    [snapshot.repo, workspace && workspace.name, snapshot_branch(snapshot)]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
+  end
+
+  defp model_label(snapshot) do
+    case execution_model(snapshot) do
+      nil -> "unknown"
+      model -> Arbiter.Agents.ModelDisplay.short(model)
+    end
+  end
+
+  defp total_tokens(events) do
+    case work_events_with_tokens(events) do
+      [] -> nil
+      evs -> Enum.reduce(evs, 0, fn e, acc -> acc + (e.tokens_in || 0) + (e.tokens_out || 0) end)
+    end
+  end
+
+  defp total_cost(events) do
+    case work_events_with_cost(events) do
+      [] -> nil
+      evs -> Enum.reduce(evs, 0.0, fn e, acc -> acc + e.cost_usd end)
+    end
+  end
+
+  defp humanize_tokens(n) when is_integer(n) and n >= 1000,
+    do: "#{:erlang.float_to_binary(n / 1000, decimals: 1)}k"
+
+  defp humanize_tokens(n) when is_integer(n), do: to_string(n)
+
+  defp format_usd(cost) when is_float(cost),
+    do: "$#{:erlang.float_to_binary(cost, decimals: 2)}"
+
+  # "sonnet · 38.4k tok · $0.42" — trailing parts drop off as data arrives.
+  defp toolbar_summary(snapshot, usage_events) do
+    tokens = total_tokens(usage_events)
+    cost = total_cost(usage_events)
+
+    [
+      model_label(snapshot),
+      tokens && "#{humanize_tokens(tokens)} tok",
+      cost && format_usd(cost)
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
+  end
+
+  defp dash_if_nil(nil), do: "—"
+  defp dash_if_nil(value), do: value
+
   # ---- render ----
 
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
-      <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
-        <%!-- ── Header ───────────────────────────────────────────────── --%>
-        <div class="flex flex-wrap items-center justify-between gap-4">
-          <div class="min-w-0">
-            <div class="flex items-center gap-2 text-xs text-base-content/50">
-              <.link navigate={~p"/"} class="link link-hover">Dashboard</.link>
-              <.icon name="hero-chevron-right" class="size-3" />
-              <span>{String.capitalize(@worker_label)} detail</span>
-            </div>
-            <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2 mt-0.5">
-              {String.capitalize(@worker_label)}
-              <code class="text-base font-mono text-base-content/80">{@task_id}</code>
-            </h1>
-          </div>
-
-          <div class="flex items-center gap-2">
-            <span
-              :if={@snapshot}
-              class="badge badge-lg gap-1.5 font-mono tabular-nums bg-base-300 border-base-300"
-              title="Elapsed since started"
-            >
-              <.icon name="hero-clock" class="size-4 text-base-content/60" />
-              {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
-            </span>
-            <span
-              id="live-indicator"
-              class={[
-                "badge badge-sm gap-1.5 transition-colors duration-200",
-                if(@live, do: "badge-success", else: "badge-warning")
-              ]}
-              title={
-                if @live,
-                  do: "WebSocket connected — output streams in real time",
-                  else: "Static render — refresh the page to reconnect"
-              }
-            >
-              <%= if @live do %>
-                <span class="relative flex h-2 w-2">
-                  <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-content opacity-75">
-                  </span>
-                  <span class="relative inline-flex h-2 w-2 rounded-full bg-success-content"></span>
-                </span>
-                live
-              <% else %>
-                <.icon name="hero-exclamation-triangle" class="size-3" /> stale (refresh)
-              <% end %>
-            </span>
-          </div>
-        </div>
+      <div class="p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-[14px]">
+        <%= if @stop_notice do %>
+          <.toast
+            id="stop-toast"
+            tone="error"
+            action="resume"
+            action_click="open_retry"
+            dismiss_key=""
+          >
+            {stop_notice_text(@task_id)}
+          </.toast>
+        <% end %>
 
         <%= if @snapshot do %>
-          <%!-- ── Step progress stepper ──────────────────────────────── --%>
-          <section class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-4 gap-3">
-              <div class="flex items-center justify-between gap-2">
-                <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
-                  <.icon name="hero-flag" class="size-4" /> Lifecycle
-                </h2>
-                <span class={["badge badge-sm", worker_status_class(@snapshot.status)]}>
-                  {worker_status_label(@snapshot.status)}
+          <%!-- ── Worker session — toolbar + log/rail grid (README §5) ──── --%>
+          <div class="border border-[var(--border-default)] rounded-[var(--radius-panel)] overflow-hidden">
+            <div class="flex items-center gap-[14px] h-[var(--toolbar-height)] px-4 bg-[var(--surface-chrome)] border-b border-[var(--border-default)]">
+              <span class="font-medium text-[12px] text-[var(--text-title)] font-[family-name:var(--font-mono)]">
+                {@task_id}
+              </span>
+              <.status_chip status={@snapshot.status} />
+              <span
+                :if={@snapshot.started_at}
+                class="text-[11.5px] font-mono text-[var(--text-secondary)]"
+              >
+                {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
+              </span>
+              <span class="text-[11.5px] text-[var(--text-secondary)] font-[family-name:var(--font-mono)] truncate">
+                {toolbar_context(@snapshot, @workspace)}
+              </span>
+              <span class="ml-auto flex items-center gap-[10px]">
+                <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                  {toolbar_summary(@snapshot, @usage_events)}
                 </span>
-              </div>
-
-              <%= if @snapshot.status == :failed do %>
-                <div class="rounded-box bg-error/10 border border-error/30 p-3 flex items-center gap-2 text-sm text-error">
-                  <.icon name="hero-x-circle" class="size-5 shrink-0" />
-                  <span class="font-medium">
-                    {String.capitalize(@worker_label)} failed — left the happy path before completion.
-                  </span>
-                </div>
-              <% else %>
-                <ul class="steps steps-vertical sm:steps-horizontal w-full">
-                  <li
-                    :for={step <- worker_flow()}
-                    class={["step", flow_step_class(flow_state(step, @snapshot.status))]}
-                    data-content={flow_step_marker(flow_state(step, @snapshot.status))}
-                  >
-                    <span class="text-xs sm:text-sm">{flow_step_label(step)}</span>
-                  </li>
-                </ul>
-              <% end %>
-            </div>
-          </section>
-
-          <%!-- ── Awaiting review panel ──────────────────────────────── --%>
-          <section
-            :if={@snapshot.status == :awaiting}
-            class="card bg-warning/10 border border-warning/40 shadow-sm"
-          >
-            <div class="card-body p-4 gap-3">
-              <div class="flex flex-wrap items-center justify-between gap-2">
-                <h2 class="text-lg font-semibold flex items-center gap-2">
-                  <.icon name="hero-eye" class="size-5 text-warning" /> Awaiting your review
-                </h2>
-                <span class="badge badge-warning gap-1.5">
-                  <.icon name="hero-clock" class="size-3.5" /> Awaiting review
-                </span>
-              </div>
-              <p class="text-sm text-base-content/70">
-                This {@worker_label} has paused and is waiting for a human decision before it can proceed.
-              </p>
-              <%= if ref = mr_ref(@snapshot) do %>
-                <a
-                  href={ref}
-                  target="_blank"
-                  rel="noopener"
-                  class="btn btn-sm btn-warning gap-1.5 w-fit transition-all duration-200 active:scale-95"
-                >
-                  <.icon name="hero-arrow-top-right-on-square" class="size-4" /> Open {@pr_label}
-                  <code class="font-mono text-xs opacity-80">{ref}</code>
-                </a>
-              <% else %>
-                <p class="text-sm text-base-content/50 italic flex items-center gap-1.5">
-                  <.icon name="hero-link-slash" class="size-4" /> No {@pr_label} ref recorded yet.
-                </p>
-              <% end %>
-            </div>
-          </section>
-
-          <%!-- ── Snapshot detail ────────────────────────────────────── --%>
-          <section class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-4 gap-4">
-              <div class="flex flex-wrap justify-between items-start gap-4">
-                <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-                  <dt class="font-medium text-base-content/60">Status:</dt>
-                  <dd>
-                    <span class={["badge badge-sm", worker_status_class(@snapshot.status)]}>
-                      {worker_status_label(@snapshot.status)}
-                    </span>
-                  </dd>
-                  <%= if claude_session?(@snapshot) do %>
-                    <dt class="font-medium text-base-content/60">Activity:</dt>
-                    <dd>
-                      <span class="badge badge-info badge-sm gap-1.5">
-                        <span
-                          :if={@snapshot.status == :running}
-                          class="loading loading-ring loading-xs"
-                        >
-                        </span>
-                        {live_activity(@snapshot)}
-                      </span>
-                    </dd>
-                  <% else %>
-                    <dt class="font-medium text-base-content/60">Current step:</dt>
-                    <dd>
-                      <code class="badge badge-ghost badge-sm font-mono">
-                        {@snapshot.current_step}
-                      </code>
-                    </dd>
-                  <% end %>
-                  <dt class="font-medium text-base-content/60">{String.capitalize(@repo_label)}:</dt>
-                  <dd><code class="font-mono text-xs">{@snapshot.repo}</code></dd>
-                  <dt class="font-medium text-base-content/60">
-                    {String.capitalize(@workspace_label)}:
-                  </dt>
-                  <dd>
-                    <%= if @workspace do %>
-                      {@workspace.name}
-                      <span class="text-base-content/50">
-                        (<code class="font-mono text-xs">{@workspace.prefix}</code>)
-                      </span>
-                    <% else %>
-                      <span class="text-base-content/50">(none)</span>
-                    <% end %>
-                  </dd>
-                  <dt class="font-medium text-base-content/60">Started:</dt>
-                  <dd class="font-mono text-xs tabular-nums">
-                    {format_ts_long(@snapshot.started_at)}
-                  </dd>
-                  <dt class="font-medium text-base-content/60">Elapsed:</dt>
-                  <dd class="font-mono text-xs tabular-nums">
-                    {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
-                  </dd>
-                  <%= if exit_status = Map.get(@snapshot.meta || %{}, :exit_status) do %>
-                    <dt class="font-medium text-base-content/60">Exit status:</dt>
-                    <dd class="font-mono text-xs">{exit_status}</dd>
-                  <% end %>
-                  <%= if result = Map.get(@snapshot.meta || %{}, :result) do %>
-                    <dt class="font-medium text-base-content/60">Result:</dt>
-                    <dd class="font-mono text-xs">{inspect(result)}</dd>
-                  <% end %>
-                  <%= if reason = Map.get(@snapshot.meta || %{}, :failure_reason) do %>
-                    <dt class="font-medium text-base-content/60">Failure:</dt>
-                    <dd class="text-error font-mono text-xs">{inspect(reason)}</dd>
-                  <% end %>
-                </dl>
-
-                <div class="flex flex-col gap-2 shrink-0">
-                  <.link navigate={~p"/tasks/#{@task_id}"} class="btn btn-sm btn-ghost gap-1.5">
-                    <.icon name="hero-arrow-top-right-on-square" class="size-4" />
-                    {String.capitalize(@issue_label)} detail
-                  </.link>
-                  <%= if @latest_run do %>
-                    <.link
-                      navigate={~p"/workers/history/#{@latest_run.id}"}
-                      class="btn btn-sm btn-ghost gap-1.5"
-                    >
-                      <.icon name="hero-archive-box" class="size-4" /> Run history
-                    </.link>
-                  <% end %>
-                  <%= if @snapshot.status in [:idle, :resuming, :running, :awaiting, :awaiting_review_gate, :awaiting_review] do %>
-                    <button
+                <%= cond do %>
+                  <% active_status?(@snapshot.status) -> %>
+                    <Core.button
+                      id="worker-stop-btn"
                       phx-click="stop"
                       data-confirm={"Stop #{@worker_label} for #{@task_id}? Any active Claude subprocess will be terminated."}
-                      class="btn btn-sm btn-error gap-1.5 transition-all duration-200 active:scale-95"
+                      variant="danger"
+                      size="sm"
                     >
-                      <.icon name="hero-stop-circle" class="size-4" /> Stop {@worker_label}
-                    </button>
-                  <% end %>
-                  <button
-                    :if={retryable?(@task, @snapshot)}
+                      Stop
+                    </Core.button>
+                  <% retryable?(@task, @snapshot) -> %>
+                    <Core.button
+                      id="worker-toolbar-resume-btn"
+                      phx-click="open_retry"
+                      variant="secondary"
+                      size="sm"
+                    >
+                      Resume
+                    </Core.button>
+                  <% true -> %>
+                <% end %>
+              </span>
+            </div>
+
+            <div
+              class="grid gap-px bg-[var(--border-default)]"
+              style="grid-template-columns: minmax(0,1fr) 272px;"
+            >
+              <div class="bg-[var(--arb-canvas-sunken)]">
+                <%= if @output_lines == [] do %>
+                  <Feedback.empty_state icon="hero-command-line">
+                    No output yet.
+                  </Feedback.empty_state>
+                <% else %>
+                  <.log_stream
+                    id="worker-output"
+                    live={@snapshot.status == :running}
+                    lines={log_stream_lines(@output_lines)}
+                    max_height="28rem"
+                    bare
+                  />
+                <% end %>
+              </div>
+
+              <div class="bg-[var(--surface-chrome)] px-4 py-[18px] flex flex-col gap-[18px]">
+                <.worker_flow status={flow_status(assigns)} failed={flow_failed?(assigns)} compact />
+
+                <.data_list class="text-xs">
+                  <:item label="task">
+                    <code class="font-mono text-xs">{@task_id}</code>
+                  </:item>
+                  <:item label="repo">
+                    <code class="font-mono text-xs">{dash_if_nil(@snapshot.repo)}</code>
+                  </:item>
+                  <:item label="branch">
+                    <code class="font-mono text-xs">{dash_if_nil(snapshot_branch(@snapshot))}</code>
+                  </:item>
+                  <:item label="model">
+                    <code class="font-mono text-xs">{model_label(@snapshot)}</code>
+                  </:item>
+                  <:item label="tokens">
+                    <code class="font-mono text-xs">
+                      {dash_if_nil(
+                        total_tokens(@usage_events) && humanize_tokens(total_tokens(@usage_events))
+                      )}
+                    </code>
+                  </:item>
+                  <:item label="spend">
+                    <code class="font-mono text-xs">
+                      {dash_if_nil(total_cost(@usage_events) && format_usd(total_cost(@usage_events)))}
+                    </code>
+                  </:item>
+                </.data_list>
+
+                <div :if={@quotas != []} class="flex flex-col gap-2">
+                  <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                    Quota
+                  </span>
+                  <.quota_bar
+                    provider={hd(@quotas).provider}
+                    window="5h"
+                    utilization={hd(@quotas).utilization_5h}
+                    reset_at={hd(@quotas).reset_5h_at}
+                    overage_status={hd(@quotas).overage_status}
+                    representative_claim={hd(@quotas).representative_claim}
+                    width={140}
+                  />
+                  <.quota_bar
+                    window="7d"
+                    show_label={false}
+                    utilization={hd(@quotas).utilization_7d}
+                    reset_at={hd(@quotas).reset_7d_at}
+                    overage_status={hd(@quotas).overage_status}
+                    representative_claim={hd(@quotas).representative_claim}
+                    width={140}
+                  />
+                </div>
+
+                <div class="flex flex-col gap-[7px]">
+                  <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                    Actions
+                  </span>
+                  <Core.button
+                    id="worker-resume-note-btn"
                     phx-click="open_retry"
-                    class="btn btn-sm btn-primary gap-1.5 transition-all duration-200 active:scale-95"
+                    size="sm"
+                    disabled={!retryable?(@task, @snapshot)}
                   >
-                    <.icon name="hero-arrow-path" class="size-4" /> Retry
-                  </button>
+                    <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
+                    Resume with note
+                  </Core.button>
+                  <%= if @latest_run do %>
+                    <Core.button
+                      size="sm"
+                      variant="ghost"
+                      phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
+                    >
+                      <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
+                      Full transcript
+                    </Core.button>
+                  <% else %>
+                    <Core.button size="sm" variant="ghost" disabled>
+                      <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
+                      Full transcript
+                    </Core.button>
+                  <% end %>
                 </div>
               </div>
             </div>
-          </section>
+          </div>
 
-          <%!-- ── Execution context ─────────────────────────────────── --%>
-          <section class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-4 gap-4">
-              <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
-                <.icon name="hero-cpu-chip" class="size-4" /> Execution context
-              </h2>
-              <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-                <dt class="font-medium text-base-content/60">Provider:</dt>
-                <dd>
-                  <code class="badge badge-ghost badge-sm font-mono">
-                    {execution_provider(@snapshot)}
-                  </code>
-                </dd>
-                <dt class="font-medium text-base-content/60">Model:</dt>
-                <dd>
-                  <%= if m = execution_model(@snapshot) do %>
-                    <code class="font-mono text-xs" title={m}>
-                      {Arbiter.Agents.ModelDisplay.short(m)}
-                    </code>
+          <%!-- ── Awaiting review panel ──────────────────────────────── --%>
+          <.panel :if={@snapshot.status == :awaiting} title="Awaiting your review">
+            <:actions>
+              <.status_chip status={:awaiting} />
+            </:actions>
+            <p class="text-sm text-[var(--text-secondary)]">
+              This {@worker_label} has paused and is waiting for a human decision before it can proceed.
+            </p>
+            <%= if ref = mr_ref(@snapshot) do %>
+              <a
+                href={ref}
+                target="_blank"
+                rel="noopener"
+                class="inline-flex items-center gap-[7px] mt-2 rounded-[var(--radius-field)] border border-solid font-medium h-[var(--control-sm)] px-[10px] text-[11.5px] bg-[var(--arb-attention)] border-[var(--arb-attention)] text-[var(--arb-attention-ink)] hover:brightness-[1.06] transition-[background,border-color] duration-[var(--dur-hover)] ease-[var(--arb-ease-out)]"
+              >
+                <Core.icon name="hero-arrow-top-right-on-square" size={14} /> Open {@pr_label}
+                <code class="font-mono text-xs opacity-80">{ref}</code>
+              </a>
+            <% else %>
+              <p class="text-sm text-[var(--text-label)] italic flex items-center gap-1.5 mt-2">
+                <Core.icon name="hero-link-slash" size={14} /> No {@pr_label} ref recorded yet.
+              </p>
+            <% end %>
+          </.panel>
+
+          <%!-- ── Details ─────────────────────────────────────────────── --%>
+          <.panel title="Details">
+            <div class="flex flex-wrap justify-between items-start gap-4">
+              <.data_list class="text-sm">
+                <:item :if={claude_session?(@snapshot)} label="Activity">
+                  {live_activity(@snapshot)}
+                </:item>
+                <:item :if={!claude_session?(@snapshot)} label="Current step">
+                  <code class="font-mono text-xs">{@snapshot.current_step}</code>
+                </:item>
+                <:item label={String.capitalize(@workspace_label)}>
+                  <%= if @workspace do %>
+                    {@workspace.name}
+                    <span class="text-[var(--text-label)]">
+                      (<code class="font-mono text-xs">{@workspace.prefix}</code>)
+                    </span>
                   <% else %>
-                    <span class="text-base-content/40 italic text-xs">unknown</span>
+                    <span class="text-[var(--text-label)]">(none)</span>
                   <% end %>
-                </dd>
-                <%= if thinking = execution_thinking(@snapshot) do %>
-                  <dt class="font-medium text-base-content/60">Reasoning effort:</dt>
-                  <dd><code class="badge badge-ghost badge-sm font-mono">{thinking}</code></dd>
-                <% end %>
-                <%= if tier = execution_model_tier(@snapshot) do %>
-                  <dt class="font-medium text-base-content/60">Model tier:</dt>
-                  <dd><code class="badge badge-ghost badge-sm font-mono">{tier}</code></dd>
-                <% end %>
-                <%= for event <- @usage_events, event.step == :work do %>
-                  <%= if cost = event.cost_usd do %>
-                    <dt class="font-medium text-base-content/60">Run cost:</dt>
-                    <dd class="font-mono text-xs">${:erlang.float_to_binary(cost, decimals: 4)}</dd>
-                  <% end %>
-                  <%= if tokens_in = event.tokens_in do %>
-                    <dt class="font-medium text-base-content/60">Tokens:</dt>
-                    <dd class="font-mono text-xs">
-                      {tokens_in} in / {event.tokens_out || "?"} out
-                      <%= if (event.cache_read_tokens || 0) > 0 do %>
-                        · {event.cache_read_tokens} cached
-                      <% end %>
-                    </dd>
-                  <% end %>
-                <% end %>
-              </dl>
+                </:item>
+                <:item label="Provider">
+                  <code class="font-mono text-xs">{execution_provider(@snapshot)}</code>
+                </:item>
+                <:item :if={thinking = execution_thinking(@snapshot)} label="Reasoning effort">
+                  <code class="font-mono text-xs">{thinking}</code>
+                </:item>
+                <:item :if={tier = execution_model_tier(@snapshot)} label="Model tier">
+                  <code class="font-mono text-xs">{tier}</code>
+                </:item>
+                <:item label="Started">
+                  <span class="font-mono text-xs tabular-nums">
+                    {format_ts_long(@snapshot.started_at)}
+                  </span>
+                </:item>
+                <:item label="Elapsed">
+                  <span class="font-mono text-xs tabular-nums">
+                    {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
+                  </span>
+                </:item>
+                <:item
+                  :if={exit_status = Map.get(@snapshot.meta || %{}, :exit_status)}
+                  label="Exit status"
+                >
+                  <span class="font-mono text-xs">{exit_status}</span>
+                </:item>
+                <:item :if={result = Map.get(@snapshot.meta || %{}, :result)} label="Result">
+                  <span class="font-mono text-xs">{inspect(result)}</span>
+                </:item>
+                <:item :if={reason = Map.get(@snapshot.meta || %{}, :failure_reason)} label="Failure">
+                  <span class="text-[var(--arb-fail-text)] font-mono text-xs">{inspect(reason)}</span>
+                </:item>
+              </.data_list>
+
+              <div class="flex flex-col gap-2 shrink-0">
+                <Core.button
+                  variant="ghost"
+                  size="sm"
+                  phx-click={JS.navigate(~p"/tasks/#{@task_id}")}
+                >
+                  <:icon><Core.icon name="hero-arrow-top-right-on-square" size={14} /></:icon>
+                  {String.capitalize(@issue_label)} detail
+                </Core.button>
+                <Core.button
+                  :if={@latest_run}
+                  variant="ghost"
+                  size="sm"
+                  phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
+                >
+                  <:icon><Core.icon name="hero-archive-box" size={14} /></:icon>
+                  Run history
+                </Core.button>
+              </div>
             </div>
-          </section>
+          </.panel>
 
           <%!-- ── Assigned task summary ─────────────────────────────── --%>
-          <%= if @task do %>
-            <section class="card bg-base-200 border border-base-300 shadow-sm">
-              <div class="card-body p-4 gap-3">
-                <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
-                  <.icon name="hero-bookmark" class="size-4" />
-                  {String.capitalize(@issue_label)}: {@task.title}
-                </h2>
-                <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-sm">
-                  <%= if @task.target_branch do %>
-                    <dt class="font-medium text-base-content/60">Target branch:</dt>
-                    <dd><code class="font-mono text-xs">{@task.target_branch}</code></dd>
-                  <% end %>
-                  <%= if @task.difficulty do %>
-                    <dt class="font-medium text-base-content/60">Difficulty:</dt>
-                    <dd>
-                      <span class="badge badge-ghost badge-sm font-mono">
-                        D{@task.difficulty}
-                      </span>
-                    </dd>
-                  <% end %>
-                  <%= if @task.priority do %>
-                    <dt class="font-medium text-base-content/60">Priority:</dt>
-                    <dd>
-                      <span class="badge badge-ghost badge-sm font-mono">
-                        P{@task.priority}
-                      </span>
-                    </dd>
-                  <% end %>
-                  <%= if @task.issue_type do %>
-                    <dt class="font-medium text-base-content/60">Type:</dt>
-                    <dd>
-                      <span class="badge badge-ghost badge-sm">
-                        {@task.issue_type}
-                      </span>
-                    </dd>
-                  <% end %>
-                  <%= if tracker_display(@task) do %>
-                    <dt class="font-medium text-base-content/60">Tracker:</dt>
-                    <dd class="font-mono text-xs">{tracker_display(@task)}</dd>
-                  <% end %>
-                </dl>
-              </div>
-            </section>
-          <% end %>
+          <.panel :if={@task} title={"#{String.capitalize(@issue_label)}: #{@task.title}"}>
+            <.data_list class="text-sm">
+              <:item :if={@task.target_branch} label="Target branch">
+                <code class="font-mono text-xs">{@task.target_branch}</code>
+              </:item>
+              <:item :if={@task.difficulty} label="Difficulty">
+                <.difficulty_meter difficulty={@task.difficulty} />
+              </:item>
+              <:item :if={@task.priority} label="Priority">
+                <.priority_tag priority={@task.priority} />
+              </:item>
+              <:item :if={@task.issue_type} label="Type">
+                <.type_tag type={@task.issue_type} />
+              </:item>
+              <:item :if={tracker_display(@task)} label="Tracker">
+                <span class="font-mono text-xs">{tracker_display(@task)}</span>
+              </:item>
+            </.data_list>
+          </.panel>
 
           <%!-- ── Worker metadata ───────────────────────────────────── --%>
-          <%= if meta_has_details?(@snapshot.meta) do %>
-            <section class="card bg-base-200 border border-base-300 shadow-sm">
-              <div class="card-body p-4 gap-3">
-                <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
-                  <.icon name="hero-information-circle" class="size-4" /> Metadata
-                </h2>
-                <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-sm">
-                  <%= if role = Map.get(@snapshot.meta || %{}, :role) do %>
-                    <dt class="font-medium text-base-content/60">Role:</dt>
-                    <dd><span class="badge badge-ghost badge-sm">{role}</span></dd>
-                  <% end %>
-                  <%= if Map.get(@snapshot.meta || %{}, :review_required) do %>
-                    <dt class="font-medium text-base-content/60">Review gate:</dt>
-                    <dd><span class="badge badge-warning badge-sm">required</span></dd>
-                  <% end %>
-                  <%= if path = Map.get(@snapshot.meta || %{}, :worktree_path) do %>
-                    <dt class="font-medium text-base-content/60">Worktree:</dt>
-                    <dd class="font-mono text-xs break-all">{path}</dd>
-                  <% end %>
-                  <%= if branch = Map.get(@snapshot.meta || %{}, :branch) do %>
-                    <dt class="font-medium text-base-content/60">Branch:</dt>
-                    <dd><code class="font-mono text-xs">{branch}</code></dd>
-                  <% end %>
-                  <%= if @snapshot.step_started_at do %>
-                    <dt class="font-medium text-base-content/60">Step started:</dt>
-                    <dd class="font-mono text-xs tabular-nums">
-                      {format_ts_long(@snapshot.step_started_at)}
-                    </dd>
-                  <% end %>
-                  <%= if reason = Map.get(@snapshot.meta || %{}, :stop_reason) do %>
-                    <dt class="font-medium text-base-content/60">Stop reason:</dt>
-                    <dd class="text-error text-xs font-mono">
-                      {Map.get(reason, :summary) || inspect(reason)}
-                    </dd>
-                  <% end %>
-                </dl>
-              </div>
-            </section>
-          <% end %>
+          <.panel :if={meta_has_details?(@snapshot.meta)} title="Metadata">
+            <.data_list class="text-sm">
+              <:item :if={role = Map.get(@snapshot.meta || %{}, :role)} label="Role">
+                {role}
+              </:item>
+              <:item :if={Map.get(@snapshot.meta || %{}, :review_required)} label="Review gate">
+                <.status_chip status="required" />
+              </:item>
+              <:item :if={path = Map.get(@snapshot.meta || %{}, :worktree_path)} label="Worktree">
+                <span class="font-mono text-xs break-all">{path}</span>
+              </:item>
+              <:item :if={branch = Map.get(@snapshot.meta || %{}, :branch)} label="Branch">
+                <code class="font-mono text-xs">{branch}</code>
+              </:item>
+              <:item :if={@snapshot.step_started_at} label="Step started">
+                <span class="font-mono text-xs tabular-nums">
+                  {format_ts_long(@snapshot.step_started_at)}
+                </span>
+              </:item>
+              <:item :if={reason = Map.get(@snapshot.meta || %{}, :stop_reason)} label="Stop reason">
+                <span class="text-[var(--arb-fail-text)] text-xs font-mono">
+                  {Map.get(reason, :summary) || inspect(reason)}
+                </span>
+              </:item>
+            </.data_list>
+          </.panel>
 
-          <%= if @snapshot.mr_ref do %>
-            <section class="card bg-base-200 p-4 mb-4" id="merge-review">
-              <h2 class="text-lg font-semibold mb-2">Merge request</h2>
-              <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-                <dt class="font-semibold">MR:</dt>
-                <dd>
-                  <%= if @snapshot.merger_url do %>
-                    <a
-                      href={@snapshot.merger_url}
-                      target="_blank"
-                      rel="noopener"
-                      class="link link-primary"
-                    >
-                      {@snapshot.mr_ref} ↗
-                    </a>
-                  <% else %>
-                    <code>{@snapshot.mr_ref}</code>
-                  <% end %>
-                </dd>
-
-                <% merger_status = Map.get(@snapshot.meta || %{}, :last_merger_status) %>
-                <%= if merger_status do %>
-                  <dt class="font-semibold">Approval:</dt>
-                  <dd>
-                    <span class={["badge badge-sm", approval_class(merger_status)]}>
-                      {approval_label(merger_status)}
-                    </span>
-                  </dd>
+          <%!-- ── Merge request ──────────────────────────────────────── --%>
+          <.panel :if={@snapshot.mr_ref} title="Merge request">
+            <.data_list class="text-sm">
+              <:item label="MR">
+                <%= if @snapshot.merger_url do %>
+                  <a
+                    href={@snapshot.merger_url}
+                    target="_blank"
+                    rel="noopener"
+                    class="hover:underline"
+                  >
+                    {@snapshot.mr_ref} ↗
+                  </a>
                 <% else %>
-                  <dt class="font-semibold">Approval:</dt>
-                  <dd class="text-base-content/60">awaiting first poll…</dd>
+                  <code class="font-mono text-xs">{@snapshot.mr_ref}</code>
                 <% end %>
-
-                <dt class="font-semibold">Poll interval:</dt>
-                <dd>{div(Watchdog.default_interval_ms(), 1000)}s</dd>
-
-                <dt class="font-semibold">Last checked:</dt>
-                <dd>
-                  <%= case Map.get(@snapshot.meta || %{}, :last_checked_at) do %>
-                    <% %DateTime{} = ts -> %>
+              </:item>
+              <:item label="Approval">
+                <%= if merger_status = Map.get(@snapshot.meta || %{}, :last_merger_status) do %>
+                  <span class={["badge", approval_class(merger_status)]}>
+                    {approval_label(merger_status)}
+                  </span>
+                <% else %>
+                  <span class="text-[var(--text-label)]">awaiting first poll…</span>
+                <% end %>
+              </:item>
+              <:item label="Poll interval">{div(Watchdog.default_interval_ms(), 1000)}s</:item>
+              <:item label="Last checked">
+                <%= case Map.get(@snapshot.meta || %{}, :last_checked_at) do %>
+                  <% %DateTime{} = ts -> %>
+                    <span class="font-mono text-xs tabular-nums">
                       {Calendar.strftime(ts, "%Y-%m-%d %H:%M:%S UTC")}
-                    <% _ -> %>
-                      <span class="text-base-content/60">never</span>
-                  <% end %>
-                </dd>
-              </dl>
-            </section>
-          <% end %>
+                    </span>
+                  <% _ -> %>
+                    <span class="text-[var(--text-label)]">never</span>
+                <% end %>
+              </:item>
+            </.data_list>
+          </.panel>
 
           <%!-- ── Live activity (claude-driven) ──────────────────────── --%>
           <%!-- A claude-driven worker does the real work in a streaming --%>
           <%!-- subprocess; its Driver never ticks the workflow Machine, so --%>
           <%!-- the fixed load_context→submit steps would sit frozen. Show --%>
           <%!-- the live activity derived from the stream instead (bd-c919xj). --%>
-          <section
-            :if={claude_session?(@snapshot)}
-            class="card bg-base-200 border border-base-300 shadow-sm"
-          >
-            <div class="card-body p-4 gap-2">
-              <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
-                <.icon name="hero-bolt" class="size-4" /> Live activity
-              </h2>
-              <div class="flex items-center gap-2">
-                <span
-                  :if={@snapshot.status == :running}
-                  class="loading loading-ring loading-sm text-info"
-                >
-                </span>
-                <span class="text-base font-medium">{live_activity(@snapshot)}</span>
-              </div>
-              <p class="text-xs text-base-content/50">
-                Driven by a live Claude session — progress streams in the output below rather than
-                advancing fixed workflow steps.
-              </p>
+          <.panel :if={claude_session?(@snapshot)} title="Live activity">
+            <div class="flex items-center gap-2">
+              <span class="text-[13px] font-medium text-[var(--text-title)]">
+                {live_activity(@snapshot)}
+              </span>
             </div>
-          </section>
+            <p class="text-xs text-[var(--text-label)] mt-1">
+              Driven by a live Claude session — progress streams in the output above rather than
+              advancing fixed workflow steps.
+            </p>
+          </.panel>
 
-          <%= if @machine_state && not claude_session?(@snapshot) do %>
-            <section class="card bg-base-200 border border-base-300 shadow-sm">
-              <div class="card-body p-4 gap-3">
-                <h2 class="text-lg font-semibold flex items-center gap-2">
-                  <.icon name="hero-cog-6-tooth" class="size-5 text-base-content/70" /> Workflow:
-                  <code class="text-sm font-mono">
-                    {short_module(@machine_state.workflow_module)}
-                  </code>
-                </h2>
-                <div class="flex flex-wrap gap-1.5">
-                  <span
-                    :for={step <- @workflow_steps}
-                    class={["badge", step_class(step, @machine_state)]}
-                  >
-                    {step}
-                  </span>
-                </div>
-                <p class="text-xs text-base-content/60">
-                  Machine status: <strong>{@machine_state.status}</strong>
-                  · current step: <code class="font-mono">{@machine_state.current_step}</code>
-                </p>
-              </div>
-            </section>
-          <% end %>
-
-          <%!-- ── Live output terminal ───────────────────────────────── --%>
-          <section class="card bg-base-200 border border-base-300 shadow-sm overflow-hidden">
-            <div class="card-body p-0 gap-0">
-              <div class="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-base-300">
-                <h2 class="text-sm font-medium flex items-center gap-2">
-                  <.icon name="hero-command-line" class="size-4 text-base-content/70" /> Output
-                  <span class="badge badge-ghost badge-sm font-mono tabular-nums">
-                    {length(@output_lines)} lines
-                  </span>
-                </h2>
-                <div
-                  :if={@snapshot.status == :running}
-                  class="flex items-center gap-1.5 text-xs text-info"
-                >
-                  <span class="relative flex h-2 w-2">
-                    <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-75">
-                    </span>
-                    <span class="relative inline-flex h-2 w-2 rounded-full bg-info"></span>
-                  </span>
-                  streaming
-                </div>
-              </div>
-
-              <%= if @output_lines == [] do %>
-                <div class="bg-neutral text-neutral-content/50 font-mono text-xs p-6 text-center italic">
-                  (no output yet)
-                </div>
-              <% else %>
-                <div
-                  id="worker-output"
-                  phx-hook=".ScrollToBottom"
-                  class="bg-neutral text-neutral-content font-mono text-xs overflow-x-auto max-h-[28rem] overflow-y-auto"
-                >
-                  <div
-                    :for={{line, idx} <- Enum.with_index(@output_lines, 1)}
-                    class="flex hover:bg-neutral-content/5 transition-colors"
-                  >
-                    <span class="select-none shrink-0 w-12 text-right pr-3 py-0.5 text-neutral-content/30 tabular-nums border-r border-neutral-content/10">
-                      {idx}
-                    </span>
-                    <code class="flex-1 whitespace-pre-wrap break-all px-3 py-0.5">{line}</code>
-                  </div>
-                </div>
-                <script :type={Phoenix.LiveView.ColocatedHook} name=".ScrollToBottom">
-                  export default {
-                    mounted() { this.el.scrollTop = this.el.scrollHeight; },
-                    updated() { this.el.scrollTop = this.el.scrollHeight; }
-                  }
-                </script>
-              <% end %>
-            </div>
-          </section>
-        <% else %>
-          <section class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-8 items-center text-center gap-2">
-              <.icon name="hero-signal-slash" class="size-10 text-base-content/30" />
-              <p class="text-sm text-base-content/70">
-                No {@worker_label} registered for {@issue_label} <code class="font-mono">{@task_id}</code>.
-              </p>
-              <p class="text-xs text-base-content/50">
-                It may have stopped, or the Phoenix node was restarted since it ran.
-              </p>
-              <button
-                :if={retryable?(@task, @snapshot)}
-                phx-click="open_retry"
-                class="btn btn-sm btn-primary gap-1.5 mt-2"
+          <.panel :if={@machine_state && not claude_session?(@snapshot)} title="Workflow">
+            <:actions>
+              <code class="text-xs font-mono text-[var(--text-label)]">
+                {short_module(@machine_state.workflow_module)}
+              </code>
+            </:actions>
+            <div class="flex flex-wrap gap-1.5">
+              <span
+                :for={step <- @workflow_steps}
+                class={["badge", step_class(step, @machine_state)]}
               >
-                <.icon name="hero-arrow-path" class="size-4" /> Retry
-              </button>
+                {step}
+              </span>
             </div>
-          </section>
+            <p class="text-xs text-[var(--text-label)] mt-2">
+              Machine status: <strong>{@machine_state.status}</strong>
+              · current step: <code class="font-mono">{@machine_state.current_step}</code>
+            </p>
+          </.panel>
+        <% else %>
+          <.panel>
+            <Feedback.empty_state
+              icon="hero-signal-slash"
+              detail="It may have stopped, or the Phoenix node was restarted since it ran."
+            >
+              No {@worker_label} registered for {@issue_label} <code class="font-mono">{@task_id}</code>.
+            </Feedback.empty_state>
+            <div :if={retryable?(@task, @snapshot)} class="flex justify-center mt-3">
+              <Core.button
+                id="worker-fallback-resume-btn"
+                phx-click="open_retry"
+                variant="secondary"
+                size="sm"
+              >
+                <:icon><Core.icon name="hero-arrow-path" size={14} /></:icon>
+                Resume
+              </Core.button>
+            </div>
+          </.panel>
         <% end %>
 
         <%!-- ── Mailbox + compose ──────────────────────────────────── --%>
-        <section class="card bg-base-200 border border-base-300 shadow-sm" id="mailbox">
-          <div class="card-body p-4 gap-4">
-            <h2 class="text-lg font-semibold flex items-center gap-2">
-              <.icon name="hero-inbox-arrow-down" class="size-5 text-base-content/70" /> Mailbox
-              <span class="badge badge-ghost badge-sm">{length(@mailbox)} unread</span>
-            </h2>
-
+        <div id="mailbox">
+          <.panel title="Mailbox" meta={"#{length(@mailbox)} unread"}>
             <%= if @mailbox == [] do %>
-              <div
-                id="mailbox-empty"
-                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
-              >
-                <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
-                <p class="mt-2 text-sm text-base-content/60">No unread mail.</p>
-              </div>
+              <Feedback.empty_state icon="hero-inbox">
+                No unread mail.
+              </Feedback.empty_state>
             <% else %>
               <ul class="flex flex-col gap-2" id="mailbox-list">
                 <li
                   :for={m <- @mailbox}
-                  class={[
-                    "rounded-box bg-base-100 border-l-4 border border-base-300 p-3",
-                    kind_border_class(m.kind)
-                  ]}
+                  class="rounded-[var(--radius-field)] bg-[var(--surface-card)] border border-[var(--border-default)] p-3"
                 >
                   <div class="flex items-baseline justify-between gap-2">
                     <div class="flex items-baseline gap-2 flex-wrap min-w-0">
-                      <span class={["badge badge-sm shrink-0", kind_badge_class(m.kind)]}>
+                      <span class={["badge shrink-0", kind_badge_class(m.kind)]}>
                         {m.kind}
                       </span>
-                      <span class="text-xs text-base-content/60">
+                      <span class="text-xs text-[var(--text-label)]">
                         from <code class="font-mono">{m.from_ref || "?"}</code>
                       </span>
                       <span :if={m.subject} class="text-sm font-medium truncate">{m.subject}</span>
                     </div>
-                    <button
-                      phx-click="mark_read"
-                      phx-value-id={m.id}
-                      class="btn btn-xs btn-ghost shrink-0"
-                    >
+                    <Core.button phx-click="mark_read" phx-value-id={m.id} variant="ghost" size="sm">
                       Mark read
-                    </button>
+                    </Core.button>
                   </div>
-                  <p class="text-sm mt-1.5 whitespace-pre-wrap text-base-content/80">{m.body}</p>
+                  <p class="text-sm mt-1.5 whitespace-pre-wrap text-[var(--text-secondary)]">
+                    {m.body}
+                  </p>
                 </li>
               </ul>
             <% end %>
@@ -1027,45 +1048,38 @@ defmodule ArbiterWeb.WorkerDetailLive do
             <form
               phx-submit="send_direction"
               phx-change="compose_change"
-              class="flex flex-col gap-2 pt-2 border-t border-base-300"
+              class="flex flex-col gap-2 pt-3 mt-1 border-t border-[var(--border-default)]"
             >
               <label class="text-sm font-medium flex items-center gap-1.5">
-                <.icon name="hero-paper-airplane" class="size-4 text-base-content/60" />
-                Send direction to <code class="font-mono">{@task_id}</code>
+                <Core.icon name="hero-paper-airplane" size={14} /> Send direction to
+                <code class="font-mono">{@task_id}</code>
                 (from coordinator)
               </label>
               <textarea
                 name="body"
                 rows="3"
                 placeholder="e.g. check the API contract before refactoring"
-                class="textarea textarea-bordered w-full text-sm"
+                class="w-full text-sm rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--surface-field)] px-3 py-2"
               >{@compose_body}</textarea>
               <div>
-                <button
-                  type="submit"
-                  class="btn btn-sm btn-primary gap-1.5 transition-all duration-200 active:scale-95"
-                  disabled={is_nil(@workspace)}
-                >
-                  <.icon name="hero-paper-airplane" class="size-4" /> Send direction
-                </button>
+                <Core.button type="submit" variant="primary" size="sm" disabled={is_nil(@workspace)}>
+                  <:icon><Core.icon name="hero-paper-airplane" size={14} /></:icon>
+                  Send direction
+                </Core.button>
               </div>
             </form>
-          </div>
-        </section>
-
-        <div>
-          <.link navigate={~p"/"} class="link link-hover text-sm flex items-center gap-1 w-fit">
-            <.icon name="hero-arrow-left" class="size-4" /> Back to dashboard
-          </.link>
+          </.panel>
         </div>
+
+        <Navigation.back_link href={~p"/"} label="Back to board" />
       </div>
 
-      <%!-- Retry modal. Confirming re-spawns an agent, so this is the
+      <%!-- Resume modal. Confirming re-spawns an agent, so this is the
            confirmation step for a credit-spending action — same contract as
            the dispatch modal on the issue page. --%>
       <div :if={@retry_modal} class="modal modal-open" id="worker-retry-modal">
         <div class="modal-box">
-          <h3 class="font-semibold text-lg mb-1">Retry {@task_id}</h3>
+          <h3 class="font-semibold text-lg mb-1">Resume {@task_id}</h3>
           <p class="text-sm text-base-content/70 mb-3">
             Attaches a <strong>fresh</strong>
             agent to the preserved worktree, briefed with a summary of what the
@@ -1073,10 +1087,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
           </p>
 
           <div role="alert" class="alert alert-warning py-2 mb-3">
-            <.icon name="hero-exclamation-triangle" class="size-5 shrink-0" />
+            <Core.icon name="hero-exclamation-triangle" size={20} />
             <span class="text-sm">
               This spends real <strong>API credits</strong>. If the worktree is gone,
-              the retry is refused rather than silently starting from scratch.
+              the resume is refused rather than silently starting from scratch.
             </span>
           </div>
 
@@ -1091,22 +1105,18 @@ defmodule ArbiterWeb.WorkerDetailLive do
           <p :if={@retry_error} class="text-sm text-error mb-2">{@retry_error}</p>
 
           <div class="modal-action">
-            <.button
+            <Core.button
               type="button"
               phx-click="cancel_retry"
-              class="btn btn-sm btn-ghost"
+              variant="ghost"
+              size="sm"
               disabled={@retrying}
             >
               Cancel
-            </.button>
-            <.button
-              phx-click="retry"
-              variant="primary"
-              class="btn btn-sm btn-primary"
-              disabled={@retrying}
-            >
-              {if @retrying, do: "Resuming…", else: "Retry"}
-            </.button>
+            </Core.button>
+            <Core.button phx-click="retry" variant="primary" size="sm" disabled={@retrying}>
+              {if @retrying, do: "Resuming…", else: "Resume"}
+            </Core.button>
           </div>
         </div>
         <div class="modal-backdrop" phx-click="cancel_retry"></div>
@@ -1235,11 +1245,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   defp mr_ref(_), do: nil
 
-  defp kind_border_class(:notification), do: "border-l-info"
-  defp kind_border_class(:direction), do: "border-l-warning"
-  defp kind_border_class(:flag), do: "border-l-accent"
-  defp kind_border_class(_), do: "border-l-base-300"
-
   # ---- execution context helpers ----------------------------------------
 
   # Provider: prefer the ACTUAL model provider synced from session (set once
@@ -1273,6 +1278,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   defp execution_model_tier(_), do: nil
+
+  defp work_events_with_cost(events) do
+    Enum.filter(events, &(&1.step == :work && not is_nil(&1.cost_usd)))
+  end
+
+  defp work_events_with_tokens(events) do
+    Enum.filter(events, &(&1.step == :work && not is_nil(&1.tokens_in)))
+  end
 
   # Tracker ref display: "jira:ABC-123", "github:42", etc.
   defp tracker_display(%Issue{tracker_type: type, tracker_ref: ref})

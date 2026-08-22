@@ -558,13 +558,16 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       >
         <span class="text-[var(--arb-text-ghost)] tabular-nums">{line.time}</span>
         <span class={log_stream_role_class(line.role)}>{line.role}</span>
-        <span class={[
-          "overflow-hidden text-ellipsis whitespace-nowrap",
-          if(Map.get(line, :emphasis, false),
-            do: "text-[var(--arb-text-body)]",
-            else: "text-[var(--text-secondary)]"
-          )
-        ]}>
+        <span
+          title={line.text}
+          class={[
+            "overflow-hidden text-ellipsis whitespace-nowrap",
+            if(Map.get(line, :emphasis, false),
+              do: "text-[var(--arb-text-body)]",
+              else: "text-[var(--text-secondary)]"
+            )
+          ]}
+        >
           {line.text}
         </span>
       </div>
