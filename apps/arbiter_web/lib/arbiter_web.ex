@@ -98,6 +98,18 @@ defmodule ArbiterWeb do
       # `ArbiterWeb.CoreComponents.Core.button/1` until a follow-up ticket
       # migrates call sites and retires the old ones.
       import ArbiterWeb.CoreComponents.Core, except: [icon: 1, button: 1]
+      # Design-handoff navigation primitives (TopNav, FilterTabs,
+      # SegmentedControl, Pager, SeeAllLink, BackLink). filter_tabs/1,
+      # pager/1, see_all_link/1, and back_link/1 are excluded: ListComponents
+      # already defines all four with a different attr contract (route-fn
+      # `tab_path`/`page_path` callbacks instead of a plain `href`/`event`),
+      # and existing index/dashboard templates depend on that shape. Reach
+      # the handoff versions as `ArbiterWeb.CoreComponents.Navigation.filter_tabs/1`
+      # etc. until a follow-up ticket migrates call sites and retires the old
+      # ones.
+      import ArbiterWeb.CoreComponents.Navigation,
+        except: [filter_tabs: 1, pager: 1, see_all_link: 1, back_link: 1]
+
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # Label pluralization (plural/1, cap_plural/1)
