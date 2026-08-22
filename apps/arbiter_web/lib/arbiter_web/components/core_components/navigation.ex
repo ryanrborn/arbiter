@@ -71,10 +71,11 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         <.brandmark form="wordmark" size={120} tone="accent" />
       </.link>
 
-      <nav class="hidden lg:flex gap-0.5 min-w-0 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
+      <nav class="flex max-lg:hidden gap-0.5 min-w-0 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
         <.link
           :for={item <- @items}
           navigate={item.href}
+          aria-current={nav_active?(@current_path, item.href) && "page"}
           class={[
             "px-[10px] py-[5px] rounded-[var(--radius-field)] whitespace-nowrap font-[family-name:var(--font-sans)] text-xs",
             nav_active?(@current_path, item.href) &&
@@ -86,7 +87,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         </.link>
       </nav>
 
-      <details class="dropdown lg:hidden" id={"#{@id}-mobile-menu"}>
+      <details class="dropdown lg:hidden" id={"#{@id}-mobile-menu"} phx-hook="DetailsPreserve">
         <summary class="list-none cursor-pointer flex items-center justify-center" aria-label="Menu">
           <.icon name="hero-bars-3" size={20} />
         </summary>
@@ -95,6 +96,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
             <.link
               navigate={item.href}
               phx-click={JS.remove_attribute("open", to: "##{@id}-mobile-menu")}
+              aria-current={nav_active?(@current_path, item.href) && "page"}
               class={[
                 "font-[family-name:var(--font-sans)] text-xs",
                 nav_active?(@current_path, item.href) && "font-medium text-[var(--text-title)]",
@@ -169,6 +171,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         :for={{tab, index} <- Enum.with_index(@tabs)}
         :if={@tab_path}
         patch={@tab_path.(filter_tab_value(tab))}
+        aria-current={filter_tab_active?(tab, @active) && "page"}
         class={filter_tab_class(tab, index, @active)}
       >
         {filter_tab_label(tab)}{filter_tab_count(tab)}
@@ -179,6 +182,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         type="button"
         phx-click={@event}
         phx-value-tab={filter_tab_value(tab)}
+        aria-pressed={filter_tab_active?(tab, @active)}
         class={filter_tab_class(tab, index, @active)}
       >
         {filter_tab_label(tab)}{filter_tab_count(tab)}
@@ -244,6 +248,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         type="button"
         phx-click={@event}
         phx-value-option={option}
+        aria-pressed={option == @value}
         class={[
           "cursor-pointer border-0 px-[10px] py-[5px] font-[family-name:var(--font-mono)] text-[11px] font-medium",
           index > 0 && "border-l border-solid border-[var(--arb-line)]",
