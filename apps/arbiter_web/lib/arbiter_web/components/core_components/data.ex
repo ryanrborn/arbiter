@@ -38,6 +38,9 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("awaiting_review_gate"), do: "badge-warning"
   defp status_chip_class("completed"), do: "badge-success"
   defp status_chip_class("failed"), do: "badge-error"
+  defp status_chip_class("open"), do: "badge-success"
+  defp status_chip_class("in_progress"), do: "badge-info"
+  defp status_chip_class("closed"), do: "badge-ghost"
   defp status_chip_class(_), do: "badge-ghost"
 
   @doc """
@@ -55,7 +58,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
   def priority_tag(assigns) do
     ~H"""
     <span class={["badge", priority_tag_class(@priority), @class]}>
-      {@priority && "P#{@priority}"}
+      {if @priority, do: "P#{@priority}", else: "—"}
     </span>
     """
   end
@@ -81,7 +84,10 @@ defmodule ArbiterWeb.CoreComponents.Data do
   attr :class, :any, default: nil
 
   def difficulty_meter(assigns) do
-    filled_count = if assigns.difficulty in 0..4, do: assigns.difficulty + 1, else: 0
+    filled_count =
+      if is_integer(assigns.difficulty) and assigns.difficulty in 0..4,
+        do: assigns.difficulty + 1,
+        else: 0
 
     assigns =
       assign(assigns,
@@ -110,6 +116,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
   defp difficulty_meter_label(nil), do: "Difficulty: not set"
   defp difficulty_meter_label(d) when d in 0..4, do: "Difficulty D#{d}"
+  defp difficulty_meter_label(_), do: "Difficulty: not set"
 
   @doc """
   Renders an issue/task type as a badge, using the literal type value

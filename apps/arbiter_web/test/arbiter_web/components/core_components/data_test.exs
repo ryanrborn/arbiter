@@ -41,6 +41,17 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       assert html =~ "badge-ghost"
       assert html =~ "some_unmapped_status"
     end
+
+    test "Issue status vocabulary gets a semantic badge class" do
+      html = render_component(&status_chip/1, status: :open)
+      assert html =~ "badge-success"
+
+      html = render_component(&status_chip/1, status: :in_progress)
+      assert html =~ "badge-info"
+
+      html = render_component(&status_chip/1, status: :closed)
+      assert html =~ "badge-ghost"
+    end
   end
 
   describe "priority_tag/1" do
@@ -64,9 +75,10 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       assert html =~ "P1"
     end
 
-    test "nil priority renders an empty ghost tag" do
+    test "nil priority renders a placeholder ghost tag" do
       html = render_component(&priority_tag/1, priority: nil)
       assert html =~ "badge-ghost"
+      assert html =~ "—"
     end
   end
 
@@ -102,6 +114,17 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
     test "nil difficulty renders all five bars empty" do
       html = render_component(&difficulty_meter/1, difficulty: nil)
 
+      assert count_occurrences(html, "difficulty-bar-filled") == 0
+      assert count_occurrences(html, "difficulty-bar-empty") == 5
+    end
+
+    test "out-of-range or wrong-type difficulty degrades gracefully instead of crashing" do
+      html = render_component(&difficulty_meter/1, difficulty: 5)
+      assert count_occurrences(html, "difficulty-bar-filled") == 0
+      assert count_occurrences(html, "difficulty-bar-empty") == 5
+      assert html =~ "Difficulty: not set"
+
+      html = render_component(&difficulty_meter/1, difficulty: "3")
       assert count_occurrences(html, "difficulty-bar-filled") == 0
       assert count_occurrences(html, "difficulty-bar-empty") == 5
     end
