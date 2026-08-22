@@ -51,7 +51,7 @@ defmodule ArbiterWeb.Layouts do
     <header class="navbar bg-base-200 border-b border-base-300 px-4 sm:px-6 lg:px-8 min-h-12 py-1">
       <div class="flex-1">
         <.link navigate={~p"/"} class="flex items-center gap-2" aria-label="Arbiter">
-          <img src="/images/arbiter-wordmark.png" alt="Arbiter" class="h-7 w-auto" />
+          <.brandmark form="wordmark" size={130} tone="accent" />
         </.link>
       </div>
 
