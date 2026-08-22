@@ -30,15 +30,18 @@ defmodule ArbiterWeb.TaskIndexLive do
   alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.Paging
   alias ArbiterWeb.TaskForm
+  alias Phoenix.LiveView.JS
   require Ash.Query
 
   @tasks_topic "tasks"
 
+  # Literal status values — FilterTabs shows these verbatim, not humanized,
+  # so the value here is what lands in the URL and the query filter.
   @filters [
-    {"All", :all},
-    {"Open", :open},
-    {"In progress", :in_progress},
-    {"Closed", :closed}
+    %{label: "All", value: "all"},
+    %{label: "Open", value: "open"},
+    %{label: "In progress", value: "in_progress"},
+    %{label: "Closed", value: "closed"}
   ]
 
   @impl true
@@ -283,25 +286,34 @@ defmodule ArbiterWeb.TaskIndexLive do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
-        <div class="flex items-start justify-between gap-4">
-          <.index_header
-            icon="hero-clipboard-document-list"
-            title={cap_plural(@issue_label)}
-            count={@total_count}
-            subtitle={"Every #{@issue_label}, filterable and paged. The dashboard shows only the current ones."}
-          />
-          <div class="flex items-center gap-2">
-            <.live_badge live={@live} />
-            <.button
+        <ArbiterWeb.CoreComponents.Domain.index_header
+          icon="hero-clipboard-document-list"
+          title={cap_plural(@issue_label)}
+          count={@total_count}
+          subtitle={"Every #{@issue_label}, filterable and paged. The dashboard shows only the current ones."}
+        >
+          <:actions>
+            <ArbiterWeb.CoreComponents.Feedback.live_badge live={@live} />
+            <ArbiterWeb.CoreComponents.Core.button
               :if={!@creating}
+              type="button"
+              variant="secondary"
+              size="sm"
               phx-click="new"
-              variant="primary"
-              class="btn btn-sm btn-primary"
             >
-              <.icon name="hero-plus" class="size-4" /> New {@issue_label}
-            </.button>
-          </div>
-        </div>
+              Quick add
+            </ArbiterWeb.CoreComponents.Core.button>
+            <ArbiterWeb.CoreComponents.Core.button
+              type="button"
+              variant="primary"
+              size="sm"
+              phx-click={JS.navigate(~p"/tasks/new")}
+            >
+              <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-plus" size={13} /></:icon>
+              New {@issue_label}
+            </ArbiterWeb.CoreComponents.Core.button>
+          </:actions>
+        </ArbiterWeb.CoreComponents.Domain.index_header>
 
         <section :if={@creating} class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-3">
@@ -424,72 +436,51 @@ defmodule ArbiterWeb.TaskIndexLive do
           </div>
         </section>
 
-        <.filter_tabs
+        <ArbiterWeb.CoreComponents.Navigation.filter_tabs
           tabs={@filters}
-          active={@status}
-          tab_path={fn value -> task_path(value, 1) end}
+          active={Atom.to_string(@status)}
+          tab_path={fn value -> task_path(String.to_existing_atom(value), 1) end}
         />
 
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-4">
-            <.empty_state :if={@tasks == []} id="tasks-empty" icon="hero-clipboard-document-list">
+        <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
+          <div :if={@tasks == []} id="tasks-empty">
+            <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-clipboard-document-list">
               No {plural(@issue_label)} match this filter.
-            </.empty_state>
-
-            <ul :if={@tasks != []} id="tasks" class="flex flex-col gap-1.5">
-              <li
-                :for={b <- @tasks}
-                class={[
-                  "rounded-box border bg-base-100 px-3 py-2 transition-colors duration-150 hover:bg-base-300/40",
-                  if(b.priority == 1,
-                    do: "border-l-4 border-error bg-error/5",
-                    else: "border-base-300"
-                  )
-                ]}
-              >
-                <div class="flex items-center gap-2">
-                  <span class={[
-                    "badge badge-sm font-mono shrink-0",
-                    if(b.priority == 1, do: "badge-error", else: "badge-ghost")
-                  ]}>
-                    P{b.priority}
-                  </span>
-                  <span class={[
-                    "badge badge-sm font-mono shrink-0",
-                    difficulty_badge_class(b.difficulty)
-                  ]}>
-                    {difficulty_label(b.difficulty)}
-                  </span>
-                  <.link navigate={~p"/tasks/#{b.id}"} class="min-w-0 flex-1 group">
-                    <div class="flex items-center gap-2">
-                      <code class="text-xs text-base-content/60 shrink-0 group-hover:text-primary transition-colors">
-                        {b.id}
-                      </code>
-                      <span
-                        class="truncate text-sm group-hover:text-primary transition-colors"
-                        title={b.title}
-                      >
-                        {b.title}
-                      </span>
-                    </div>
-                  </.link>
-                  <span class={["badge badge-sm shrink-0", status_badge_class(b.status)]}>
-                    {b.status}
-                  </span>
-                </div>
-              </li>
-            </ul>
-
-            <.pager
-              page={@page}
-              total_pages={@total_pages}
-              total_count={@total_count}
-              page_path={fn page -> task_path(@status, page) end}
-            />
+            </ArbiterWeb.CoreComponents.Feedback.empty_state>
           </div>
-        </section>
 
-        <.back_link />
+          <ul :if={@tasks != []} id="tasks" class="flex flex-col gap-1.5">
+            <li :for={b <- @tasks} class={issue_row_class(b)}>
+              <.priority_tag priority={b.priority} />
+              <.difficulty_meter difficulty={b.difficulty} />
+              <.link
+                navigate={~p"/tasks/#{b.id}"}
+                class="min-w-0 flex-1 flex items-center gap-2 group"
+              >
+                <span class="font-[family-name:var(--font-mono)] text-[10.5px] text-[var(--text-secondary)] shrink-0 group-hover:text-[var(--text-link)] transition-colors">
+                  {b.id}
+                </span>
+                <span
+                  class="truncate text-[12.5px] font-medium text-[var(--text-title)] group-hover:text-[var(--text-link)] transition-colors"
+                  title={b.title}
+                >
+                  {b.title}
+                </span>
+              </.link>
+              <.status_chip status={b.status} />
+            </li>
+          </ul>
+
+          <ArbiterWeb.CoreComponents.Navigation.pager
+            page={@page}
+            total_pages={@total_pages}
+            total_count={@total_count}
+            page_path={fn page -> task_path(@status, page) end}
+            class={@tasks != [] && "pt-2"}
+          />
+        </ArbiterWeb.CoreComponents.Core.panel>
+
+        <ArbiterWeb.CoreComponents.Navigation.back_link />
       </div>
     </Layouts.app>
     """
@@ -497,19 +488,22 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   # ---- view helpers ----
 
-  defp status_badge_class(:open), do: "badge-success"
-  defp status_badge_class(:in_progress), do: "badge-info"
-  defp status_badge_class(:closed), do: "badge-ghost"
-  defp status_badge_class(_), do: ""
-
-  defp difficulty_label(nil), do: "—"
-  defp difficulty_label(d) when is_integer(d) and d in 0..4, do: "D#{d}"
-  defp difficulty_label(_), do: "—"
-
-  defp difficulty_badge_class(0), do: "badge-success"
-  defp difficulty_badge_class(1), do: "badge-info"
-  defp difficulty_badge_class(2), do: "badge-secondary"
-  defp difficulty_badge_class(3), do: "badge-warning"
-  defp difficulty_badge_class(4), do: "badge-error"
-  defp difficulty_badge_class(_), do: "badge-ghost"
+  # P1 is the only priority that owns the row: a red left rule plus a faint
+  # wash, matching the accent-rule treatment `Domain.task_card/1` uses for
+  # its `fail` accent. Closed issues recede instead — opacity 0.62, no rule.
+  defp issue_row_class(issue) do
+    [
+      "flex items-center gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid",
+      "border-[var(--border-strong)] hover:bg-[var(--arb-raised-hover)]",
+      "transition-colors duration-[var(--dur-hover)]",
+      if(issue.priority == 1,
+        do: [
+          "bg-[var(--arb-fail-wash)]",
+          "border-l-[length:var(--border-accent-width)] border-l-[color:var(--arb-fail)]"
+        ],
+        else: "bg-[var(--surface-card)]"
+      ),
+      issue.status == :closed && "opacity-[0.62]"
+    ]
+  end
 end
