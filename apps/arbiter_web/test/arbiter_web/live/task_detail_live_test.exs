@@ -7,6 +7,29 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
 
+  # A minimal real GenServer double for `Arbiter.Worker`, registered under the
+  # same registry key a live worker uses, answering the `:snapshot` call
+  # `Worker.state/1` makes. Enough for the page to see a run as live and to
+  # seed the expanded transcript from `meta.output_lines`.
+  defmodule FakeWorker do
+    use GenServer
+
+    def start_link(task_id, output_lines) do
+      GenServer.start_link(__MODULE__, output_lines,
+        name: Arbiter.Worker.Registry.via_tuple(task_id)
+      )
+    end
+
+    @impl true
+    def init(output_lines), do: {:ok, output_lines}
+
+    @impl true
+    def handle_call(:snapshot, _from, lines) do
+      {:reply, %{status: :running, started_at: DateTime.utc_now(), meta: %{output_lines: lines}},
+       lines}
+    end
+  end
+
   setup do
     for snap <- Worker.list_children() do
       Worker.stop(snap.task_id)
@@ -436,6 +459,509 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       assert html =~ "kodex"
+    end
+  end
+
+  # ── Redesigned screen (bd-289r9h / README §4) ────────────────────────────
+  #
+  # The task detail screen absorbs the run index and run detail pages: every
+  # run that touched this issue is a row in an in-place-expanding roster, and
+  # the audit log folds into the Activity stream.
+  describe "redesigned shell" do
+    test "renders the toolbar breadcrumb, id, status chip and back link",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "shell", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "Board / Issues /"
+      assert html =~ task.id
+      assert html =~ "Back to board"
+    end
+
+    test "acceptance criteria render as one real checkbox per line",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "with acceptance",
+          acceptance: "- [x] first criterion\n- [ ] second criterion",
+          workspace_id: ws.id
+        })
+
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "ACCEPTANCE"
+      assert html =~ "first criterion"
+      assert html =~ "second criterion"
+      # The markdown markers carry the state; they are not literal prose.
+      refute html =~ "- [x] first criterion"
+
+      # Real toggles, not decoration: ticking one persists onto the issue by
+      # rewriting its markdown marker, so the CLI reads the same state.
+      view |> element(~s(input[phx-value-criterion="1"])) |> render_click()
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.acceptance == "- [x] first criterion\n- [x] second criterion"
+    end
+  end
+
+  describe "run roster (absorbs the run index)" do
+    setup %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "rostered", workspace_id: ws.id})
+
+      {:ok, main} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :completed,
+          started_at: ~U[2026-07-01 10:00:00.000000Z],
+          completed_at: ~U[2026-07-01 10:12:00.000000Z],
+          output_lines: ["main run line one", "main run line two"]
+        })
+
+      {:ok, review} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#review",
+          repo: "test/repo",
+          worker_type: :review,
+          status: :failed,
+          exit_code: 1,
+          failure_reason: "compile error in loop_queue.ex",
+          started_at: ~U[2026-07-01 11:00:00.000000Z],
+          completed_at: ~U[2026-07-01 11:06:00.000000Z],
+          output_lines: ["review run transcript line"]
+        })
+
+      {:ok, task: task, main: main, review: review}
+    end
+
+    test "lists every run for the issue with role filter tabs and counts",
+         %{conn: conn, task: task} do
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "RUNS"
+      assert html =~ "2 total"
+      # One tab per role present, plus All.
+      assert html =~ "All 2"
+      assert html =~ "main 1"
+      assert html =~ "review 1"
+    end
+
+    test "a run row expands in place to its transcript — no navigation",
+         %{conn: conn, task: task, main: main} do
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ "main run line one"
+
+      html = view |> element(~s([phx-value-run="#{main.id}"])) |> render_click()
+
+      assert html =~ "main run line one"
+      assert html =~ "main run line two"
+      # Still on the task detail page — nothing navigated away.
+      assert html =~ "Board / Issues /"
+
+      # Clicking the open row collapses it.
+      html = view |> element(~s([phx-value-run="#{main.id}"])) |> render_click()
+      refute html =~ "main run line one"
+    end
+
+    test "the expanded transcript header carries the run's machine facts",
+         %{conn: conn, task: task, review: review} do
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      html = view |> element(~s([phx-value-run="#{review.id}"])) |> render_click()
+
+      assert html =~ "exit 1 · compile error in loop_queue.ex"
+      assert html =~ "1 lines" or html =~ "1 line"
+      assert html =~ "Open session"
+      assert html =~ "Full transcript"
+    end
+
+    test "a running run's transcript streams from the live worker, not output_lines",
+         %{conn: conn, task: task} do
+      # This is the exact shape `worker.ex` persists at run start: the column
+      # is written once as `[]` and not touched again until the run finishes.
+      {:ok, running} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :running,
+          started_at: ~U[2026-07-02 09:00:00.000000Z],
+          output_lines: []
+        })
+
+      start_supervised!(%{
+        id: :fake_worker,
+        start: {FakeWorker, :start_link, [task.id, ["seeded line from the snapshot"]]}
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      html = view |> element(~s([phx-value-run="#{running.id}"])) |> render_click()
+
+      # Seeded from the worker snapshot rather than the empty persisted column.
+      assert html =~ "seeded line from the snapshot"
+      refute html =~ "No output captured for this run."
+
+      # ... and subsequent output lands without a reload.
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "worker:" <> task.id,
+        {:worker_output, task.id, "a line broadcast mid-run"}
+      )
+
+      html = render(view)
+      assert html =~ "a line broadcast mid-run"
+      assert html =~ "2 lines"
+    end
+
+    test "an ended run's Open session link is disabled even while a worker is alive",
+         %{conn: conn, task: task, main: main} do
+      # A worker is running for this issue right now — but `main` completed
+      # yesterday, so its own session is gone and the link must not offer it.
+      start_supervised!(%{
+        id: :fake_worker,
+        start: {FakeWorker, :start_link, [task.id, []]}
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      html = view |> element(~s([phx-value-run="#{main.id}"])) |> render_click()
+
+      # The two branches are mutually exclusive, so the disabled span being
+      # rendered is exactly the assertion that the live link was not.
+      assert html =~ "This run has ended — its live session is gone"
+    end
+
+    test "role tabs filter the roster by worker_type", %{conn: conn, task: task} do
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      html = view |> element(~s([phx-value-tab="review"])) |> render_click()
+
+      assert html =~ "review"
+      refute html =~ "fix pass"
+    end
+
+    test "a role with no runs shows the roster empty state", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "runless", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "No runs of this kind on this issue yet."
+    end
+
+    # The roster covers the review gate's `#review` runs as well as the
+    # issue's own, so it has to go live for both. A review worker broadcasts
+    # its lifecycle under `<id>#review`; matching only the bare id leaves the
+    # review half of the roster stale until a full page reload.
+    test "a review-gate run's lifecycle event refreshes the roster",
+         %{conn: conn, task: task} do
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ "later review run"
+
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#review",
+          repo: "test/repo",
+          worker_type: :review,
+          status: :running,
+          started_at: ~U[2026-07-01 12:00:00.000000Z],
+          output_lines: ["later review run"]
+        })
+
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "workers",
+        {:worker_lifecycle, :started, %{task_id: task.id <> "#review"}}
+      )
+
+      html = render(view)
+
+      assert html =~ "3 total"
+      assert html =~ "review 2"
+    end
+
+    # A revise round and a merge-queue fix pass run under deeper synthetic ids
+    # (`<id>#review#impl2`, `<id>#fix`), which is exactly what the run's own
+    # `base_task_id` column records. Scoping the roster to `[id, id#review]`
+    # alone leaves the `impl` and `fix pass` tabs permanently empty.
+    test "the roster covers revise-round and fix-pass runs by base_task_id",
+         %{conn: conn, task: task} do
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#review#impl2",
+          base_task_id: task.id,
+          repo: "test/repo",
+          worker_type: :impl,
+          status: :completed,
+          started_at: ~U[2026-07-01 11:30:00.000000Z],
+          completed_at: ~U[2026-07-01 11:40:00.000000Z],
+          output_lines: ["revise round transcript"]
+        })
+
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#fix",
+          base_task_id: task.id,
+          repo: "test/repo",
+          worker_type: :fix_pass,
+          status: :completed,
+          started_at: ~U[2026-07-01 12:30:00.000000Z],
+          completed_at: ~U[2026-07-01 12:35:00.000000Z],
+          output_lines: ["fix pass transcript"]
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "4 total"
+      assert html =~ "impl 1"
+      assert html =~ "fix pass 1"
+    end
+  end
+
+  describe "activity stream (the audit log folds in)" do
+    test "renders this issue's audit transitions and links to the audit page",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "audited", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{priority: 0})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "ACTIVITY"
+      assert html =~ "create"
+      assert html =~ "update"
+      # Same transitions the /audit page shows, scoped to this subject.
+      assert html =~ "/audit?entity_id=#{task.id}"
+      # README §4 asks for relative time in the gutter, not an absolute stamp.
+      assert html =~ ~r/\d+[smhd] ago/
+      assert html =~ "2 transitions"
+    end
+
+    test "the panel meta says so when the stream is truncated", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "chatty", workspace_id: ws.id})
+
+      # 1 create + 24 updates = 25 versions, past the 20-row query cap.
+      Enum.reduce(1..24, task, fn n, acc ->
+        {:ok, updated} = Ash.update(acc, %{title: "chatty #{n}"})
+        updated
+      end)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "latest 20 of 25 transitions"
+    end
+  end
+
+  describe "right rail" do
+    test "the current run block summarises the issue's runs rather than naming one worker",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "railed", workspace_id: ws.id})
+
+      for started <- [~U[2026-07-01 10:00:00.000000Z], ~U[2026-07-01 11:00:00.000000Z]] do
+        {:ok, _} =
+          Ash.create(Run, %{
+            task_id: task.id,
+            repo: "test/repo",
+            status: :completed,
+            started_at: started
+          })
+      end
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "CURRENT RUN"
+      assert html =~ "2 runs on this issue"
+    end
+
+    test "machine state, dependencies and skills each render in the rail",
+         %{conn: conn, ws: ws} do
+      {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "railed",
+          workspace_id: ws.id,
+          assignee: "ada",
+          target_branch: "main"
+        })
+
+      {:ok, task} = Ash.update(task, %{pr_ref: "#591"})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: task.id,
+          to_issue_id: blocker.id,
+          type: :blocks
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "MACHINE STATE"
+      assert html =~ "ada"
+      assert html =~ "#591"
+
+      assert html =~ "DEPENDENCIES"
+      assert html =~ "blocks"
+      assert html =~ blocker.id
+
+      assert html =~ "SKILLS"
+    end
+
+    test "machine state names the repo the issue runs against", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "checked out", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "acme/widgets",
+          status: :completed,
+          started_at: ~U[2026-07-01 10:00:00.000000Z]
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "MACHINE STATE"
+      assert html =~ "acme/widgets"
+    end
+
+    test "the skills rail lists the effective set a dispatch would carry", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "skill-ws-#{System.unique_integer([:positive])}",
+          prefix: "sk",
+          config: %{"skills" => %{"workspace" => ["rail-tdd"]}}
+        })
+
+      {:ok, _skill} =
+        Arbiter.Skills.create_skill(%{
+          name: "rail-tdd",
+          body: "# TDD",
+          activation_mode: :always_on
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "skilled", workspace_id: ws.id, issue_type: :feature})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "rail-tdd"
+      assert html =~ "always_on"
+    end
+  end
+
+  describe "handoff §4 detail" do
+    test "the title block dates the issue in relative time", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "dated", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # `opened 2d ago · updated 41m ago` — the operator reads age, not
+      # wall-clock stamps, in the header.
+      assert html =~ "opened "
+      assert html =~ "updated "
+      assert html =~ ~r/opened \d+[smhd] ago/
+      assert html =~ ~r/updated \d+[smhd] ago/
+    end
+
+    test "acceptance criteria use the handoff Checkbox, not the daisyUI one",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "handoff checkbox",
+          acceptance: "- [x] done one\n- [ ] pending two",
+          workspace_id: ws.id
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # The handoff Checkbox hides the native input and draws its own 14px
+      # box; the daisyUI one keeps the native control with `checkbox` classes.
+      refute html =~ "checkbox checkbox-xs"
+      assert html =~ "sr-only peer"
+      # Checked boxes carry the tick glyph.
+      assert html =~ "✓"
+    end
+
+    test "the runs header counts running rows and totals their spend",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "spendy", workspace_id: ws.id})
+
+      {:ok, done} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :completed,
+          started_at: ~U[2026-07-01 10:00:00.000000Z],
+          completed_at: ~U[2026-07-01 10:12:00.000000Z]
+        })
+
+      {:ok, _running} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :impl,
+          status: :running,
+          started_at: ~U[2026-07-01 11:00:00.000000Z]
+        })
+
+      {:ok, _usage} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: task.id,
+          worker_run_id: done.id,
+          step: :work,
+          provider: "anthropic",
+          model: "sonnet",
+          cost_usd: 3.42,
+          occurred_at: ~U[2026-07-01 10:12:00.000000Z]
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "2 total"
+      assert html =~ "1 running"
+      assert html =~ "$3.42"
+    end
+
+    test "role tabs follow the handoff order and label fix_pass as prose",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "roles", workspace_id: ws.id})
+
+      for {role, task_id} <- [
+            {:review, task.id <> "#review"},
+            {:conflict, task.id},
+            {:fix_pass, task.id},
+            {:impl, task.id},
+            {:main, task.id}
+          ] do
+        {:ok, _} =
+          Ash.create(Run, %{
+            task_id: task_id,
+            repo: "test/repo",
+            worker_type: role,
+            status: :completed,
+            started_at: ~U[2026-07-01 10:00:00.000000Z]
+          })
+      end
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "fix pass 1"
+      refute html =~ "fix_pass 1"
+
+      order = ~w(all main impl review fix_pass conflict)
+
+      positions =
+        Enum.map(order, fn value ->
+          {pos, _} = :binary.match(html, ~s(phx-value-tab="#{value}"))
+          pos
+        end)
+
+      assert positions == Enum.sort(positions),
+             "filter tabs are out of handoff order: #{inspect(Enum.zip(order, positions))}"
     end
   end
 end

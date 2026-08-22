@@ -14,6 +14,8 @@ defmodule ArbiterWeb.AuditLogLive do
   Filters:
     - **Date range** (`since` / `until` — ISO date strings, both inclusive).
     - **Entity ID** (task id; partial match against `version_source_id`).
+      Also accepted as an `?entity_id=` query param, which is how the task
+      detail screen's Activity panel links through to the full history.
     - **Action name** (create | update | close | reopen | all).
 
   ## What's NOT in scope (Phase 5)
@@ -41,12 +43,24 @@ defmodule ArbiterWeb.AuditLogLive do
   require Ash.Query
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(params, _session, socket) do
     {:ok,
      socket
-     |> assign(:filters, default_filters())
+     |> assign(:filters, seed_filters(params))
      |> load_versions()}
   end
+
+  # The task detail screen's Activity panel is this stream scoped to one
+  # subject; its "History" link hands the subject over as `?entity_id=`, so
+  # the page has to open already filtered rather than dumping every issue.
+  defp seed_filters(params) when is_map(params) do
+    case params["entity_id"] do
+      eid when is_binary(eid) -> %{default_filters() | entity_id: String.trim(eid)}
+      _ -> default_filters()
+    end
+  end
+
+  defp seed_filters(_), do: default_filters()
 
   @impl true
   def handle_event("filter", %{"filters" => params}, socket) do

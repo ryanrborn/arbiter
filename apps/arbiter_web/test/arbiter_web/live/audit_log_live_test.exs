@@ -38,6 +38,29 @@ defmodule ArbiterWeb.AuditLogLiveTest do
     end
   end
 
+  describe "entity_id query param" do
+    # The task detail screen's Activity panel is a filtered view of this
+    # page — its "History" link hands the subject over as a query param.
+    test "seeds the entity filter from the URL", %{conn: conn, ws: ws} do
+      {:ok, mine} = Ash.create(Issue, %{title: "deep linked task", workspace_id: ws.id})
+      {:ok, _other} = Ash.create(Issue, %{title: "unrelated task", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, "/audit?entity_id=#{mine.id}")
+
+      assert html =~ "deep linked task"
+      refute html =~ "unrelated task"
+      assert html =~ ~s(value="#{mine.id}")
+    end
+
+    test "an unknown param leaves the unfiltered list alone", %{conn: conn, ws: ws} do
+      {:ok, _task} = Ash.create(Issue, %{title: "still listed", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, "/audit?bogus=1")
+
+      assert html =~ "still listed"
+    end
+  end
+
   describe "filters" do
     test "filter by action=close shows only close events", %{conn: conn, ws: ws} do
       {:ok, b1} = Ash.create(Issue, %{title: "to close", workspace_id: ws.id})

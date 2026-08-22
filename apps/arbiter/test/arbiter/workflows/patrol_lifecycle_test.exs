@@ -109,6 +109,13 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
         })
 
       {:ok, task} = Ash.update(task, %{pr_ref: "#9"}, action: :update)
+
+      # Wait for the subscriber to actually process the :updated broadcast and
+      # start the patrol before reaping it below — otherwise the reap can race
+      # ahead of the async start and find nothing to terminate, leaving the
+      # legitimately-started patrol running underneath the rest of the test.
+      await(fn -> PRPatrolSupervisor.whereis(ws.id) end)
+
       {:ok, closed} = Ash.update(task, %{}, action: :close)
 
       # Reap the patrol the pr_ref update legitimately started, so the state is
