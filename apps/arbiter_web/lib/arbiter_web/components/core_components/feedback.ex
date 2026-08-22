@@ -10,7 +10,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   """
   use Phoenix.Component
 
-  import ArbiterWeb.CoreComponents.Core, only: [icon: 1, key_hint: 1]
+  import ArbiterWeb.CoreComponents.Core, only: [icon: 1]
 
   alias Phoenix.LiveView.JS
 
@@ -262,7 +262,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
         <div :for={{step, i} <- Enum.with_index(@steps)} class="contents">
           <span
             class={[
-              "flex-none w-[9px] h-[9px] rounded-full border-[var(--border-width)]",
+              "flex-none w-[9px] h-[9px] rounded-full border-[length:var(--border-width)]",
               worker_flow_dot_class(flow_state(step, @status), @failed, i == @idx)
             ]}
             style={worker_flow_dot_style(flow_state(step, @status), @failed, i, @idx)}
@@ -407,7 +407,12 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       >
         {@action}
       </span>
-      <.key_hint :if={@dismiss_key != ""} class="border-0 p-0">{@dismiss_key}</.key_hint>
+      <span
+        :if={@dismiss_key != ""}
+        class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+      >
+        {@dismiss_key}
+      </span>
     </div>
     """
   end
@@ -416,6 +421,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   defp toast_hue("error"), do: "var(--arb-fail)"
   defp toast_hue("attention"), do: "var(--arb-attention)"
   defp toast_hue("live"), do: "var(--arb-live)"
+  defp toast_hue(_other), do: "var(--arb-info)"
 
   @doc """
   Toast-based replacement for `flash_group/1`: standard `:info`/`:error`
@@ -501,7 +507,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   Says what is empty, and where possible why. Never a call to action dressed
   up as an error.
   """
-  attr :icon, :string, default: "hero-inbox", doc: ~s(full Heroicon class, or nil to omit)
+  attr :icon, :any, default: "hero-inbox", doc: ~s(full Heroicon class, or nil to omit)
   attr :detail, :string, default: nil, doc: "mono second line explaining why it's empty"
   attr :class, :any, default: nil
   slot :inner_block, required: true
@@ -510,7 +516,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
     ~H"""
     <div class={[
       "text-center px-5 py-5 rounded-[var(--radius-field)] border-dashed",
-      "border-[var(--border-width)] border-[var(--border-strong)]",
+      "border-[length:var(--border-width)] border-[var(--border-strong)]",
       @class
     ]}>
       <.icon :if={@icon} name={@icon} size={22} color="var(--text-label)" class="mb-2 mx-auto" />
