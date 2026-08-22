@@ -64,6 +64,7 @@ defmodule ArbiterWeb.BoardLive do
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
 
   @tasks_topic "tasks"
   @workers_topic "workers"
@@ -845,7 +846,7 @@ defmodule ArbiterWeb.BoardLive do
                   >
                     <:status>
                       <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-info)]">
-                        #{i + 1} · {card.merger_status || "checks"}
+                        #{i + 1} · {merge_status_text(card.merger_status)}
                       </span>
                     </:status>
                   </.task_card>
@@ -1087,9 +1088,9 @@ defmodule ArbiterWeb.BoardLive do
 
   # ---- render helpers -------------------------------------------------------
 
-  attr :label, :string, required: true
-  attr :count, :any, required: true
-  attr :tone, :any, default: nil
+  attr(:label, :string, required: true)
+  attr(:count, :any, required: true)
+  attr(:tone, :any, default: nil)
 
   defp column_head(assigns) do
     assigns = assign(assigns, :hue, head_hue(assigns.tone))
@@ -1120,8 +1121,8 @@ defmodule ArbiterWeb.BoardLive do
     """
   end
 
-  attr :column, :string, required: true
-  attr :count, :integer, required: true
+  attr(:column, :string, required: true)
+  attr(:count, :integer, required: true)
 
   defp more(assigns) do
     ~H"""
@@ -1161,6 +1162,38 @@ defmodule ArbiterWeb.BoardLive do
 
   defp merge_activity(%{mr_ref: ref}) when is_binary(ref) and ref != "", do: ref
   defp merge_activity(_card), do: "waiting on checks"
+
+  # `card.merger_status` is the raw poll result Arbiter.Worker.Watchdog reads
+  # (a map with :status/:approved/:pipeline/etc, not a display string) — reduce
+  # it the same way merge_queue_index_live.ex does, to the board's short
+  # lowercase mono vocabulary instead of rendering the map itself.
+  defp merge_status_text(nil), do: "checks"
+
+  defp merge_status_text(status) when is_map(status) do
+    case Watchdog.effective_block_reason(status) do
+      nil ->
+        case Watchdog.classify(status) do
+          :merged -> "merged"
+          :approved -> "approved"
+          :closed -> "closed"
+          :pending -> "checks"
+        end
+
+      reason ->
+        block_reason_text(reason)
+    end
+  end
+
+  defp merge_status_text(_status), do: "checks"
+
+  defp block_reason_text(:conflict), do: "conflict"
+  defp block_reason_text(:behind_base), do: "behind base"
+  defp block_reason_text(:ci_failed), do: "ci failed"
+  defp block_reason_text(:needs_approval), do: "needs approval"
+  defp block_reason_text(:needs_nonauthor_approval), do: "awaiting reviewer"
+  defp block_reason_text(:draft), do: "draft"
+  defp block_reason_text(:blocked_other), do: "blocked"
+  defp block_reason_text(other), do: "blocked · #{other}"
 
   # The foot of the Ready column, where the handoff's drop zone used to be.
   defp ready_foot(%{paused: true}, false),
