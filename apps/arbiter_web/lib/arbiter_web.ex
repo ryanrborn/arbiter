@@ -17,7 +17,7 @@ defmodule ArbiterWeb do
   those modules here.
   """
 
-  def static_paths, do: ~w(assets fonts images favicon.ico robots.txt)
+  def static_paths, do: ~w(assets fonts images favicon.svg robots.txt)
 
   def router do
     quote do
@@ -86,6 +86,7 @@ defmodule ArbiterWeb do
       import Phoenix.HTML
       # Core UI components
       import ArbiterWeb.CoreComponents
+      import ArbiterWeb.CoreComponents.Brandmark
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # Label pluralization (plural/1, cap_plural/1)
