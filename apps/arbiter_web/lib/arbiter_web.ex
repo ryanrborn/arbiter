@@ -88,6 +88,15 @@ defmodule ArbiterWeb do
       import ArbiterWeb.CoreComponents
       # Data-display primitives (tags, chips, meter, list/table)
       import ArbiterWeb.CoreComponents.Data
+      # Design-handoff core primitives (Button, Icon, KeyHint, Toggle, Panel).
+      # icon/1 and button/1 are excluded: CoreComponents already defines both,
+      # and hundreds of existing call sites depend on that shape (e.g. icon/1
+      # sized via a Tailwind `size-N` class, which the handoff Icon's explicit
+      # inline width/height would silently override). Reach the handoff
+      # versions as `ArbiterWeb.CoreComponents.Core.icon/1` /
+      # `ArbiterWeb.CoreComponents.Core.button/1` until a follow-up ticket
+      # migrates call sites and retires the old ones.
+      import ArbiterWeb.CoreComponents.Core, except: [icon: 1, button: 1]
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # Label pluralization (plural/1, cap_plural/1)
