@@ -67,27 +67,99 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert render(view) =~ "fresh-line"
     end
 
+    test "toolbar shows elapsed runtime beside the status chip", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-elapsed", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      # started_at is "now" at spawn time, so the toolbar reads e.g. "0s"/"0m".
+      assert html =~ ~r/font-mono[^>]*>\s*\d+[smh]/
+    end
+
     test "shows the workspace context when the task exists", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-ws", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
       {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
-      assert html =~ "Workspace:"
+      assert html =~ "Workspace"
       assert html =~ ws.name
     end
 
-    test "Stop button kills the worker and redirects to /", %{conn: conn, ws: ws} do
+    test "Stop signals the worker, stays on the page, and toasts the worktree notice",
+         %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-stop", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
-      assert html =~ "Stop worker"
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      assert has_element?(view, "#worker-stop-btn")
 
-      result = render_click(view, "stop")
+      html = render_click(view, "stop")
 
-      # push_navigate emits a {:live_redirect, ...} return from render_click.
-      assert {:error, {:live_redirect, %{to: "/"}}} = result
+      # Stays on the page — no redirect — but the worker really is gone.
       assert Worker.whereis(task.id) == nil
+
+      # Verbatim toast copy per the design handoff; the worktree survives.
+      assert html =~ "Stop signalled to #{task.id} — the worktree is left in place"
+      assert html =~ ~s(id="stop-toast")
+
+      # Stop button flips to a secondary Resume action.
+      refute has_element?(view, "#worker-stop-btn")
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+
+      # The chip/flow node read as failed/stopped.
+      assert html =~ ~s(badge-error)
+
+      # The phx-click lives on the "resume" action span only, not the toast
+      # root — clicking the toast body/dismiss hint must not open the modal.
+      refute has_element?(view, ~s(div#stop-toast[phx-click]))
+      assert has_element?(view, ~s(#stop-toast span[phx-click="open_retry"]), "resume")
+    end
+
+    test "stop notice clears when the worker restarts from outside this view",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-restart", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = render_click(view, "stop")
+      assert html =~ "the worktree is left in place"
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+
+      # Simulate the worker being resumed from outside this LiveView (another
+      # tab, the issue page, `arb worker resume`) — a fresh `:started` echo
+      # arrives on the shared "workers" topic.
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      html = render(view)
+      refute html =~ "the worktree is left in place"
+      refute has_element?(view, "#worker-toolbar-resume-btn")
+    end
+
+    test "stop notice survives an unrelated worker's lifecycle events",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-stop-unrelated", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, other_task} = Ash.create(Issue, %{title: "pd-other", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = render_click(view, "stop")
+      assert html =~ "the worktree is left in place"
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+      assert html =~ ~s(badge-error)
+
+      # An unrelated worker starting (and later stopping) broadcasts on the
+      # same shared "workers" topic — it must not clobber our synthetic
+      # stopped snapshot/toast/chip/flow.
+      {:ok, _other_pid} = Worker.start(task_id: other_task.id, repo: "r")
+      Worker.stop(other_task.id)
+      Process.sleep(20)
+
+      html = render(view)
+      assert html =~ "the worktree is left in place"
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+      assert html =~ ~s(badge-error)
     end
 
     test "no Stop button when the worker is :completed", %{conn: conn, ws: ws} do
@@ -96,11 +168,11 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.advance(pid, :design)
       :ok = Worker.complete(pid, :done)
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
-      refute html =~ "Stop worker"
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      refute has_element?(view, "#worker-stop-btn")
     end
 
-    test "status badge for :resuming is colored and labeled 'Resuming'",
+    test "status badge for :resuming is colored and labeled with the literal status",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-resuming", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", meta: %{resume: true})
@@ -108,10 +180,10 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
 
       assert html =~ "badge-info"
-      assert html =~ "Resuming"
+      assert html =~ "resuming"
     end
 
-    test "status badge for :awaiting_review_gate is colored and labeled 'In review_gate'",
+    test "status badge for :awaiting_review_gate is colored and labeled with the literal status",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-review-gate", workspace_id: ws.id})
 
@@ -135,7 +207,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
 
       assert html =~ "badge-warning"
-      assert html =~ "In review_gate"
+      assert html =~ "awaiting_review_gate"
     end
 
     test "renders the workflow step bar when a MachineState exists",
@@ -152,7 +224,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
 
-      assert html =~ "Workflow:"
+      assert html =~ "Workflow"
       # Work's first step is :load_context.
       assert html =~ "load_context"
       assert html =~ "submit"
@@ -289,57 +361,100 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
 
-      # The output div should have the colocated hook. Per Phoenix.LiveView.ColocatedHook
-      # convention, the source uses name=".ScrollToBottom" and phx-hook=".ScrollToBottom",
-      # but at render time Phoenix qualifies it to the module path for resolution.
+      # The log_stream component brings its own colocated stick-to-bottom
+      # hook. Per Phoenix.LiveView.ColocatedHook convention, the source uses
+      # name=".LogStreamStick" and phx-hook=".LogStreamStick", but at render
+      # time Phoenix qualifies it to the module path for resolution.
       assert html =~ ~s(id="worker-output")
-      assert html =~ ~s(phx-hook="ArbiterWeb.WorkerDetailLive.ScrollToBottom")
+      assert html =~ ~s(phx-hook="ArbiterWeb.CoreComponents.Domain.LogStreamStick")
+    end
+
+    test "long output lines keep their full text reachable via title", %{conn: conn, ws: ws} do
+      long_line = String.duplicate("x", 400)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-long-line", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.report(pid, :output_lines, [long_line])
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ ~s(title="#{long_line}")
+    end
+
+    test "navigation actions render as buttons, not buttons nested in anchors",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-nav", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "a button")
+    end
+
+    test "awaiting-review panel's Open PR link is not a button nested in an anchor",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-awaiting-ref", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.advance(pid, :claude)
+      :ok = Worker.report(pid, :mr_ref, "https://github.com/org/repo/pull/42")
+      :ok = Worker.await(pid)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "a button")
+      assert has_element?(view, ~s(a[href="https://github.com/org/repo/pull/42"]))
+      assert html =~ "Open pull request"
     end
   end
 
   describe "retry / resume" do
-    test "a failed worker offers a Retry action", %{conn: conn, ws: ws} do
+    test "a failed worker offers a Resume action", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-failed", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.fail(pid, :boom)
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
 
-      assert html =~ ~s(phx-click="open_retry")
-      assert html =~ "Retry"
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+      assert html =~ "Resume"
     end
 
-    test "a running worker offers no Retry action", %{conn: conn, ws: ws} do
+    test "a running worker offers no active Resume action", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-running", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
-      refute html =~ ~s(phx-click="open_retry")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      refute has_element?(view, "#worker-toolbar-resume-btn")
+      refute has_element?(view, "#worker-fallback-resume-btn")
+      # The rail's "Resume with note" action stays visible but disabled.
+      assert has_element?(view, "#worker-resume-note-btn[disabled]")
     end
 
-    test "an unregistered worker still offers Retry when the task exists",
+    test "an unregistered worker still offers Resume when the task exists",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-gone", workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
-      assert html =~ ~s(phx-click="open_retry")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      assert has_element?(view, "#worker-fallback-resume-btn")
     end
 
-    test "no Retry for a task that doesn't exist at all", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/workers/no-such-task")
-      refute html =~ ~s(phx-click="open_retry")
+    test "no Resume for a task that doesn't exist at all", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/workers/no-such-task")
+      refute has_element?(view, "#worker-fallback-resume-btn")
     end
 
-    # `Dispatch.resume/2` refuses a closed issue outright, so offering the
-    # button would only ever produce an error flash.
-    test "no Retry for a closed issue", %{conn: conn, ws: ws} do
+    # `Dispatch.resume/2` refuses a closed issue outright, so offering an
+    # active button would only ever produce an error flash.
+    test "no active Resume for a closed issue", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-closed", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.fail(pid, :boom)
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
-      refute html =~ ~s(phx-click="open_retry")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      refute has_element?(view, "#worker-toolbar-resume-btn")
+      refute has_element?(view, "#worker-fallback-resume-btn")
+      refute has_element?(view, "#worker-resume-note-btn")
     end
 
     test "the Retry modal warns about API credits before re-spawning",
@@ -349,7 +464,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.fail(pid, :boom)
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
-      html = view |> element(~s(button[phx-click="open_retry"])) |> render_click()
+      html = view |> element("#worker-toolbar-resume-btn") |> render_click()
 
       assert html =~ ~s(id="worker-retry-modal")
       assert html =~ "API credits"
@@ -369,7 +484,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.fail(pid, :boom)
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
-      view |> element(~s(button[phx-click="open_retry"])) |> render_click()
+      view |> element("#worker-toolbar-resume-btn") |> render_click()
 
       pending = render_click(view, "retry")
       assert pending =~ ~s(id="worker-retry-pending")
@@ -378,7 +493,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       # The modal stays open with the reason inline, rather than closing and
       # leaving the operator to catch a flash.
-      assert html =~ "Retry failed"
+      assert html =~ "Resume failed"
       assert html =~ ~s(id="worker-retry-modal")
       refute html =~ ~s(id="worker-retry-pending")
     end
@@ -390,14 +505,14 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.fail(pid, :boom)
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
-      view |> element(~s(button[phx-click="open_retry"])) |> render_click()
+      view |> element("#worker-toolbar-resume-btn") |> render_click()
 
       render_click(view, "retry")
       # Still pending — the guard clause drops this one on the floor rather
       # than starting a second resume.
       render_click(view, "retry")
 
-      assert render_async(view) =~ "Retry failed"
+      assert render_async(view) =~ "Resume failed"
     end
   end
 
