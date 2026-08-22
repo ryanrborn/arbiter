@@ -309,10 +309,11 @@ defmodule ArbiterWeb.CoreComponents.Forms do
     >
       <span
         class={[
-          "flex-none inline-flex items-center justify-center w-[14px] h-[14px] rounded-[var(--radius-chip)] border border-solid",
+          "flex-none inline-flex items-center justify-center w-[14px] h-[14px] rounded-[var(--radius-chip)] border border-solid transition-all",
           @align == "start" && "mt-[2px]",
           @checked && "bg-[var(--accent-primary)] border-[var(--accent-primary)]",
-          !@checked && "bg-transparent border-[var(--border-strong)]"
+          !@checked && "bg-transparent border-[var(--border-strong)]",
+          "peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring-focus)] peer-focus-visible:ring-offset-2"
         ]}
       >
         <span
@@ -329,7 +330,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
         checked={@checked}
         disabled={@disabled}
         required={@required}
-        class="hidden"
+        class="sr-only peer"
         {@rest}
       />
       <span :if={@label}>{@label}</span>

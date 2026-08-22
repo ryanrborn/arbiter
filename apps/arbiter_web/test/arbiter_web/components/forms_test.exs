@@ -81,5 +81,16 @@ defmodule ArbiterWeb.CoreComponents.FormsTest do
       html = render_component(&checkbox/1, name: "agree", id: "agree-checkbox", checked: true)
       assert html =~ "checked"
     end
+
+    test "input is sr-only for accessibility" do
+      html = render_component(&checkbox/1, name: "agree", id: "agree-checkbox")
+      assert html =~ "sr-only"
+      refute html =~ "class=\"hidden\""
+    end
+
+    test "custom box has focus-visible styling" do
+      html = render_component(&checkbox/1, name: "agree", id: "agree-checkbox")
+      assert html =~ "peer-focus-visible"
+    end
   end
 end
