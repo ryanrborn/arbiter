@@ -1,175 +1,198 @@
 defmodule ArbiterWeb.AuditLogLive do
   @moduledoc """
-  LiveView at `/audit` — timeline of task state transitions sourced from
-  `AshPaperTrail` versions on `Arbiter.Tasks.Issue`.
+  LiveView at `/audit` — a filtered/paged table of task state transitions
+  sourced from `AshPaperTrail` versions on `Arbiter.Tasks.Issue`.
 
-  ## What's in scope (MVP)
+  ## Columns
 
-  Every paper-trail `Version` row for an Issue:
-    - create
-    - update
-    - close
-    - reopen
+  time / actor / subject / action / detail — `detail` renders a status
+  transition **verbatim**, e.g. `open → in_progress`, never humanized. Any
+  other changed fields are shown as `key=value`, also verbatim — see
+  `ArbiterWeb.CoreComponents.Data.status_chip/1`'s doc for the same rule
+  applied elsewhere in this component library.
 
-  Filters:
-    - **Date range** (`since` / `until` — ISO date strings, both inclusive).
-    - **Entity ID** (task id; partial match against `version_source_id`).
-    - **Action name** (create | update | close | reopen | all).
+  ## Actor
 
-  ## What's NOT in scope (Phase 5)
+  `Issue` has no `belongs_to_actor` (see `Arbiter.PaperTrail`'s moduledoc) —
+  the only actor signal on an Issue version is the optional `change_origin`
+  argument threaded through the `:update` action (`create`/`close`/`reopen`
+  never set it), landing in `version_action_inputs["change_origin"]` via
+  `store_action_inputs?(true)`. A version with no `change_origin` is shown
+  as `"system"`.
 
-    - Actor filter (paper_trail's default config doesn't track who; needs
-      `belongs_to_actor :user, User` setup or a sidecar audit table).
-    - Worker lifecycle events (no audit resource yet).
-    - PR/merge events (gte-022/023 don't write to paper_trail).
+  The **Human / Machine** tabs approximate a real actor-kind distinction
+  from that one string: `"worker:<task_id>"`, `"loop:..."`, `"coordinator"`,
+  and unattributed (`"system"`) writes are machine actors (every one of
+  those is itself an AI agent session); `"cli"`, `"dashboard"`, or any other
+  bare label is treated as human. This is a heuristic, not a first-class
+  actor model — the moduledoc this replaces already punted actor filtering
+  to "Phase 5" for the same reason (no actor resource to belong to).
 
-  The acceptance criterion's "filter by actor=coordinator" is therefore
-  approximated: the JSON `version_action_inputs` map sometimes contains
-  task fields with author names (e.g. assignee). MVP punts on this; once
-  `belongs_to_actor` is wired (a separate Phase 5 task), the filter form
-  here will be extended.
+  ## Query syntax
 
-  ## Export
+  The mono search box accepts space-separated `key:value` clauses —
+  `subject:`, `actor:`, `action:` — ANDed together; a bare word without a
+  `key:` prefix matches subject, actor, or action (substring, case
+  insensitive).
 
-  "Export as JSON" downloads the currently-filtered version list as a
-  JSON-array file via a redirect to `GET /audit/export`.
+  Reads are bounded to the 500 most recent versions (same cap the prior
+  implementation used); tabs/query filter and pagination happen in memory
+  over that window, matching `ArbiterWeb.WorkerIndexLive`'s in-memory
+  paging pattern for other bounded, non-tabular-query data.
   """
 
   use ArbiterWeb, :live_view
 
   alias Arbiter.Tasks.Issue.Version
+  alias ArbiterWeb.CoreComponents.{Core, Data, Feedback, Forms, Navigation}
+  alias ArbiterWeb.Paging
   require Ash.Query
+
+  @tabs [
+    %{label: "All", value: "all"},
+    %{label: "Human", value: "human"},
+    %{label: "Machine", value: "machine"}
+  ]
+
+  @actor_hues ~w(--arb-live --arb-info --arb-proposal --arb-attention --arb-fail)
 
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     |> assign(:filters, default_filters())
-     |> load_versions()}
+     |> assign(:tabs, @tabs)
+     |> assign(:tab, "all")
+     |> assign(:query, "")
+     |> assign(:page, 1)
+     |> load_events()}
   end
 
   @impl true
-  def handle_event("filter", %{"filters" => params}, socket) do
-    filters = parse_filters(params)
-
-    {:noreply,
-     socket
-     |> assign(:filters, filters)
-     |> load_versions()}
+  def handle_event("filter-tab", %{"tab" => tab}, socket) do
+    {:noreply, socket |> assign(:tab, tab) |> assign(:page, 1) |> load_events()}
   end
 
-  def handle_event("reset", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(:filters, default_filters())
-     |> load_versions()}
+  def handle_event("search", %{"q" => q}, socket) do
+    {:noreply, socket |> assign(:query, q) |> assign(:page, 1) |> load_events()}
   end
 
-  def handle_event("export", _params, socket) do
-    payload = versions_to_export(socket.assigns.versions)
-    filename = "audit-#{Date.utc_today() |> Date.to_iso8601()}.json"
-
-    {:noreply,
-     push_event(socket, "download", %{
-       filename: filename,
-       content: Jason.encode!(payload, pretty: true),
-       content_type: "application/json"
-     })}
+  def handle_event("page", %{"page" => page}, socket) do
+    {:noreply, socket |> assign(:page, Paging.parse_page(%{"page" => page})) |> load_events()}
   end
 
   # ---- data ----
 
-  defp default_filters do
-    %{
-      since: nil,
-      until: nil,
-      entity_id: "",
-      action: "all"
-    }
+  defp load_events(socket) do
+    rows =
+      read_events()
+      |> filter_by_tab(socket.assigns.tab)
+      |> filter_by_query(socket.assigns.query)
+
+    page = Paging.paginate_list(rows, socket.assigns.page)
+
+    socket
+    |> assign(:events, page.entries)
+    |> assign(:page_info, page)
   end
 
-  defp parse_filters(params) do
-    %{
-      since: parse_date(params["since"]),
-      until: parse_date(params["until"]),
-      entity_id: params["entity_id"] |> to_string() |> String.trim(),
-      action: params["action"] || "all"
-    }
+  defp read_events do
+    Version
+    |> Ash.Query.new()
+    |> Ash.Query.sort(version_inserted_at: :desc)
+    |> Ash.Query.limit(500)
+    |> Ash.read!()
+    |> Enum.sort_by(& &1.version_inserted_at, {:asc, DateTime})
+    |> annotate_transitions()
+    |> Enum.reverse()
   end
 
-  defp parse_date(""), do: nil
-  defp parse_date(nil), do: nil
+  # Walk chronologically so a status change can show what it changed *from*,
+  # not just what it changed to — `changes` (AshPaperTrail's changes_only
+  # mode) only ever carries the new value.
+  defp annotate_transitions(versions) do
+    {rows, _last_status_by_subject} =
+      Enum.map_reduce(versions, %{}, fn v, last_status ->
+        subject = v.version_source_id
+        changes = v.changes || %{}
+        new_status = Map.get(changes, "status")
 
-  defp parse_date(str) when is_binary(str) do
-    case Date.from_iso8601(str) do
-      {:ok, d} -> d
-      _ -> nil
+        transition = new_status && {Map.get(last_status, subject), new_status}
+
+        last_status =
+          if new_status, do: Map.put(last_status, subject, new_status), else: last_status
+
+        row = %{
+          id: v.id,
+          at: v.version_inserted_at,
+          actor: actor_of(v),
+          subject: subject,
+          action: v.version_action_name,
+          transition: transition,
+          changes: Map.delete(changes, "status")
+        }
+
+        {row, last_status}
+      end)
+
+    rows
+  end
+
+  defp actor_of(%{version_action_inputs: %{"change_origin" => origin}})
+       when is_binary(origin) and origin != "",
+       do: origin
+
+  defp actor_of(_version), do: "system"
+
+  defp actor_kind("system"), do: "machine"
+
+  defp actor_kind(actor) do
+    cond do
+      String.starts_with?(actor, "worker:") -> "machine"
+      String.starts_with?(actor, "loop:") -> "machine"
+      actor == "coordinator" -> "machine"
+      true -> "human"
     end
   end
 
-  defp load_versions(socket) do
-    versions = read_versions(socket.assigns.filters)
-    assign(socket, :versions, versions)
+  defp actor_hue(actor) do
+    Enum.at(@actor_hues, :erlang.phash2(actor, length(@actor_hues)))
   end
 
-  defp read_versions(filters) do
-    query = Ash.Query.new(Version) |> Ash.Query.sort(version_inserted_at: :desc)
+  defp filter_by_tab(rows, "all"), do: rows
+  defp filter_by_tab(rows, tab), do: Enum.filter(rows, &(actor_kind(&1.actor) == tab))
 
-    query =
-      query
-      |> filter_by_action(filters.action)
-      |> filter_by_entity_id(filters.entity_id)
-      |> filter_by_since(filters.since)
-      |> filter_by_until(filters.until)
-      |> Ash.Query.limit(500)
+  defp filter_by_query(rows, query) when query in [nil, ""], do: rows
 
-    Ash.read!(query)
+  defp filter_by_query(rows, query) do
+    clauses = query |> String.split() |> Enum.map(&parse_clause/1)
+    Enum.filter(rows, fn row -> Enum.all?(clauses, &matches_clause?(row, &1)) end)
   end
 
-  defp filter_by_action(query, "all"), do: query
+  defp parse_clause("subject:" <> v), do: {:subject, v}
+  defp parse_clause("actor:" <> v), do: {:actor, v}
+  defp parse_clause("action:" <> v), do: {:action, v}
+  defp parse_clause(v), do: {:any, v}
 
-  defp filter_by_action(query, action) when action in ~w(create update close reopen) do
-    atom = String.to_existing_atom(action)
-    Ash.Query.filter(query, version_action_name == ^atom)
+  defp matches_clause?(row, {:subject, v}), do: contains?(row.subject, v)
+  defp matches_clause?(row, {:actor, v}), do: contains?(row.actor, v)
+  defp matches_clause?(row, {:action, v}), do: contains?(to_string(row.action), v)
+
+  defp matches_clause?(row, {:any, v}) do
+    contains?(row.subject, v) or contains?(row.actor, v) or contains?(to_string(row.action), v)
   end
 
-  defp filter_by_action(query, _), do: query
+  defp contains?(str, sub), do: String.contains?(String.downcase(str), String.downcase(sub))
 
-  defp filter_by_entity_id(query, ""), do: query
-
-  defp filter_by_entity_id(query, eid) do
-    pattern = "%" <> eid <> "%"
-    Ash.Query.filter(query, like(version_source_id, ^pattern))
+  defp detail_text(%{transition: {old, new}}) when not is_nil(new) do
+    if old, do: "#{old} → #{new}", else: new
   end
 
-  defp filter_by_since(query, nil), do: query
-
-  defp filter_by_since(query, %Date{} = d) do
-    dt = DateTime.new!(d, ~T[00:00:00], "Etc/UTC")
-    Ash.Query.filter(query, version_inserted_at >= ^dt)
+  defp detail_text(%{changes: changes}) do
+    Enum.map_join(changes, ", ", fn {k, v} -> "#{k}=#{verbatim(v)}" end)
   end
 
-  defp filter_by_until(query, nil), do: query
-
-  defp filter_by_until(query, %Date{} = d) do
-    # `until` is inclusive — use end-of-day.
-    dt = DateTime.new!(d, ~T[23:59:59.999999], "Etc/UTC")
-    Ash.Query.filter(query, version_inserted_at <= ^dt)
-  end
-
-  defp versions_to_export(versions) do
-    Enum.map(versions, fn v ->
-      %{
-        id: v.id,
-        task_id: v.version_source_id,
-        action: v.version_action_name,
-        action_type: v.version_action_type,
-        inputs: v.version_action_inputs,
-        changes: v.changes,
-        at: v.version_inserted_at
-      }
-    end)
-  end
+  defp verbatim(v) when is_binary(v), do: v
+  defp verbatim(v), do: inspect(v)
 
   # ---- render ----
 
@@ -177,176 +200,67 @@ defmodule ArbiterWeb.AuditLogLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
-      <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6" id="audit-log" phx-hook="DownloadOnEvent">
-        <%!-- ── Header ───────────────────────────────────────────────── --%>
+      <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6" id="audit-log">
         <div>
           <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <.icon name="hero-clock" class="size-6 text-base-content/70" /> Audit log
+            <Core.icon name="hero-clock" class="size-6 text-base-content/70" /> Audit log
           </h1>
           <p class="text-sm text-base-content/60 mt-1">
-            {length(@versions)} most recent directive changes (max 500), sourced from
+            {@page_info.total_count} matching events (of the 500 most recent), sourced from
             <code class="text-xs">ash_paper_trail</code>
             versions on <code class="text-xs">Arbiter.Tasks.Issue</code>.
           </p>
         </div>
 
-        <%!-- ── Filter bar ───────────────────────────────────────────── --%>
-        <form
-          phx-change="filter"
-          phx-submit="filter"
-          class="card bg-base-200 border border-base-300 shadow-sm"
-        >
-          <div class="card-body p-4 gap-4">
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <label class="form-control">
-                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
-                  <.icon name="hero-calendar-days" class="size-3.5" /> Since
-                </span>
-                <input
-                  type="date"
-                  name="filters[since]"
-                  value={iso_or_blank(@filters.since)}
-                  class="input input-bordered input-sm w-full"
-                />
-              </label>
-              <label class="form-control">
-                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
-                  <.icon name="hero-calendar-days" class="size-3.5" /> Until
-                </span>
-                <input
-                  type="date"
-                  name="filters[until]"
-                  value={iso_or_blank(@filters.until)}
-                  class="input input-bordered input-sm w-full"
-                />
-              </label>
-              <label class="form-control">
-                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
-                  <.icon name="hero-hashtag" class="size-3.5" /> Task id contains
-                </span>
-                <input
-                  type="text"
-                  name="filters[entity_id]"
-                  value={@filters.entity_id}
-                  placeholder="gte- · hq- · …"
-                  class="input input-bordered input-sm w-full"
-                />
-              </label>
-              <label class="form-control">
-                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
-                  <.icon name="hero-funnel" class="size-3.5" /> Action
-                </span>
-                <select name="filters[action]" class="select select-bordered select-sm w-full">
-                  <option
-                    :for={opt <- ~w(all create update close reopen)}
-                    value={opt}
-                    selected={@filters.action == opt}
-                  >
-                    {opt}
-                  </option>
-                </select>
-              </label>
-            </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <Navigation.filter_tabs tabs={@tabs} active={@tab} event="filter-tab" />
+          <form phx-change="search" class="flex-1 min-w-[240px]">
+            <Forms.input
+              type="text"
+              name="q"
+              id="audit-query"
+              value={@query}
+              placeholder="subject:bd-3o8mq1"
+              mono
+            />
+          </form>
+        </div>
 
-            <div class="flex flex-wrap items-center gap-2 pt-1 border-t border-base-300 mt-1">
-              <button
-                type="button"
-                phx-click="reset"
-                class="btn btn-sm btn-ghost gap-1.5 active:scale-95 transition-transform"
-              >
-                <.icon name="hero-arrow-path" class="size-4" /> Reset
-              </button>
-              <div class="flex-1"></div>
-              <button
-                type="button"
-                phx-click="export"
-                class="btn btn-sm btn-primary gap-1.5 active:scale-95 transition-transform"
-              >
-                <.icon name="hero-arrow-down-tray" class="size-4" /> Export as JSON
-              </button>
-            </div>
-          </div>
-        </form>
+        <Feedback.empty_state :if={@events == []} icon="hero-inbox" detail="No matching audit events.">
+          Nothing here
+        </Feedback.empty_state>
 
-        <%!-- ── Event stream ─────────────────────────────────────────── --%>
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-4">
-            <div
-              :if={@versions == []}
-              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-8 text-center"
-            >
-              <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
-              <p class="mt-2 text-sm text-base-content/60">No matching audit events.</p>
-            </div>
+        <Data.data_table :if={@events != []} id="audit-table" rows={@events}>
+          <:col :let={row} label="Time">
+            <span class="text-xs text-base-content/60 font-mono tabular-nums whitespace-nowrap">
+              {Calendar.strftime(row.at, "%Y-%m-%d %H:%M:%S")}
+            </span>
+          </:col>
+          <:col :let={row} label="Actor">
+            <span class="font-mono text-xs" style={"color: var(#{actor_hue(row.actor)});"}>
+              {row.actor}
+            </span>
+          </:col>
+          <:col :let={row} label="Subject">
+            <code class="text-xs">{row.subject}</code>
+          </:col>
+          <:col :let={row} label="Action">
+            <span class="font-mono text-xs">{row.action}</span>
+          </:col>
+          <:col :let={row} label="Detail">
+            <span class="font-mono text-xs break-words">{detail_text(row)}</span>
+          </:col>
+        </Data.data_table>
 
-            <ol :if={@versions != []} id="audit-stream" class="relative flex flex-col">
-              <li
-                :for={v <- @versions}
-                class="group relative flex gap-3 pb-4 last:pb-0 pl-1 transition-colors duration-150"
-              >
-                <%!-- timeline rail + node --%>
-                <div class="relative flex flex-col items-center shrink-0">
-                  <span class={[
-                    "z-10 flex items-center justify-center size-8 rounded-full ring-4 ring-base-200",
-                    action_dot_class(v.version_action_name)
-                  ]}>
-                    <.icon name={action_icon(v.version_action_name)} class="size-4" />
-                  </span>
-                  <span class="absolute top-8 bottom-0 w-px bg-base-300"></span>
-                </div>
-
-                <%!-- event body --%>
-                <div class="min-w-0 flex-1 -mt-0.5 rounded-box bg-base-100 border border-base-300 px-3 py-2 transition-colors duration-150 group-hover:border-base-content/20">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class={action_badge_class(v.version_action_name)}>
-                      {v.version_action_name}
-                    </span>
-                    <code class="text-xs text-base-content/70">{v.version_source_id}</code>
-                    <span class="flex-1"></span>
-                    <span class="text-xs text-base-content/50 font-mono tabular-nums whitespace-nowrap">
-                      {Calendar.strftime(v.version_inserted_at, "%Y-%m-%d %H:%M:%S")}
-                    </span>
-                  </div>
-                  <p
-                    :if={format_changes(v.changes) != ""}
-                    class="mt-1 text-xs text-base-content/70 font-mono break-words"
-                  >
-                    {format_changes(v.changes)}
-                  </p>
-                </div>
-              </li>
-            </ol>
-          </div>
-        </section>
+        <Navigation.pager
+          :if={@page_info.total_pages > 1}
+          page={@page_info.page}
+          total_pages={@page_info.total_pages}
+          total_count={@page_info.total_count}
+          event="page"
+        />
       </div>
     </Layouts.app>
     """
   end
-
-  defp iso_or_blank(nil), do: ""
-  defp iso_or_blank(%Date{} = d), do: Date.to_iso8601(d)
-
-  defp action_badge_class(:create), do: "badge badge-success"
-  defp action_badge_class(:close), do: "badge badge-neutral"
-  defp action_badge_class(:reopen), do: "badge badge-warning"
-  defp action_badge_class(_), do: "badge badge-info"
-
-  # Filled timeline-node color per audit action (mirrors action_badge_class/1).
-  defp action_dot_class(:create), do: "bg-success text-success-content"
-  defp action_dot_class(:close), do: "bg-neutral text-neutral-content"
-  defp action_dot_class(:reopen), do: "bg-warning text-warning-content"
-  defp action_dot_class(_), do: "bg-info text-info-content"
-
-  defp action_icon(:create), do: "hero-plus-circle"
-  defp action_icon(:close), do: "hero-lock-closed"
-  defp action_icon(:reopen), do: "hero-arrow-path"
-  defp action_icon(_), do: "hero-pencil-square"
-
-  defp format_changes(changes) when is_map(changes) do
-    changes
-    |> Map.take(["status", "title", "priority", "tracker_type", "assignee"])
-    |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
-  end
-
-  defp format_changes(_), do: ""
 end
