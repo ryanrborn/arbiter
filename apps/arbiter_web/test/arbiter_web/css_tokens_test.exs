@@ -22,10 +22,19 @@ defmodule ArbiterWeb.CssTokensTest do
     assert css =~ "--depth: 0;"
   end
 
-  test "light daisyUI theme keeps existing prefersdark/default wiring", %{css: css} do
-    assert css =~ "name: \"light\";"
-    assert css =~ "default: true;"
-    assert css =~ "prefersdark: false;"
+  test "dark is the default daisyUI theme and light is opt-in", %{css: css} do
+    [dark_block, light_block] =
+      ~r/@plugin "\.\.\/vendor\/daisyui-theme" \{(.*?)\n\}/s
+      |> Regex.scan(css, capture: :all_but_first)
+      |> Enum.map(&hd/1)
+
+    assert dark_block =~ ~s(name: "dark";)
+    assert dark_block =~ "default: true;"
+    assert dark_block =~ "prefersdark: false;"
+
+    assert light_block =~ ~s(name: "light";)
+    assert light_block =~ "default: false;"
+    assert light_block =~ "prefersdark: false;"
   end
 
   test "extra design tokens are present as plain custom properties", %{css: css} do
