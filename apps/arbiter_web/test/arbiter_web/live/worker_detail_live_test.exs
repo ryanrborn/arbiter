@@ -67,6 +67,16 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert render(view) =~ "fresh-line"
     end
 
+    test "toolbar shows elapsed runtime beside the status chip", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-elapsed", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      # started_at is "now" at spawn time, so the toolbar reads e.g. "0s"/"0m".
+      assert html =~ ~r/font-mono[^>]*>\s*\d+[smh]/
+    end
+
     test "shows the workspace context when the task exists", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-ws", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
@@ -99,6 +109,31 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       # The chip/flow node read as failed/stopped.
       assert html =~ ~s(badge-error)
+
+      # The phx-click lives on the "resume" action span only, not the toast
+      # root — clicking the toast body/dismiss hint must not open the modal.
+      refute has_element?(view, ~s(div#stop-toast[phx-click]))
+      assert has_element?(view, ~s(#stop-toast span[phx-click="open_retry"]), "resume")
+    end
+
+    test "stop notice clears when the worker restarts from outside this view",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-restart", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = render_click(view, "stop")
+      assert html =~ "the worktree is left in place"
+      assert has_element?(view, "#worker-toolbar-resume-btn")
+
+      # Simulate the worker being resumed from outside this LiveView (another
+      # tab, the issue page, `arb worker resume`) — a fresh `:started` echo
+      # arrives on the shared "workers" topic.
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      html = render(view)
+      refute html =~ "the worktree is left in place"
+      refute has_element?(view, "#worker-toolbar-resume-btn")
     end
 
     test "no Stop button when the worker is :completed", %{conn: conn, ws: ws} do
@@ -306,6 +341,28 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       # time Phoenix qualifies it to the module path for resolution.
       assert html =~ ~s(id="worker-output")
       assert html =~ ~s(phx-hook="ArbiterWeb.CoreComponents.Domain.LogStreamStick")
+    end
+
+    test "long output lines keep their full text reachable via title", %{conn: conn, ws: ws} do
+      long_line = String.duplicate("x", 400)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-long-line", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.report(pid, :output_lines, [long_line])
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ ~s(title="#{long_line}")
+    end
+
+    test "navigation actions render as buttons, not buttons nested in anchors",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-nav", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "a button")
     end
   end
 

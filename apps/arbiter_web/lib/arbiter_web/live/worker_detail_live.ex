@@ -94,7 +94,20 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   def handle_info({:worker_lifecycle, _event, _snap}, socket) do
-    {:noreply, refresh_all(socket)}
+    socket = refresh_all(socket)
+
+    socket =
+      case socket.assigns[:snapshot] do
+        %{status: status} ->
+          if active_status?(status),
+            do: assign(socket, stop_notice: false, stopped_flow_step: nil),
+            else: socket
+
+        _ ->
+          socket
+      end
+
+    {:noreply, socket}
   end
 
   def handle_info({:worker_output, _task_id, line}, socket) do
@@ -581,7 +594,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-[14px]">
         <%= if @stop_notice do %>
-          <.toast id="stop-toast" tone="error" action="resume" phx-click="open_retry">
+          <.toast id="stop-toast" tone="error" action="resume" action_click="open_retry">
             {stop_notice_text(@task_id)}
           </.toast>
         <% end %>
@@ -594,6 +607,12 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 {@task_id}
               </span>
               <.status_chip status={@snapshot.status} />
+              <span
+                :if={@snapshot.started_at}
+                class="text-[11.5px] font-mono text-[var(--text-secondary)]"
+              >
+                {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
+              </span>
               <span class="text-[11.5px] text-[var(--text-secondary)] font-[family-name:var(--font-mono)] truncate">
                 {toolbar_context(@snapshot, @workspace)}
               </span>
@@ -714,12 +733,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
                     Resume with note
                   </Core.button>
                   <%= if @latest_run do %>
-                    <.link navigate={~p"/workers/history/#{@latest_run.id}"}>
-                      <Core.button size="sm" variant="ghost">
-                        <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
-                        Full transcript
-                      </Core.button>
-                    </.link>
+                    <Core.button
+                      size="sm"
+                      variant="ghost"
+                      phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
+                    >
+                      <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
+                      Full transcript
+                    </Core.button>
                   <% else %>
                     <Core.button size="sm" variant="ghost" disabled>
                       <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
@@ -812,18 +833,23 @@ defmodule ArbiterWeb.WorkerDetailLive do
               </.data_list>
 
               <div class="flex flex-col gap-2 shrink-0">
-                <.link navigate={~p"/tasks/#{@task_id}"}>
-                  <Core.button variant="ghost" size="sm">
-                    <:icon><Core.icon name="hero-arrow-top-right-on-square" size={14} /></:icon>
-                    {String.capitalize(@issue_label)} detail
-                  </Core.button>
-                </.link>
-                <.link :if={@latest_run} navigate={~p"/workers/history/#{@latest_run.id}"}>
-                  <Core.button variant="ghost" size="sm">
-                    <:icon><Core.icon name="hero-archive-box" size={14} /></:icon>
-                    Run history
-                  </Core.button>
-                </.link>
+                <Core.button
+                  variant="ghost"
+                  size="sm"
+                  phx-click={JS.navigate(~p"/tasks/#{@task_id}")}
+                >
+                  <:icon><Core.icon name="hero-arrow-top-right-on-square" size={14} /></:icon>
+                  {String.capitalize(@issue_label)} detail
+                </Core.button>
+                <Core.button
+                  :if={@latest_run}
+                  variant="ghost"
+                  size="sm"
+                  phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
+                >
+                  <:icon><Core.icon name="hero-archive-box" size={14} /></:icon>
+                  Run history
+                </Core.button>
               </div>
             </div>
           </.panel>
