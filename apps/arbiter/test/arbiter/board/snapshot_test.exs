@@ -110,7 +110,9 @@ defmodule Arbiter.Board.SnapshotTest do
           blocked_by: %{"bd-a" => ["bd-z"]}
         )
 
-      assert [%{id: "bd-a", state: :blocked, reason: "blocked — waiting on bd-z"}, _] = board.ready
+      assert [%{id: "bd-a", state: :blocked, reason: "blocked — waiting on bd-z"}, _] =
+               board.ready
+
       assert board.promote == "bd-b"
     end
 
@@ -139,8 +141,95 @@ defmodule Arbiter.Board.SnapshotTest do
           workers: [worker("bd-run", :running)]
         )
 
-      assert [%{id: "bd-a", state: :blocked, reason: "blocked — lib/board.ex in flight on bd-run"}] =
+      assert [
+               %{
+                 id: "bd-a",
+                 state: :blocked,
+                 reason: "blocked — lib/board.ex in flight on bd-run"
+               }
+             ] =
                board.ready
+    end
+  end
+
+  describe "manual ready order" do
+    test "ids named in :ready_order lead the queue, in that order" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{priority: 1}), issue("bd-b", %{priority: 2}), issue("bd-c")],
+          ready_order: ["bd-c", "bd-b"]
+        )
+
+      assert ids(board.ready) == ["bd-c", "bd-b", "bd-a"]
+    end
+
+    test "an id the operator ranked but that is no longer Ready is simply ignored" do
+      board = derive(issues: [issue("bd-a")], ready_order: ["bd-gone", "bd-a"])
+
+      assert ids(board.ready) == ["bd-a"]
+    end
+
+    test "unranked cards keep priority order behind the ranked ones" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{priority: 3}),
+            issue("bd-b", %{priority: 1}),
+            issue("bd-c", %{priority: 2})
+          ],
+          ready_order: ["bd-a"]
+        )
+
+      assert ids(board.ready) == ["bd-a", "bd-b", "bd-c"]
+    end
+
+    test "the hand-ranked leader is the card the scheduler promotes" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{priority: 1}), issue("bd-b", %{priority: 3})],
+          ready_order: ["bd-b"]
+        )
+
+      assert board.promote == "bd-b"
+    end
+  end
+
+  describe "assignee" do
+    test "every card carries the issue's assignee, so the board can filter by it" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{assignee: "alice"}),
+            issue("bd-b", %{status: :closed, assignee: "bob", updated_at: @now})
+          ],
+          workers: [worker("bd-c", :running)]
+        )
+
+      assert [%{card: %{assignee: "alice"}}] = board.ready
+      assert [%{assignee: "bob"}] = board.closed_today
+      # A worker's card takes its assignee from the issue; with no issue behind
+      # it there is simply nobody to name.
+      assert [%{assignee: nil}] = board.running
+    end
+  end
+
+  describe "empty/1" do
+    test "is a full board shape a screen can render, reporting itself paused" do
+      board = Arbiter.Board.Snapshot.empty(@now)
+
+      assert board.ready == []
+      assert board.running == []
+      assert board.needs_you == []
+      assert board.merge_queue == []
+      assert board.closed_today == []
+      assert board.promote == nil
+      assert board.slots_total == 0
+      assert board.slots_free == 0
+      assert board.quota == :ok
+      # Paused, because nothing should claim a queue position in a queue this
+      # process could not read.
+      assert board.paused
+      assert board.now == @now
     end
   end
 
@@ -188,7 +277,14 @@ defmodule Arbiter.Board.SnapshotTest do
           ]
         )
 
-      assert [%{id: "bd-a", title: "Task bd-a", step: :implement, activity: "edit · scheduler.ex"}] =
+      assert [
+               %{
+                 id: "bd-a",
+                 title: "Task bd-a",
+                 step: :implement,
+                 activity: "edit · scheduler.ex"
+               }
+             ] =
                board.running
     end
 

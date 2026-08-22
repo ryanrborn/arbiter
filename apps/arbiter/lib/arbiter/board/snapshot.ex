@@ -80,8 +80,15 @@ defmodule Arbiter.Board.Snapshot do
 
   Expected keys: `:issues`, `:workers`, `:blocked_by` (issue id → open blocker
   ids), `:changed_files` (task id → repo-relative paths a worktree has
-  touched), `:now`, `:slots_total`, `:quota` and `:paused`. Every key has a
-  sane default, so a caller may pass only what it has.
+  touched), `:now`, `:slots_total`, `:quota`, `:paused` and `:ready_order`.
+  Every key has a sane default, so a caller may pass only what it has.
+
+  `:ready_order` is the operator's hand-ranking of the Ready queue — the ids
+  it names lead the queue in that order, and everything else follows in
+  priority order behind them. Because the scheduler promotes the first
+  eligible card, dragging a card to the top of Ready is how a human overrides
+  the machine's idea of what matters most without dispatching anything by
+  hand.
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
@@ -93,6 +100,7 @@ defmodule Arbiter.Board.Snapshot do
     slots_total = Map.get(input, :slots_total) || 0
     quota = Map.get(input, :quota) || :ok
     paused? = Map.get(input, :paused) == true
+    ready_order = Map.get(input, :ready_order) || []
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
     {authors, reviewers} = Enum.split_with(workers, &(worker_role(&1) != :reviewer))
@@ -104,7 +112,7 @@ defmodule Arbiter.Board.Snapshot do
 
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, worked, blocked_by),
+        ready: ready_cards(issues, worked, blocked_by, ready_order),
         running: in_flight(authors, issues_by_id, changed),
         slots_free: slots_free,
         quota: quota,
@@ -130,8 +138,8 @@ defmodule Arbiter.Board.Snapshot do
   Read the world and derive the board.
 
   Options mirror `derive/1`'s inputs and override what would otherwise be
-  read: `:now`, `:slots_total`, `:quota`, `:paused`, `:issues`, `:workers`,
-  `:changed_files`. Every read is best-effort — a board that renders four
+  read: `:now`, `:slots_total`, `:quota`, `:paused`, `:ready_order`,
+  `:issues`, `:workers`, `:changed_files`. Every read is best-effort — a board that renders four
   columns beats one that raises.
   """
   @spec load(keyword()) :: t()
@@ -147,8 +155,34 @@ defmodule Arbiter.Board.Snapshot do
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
       slots_total: Keyword.get(opts, :slots_total) || system_max_concurrent(),
       quota: Keyword.get_lazy(opts, :quota, &quota_hold/0),
-      paused: Keyword.get(opts, :paused, false)
+      paused: Keyword.get(opts, :paused, false),
+      ready_order: Keyword.get(opts, :ready_order, [])
     })
+  end
+
+  @doc """
+  A board with five empty columns and nothing to promote.
+
+  What a caller renders when its read of the world failed. It reports itself
+  `paused: true` on purpose: a queue nobody could read is not one anything
+  should be dispatching from, and every Ready card would otherwise claim a
+  position in a queue that isn't moving.
+  """
+  @spec empty(DateTime.t() | nil) :: t()
+  def empty(now \\ nil) do
+    %{
+      ready: [],
+      running: [],
+      needs_you: [],
+      merge_queue: [],
+      closed_today: [],
+      promote: nil,
+      slots_total: 0,
+      slots_free: 0,
+      quota: :ok,
+      paused: true,
+      now: now || DateTime.utc_now()
+    }
   end
 
   @doc """
@@ -190,14 +224,16 @@ defmodule Arbiter.Board.Snapshot do
 
   # ---- ready ---------------------------------------------------------------
 
-  defp ready_cards(issues, worked, blocked_by) do
+  defp ready_cards(issues, worked, blocked_by, ready_order) do
+    ranked = ranking(ready_order)
+
     issues
     |> Enum.filter(fn issue ->
       issue.status == :open and
         Map.get(issue, :issue_type) not in @non_dispatchable_types and
         not MapSet.member?(worked, issue.id)
     end)
-    |> Enum.sort_by(&{priority(&1), created_at(&1)}, :asc)
+    |> Enum.sort_by(&{Map.get(ranked, &1.id, :infinity), priority(&1), created_at(&1)}, :asc)
     |> Enum.map(fn issue ->
       %{
         id: issue.id,
@@ -206,10 +242,20 @@ defmodule Arbiter.Board.Snapshot do
         difficulty: Map.get(issue, :difficulty),
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
+        assignee: Map.get(issue, :assignee),
         scope: FileScope.declared_paths(issue),
         blocked_by: Map.get(blocked_by, issue.id, [])
       }
     end)
+  end
+
+  # Rank → sort key. Hand-ranked ids get their index; everything else sorts
+  # behind them under `:infinity`, which compares greater than any integer in
+  # Erlang's term order. Ranked ids that are no longer Ready just never match.
+  defp ranking(ready_order) do
+    ready_order
+    |> Enum.with_index()
+    |> Map.new()
   end
 
   # ---- running / needs you / merge queue ------------------------------------
@@ -270,6 +316,7 @@ defmodule Arbiter.Board.Snapshot do
         title: Map.get(issue, :title),
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
+        assignee: Map.get(issue, :assignee),
         closed_at: Map.get(issue, :updated_at)
       }
     end)
@@ -284,6 +331,7 @@ defmodule Arbiter.Board.Snapshot do
       priority: issue && Map.get(issue, :priority),
       difficulty: issue && Map.get(issue, :difficulty),
       workspace_id: Map.get(worker, :workspace_id),
+      assignee: issue && Map.get(issue, :assignee),
       status: worker.status
     }
   end
