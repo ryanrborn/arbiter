@@ -35,6 +35,16 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       assert html =~ "badge-error"
     end
 
+    test "the handoff's spaced display labels get the same badge as their snake_case twins" do
+      # RunRow renders `status="awaiting review"` straight from the design
+      # handoff; without this it fell through to badge-ghost and the amber
+      # "needs you" signal was lost on the roster.
+      html = render_component(&status_chip/1, status: "awaiting review")
+
+      assert html =~ "badge-warning"
+      assert html =~ "awaiting review"
+    end
+
     test "unknown status falls back to a ghost badge without crashing" do
       html = render_component(&status_chip/1, status: :some_unmapped_status)
 
