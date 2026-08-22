@@ -102,6 +102,18 @@ defmodule ArbiterWeb do
       # to avoid shadowing the existing input/1, select/1, textarea/1, checkbox/1 in
       # CoreComponents. Call them fully-qualified: ArbiterWeb.CoreComponents.Forms.input/1
       # until the cleanup ticket (bd-3z2txy) drops the old versions.
+      # Design-handoff feedback primitives (LiveBadge, QuotaBar, WorkerFlow, Toast, EmptyState).
+      # live_badge/1 and empty_state/1 are excluded: ArbiterWeb.ListComponents
+      # already defines both with a different shape (live_badge/1: a required
+      # `live` boolean, no `id`, daisyUI badge markup; empty_state/1: no
+      # `detail` slot, daisyUI dashed-box markup), and existing call sites
+      # (skill_index_live, run_index_live, worker_index_live,
+      # merge_queue_index_live, loop_proposal_index_live) depend on them.
+      # Reach the handoff versions as
+      # `ArbiterWeb.CoreComponents.Feedback.live_badge/1` /
+      # `ArbiterWeb.CoreComponents.Feedback.empty_state/1` until a follow-up
+      # ticket migrates call sites and retires the old ones.
+      import ArbiterWeb.CoreComponents.Feedback, except: [live_badge: 1, empty_state: 1]
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
       # Label pluralization (plural/1, cap_plural/1)
