@@ -62,24 +62,32 @@ defmodule ArbiterWeb.Layouts do
     ~H"""
     <.top_nav items={@nav_items} current_path={@current_path}>
       <:right>
-        <div :for={quota <- @quotas} class="flex items-center gap-3">
-          <.quota_bar
-            provider={quota_provider_label(quota.provider)}
-            window="5h"
-            utilization={quota.utilization_5h}
-            reset_at={quota.reset_5h_at}
-            overage_status={quota.overage_status}
-            representative_claim={quota.representative_claim}
-            on_exhaustion={@quota_on_exhaustion}
-          />
-          <.quota_bar
-            window="7d"
-            utilization={quota.utilization_7d}
-            reset_at={quota.reset_7d_at}
-            overage_status={quota.overage_status}
-            representative_claim={quota.representative_claim}
-            on_exhaustion={@quota_on_exhaustion}
-          />
+        <div :for={quota <- @quotas} class="max-lg:hidden flex flex-col gap-[3px]">
+          <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+            {quota_provider_label(quota.provider)}
+          </span>
+          <div class="flex items-center gap-3">
+            <.quota_bar
+              provider={quota.provider}
+              show_label={false}
+              window="5h"
+              utilization={quota.utilization_5h}
+              reset_at={quota.reset_5h_at}
+              overage_status={quota.overage_status}
+              representative_claim={quota.representative_claim}
+              on_exhaustion={@quota_on_exhaustion}
+            />
+            <.quota_bar
+              provider={quota.provider}
+              show_label={false}
+              window="7d"
+              utilization={quota.utilization_7d}
+              reset_at={quota.reset_7d_at}
+              overage_status={quota.overage_status}
+              representative_claim={quota.representative_claim}
+              on_exhaustion={@quota_on_exhaustion}
+            />
+          </div>
         </div>
         <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" />
         <.theme_toggle />

@@ -95,6 +95,32 @@ defmodule ArbiterWeb.LayoutsTest do
 
       assert html =~ "live-badge" or html =~ ~s(id="appshell-live")
     end
+
+    test "passes the raw provider key through so claude keeps its pace-aware hairline and label" do
+      reset_at = DateTime.add(DateTime.utc_now(), 200 * 60, :second)
+
+      quota =
+        Arbiter.Quota.blank_view("claude")
+        |> Map.put(:utilization_5h, 0.85)
+        |> Map.put(:reset_5h_at, reset_at)
+
+      expected_elapsed_pct = ArbiterWeb.QuotaHelpers.quota_elapsed_pct_5h("claude", reset_at)
+
+      expected_pace_label =
+        ArbiterWeb.QuotaHelpers.quota_pace_label_5h("claude", 0.85, reset_at, nil, :throttle)
+
+      # Sanity-check the fixture actually exercises the amber/red pace path
+      # (and not the "claude" label ever leaking `quota_provider_label/1`'s
+      # already-mapped display string back into the logic functions).
+      assert expected_elapsed_pct
+      assert expected_pace_label =~ "stalls in"
+
+      html = render_app(%{quotas: [quota], quota_on_exhaustion: :throttle})
+
+      assert html =~ "left: #{expected_elapsed_pct}%;"
+      assert html =~ expected_pace_label
+      assert html =~ "Claude"
+    end
   end
 
   describe "app/1 — theme toggle" do

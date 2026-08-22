@@ -76,7 +76,6 @@ defmodule ArbiterWeb.AuditLogLiveTest do
 
       assert html =~ b1.id
       refute html =~ b2.id
-      _ = b2
     end
 
     test "filter by future-only date range yields empty", %{conn: conn, ws: ws} do
