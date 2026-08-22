@@ -88,19 +88,22 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       assert html =~ hyp.gist
       refute html =~ rejected.gist
 
-      html = view |> element("form[phx-change=filter]") |> render_change(%{"state" => "rejected"})
+      html =
+        view
+        |> element("button[phx-click=filter][phx-value-tab=rejected]")
+        |> render_click()
+
       assert html =~ rejected.gist
       refute html =~ hyp.gist
     end
 
-    test "a filter value outside the select's options falls back to live", %{conn: conn} do
+    test "a filter value outside the tabs' options falls back to live", %{conn: conn} do
       hyp = hypothesis()
       {:ok, view, _html} = live(conn, ~p"/loop")
 
-      # The phx-change payload is client-controlled; an unknown value must not
+      # The phx-click payload is client-controlled; an unknown value must not
       # reach String.to_existing_atom/1 and take the LiveView down with it.
-      html =
-        render_change(view, :filter, %{"state" => "no-such-state-#{System.unique_integer()}"})
+      html = render_click(view, :filter, %{"tab" => "no-such-state-#{System.unique_integer()}"})
 
       assert html =~ hyp.gist
       assert Process.alive?(view.pid)
@@ -197,6 +200,137 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       {:ok, after_reject} = Loop.get_pending(row.id)
       assert after_reject.state == :rejected
       assert after_reject.rejection_reason == "handled in CLAUDE.md instead"
+    end
+  end
+
+  describe "decided rows stay visible, dimmed" do
+    test "an applied row stays in the live filter, dimmed, with a dismiss toast — until dismissed",
+         %{conn: conn} do
+      {:ok, skill} =
+        Skills.create_skill(%{
+          name: "loop-live-#{System.unique_integer([:positive])}",
+          body: "# before"
+        })
+
+      row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+      view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
+
+      html = view |> element("button[phx-click=apply]") |> render_click()
+
+      # The live filter excludes :applied rows from a fresh query — but this
+      # one was *just* decided in this session, so it must not vanish.
+      assert html =~ row.gist
+      assert html =~ ~s(data-decided="applied")
+      assert html =~ "Dismiss"
+      # The toast only hides the row — it never claims to undo the write.
+      refute html =~ "Undo"
+
+      html = view |> element("[phx-click=dismiss_decision]") |> render_click()
+
+      refute html =~ row.gist
+    end
+
+    test "dismiss clears every decided row in this session, not just the most recently toasted",
+         %{conn: conn} do
+      row_a = proposed()
+      row_b = proposed()
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+
+      view |> element("button[phx-value-id='#{row_a.id}']", "Review") |> render_click()
+      view |> form("form[phx-submit=reject]") |> render_submit()
+
+      view |> element("button[phx-value-id='#{row_b.id}']", "Review") |> render_click()
+      html = view |> form("form[phx-submit=reject]") |> render_submit()
+
+      # Both are dimmed and visible even though only the most recent toast shows.
+      assert html =~ row_a.gist
+      assert html =~ row_b.gist
+
+      html = view |> element("[phx-click=dismiss_decision]") |> render_click()
+
+      refute html =~ row_a.gist
+      refute html =~ row_b.gist
+    end
+
+    test "switching filters clears decided rows so they don't leak into other filters",
+         %{conn: conn} do
+      {:ok, skill} =
+        Skills.create_skill(%{
+          name: "loop-live-#{System.unique_integer([:positive])}",
+          body: "# before"
+        })
+
+      row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+      view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
+      view |> element("button[phx-click=apply]") |> render_click()
+
+      html =
+        view
+        |> element("button[phx-click=filter][phx-value-tab=rejected]")
+        |> render_click()
+
+      # The applied row must not leak into an unrelated filter's list or count.
+      refute html =~ row.gist
+    end
+
+    test "a decided row keeps its created_at-sorted position instead of jumping to the bottom",
+         %{conn: conn} do
+      older = proposed()
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+      view |> element("button[phx-value-id='#{older.id}']", "Review") |> render_click()
+      view |> element("button[phx-click=apply]") |> render_click()
+
+      newer = proposed()
+      html = render(view)
+
+      {older_pos, _} = :binary.match(html, older.gist)
+      {newer_pos, _} = :binary.match(html, newer.gist)
+
+      assert newer_pos < older_pos
+    end
+
+    test "applying an already-applied proposal is a no-op, not an error", %{conn: conn} do
+      {:ok, skill} =
+        Skills.create_skill(%{
+          name: "loop-live-#{System.unique_integer([:positive])}",
+          body: "# before"
+        })
+
+      row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
+      {:ok, _already_applied} = Loop.apply_pending(row.id, actor: "test-setup")
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+
+      # Simulate a stray double-click race: the event fires even though the
+      # apply button for an already-decided row isn't normally reachable.
+      html = render_click(view, "apply", %{"id" => row.id})
+
+      refute html =~ "only a :proposed row can be applied"
+      assert Process.alive?(view.pid)
+
+      {:ok, unchanged} = Loop.get_pending(row.id)
+      assert unchanged.state == :applied
+    end
+
+    test "rejecting an already-rejected proposal is a no-op, not an error", %{conn: conn} do
+      row = proposed()
+      {:ok, _already_rejected} = Loop.reject_pending(row.id, actor: "test-setup")
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+
+      html = render_click(view, "reject", %{"id" => row.id})
+
+      refute html =~ "nothing to reject"
+      assert Process.alive?(view.pid)
+
+      {:ok, unchanged} = Loop.get_pending(row.id)
+      assert unchanged.state == :rejected
     end
   end
 end
