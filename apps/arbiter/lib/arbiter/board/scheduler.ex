@@ -40,12 +40,18 @@ defmodule Arbiter.Board.Scheduler do
   Quota outranks the slot count deliberately: a free slot you may not use is
   not the fact worth showing.
 
-  Only the *head* of the queue carries a board-wide hold. Cards behind it show
-  their queue position (`2 ahead in queue`) — they aren't blocked, they're
-  waiting, and the distinction is what makes a stalled board readable. A card
-  held by a card-specific block is *skipped over* rather than counted, so the
-  card behind it reads `next up` rather than `1 ahead` of work that isn't
-  going anywhere.
+  Only the *head* of the queue carries a board-wide hold — with one exception.
+  Cards behind the head show their queue position (`2 ahead in queue`) — they
+  aren't blocked, they're waiting, and the distinction is what makes a stalled
+  board readable. A card held by a card-specific block is *skipped over* rather
+  than counted, so the card behind it reads `next up` rather than `1 ahead` of
+  work that isn't going anywhere.
+
+  The exception is **paused**: a queue position implies a queue that is
+  moving, so while the scheduler is paused *every* otherwise-unblocked card
+  reads `scheduler paused`, not just the head. Card-specific blocks still win
+  over it — a paused board should not hide the fact that a card is also
+  waiting on a dependency.
   """
 
   alias Arbiter.Board.FileScope
@@ -164,7 +170,6 @@ defmodule Arbiter.Board.Scheduler do
 
   defp bump(acc), do: %{acc | ahead: acc.ahead + 1}
 
-  defp ahead_reason(1), do: "1 ahead in queue"
   defp ahead_reason(n), do: "#{n} ahead in queue"
 
   defp entry(card, state, reason),

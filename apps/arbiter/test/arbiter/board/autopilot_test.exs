@@ -61,6 +61,62 @@ defmodule Arbiter.Board.AutopilotTest do
     end
   end
 
+  describe "a dispatch does not take the process with it" do
+    # The board refreshes *because* a dispatch is happening — Worker.init
+    # broadcasts :started mid-flight — so the one moment every open board asks
+    # this process a question is the moment a synchronous dispatch would have
+    # it blocked. Dispatch is seconds to minutes; the call timeout is five.
+    test "the autopilot keeps answering while a promotion is in flight" do
+      test = self()
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn id ->
+            send(test, {:dispatch_started, id, self()})
+            assert_receive :release, 2_000
+            {:ok, %{task_id: id}}
+          end
+        )
+
+      spawn_link(fn -> send(test, {:tick_outcome, Autopilot.tick(pid)}) end)
+      assert_receive {:dispatch_started, "bd-1", task}
+
+      # Mid-dispatch, and every one of these answers promptly.
+      assert Autopilot.paused?(pid, 200) == false
+      assert %{paused: false} = Autopilot.board(pid, [], 200)
+      assert :ok = Autopilot.pause(pid)
+      assert :ok = Autopilot.resume(pid)
+
+      send(task, :release)
+      # The tick that started it still gets the outcome, once there is one.
+      assert_receive {:tick_outcome, {:ok, "bd-1"}}
+    end
+
+    test "a tick that lands mid-dispatch does not start a second one" do
+      test = self()
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn id ->
+            send(test, {:dispatch_started, id, self()})
+            assert_receive :release, 2_000
+            {:ok, %{task_id: id}}
+          end
+        )
+
+      spawn_link(fn -> send(test, {:tick_outcome, Autopilot.tick(pid)}) end)
+      assert_receive {:dispatch_started, "bd-1", task}
+
+      assert {:busy, "bd-1"} = Autopilot.tick(pid, 200)
+      refute_receive {:dispatch_started, _, _}, 50
+
+      send(task, :release)
+      assert_receive {:tick_outcome, {:ok, "bd-1"}}
+    end
+  end
+
   describe "the pause switch" do
     test "starts paused when asked, and dispatches nothing while paused" do
       pid = start(paused: true)

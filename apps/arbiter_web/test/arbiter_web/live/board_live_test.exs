@@ -188,6 +188,21 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
     end
 
+    test "putting a Running card back down where it was asks nothing", %{conn: conn, ws: ws} do
+      task = issue(ws, "picked up, thought better of it")
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      html = drag(view, task.id, "running", "running")
+
+      # A drag that changed nothing must not offer to destroy live work: the
+      # confirmation is one click from killing the agent.
+      refute html =~ "Stop"
+      refute has_element?(view, ~s(button[phx-click="confirm_stop"]))
+      assert Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
+    end
+
     test "cancelling the confirmation leaves the worker alone", %{conn: conn, ws: ws} do
       task = issue(ws, "leave me be")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)

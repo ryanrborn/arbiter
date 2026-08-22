@@ -73,6 +73,11 @@ defmodule ArbiterWeb.BoardLive do
   # How many cards a column shows before it collapses into an "N more" row.
   @column_limit 8
 
+  # Every call this LiveView makes out to another process is bounded. Nothing
+  # on the render path may hang the operator's only view of the fleet.
+  @scheduler_call_timeout_ms 2_000
+  @stop_timeout_ms 5_000
+
   @columns [
     %{key: "ready", label: "Ready", tone: nil},
     %{key: "running", label: "Running", tone: "live"},
@@ -162,12 +167,15 @@ defmodule ArbiterWeb.BoardLive do
   # One switch for the whole install, because there is one scheduler. Pausing
   # leaves in-flight work alone — it only stops the queue draining.
   def handle_event("toggle_scheduler", _params, socket) do
-    if Autopilot.running?(Autopilot) do
-      if Autopilot.paused?(Autopilot),
-        do: Autopilot.resume(Autopilot),
-        else: Autopilot.pause(Autopilot)
+    if scheduler_running?() do
+      case toggle_scheduler() do
+        :ok ->
+          {:noreply, refresh_board(socket)}
 
-      {:noreply, refresh_board(socket)}
+        {:error, _reason} ->
+          {:noreply,
+           put_flash(socket, :error, "The board scheduler didn't answer — try that again.")}
+      end
     else
       {:noreply, put_flash(socket, :error, "The board scheduler isn't running on this install.")}
     end
@@ -209,9 +217,15 @@ defmodule ArbiterWeb.BoardLive do
     id = socket.assigns.confirm_stop
 
     socket =
-      case Worker.stop(id, :normal) do
-        :ok -> put_flash(socket, :info, "Stopped the worker on #{id}.")
-        {:error, :not_found} -> put_flash(socket, :error, "No worker registered for #{id}.")
+      case stop_worker_now(id) do
+        :ok ->
+          put_flash(socket, :info, "Stopped the worker on #{id}.")
+
+        {:error, :not_found} ->
+          put_flash(socket, :error, "No worker registered for #{id}.")
+
+        {:error, reason} ->
+          put_flash(socket, :error, "Could not stop the worker on #{id}: #{inspect(reason)}")
       end
 
     {:noreply, socket |> assign(:confirm_stop, nil) |> refresh_board()}
@@ -235,10 +249,17 @@ defmodule ArbiterWeb.BoardLive do
 
   # ---- what a landing means ------------------------------------------------
 
+  # A card released over the column it started in did nothing, whatever column
+  # that is. This has to come first: without it a Running card picked up and
+  # put straight back down falls through to the stop-the-worker prompt below,
+  # which is one stray click from destroying live work the operator never
+  # meant to touch.
+  defp dropped(socket, _id, same, same), do: socket
+
   # Running is not a drop target. The whole point of the scheduler is that a
   # person does not decide *when* — so say what the card is waiting for
   # instead of pretending the drag did something.
-  defp dropped(socket, id, from, "running") when from != "running" do
+  defp dropped(socket, id, _from, "running") do
     put_flash(
       socket,
       :error,
@@ -310,8 +331,22 @@ defmodule ArbiterWeb.BoardLive do
   end
 
   defp stop_worker(socket, id) do
-    _ = Worker.stop(id, :normal)
+    _ = stop_worker_now(id)
     socket
+  end
+
+  # `Worker.stop/3` defaults to `:infinity`, and `GenServer.stop/3` *exits the
+  # caller* when the worker is already gone (a `:noproc` race against
+  # `whereis/1`) or dies for a reason other than the one asked for. Neither is
+  # survivable here: this runs in the LiveView, which is the operator's only
+  # view of the fleet, so a worker wedged in `terminate/2` must not be able to
+  # take the board down with it or hang it forever.
+  defp stop_worker_now(id) do
+    Worker.stop(id, :normal, @stop_timeout_ms)
+  rescue
+    e -> {:error, e}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # Back to `:open` so `Snapshot` counts it as Ready again. A worker leaves its
@@ -330,12 +365,27 @@ defmodule ArbiterWeb.BoardLive do
   # ---- reads ----------------------------------------------------------------
 
   # The board the *scheduler* sees, so the reasons on screen are the reasons it
-  # is acting on. When the autopilot isn't running there is nothing to drain
-  # the queue, which is exactly what `paused: true` renders.
+  # is acting on — but derived *here*, in this LiveView, not fetched from the
+  # autopilot. The only thing that process contributes to a board read is the
+  # pause flag, and asking it for the whole snapshot would put every open
+  # board behind one mailbox: behind each other, and behind whatever the
+  # autopilot is doing. Dispatch broadcasts `:started` mid-flight, so the
+  # boards refreshing on that would be queueing against the very promotion
+  # they are refreshing to show.
+  #
+  # When the autopilot isn't running at all there is nothing to drain the
+  # queue, which is exactly what `paused: true` renders.
   defp refresh_board(socket) do
     running? = scheduler_running?()
-    opts = [now: DateTime.utc_now(), ready_order: socket.assigns.ready_order]
-    board = read_board(running?, opts, socket.assigns.now)
+    paused? = not running? or scheduler_paused?()
+
+    opts = [
+      now: DateTime.utc_now(),
+      ready_order: socket.assigns.ready_order,
+      paused: paused?
+    ]
+
+    board = read_board(opts, socket.assigns.now)
 
     socket
     |> assign(:board, board)
@@ -346,20 +396,44 @@ defmodule ArbiterWeb.BoardLive do
   # A read that raises must not take the page down — five empty columns and a
   # `paused` board say "we cannot see anything right now", which is true and
   # is the only honest thing to render.
-  defp read_board(running?, opts, now) do
-    if running? do
-      Autopilot.board(Autopilot, opts)
-    else
-      Snapshot.load(Keyword.put(opts, :paused, true))
-    end
+  defp read_board(opts, now) do
+    Snapshot.load(opts)
   rescue
     _ -> Snapshot.empty(now)
+  catch
+    :exit, _ -> Snapshot.empty(now)
   end
 
   defp scheduler_running? do
     Autopilot.running?(Autopilot)
   rescue
     _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  # Bounded and exit-safe for the same reason the read is: the switch is on the
+  # board, and a scheduler that has just died or is slow to answer must leave
+  # the operator with a board and a flash, not a dead LiveView.
+  defp toggle_scheduler do
+    if scheduler_paused?(),
+      do: Autopilot.resume(Autopilot),
+      else: Autopilot.pause(Autopilot)
+  rescue
+    e -> {:error, e}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # A short budget and a caught exit, because this is on the render path: a
+  # scheduler that cannot answer promptly is treated as one that is not
+  # draining the queue, which is the reading that under-promises.
+  defp scheduler_paused? do
+    Autopilot.paused?(Autopilot, @scheduler_call_timeout_ms)
+  rescue
+    _ -> true
+  catch
+    :exit, _ -> true
   end
 
   defp load_workspaces(socket) do
