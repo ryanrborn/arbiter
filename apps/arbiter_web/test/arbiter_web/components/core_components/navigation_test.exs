@@ -79,6 +79,14 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
       assert html =~ "lg:hidden"
       assert html =~ "hero-bars-3"
     end
+
+    test "derives the mobile menu id from the id attr so two top_navs on one page don't collide" do
+      html = render_component(&top_nav/1, %{items: @items, current_path: "/", id: "second-nav"})
+
+      assert html =~ ~s(id="second-nav-mobile-menu")
+      assert html =~ "second-nav-mobile-menu&quot;,&quot;attr&quot;:&quot;open&quot;"
+      refute html =~ "top-nav-mobile-menu"
+    end
   end
 
   describe "filter_tabs/1" do
@@ -114,6 +122,21 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
 
       assert html =~ ~s(phx-click="filter-select")
       assert html =~ ~s(phx-value-tab="open")
+    end
+
+    test "renders <.link patch> to tab_path instead of a phx-click button when tab_path is set" do
+      tabs = [%{label: "Open", value: "open", count: 1}]
+
+      html =
+        render_component(&filter_tabs/1, %{
+          tabs: tabs,
+          active: "open",
+          tab_path: fn value -> "/tasks?filter=#{value}" end
+        })
+
+      assert html =~ ~s(href="/tasks?filter=open")
+      assert html =~ ~s(data-phx-link="patch")
+      refute html =~ "phx-click"
     end
   end
 
@@ -179,13 +202,53 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
       assert html =~ ~s(phx-value-page="2")
       assert html =~ ~s(phx-value-page="4")
     end
+
+    test "Prev/Next buttons are type=\"button\" so they can't submit an enclosing form" do
+      html =
+        render_component(&pager/1, %{
+          page: 3,
+          total_pages: 7,
+          total_count: 84,
+          event: "page-select"
+        })
+
+      assert element_containing(html, "Prev") =~ ~s(type="button")
+      assert element_containing(html, "Next") =~ ~s(type="button")
+    end
+
+    test "renders <.link patch> to page_path instead of a phx-click button when page_path is set" do
+      html =
+        render_component(&pager/1, %{
+          page: 3,
+          total_pages: 7,
+          total_count: 84,
+          page_path: fn page -> "/tasks?page=#{page}" end
+        })
+
+      assert element_containing(html, "Prev") =~ ~s(href="/tasks?page=2")
+      assert element_containing(html, "Next") =~ ~s(href="/tasks?page=4")
+      refute html =~ "phx-click"
+    end
+
+    test "page_path still falls back to a disabled button at the boundaries" do
+      html =
+        render_component(&pager/1, %{
+          page: 1,
+          total_pages: 7,
+          total_count: 84,
+          page_path: fn page -> "/tasks?page=#{page}" end
+        })
+
+      assert element_containing(html, "Prev") =~ "disabled"
+      refute element_containing(html, "Prev") =~ "href"
+    end
   end
 
   describe "see_all_link/1" do
-    test "defaults to href \"#\" and label \"See all\"" do
-      html = render_component(&see_all_link/1, %{})
+    test "defaults to label \"See all\"" do
+      html = render_component(&see_all_link/1, %{href: "/workers"})
 
-      assert html =~ ~s(href="#")
+      assert html =~ ~s(href="/workers")
       assert html =~ "See all"
       assert html =~ "hero-arrow-right"
     end

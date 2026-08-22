@@ -46,6 +46,10 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
     default: nil,
     doc: "request path, for prefix-matching the active item"
 
+  attr :id, :string,
+    default: "top-nav",
+    doc: "base id — the mobile menu's id is derived as \"\#{id}-mobile-menu\"; override when rendering more than one top_nav on a page"
+
   attr :class, :any, default: nil
   attr :rest, :global
 
@@ -80,7 +84,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         </.link>
       </nav>
 
-      <details class="dropdown lg:hidden" id="top-nav-mobile-menu">
+      <details class="dropdown lg:hidden" id={"#{@id}-mobile-menu"}>
         <summary class="list-none cursor-pointer flex items-center justify-center" aria-label="Menu">
           <.icon name="hero-bars-3" size={20} />
         </summary>
@@ -88,7 +92,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
           <li :for={item <- @items}>
             <.link
               navigate={item.href}
-              phx-click={JS.remove_attribute("open", to: "#top-nav-mobile-menu")}
+              phx-click={JS.remove_attribute("open", to: "##{@id}-mobile-menu")}
               class={[
                 "font-[family-name:var(--font-sans)] text-xs",
                 nav_active?(@current_path, item.href) && "font-medium text-[var(--text-title)]",
@@ -119,16 +123,33 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
   The status filter on an index page. Counts live inside the tab; a tab only
   takes a state color when its count is nonzero and it wants attention.
 
+  Pass `event` for socket-local state, or `tab_path` when the screen drives
+  the active tab through the URL (the usual case for index screens — see
+  `ArbiterWeb.ListComponents.filter_tabs/1` for the pattern this mirrors):
+  with `tab_path` set, tabs render as `<.link patch={...}>` instead of
+  `<button phx-click>`, so the active filter survives in the URL and the
+  page stays shareable / back-button safe.
+
   ## Examples
 
       <.filter_tabs
         tabs={[%{label: "All", value: "all", count: 84}, %{label: "Open", value: "open", count: 12}]}
         active="all" event="filter-select"
       />
+
+      <.filter_tabs
+        tabs={[%{label: "All", value: "all"}, %{label: "Open", value: "open"}]}
+        active={@filter} tab_path={&"/tasks?filter=\#{&1}"}
+      />
   """
   attr :tabs, :list, required: true, doc: "list of strings or %{label, value, count, tone}"
   attr :active, :string, default: nil
   attr :event, :string, default: nil, doc: ~s(phx-click event name, pushed with phx-value-tab)
+
+  attr :tab_path, :any,
+    default: nil,
+    doc: "1-arity function mapping a tab value to a patch path — renders <.link patch={...}> instead of <button phx-click>"
+
   attr :class, :any, default: nil
   attr :rest, :global
 
@@ -141,25 +162,38 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
       ]}
       {@rest}
     >
+      <.link
+        :for={{tab, index} <- Enum.with_index(@tabs)}
+        :if={@tab_path}
+        patch={@tab_path.(filter_tab_value(tab))}
+        class={filter_tab_class(tab, index, @active)}
+      >
+        {filter_tab_label(tab)}{filter_tab_count(tab)}
+      </.link>
       <button
         :for={{tab, index} <- Enum.with_index(@tabs)}
+        :if={!@tab_path}
         type="button"
         phx-click={@event}
         phx-value-tab={filter_tab_value(tab)}
-        class={[
-          "cursor-pointer border-0 px-3 py-[5px] font-[family-name:var(--font-mono)] text-[11.5px] font-medium",
-          index > 0 && "border-l border-solid border-[var(--border-strong)]",
-          filter_tab_active?(tab, @active) && "bg-[var(--arb-done-wash)] text-[var(--text-title)]",
-          !filter_tab_active?(tab, @active) && filter_tab_tone(tab) == "attention" &&
-            "bg-transparent text-[var(--arb-attention)]",
-          !filter_tab_active?(tab, @active) && filter_tab_tone(tab) != "attention" &&
-            "bg-transparent text-[var(--text-secondary)]"
-        ]}
+        class={filter_tab_class(tab, index, @active)}
       >
         {filter_tab_label(tab)}{filter_tab_count(tab)}
       </button>
     </div>
     """
+  end
+
+  defp filter_tab_class(tab, index, active) do
+    [
+      "cursor-pointer border-0 px-3 py-[5px] font-[family-name:var(--font-mono)] text-[11.5px] font-medium",
+      index > 0 && "border-l border-solid border-[var(--border-strong)]",
+      filter_tab_active?(tab, active) && "bg-[var(--arb-done-wash)] text-[var(--text-title)]",
+      !filter_tab_active?(tab, active) && filter_tab_tone(tab) == "attention" &&
+        "bg-transparent text-[var(--arb-attention)]",
+      !filter_tab_active?(tab, active) && filter_tab_tone(tab) != "attention" &&
+        "bg-transparent text-[var(--text-secondary)]"
+    ]
   end
 
   defp filter_tab_label(tab) when is_binary(tab), do: tab
@@ -225,14 +259,28 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
   right. The total is always shown, even on a single page; the Prev/Next
   group hides itself when there's only one page.
 
+  Pass `event` for socket-local state, or `page_path` when the screen drives
+  the current page through the URL (the usual case for index screens — see
+  `ArbiterWeb.ListComponents.pager/1` for the pattern this mirrors): with
+  `page_path` set, Prev/Next render as `<.link patch={...}>` instead of
+  `<.button phx-click>`, so the page survives in the URL and stays
+  shareable / back-button safe.
+
   ## Examples
 
       <.pager page={2} total_pages={7} total_count={84} event="page-select" />
+
+      <.pager page={@page} total_pages={@total_pages} total_count={@total} page_path={&"/tasks?page=\#{&1}"} />
   """
   attr :page, :integer, default: 1
   attr :total_pages, :integer, default: 1
   attr :total_count, :integer, default: 0
   attr :event, :string, default: nil, doc: ~s(phx-click event name, pushed with phx-value-page)
+
+  attr :page_path, :any,
+    default: nil,
+    doc: "1-arity function mapping a page number to a patch path — renders <.link patch={...}> instead of <.button phx-click>"
+
   attr :class, :any, default: nil
   attr :rest, :global
 
@@ -243,28 +291,36 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         {@total_count} total
       </span>
       <span :if={@total_pages > 1} class="flex items-center gap-1.5">
-        <.button
-          size="sm"
-          disabled={@page <= 1}
-          phx-click={@event}
-          phx-value-page={@page - 1}
-        >
+        <.link :if={@page_path && @page > 1} patch={@page_path.(@page - 1)} class={pager_link_class()}>
+          Prev
+        </.link>
+        <.button :if={!(@page_path && @page > 1)} type="button" size="sm" disabled={@page <= 1} phx-click={@event} phx-value-page={@page - 1}>
           Prev
         </.button>
         <span class="px-1 font-[family-name:var(--font-mono)] text-[11.5px] tabular-nums text-[var(--text-secondary)]">
           {@page} / {@total_pages}
         </span>
-        <.button
-          size="sm"
-          disabled={@page >= @total_pages}
-          phx-click={@event}
-          phx-value-page={@page + 1}
-        >
+        <.link :if={@page_path && @page < @total_pages} patch={@page_path.(@page + 1)} class={pager_link_class()}>
+          Next
+        </.link>
+        <.button :if={!(@page_path && @page < @total_pages)} type="button" size="sm" disabled={@page >= @total_pages} phx-click={@event} phx-value-page={@page + 1}>
           Next
         </.button>
       </span>
     </div>
     """
+  end
+
+  # Matches Core.button's variant="secondary" size="sm" appearance for the
+  # enabled Prev/Next link — an <a> can't carry a meaningful `disabled`
+  # state, so the boundary case still falls through to a real disabled
+  # <.button> above.
+  defp pager_link_class do
+    [
+      "inline-flex items-center gap-[7px] rounded-[var(--radius-field)] border border-solid font-medium",
+      "cursor-pointer h-[var(--control-sm)] px-[10px] text-[11.5px]",
+      "bg-[var(--surface-card)] border-[var(--border-strong)] text-[var(--arb-text-body)] hover:bg-[var(--arb-raised-hover)]"
+    ]
   end
 
   @doc """
@@ -276,7 +332,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
       <.see_all_link href="/workers" />
       <.see_all_link href="/workers/history" label="History" />
   """
-  attr :href, :string, default: "#"
+  attr :href, :string, required: true
   attr :label, :string, default: "See all"
   attr :class, :any, default: nil
   attr :rest, :global
