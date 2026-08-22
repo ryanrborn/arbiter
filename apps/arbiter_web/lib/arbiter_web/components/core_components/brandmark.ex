@@ -43,7 +43,9 @@ defmodule ArbiterWeb.CoreComponents.Brandmark do
   # Below the wordmark's 120px minimum width there is no room for the word —
   # the geometry table calls for icon-only, and picking that fallback is the
   # component's job, not the caller's (same as the icon's display/micro switch).
-  defp wordmark(%{size: size} = assigns) when size < 120, do: icon(assigns)
+  defp wordmark(%{size: size} = assigns) when size < 120 do
+    icon(assign(assigns, :size, round(size * 48 / 200)))
+  end
 
   defp wordmark(assigns) do
     colors = tone_colors(assigns.tone)
@@ -61,14 +63,14 @@ defmodule ArbiterWeb.CoreComponents.Brandmark do
     # the child. The "noformat" sigil modifier exempts this template from
     # that reformatting instead.
     ~H"""
-    <svg viewBox="0 0 200 48" width={@size} height={@height} role="img" aria-label="arbiter" class={@class} {@rest}><path d="M38 7 H28 V41 H38" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><path d="M162 7 H172 V41 H162" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><text x="100" y="33" text-anchor="middle" font-family="Geist Mono, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="500" font-size="26" letter-spacing="-0.035em" fill={@colors.content} style={content_style(@colors.content_opacity)}>arbiter</text></svg>
+    <svg viewBox="0 0 200 48" width={@size} height={@height} role="img" aria-label="arbiter" class={@class} {@rest}><rect :if={@colors.tile_bg} width="200" height="48" rx="8" fill={@colors.tile_bg} /><path d="M38 7 H28 V41 H38" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><path d="M162 7 H172 V41 H162" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><text x="100" y="33" text-anchor="middle" font-family="Geist Mono, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="500" font-size="26" letter-spacing="-0.035em" fill={@colors.content}>arbiter</text></svg>
     """noformat
   end
 
   # Below 16px the brackets stop resolving — fall back to the tile+slash
   # favicon geometry regardless of requested tone.
   defp icon(%{size: size} = assigns) when size < 16 do
-    colors = tone_colors(assigns.tone)
+    colors = tone_colors("tile")
     assigns = assign(assigns, :colors, colors)
 
     ~H"""

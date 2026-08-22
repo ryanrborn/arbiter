@@ -61,6 +61,14 @@ defmodule ArbiterWeb.CoreComponents.BrandmarkTest do
       assert html =~ "var(--arb-live)"
     end
 
+    test "below 16px falls back to the tile regardless of requested tone" do
+      html = render_component(&brandmark/1, form: "icon", size: 12, tone: "accent")
+
+      assert html =~ ~s(rx="8")
+      assert html =~ "var(--arb-live)"
+      assert html =~ ~s(d="M25 47 L39 17")
+    end
+
     test "never mirrors the slash or rounds its caps" do
       html = render_component(&brandmark/1, form: "icon", size: 32, tone: "accent")
 
@@ -110,6 +118,27 @@ defmodule ArbiterWeb.CoreComponents.BrandmarkTest do
 
       assert html =~ ">arbiter<"
       assert html =~ ~s(stroke-width="5")
+    end
+
+    test "scales the sub-120px icon fallback to the wordmark's height, not its width" do
+      html = render_component(&brandmark/1, form: "wordmark", size: 100, tone: "accent")
+
+      assert html =~ ~s(width="24" height="24")
+    end
+
+    test "tile tone renders the lime tile background" do
+      html = render_component(&brandmark/1, form: "wordmark", size: 160, tone: "tile")
+
+      assert html =~ ~s(rx="8")
+      assert html =~ "var(--arb-live)"
+      assert html =~ ">arbiter<"
+    end
+
+    test "mono tone renders the word at full opacity" do
+      html = render_component(&brandmark/1, form: "wordmark", size: 160, tone: "mono")
+
+      assert html =~ ">arbiter<"
+      refute html =~ "opacity: 0.5"
     end
   end
 end
