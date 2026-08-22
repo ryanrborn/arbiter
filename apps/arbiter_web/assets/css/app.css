@@ -27,8 +27,8 @@
   on Elixir colors. Build your own at: https://daisyui.com/theme-generator/ */
 @plugin "../vendor/daisyui-theme" {
   name: "dark";
-  default: false;
-  prefersdark: true;
+  default: true;
+  prefersdark: false;
   color-scheme: "dark";
   --color-base-100: oklch(20.5% 0.014 258);
   --color-base-200: oklch(19% 0.014 258);
@@ -62,7 +62,7 @@
 
 @plugin "../vendor/daisyui-theme" {
   name: "light";
-  default: true;
+  default: false;
   prefersdark: false;
   color-scheme: "light";
   --color-base-100: oklch(100% 0 0);
@@ -176,19 +176,19 @@
   --font-weight-semibold: 600;
 
   /* --- type scale --- */
-  --text-page-title: 28px;
-  --text-section: 20px;
-  --text-card-title: 15px;
-  --text-base: 13px;
-  --text-data: 12px;
-  --text-eyebrow: 10.5px;
+  --arb-text-page-title: 28px;
+  --arb-text-section: 20px;
+  --arb-text-card-title: 15px;
+  --arb-text-base: 13px;
+  --arb-text-data: 12px;
+  --arb-text-eyebrow: 10.5px;
 
-  --text-card-title-dense: 12.5px;
-  --text-data-dense: 11.5px;
-  --text-data-micro: 10.5px;
+  --arb-text-card-title-dense: 12.5px;
+  --arb-text-data-dense: 11.5px;
+  --arb-text-data-micro: 10.5px;
 
   --leading-tight: 1.25;
-  --leading-snug: 1.4;
+  --arb-leading-snug: 1.4;
   --leading-body: 1.6;
   --leading-log: 1.7;
 
@@ -196,12 +196,12 @@
   --tracking-section: -0.02em;
   --tracking-eyebrow: 0.12em;
 
-  --type-page-title: var(--font-weight-semibold) var(--text-page-title) / var(--leading-tight) var(--font-sans);
-  --type-section: var(--font-weight-semibold) var(--text-section) / var(--leading-tight) var(--font-sans);
-  --type-card-title: var(--font-weight-medium) var(--text-card-title) / var(--leading-snug) var(--font-sans);
-  --type-body: var(--font-weight-regular) var(--text-base) / var(--leading-body) var(--font-sans);
-  --type-data: var(--font-weight-regular) var(--text-data) / var(--leading-snug) var(--font-mono);
-  --type-eyebrow: var(--font-weight-medium) var(--text-eyebrow) / 1.4 var(--font-mono);
+  --type-page-title: var(--font-weight-semibold) var(--arb-text-page-title) / var(--leading-tight) var(--font-sans);
+  --type-section: var(--font-weight-semibold) var(--arb-text-section) / var(--leading-tight) var(--font-sans);
+  --type-card-title: var(--font-weight-medium) var(--arb-text-card-title) / var(--arb-leading-snug) var(--font-sans);
+  --type-body: var(--font-weight-regular) var(--arb-text-base) / var(--leading-body) var(--font-sans);
+  --type-data: var(--font-weight-regular) var(--arb-text-data) / var(--arb-leading-snug) var(--font-mono);
+  --type-eyebrow: var(--font-weight-medium) var(--arb-text-eyebrow) / 1.4 var(--font-mono);
 
   /* --- spacing (4px grid) and row heights --- */
   --space-1: 4px;
@@ -230,7 +230,7 @@
 
   /* --- shape --- */
   --radius-chip: 2px;
-  --radius-field: 3px;
+  --arb-radius-field: 3px;
   --radius-panel: 4px;
   --radius-pill: 99px;
 
@@ -245,8 +245,8 @@
   --dur-instant: 120ms;
   --dur-hover: 150ms;
   --dur-bar: 500ms;
-  --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
-  --ease-in-out: cubic-bezier(0.4, 0, 0.4, 1);
+  --arb-ease-out: cubic-bezier(0.2, 0, 0.2, 1);
+  --arb-ease-in-out: cubic-bezier(0.4, 0, 0.4, 1);
   --pulse-period: 1.4s;
   --ping-period: 1.8s;
 }
@@ -309,18 +309,21 @@
 }
 
 /* Minimal element defaults so the console look applies without repeating
-   itself in every component. */
-html { background: var(--surface-page) }
-body {
-  background: var(--surface-page);
-  color: var(--text-body);
-  font: var(--type-body);
-  -webkit-font-smoothing: antialiased;
+   itself in every component. Layered under @layer base so daisyUI components
+   and Tailwind utilities (both compiled into their own layers) still win. */
+@layer base {
+  html { background: var(--surface-page) }
+  body {
+    background: var(--surface-page);
+    color: var(--text-body);
+    font: var(--type-body);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--text-link) }
+  a:hover { color: var(--text-link-hover) }
+  code, pre, .arb-mono { font-family: var(--font-mono) }
+  .arb-tabular { font-variant-numeric: tabular-nums }
 }
-a { color: var(--text-link) }
-a:hover { color: var(--text-link-hover) }
-code, pre, .arb-mono { font-family: var(--font-mono) }
-.arb-tabular { font-variant-numeric: tabular-nums }
 
 /* Add variants based on LiveView classes */
 @custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
