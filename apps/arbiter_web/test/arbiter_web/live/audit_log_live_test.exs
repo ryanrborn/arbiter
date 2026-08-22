@@ -13,147 +13,95 @@ defmodule ArbiterWeb.AuditLogLiveTest do
   end
 
   describe "mount" do
-    test "renders the header + empty state when there are no recent changes", %{
+    test "renders the header, filter tabs, and search input when there are no events", %{
       conn: conn,
       ws: _ws
     } do
       {:ok, _view, html} = live(conn, "/audit")
 
       assert html =~ "Audit log"
-      assert html =~ "Since"
-      assert html =~ "Until"
-      assert html =~ "Task id contains"
-      assert html =~ "Export as JSON"
+      assert html =~ "All"
+      assert html =~ "Human"
+      assert html =~ "Machine"
+      assert html =~ "subject:"
     end
 
-    test "lists existing paper_trail versions", %{conn: conn, ws: ws} do
-      {:ok, _task} =
-        Ash.create(Issue, %{title: "audit me", workspace_id: ws.id})
+    test "lists a create event for the subject/action columns", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "audit me", workspace_id: ws.id})
 
       {:ok, _view, html} = live(conn, "/audit")
 
-      assert html =~ "audit me"
-      # The action badge for a create
+      assert html =~ task.id
       assert html =~ "create"
     end
   end
 
-  describe "entity_id query param" do
-    # The task detail screen's Activity panel is a filtered view of this
-    # page — its "History" link hands the subject over as a query param.
-    test "seeds the entity filter from the URL", %{conn: conn, ws: ws} do
-      {:ok, mine} = Ash.create(Issue, %{title: "deep linked task", workspace_id: ws.id})
-      {:ok, _other} = Ash.create(Issue, %{title: "unrelated task", workspace_id: ws.id})
+  describe "status transitions" do
+    test "renders the literal old → new status, never prettified", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "transition me", workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, "/audit?entity_id=#{mine.id}")
+      {:ok, _task} =
+        Ash.update(task, %{status: :in_progress, change_origin: "cli"}, action: :update)
 
-      assert html =~ "deep linked task"
-      refute html =~ "unrelated task"
-      assert html =~ ~s(value="#{mine.id}")
-    end
+      {:ok, _view, html} = live(conn, "/audit")
 
-    test "an unknown param leaves the unfiltered list alone", %{conn: conn, ws: ws} do
-      {:ok, _task} = Ash.create(Issue, %{title: "still listed", workspace_id: ws.id})
-
-      {:ok, _view, html} = live(conn, "/audit?bogus=1")
-
-      assert html =~ "still listed"
+      assert html =~ "open → in_progress"
     end
   end
 
-  describe "filters" do
-    test "filter by action=close shows only close events", %{conn: conn, ws: ws} do
-      {:ok, b1} = Ash.create(Issue, %{title: "to close", workspace_id: ws.id})
-      {:ok, _b2} = Ash.create(Issue, %{title: "remains open", workspace_id: ws.id})
-      {:ok, _closed} = Ash.update(b1, %{}, action: :close)
+  describe "actor filter tabs" do
+    test "Machine tab narrows to worker-attributed events", %{conn: conn, ws: ws} do
+      {:ok, human_task} = Ash.create(Issue, %{title: "human edit", workspace_id: ws.id})
+      {:ok, machine_task} = Ash.create(Issue, %{title: "machine edit", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.update(human_task, %{status: :in_progress, change_origin: "cli"}, action: :update)
+
+      {:ok, _} =
+        Ash.update(machine_task, %{status: :in_progress, change_origin: "worker:au-1"},
+          action: :update
+        )
 
       {:ok, view, _html} = live(conn, "/audit")
 
-      html =
-        render_change(view, "filter", %{
-          "filters" => %{"action" => "close", "since" => "", "until" => "", "entity_id" => ""}
-        })
+      html = render_click(view, "filter-tab", %{"tab" => "machine"})
 
-      # close events show up
-      assert html =~ "close"
-      # 'create' for "remains open" should NOT be in the table body when filtered to :close
-      # (it may still appear in the select option list, so we check for the task id)
-      refute html =~ "remains open"
+      assert html =~ "worker:au-1"
+      refute html =~ ~r/>\s*cli\s*</
     end
 
-    test "filter by entity_id substring narrows to that task", %{conn: conn, ws: ws} do
+    test "Human tab narrows to non-worker-attributed events", %{conn: conn, ws: ws} do
+      {:ok, human_task} = Ash.create(Issue, %{title: "human edit", workspace_id: ws.id})
+      {:ok, machine_task} = Ash.create(Issue, %{title: "machine edit", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.update(human_task, %{status: :in_progress, change_origin: "cli"}, action: :update)
+
+      {:ok, _} =
+        Ash.update(machine_task, %{status: :in_progress, change_origin: "worker:au-1"},
+          action: :update
+        )
+
+      {:ok, view, _html} = live(conn, "/audit")
+
+      html = render_click(view, "filter-tab", %{"tab" => "human"})
+
+      assert html =~ ~r/>\s*cli\s*</
+      refute html =~ "worker:au-1"
+    end
+  end
+
+  describe "query search" do
+    test "subject: narrows to the matching task id", %{conn: conn, ws: ws} do
       {:ok, b1} = Ash.create(Issue, %{title: "first", workspace_id: ws.id})
       {:ok, b2} = Ash.create(Issue, %{title: "second", workspace_id: ws.id})
 
       {:ok, view, _html} = live(conn, "/audit")
 
-      html =
-        render_change(view, "filter", %{
-          "filters" => %{
-            "action" => "all",
-            "since" => "",
-            "until" => "",
-            "entity_id" => b1.id
-          }
-        })
+      html = render_change(view, "search", %{"q" => "subject:#{b1.id}"})
 
       assert html =~ b1.id
       refute html =~ b2.id
-    end
-
-    test "filter by future-only date range yields empty", %{conn: conn, ws: ws} do
-      {:ok, _b} = Ash.create(Issue, %{title: "today", workspace_id: ws.id})
-
-      {:ok, view, _html} = live(conn, "/audit")
-
-      future = Date.utc_today() |> Date.add(7) |> Date.to_iso8601()
-
-      html =
-        render_change(view, "filter", %{
-          "filters" => %{
-            "since" => future,
-            "until" => "",
-            "entity_id" => "",
-            "action" => "all"
-          }
-        })
-
-      assert html =~ "No matching audit events."
-    end
-
-    test "reset clears filters", %{conn: conn, ws: ws} do
-      {:ok, _b} = Ash.create(Issue, %{title: "before reset", workspace_id: ws.id})
-
-      {:ok, view, _html} = live(conn, "/audit")
-
-      future = Date.utc_today() |> Date.add(7) |> Date.to_iso8601()
-
-      _ =
-        render_change(view, "filter", %{
-          "filters" => %{
-            "since" => future,
-            "until" => "",
-            "entity_id" => "",
-            "action" => "all"
-          }
-        })
-
-      html = render_click(view, "reset", %{})
-      assert html =~ "before reset"
-    end
-  end
-
-  describe "export" do
-    test "export click pushes a download event with JSON payload", %{conn: conn, ws: ws} do
-      {:ok, _b} = Ash.create(Issue, %{title: "for export", workspace_id: ws.id})
-
-      {:ok, view, _html} = live(conn, "/audit")
-
-      assert render_hook(view, "export", %{}) |> is_binary()
-
-      # The push_event lands as a :push_event message visible via Phoenix.LiveView
-      # internals; the cleanest assert is that the click doesn't crash.
-      # (A more elaborate assertion would use a phx-hook in JS land.)
     end
   end
 end
