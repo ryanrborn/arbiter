@@ -48,7 +48,8 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
 
   attr :id, :string,
     default: "top-nav",
-    doc: "base id — the mobile menu's id is derived as \"\#{id}-mobile-menu\"; override when rendering more than one top_nav on a page"
+    doc:
+      "base id — the mobile menu's id is derived as \"\#{id}-mobile-menu\"; override when rendering more than one top_nav on a page"
 
   attr :class, :any, default: nil
   attr :rest, :global
@@ -148,7 +149,8 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
 
   attr :tab_path, :any,
     default: nil,
-    doc: "1-arity function mapping a tab value to a patch path — renders <.link patch={...}> instead of <button phx-click>"
+    doc:
+      "1-arity function mapping a tab value to a patch path — renders <.link patch={...}> instead of <button phx-click>"
 
   attr :class, :any, default: nil
   attr :rest, :global
@@ -279,7 +281,8 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
 
   attr :page_path, :any,
     default: nil,
-    doc: "1-arity function mapping a page number to a patch path — renders <.link patch={...}> instead of <.button phx-click>"
+    doc:
+      "1-arity function mapping a page number to a patch path — renders <.link patch={...}> instead of <.button phx-click>"
 
   attr :class, :any, default: nil
   attr :rest, :global
@@ -294,16 +297,34 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         <.link :if={@page_path && @page > 1} patch={@page_path.(@page - 1)} class={pager_link_class()}>
           Prev
         </.link>
-        <.button :if={!(@page_path && @page > 1)} type="button" size="sm" disabled={@page <= 1} phx-click={@event} phx-value-page={@page - 1}>
+        <.button
+          :if={!(@page_path && @page > 1)}
+          type="button"
+          size="sm"
+          disabled={@page <= 1}
+          phx-click={@event}
+          phx-value-page={@page - 1}
+        >
           Prev
         </.button>
         <span class="px-1 font-[family-name:var(--font-mono)] text-[11.5px] tabular-nums text-[var(--text-secondary)]">
           {@page} / {@total_pages}
         </span>
-        <.link :if={@page_path && @page < @total_pages} patch={@page_path.(@page + 1)} class={pager_link_class()}>
+        <.link
+          :if={@page_path && @page < @total_pages}
+          patch={@page_path.(@page + 1)}
+          class={pager_link_class()}
+        >
           Next
         </.link>
-        <.button :if={!(@page_path && @page < @total_pages)} type="button" size="sm" disabled={@page >= @total_pages} phx-click={@event} phx-value-page={@page + 1}>
+        <.button
+          :if={!(@page_path && @page < @total_pages)}
+          type="button"
+          size="sm"
+          disabled={@page >= @total_pages}
+          phx-click={@event}
+          phx-value-page={@page + 1}
+        >
           Next
         </.button>
       </span>
