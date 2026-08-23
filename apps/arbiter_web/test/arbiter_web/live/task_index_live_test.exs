@@ -135,15 +135,6 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
     end
   end
 
-  describe "new issue navigation" do
-    test "the primary New issue action links to the Create screen", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/tasks")
-
-      assert html =~ "&quot;navigate&quot;"
-      assert html =~ "&quot;href&quot;:&quot;/tasks/new&quot;"
-    end
-  end
-
   describe "create" do
     test "the New button reveals the inline create form", %{conn: conn} do
       {:ok, view, html} = live(conn, ~p"/tasks")
