@@ -15,13 +15,17 @@ defmodule ArbiterWeb.WorkerIndexLive do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias ArbiterWeb.Paging
+  alias ArbiterWeb.CoreComponents.Domain
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Navigation
+  require Ash.Query
 
   @workers_topic "workers"
 
   @filters [
-    {"All", :all},
-    {"Running", :running},
-    {"Awaiting", :awaiting}
+    %{label: "All", value: "all"},
+    %{label: "Running", value: "running"},
+    %{label: "Awaiting", value: "awaiting"}
   ]
 
   @impl true
@@ -103,7 +107,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   defp matches_status?(_p, _), do: false
 
-  defp parse_status(%{"status" => s}) when s in ~w(running awaiting),
+  defp parse_status(%{"status" => s}) when s in ~w(running awaiting all),
     do: String.to_existing_atom(s)
 
   defp parse_status(_), do: :all
@@ -117,82 +121,86 @@ defmodule ArbiterWeb.WorkerIndexLive do
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <div class="flex items-start justify-between gap-4">
-          <.index_header
+          <Domain.index_header
             icon="hero-cpu-chip"
             title={"Active #{cap_plural(@worker_label)}"}
             count={@total_count}
             subtitle={"Every #{@worker_label} running right now. Finished runs live on the history index."}
           />
-          <.live_badge live={@live} />
+          <Feedback.live_badge live={@live} />
         </div>
 
-        <.filter_tabs
+        <Navigation.filter_tabs
           tabs={@filters}
-          active={@status}
-          tab_path={fn value -> worker_path(value, 1) end}
+          active={Atom.to_string(@status)}
+          tab_path={fn value -> worker_path(String.to_existing_atom(value), 1) end}
         />
 
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-4">
-            <.empty_state :if={@workers == []} id="workers-empty" icon="hero-moon">
+        <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
+          <div :if={@workers == []} id="workers-empty">
+            <Feedback.empty_state icon="hero-moon">
               No active {plural(@worker_label)} match this filter.
-            </.empty_state>
+            </Feedback.empty_state>
+          </div>
 
-            <ul :if={@workers != []} id="workers" class="flex flex-col gap-3">
-              <li
-                :for={p <- @workers}
-                class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-info/50"
+          <ul :if={@workers != []} id="workers" class="flex flex-col gap-3">
+            <li :for={p <- @workers} class="flex flex-col">
+              <.link
+                navigate={~p"/workers/#{p.task_id}"}
+                class={[
+                  "flex items-center justify-between gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid",
+                  "border-[var(--border-default)] bg-[var(--arb-panel-alt)] hover:bg-[var(--arb-raised-hover)]",
+                  "transition-colors duration-[var(--dur-hover)] no-underline"
+                ]}
               >
-                <div class="flex items-center justify-between gap-2">
-                  <.link
-                    navigate={~p"/workers/#{p.task_id}"}
-                    class="flex items-center gap-2 min-w-0 group"
-                  >
-                    <span class="relative flex h-2.5 w-2.5 shrink-0">
-                      <span
-                        :if={p.status == :running}
-                        class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-75"
-                      >
-                      </span>
-                      <span class={[
-                        "relative inline-flex h-2.5 w-2.5 rounded-full",
-                        status_dot_class(p.status)
-                      ]}>
-                      </span>
+                <div class="flex items-center gap-2 min-w-0 flex-1">
+                  <span class="relative flex h-2.5 w-2.5 shrink-0">
+                    <span
+                      :if={p.status == :running}
+                      class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--arb-live)] opacity-75"
+                    >
                     </span>
-                    <code class="text-xs font-semibold group-hover:text-info transition-colors truncate">
-                      {p.task_id}
-                    </code>
-                  </.link>
-                  <span class={["badge badge-sm shrink-0", awaiting_review_status_class(p)]}>
+                    <span class={[
+                      "relative inline-flex h-2.5 w-2.5 rounded-full",
+                      status_dot_class(p.status)
+                    ]}>
+                    </span>
+                  </span>
+                  <code class="text-[11px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-secondary)] group-hover:text-[var(--text-link)] transition-colors truncate">
+                    {p.task_id}
+                  </code>
+                </div>
+                <div class="flex items-center gap-2 flex-none">
+                  <span class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] whitespace-nowrap" title="Elapsed">
+                    {humanize_seconds(runtime_seconds(p.started_at, @now))}
+                  </span>
+                  <span class={["text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium", awaiting_review_status_class(p)]}>
                     {awaiting_review_status_label(p)}
                   </span>
                 </div>
-                <div class="flex items-center justify-between gap-2 mt-1.5 text-xs text-base-content/60">
-                  <span class="truncate">{p.workspace_name}</span>
-                  <span class="font-mono tabular-nums shrink-0" title="Elapsed">
-                    {humanize_seconds(runtime_seconds(p.started_at, @now))}
-                  </span>
-                </div>
-              </li>
-            </ul>
+              </.link>
+              <span class="text-[10.5px] text-[var(--text-label)] px-3 py-1">
+                {p.workspace_name}
+              </span>
+            </li>
+          </ul>
 
-            <.pager
-              page={@page}
-              total_pages={@total_pages}
-              total_count={@total_count}
-              page_path={fn page -> worker_path(@status, page) end}
-            />
-          </div>
-        </section>
+          <Navigation.pager
+            page={@page}
+            total_pages={@total_pages}
+            total_count={@total_count}
+            page_path={fn page -> worker_path(@status, page) end}
+          />
+        </ArbiterWeb.CoreComponents.Core.panel>
 
         <div class="flex items-center gap-4">
-          <.back_link />
+          <Navigation.back_link />
           <.link
             navigate={~p"/workers/history"}
-            class="link link-hover text-sm flex items-center gap-1"
+            class="text-[12.5px] font-medium text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors flex items-center gap-1.5"
           >
-            <.icon name="hero-clock" class="size-4" /> History (completed {plural(@worker_label)})
+            <ArbiterWeb.CoreComponents.Core.icon name="hero-clock" size={14} />
+            History (completed {plural(@worker_label)})
           </.link>
         </div>
       </div>
@@ -211,23 +219,23 @@ defmodule ArbiterWeb.WorkerIndexLive do
   defp humanize_seconds(s) when s < 3600, do: "#{div(s, 60)}m"
   defp humanize_seconds(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
 
-  defp status_dot_class(:running), do: "bg-info"
-  defp status_dot_class(:awaiting), do: "bg-warning"
-  defp status_dot_class(:awaiting_review), do: "bg-warning"
-  defp status_dot_class(:awaiting_review_gate), do: "bg-warning"
-  defp status_dot_class(:completed), do: "bg-success"
-  defp status_dot_class(:failed), do: "bg-error"
-  defp status_dot_class(_), do: "bg-base-content/30"
+  defp status_dot_class(:running), do: "bg-[var(--arb-live)]"
+  defp status_dot_class(:awaiting), do: "bg-[var(--arb-attention)]"
+  defp status_dot_class(:awaiting_review), do: "bg-[var(--arb-attention)]"
+  defp status_dot_class(:awaiting_review_gate), do: "bg-[var(--arb-attention)]"
+  defp status_dot_class(:completed), do: "bg-[var(--arb-done)]"
+  defp status_dot_class(:failed), do: "bg-[var(--arb-fail)]"
+  defp status_dot_class(_), do: "bg-[var(--text-label)]"
 
-  defp worker_status_class(:idle), do: "badge-ghost"
-  defp worker_status_class(:resuming), do: "badge-info"
-  defp worker_status_class(:running), do: "badge-info"
-  defp worker_status_class(:awaiting), do: "badge-warning"
-  defp worker_status_class(:awaiting_review_gate), do: "badge-warning"
-  defp worker_status_class(:awaiting_review), do: "badge-warning"
-  defp worker_status_class(:completed), do: "badge-success"
-  defp worker_status_class(:failed), do: "badge-error"
-  defp worker_status_class(_), do: ""
+  defp worker_status_class(:idle), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
+  defp worker_status_class(:resuming), do: "bg-[color-mix(in_oklch,var(--arb-info)_20%,transparent)] text-[var(--arb-info)]"
+  defp worker_status_class(:running), do: "bg-[color-mix(in_oklch,var(--arb-live)_20%,transparent)] text-[var(--arb-live)]"
+  defp worker_status_class(:awaiting), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+  defp worker_status_class(:awaiting_review_gate), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+  defp worker_status_class(:awaiting_review), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+  defp worker_status_class(:completed), do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
+  defp worker_status_class(:failed), do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+  defp worker_status_class(_), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
 
   defp worker_status_label(:idle), do: "Idle"
   defp worker_status_label(:resuming), do: "Resuming"
@@ -260,12 +268,26 @@ defmodule ArbiterWeb.WorkerIndexLive do
   defp awaiting_review_status_class(%{status: :awaiting_review, meta: meta}) when is_map(meta) do
     case Map.get(meta, :last_merger_status) do
       merger_status when is_map(merger_status) ->
-        ArbiterWeb.WorkerDetailLive.approval_class(merger_status)
+        approval_badge_class(merger_status)
 
       _ ->
-        "badge-warning"
+        worker_status_class(:awaiting_review)
     end
   end
 
   defp awaiting_review_status_class(worker), do: worker_status_class(worker.status)
+
+  defp approval_badge_class(%{status: :merged}), do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
+  defp approval_badge_class(%{status: :closed}), do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+  defp approval_badge_class(status) when is_map(status) do
+    case status do
+      %{blocks: blocks} when is_list(blocks) and blocks != [] ->
+        "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+      %{approved_by: approved} when is_list(approved) and approved != [] ->
+        "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
+      _ ->
+        "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+    end
+  end
+  defp approval_badge_class(_), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
 end
