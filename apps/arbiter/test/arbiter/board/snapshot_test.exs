@@ -219,8 +219,7 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert board.ready == []
       assert board.running == []
-      assert board.needs_you == []
-      assert board.merge_queue == []
+      assert board.waiting == []
       assert board.closed_today == []
       assert board.promote == nil
       assert board.slots_total == 0
@@ -292,7 +291,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board = derive(workers: [worker("bd-a", :awaiting_review_gate)])
 
       assert [%{id: "bd-a", activity: "in review"}] = board.running
-      assert board.needs_you == []
+      assert board.waiting == []
     end
 
     test "reviewer workers fold into the author's card instead of queueing twice" do
@@ -308,40 +307,144 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
-  describe "needs you column" do
-    test "collects failed and human-awaiting workers with why they stopped" do
+  describe "waiting column" do
+    test "unions the parked and the merge-parked, longest wait first" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :failed, %{
+              step_started_at: ~U[2026-08-22 11:00:00Z],
+              meta: %{stop_reason: %{category: :exited_without_done, summary: "review rejected"}}
+            }),
+            worker("bd-b", :awaiting, %{
+              step_started_at: @now,
+              meta: %{await_reason: "needs a decision"}
+            }),
+            worker("bd-c", :awaiting_review, %{mr_ref: "!41", step_started_at: @yesterday}),
+            worker("bd-d", :running)
+          ]
+        )
+
+      assert ids(board.waiting) == ["bd-c", "bd-a", "bd-b"]
+      refute Map.has_key?(board, :needs_you)
+      refute Map.has_key?(board, :merge_queue)
+    end
+
+    test "carries the halt reason of a parked worker and the merge fields of a merge-parked one" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting, %{meta: %{await_reason: "needs a decision"}}),
+            worker("bd-b", :awaiting_review, %{
+              step_started_at: @yesterday,
+              mr_ref: "!42",
+              merger_url: "https://example.test/42",
+              meta: %{last_merger_status: %{approved: false}}
+            })
+          ]
+        )
+
+      assert [
+               %{id: "bd-b", mr_ref: "!42", merger_url: "https://example.test/42"},
+               %{id: "bd-a", reason: "needs a decision"}
+             ] = board.waiting
+
+      assert [%{merger_status: %{approved: false}}, %{merger_status: nil}] = board.waiting
+    end
+  end
+
+  # The flag is not "which status" — it is "has the system run out of things to
+  # try on its own", read off each Waiting card.
+  defp flags(board), do: Map.new(board.waiting, &{&1.id, &1.needs_you})
+
+  describe "the needs-you flag" do
+    test "a worker that asked a human a question always flags" do
+      board = derive(workers: [worker("bd-a", :awaiting, %{meta: %{await_reason: "which?"}})])
+
+      assert flags(board) == %{"bd-a" => true}
+    end
+
+    test "a merge request the forge is still chewing on does not flag" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting_review, %{meta: %{last_merger_status: %{approved: false}}}),
+            worker("bd-b", :awaiting_review, %{meta: %{}})
+          ]
+        )
+
+      assert flags(board) == %{"bd-a" => false, "bd-b" => false}
+    end
+
+    test "an approved merge request blocked on anything the Watchdog cannot clear flags" do
+      board =
+        derive(
+          workers:
+            for {id, reason} <- [
+                  {"bd-a", :conflict},
+                  {"bd-b", :needs_approval},
+                  {"bd-c", :needs_nonauthor_approval},
+                  # Nothing in Arbiter takes a PR out of draft or resolves a
+                  # forge-specific block, so these are the operator's too.
+                  {"bd-d", :draft},
+                  {"bd-e", :blocked_other}
+                ] do
+              worker(id, :awaiting_review, %{
+                meta: %{last_merger_status: %{approved: true, block_reason: reason}}
+              })
+            end
+        )
+
+      assert flags(board) == %{
+               "bd-a" => true,
+               "bd-b" => true,
+               "bd-c" => true,
+               "bd-d" => true,
+               "bd-e" => true
+             }
+    end
+
+    test "a block the system still auto-handles does not flag" do
+      board =
+        derive(
+          workers:
+            for {id, reason} <- [{"bd-a", :behind_base}, {"bd-b", :ci_failed}] do
+              worker(id, :awaiting_review, %{
+                meta: %{last_merger_status: %{approved: true, block_reason: reason}}
+              })
+            end
+        )
+
+      assert flags(board) == %{"bd-a" => false, "bd-b" => false}
+    end
+
+    test "a parked failure with nothing left in flight flags" do
       board =
         derive(
           workers: [
             worker("bd-a", :failed, %{
               meta: %{stop_reason: %{category: :exited_without_done, summary: "review rejected"}}
-            }),
-            worker("bd-b", :awaiting, %{meta: %{await_reason: "needs a decision"}}),
-            worker("bd-c", :running)
+            })
           ]
         )
 
-      assert ids(board.needs_you) == ["bd-a", "bd-b"]
-      assert [%{reason: "review rejected"}, %{reason: "needs a decision"}] = board.needs_you
+      assert flags(board) == %{"bd-a" => true}
     end
-  end
 
-  describe "merge queue column" do
-    test "collects workers parked on an open merge request, longest wait first" do
+    # A review-timeout failure keeps the last poll's merger status in its meta,
+    # so a terminal worker can still be carrying an auto-resolvable block. The
+    # worker is dead either way — the status wins over the stale block.
+    test "a parked failure flags even carrying a stale auto-resolvable block" do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review, %{
-              mr_ref: "!42",
-              step_started_at: @now,
-              merger_url: "https://example.test/42"
-            }),
-            worker("bd-b", :awaiting_review, %{mr_ref: "!41", step_started_at: @yesterday})
+            worker("bd-a", :failed, %{
+              meta: %{last_merger_status: %{approved: true, block_reason: :ci_failed}}
+            })
           ]
         )
 
-      assert ids(board.merge_queue) == ["bd-b", "bd-a"]
-      assert [_, %{mr_ref: "!42", merger_url: "https://example.test/42"}] = board.merge_queue
+      assert flags(board) == %{"bd-a" => true}
     end
   end
 
