@@ -8,7 +8,12 @@ defmodule ArbiterWeb.WorkspaceDetail.StandingOrdersComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
+
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, :order_error, nil)}
@@ -75,63 +80,58 @@ defmodule ArbiterWeb.WorkspaceDetail.StandingOrdersComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <section id={@id} class="card bg-base-200 border border-base-300 shadow-sm">
-      <div class="card-body p-4 gap-3">
-        <h2 class="font-semibold flex items-center gap-2">
-          <.icon name="hero-clipboard-document-check" class="size-5 text-base-content/60" />
-          Standing orders <span class="text-base-content/40 font-normal">({length(@orders)})</span>
-        </h2>
-        <p class="text-xs text-base-content/50 -mt-1">
-          Short imperative directives surfaced high in every worker's <code>arb prime</code> briefing.
-        </p>
-
-        <ul :if={@orders != []} id="standing-orders" class="flex flex-col gap-1.5">
-          <li
-            :for={{order, idx} <- Enum.with_index(@orders)}
-            class="flex items-start gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
-          >
-            <span class="text-xs text-base-content/40 font-mono mt-0.5 w-5 shrink-0">
-              {idx + 1}.
-            </span>
-            <span class="text-sm flex-1 min-w-0 break-words">{order_text(order)}</span>
-            <button
-              type="button"
-              phx-click="rm_order"
-              phx-target={@myself}
-              phx-value-index={idx}
-              class="btn btn-ghost btn-xs text-error shrink-0"
-              aria-label="Remove standing order"
-              data-confirm="Remove this standing order?"
-            >
-              <.icon name="hero-trash" class="size-4" />
-            </button>
-          </li>
-        </ul>
-
-        <p :if={@orders == []} class="text-sm text-base-content/50 italic">
-          No standing orders set.
-        </p>
-
-        <.form
-          for={%{}}
-          as={:order}
-          phx-submit="add_order"
-          phx-target={@myself}
-          class="flex gap-2 items-start mt-1"
+    <div id={@id} class={pane_class("standing_orders", @section)}>
+      <.rows>
+        <.setting_row
+          name="Standing orders"
+          consequence="every worker reads these at the top of its arb prime briefing, on every dispatch in this workspace"
         >
-          <input
-            type="text"
-            name="order[text]"
-            placeholder="e.g. Check your inbox at the start of every step"
-            class="input input-sm flex-1"
-          />
-          <.button type="submit" class="btn btn-sm">
-            <.icon name="hero-plus" class="size-4" /> Add
-          </.button>
-        </.form>
-        <p :if={@order_error} class="text-sm text-error">{@order_error}</p>
-      </div>
-    </section>
+          <:below>
+            <ul :if={@orders != []} id="standing-orders" class={list_class()}>
+              <.list_row :for={{order, idx} <- Enum.with_index(@orders)} class="items-start">
+                <span class="mt-px w-5 shrink-0 text-[var(--text-label)]">{idx + 1}.</span>
+                <span class="min-w-0 flex-1 break-words">{order_text(order)}</span>
+                <.remove_button
+                  label="Remove standing order"
+                  phx-click="rm_order"
+                  phx-target={@myself}
+                  phx-value-index={idx}
+                  data-confirm="Remove this standing order?"
+                />
+              </.list_row>
+            </ul>
+
+            <Feedback.empty_state
+              :if={@orders == []}
+              icon="hero-clipboard-document-check"
+              detail="standing_orders is empty"
+            >
+              No standing orders — workers get the default briefing only.
+            </Feedback.empty_state>
+
+            <.form
+              for={%{}}
+              as={:order}
+              phx-submit="add_order"
+              phx-target={@myself}
+              class="mt-2 flex items-center gap-2"
+            >
+              <Forms.input
+                name="order[text]"
+                value=""
+                size="sm"
+                mono={false}
+                placeholder="Check your inbox at the start of every step"
+                class="flex-1"
+              />
+              <Core.button type="submit" size="sm">Add</Core.button>
+            </.form>
+          </:below>
+        </.setting_row>
+      </.rows>
+
+      <p :if={@order_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">{@order_error}</p>
+    </div>
     """
   end
 end

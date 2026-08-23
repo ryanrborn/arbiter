@@ -8,7 +8,11 @@ defmodule ArbiterWeb.WorkspaceDetail.RoutingAdaptersComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
+
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, :routing_adapter_error, nil)}
@@ -71,69 +75,64 @@ defmodule ArbiterWeb.WorkspaceDetail.RoutingAdaptersComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <div id={@id} class="border-t border-base-300 pt-3">
-      <h3 class="font-semibold text-sm flex items-center gap-2">
-        Round-robin adapters
-        <span class="text-base-content/40 font-normal">({length(@routing_adapters)})</span>
-      </h3>
-      <p class="text-xs text-base-content/50 mt-1">
-        <code>routing.adapters</code>
-        — ordered list of agent-config overrides cycled per dispatch (<code>round_robin</code> policy only).
-      </p>
-
-      <ul :if={@routing_adapters != []} id="routing-adapters" class="flex flex-col gap-1.5 mt-2">
-        <li
-          :for={{adapter, index} <- @routing_adapters}
-          class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
+    <div id={@id} class={pane_class("routing", @section)}>
+      <.rows>
+        <.setting_row
+          name="Round-robin adapters"
+          consequence="routing.adapters — the round_robin policy takes the next one of these per dispatch; every other policy ignores them"
         >
-          <span class="badge badge-sm badge-ghost">{index}</span>
-          <span class="text-xs font-mono text-base-content/60 flex-1">
-            {routing_entry_summary(adapter)}
-          </span>
-          <button
-            type="button"
-            phx-click="rm_routing_adapter"
-            phx-target={@myself}
-            phx-value-index={index}
-            class="btn btn-ghost btn-xs text-error shrink-0"
-            aria-label={"Remove adapter #{index}"}
-            data-confirm={"Remove routing.adapters[#{index}]?"}
-          >
-            <.icon name="hero-trash" class="size-4" />
-          </button>
-        </li>
-      </ul>
+          <:below>
+            <ul :if={@routing_adapters != []} id="routing-adapters" class={list_class()}>
+              <.list_row :for={{adapter, index} <- @routing_adapters}>
+                <span class="w-5 text-[var(--text-label)]">{index}</span>
+                <span class="flex-1 truncate text-[var(--text-secondary)]">
+                  {routing_entry_summary(adapter)}
+                </span>
+                <.remove_button
+                  label={"Remove adapter #{index}"}
+                  phx-click="rm_routing_adapter"
+                  phx-target={@myself}
+                  phx-value-index={index}
+                  data-confirm={"Remove routing.adapters[#{index}]?"}
+                />
+              </.list_row>
+            </ul>
 
-      <.form
-        for={%{}}
-        as={:adapter}
-        phx-submit="add_routing_adapter"
-        phx-target={@myself}
-        class="flex flex-wrap gap-2 items-start mt-2"
-      >
-        <input
-          type="text"
-          name="adapter[model_tier]"
-          placeholder="model_tier, e.g. economy"
-          class="input input-sm flex-1"
-        />
-        <input
-          type="text"
-          name="adapter[thinking]"
-          placeholder="thinking, e.g. low"
-          class="input input-sm flex-1"
-        />
-        <input
-          type="text"
-          name="adapter[model]"
-          placeholder="model (raw override, optional)"
-          class="input input-sm flex-1"
-        />
-        <.button type="submit" class="btn btn-sm">
-          <.icon name="hero-plus" class="size-4" /> Add
-        </.button>
-      </.form>
-      <p :if={@routing_adapter_error} class="text-sm text-error mt-1">
+            <.form
+              for={%{}}
+              as={:adapter}
+              phx-submit="add_routing_adapter"
+              phx-target={@myself}
+              class="mt-2 flex flex-wrap items-center gap-2"
+            >
+              <Forms.input
+                name="adapter[model_tier]"
+                value=""
+                size="sm"
+                placeholder="economy"
+                class="flex-1"
+              />
+              <Forms.input
+                name="adapter[thinking]"
+                value=""
+                size="sm"
+                placeholder="low"
+                class="flex-1"
+              />
+              <Forms.input
+                name="adapter[model]"
+                value=""
+                size="sm"
+                placeholder="raw model override"
+                class="flex-1"
+              />
+              <Core.button type="submit" size="sm">Add</Core.button>
+            </.form>
+          </:below>
+        </.setting_row>
+      </.rows>
+
+      <p :if={@routing_adapter_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
         {@routing_adapter_error}
       </p>
     </div>

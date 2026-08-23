@@ -37,7 +37,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   attr :disabled, :boolean, default: false
   attr :required, :boolean, default: false
   attr :class, :any, default: nil
-  attr :rest, :global, include: ~w(pattern title minlength maxlength step min max)
+  attr :rest, :global, include: ~w(pattern title minlength maxlength step min max autocomplete)
 
   def input(assigns) do
     ~H"""
@@ -329,7 +329,10 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   attr :disabled, :boolean, default: false
   attr :required, :boolean, default: false
   attr :class, :any, default: nil
-  attr :rest, :global
+
+  # `value` is what a checked box submits; a plain global list omits it, and
+  # without it every checked box in a form posts the browser default "on".
+  attr :rest, :global, include: ~w(value)
 
   def checkbox(assigns) do
     ~H"""
@@ -350,17 +353,24 @@ defmodule ArbiterWeb.CoreComponents.Forms do
         class="sr-only peer"
         {@rest}
       />
+      <%!-- Painted from the input's own `:checked` state, never from the
+           assign: a checkbox with no `phx-change` still has to fill in the
+           moment it is clicked, and here that box is what says whether the
+           value is encrypted at rest. `checked` seeds the DOM; CSS follows
+           it from there. --%>
       <span class={[
         "flex-none inline-flex items-center justify-center w-[14px] h-[14px] rounded-[var(--radius-chip)] border border-solid transition-all",
         @align == "start" && "mt-[2px]",
-        @checked && "bg-[var(--accent-primary)] border-[var(--accent-primary)]",
-        !@checked && "bg-transparent border-[var(--border-strong)]",
+        "bg-transparent border-[var(--border-strong)]",
+        "peer-checked:bg-[var(--accent-primary)] peer-checked:border-[var(--accent-primary)]",
+        "peer-checked:[&>span]:text-[var(--accent-primary-ink)]",
         "peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring-focus)] peer-focus-visible:ring-offset-2"
       ]}>
-        <span
-          :if={@checked}
-          class="text-[9px] font-[600] text-[var(--accent-primary-ink)] font-[family-name:var(--font-mono)]"
-        >
+        <%!-- The tick reaches its colour through an arbitrary child variant,
+             the way the switch knob does in `WorkspaceDetail.Rows`: it is a
+             descendant of the peer's sibling, not a sibling itself, so a bare
+             `peer-checked:` on it would never match. --%>
+        <span class="text-[9px] font-[600] text-transparent font-[family-name:var(--font-mono)]">
           ✓
         </span>
       </span>
