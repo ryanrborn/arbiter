@@ -49,7 +49,7 @@ defmodule ArbiterWeb.SkillIndexLive do
 
   @impl true
   def handle_event("select", %{"id" => id}, socket) do
-    {:noreply, assign(socket, :selected_id, id)}
+    {:noreply, assign(socket, selected_id: id, editing: nil, form_error: nil, name_warning: nil)}
   end
 
   def handle_event("new", _params, socket) do
@@ -167,12 +167,29 @@ defmodule ArbiterWeb.SkillIndexLive do
     case Skills.get_skill(id) do
       {:ok, skill} ->
         case Skills.update_skill(skill, attrs_fun.(skill)) do
-          {:ok, _updated} -> {:noreply, refresh(socket)}
+          {:ok, updated} -> {:noreply, socket |> resync_editing_form(updated) |> refresh()}
           {:error, _} -> {:noreply, put_flash(socket, :error, "Could not update skill.")}
         end
 
       {:error, :not_found} ->
         {:noreply, put_flash(socket, :error, "Skill not found.")}
+    end
+  end
+
+  # The edit form (if open) holds its own copy of activation_mode/code_only in
+  # form_activation/form_code_only; a toggle write below it must refresh that
+  # copy too, or a subsequent Save resubmits the stale value and clobbers the
+  # toggle that was just flipped.
+  defp resync_editing_form(socket, %Skills.Skill{} = updated) do
+    case socket.assigns.editing do
+      %Skills.Skill{id: id} when id == updated.id ->
+        socket
+        |> assign(:editing, updated)
+        |> assign(:form_activation, to_string(updated.activation_mode))
+        |> assign(:form_code_only, updated.code_only == true)
+
+      _ ->
+        socket
     end
   end
 
@@ -439,6 +456,10 @@ defmodule ArbiterWeb.SkillIndexLive do
               id={"skill-row-#{skill.id}"}
               phx-click="select"
               phx-value-id={skill.id}
+              tabindex="0"
+              role="button"
+              phx-key="Enter"
+              phx-keydown="select"
               class={[
                 "px-[11px] py-[9px] rounded-[3px] cursor-pointer border border-transparent",
                 @selected && @selected.id == skill.id &&
@@ -447,16 +468,20 @@ defmodule ArbiterWeb.SkillIndexLive do
               ]}
             >
               <div class="flex items-center gap-1.5">
-                <span class="font-medium text-[12px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]">
+                <span class={[
+                  "font-medium text-[12px] font-[family-name:var(--font-mono)]",
+                  @selected && @selected.id == skill.id && "text-[var(--text-title)]",
+                  !(@selected && @selected.id == skill.id) && "text-[var(--arb-text-body)]"
+                ]}>
                   {skill.name}
                 </span>
-                <ArbiterWeb.CoreComponents.Core.icon
+                <span
                   :if={Skills.bundled_skill?(skill.name)}
-                  name="hero-exclamation-triangle"
-                  size={10}
-                  color="var(--arb-attention)"
+                  class="font-medium text-[9.5px] font-[family-name:var(--font-mono)] text-[var(--arb-attention)]"
                   title="Collides with a bundled skill name"
-                />
+                >
+                  collides
+                </span>
                 <span
                   class={[
                     "ml-auto text-[10px] font-[family-name:var(--font-mono)] tabular-nums whitespace-nowrap",
@@ -472,12 +497,21 @@ defmodule ArbiterWeb.SkillIndexLive do
                 </span>
               </div>
               <div class="flex items-center gap-1 flex-wrap mt-1">
-                <.type_tag :if={skill.activation_mode == :always_on} type="auto" />
-                <.type_tag :if={skill.code_only} type="code only" />
+                <.type_tag
+                  :if={skill.activation_mode == :always_on}
+                  type="auto"
+                  title="Auto-invoked in every worker prompt where it applies"
+                />
+                <.type_tag
+                  :if={skill.code_only}
+                  type="code only"
+                  title="Only applies to code-producing tasks (feature/bug/chore)"
+                />
                 <.type_tag
                   :if={invoke_count(@usage_by_skill_id, skill) == 0}
                   type="never invoked"
                   dashed
+                  title="Materialized but never invoked"
                 />
               </div>
             </li>
@@ -490,12 +524,12 @@ defmodule ArbiterWeb.SkillIndexLive do
           >
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
-                <h2 class="font-medium text-[15px] font-[family-name:var(--font-mono)] text-[var(--arb-text-body)] m-0">
+                <h2 class="font-medium text-[15px] font-[family-name:var(--font-mono)] text-[var(--text-title)] m-0">
                   {@selected.name}
                 </h2>
                 <p
                   :if={metadata_gist(@selected.metadata)}
-                  class="mt-1 text-[12.5px] leading-[1.6] font-[family-name:var(--font-sans)] text-[var(--text-secondary)] max-w-[62ch]"
+                  class="mt-1 text-[12.5px] leading-[1.6] font-[family-name:var(--font-sans)] text-[var(--arb-text-body)] max-w-[62ch]"
                 >
                   {metadata_gist(@selected.metadata)}
                 </p>

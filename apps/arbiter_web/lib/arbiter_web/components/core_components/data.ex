@@ -142,10 +142,11 @@ defmodule ArbiterWeb.CoreComponents.Data do
   attr :type, :any, required: true
   attr :dashed, :boolean, default: false
   attr :class, :any, default: nil
+  attr :rest, :global
 
   def type_tag(assigns) do
     ~H"""
-    <span class={["badge badge-ghost", @dashed && "border-dashed", @class]}>{@type}</span>
+    <span class={["badge badge-ghost", @dashed && "border-dashed", @class]} {@rest}>{@type}</span>
     """
   end
 
