@@ -12,19 +12,99 @@ defmodule ArbiterWeb.SkillIndexLiveTest do
   end
 
   describe "index" do
-    test "lists skills", %{conn: conn} do
+    test "lists skills and auto-selects the first one into the detail pane", %{conn: conn} do
       skill = new_skill(%{metadata: %{"description" => "does a thing"}})
 
       {:ok, _view, html} = live(conn, ~p"/skills")
 
-      assert html =~ "/#{skill.name}"
+      assert html =~ skill.name
       assert html =~ "does a thing"
-      assert html =~ ~s(id="skills")
+      assert html =~ ~s(id="skills-list")
+      assert html =~ ~s(id="skill-detail")
     end
 
     test "shows empty state with no skills", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/skills")
       assert html =~ "No skills yet"
+    end
+
+    test "flags a name that collides with a bundled skill", %{conn: conn} do
+      new_skill(%{name: "code-review"})
+
+      {:ok, _view, html} = live(conn, ~p"/skills")
+
+      assert html =~ "Collides with a bundled skill name"
+    end
+  end
+
+  describe "detail selection" do
+    test "clicking a list item selects it into the detail pane", %{conn: conn} do
+      _first = new_skill(%{name: "aaa-skill"})
+      second = new_skill(%{name: "zzz-skill", metadata: %{"description" => "second one"}})
+
+      {:ok, view, _html} = live(conn, ~p"/skills")
+
+      html =
+        view
+        |> element("#skill-row-#{second.id}")
+        |> render_click()
+
+      assert html =~ "second one"
+    end
+
+    test "detail pane shows materialized/invoked/invoke-rate/scope and toggles with consequence hints",
+         %{conn: conn} do
+      skill = new_skill(%{code_only: true})
+
+      {:ok, _view, html} = live(conn, ~p"/skills")
+
+      assert html =~ "materialized"
+      assert html =~ "invoked"
+      assert html =~ "invoke rate"
+      assert html =~ "scope"
+      assert html =~ "feature · bug · chore"
+      assert html =~ "Auto-invoke"
+      assert html =~ "added to every worker prompt where it applies"
+      assert html =~ "Code-producing tasks only"
+      assert html =~ "skipped on decision and epic types"
+      assert html =~ skill.name
+    end
+
+    test "shows the never-invoked EmptyState when invoke count is zero", %{conn: conn} do
+      new_skill()
+
+      {:ok, _view, html} = live(conn, ~p"/skills")
+
+      assert html =~ "This skill has never been invoked. The loop pass will propose retiring it."
+      assert html =~ "materialized 0 times, invoked 0"
+    end
+  end
+
+  describe "toggles write through to the skill record" do
+    test "toggling auto-invoke flips activation_mode on the skill", %{conn: conn} do
+      skill = new_skill(%{activation_mode: :situational})
+
+      {:ok, view, _html} = live(conn, ~p"/skills")
+
+      view
+      |> element("#toggle-auto-invoke")
+      |> render_click()
+
+      {:ok, reloaded} = Skills.get_skill(skill.id)
+      assert reloaded.activation_mode == :always_on
+    end
+
+    test "toggling code-producing-tasks-only flips code_only on the skill", %{conn: conn} do
+      skill = new_skill(%{code_only: false})
+
+      {:ok, view, _html} = live(conn, ~p"/skills")
+
+      view
+      |> element("#toggle-code-only")
+      |> render_click()
+
+      {:ok, reloaded} = Skills.get_skill(skill.id)
+      assert reloaded.code_only == true
     end
   end
 
@@ -43,7 +123,7 @@ defmodule ArbiterWeb.SkillIndexLiveTest do
         })
         |> render_submit()
 
-      assert html =~ "/#{name}"
+      assert html =~ name
       assert {:ok, _} = Skills.get_skill(name)
     end
 
@@ -81,12 +161,12 @@ defmodule ArbiterWeb.SkillIndexLiveTest do
   end
 
   describe "edit" do
-    test "edits an existing skill's body", %{conn: conn} do
+    test "edits the selected skill's body from the detail pane", %{conn: conn} do
       skill = new_skill(%{body: "v1"})
 
       {:ok, view, _html} = live(conn, ~p"/skills")
 
-      view |> element("button", "Edit") |> render_click()
+      view |> element("#skill-detail button", "Edit") |> render_click()
 
       view
       |> form("form[phx-submit=save]", %{
@@ -100,13 +180,13 @@ defmodule ArbiterWeb.SkillIndexLiveTest do
   end
 
   describe "delete" do
-    test "deletes a skill", %{conn: conn} do
+    test "deletes the selected skill from the detail pane", %{conn: conn} do
       skill = new_skill()
 
       {:ok, view, _html} = live(conn, ~p"/skills")
 
       view
-      |> element("button[phx-click=delete][phx-value-id='#{skill.id}']")
+      |> element("#skill-detail button[phx-click=delete][phx-value-id='#{skill.id}']")
       |> render_click()
 
       assert {:error, :not_found} = Skills.get_skill(skill.id)

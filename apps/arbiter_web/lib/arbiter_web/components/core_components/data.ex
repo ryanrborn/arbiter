@@ -134,13 +134,19 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
       <.type_tag type={:bug_fix} />
       <.type_tag type="spike" />
+      <.type_tag type="never invoked" dashed />
+
+  `dashed` marks an add affordance or a dead-state flag (e.g. a skill that
+  has never been invoked) rather than a real category.
   """
   attr :type, :any, required: true
+  attr :dashed, :boolean, default: false
   attr :class, :any, default: nil
+  attr :rest, :global
 
   def type_tag(assigns) do
     ~H"""
-    <span class={["badge badge-ghost", @class]}>{@type}</span>
+    <span class={["badge badge-ghost", @dashed && "border-dashed", @class]} {@rest}>{@type}</span>
     """
   end
 

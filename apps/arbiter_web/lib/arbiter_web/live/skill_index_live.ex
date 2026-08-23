@@ -2,12 +2,21 @@ defmodule ArbiterWeb.SkillIndexLive do
   @moduledoc """
   Skill registry management at `/skills` — the operator's authoring UI for the
   system-wide, user-authored worker skill library (epic bd-xfc55c, child
-  bd-cj6i08).
+  bd-cj6i08), redesigned per the operator-console handoff, README §7
+  (bd-ahuwj5).
 
-  Full CRUD in one page: lists every skill, with an inline create/edit form
-  built around a plain **textarea** to write or paste a skill body, plus delete.
-  Skills are system-wide (not workspace-scoped) — one definition is shared
-  across the whole arbiter system.
+  List + detail split: the left list shows every skill with its
+  materialized/invoked counts; the right pane shows the selected skill's
+  detail, including two `Toggle`s that write through to the skill
+  record — `auto-invoke` (`activation_mode`) and `code-producing tasks only`
+  (`code_only`) — each carrying its one-line consequence. A skill that has
+  never been invoked shows an `EmptyState` explaining the loop pass will
+  propose retiring it.
+
+  Full CRUD remains: an inline create/edit form built around a plain
+  **textarea** to write or paste a skill body, plus delete, both reachable
+  from the detail pane's `Edit`/`Delete` actions (and `New skill` in the
+  header).
 
   Author-time guardrail: when the entered name collides with a bundled skill
   (spike bd-5tc1s0 finding #3 — workers always see the ~20 built-ins) a warning
@@ -25,6 +34,7 @@ defmodule ArbiterWeb.SkillIndexLive do
     {:ok,
      socket
      |> assign(:live, connected?(socket))
+     |> assign(:selected_id, nil)
      # editing: nil = form closed, :new = create, %Skill{} = editing that row
      |> assign(:editing, nil)
      |> assign(:form_name, "")
@@ -38,6 +48,10 @@ defmodule ArbiterWeb.SkillIndexLive do
   end
 
   @impl true
+  def handle_event("select", %{"id" => id}, socket) do
+    {:noreply, assign(socket, selected_id: id, editing: nil, form_error: nil, name_warning: nil)}
+  end
+
   def handle_event("new", _params, socket) do
     {:noreply,
      socket
@@ -130,11 +144,52 @@ defmodule ArbiterWeb.SkillIndexLive do
         {:noreply,
          socket
          |> put_flash(:info, "Deleted skill.")
-         |> assign(editing: nil)
+         |> assign(editing: nil, selected_id: nil)
          |> refresh()}
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Could not delete skill.")}
+    end
+  end
+
+  def handle_event("toggle_auto_invoke", %{"id" => id}, socket) do
+    toggle_skill(socket, id, fn skill ->
+      new_mode = if skill.activation_mode == :always_on, do: :situational, else: :always_on
+      %{activation_mode: new_mode}
+    end)
+  end
+
+  def handle_event("toggle_code_only", %{"id" => id}, socket) do
+    toggle_skill(socket, id, fn skill -> %{code_only: !skill.code_only} end)
+  end
+
+  defp toggle_skill(socket, id, attrs_fun) do
+    case Skills.get_skill(id) do
+      {:ok, skill} ->
+        case Skills.update_skill(skill, attrs_fun.(skill)) do
+          {:ok, updated} -> {:noreply, socket |> resync_editing_form(updated) |> refresh()}
+          {:error, _} -> {:noreply, put_flash(socket, :error, "Could not update skill.")}
+        end
+
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "Skill not found.")}
+    end
+  end
+
+  # The edit form (if open) holds its own copy of activation_mode/code_only in
+  # form_activation/form_code_only; a toggle write below it must refresh that
+  # copy too, or a subsequent Save resubmits the stale value and clobbers the
+  # toggle that was just flipped.
+  defp resync_editing_form(socket, %Skills.Skill{} = updated) do
+    case socket.assigns.editing do
+      %Skills.Skill{id: id} when id == updated.id ->
+        socket
+        |> assign(:editing, updated)
+        |> assign(:form_activation, to_string(updated.activation_mode))
+        |> assign(:form_code_only, updated.code_only == true)
+
+      _ ->
+        socket
     end
   end
 
@@ -163,7 +218,7 @@ defmodule ArbiterWeb.SkillIndexLive do
 
     {:noreply,
      socket
-     |> assign(editing: nil, form_error: nil, name_warning: nil)
+     |> assign(editing: nil, form_error: nil, name_warning: nil, selected_id: skill.id)
      |> put_flash(:info, flash)
      |> refresh()}
   end
@@ -181,9 +236,23 @@ defmodule ArbiterWeb.SkillIndexLive do
   end
 
   defp refresh(socket) do
+    skills = Skills.list_skills()
+
     socket
-    |> assign(:skills, Skills.list_skills())
+    |> assign(:skills, skills)
     |> assign(:usage_by_skill_id, load_usage_by_skill_id())
+    |> assign(:selected_id, reselect(socket.assigns[:selected_id], skills))
+  end
+
+  defp reselect(selected_id, skills) do
+    if Enum.any?(skills, &(&1.id == selected_id)) do
+      selected_id
+    else
+      case skills do
+        [first | _] -> first.id
+        [] -> nil
+      end
+    end
   end
 
   # Load every skill's usage row in one query, indexed by skill_id — avoids an
@@ -212,21 +281,21 @@ defmodule ArbiterWeb.SkillIndexLive do
   defp metadata_to_text(m) when is_map(m) and map_size(m) > 0, do: Jason.encode!(m)
   defp metadata_to_text(_), do: ""
 
-  defp error_message(%Ash.Error.Invalid{errors: errors}) do
-    errors |> Enum.map(&Exception.message/1) |> Enum.join("; ")
-  end
-
-  defp error_message(err) when is_exception(err), do: Exception.message(err)
-  defp error_message(err), do: inspect(err)
-
-  defp metadata_summary(m) when is_map(m) and map_size(m) > 0 do
+  defp metadata_gist(m) when is_map(m) and map_size(m) > 0 do
     case Map.get(m, "description") do
       d when is_binary(d) and d != "" -> d
       _ -> Jason.encode!(m)
     end
   end
 
-  defp metadata_summary(_), do: nil
+  defp metadata_gist(_), do: nil
+
+  defp error_message(%Ash.Error.Invalid{errors: errors}) do
+    errors |> Enum.map(&Exception.message/1) |> Enum.join("; ")
+  end
+
+  defp error_message(err) when is_exception(err), do: Exception.message(err)
+  defp error_message(err), do: inspect(err)
 
   # Read usage counts for a skill out of the preloaded @usage_by_skill_id map
   # (see refresh/1); returns 0 if the skill has no usage row yet.
@@ -244,31 +313,52 @@ defmodule ArbiterWeb.SkillIndexLive do
     end
   end
 
+  defp invoke_rate(usage_by_skill_id, skill) do
+    materialized = materialize_count(usage_by_skill_id, skill)
+    invoked = invoke_count(usage_by_skill_id, skill)
+
+    if materialized > 0 do
+      "#{round(invoked / materialized * 100)}%"
+    else
+      "0%"
+    end
+  end
+
+  defp scope_label(%{code_only: true}), do: "feature · bug · chore"
+  defp scope_label(_), do: "all task types"
+
+  defp selected_skill(skills, selected_id) do
+    Enum.find(skills, fn skill -> skill.id == selected_id end) || List.first(skills)
+  end
+
   @impl true
   def render(assigns) do
+    assigns = assign(assigns, :selected, selected_skill(assigns.skills, assigns.selected_id))
+
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
-        <.index_header
-          icon="hero-sparkles"
+        <ArbiterWeb.CoreComponents.Domain.index_header
+          icon="hero-clipboard-document-list"
           title="Skills"
           count={length(@skills)}
           subtitle="System-wide, user-authored worker skill library. Materialized into worker worktrees at dispatch."
         >
           <:actions>
             <div class="flex items-center gap-2">
-              <.live_badge live={@live} />
-              <.button
+              <ArbiterWeb.CoreComponents.Feedback.live_badge id="skills-live" live={@live} />
+              <ArbiterWeb.CoreComponents.Core.button
                 :if={@editing == nil}
                 phx-click="new"
                 variant="primary"
-                class="btn btn-sm btn-primary"
+                size="sm"
               >
-                <.icon name="hero-plus" class="size-4" /> New skill
-              </.button>
+                <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-plus" size={13} /></:icon>
+                New skill
+              </ArbiterWeb.CoreComponents.Core.button>
             </div>
           </:actions>
-        </.index_header>
+        </ArbiterWeb.CoreComponents.Domain.index_header>
 
         <section :if={@editing != nil} class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-3">
@@ -285,7 +375,11 @@ defmodule ArbiterWeb.SkillIndexLive do
               />
 
               <p :if={@name_warning} class="text-xs text-warning flex items-start gap-1">
-                <.icon name="hero-exclamation-triangle" class="size-4 shrink-0" />
+                <ArbiterWeb.CoreComponents.Core.icon
+                  name="hero-exclamation-triangle"
+                  size={14}
+                  class="shrink-0"
+                />
                 <span>{@name_warning}</span>
               </p>
 
@@ -329,102 +423,175 @@ defmodule ArbiterWeb.SkillIndexLive do
               <p :if={@form_error} class="text-sm text-error">{@form_error}</p>
 
               <div class="flex gap-2 mt-1">
-                <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
+                <ArbiterWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
                   {if @editing == :new, do: "Create", else: "Save"}
-                </.button>
-                <.button type="button" phx-click="cancel" class="btn btn-sm btn-ghost">
+                </ArbiterWeb.CoreComponents.Core.button>
+                <ArbiterWeb.CoreComponents.Core.button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  phx-click="cancel"
+                >
                   Cancel
-                </.button>
+                </ArbiterWeb.CoreComponents.Core.button>
               </div>
             </.form>
           </div>
         </section>
 
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-2">
-            <.empty_state :if={@skills == []} id="skills-empty" icon="hero-sparkles">
-              No skills yet. Create one to build the worker skill library.
-            </.empty_state>
+        <ArbiterWeb.CoreComponents.Feedback.empty_state :if={@skills == []} icon="hero-sparkles">
+          No skills yet. Create one to build the worker skill library.
+        </ArbiterWeb.CoreComponents.Feedback.empty_state>
 
-            <ul :if={@skills != []} id="skills" class="flex flex-col gap-1.5">
-              <li
-                :for={skill <- @skills}
-                class="rounded-box border border-base-300 bg-base-100 px-3 py-2"
-              >
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="badge badge-sm badge-ghost font-mono shrink-0">/{skill.name}</span>
-                  <span
-                    :if={Skills.bundled_skill?(skill.name)}
-                    class="badge badge-sm badge-warning badge-soft gap-1"
-                    title="Collides with a bundled skill name"
-                  >
-                    <.icon name="hero-exclamation-triangle" class="size-3" /> bundled name
-                  </span>
-                  <span
-                    :if={skill.activation_mode == :always_on}
-                    class="badge badge-sm badge-primary badge-soft"
-                    title="Auto-invoked in every worker prompt where it applies"
-                  >
-                    always-on
-                  </span>
-                  <span
-                    :if={skill.code_only}
-                    class="badge badge-sm badge-ghost"
-                    title="Only applies to code-producing tasks (feature/bug/chore)"
-                  >
-                    code-only
-                  </span>
-                  <span
-                    :if={
-                      materialize_count(@usage_by_skill_id, skill) > 0 and
-                        invoke_count(@usage_by_skill_id, skill) == 0
-                    }
-                    class="badge badge-sm badge-warning badge-soft"
-                    title="Materialized but never invoked"
-                  >
-                    unused
-                  </span>
-                  <span class="text-xs text-base-content/50">{byte_size(skill.body)} bytes</span>
-                  <span
-                    :if={materialize_count(@usage_by_skill_id, skill) > 0}
-                    class="text-xs text-base-content/60"
-                    title="Materialized / Invoked"
-                  >
-                    ↓ {materialize_count(@usage_by_skill_id, skill)} / ⧗ {invoke_count(
-                      @usage_by_skill_id,
-                      skill
-                    )}
-                  </span>
-                  <div class="ml-auto flex items-center gap-1">
-                    <.button
-                      phx-click="edit"
-                      phx-value-id={skill.id}
-                      class="btn btn-xs btn-ghost"
-                    >
-                      <.icon name="hero-pencil-square" class="size-3.5" /> Edit
-                    </.button>
-                    <.button
-                      phx-click="delete"
-                      phx-value-id={skill.id}
-                      data-confirm={"Delete skill #{skill.name}?"}
-                      class="btn btn-xs btn-ghost text-error"
-                    >
-                      <.icon name="hero-trash" class="size-3.5" /> Delete
-                    </.button>
-                  </div>
-                </div>
-                <p
-                  :if={metadata_summary(skill.metadata)}
-                  class="text-xs text-base-content/60 mt-1"
+        <div
+          :if={@skills != []}
+          class="grid grid-cols-[minmax(0,320px)_minmax(0,1fr)] gap-px bg-[var(--arb-line)] border border-[var(--arb-line)] rounded-[4px] overflow-hidden"
+        >
+          <ul
+            id="skills-list"
+            class="bg-[var(--arb-panel)] p-[10px] flex flex-col gap-1.5 list-none m-0"
+          >
+            <li
+              :for={skill <- @skills}
+              id={"skill-row-#{skill.id}"}
+              phx-click="select"
+              phx-value-id={skill.id}
+              tabindex="0"
+              role="button"
+              phx-key="Enter"
+              phx-keydown="select"
+              class={[
+                "px-[11px] py-[9px] rounded-[3px] cursor-pointer border border-transparent",
+                @selected && @selected.id == skill.id &&
+                  "bg-[var(--arb-raised)] border-[var(--arb-line-strong)] border-l-2 border-l-[var(--accent-primary)]",
+                !(@selected && @selected.id == skill.id) && "hover:bg-[var(--arb-raised-hover)]"
+              ]}
+            >
+              <div class="flex items-center gap-1.5">
+                <span class={[
+                  "font-medium text-[12px] font-[family-name:var(--font-mono)]",
+                  @selected && @selected.id == skill.id && "text-[var(--text-title)]",
+                  !(@selected && @selected.id == skill.id) && "text-[var(--arb-text-body)]"
+                ]}>
+                  {skill.name}
+                </span>
+                <span
+                  :if={Skills.bundled_skill?(skill.name)}
+                  class="font-medium text-[9.5px] font-[family-name:var(--font-mono)] text-[var(--arb-attention)]"
+                  title="Collides with a bundled skill name"
                 >
-                  {metadata_summary(skill.metadata)}
-                </p>
-              </li>
-            </ul>
-          </div>
-        </section>
+                  collides
+                </span>
+                <span
+                  class={[
+                    "ml-auto text-[10px] font-[family-name:var(--font-mono)] tabular-nums whitespace-nowrap",
+                    invoke_count(@usage_by_skill_id, skill) == 0 && "text-[var(--arb-text-ghost)]",
+                    invoke_count(@usage_by_skill_id, skill) > 0 && "text-[var(--text-label)]"
+                  ]}
+                  title="Materialized / Invoked"
+                >
+                  {materialize_count(@usage_by_skill_id, skill)} / {invoke_count(
+                    @usage_by_skill_id,
+                    skill
+                  )}
+                </span>
+              </div>
+              <div class="flex items-center gap-1 flex-wrap mt-1">
+                <.type_tag
+                  :if={skill.activation_mode == :always_on}
+                  type="auto"
+                  title="Auto-invoked in every worker prompt where it applies"
+                />
+                <.type_tag
+                  :if={skill.code_only}
+                  type="code only"
+                  title="Only applies to code-producing tasks (feature/bug/chore)"
+                />
+                <.type_tag
+                  :if={invoke_count(@usage_by_skill_id, skill) == 0}
+                  type="never invoked"
+                  dashed
+                  title="Materialized but never invoked"
+                />
+              </div>
+            </li>
+          </ul>
 
-        <.back_link />
+          <div
+            :if={@selected}
+            id="skill-detail"
+            class="bg-[var(--arb-chrome)] p-[18px] pb-[22px] flex flex-col gap-4"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <h2 class="font-medium text-[15px] font-[family-name:var(--font-mono)] text-[var(--text-title)] m-0">
+                  {@selected.name}
+                </h2>
+                <p
+                  :if={metadata_gist(@selected.metadata)}
+                  class="mt-1 text-[12.5px] leading-[1.6] font-[family-name:var(--font-sans)] text-[var(--arb-text-body)] max-w-[62ch]"
+                >
+                  {metadata_gist(@selected.metadata)}
+                </p>
+              </div>
+              <div class="flex items-center gap-2 flex-none">
+                <ArbiterWeb.CoreComponents.Core.button
+                  variant="secondary"
+                  size="sm"
+                  phx-click="edit"
+                  phx-value-id={@selected.id}
+                >
+                  Edit
+                </ArbiterWeb.CoreComponents.Core.button>
+                <ArbiterWeb.CoreComponents.Core.button
+                  variant="danger"
+                  size="sm"
+                  phx-click="delete"
+                  phx-value-id={@selected.id}
+                  data-confirm={"Delete skill #{@selected.name}?"}
+                >
+                  Delete
+                </ArbiterWeb.CoreComponents.Core.button>
+              </div>
+            </div>
+
+            <.data_list>
+              <:item label="materialized">{materialize_count(@usage_by_skill_id, @selected)}</:item>
+              <:item label="invoked">{invoke_count(@usage_by_skill_id, @selected)}</:item>
+              <:item label="invoke rate">{invoke_rate(@usage_by_skill_id, @selected)}</:item>
+              <:item label="scope">{scope_label(@selected)}</:item>
+            </.data_list>
+
+            <div class="border-t border-[var(--arb-line)] pt-4 flex flex-col gap-4">
+              <.toggle
+                id="toggle-auto-invoke"
+                checked={@selected.activation_mode == :always_on}
+                label="Auto-invoke"
+                hint="added to every worker prompt where it applies"
+                phx-click="toggle_auto_invoke"
+                phx-value-id={@selected.id}
+              />
+              <.toggle
+                id="toggle-code-only"
+                checked={@selected.code_only == true}
+                label="Code-producing tasks only"
+                hint="skipped on decision and epic types"
+                phx-click="toggle_code_only"
+                phx-value-id={@selected.id}
+              />
+            </div>
+
+            <ArbiterWeb.CoreComponents.Feedback.empty_state
+              :if={invoke_count(@usage_by_skill_id, @selected) == 0}
+              icon="hero-exclamation-triangle"
+              detail={"materialized #{materialize_count(@usage_by_skill_id, @selected)} times, invoked 0"}
+            >
+              This skill has never been invoked. The loop pass will propose retiring it.
+            </ArbiterWeb.CoreComponents.Feedback.empty_state>
+          </div>
+        </div>
+
+        <ArbiterWeb.CoreComponents.Navigation.back_link />
       </div>
     </Layouts.app>
     """
