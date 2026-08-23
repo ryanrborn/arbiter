@@ -1025,8 +1025,8 @@ defmodule ArbiterWeb.BoardLive do
 
       <script :type={Phoenix.LiveView.ColocatedHook} name=".BoardDrag">
         // Drag is a human action, and only for the moves a human decides:
-        // reorder within Ready, pull out of Running, hand a Needs-you or
-        // merge-queue card to another stage. Dropping INTO Running is pushed
+        // reorder within Ready, pull out of Running, move a Waiting card back
+        // to Ready or forward out of the column. Dropping INTO Running is pushed
         // to the server so it can explain itself rather than silently no-op.
         export default {
           mounted() { this.wire() },

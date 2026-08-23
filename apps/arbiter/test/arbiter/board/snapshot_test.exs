@@ -376,14 +376,18 @@ defmodule Arbiter.Board.SnapshotTest do
       assert flags(board) == %{"bd-a" => false, "bd-b" => false}
     end
 
-    test "an approved merge request blocked on something only a person clears flags" do
+    test "an approved merge request blocked on anything the Watchdog cannot clear flags" do
       board =
         derive(
           workers:
             for {id, reason} <- [
                   {"bd-a", :conflict},
                   {"bd-b", :needs_approval},
-                  {"bd-c", :needs_nonauthor_approval}
+                  {"bd-c", :needs_nonauthor_approval},
+                  # Nothing in Arbiter takes a PR out of draft or resolves a
+                  # forge-specific block, so these are the operator's too.
+                  {"bd-d", :draft},
+                  {"bd-e", :blocked_other}
                 ] do
               worker(id, :awaiting_review, %{
                 meta: %{last_merger_status: %{approved: true, block_reason: reason}}
@@ -391,21 +395,27 @@ defmodule Arbiter.Board.SnapshotTest do
             end
         )
 
-      assert flags(board) == %{"bd-a" => true, "bd-b" => true, "bd-c" => true}
+      assert flags(board) == %{
+               "bd-a" => true,
+               "bd-b" => true,
+               "bd-c" => true,
+               "bd-d" => true,
+               "bd-e" => true
+             }
     end
 
     test "a block the system still auto-handles does not flag" do
       board =
         derive(
           workers:
-            for {id, reason} <- [{"bd-a", :behind_base}, {"bd-b", :ci_failed}, {"bd-c", :draft}] do
+            for {id, reason} <- [{"bd-a", :behind_base}, {"bd-b", :ci_failed}] do
               worker(id, :awaiting_review, %{
                 meta: %{last_merger_status: %{approved: true, block_reason: reason}}
               })
             end
         )
 
-      assert flags(board) == %{"bd-a" => false, "bd-b" => false, "bd-c" => false}
+      assert flags(board) == %{"bd-a" => false, "bd-b" => false}
     end
 
     test "a parked failure with nothing left in flight flags" do
@@ -414,6 +424,22 @@ defmodule Arbiter.Board.SnapshotTest do
           workers: [
             worker("bd-a", :failed, %{
               meta: %{stop_reason: %{category: :exited_without_done, summary: "review rejected"}}
+            })
+          ]
+        )
+
+      assert flags(board) == %{"bd-a" => true}
+    end
+
+    # A review-timeout failure keeps the last poll's merger status in its meta,
+    # so a terminal worker can still be carrying an auto-resolvable block. The
+    # worker is dead either way — the status wins over the stale block.
+    test "a parked failure flags even carrying a stale auto-resolvable block" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :failed, %{
+              meta: %{last_merger_status: %{approved: true, block_reason: :ci_failed}}
             })
           ]
         )

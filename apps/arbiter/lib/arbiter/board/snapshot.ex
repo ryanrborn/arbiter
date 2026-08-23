@@ -40,19 +40,22 @@ defmodule Arbiter.Board.Snapshot do
 
     * `:awaiting` always flags — the worker asked a question, and there is no
       such thing as retrying a question.
-    * anything else flags only when its merge block is one nothing in Arbiter
-      can clear: `:conflict`, `:needs_approval`, `:needs_nonauthor_approval`.
-      A `:behind_base` or a `:ci_failed` does not, because the merge queue is
-      already rebasing or dispatching a fix pass against it.
-    * a `:failed` worker with no block at all flags: nothing retries a parked
-      failure.
+    * `:failed` always flags — a parked worker is terminal by definition, so
+      whatever it was last seen waiting on, nothing is going to turn it.
+    * an open MR flags unless its block is one the Watchdog still resolves by
+      itself — `:behind_base` (it rebases) and `:ci_failed` (it dispatches a
+      fix pass). Everything else, from `:conflict` to `:needs_approval` to
+      `:draft`, waits on a person; an unblocked MR is simply mid-review, which
+      is still the machine's turn.
 
   The block reason is read through `Arbiter.Worker.Watchdog`
   (`effective_block_reason/1`, itself gated on `classify/1 == :approved`), the
   same surface the merge-queue screen reads, so the flag can never disagree
-  with the status text rendered next to it. The list is expected to *shrink*
-  as more auto-recovery lands — it measures "still needs a human today", not
-  "something is imperfect".
+  with the status text rendered next to it. The exempt list is the Watchdog's
+  own `auto_resolvable?/1` set rather than a hand-kept roster of human blocks,
+  so it *shrinks* as more auto-recovery lands and a newly-invented block
+  reason defaults to "a person's" instead of silently reading as pipeline
+  wait. It measures "still needs a human today", not "something is imperfect".
 
   A worker at `:awaiting_review` holds an MR, not a subprocess, so it does not
   consume a worker slot; every other live status does. That is what makes
@@ -83,8 +86,9 @@ defmodule Arbiter.Board.Snapshot do
   # Worker is done; the outcome is somebody else's to produce.
   @waiting_statuses [:awaiting, :failed, :awaiting_review]
 
-  # Merge blocks no amount of waiting or retrying clears — see the moduledoc.
-  @needs_human_block_reasons [:conflict, :needs_approval, :needs_nonauthor_approval]
+  # The only blocks the Watchdog still clears on its own — mirrors its
+  # `auto_resolvable?/1`. Everything else needs a person today.
+  @auto_resolving_block_reasons [:behind_base, :ci_failed]
 
   # Board-level dispatch is per-issue, so containers never queue: an epic is a
   # rollup of children, not something a worker can be handed.
@@ -331,12 +335,16 @@ defmodule Arbiter.Board.Snapshot do
   # A question has no retry, so it is always the human's.
   defp needs_you?(%{status: :awaiting}), do: true
 
+  # A parked worker is terminal — the system has exhausted itself by
+  # definition, whatever its last poll happened to record.
+  defp needs_you?(%{status: :failed}), do: true
+
   defp needs_you?(worker) do
     case Watchdog.effective_block_reason(get_meta(worker, :last_merger_status) || %{}) do
-      # No block the forge will admit to: an open MR is simply mid-review (the
-      # machine's turn), while a parked failure has nothing left to turn.
-      nil -> worker.status == :failed
-      reason -> reason in @needs_human_block_reasons
+      # No block the forge will admit to: the MR is simply mid-review, which is
+      # still the machine's turn.
+      nil -> false
+      reason -> reason not in @auto_resolving_block_reasons
     end
   end
 
