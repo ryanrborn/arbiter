@@ -12,7 +12,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
       queue position / task id / title / PR link / check dots / time in
       queue.
     * **Landed today** — every `Arbiter.Workers.Run` that reached `:completed`
-      (its MR merged) since local midnight, rendered as a 3-column grid of
+      (its MR merged) since UTC midnight, rendered as a 3-column grid of
       muted `TaskCard`s.
     * **Rejected** — a rejected/closed MR never accumulates a list here: the
       workflow reopens the task it belongs to, so it leaves the merge queue's
@@ -32,6 +32,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
+  alias Arbiter.Workflows.MergeQueueSupervisor
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
@@ -74,42 +75,54 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp parse_tab(_params), do: "queued"
 
   defp refresh(socket) do
+    children = list_children()
+
     socket
-    |> assign(:queued_count, queued_count())
-    |> assign(:landed_today_count, landed_today_count())
-    |> refresh_tab()
+    |> assign(:queued_count, Enum.count(children, &(&1.status == :awaiting_review)))
+    |> refresh_tab(children)
   end
 
-  defp refresh_tab(%{assigns: %{tab: "landed"}} = socket) do
+  defp refresh_tab(%{assigns: %{tab: "landed"}} = socket, _children) do
     result = Paging.paginate(landed_today_query(), socket.assigns.page, @landed_page_size)
 
     socket
     |> assign(:landed, Enum.map(result.entries, &landed_task_card_attrs/1))
+    |> assign(:landed_today_count, result.total_count)
     |> assign(:page, result.page)
     |> assign(:total_pages, result.total_pages)
     |> assign(:total_count, result.total_count)
   end
 
-  defp refresh_tab(%{assigns: %{tab: "rejected"}} = socket) do
+  defp refresh_tab(%{assigns: %{tab: "rejected"}} = socket, _children) do
     socket
+    |> assign(:landed_today_count, landed_today_count())
     |> assign(:total_pages, 1)
     |> assign(:total_count, 0)
   end
 
-  defp refresh_tab(socket) do
+  defp refresh_tab(socket, children) do
     workspaces_by_id = index_workspaces()
+    queue_positions = queue_positions_by_task_id()
+    workers = queued_workers(children) |> Enum.sort_by(& &1.since, {:asc, DateTime})
+
+    {_next_rank, wait_ranks} =
+      Enum.reduce(workers, {1, %{}}, fn p, {rank, acc} ->
+        if Map.has_key?(queue_positions, p.task_id) do
+          {rank, acc}
+        else
+          {rank + 1, Map.put(acc, p.task_id, rank)}
+        end
+      end)
 
     entries =
-      queued_workers()
-      |> Enum.sort_by(& &1.since, {:asc, DateTime})
-      |> Enum.with_index(1)
-      |> Enum.map(fn {p, position} ->
+      Enum.map(workers, fn p ->
+        position = Map.get(queue_positions, p.task_id) || Map.fetch!(wait_ranks, p.task_id)
+
         %{
           position: position,
           task_id: p.task_id,
           title: p.title,
           workspace_name: workspace_name(workspaces_by_id, p.workspace_id),
-          merger_type: merger_type(workspaces_by_id, p.workspace_id),
           mr_ref: p.mr_ref,
           merger_url: p.merger_url,
           merger_status: p.merger_status,
@@ -120,6 +133,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     result = Paging.paginate_list(entries, socket.assigns.page)
 
     socket
+    |> assign(:landed_today_count, landed_today_count())
     |> assign(:entries, result.entries)
     |> assign(:page, result.page)
     |> assign(:total_pages, result.total_pages)
@@ -128,8 +142,8 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
 
   # ---- Queued ----
 
-  defp queued_workers do
-    workers = list_children() |> Enum.filter(&(&1.status == :awaiting_review))
+  defp queued_workers(children) do
+    workers = Enum.filter(children, &(&1.status == :awaiting_review))
     titles_by_id = titles_for(Enum.map(workers, & &1.task_id))
 
     Enum.map(workers, fn p ->
@@ -147,7 +161,19 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     end)
   end
 
-  defp queued_count, do: list_children() |> Enum.count(&(&1.status == :awaiting_review))
+  # Real merge-admission position and per-item pipeline status from the
+  # running MergeQueue, keyed by task_id. Workers whose workspace has no
+  # running queue (or the queue call times out) fall back to a wait-time
+  # rank in `refresh_tab/2` — best-effort, never blocks the page.
+  defp queue_positions_by_task_id do
+    MergeQueueSupervisor.queue_views()
+    |> Enum.flat_map(fn {_ws_id, items} -> items end)
+    |> Map.new(fn item -> {item.task_id, item.position} end)
+  rescue
+    _ -> %{}
+  catch
+    :exit, _ -> %{}
+  end
 
   defp titles_for([]), do: %{}
 
@@ -180,17 +206,6 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
       {:ok, ws} -> ws.name
       :error -> "(unknown)"
     end
-  end
-
-  defp merger_type(_by_id, nil), do: :direct
-
-  defp merger_type(by_id, ws_id) do
-    case Map.fetch(by_id, ws_id) do
-      {:ok, ws} -> Workspace.merger_strategy(ws)
-      :error -> :direct
-    end
-  rescue
-    _ -> :direct
   end
 
   # ---- Landed today ----
@@ -226,7 +241,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp landed_footer(%Run{completed_at: nil}), do: nil
 
   defp landed_footer(%Run{completed_at: completed_at}) do
-    "merged #{Calendar.strftime(completed_at, "%H:%M")}"
+    "merged #{Calendar.strftime(completed_at, "%H:%M")} UTC"
   end
 
   # ---- view helpers ----
@@ -241,9 +256,24 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     ]
   end
 
+  defp header_count("landed", _queued_count, landed_today_count), do: landed_today_count
+  defp header_count("rejected", _queued_count, _landed_today_count), do: 0
+  defp header_count(_tab, queued_count, _landed_today_count), do: queued_count
+
+  defp header_subtitle("landed", pr_label), do: "Every #{pr_label} merged since midnight UTC."
+
+  defp header_subtitle("rejected", pr_label),
+    do: "Rejected or closed #{plural(pr_label)} reopen their task instead of collecting here."
+
+  defp header_subtitle(_tab, pr_label), do: "Every #{pr_label} integrating now, longest-waiting first."
+
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :tab_defs, tabs(assigns.queued_count, assigns.landed_today_count))
+    assigns =
+      assigns
+      |> assign(:tab_defs, tabs(assigns.queued_count, assigns.landed_today_count))
+      |> assign(:header_count, header_count(assigns.tab, assigns.queued_count, assigns.landed_today_count))
+      |> assign(:header_subtitle, header_subtitle(assigns.tab, assigns.pr_label))
 
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
@@ -252,8 +282,8 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
           <Domain.index_header
             icon="hero-arrow-path-rounded-square"
             title={cap_plural(@merge_queue_label)}
-            count={@queued_count}
-            subtitle={"Every #{@pr_label} integrating now, longest-waiting first."}
+            count={@header_count}
+            subtitle={@header_subtitle}
           />
           <Feedback.live_badge live={@live} />
         </div>
@@ -417,6 +447,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     cond do
       Watchdog.ci_failed?(status) -> :fail
       Watchdog.ci_pending?(status) -> :pending
+      Map.get(status, :pipeline) in [nil, :not_started] -> :unknown
       true -> :pass
     end
   end
@@ -430,7 +461,9 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   end
 
   defp check_mergeable_state(status) do
-    if Watchdog.block_reason(status) in [:conflict, :behind_base], do: :fail, else: :pass
+    if Watchdog.block_reason(status) in [nil, :ci_failed, :needs_approval, :needs_nonauthor_approval],
+      do: :pass,
+      else: :fail
   end
 
   defp check_dot_class(:pass), do: "bg-success"

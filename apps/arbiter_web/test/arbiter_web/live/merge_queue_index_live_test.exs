@@ -100,6 +100,77 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
       assert html =~ "Landed today"
       assert html =~ "Rejected"
     end
+
+    test "a draft PR lights the Mergeable dot red, not green", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "draft-pr", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+
+      :ok =
+        Worker.record_merger_status(pid, %{
+          pipeline: :success,
+          approved: true,
+          block_reason: :draft
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/merge_queue")
+
+      [_, mergeable_dot] =
+        Regex.run(~r/<span[^>]*title="Mergeable"[^>]*class="([^"]*)"/, html) ||
+          Regex.run(~r/class="([^"]*)"[^>]*title="Mergeable"/, html)
+
+      assert mergeable_dot =~ "bg-error"
+    end
+
+    test "an unknown/not-yet-started CI signal renders as unknown, not passed",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no-ci-yet", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+
+      :ok = Worker.record_merger_status(pid, %{pipeline: :not_started, approved: false})
+
+      {:ok, _view, html} = live(conn, ~p"/merge_queue")
+
+      [_, ci_dot] =
+        Regex.run(~r/class="([^"]*)"[^>]*title="CI"/, html) ||
+          Regex.run(~r/<span[^>]*title="CI"[^>]*class="([^"]*)"/, html)
+
+      refute ci_dot =~ "bg-success"
+      assert ci_dot =~ "bg-base-300"
+    end
+
+    test "the header count and subtitle describe the active tab, not always Queued",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+
+      Ash.create!(Run, %{
+        task_id: task.id,
+        task_title: task.title,
+        repo: "test/repo",
+        workspace_id: ws.id,
+        status: :completed,
+        started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
+        completed_at: DateTime.utc_now(),
+        mr_ref: "!42"
+      })
+
+      {:ok, _view, queued_html} = live(conn, ~p"/merge_queue")
+      assert queued_html =~ "integrating now, longest-waiting first"
+
+      {:ok, _view, landed_html} = live(conn, ~p"/merge_queue?tab=landed")
+      refute landed_html =~ "integrating now, longest-waiting first"
+      assert landed_html =~ "merged since midnight UTC"
+
+      {:ok, _view, rejected_html} = live(conn, ~p"/merge_queue?tab=rejected")
+      refute rejected_html =~ "integrating now, longest-waiting first"
+      assert rejected_html =~ "reopen their task instead of collecting here"
+    end
   end
 
   describe "Landed today tab" do
@@ -124,6 +195,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
       assert html =~ "lg:grid-cols-3"
       assert html =~ task.id
       assert html =~ "shipped-thing"
+      assert html =~ "UTC"
       refute html =~ ~s(id="merge_queue-landed-empty")
     end
 
