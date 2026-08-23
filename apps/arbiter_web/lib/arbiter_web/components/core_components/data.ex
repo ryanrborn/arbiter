@@ -49,6 +49,11 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("applied"), do: "badge-success"
   defp status_chip_class("rejected"), do: "badge-error"
   defp status_chip_class("superseded"), do: "badge-neutral"
+  # Worktree state on the workspace config screen: a dirty checkout is not an
+  # error, it is the one thing an operator has to deal with before a worker can
+  # take the repo — so it warns rather than fails.
+  defp status_chip_class("clean"), do: "badge-success"
+  defp status_chip_class("dirty"), do: "badge-warning"
   defp status_chip_class(_), do: "badge-ghost"
 
   @doc """
@@ -192,6 +197,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
   slot :col, required: true do
     attr :label, :string
+    attr :width, :string, doc: ~s(fixed column width, e.g. "110px" — the rest share what is left)
   end
 
   def data_table(assigns) do
@@ -199,7 +205,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
     <table id={@id} class={["table table-zebra", @class]}>
       <thead>
         <tr>
-          <th :for={col <- @col}>{col[:label]}</th>
+          <th :for={col <- @col} style={col[:width] && "width: #{col[:width]}"}>{col[:label]}</th>
         </tr>
       </thead>
       <tbody>

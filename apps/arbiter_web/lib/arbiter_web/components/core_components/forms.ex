@@ -37,7 +37,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   attr :disabled, :boolean, default: false
   attr :required, :boolean, default: false
   attr :class, :any, default: nil
-  attr :rest, :global, include: ~w(pattern title minlength maxlength step min max)
+  attr :rest, :global, include: ~w(pattern title minlength maxlength step min max autocomplete)
 
   def input(assigns) do
     ~H"""
@@ -321,7 +321,10 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   attr :disabled, :boolean, default: false
   attr :required, :boolean, default: false
   attr :class, :any, default: nil
-  attr :rest, :global
+
+  # `value` is what a checked box submits; a plain global list omits it, and
+  # without it every checked box in a form posts the browser default "on".
+  attr :rest, :global, include: ~w(value)
 
   def checkbox(assigns) do
     ~H"""

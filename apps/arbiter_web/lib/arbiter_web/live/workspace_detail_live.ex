@@ -3,14 +3,20 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   Workspace detail + editor at `/workspaces/:id`.
 
   Surfaces every config section a non-CLI operator needs to onboard and run a
-  workspace: tracker, merger, agent + review-agent, routing policy, review
-  gate, standing orders, and secrets.
+  workspace: repos, policy, agent models, routing, standing orders, tracker,
+  secrets and security. Those eight are the **rail** down the left of the
+  panel; the body shows exactly one of them at a time.
 
-  This module is the **shell**: it loads the workspace, owns the page chrome
-  and the name/prefix form, and composes one `Phoenix.LiveComponent` per
-  settings section. Each section owns its own form, its own error assign and
-  its own writes — see `ArbiterWeb.WorkspaceDetail.Shared` for the small
-  contract they share:
+  Every pane stays mounted, hidden with CSS rather than unmounted. A section
+  is a live component that owns real state — an open secret modal, a pending
+  security downgrade, a half-typed routing rule — and throwing that away every
+  time the operator glances at another section would be its own bug.
+
+  This module is the **shell**: it loads the workspace, owns the rail, the
+  workspace-identity form and the install-wide dispatch switch, and composes
+  one `Phoenix.LiveComponent` per settings section. Each section owns its own
+  form, its own error assign and its own writes — see
+  `ArbiterWeb.WorkspaceDetail.Shared` for the small contract they share:
 
     * `ArbiterWeb.WorkspaceDetail.PolicyConfigComponent` — the high-level
       enums (agent / review-agent provider pools, tracker type, merger
@@ -18,7 +24,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     * `ArbiterWeb.WorkspaceDetail.TrackerConfigComponent` — `tracker.config.*`,
       the adapter-specific fields scoped to the selected tracker type. Rendered
       *by* the policy component, whose select drives which fields show.
-    * `ArbiterWeb.WorkspaceDetail.RepoPathsComponent` — `repos.*.path`.
+    * `ArbiterWeb.WorkspaceDetail.RepoPathsComponent` — `repo_paths.*`.
     * `ArbiterWeb.WorkspaceDetail.RepoOverridesComponent` —
       `review_automation.repo_overrides`.
     * `ArbiterWeb.WorkspaceDetail.RoutingRulesComponent` /
@@ -49,14 +55,41 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   use ArbiterWeb, :live_view
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Board.Autopilot
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Tasks.Workspace.Changes.ValidateConfig
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Domain
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Forms
+  alias ArbiterWeb.CoreComponents.Navigation
   alias ArbiterWeb.WorkspaceDetail
+
+  # The rail, in the order an operator onboards a workspace: point it at code,
+  # decide how work flows, then how it is run, then what it is allowed to do.
+  @sections [
+    {"repos", "Repos"},
+    {"policy", "Policy"},
+    {"agent_models", "Agent models"},
+    {"routing", "Routing"},
+    {"standing_orders", "Standing orders"},
+    {"tracker", "Tracker"},
+    {"secrets", "Secrets"},
+    {"security", "Security"}
+  ]
+
+  @section_slugs Enum.map(@sections, &elem(&1, 0))
+
+  # The scheduler is a GenServer that can be down (or slow) without the config
+  # screen being wrong, so every call to it is guarded — same contract as the
+  # board's, see `ArbiterWeb.BoardLive`.
+  @scheduler_call_timeout_ms 2_000
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -67,6 +100,9 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
          |> assign(:workspace, ws)
          |> assign(:not_found, false)
          |> assign(:details_error, nil)
+         |> assign(:section, "repos")
+         |> assign(:sections, @sections)
+         |> assign(:autodispatch, autodispatch_on?())
          |> assign(:tracker_types, Workspace.valid_tracker_types())
          |> assign(:merger_strategies, Workspace.valid_merger_strategies())
          |> assign(:agent_types, Agents.valid_agent_types())
@@ -82,12 +118,18 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
-  # ---- workspace details (name/prefix) ----
-  #
-  # The only form still handled here: it writes workspace *attributes* rather
-  # than config, so it shares nothing with the section components.
+  # ---- rail ----
 
   @impl true
+  def handle_event("section", %{"section" => slug}, socket) when slug in @section_slugs do
+    {:noreply, assign(socket, :section, slug)}
+  end
+
+  # ---- workspace details (name/prefix) ----
+  #
+  # The only settings form still handled here: it writes workspace *attributes*
+  # rather than config, so it shares nothing with the section components.
+
   def handle_event("save_details", %{"details" => %{"name" => name, "prefix" => prefix}}, socket) do
     case Ash.update(socket.assigns.workspace, %{name: name, prefix: prefix}, action: :update) do
       {:ok, ws} ->
@@ -100,6 +142,25 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       {:error, err} ->
         {:noreply, assign(socket, :details_error, error_message(err))}
     end
+  end
+
+  # Auto-dispatch is the board scheduler, which is install-wide rather than
+  # per-workspace — the switch is shown here because this is where an operator
+  # comes to decide how work flows, but flipping it stops or starts promotion
+  # for *every* workspace. The consequence line says so.
+  def handle_event("toggle_autodispatch", _params, socket) do
+    on? = socket.assigns.autodispatch
+
+    _ =
+      guarded(
+        fn -> if on?, do: Autopilot.pause(Autopilot), else: Autopilot.resume(Autopilot) end,
+        nil
+      )
+
+    {:noreply,
+     socket
+     |> assign(:autodispatch, autodispatch_on?())
+     |> put_flash(:info, if(on?, do: "Auto-dispatch paused.", else: "Auto-dispatch resumed."))}
   end
 
   # ---- section callbacks ----
@@ -119,17 +180,30 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     {:noreply, put_flash(socket, kind, message)}
   end
 
+  # ---- scheduler ----
+
+  defp autodispatch_on?,
+    do: guarded(fn -> Autopilot.running?(@scheduler_call_timeout_ms) end, false)
+
+  defp guarded(fun, fallback) do
+    fun.()
+  rescue
+    _ -> fallback
+  catch
+    :exit, _ -> fallback
+  end
+
   # ---- render ----
 
   @impl true
   def render(%{not_found: true} = assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
-      <div class="p-4 sm:p-6 max-w-3xl mx-auto space-y-4">
-        <.empty_state id="ws-404" icon="hero-building-office-2">
+      <div class="mx-auto flex max-w-[1100px] flex-col gap-4 p-4 sm:p-6">
+        <Feedback.empty_state icon="hero-building-office-2" detail="no workspace with that id">
           Workspace not found.
-        </.empty_state>
-        <.link navigate={~p"/workspaces"} class="link link-primary text-sm">← All workspaces</.link>
+        </Feedback.empty_state>
+        <Navigation.back_link href={~p"/workspaces"} label="Back to workspaces" />
       </div>
     </Layouts.app>
     """
@@ -138,74 +212,115 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
-      <div class="p-4 sm:p-6 max-w-4xl mx-auto space-y-6">
-        <div>
-          <.link navigate={~p"/workspaces"} class="link link-hover text-sm text-base-content/60">
-            ← All workspaces
-          </.link>
-          <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2 mt-1">
-            <span class="badge badge-ghost font-mono">{@workspace.prefix}</span>
-            {@workspace.name}
-          </h1>
-          <p class="text-xs text-base-content/50 mt-1 font-mono">{@workspace.id}</p>
-          <p :if={@workspace.description not in [nil, ""]} class="text-sm text-base-content/70 mt-1">
-            {@workspace.description}
-          </p>
-        </div>
+      <div class="mx-auto flex max-w-[1100px] flex-col gap-5 p-4 sm:p-6">
+        <Domain.index_header
+          icon="hero-cog-6-tooth"
+          title={@workspace.name}
+          subtitle="Tracker, merger, agent routing, standing orders and secrets — per workspace."
+        >
+          <:actions>
+            <span class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]">
+              {@workspace.prefix}-
+            </span>
+            <Feedback.live_badge id="ws-live" live />
+          </:actions>
+        </Domain.index_header>
 
-        <%!-- Workspace details (name/prefix) --%>
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-3">
-            <h2 class="font-semibold flex items-center gap-2">
-              <.icon name="hero-identification" class="size-5 text-base-content/60" />
-              Workspace details
-            </h2>
-            <.form
-              for={%{}}
-              as={:details}
-              phx-submit="save_details"
-              class="grid sm:grid-cols-2 gap-x-4"
+        <div class="grid min-h-[400px] grid-cols-[168px_minmax(0,1fr)] overflow-hidden rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]">
+          <nav
+            id="ws-rail"
+            aria-label="Workspace settings"
+            class="flex flex-col gap-px border-r border-solid border-[var(--border-default)] py-[14px]"
+          >
+            <button
+              :for={{slug, label} <- @sections}
+              type="button"
+              phx-click="section"
+              phx-value-section={slug}
+              aria-selected={to_string(@section == slug)}
+              class={[
+                "cursor-pointer border-l-[var(--border-accent-width)] border-solid px-[14px] py-[7px] text-left",
+                "font-[family-name:var(--font-sans)] text-[11.5px] leading-[1.3]",
+                @section == slug &&
+                  "border-[var(--accent-primary)] bg-[var(--arb-raised)] font-medium text-[var(--text-title)]",
+                @section != slug &&
+                  "border-transparent font-normal text-[var(--text-secondary)] hover:bg-[var(--arb-raised)]"
+              ]}
             >
-              <.input
-                name="details[name]"
-                label="Name"
-                value={@workspace.name}
-                required
-              />
-              <div>
-                <.input
-                  name="details[prefix]"
-                  label="Prefix"
-                  value={@workspace.prefix}
-                  pattern="[a-z][a-z0-9]*"
-                  maxlength="16"
-                  required
-                />
-                <p class="text-xs text-base-content/50 mt-1">
-                  Changing the prefix does not rename existing issue IDs — the prefix is baked
-                  into each ID at creation time, so old and new issues will show different
-                  prefixes in this workspace. This is expected.
-                </p>
-              </div>
-              <div class="sm:col-span-2 flex items-center gap-3 mt-2">
-                <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
-                  Save details
-                </.button>
-                <p :if={@details_error} class="text-sm text-error">{@details_error}</p>
-              </div>
-            </.form>
-          </div>
-        </section>
+              {label}
+            </button>
+          </nav>
 
-        <%!-- Configuration --%>
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-3">
-            <h2 class="font-semibold flex items-center gap-2">
-              <.icon name="hero-cog-6-tooth" class="size-5 text-base-content/60" /> Configuration
-            </h2>
+          <div class="flex min-w-0 flex-col gap-4 px-[18px] pt-[18px] pb-[24px]">
+            <%!-- Every header stays in the DOM alongside its pane, so the one
+                 on screen is always the one the rail has selected. --%>
+            <.section_header
+              :for={{slug, label} <- @sections}
+              name={slug}
+              section={@section}
+              title={label}
+              context={section_context(slug, @workspace)}
+            />
+
+            <.live_component
+              module={WorkspaceDetail.RepoPathsComponent}
+              id="repo-paths-section"
+              section={@section}
+              workspace={@workspace}
+            />
+
+            <%!-- Workspace identity leads the Policy pane: name and prefix are
+                 what every other setting is scoped to. --%>
+            <.pane name="policy" section={@section}>
+              <.form for={%{}} as={:details} phx-submit="save_details">
+                <.rows>
+                  <.setting_row
+                    name="Workspace name"
+                    consequence="what this workspace is called in the board, the CLI and every worker prompt"
+                  >
+                    <:control>
+                      <Forms.input name="details[name]" value={@workspace.name} size="sm" required />
+                    </:control>
+                  </.setting_row>
+                  <.setting_row
+                    name="Issue prefix"
+                    consequence="new issue IDs get this prefix; it does not rename existing issue IDs"
+                  >
+                    <:control>
+                      <Forms.input
+                        name="details[prefix]"
+                        value={@workspace.prefix}
+                        size="sm"
+                        pattern="[a-z][a-z0-9]*"
+                        maxlength="16"
+                        required
+                      />
+                    </:control>
+                  </.setting_row>
+                  <.toggle_row
+                    name="Auto-dispatch ready issues"
+                    consequence="Ready issues promote themselves each scheduler tick, within slot, dependency, file-overlap and quota limits; install-wide"
+                    checked={@autodispatch}
+                    click="toggle_autodispatch"
+                  />
+                </.rows>
+                <div class="mt-3 flex items-center gap-3">
+                  <Core.button type="submit" variant="primary" size="sm">Save details</Core.button>
+                  <p :if={@details_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
+                    {@details_error}
+                  </p>
+                </div>
+              </.form>
+            </.pane>
+
+            <%!-- The tracker pane is rendered *by* the policy component, whose
+                 select drives which adapter fields show; its header has to
+                 come from here, ahead of it in the DOM. Panes for other
+                 sections are hidden, so DOM order across sections is free. --%>
             <.live_component
               module={WorkspaceDetail.PolicyConfigComponent}
               id="policy-config"
+              section={@section}
               workspace={@workspace}
               agent_types={@agent_types}
               tracker_types={@tracker_types}
@@ -214,65 +329,87 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               review_automation_modes={@review_automation_modes}
               quota_modes={@quota_modes}
             />
+
             <.live_component
               module={WorkspaceDetail.RepoOverridesComponent}
               id="repo-overrides-section"
+              section={@section}
               workspace={@workspace}
               review_automation_modes={@review_automation_modes}
             />
+
             <.live_component
-              module={WorkspaceDetail.RepoPathsComponent}
-              id="repo-paths-section"
+              module={WorkspaceDetail.AgentModelConfigComponent}
+              id="agent-model-config"
+              section={@section}
               workspace={@workspace}
+              agent_types={@agent_types}
             />
+
             <.live_component
               module={WorkspaceDetail.RoutingRulesComponent}
               id="routing-rules-section"
+              section={@section}
               workspace={@workspace}
             />
+
             <.live_component
               module={WorkspaceDetail.RoutingAdaptersComponent}
               id="routing-adapters-section"
+              section={@section}
+              workspace={@workspace}
+            />
+
+            <.live_component
+              module={WorkspaceDetail.StandingOrdersComponent}
+              id="standing-orders-section"
+              section={@section}
+              workspace={@workspace}
+            />
+
+            <.live_component
+              module={WorkspaceDetail.SecretsComponent}
+              id="secrets-section"
+              section={@section}
+              workspace={@workspace}
+            />
+
+            <.live_component
+              module={WorkspaceDetail.WorkerSecurityComponent}
+              id="agent-security"
+              section={@section}
+              workspace={@workspace}
+              security_modes={@security_modes}
+              security_filesystems={@security_filesystems}
+              safe_default_categories={@safe_default_categories}
+            />
+
+            <.live_component
+              module={WorkspaceDetail.WorkerEnvVarsComponent}
+              id="worker-env-section"
+              section={@section}
               workspace={@workspace}
             />
           </div>
-        </section>
+        </div>
 
-        <.live_component
-          module={WorkspaceDetail.AgentModelConfigComponent}
-          id="agent-model-config"
-          workspace={@workspace}
-          agent_types={@agent_types}
-        />
-
-        <.live_component
-          module={WorkspaceDetail.WorkerSecurityComponent}
-          id="agent-security"
-          workspace={@workspace}
-          security_modes={@security_modes}
-          security_filesystems={@security_filesystems}
-          safe_default_categories={@safe_default_categories}
-        />
-
-        <.live_component
-          module={WorkspaceDetail.StandingOrdersComponent}
-          id="standing-orders-section"
-          workspace={@workspace}
-        />
-
-        <.live_component
-          module={WorkspaceDetail.SecretsComponent}
-          id="secrets-section"
-          workspace={@workspace}
-        />
-
-        <.live_component
-          module={WorkspaceDetail.WorkerEnvVarsComponent}
-          id="worker-env-section"
-          workspace={@workspace}
-        />
+        <Navigation.back_link href={~p"/"} label="Back to board" />
       </div>
     </Layouts.app>
     """
+  end
+
+  # Right-aligned note on the section header. Repos counts what it holds
+  # because that count is the thing an operator is checking; every other
+  # section says which workspace it is editing, which is the thing they are
+  # about to get wrong with two tabs open.
+  defp section_context("repos", ws), do: "#{map_size(repo_paths_map(ws))} paths"
+  defp section_context(_slug, ws), do: "workspace: #{ws.name}"
+
+  defp repo_paths_map(ws) do
+    case cfg(ws, ["repo_paths"]) do
+      m when is_map(m) -> m
+      _ -> %{}
+    end
   end
 end

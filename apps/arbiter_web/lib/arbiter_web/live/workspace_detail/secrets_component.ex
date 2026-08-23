@@ -9,7 +9,12 @@ defmodule ArbiterWeb.WorkspaceDetail.SecretsComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
+
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, secret_modal: false, secret_error: nil)}
@@ -75,91 +80,96 @@ defmodule ArbiterWeb.WorkspaceDetail.SecretsComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <section id={@id} class="card bg-base-200 border border-base-300 shadow-sm">
-      <div class="card-body p-4 gap-3">
-        <div class="flex items-center justify-between gap-2">
-          <h2 class="font-semibold flex items-center gap-2">
-            <.icon name="hero-key" class="size-5 text-base-content/60" /> Secrets
-            <span class="text-base-content/40 font-normal">({length(@secret_keys)})</span>
-          </h2>
-          <.button phx-click="open_secret_modal" phx-target={@myself} class="btn btn-sm">
-            <.icon name="hero-plus" class="size-4" /> Set secret
-          </.button>
-        </div>
-        <p class="text-xs text-base-content/50 -mt-1">
-          Encrypted at rest. Only key names are shown — values are never displayed. Reference one
-          from config with <code>credentials_ref: "secret:&lt;key&gt;"</code>.
-        </p>
-
-        <ul :if={@secret_keys != []} id="secret-keys" class="flex flex-col gap-1.5">
-          <li
-            :for={key <- @secret_keys}
-            class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
-          >
-            <.icon name="hero-lock-closed" class="size-4 text-base-content/40 shrink-0" />
-            <code class="text-sm flex-1">{key}</code>
-            <span class="text-xs text-base-content/40">••••••••</span>
-            <button
-              type="button"
-              phx-click="rm_secret"
-              phx-target={@myself}
-              phx-value-key={key}
-              class="btn btn-ghost btn-xs text-error shrink-0"
-              aria-label="Remove secret"
-              data-confirm={"Remove secret #{key}?"}
-            >
-              <.icon name="hero-trash" class="size-4" />
-            </button>
-          </li>
-        </ul>
-
-        <p :if={@secret_keys == []} class="text-sm text-base-content/50 italic">
-          No secrets set.
-        </p>
-
-        <%!-- Set-secret modal. Rendered inside the section (rather than at the
-             page root as it was pre-split) so this component keeps the single
-             root element a stateful LiveComponent needs; it is
-             position-fixed, so where it sits in the tree doesn't matter. --%>
-        <div :if={@secret_modal} class="modal modal-open" id="secret-modal">
-          <div class="modal-box">
-            <h3 class="font-semibold text-lg mb-3">Set secret</h3>
-            <.form
-              for={%{}}
-              as={:secret}
-              phx-submit="set_secret"
-              phx-target={@myself}
-              class="space-y-2"
-            >
-              <.input name="secret[key]" label="Key" value="" placeholder="tracker_token" required />
-              <.input
-                type="password"
-                name="secret[value]"
-                label="Value (write-only — never shown again)"
-                value=""
-                autocomplete="off"
-                required
-              />
-              <p :if={@secret_error} class="text-sm text-error">{@secret_error}</p>
-              <div class="modal-action">
-                <.button
-                  type="button"
-                  phx-click="close_secret_modal"
+    <div id={@id} class={pane_class("secrets", @section)}>
+      <.rows>
+        <.setting_row
+          name="Stored secrets"
+          consequence="encrypted at rest and never shown again; reference one from config as credentials_ref: secret:<key>"
+        >
+          <:control>
+            <Core.button type="button" phx-click="open_secret_modal" phx-target={@myself} size="sm">
+              Set secret
+            </Core.button>
+          </:control>
+          <:below>
+            <ul :if={@secret_keys != []} id="secret-keys" class={list_class()}>
+              <.list_row :for={key <- @secret_keys}>
+                <Core.icon name="hero-lock-closed" size={13} color="var(--text-label)" />
+                <span class="flex-1 truncate">{key}</span>
+                <span class="text-[var(--text-label)]">••••••••</span>
+                <.remove_button
+                  label="Remove secret"
+                  phx-click="rm_secret"
                   phx-target={@myself}
-                  class="btn btn-sm btn-ghost"
-                >
-                  Cancel
-                </.button>
-                <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
-                  Store
-                </.button>
-              </div>
-            </.form>
-          </div>
-          <div class="modal-backdrop" phx-click="close_secret_modal" phx-target={@myself}></div>
+                  phx-value-key={key}
+                  data-confirm={"Remove secret #{key}?"}
+                />
+              </.list_row>
+            </ul>
+
+            <Feedback.empty_state
+              :if={@secret_keys == []}
+              icon="hero-key"
+              detail="no secrets stored"
+            >
+              Nothing here yet — tracker and agent credentials live in this list.
+            </Feedback.empty_state>
+          </:below>
+        </.setting_row>
+      </.rows>
+
+      <%!-- Set-secret modal. Rendered inside the section (rather than at the
+           page root as it was pre-split) so this component keeps the single
+           root element a stateful LiveComponent needs; it is
+           position-fixed, so where it sits in the tree doesn't matter. --%>
+      <div :if={@secret_modal} class="modal modal-open" id="secret-modal">
+        <div class="modal-box">
+          <h3 class="mb-3 text-[13px] font-medium text-[var(--text-title)]">Set secret</h3>
+          <.form
+            for={%{}}
+            as={:secret}
+            phx-submit="set_secret"
+            phx-target={@myself}
+            class="flex flex-col gap-3"
+          >
+            <Forms.input
+              name="secret[key]"
+              label="Key"
+              value=""
+              size="sm"
+              placeholder="tracker_token"
+              required
+            />
+            <Forms.input
+              type="password"
+              name="secret[value]"
+              label="Value"
+              hint="write-only — never shown again"
+              value=""
+              size="sm"
+              autocomplete="off"
+              required
+            />
+            <p :if={@secret_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
+              {@secret_error}
+            </p>
+            <div class="modal-action">
+              <Core.button
+                type="button"
+                variant="ghost"
+                size="sm"
+                phx-click="close_secret_modal"
+                phx-target={@myself}
+              >
+                Cancel
+              </Core.button>
+              <Core.button type="submit" variant="primary" size="sm">Store</Core.button>
+            </div>
+          </.form>
         </div>
+        <div class="modal-backdrop" phx-click="close_secret_modal" phx-target={@myself}></div>
       </div>
-    </section>
+    </div>
     """
   end
 end

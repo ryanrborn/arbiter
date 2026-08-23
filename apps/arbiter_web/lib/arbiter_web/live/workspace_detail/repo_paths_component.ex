@@ -10,9 +10,15 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
 
   alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Worker.Worktree
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Data
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, :repo_path_error, nil)}
@@ -20,7 +26,42 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
   @impl true
   def update(assigns, socket) do
     socket = assign(socket, assigns)
-    {:ok, assign(socket, :repo_paths, socket.assigns.workspace |> repo_paths() |> Enum.sort())}
+
+    {:ok,
+     socket
+     |> assign(:repo_paths, socket.assigns.workspace |> repo_paths() |> Enum.sort())
+     |> load_worktree_states()}
+  end
+
+  # Each state costs a `git status` in the repo, so it is recomputed only when
+  # the set of paths actually changes — the parent re-renders this component on
+  # every write anywhere on the page.
+  defp load_worktree_states(socket) do
+    paths = socket.assigns.repo_paths
+
+    if socket.assigns[:worktree_of] == paths do
+      socket
+    else
+      socket
+      |> assign(:worktree_of, paths)
+      |> assign(
+        :worktree_states,
+        Map.new(paths, fn {repo, path} -> {repo, worktree_state(path)} end)
+      )
+    end
+  end
+
+  # A path that isn't a git checkout, or isn't there at all, is `unknown`
+  # rather than an error: the entry is still legitimate config, it just can't
+  # be inspected from here.
+  defp worktree_state(nil), do: "unknown"
+
+  defp worktree_state(path) do
+    case Worktree.has_uncommitted?(Path.expand(path)) do
+      {:ok, true} -> "dirty"
+      {:ok, false} -> "clean"
+      _ -> "unknown"
+    end
   end
 
   @impl true
@@ -92,64 +133,81 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <div id={@id} class="border-t border-base-300 pt-3">
-      <h3 class="font-semibold text-sm flex items-center gap-2">
-        Repo paths <span class="text-base-content/40 font-normal">({length(@repo_paths)})</span>
-      </h3>
-      <p class="text-xs text-base-content/50 mt-1">
-        <code>repo_paths</code> — repo name to local filesystem checkout path, used
-        to resolve a dispatch's working directory.
-      </p>
-
-      <ul :if={@repo_paths != []} id="repo-paths" class="flex flex-col gap-1.5 mt-2">
-        <li
-          :for={{repo, path} <- @repo_paths}
-          class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
-        >
-          <code class="text-sm font-semibold">{repo}</code>
-          <span class="text-xs font-mono text-base-content/60 flex-1">
-            {path || "— (invalid entry)"}
+    <div id={@id} class={pane_class("repos", @section)}>
+      <Data.data_table
+        :if={@repo_paths != []}
+        id="repo-paths"
+        rows={@repo_paths}
+        class="table-sm font-[family-name:var(--font-mono)] text-[11.5px]"
+      >
+        <:col :let={{repo, _path}} label="repo" width="110px">{repo}</:col>
+        <:col :let={{_repo, path}} label="path">
+          <span class="text-[var(--text-secondary)]">{path || "— (invalid entry)"}</span>
+        </:col>
+        <:col :let={{repo, _path}} label="worktree" width="84px">
+          <span data-worktree-state={Map.get(@worktree_states, repo, "unknown")}>
+            <Data.status_chip status={Map.get(@worktree_states, repo, "unknown")} class="badge-sm" />
           </span>
-          <button
-            type="button"
+        </:col>
+        <:col :let={{repo, _path}} label="" width="40px">
+          <.remove_button
+            label={"Remove repo path for #{repo}"}
             phx-click="rm_repo_path"
             phx-target={@myself}
             phx-value-repo={repo}
-            class="btn btn-ghost btn-xs text-error shrink-0"
-            aria-label={"Remove repo path for #{repo}"}
             data-confirm={"Remove the repo_paths entry for #{repo}?"}
-          >
-            <.icon name="hero-trash" class="size-4" />
-          </button>
-        </li>
-      </ul>
+          />
+        </:col>
+      </Data.data_table>
 
-      <.form
-        for={%{}}
-        as={:repo_path}
-        phx-submit="add_repo_path"
-        phx-target={@myself}
-        class="flex gap-2 items-start mt-2"
+      <Feedback.empty_state
+        :if={@repo_paths == []}
+        icon="hero-folder-open"
+        detail="repo_paths is empty"
       >
-        <input
-          type="text"
-          name="repo_path[repo]"
-          placeholder="repo name, e.g. arbiter"
-          class="input input-sm flex-1"
-          required
-        />
-        <input
-          type="text"
-          name="repo_path[path]"
-          placeholder="/home/ryan/dev/arbiter"
-          class="input input-sm flex-1"
-          required
-        />
-        <.button type="submit" class="btn btn-sm">
-          <.icon name="hero-plus" class="size-4" /> Add
-        </.button>
-      </.form>
-      <p :if={@repo_path_error} class="text-sm text-error mt-1">{@repo_path_error}</p>
+        No repo is registered yet — nothing can be dispatched.
+      </Feedback.empty_state>
+
+      <.rows>
+        <.setting_row
+          name="Add repo path"
+          consequence="registers a checkout the dispatcher resolves a worker's working directory from"
+        >
+          <:below>
+            <.form
+              for={%{}}
+              as={:repo_path}
+              phx-submit="add_repo_path"
+              phx-target={@myself}
+              class="flex items-end gap-2"
+            >
+              <Forms.input
+                name="repo_path[repo]"
+                label="Repo"
+                value=""
+                size="sm"
+                placeholder="arbiter"
+                class="flex-none w-[140px]"
+                required
+              />
+              <Forms.input
+                name="repo_path[path]"
+                label="Add repo path"
+                value=""
+                size="sm"
+                placeholder="~/dev/my-project"
+                class="flex-1"
+                required
+              />
+              <Core.button type="submit" variant="primary" size="sm">Register</Core.button>
+            </.form>
+          </:below>
+        </.setting_row>
+      </.rows>
+
+      <p :if={@repo_path_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
+        {@repo_path_error}
+      </p>
     </div>
     """
   end
