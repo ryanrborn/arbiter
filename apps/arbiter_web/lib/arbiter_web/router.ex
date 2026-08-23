@@ -34,6 +34,7 @@ defmodule ArbiterWeb.Router do
       # `:task_id`/`:id` catch-alls so e.g. `/workers/history` isn't claimed
       # as a worker detail.
       live("/tasks", TaskIndexLive)
+      live("/tasks/new", TaskNewLive)
       live("/tasks/:id", TaskDetailLive)
 
       live("/merge_queue", MergeQueueIndexLive)
