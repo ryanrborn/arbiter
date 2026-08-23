@@ -13,16 +13,19 @@ defmodule ArbiterWeb.RunIndexLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Workers.Run
+  alias ArbiterWeb.CoreComponents.Domain
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Navigation
   alias ArbiterWeb.Paging
   require Ash.Query
 
   @workers_topic "workers"
 
   @filters [
-    {"All", :all},
-    {"Running", :running},
-    {"Completed", :completed},
-    {"Failed", :failed}
+    %{label: "All", value: "all"},
+    %{label: "Running", value: "running"},
+    %{label: "Completed", value: "completed"},
+    %{label: "Failed", value: "failed"}
   ]
 
   @impl true
@@ -33,7 +36,6 @@ defmodule ArbiterWeb.RunIndexLive do
      socket
      |> assign(:live, connected?(socket))
      |> assign(:worker_label, "worker")
-     |> assign(:issue_label, "issue")
      |> assign(:filters, @filters)}
   end
 
@@ -82,74 +84,54 @@ defmodule ArbiterWeb.RunIndexLive do
     <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <div class="flex items-start justify-between gap-4">
-          <.index_header
+          <Domain.index_header
             icon="hero-clock"
-            title={"#{String.capitalize(@worker_label)} history"}
+            title={"#{cap_plural(@worker_label)} history"}
             count={@total_count}
             subtitle={"Every recorded #{@worker_label} run. The dashboard shows only the most recent."}
           />
-          <.live_badge live={@live} />
+          <Feedback.live_badge live={@live} />
         </div>
 
-        <.filter_tabs
+        <Navigation.filter_tabs
           tabs={@filters}
-          active={@status}
-          tab_path={fn value -> run_path(value, 1) end}
+          active={Atom.to_string(@status)}
+          tab_path={fn value -> run_path(String.to_existing_atom(value), 1) end}
         />
 
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-4">
-            <.empty_state :if={@runs == []} id="runs-empty" icon="hero-archive-box">
+        <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
+          <div :if={@runs == []} id="runs-empty">
+            <Feedback.empty_state icon="hero-moon">
               No {@worker_label} runs match this filter.
-            </.empty_state>
-
-            <div :if={@runs != []} class="overflow-x-auto">
-              <table class="table table-sm" id="runs">
-                <thead>
-                  <tr class="text-base-content/60">
-                    <th>{String.capitalize(@issue_label)}</th>
-                    <th>Title</th>
-                    <th>Type</th>
-                    <th>Status</th>
-                    <th>Started</th>
-                    <th class="text-right">Duration</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr :for={r <- @runs} class="hover:bg-base-300/40 transition-colors">
-                    <td>
-                      <.link navigate={~p"/workers/history/#{r.id}"} class="link link-hover">
-                        <code class="text-xs">{r.task_id}</code>
-                      </.link>
-                    </td>
-                    <td class="text-xs max-w-xs truncate" title={r.task_title || ""}>
-                      {r.task_title || "—"}
-                    </td>
-                    <td>
-                      <span class="badge badge-sm badge-ghost">{r.worker_type}</span>
-                    </td>
-                    <td>
-                      <span class={["badge badge-sm", run_status_class(r.status)]}>{r.status}</span>
-                    </td>
-                    <td class="text-xs whitespace-nowrap">{format_ts(r.started_at)}</td>
-                    <td class="text-xs text-right font-mono tabular-nums whitespace-nowrap">
-                      {humanize_duration(r.started_at, r.completed_at)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <.pager
-              page={@page}
-              total_pages={@total_pages}
-              total_count={@total_count}
-              page_path={fn page -> run_path(@status, page) end}
-            />
+            </Feedback.empty_state>
           </div>
-        </section>
 
-        <.back_link />
+          <ul :if={@runs != []} id="runs-history" class="flex flex-col gap-3">
+            <li :for={r <- @runs}>
+              <.link navigate={~p"/workers/history/#{r.id}"} class="block no-underline">
+                <Domain.run_row
+                  worker={r.task_id}
+                  outcome={r.task_title || r.task_id}
+                  status={r.status}
+                  duration={humanize_duration(r.started_at, r.completed_at)}
+                  role={r.worker_type}
+                  selected={false}
+                  expanded={false}
+                  class="cursor-pointer hover:bg-[var(--surface-raised)]"
+                />
+              </.link>
+            </li>
+          </ul>
+
+          <Navigation.pager
+            page={@page}
+            total_pages={@total_pages}
+            total_count={@total_count}
+            page_path={fn page -> run_path(@status, page) end}
+          />
+        </ArbiterWeb.CoreComponents.Core.panel>
+
+        <Navigation.back_link />
       </div>
     </Layouts.app>
     """
@@ -157,19 +139,11 @@ defmodule ArbiterWeb.RunIndexLive do
 
   # ---- view helpers ----
 
-  defp run_status_class(:completed), do: "badge-success"
-  defp run_status_class(:failed), do: "badge-error"
-  defp run_status_class(:running), do: "badge-info"
-  defp run_status_class(_), do: "badge-ghost"
-
-  defp format_ts(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
-  defp format_ts(_), do: "—"
-
   defp humanize_duration(%DateTime{} = started_at, %DateTime{} = ended_at) do
     started_at |> DateTime.diff(ended_at, :second) |> abs() |> humanize_seconds()
   end
 
-  defp humanize_duration(_, _), do: "—"
+  defp humanize_duration(_, _), do: nil
 
   defp humanize_seconds(s) when s < 60, do: "#{s}s"
   defp humanize_seconds(s) when s < 3600, do: "#{div(s, 60)}m"
