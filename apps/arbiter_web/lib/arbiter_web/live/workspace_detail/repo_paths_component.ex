@@ -181,24 +181,31 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
               phx-target={@myself}
               class="flex items-end gap-2"
             >
-              <Forms.input
-                name="repo_path[repo]"
-                label="Repo"
-                value=""
-                size="sm"
-                placeholder="arbiter"
-                class="flex-none w-[140px]"
-                required
-              />
-              <Forms.input
-                name="repo_path[path]"
-                label="Add repo path"
-                value=""
-                size="sm"
-                placeholder="~/dev/my-project"
-                class="flex-1"
-                required
-              />
+              <%!-- The flex sizing goes on wrappers, not on the inputs:
+                   `Forms.input/1` with a label wraps the field in a
+                   column-flex `<label>` and puts `class` on the inner span, so
+                   a `flex-1` handed to the input would size a `w-full` child
+                   instead of the flex item. --%>
+              <div class="w-[140px] flex-none">
+                <Forms.input
+                  name="repo_path[repo]"
+                  label="Repo"
+                  value=""
+                  size="sm"
+                  placeholder="arbiter"
+                  required
+                />
+              </div>
+              <div class="min-w-0 flex-1">
+                <Forms.input
+                  name="repo_path[path]"
+                  label="Path"
+                  value=""
+                  size="sm"
+                  placeholder="~/dev/my-project"
+                  required
+                />
+              </div>
               <Core.button type="submit" variant="primary" size="sm">Register</Core.button>
             </.form>
           </:below>

@@ -13,6 +13,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
   import Phoenix.LiveViewTest
 
+  alias Arbiter.Board.Autopilot
   alias Arbiter.Tasks.Workspace
 
   @sections [
@@ -204,6 +205,85 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
                ~s(form[phx-submit=add_repo_path] button[type=submit]),
                "Register"
              )
+    end
+  end
+
+  describe "the auto-dispatch switch" do
+    @switch ~s(button[role="switch"][aria-label="Auto-dispatch ready issues"])
+
+    # The autopilot is one process for the whole VM and ships paused in test.
+    # These tests move it, so put it back however they leave it.
+    setup do
+      on_exit(fn -> Autopilot.pause(Autopilot) end)
+      :ok
+    end
+
+    test "reads off while the board scheduler is paused", %{conn: conn} do
+      Autopilot.pause(Autopilot)
+      ws = new_workspace()
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert has_element?(view, @switch <> ~s([aria-checked="false"]))
+    end
+
+    test "reads on while the board scheduler is promoting", %{conn: conn} do
+      Autopilot.resume(Autopilot)
+      ws = new_workspace()
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert has_element?(view, @switch <> ~s([aria-checked="true"])),
+             "a running, unpaused autopilot must read as on"
+    end
+
+    # The regression this pins: an `autodispatch_on?` that always answered
+    # `false` left the switch stuck on the resume branch, so clicking it could
+    # start the scheduler but never stop it.
+    test "pauses the scheduler on the way down and resumes it on the way up", %{conn: conn} do
+      Autopilot.resume(Autopilot)
+      ws = new_workspace()
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      html = view |> element(@switch) |> render_click()
+
+      assert Autopilot.paused?(Autopilot)
+      assert html =~ "Auto-dispatch paused."
+      assert has_element?(view, @switch <> ~s([aria-checked="false"]))
+
+      html = view |> element(@switch) |> render_click()
+
+      refute Autopilot.paused?(Autopilot)
+      assert html =~ "Auto-dispatch resumed."
+      assert has_element?(view, @switch <> ~s([aria-checked="true"]))
+    end
+  end
+
+  # A checkbox with no `phx-change` has nothing to re-render it, so the tick
+  # has to come from the input's own `:checked` state. Both of these boxes say
+  # something an operator must be able to read back: whether a value is
+  # encrypted at rest, and whether a destructive-op guard is on.
+  describe "checkbox state" do
+    test "paints the worker-env secret box from the box itself", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      html = view |> element("button[phx-click=open_worker_env_modal]") |> render_click()
+
+      assert html =~ ~s(name="worker_env[secret]")
+      assert html =~ "peer-checked:bg-[var(--accent-primary)]"
+    end
+
+    test "shows no tick on an unchecked safe-default guard", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      [_, span_class] =
+        Regex.run(
+          ~r/name="security\[safe_defaults\]\[[a-z_]+\]"[^>]*>\s*<span class="([^"]+)"/,
+          html
+        )
+
+      assert span_class =~ "text-transparent"
+      assert span_class =~ "peer-checked:text-[var(--accent-primary-ink)]"
     end
   end
 

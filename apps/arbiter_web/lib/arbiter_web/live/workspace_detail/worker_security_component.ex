@@ -374,7 +374,10 @@ defmodule ArbiterWeb.WorkspaceDetail.WorkerSecurityComponent do
                     checked={category in @security_policy.permissions.safe_defaults}
                     class="peer sr-only"
                   />
-                  <span class="inline-flex size-[14px] flex-none items-center justify-center rounded-[var(--radius-chip)] border border-solid border-[var(--border-strong)] text-[9px] peer-checked:border-[var(--accent-primary)] peer-checked:bg-[var(--accent-primary)] peer-checked:text-[var(--accent-primary-ink)]">
+                  <%!-- The tick is transparent until the box is ticked: on this
+                       screen a checkmark means "this destructive-op guard is
+                       on", so an unchecked guard must not show one. --%>
+                  <span class="inline-flex size-[14px] flex-none items-center justify-center rounded-[var(--radius-chip)] border border-solid border-[var(--border-strong)] text-[9px] text-transparent peer-checked:border-[var(--accent-primary)] peer-checked:bg-[var(--accent-primary)] peer-checked:text-[var(--accent-primary-ink)]">
                     ✓
                   </span>
                   {category}

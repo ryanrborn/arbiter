@@ -151,16 +151,35 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   def handle_event("toggle_autodispatch", _params, socket) do
     on? = socket.assigns.autodispatch
 
-    _ =
+    wrote? =
       guarded(
-        fn -> if on?, do: Autopilot.pause(Autopilot), else: Autopilot.resume(Autopilot) end,
-        nil
+        fn ->
+          if on?, do: Autopilot.pause(Autopilot), else: Autopilot.resume(Autopilot)
+          true
+        end,
+        false
       )
 
+    # Flash what the scheduler actually did, not what we asked it to. A dead or
+    # unreachable autopilot leaves the switch where it was, and saying
+    # "paused." over a scheduler that never heard us is the one message an
+    # operator must not be given.
+    socket = assign(socket, :autodispatch, autodispatch_on?())
+
     {:noreply,
-     socket
-     |> assign(:autodispatch, autodispatch_on?())
-     |> put_flash(:info, if(on?, do: "Auto-dispatch paused.", else: "Auto-dispatch resumed."))}
+     if wrote? do
+       put_flash(
+         socket,
+         :info,
+         if(on?, do: "Auto-dispatch paused.", else: "Auto-dispatch resumed.")
+       )
+     else
+       put_flash(
+         socket,
+         :error,
+         "The board scheduler did not answer — auto-dispatch is unchanged."
+       )
+     end}
   end
 
   # ---- section callbacks ----
@@ -182,8 +201,19 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   # ---- scheduler ----
 
+  # Two questions, not one: `running?/1` answers "is there an autopilot at all"
+  # (it takes a server, never a timeout), `paused?/2` answers "is it draining
+  # the queue". The switch is about the second — an install with no autopilot
+  # reads as off, same as `BoardLive`.
   defp autodispatch_on?,
-    do: guarded(fn -> Autopilot.running?(@scheduler_call_timeout_ms) end, false)
+    do:
+      guarded(
+        fn ->
+          Autopilot.running?(Autopilot) and
+            not Autopilot.paused?(Autopilot, @scheduler_call_timeout_ms)
+        end,
+        false
+      )
 
   defp guarded(fun, fallback) do
     fun.()
