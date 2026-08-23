@@ -24,8 +24,16 @@ defmodule ArbiterWeb.RunIndexLiveTest do
   end
 
   test "lists completed and failed runs with the new component structure", %{conn: conn} do
-    completed = run(%{task_id: "bd-ok", task_title: "the-good-run", status: :completed, worker_type: "main"})
-    _failed = run(%{task_id: "bd-bad", task_title: "the-bad-run", status: :failed, worker_type: "review"})
+    completed =
+      run(%{
+        task_id: "bd-ok",
+        task_title: "the-good-run",
+        status: :completed,
+        worker_type: "main"
+      })
+
+    _failed =
+      run(%{task_id: "bd-bad", task_title: "the-bad-run", status: :failed, worker_type: "review"})
 
     {:ok, _view, html} = live(conn, ~p"/workers/history")
 

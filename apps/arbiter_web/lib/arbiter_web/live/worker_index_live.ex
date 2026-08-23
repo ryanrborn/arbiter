@@ -171,10 +171,16 @@ defmodule ArbiterWeb.WorkerIndexLive do
                   </code>
                 </div>
                 <div class="flex items-center gap-2 flex-none">
-                  <span class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] whitespace-nowrap" title="Elapsed">
+                  <span
+                    class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] whitespace-nowrap"
+                    title="Elapsed"
+                  >
                     {humanize_seconds(runtime_seconds(p.started_at, @now))}
                   </span>
-                  <span class={["text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium", awaiting_review_status_class(p)]}>
+                  <span class={[
+                    "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
+                    awaiting_review_status_class(p)
+                  ]}>
                     {awaiting_review_status_label(p)}
                   </span>
                 </div>
@@ -228,13 +234,31 @@ defmodule ArbiterWeb.WorkerIndexLive do
   defp status_dot_class(_), do: "bg-[var(--text-label)]"
 
   defp worker_status_class(:idle), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
-  defp worker_status_class(:resuming), do: "bg-[color-mix(in_oklch,var(--arb-info)_20%,transparent)] text-[var(--arb-info)]"
-  defp worker_status_class(:running), do: "bg-[color-mix(in_oklch,var(--arb-live)_20%,transparent)] text-[var(--arb-live)]"
-  defp worker_status_class(:awaiting), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
-  defp worker_status_class(:awaiting_review_gate), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
-  defp worker_status_class(:awaiting_review), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
-  defp worker_status_class(:completed), do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
-  defp worker_status_class(:failed), do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+
+  defp worker_status_class(:resuming),
+    do: "bg-[color-mix(in_oklch,var(--arb-info)_20%,transparent)] text-[var(--arb-info)]"
+
+  defp worker_status_class(:running),
+    do: "bg-[color-mix(in_oklch,var(--arb-live)_20%,transparent)] text-[var(--arb-live)]"
+
+  defp worker_status_class(:awaiting),
+    do:
+      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+
+  defp worker_status_class(:awaiting_review_gate),
+    do:
+      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+
+  defp worker_status_class(:awaiting_review),
+    do:
+      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+
+  defp worker_status_class(:completed),
+    do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
+
+  defp worker_status_class(:failed),
+    do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+
   defp worker_status_class(_), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
 
   defp worker_status_label(:idle), do: "Idle"
@@ -277,17 +301,26 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   defp awaiting_review_status_class(worker), do: worker_status_class(worker.status)
 
-  defp approval_badge_class(%{status: :merged}), do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
-  defp approval_badge_class(%{status: :closed}), do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+  defp approval_badge_class(%{status: :merged}),
+    do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
+
+  defp approval_badge_class(%{status: :closed}),
+    do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+
   defp approval_badge_class(status) when is_map(status) do
     case status do
       %{blocks: blocks} when is_list(blocks) and blocks != [] ->
         "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+
       %{approved_by: approved} when is_list(approved) and approved != [] ->
         "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
+
       _ ->
         "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
     end
   end
-  defp approval_badge_class(_), do: "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
+
+  defp approval_badge_class(_),
+    do:
+      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
 end

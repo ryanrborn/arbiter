@@ -63,13 +63,20 @@ defmodule ArbiterWeb.RunDetailLive do
             <div class="flex flex-wrap items-center justify-between gap-4">
               <div class="min-w-0">
                 <div class="flex items-center gap-2 text-[10.5px] text-[var(--text-label)]">
-                  <.link navigate={~p"/"} class="text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors">Dashboard</.link>
+                  <.link
+                    navigate={~p"/"}
+                    class="text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors"
+                  >
+                    Dashboard
+                  </.link>
                   <ArbiterWeb.CoreComponents.Core.icon name="hero-chevron-right" size={12} />
                   <span>{cap_plural(@worker_label)} history</span>
                 </div>
                 <h1 class="text-[24px] font-semibold leading-[1.2] tracking-[var(--tracking-section)] text-[var(--text-title)] flex items-center gap-2 mt-1.5">
                   {cap_plural(@worker_label)} run
-                  <code class="font-[family-name:var(--font-mono)] text-[16px] font-normal text-[var(--text-secondary)]">{@run.task_id}</code>
+                  <code class="font-[family-name:var(--font-mono)] text-[16px] font-normal text-[var(--text-secondary)]">
+                    {@run.task_id}
+                  </code>
                 </h1>
               </div>
 
@@ -78,10 +85,16 @@ defmodule ArbiterWeb.RunDetailLive do
                   class="text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] bg-[var(--arb-panel)] text-[var(--text-secondary)] font-medium"
                   title="This is a persisted post-mortem, not a live view"
                 >
-                  <ArbiterWeb.CoreComponents.Core.icon name="hero-archive-box" size={12} class="inline mr-1" />
-                  Historical
+                  <ArbiterWeb.CoreComponents.Core.icon
+                    name="hero-archive-box"
+                    size={12}
+                    class="inline mr-1"
+                  /> Historical
                 </span>
-                <span class={["text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium", run_status_badge_class(@run.status)]}>
+                <span class={[
+                  "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
+                  run_status_badge_class(@run.status)
+                ]}>
                   {format_status(@run.status)}
                 </span>
               </div>
@@ -90,7 +103,9 @@ defmodule ArbiterWeb.RunDetailLive do
             <%!-- ── Run metadata ────────────────────────────────────── --%>
             <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
               <div class="flex flex-col gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)]">
-                <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">DURATION</span>
+                <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">
+                  DURATION
+                </span>
                 <span class="text-[14px] font-semibold text-[var(--text-title)] font-[family-name:var(--font-mono)]">
                   {humanize_duration(@run.started_at, @run.completed_at)}
                 </span>
@@ -98,7 +113,9 @@ defmodule ArbiterWeb.RunDetailLive do
               </div>
 
               <div class="flex flex-col gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)]">
-                <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">STARTED</span>
+                <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">
+                  STARTED
+                </span>
                 <span class="text-[12px] font-medium text-[var(--text-title)] font-[family-name:var(--font-mono)]">
                   {format_dt(@run.started_at)}
                 </span>
@@ -112,18 +129,27 @@ defmodule ArbiterWeb.RunDetailLive do
               </div>
 
               <div class="flex flex-col gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)]">
-                <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">TYPE</span>
+                <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">
+                  TYPE
+                </span>
                 <span class="text-[12px] font-medium text-[var(--text-title)] font-[family-name:var(--font-mono)] truncate">
                   {@run.worker_type}
                 </span>
                 <span class="text-[10px] text-[var(--text-secondary)]">
-                  <%= if @run.model do %>{@run.model}<% else %>no model recorded<% end %>
+                  <%= if @run.model do %>
+                    {@run.model}
+                  <% else %>
+                    no model recorded
+                  <% end %>
                 </span>
               </div>
             </div>
 
             <%!-- ── Live worker link ────────────────────────────────── --%>
-            <div :if={@live_worker?} class="rounded-[var(--radius-field)] bg-[color-mix(in_oklch,var(--arb-live)_10%,transparent)] border border-[color-mix(in_oklch,var(--arb-live)_30%,transparent)] p-3">
+            <div
+              :if={@live_worker?}
+              class="rounded-[var(--radius-field)] bg-[color-mix(in_oklch,var(--arb-live)_10%,transparent)] border border-[color-mix(in_oklch,var(--arb-live)_30%,transparent)] p-3"
+            >
               <.link
                 navigate={~p"/workers/#{@run.task_id}"}
                 class="text-[12px] font-medium text-[var(--arb-live)] hover:text-[var(--text-title)] transition-colors flex items-center gap-1.5 w-fit"
@@ -144,7 +170,11 @@ defmodule ArbiterWeb.RunDetailLive do
         <% else %>
           <ArbiterWeb.CoreComponents.Core.panel>
             <div class="flex flex-col items-center justify-center gap-3 py-12">
-              <ArbiterWeb.CoreComponents.Core.icon name="hero-archive-box-x-mark" size={32} color="var(--text-label)" />
+              <ArbiterWeb.CoreComponents.Core.icon
+                name="hero-archive-box-x-mark"
+                size={32}
+                color="var(--text-label)"
+              />
               <p class="text-[12px] text-[var(--text-secondary)]">
                 No run found for id <code class="font-mono">{@run_id}</code>.
               </p>
@@ -153,7 +183,10 @@ defmodule ArbiterWeb.RunDetailLive do
         <% end %>
 
         <div>
-          <.link navigate={~p"/"} class="text-[12px] font-medium text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors flex items-center gap-1.5 w-fit">
+          <.link
+            navigate={~p"/"}
+            class="text-[12px] font-medium text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors flex items-center gap-1.5 w-fit"
+          >
             <ArbiterWeb.CoreComponents.Core.icon name="hero-arrow-left" size={14} /> Back to dashboard
           </.link>
         </div>
@@ -162,9 +195,15 @@ defmodule ArbiterWeb.RunDetailLive do
     """
   end
 
-  defp run_status_badge_class(:completed), do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
-  defp run_status_badge_class(:failed), do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
-  defp run_status_badge_class(:running), do: "bg-[color-mix(in_oklch,var(--arb-live)_20%,transparent)] text-[var(--arb-live)]"
+  defp run_status_badge_class(:completed),
+    do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
+
+  defp run_status_badge_class(:failed),
+    do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
+
+  defp run_status_badge_class(:running),
+    do: "bg-[color-mix(in_oklch,var(--arb-live)_20%,transparent)] text-[var(--arb-live)]"
+
   defp run_status_badge_class(_), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
 
   defp format_status(:completed), do: "Completed"
