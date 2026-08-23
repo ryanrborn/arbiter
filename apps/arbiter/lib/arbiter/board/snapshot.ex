@@ -1,6 +1,6 @@
 defmodule Arbiter.Board.Snapshot do
   @moduledoc """
-  The board, derived. One read of the world in, five columns and a dispatch
+  The board, derived. One read of the world in, four columns and a dispatch
   decision out.
 
   The operator console's board is not a stored object — Arbiter has no "board"
@@ -8,7 +8,7 @@ defmodule Arbiter.Board.Snapshot do
   that already exists (issues, live workers, merge requests), so the board can
   never drift from the system it describes: there is nothing to keep in sync.
 
-  ## The five columns
+  ## The four columns
 
     * **Ready** — open, dispatchable issues nobody is working. A real queue,
       ordered by priority then age, each card carrying the reason
@@ -19,14 +19,40 @@ defmodule Arbiter.Board.Snapshot do
       reads the diff — automated, so still the machine's turn). Reviewer
       workers fold into the author's card rather than occupying one of their
       own; a review is a phase of the author's work, not a second piece of it.
-    * **Needs you** — `:awaiting` (the worker asked a human a question) and
-      `:failed` (parked; send it back or close it). The only column whose
-      cards move because a person decided something.
-    * **Merge queue** — `:awaiting_review`: the agent is done, an MR is open,
-      the Watchdog is polling. Longest wait first, because a stalled merge is
-      the thing worth seeing.
+    * **Waiting** — the worker is done and the outcome now depends on
+      something outside it: `:awaiting` (it asked a human a question),
+      `:failed` (parked; send it back or close it) and `:awaiting_review` (an
+      MR is open and the Watchdog is polling). Longest wait first, because a
+      stalled card is the thing worth seeing.
     * **Closed today** — issues closed since midnight UTC. The day's evidence
       of progress, and the only column with no action on it.
+
+  ## Waiting, and the needs-you flag
+
+  Waiting used to be two columns — Needs you and Merge queue — which split
+  cards by *what* they wait on: a person, or a poll. That is not the split an
+  operator acts on. Every card in the column is equally out of the worker's
+  hands; the only question that changes what a human does next is whether the
+  system has anything left to try on its own.
+
+  So it is one column, and that narrower signal rides on the card as
+  `:needs_you`:
+
+    * `:awaiting` always flags — the worker asked a question, and there is no
+      such thing as retrying a question.
+    * anything else flags only when its merge block is one nothing in Arbiter
+      can clear: `:conflict`, `:needs_approval`, `:needs_nonauthor_approval`.
+      A `:behind_base` or a `:ci_failed` does not, because the merge queue is
+      already rebasing or dispatching a fix pass against it.
+    * a `:failed` worker with no block at all flags: nothing retries a parked
+      failure.
+
+  The block reason is read through `Arbiter.Worker.Watchdog`
+  (`effective_block_reason/1`, itself gated on `classify/1 == :approved`), the
+  same surface the merge-queue screen reads, so the flag can never disagree
+  with the status text rendered next to it. The list is expected to *shrink*
+  as more auto-recovery lands — it measures "still needs a human today", not
+  "something is imperfect".
 
   A worker at `:awaiting_review` holds an MR, not a subprocess, so it does not
   consume a worker slot; every other live status does. That is what makes
@@ -44,6 +70,7 @@ defmodule Arbiter.Board.Snapshot do
 
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Worker.Watchdog
 
   require Ash.Query
 
@@ -52,8 +79,12 @@ defmodule Arbiter.Board.Snapshot do
 
   # Live agent working; the author is still "running" while a reviewer reads.
   @running_statuses [:idle, :resuming, :running, :awaiting_review_gate]
-  @needs_you_statuses [:awaiting, :failed]
-  @merge_statuses [:awaiting_review]
+
+  # Worker is done; the outcome is somebody else's to produce.
+  @waiting_statuses [:awaiting, :failed, :awaiting_review]
+
+  # Merge blocks no amount of waiting or retrying clears — see the moduledoc.
+  @needs_human_block_reasons [:conflict, :needs_approval, :needs_nonauthor_approval]
 
   # Board-level dispatch is per-issue, so containers never queue: an epic is a
   # rollup of children, not something a worker can be handed.
@@ -64,8 +95,7 @@ defmodule Arbiter.Board.Snapshot do
   @type t :: %{
           ready: [Scheduler.entry()],
           running: [map()],
-          needs_you: [map()],
-          merge_queue: [map()],
+          waiting: [map()],
           closed_today: [map()],
           promote: String.t() | nil,
           slots_total: non_neg_integer(),
@@ -122,8 +152,7 @@ defmodule Arbiter.Board.Snapshot do
     %{
       ready: plan.entries,
       running: running,
-      needs_you: needs_you_cards(authors, issues_by_id),
-      merge_queue: merge_cards(authors, issues_by_id),
+      waiting: waiting_cards(authors, issues_by_id),
       closed_today: closed_today_cards(issues, now),
       promote: plan.promote,
       slots_total: slots_total,
@@ -139,8 +168,8 @@ defmodule Arbiter.Board.Snapshot do
 
   Options mirror `derive/1`'s inputs and override what would otherwise be
   read: `:now`, `:slots_total`, `:quota`, `:paused`, `:ready_order`,
-  `:issues`, `:workers`, `:changed_files`. Every read is best-effort — a board that renders four
-  columns beats one that raises.
+  `:issues`, `:workers`, `:changed_files`. Every read is best-effort — a board
+  that renders four columns beats one that raises.
   """
   @spec load(keyword()) :: t()
   def load(opts \\ []) do
@@ -161,7 +190,7 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   @doc """
-  A board with five empty columns and nothing to promote.
+  A board with four empty columns and nothing to promote.
 
   What a caller renders when its read of the world failed. It reports itself
   `paused: true` on purpose: a queue nobody could read is not one anything
@@ -173,8 +202,7 @@ defmodule Arbiter.Board.Snapshot do
     %{
       ready: [],
       running: [],
-      needs_you: [],
-      merge_queue: [],
+      waiting: [],
       closed_today: [],
       promote: nil,
       slots_total: 0,
@@ -258,7 +286,7 @@ defmodule Arbiter.Board.Snapshot do
     |> Map.new()
   end
 
-  # ---- running / needs you / merge queue ------------------------------------
+  # ---- running / waiting ----------------------------------------------------
 
   defp running_cards(workers, issues_by_id, reviewers_by_author) do
     workers
@@ -275,31 +303,41 @@ defmodule Arbiter.Board.Snapshot do
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
 
-  defp needs_you_cards(workers, issues_by_id) do
+  # One column, so one card shape: a parked worker's card still carries the
+  # (empty) merge fields and a merge-parked one still carries a (nil) reason.
+  # The view reads whichever it has instead of branching on which half of the
+  # union produced the card.
+  defp waiting_cards(workers, issues_by_id) do
     workers
-    |> Enum.filter(&(&1.status in @needs_you_statuses))
-    |> Enum.map(fn w ->
-      w
-      |> base_card(issues_by_id)
-      |> Map.merge(%{reason: halt_reason(w), since: since(w)})
-    end)
-    |> Enum.sort_by(& &1.since, {:asc, DateTime})
-  end
-
-  defp merge_cards(workers, issues_by_id) do
-    workers
-    |> Enum.filter(&(&1.status in @merge_statuses))
+    |> Enum.filter(&(&1.status in @waiting_statuses))
     |> Enum.map(fn w ->
       w
       |> base_card(issues_by_id)
       |> Map.merge(%{
+        reason: waiting_reason(w),
         mr_ref: Map.get(w, :mr_ref),
         merger_url: Map.get(w, :merger_url),
         merger_status: get_meta(w, :last_merger_status),
+        needs_you: needs_you?(w),
         since: since(w)
       })
     end)
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
+  end
+
+  defp waiting_reason(%{status: :awaiting_review}), do: nil
+  defp waiting_reason(worker), do: halt_reason(worker)
+
+  # A question has no retry, so it is always the human's.
+  defp needs_you?(%{status: :awaiting}), do: true
+
+  defp needs_you?(worker) do
+    case Watchdog.effective_block_reason(get_meta(worker, :last_merger_status) || %{}) do
+      # No block the forge will admit to: an open MR is simply mid-review (the
+      # machine's turn), while a parked failure has nothing left to turn.
+      nil -> worker.status == :failed
+      reason -> reason in @needs_human_block_reasons
+    end
   end
 
   defp closed_today_cards(issues, now) do

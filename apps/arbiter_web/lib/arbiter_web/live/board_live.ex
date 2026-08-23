@@ -3,12 +3,22 @@ defmodule ArbiterWeb.BoardLive do
   The board — the home screen, and the only page that answers "what is the
   fleet doing" in one look.
 
-  Five columns for where a piece of work actually sits: **Ready**, **Running**,
-  **Needs you**, **Merge queue**, **Closed today**. They are stages, not
-  statuses — the task FSM still only knows `open` / `in_progress` / `closed`,
-  and every column is derived from worker state, review state and merge-queue
-  membership by `Arbiter.Board.Snapshot`. Nothing here is stored, so nothing
-  here can drift.
+  Four columns for where a piece of work actually sits: **Ready**, **Running**,
+  **Waiting**, **Closed today**. They are stages, not statuses — the task FSM
+  still only knows `open` / `in_progress` / `closed`, and every column is
+  derived from worker state, review state and merge-queue membership by
+  `Arbiter.Board.Snapshot`. Nothing here is stored, so nothing here can drift.
+
+  ## Waiting is one column, and the flag is the only split
+
+  Waiting was two — Needs you and Merge queue — until bd-crn03r merged them.
+  Both held cards whose worker was done and whose outcome hung on something
+  external, and splitting them by *what* is external (a person vs. a poll)
+  drew a line the operator never acts on. The line that matters is narrower:
+  has the system run out of things to try? `Arbiter.Board.Snapshot` answers
+  that per card as `:needs_you`, and this screen renders it as one small flag
+  in the card header — not a hue, not an accent rule, not a column of its own.
+  Everything else in the column reads as plain pipeline-wait.
 
   ## Ready is a queue, not a parking lot
 
@@ -35,14 +45,13 @@ defmodule ArbiterWeb.BoardLive do
       idea of what matters most without dispatching anything by hand;
     * **pulling a card out of Running** — stops the worker, and asks first,
       because that kills a live agent mid-thought;
-    * **Needs-you review outcomes** — dropping a parked card on Ready sends
-      the work back (the halted worker is discarded and the issue returns to
-      the queue for the scheduler to re-decide); dropping it toward the merge
-      queue lets it proceed (the parked worker un-parks and finishes its own
-      way there). The worker FSM has the final say on both;
-    * **merge-queue-adjacent moves** — dropping a merge-queue card out of the
-      column stops the worker sitting on the merge request without touching
-      the merge request itself.
+    * **Waiting outcomes** — dropping a Waiting card on Ready sends the work
+      back (the halted worker is discarded and the issue returns to the queue
+      for the scheduler to re-decide); dropping it forward, toward Closed,
+      means "carry on" — a parked worker un-parks and finishes its own way to
+      a merge request, while a card already sitting on one is pulled out of
+      the queue (the worker stops; the merge request itself is untouched).
+      The worker FSM has the final say on the first.
 
   Dragging *into* Running is refused with an explanation. There is no hidden
   manual path into flight: if a card is not being promoted, the reason on its
@@ -82,8 +91,7 @@ defmodule ArbiterWeb.BoardLive do
   @columns [
     %{key: "ready", label: "Ready", tone: nil},
     %{key: "running", label: "Running", tone: "live"},
-    %{key: "needs_you", label: "Needs you", tone: "attention"},
-    %{key: "merge", label: "Merge queue", tone: nil},
+    %{key: "waiting", label: "Waiting", tone: nil},
     %{key: "closed", label: "Closed today", tone: nil}
   ]
 
@@ -95,8 +103,8 @@ defmodule ArbiterWeb.BoardLive do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Autopilot.topic())
-      # Elapsed counters on Running cards, and the waiting times that make the
-      # Needs-you column readable. Reassigns `:now` only — no reads.
+      # Elapsed counters on Running cards, and the wait times the Waiting
+      # column is ordered by. Reassigns `:now` only — no reads.
       :timer.send_interval(1000, self(), :tick)
     end
 
@@ -279,13 +287,29 @@ defmodule ArbiterWeb.BoardLive do
   # again. Deliberately not `Dispatch.resume/1`: sending work back to Ready
   # means the scheduler re-decides it on the merits, not that a stale session
   # picks up where it left off.
-  defp dropped(socket, id, "needs_you", "ready"), do: requeue(socket, id, "Sent")
+  defp dropped(socket, id, "waiting", "ready"), do: requeue(socket, id, "Sent")
+
+  # Forward, out of Waiting. One gesture, two meanings, because the column
+  # holds two kinds of card and the card — not the drop target — says which:
+  # a *parked* worker is being told "carry on", a worker already sitting on a
+  # merge request is being pulled off it.
+  defp dropped(socket, id, "waiting", "closed") do
+    case waiting_status(socket, id) do
+      :awaiting_review -> pull_from_merge(socket, id)
+      _ -> proceed(socket, id)
+    end
+  end
+
+  # Everything else — a card dropped back where it came from, or onto a column
+  # that implies no action. Silence is the right answer; a flash for every
+  # stray drop trains the operator to ignore flashes.
+  defp dropped(socket, _id, _from, _to), do: socket
 
   # Proceed. The answer the worker was parked on is "carry on", so un-park it
-  # and let it finish its own way to review and the merge queue. The FSM,
-  # not the board, decides whether that is legal from where the card actually
-  # sits — a review rejection parks at :failed and refuses.
-  defp dropped(socket, id, "needs_you", to) when to in ["merge", "closed"] do
+  # and let it finish its own way to review and a merge request. The FSM, not
+  # the board, decides whether that is legal from where the card actually sits
+  # — a review rejection parks at :failed and refuses.
+  defp proceed(socket, id) do
     case Worker.resume(id) do
       :ok ->
         socket
@@ -305,22 +329,24 @@ defmodule ArbiterWeb.BoardLive do
     end
   end
 
-  # Out of the merge queue. The merge request itself is not touched — what
+  # Off the merge request. The merge request itself is not touched — what
   # stops is the worker sitting on it — so this is reversible by re-opening
   # the task's merge from the task page.
-  defp dropped(socket, id, "merge", "ready"), do: requeue(socket, id, "Pulled")
-
-  defp dropped(socket, id, "merge", to) when to in ["needs_you", "closed"] do
+  defp pull_from_merge(socket, id) do
     socket
     |> stop_worker(id)
     |> put_flash(:info, "Pulled #{id} out of the merge queue. Its merge request is untouched.")
     |> refresh_board()
   end
 
-  # Everything else — a card dropped back where it came from, or onto a column
-  # that implies no action. Silence is the right answer; a flash for every
-  # stray drop trains the operator to ignore flashes.
-  defp dropped(socket, _id, _from, _to), do: socket
+  # Which half of Waiting the card is in, read off the board that rendered the
+  # card the operator actually dragged.
+  defp waiting_status(socket, id) do
+    case Enum.find(socket.assigns.board.waiting, &(&1.id == id)) do
+      nil -> nil
+      card -> card.status
+    end
+  end
 
   # Stop whatever worker holds the card and hand the issue back to the queue.
   defp requeue(socket, id, verb) do
@@ -394,7 +420,7 @@ defmodule ArbiterWeb.BoardLive do
     |> assign(:now, board.now)
   end
 
-  # A read that raises must not take the page down — five empty columns and a
+  # A read that raises must not take the page down — four empty columns and a
   # `paused` board say "we cannot see anything right now", which is true and
   # is the only honest thing to render.
   defp read_board(opts, now) do
@@ -528,8 +554,11 @@ defmodule ArbiterWeb.BoardLive do
   # ---- card routing ---------------------------------------------------------
 
   defp card_href("running", card), do: ~p"/workers/#{card.id}"
-  defp card_href("needs_you", card), do: ~p"/workers/#{card.id}"
-  defp card_href("merge", _card), do: ~p"/merge_queue"
+
+  # A card sitting on a merge request is a merge-queue row; anything else in
+  # Waiting is a worker you open and answer.
+  defp card_href("waiting", %{status: :awaiting_review}), do: ~p"/merge_queue"
+  defp card_href("waiting", card), do: ~p"/workers/#{card.id}"
 
   defp card_href(_column, card) do
     if String.starts_with?(to_string(card.id), "loop-"),
@@ -589,8 +618,7 @@ defmodule ArbiterWeb.BoardLive do
       assigns
       |> assign(:ready, visible(assigns, assigns.board.ready, "ready"))
       |> assign(:running, visible(assigns, assigns.board.running, "running"))
-      |> assign(:needs_you, visible(assigns, assigns.board.needs_you, "needs_you"))
-      |> assign(:merge, visible(assigns, assigns.board.merge_queue, "merge"))
+      |> assign(:waiting, visible(assigns, assigns.board.waiting, "waiting"))
       |> assign(:closed, visible(assigns, assigns.board.closed_today, "closed"))
 
     ~H"""
@@ -672,7 +700,7 @@ defmodule ArbiterWeb.BoardLive do
           <div
             id="board-columns"
             phx-hook=".BoardDrag"
-            class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-px bg-[var(--arb-line-soft)] min-h-[560px]"
+            class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-px bg-[var(--arb-line-soft)] min-h-[560px]"
           >
             <%!-- Ready — the queue. Every card says why it is or isn't going. --%>
             <div
@@ -763,45 +791,55 @@ defmodule ArbiterWeb.BoardLive do
               />
             </div>
 
-            <%!-- Needs you — the only column that moves because a person decided. --%>
+            <%!-- Waiting — the worker is done; the outcome is somewhere else.
+                 Uniform cards: the flag, not a hue, marks the ones that are
+                 yours. The column head still takes the attention hue when it
+                 holds any of them, because a board is read from across a
+                 room before it is read card by card. --%>
             <div
-              id="board-column-needs-you"
-              data-column="needs_you"
+              id="board-column-waiting"
+              data-column="waiting"
               class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
             >
-              <.column_head label="Needs you" count={length(@needs_you)} tone="attention" />
+              <.column_head
+                label="Waiting"
+                count={length(@waiting)}
+                tone={if Enum.any?(@waiting, & &1.needs_you), do: "attention", else: nil}
+              />
 
               <div
-                :for={card <- Enum.take(@needs_you, limit(@expanded, "needs_you"))}
+                :for={card <- Enum.take(@waiting, limit(@expanded, "waiting"))}
                 id={"card-#{card.id}"}
                 class="contents"
               >
                 <.task_card
                   id={card.id}
                   title={card.title || card.id}
-                  accent={if card.status == :failed, do: "fail", else: "attention"}
-                  activity={card.reason}
+                  activity={waiting_activity(card)}
+                  footer={waiting_note(card, waiting_activity(card))}
                   draggable="true"
                   data-card={card.id}
-                  data-column="needs_you"
+                  data-column="waiting"
                 >
                   <:status>
-                    <span class={[
-                      "text-[10px] font-medium font-[family-name:var(--font-mono)]",
-                      if(card.status == :failed,
-                        do: "text-[var(--arb-fail-text)]",
-                        else: "text-[var(--arb-attention)]"
-                      )
-                    ]}>
-                      {if card.status == :failed,
-                        do: "failed",
-                        else: "#{elapsed(card.since, @now)} waiting"}
+                    <span class="flex items-center gap-1.5">
+                      <span
+                        :if={card.needs_you}
+                        data-needs-you
+                        title="needs you — nothing left for the system to try"
+                        aria-label="needs you"
+                        class="hero-flag"
+                        style="width: 11px; height: 11px; background-color: var(--arb-attention);"
+                      />
+                      <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-label)]">
+                        {elapsed(card.since, @now)} waiting
+                      </span>
                     </span>
                   </:status>
                   <:actions>
-                    <.link navigate={card_href("needs_you", card)} class="contents">
-                      <span class="px-2 py-[2px] rounded-[var(--radius-chip)] text-[10px] font-medium font-[family-name:var(--font-mono)] bg-[var(--arb-attention)] text-[var(--arb-attention-ink)]">
-                        {if card.status == :failed, do: "retry", else: "answer"}
+                    <.link navigate={card_href("waiting", card)} class="contents">
+                      <span class="px-2 py-[2px] rounded-[var(--radius-chip)] text-[10px] font-medium font-[family-name:var(--font-mono)] border border-solid border-[var(--border-strong)] text-[var(--text-link)]">
+                        {waiting_action(card)}
                       </span>
                     </.link>
                     <.link navigate={~p"/tasks/#{card.id}"} class="contents">
@@ -814,49 +852,9 @@ defmodule ArbiterWeb.BoardLive do
               </div>
 
               <.more
-                :if={length(@needs_you) > limit(@expanded, "needs_you")}
-                column="needs_you"
-                count={length(@needs_you) - limit(@expanded, "needs_you")}
-              />
-            </div>
-
-            <%!-- Merge queue — done by the agent, held by the merger. --%>
-            <div
-              id="board-column-merge"
-              data-column="merge"
-              class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
-            >
-              <.column_head label="Merge queue" count={length(@merge)} tone={nil} />
-
-              <div
-                :for={{card, i} <- Enum.with_index(Enum.take(@merge, limit(@expanded, "merge")))}
-                id={"card-#{card.id}"}
-                class="contents"
-              >
-                <.link navigate={card_href("merge", card)} class="contents">
-                  <.task_card
-                    id={card.id}
-                    title={card.title || card.id}
-                    accent={if i == 0, do: "info", else: nil}
-                    activity={merge_activity(card)}
-                    footer={elapsed(card.since, @now) && "#{elapsed(card.since, @now)} in queue"}
-                    draggable="true"
-                    data-card={card.id}
-                    data-column="merge"
-                  >
-                    <:status>
-                      <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-info)]">
-                        #{i + 1} · {merge_status_text(card.merger_status)}
-                      </span>
-                    </:status>
-                  </.task_card>
-                </.link>
-              </div>
-
-              <.more
-                :if={length(@merge) > limit(@expanded, "merge")}
-                column="merge"
-                count={length(@merge) - limit(@expanded, "merge")}
+                :if={length(@waiting) > limit(@expanded, "waiting")}
+                column="waiting"
+                count={length(@waiting) - limit(@expanded, "waiting")}
               />
             </div>
 
@@ -1159,6 +1157,31 @@ defmodule ArbiterWeb.BoardLive do
   defp ready_accent(:next), do: "live"
   defp ready_accent(:blocked), do: "attention"
   defp ready_accent(_), do: nil
+
+  # The one live line on a Waiting card: why the worker stopped, or — for one
+  # already sitting on a merge request — which request.
+  defp waiting_activity(%{status: :awaiting_review} = card), do: merge_activity(card)
+  defp waiting_activity(%{reason: reason}) when is_binary(reason) and reason != "", do: reason
+  defp waiting_activity(_card), do: "waiting"
+
+  # The state word under the card. Deliberately the same mono grey for every
+  # card in the column: what separates them is the flag, not the palette.
+  # Suppressed when the activity line above it already says the same thing —
+  # a worker that stopped with no summary reports "failed" for both.
+  defp waiting_note(card, activity) do
+    case waiting_note(card) do
+      ^activity -> nil
+      note -> note
+    end
+  end
+
+  defp waiting_note(%{status: :awaiting_review} = card), do: merge_status_text(card.merger_status)
+  defp waiting_note(%{status: :failed}), do: "failed"
+  defp waiting_note(_card), do: "parked"
+
+  defp waiting_action(%{status: :awaiting_review}), do: "merge queue"
+  defp waiting_action(%{status: :failed}), do: "retry"
+  defp waiting_action(_card), do: "answer"
 
   defp merge_activity(%{mr_ref: ref}) when is_binary(ref) and ref != "", do: ref
   defp merge_activity(_card), do: "waiting on checks"
