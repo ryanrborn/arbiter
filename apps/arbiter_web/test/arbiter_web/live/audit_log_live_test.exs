@@ -104,4 +104,32 @@ defmodule ArbiterWeb.AuditLogLiveTest do
       refute html =~ b2.id
     end
   end
+
+  describe "deep link from the task detail screen" do
+    test "?entity_id= seeds the subject filter", %{conn: conn, ws: ws} do
+      {:ok, b1} = Ash.create(Issue, %{title: "linked", workspace_id: ws.id})
+      {:ok, b2} = Ash.create(Issue, %{title: "other", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, "/audit?entity_id=#{b1.id}")
+
+      assert html =~ "value=\"subject:#{b1.id}\""
+      assert html =~ b1.id
+      refute html =~ b2.id
+    end
+
+    test "the subject filter survives a truncated 500-row read window", %{conn: conn, ws: ws} do
+      {:ok, target} = Ash.create(Issue, %{title: "old history", workspace_id: ws.id})
+
+      for n <- 1..500 do
+        {:ok, filler} = Ash.create(Issue, %{title: "filler #{n}", workspace_id: ws.id})
+
+        {:ok, _} =
+          Ash.update(filler, %{status: :in_progress, change_origin: "cli"}, action: :update)
+      end
+
+      {:ok, _view, html} = live(conn, "/audit?entity_id=#{target.id}")
+
+      assert html =~ target.id
+    end
+  end
 end

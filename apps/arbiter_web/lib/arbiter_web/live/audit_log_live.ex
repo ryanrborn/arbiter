@@ -35,10 +35,25 @@ defmodule ArbiterWeb.AuditLogLive do
   `key:` prefix matches subject, actor, or action (substring, case
   insensitive).
 
-  Reads are bounded to the 500 most recent versions (same cap the prior
-  implementation used); tabs/query filter and pagination happen in memory
-  over that window, matching `ArbiterWeb.WorkerIndexLive`'s in-memory
-  paging pattern for other bounded, non-tabular-query data.
+  `subject:` is pushed into the `Ash.Query.filter/2` *before* the 500-row
+  cap (see `read_events/1`), so a task's full history is reachable by id
+  regardless of how much has been written since — the same guarantee the
+  replaced implementation's `filter_by_entity_id/2` gave. `action:` pushes
+  down too, but only when the value is one of the known action names
+  (`create`/`update`/`close`/`reopen` — `version_action_name` is
+  atom-typed, so only an exact match is safe to push as SQL); any other
+  `action:` value, `actor:`, and bare-word clauses, plus the Human/Machine
+  tab, only narrow within the already-bounded window (no `belongs_to_actor`,
+  so there's no column to filter actor on server-side — see "Actor" above).
+  Tab, query, and page are round-tripped through the URL (`?tab=&q=&page=`)
+  via `handle_params/3` so the view is shareable and back-button safe, and
+  so a deep link can seed a filter (see `subject_from_params/1`).
+
+  Reads are bounded to the 500 most recent versions *matching the pushed
+  filter* (same cap the prior implementation used). The raw read is cached
+  in `:raw_events` and only re-run when the pushed-down filter changes —
+  tab switches, in-memory query edits, and paging re-filter/re-slice the
+  cached window instead of re-querying.
   """
 
   use ArbiterWeb, :live_view
@@ -54,39 +69,73 @@ defmodule ArbiterWeb.AuditLogLive do
     %{label: "Machine", value: "machine"}
   ]
 
-  @actor_hues ~w(--arb-live --arb-info --arb-proposal --arb-attention --arb-fail)
+  # Identity colours only — deliberately excludes --arb-fail/--arb-attention
+  # so an ordinary actor is never painted with a semantic error/warning tone.
+  @actor_hues ~w(--arb-live --arb-info --arb-proposal)
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok,
-     socket
-     |> assign(:tabs, @tabs)
-     |> assign(:tab, "all")
-     |> assign(:query, "")
-     |> assign(:page, 1)
-     |> load_events()}
+    {:ok, socket |> assign(:tabs, @tabs) |> assign(:raw_events, nil) |> assign(:raw_key, nil)}
   end
 
   @impl true
+  def handle_params(params, _uri, socket) do
+    tab = if params["tab"] in ~w(all human machine), do: params["tab"], else: "all"
+    query = params["q"] || subject_from_params(params) || ""
+    page = Paging.parse_page(params)
+
+    {:noreply,
+     socket
+     |> assign(:tab, tab)
+     |> assign(:query, query)
+     |> assign(:page, page)
+     |> load_events()}
+  end
+
+  # The task detail screen's Activity panel hands the subject over as
+  # `?entity_id=`; translate it into the same `subject:` clause the search
+  # box accepts so the deep link lands pre-filtered.
+  defp subject_from_params(%{"entity_id" => eid}) when is_binary(eid) and eid != "",
+    do: "subject:#{eid}"
+
+  defp subject_from_params(_params), do: nil
+
+  @impl true
   def handle_event("filter-tab", %{"tab" => tab}, socket) do
-    {:noreply, socket |> assign(:tab, tab) |> assign(:page, 1) |> load_events()}
+    {:noreply, push_patch(socket, to: audit_path(tab, socket.assigns.query, 1))}
   end
 
   def handle_event("search", %{"q" => q}, socket) do
-    {:noreply, socket |> assign(:query, q) |> assign(:page, 1) |> load_events()}
+    {:noreply, push_patch(socket, to: audit_path(socket.assigns.tab, q, 1))}
   end
 
   def handle_event("page", %{"page" => page}, socket) do
-    {:noreply, socket |> assign(:page, Paging.parse_page(%{"page" => page})) |> load_events()}
+    {:noreply,
+     push_patch(socket,
+       to:
+         audit_path(
+           socket.assigns.tab,
+           socket.assigns.query,
+           Paging.parse_page(%{"page" => page})
+         )
+     )}
   end
+
+  defp audit_path(tab, query, page),
+    do: ~p"/audit?#{[tab: tab, q: query, page: page]}"
 
   # ---- data ----
 
   defp load_events(socket) do
+    clauses = socket.assigns.query |> String.split() |> Enum.map(&parse_clause/1)
+    {sql_clauses, memory_clauses} = Enum.split_with(clauses, &pushable?/1)
+
+    socket = refresh_raw_events(socket, sql_clauses)
+
     rows =
-      read_events()
+      socket.assigns.raw_events
       |> filter_by_tab(socket.assigns.tab)
-      |> filter_by_query(socket.assigns.query)
+      |> filter_by_clauses(memory_clauses)
 
     page = Paging.paginate_list(rows, socket.assigns.page)
 
@@ -95,16 +144,47 @@ defmodule ArbiterWeb.AuditLogLive do
     |> assign(:page_info, page)
   end
 
-  defp read_events do
+  # Only re-reads the database when the pushed-down (subject/action) portion
+  # of the query changed — tab switches and in-memory-only query edits reuse
+  # the cached window.
+  defp refresh_raw_events(socket, sql_clauses) do
+    if socket.assigns.raw_key == sql_clauses do
+      socket
+    else
+      socket
+      |> assign(:raw_events, read_events(sql_clauses))
+      |> assign(:raw_key, sql_clauses)
+    end
+  end
+
+  @known_actions ~w(create update close reopen)
+
+  # subject: always pushes down. action: only pushes down for an exact,
+  # known action name — version_action_name is atom-typed, so anything else
+  # (a partial word) has to stay an in-memory substring match.
+  defp pushable?({:subject, _v}), do: true
+  defp pushable?({:action, v}), do: v in @known_actions
+  defp pushable?(_clause), do: false
+
+  defp read_events(sql_clauses) do
     Version
     |> Ash.Query.new()
     |> Ash.Query.sort(version_inserted_at: :desc)
+    |> push_sql_clauses(sql_clauses)
     |> Ash.Query.limit(500)
     |> Ash.read!()
     |> Enum.sort_by(& &1.version_inserted_at, {:asc, DateTime})
     |> annotate_transitions()
     |> Enum.reverse()
   end
+
+  defp push_sql_clauses(query, clauses), do: Enum.reduce(clauses, query, &push_sql_clause/2)
+
+  defp push_sql_clause({:subject, v}, query),
+    do: Ash.Query.filter(query, like(version_source_id, ^"%#{v}%"))
+
+  defp push_sql_clause({:action, v}, query),
+    do: Ash.Query.filter(query, version_action_name == ^String.to_existing_atom(v))
 
   # Walk chronologically so a status change can show what it changed *from*,
   # not just what it changed to — `changes` (AshPaperTrail's changes_only
@@ -161,10 +241,9 @@ defmodule ArbiterWeb.AuditLogLive do
   defp filter_by_tab(rows, "all"), do: rows
   defp filter_by_tab(rows, tab), do: Enum.filter(rows, &(actor_kind(&1.actor) == tab))
 
-  defp filter_by_query(rows, query) when query in [nil, ""], do: rows
+  defp filter_by_clauses(rows, []), do: rows
 
-  defp filter_by_query(rows, query) do
-    clauses = query |> String.split() |> Enum.map(&parse_clause/1)
+  defp filter_by_clauses(rows, clauses) do
     Enum.filter(rows, fn row -> Enum.all?(clauses, &matches_clause?(row, &1)) end)
   end
 
@@ -203,7 +282,7 @@ defmodule ArbiterWeb.AuditLogLive do
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6" id="audit-log">
         <div>
           <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Core.icon name="hero-clock" class="size-6 text-base-content/70" /> Audit log
+            <Core.icon name="hero-clock" size={24} class="text-base-content/70" /> Audit log
           </h1>
           <p class="text-sm text-base-content/60 mt-1">
             {@page_info.total_count} matching events (of the 500 most recent), sourced from
@@ -213,7 +292,11 @@ defmodule ArbiterWeb.AuditLogLive do
         </div>
 
         <div class="flex flex-wrap items-center gap-3">
-          <Navigation.filter_tabs tabs={@tabs} active={@tab} event="filter-tab" />
+          <Navigation.filter_tabs
+            tabs={@tabs}
+            active={@tab}
+            tab_path={&audit_path(&1, @query, 1)}
+          />
           <form phx-change="search" class="flex-1 min-w-[240px]">
             <Forms.input
               type="text"
@@ -221,6 +304,7 @@ defmodule ArbiterWeb.AuditLogLive do
               id="audit-query"
               value={@query}
               placeholder="subject:bd-3o8mq1"
+              phx-debounce="300"
               mono
             />
           </form>
@@ -257,7 +341,7 @@ defmodule ArbiterWeb.AuditLogLive do
           page={@page_info.page}
           total_pages={@page_info.total_pages}
           total_count={@page_info.total_count}
-          event="page"
+          page_path={&audit_path(@tab, @query, &1)}
         />
       </div>
     </Layouts.app>
