@@ -15,10 +15,13 @@ defmodule ArbiterWeb.WorkspaceDetail.WorkerSecurityComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Workspace.Changes.PatchConfig
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, security_error: nil, security_confirm: nil)}
@@ -255,232 +258,232 @@ defmodule ArbiterWeb.WorkspaceDetail.WorkerSecurityComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <section id={@id} class="card bg-base-200 border-2 border-warning/40 shadow-sm">
-      <div class="card-body p-4 gap-3">
-        <h2 class="font-semibold flex items-center gap-2">
-          <.icon name="hero-shield-exclamation" class="size-5 text-warning" />
-          Advanced — worker security
-        </h2>
-        <p class="text-xs text-base-content/50 -mt-1">
-          <code>agent.security.*</code>
-          controls the filesystem, network and destructive-action guardrails applied to every
-          worker this workspace dispatches on this machine. Weakening a guard needs an explicit
-          confirmation.
+    <div id={@id} class={pane_class("security", @section)}>
+      <div class="rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--arb-raised)] px-3 py-[10px]">
+        <p class="m-0 font-[family-name:var(--font-mono)] text-[10.5px] tracking-[0.06em] text-[var(--text-label)] uppercase">
+          Effective workspace-wide posture right now
         </p>
-
-        <div class="rounded-box border border-base-300 bg-base-100 px-3 py-2">
-          <p class="text-xs uppercase tracking-wide text-base-content/50">
-            Effective workspace-wide posture right now
-          </p>
-          <p class="font-mono text-sm mt-0.5">{security_summary(@security_policy)}</p>
-          <div class="flex flex-wrap gap-1 mt-2">
-            <span class="badge badge-sm badge-outline font-mono">
-              mode={@security_policy.permissions.mode}
-            </span>
-            <span class={[
-              "badge badge-sm font-mono",
-              if(@security_policy.sandbox.enabled, do: "badge-success", else: "badge-error")
-            ]}>
-              sandbox={if @security_policy.sandbox.enabled, do: "on", else: "OFF"}
-            </span>
-            <span class={[
-              "badge badge-sm font-mono",
-              if(@security_policy.sandbox.filesystem == :worktree,
-                do: "badge-success",
-                else: "badge-error"
-              )
-            ]}>
-              fs={@security_policy.sandbox.filesystem}
-            </span>
-            <span class="badge badge-sm badge-outline font-mono">
-              net={if @security_policy.sandbox.network, do: "on", else: "tools-off"}
-            </span>
-            <span class={[
-              "badge badge-sm font-mono",
-              if(
-                length(@security_policy.permissions.safe_defaults) ==
-                  length(@safe_default_categories),
-                do: "badge-success",
-                else: "badge-warning"
-              )
-            ]}>
-              safe_defaults={length(@security_policy.permissions.safe_defaults)}/{length(
-                @safe_default_categories
-              )}
-            </span>
-          </div>
-
-          <%!-- agent.security.repos.<repo> layers on top of the line above
-               for dispatches against that repo, so the workspace-wide
-               posture is not the whole story. Read-only: the form below
-               edits the workspace layer only. --%>
-          <div :if={@security_repo_postures != []} id="security-repo-postures" class="mt-3">
-            <p class="text-xs uppercase tracking-wide text-base-content/50">
-              Per-repo overrides (<code>agent.security.repos.*</code>) — applied on top of the
-              line above; edit via <code>arb config</code>
-            </p>
-            <ul class="mt-1 flex flex-col gap-0.5">
-              <li
-                :for={{repo, policy} <- @security_repo_postures}
-                class="font-mono text-xs flex flex-wrap gap-x-2"
-              >
-                <span class="text-base-content/60">{repo}:</span>
-                <span>{security_summary(policy)}</span>
-              </li>
-            </ul>
-          </div>
+        <p class="mt-[3px] mb-0 font-[family-name:var(--font-mono)] text-[12px] text-[var(--text-body)]">
+          {security_summary(@security_policy)}
+        </p>
+        <div class="mt-2 flex flex-wrap gap-1">
+          <span class={posture_chip(nil)}>mode={@security_policy.permissions.mode}</span>
+          <span class={posture_chip(@security_policy.sandbox.enabled)}>
+            sandbox={if @security_policy.sandbox.enabled, do: "on", else: "OFF"}
+          </span>
+          <span class={posture_chip(@security_policy.sandbox.filesystem == :worktree)}>
+            fs={@security_policy.sandbox.filesystem}
+          </span>
+          <span class={posture_chip(nil)}>
+            net={if @security_policy.sandbox.network, do: "on", else: "tools-off"}
+          </span>
+          <span class={
+            posture_chip(
+              length(@security_policy.permissions.safe_defaults) ==
+                length(@safe_default_categories)
+            )
+          }>
+            safe_defaults={length(@security_policy.permissions.safe_defaults)}/{length(
+              @safe_default_categories
+            )}
+          </span>
         </div>
 
-        <details class="collapse collapse-arrow border border-base-300 bg-base-100">
-          <summary class="collapse-title text-sm font-medium">
-            Edit security posture
-          </summary>
-          <div class="collapse-content">
-            <.form
-              for={%{}}
-              as={:security}
-              phx-submit="save_security"
-              phx-target={@myself}
-              class="space-y-3"
+        <%!-- agent.security.repos.<repo> layers on top of the line above
+             for dispatches against that repo, so the workspace-wide
+             posture is not the whole story. Read-only: the form below
+             edits the workspace layer only. --%>
+        <div :if={@security_repo_postures != []} id="security-repo-postures" class="mt-3">
+          <p class="m-0 font-[family-name:var(--font-mono)] text-[10.5px] tracking-[0.06em] text-[var(--text-label)] uppercase">
+            Per-repo overrides (agent.security.repos.*) — applied on top of the line above; edit via
+            <code>arb config</code>
+          </p>
+          <ul class="mt-1 flex list-none flex-col gap-[2px] p-0">
+            <li
+              :for={{repo, policy} <- @security_repo_postures}
+              class="flex flex-wrap gap-x-2 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-secondary)]"
             >
-              <div class="grid sm:grid-cols-2 gap-x-4">
-                <.input
-                  type="select"
-                  name="security[mode]"
-                  label="Permission mode (permissions.mode)"
-                  options={Enum.map(@security_modes, &{Atom.to_string(&1), Atom.to_string(&1)})}
-                  value={Atom.to_string(@security_policy.permissions.mode)}
-                />
-                <.input
-                  type="select"
-                  name="security[sandbox_filesystem]"
-                  label="Filesystem scope (sandbox.filesystem)"
-                  options={Enum.map(@security_filesystems, &{Atom.to_string(&1), Atom.to_string(&1)})}
-                  value={Atom.to_string(@security_policy.sandbox.filesystem)}
-                />
-                <label class="fieldset flex items-center gap-2 mt-2">
-                  <input type="hidden" name="security[sandbox_enabled]" value="false" />
-                  <input
-                    type="checkbox"
-                    name="security[sandbox_enabled]"
-                    value="true"
-                    checked={@security_policy.sandbox.enabled}
-                    class="toggle toggle-sm toggle-primary"
-                  />
-                  <span class="text-sm">Sandbox enabled (sandbox.enabled)</span>
-                </label>
-                <label class="fieldset flex items-center gap-2 mt-2">
-                  <input type="hidden" name="security[sandbox_network]" value="false" />
-                  <input
-                    type="checkbox"
-                    name="security[sandbox_network]"
-                    value="true"
-                    checked={@security_policy.sandbox.network}
-                    class="toggle toggle-sm toggle-primary"
-                  />
-                  <span class="text-sm">Network egress allowed (sandbox.network)</span>
-                </label>
-              </div>
-
-              <fieldset class="fieldset">
-                <legend class="label">Safe-default guards (permissions.safe_defaults)</legend>
-                <p class="text-xs text-base-content/50">
-                  The baseline destructive-op categories every adapter denies. Unchecking one
-                  requires confirmation.
-                </p>
-                <div class="flex flex-wrap gap-x-4 gap-y-1 mt-1">
-                  <label
-                    :for={category <- @safe_default_categories}
-                    class="flex items-center gap-2 text-sm cursor-pointer"
-                  >
-                    <input type="hidden" name={"security[safe_defaults][#{category}]"} value="false" />
-                    <input
-                      type="checkbox"
-                      name={"security[safe_defaults][#{category}]"}
-                      value="true"
-                      checked={category in @security_policy.permissions.safe_defaults}
-                      class="checkbox checkbox-sm"
-                    />
-                    <code>{category}</code>
-                  </label>
-                </div>
-              </fieldset>
-
-              <div class="grid sm:grid-cols-2 gap-x-4">
-                <.input
-                  type="textarea"
-                  name="security[allow]"
-                  label="Allow rules (permissions.allow) — one per line"
-                  value={rules_text(@security_policy.permissions.allow)}
-                  rows="4"
-                />
-                <.input
-                  type="textarea"
-                  name="security[deny]"
-                  label="Deny rules (permissions.deny) — one per line"
-                  value={rules_text(@security_policy.permissions.deny)}
-                  rows="4"
-                />
-              </div>
-
-              <div class="flex items-center gap-3">
-                <.button type="submit" class="btn btn-sm btn-warning">
-                  Review security changes
-                </.button>
-                <p :if={@security_error} class="text-sm text-error">{@security_error}</p>
-              </div>
-            </.form>
-          </div>
-        </details>
-
-        <%!-- Security-downgrade confirmation. The plain submit above never
-             writes when a guard is being removed; this is the only path that
-             applies such a change, and it names each guard explicitly. --%>
-        <div :if={@security_confirm} class="modal modal-open" id="security-confirm-modal">
-          <div class="modal-box border-2 border-error/50">
-            <h3 class="font-semibold text-lg mb-1 flex items-center gap-2">
-              <.icon name="hero-shield-exclamation" class="size-5 text-error" />
-              Weaken this workspace's security posture?
-            </h3>
-            <p class="text-sm text-base-content/70">
-              These changes remove guardrails from every worker this workspace dispatches on this
-              machine:
-            </p>
-            <ul class="list-disc list-inside text-sm text-error mt-2 space-y-1">
-              <li :for={downgrade <- @security_confirm.downgrades}>{downgrade}</li>
-            </ul>
-            <p class="text-xs text-base-content/50 mt-3">
-              Resulting workspace-wide posture:
-              <span class="font-mono">{@security_confirm.posture}</span>
-            </p>
-            <p :if={@security_repo_postures != []} class="text-xs text-warning mt-1">
-              {length(@security_repo_postures)} per-repo override(s) still layer on top of this — see
-              <code>agent.security.repos.*</code>
-              in the posture panel.
-            </p>
-            <div class="modal-action">
-              <.button
-                type="button"
-                phx-click="cancel_security"
-                phx-target={@myself}
-                class="btn btn-sm btn-ghost"
-              >
-                Cancel
-              </.button>
-              <.button
-                type="button"
-                phx-click="confirm_security"
-                phx-target={@myself}
-                class="btn btn-sm btn-error"
-              >
-                I understand — weaken the posture
-              </.button>
-            </div>
-          </div>
-          <div class="modal-backdrop" phx-click="cancel_security" phx-target={@myself}></div>
+              <span class="text-[var(--text-label)]">{repo}:</span>
+              <span>{security_summary(policy)}</span>
+            </li>
+          </ul>
         </div>
       </div>
-    </section>
+
+      <.form for={%{}} as={:security} phx-submit="save_security" phx-target={@myself}>
+        <.rows>
+          <.setting_row
+            name="Permission mode"
+            consequence="permissions.mode — how a worker's tool calls are gated; bypass runs every call unprompted, so nothing but the deny rules stops it"
+          >
+            <:control>
+              <Forms.select
+                name="security[mode]"
+                options={Enum.map(@security_modes, &{Atom.to_string(&1), Atom.to_string(&1)})}
+                value={Atom.to_string(@security_policy.permissions.mode)}
+                size="sm"
+                class="w-[180px]"
+              />
+            </:control>
+          </.setting_row>
+
+          <.setting_row
+            name="Filesystem scope"
+            consequence="sandbox.filesystem — worktree confines writes to the worker's own checkout; anything else lets a worker write outside it and corrupt sibling workers"
+          >
+            <:control>
+              <Forms.select
+                name="security[sandbox_filesystem]"
+                options={Enum.map(@security_filesystems, &{Atom.to_string(&1), Atom.to_string(&1)})}
+                value={Atom.to_string(@security_policy.sandbox.filesystem)}
+                size="sm"
+                class="w-[180px]"
+              />
+            </:control>
+          </.setting_row>
+
+          <.toggle_row
+            name="Sandbox enabled"
+            consequence="sandbox.enabled — off runs every worker directly on this host with no filesystem or network containment at all"
+            field="security[sandbox_enabled]"
+            checked={@security_policy.sandbox.enabled}
+          />
+
+          <.toggle_row
+            name="Network egress allowed"
+            consequence="sandbox.network — off cuts a worker's outbound network, so it cannot fetch dependencies or reach a forge"
+            field="security[sandbox_network]"
+            checked={@security_policy.sandbox.network}
+          />
+
+          <.setting_row
+            name="Safe-default guards"
+            consequence="permissions.safe_defaults — the destructive-op categories every adapter denies outright; unchecking one hands that class of command to every worker"
+          >
+            <:below>
+              <div class="flex flex-wrap gap-x-4 gap-y-1">
+                <label
+                  :for={category <- @safe_default_categories}
+                  class="flex cursor-pointer items-center gap-[7px] font-[family-name:var(--font-mono)] text-[11.5px] text-[var(--text-body)]"
+                >
+                  <input type="hidden" name={"security[safe_defaults][#{category}]"} value="false" />
+                  <input
+                    type="checkbox"
+                    name={"security[safe_defaults][#{category}]"}
+                    value="true"
+                    checked={category in @security_policy.permissions.safe_defaults}
+                    class="peer sr-only"
+                  />
+                  <%!-- The tick is transparent until the box is ticked: on this
+                       screen a checkmark means "this destructive-op guard is
+                       on", so an unchecked guard must not show one. --%>
+                  <span class="inline-flex size-[14px] flex-none items-center justify-center rounded-[var(--radius-chip)] border border-solid border-[var(--border-strong)] text-[9px] text-transparent peer-checked:border-[var(--accent-primary)] peer-checked:bg-[var(--accent-primary)] peer-checked:text-[var(--accent-primary-ink)]">
+                    ✓
+                  </span>
+                  {category}
+                </label>
+              </div>
+            </:below>
+          </.setting_row>
+
+          <.setting_row
+            name="Allow rules"
+            consequence="permissions.allow — one rule per line, each pre-approving a tool call a worker would otherwise be stopped on"
+          >
+            <:below>
+              <Forms.textarea
+                name="security[allow]"
+                value={rules_text(@security_policy.permissions.allow)}
+                rows={4}
+                placeholder="Bash(mix test:*)"
+              />
+            </:below>
+          </.setting_row>
+
+          <.setting_row
+            name="Deny rules"
+            consequence="permissions.deny — one rule per line; a matching call is refused even in bypass mode, so this is the last guard that still holds"
+          >
+            <:below>
+              <Forms.textarea
+                name="security[deny]"
+                value={rules_text(@security_policy.permissions.deny)}
+                rows={4}
+                placeholder="Bash(rm -rf:*)"
+              />
+            </:below>
+          </.setting_row>
+        </.rows>
+
+        <div class="mt-3 flex items-center gap-3">
+          <Core.button type="submit" variant="danger" size="sm">
+            Review security changes
+          </Core.button>
+          <p :if={@security_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
+            {@security_error}
+          </p>
+        </div>
+      </.form>
+
+      <%!-- Security-downgrade confirmation. The plain submit above never
+           writes when a guard is being removed; this is the only path that
+           applies such a change, and it names each guard explicitly. --%>
+      <div :if={@security_confirm} class="modal modal-open" id="security-confirm-modal">
+        <div class="modal-box border border-solid border-[var(--arb-fail)] bg-[var(--surface-chrome)]">
+          <h3 class="m-0 flex items-center gap-2 text-[14px] font-medium text-[var(--text-title)]">
+            <Core.icon name="hero-shield-exclamation" size={16} class="text-[var(--arb-fail-text)]" />
+            Weaken this workspace's security posture?
+          </h3>
+          <p class="mt-1 mb-0 text-[12px] text-[var(--text-secondary)]">
+            These changes remove guardrails from every worker this workspace dispatches on this
+            machine:
+          </p>
+          <ul class="mt-2 flex list-disc flex-col gap-1 pl-5 text-[12px] text-[var(--arb-fail-text)]">
+            <li :for={downgrade <- @security_confirm.downgrades}>{downgrade}</li>
+          </ul>
+          <p class="mt-3 mb-0 text-[11px] text-[var(--text-label)]">
+            Resulting workspace-wide posture:
+            <span class="font-[family-name:var(--font-mono)]">{@security_confirm.posture}</span>
+          </p>
+          <p
+            :if={@security_repo_postures != []}
+            class="mt-1 mb-0 text-[11px] text-[var(--arb-attention)]"
+          >
+            {length(@security_repo_postures)} per-repo override(s) still layer on top of this — see
+            <code>agent.security.repos.*</code>
+            in the posture panel.
+          </p>
+          <div class="modal-action">
+            <Core.button type="button" size="sm" phx-click="cancel_security" phx-target={@myself}>
+              Cancel
+            </Core.button>
+            <Core.button
+              type="button"
+              variant="danger"
+              size="sm"
+              phx-click="confirm_security"
+              phx-target={@myself}
+            >
+              I understand — weaken the posture
+            </Core.button>
+          </div>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_security" phx-target={@myself}></div>
+      </div>
+    </div>
     """
+  end
+
+  # A guard that is on reads as pass, off as fail; the two informational chips
+  # (mode, net) are neutral because neither value is by itself a weakening.
+  defp posture_chip(state) do
+    [
+      "inline-flex items-center rounded-[var(--radius-chip)] border border-solid px-[6px] py-[1px] font-[family-name:var(--font-mono)] text-[10.5px]",
+      case state do
+        true -> "border-[var(--arb-live)] text-[var(--arb-live)]"
+        false -> "border-[var(--arb-fail)] text-[var(--arb-fail-text)]"
+        nil -> "border-[var(--border-default)] text-[var(--text-secondary)]"
+      end
+    ]
   end
 end

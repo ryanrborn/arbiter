@@ -21,9 +21,13 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
 
   alias Arbiter.Tasks.Workspace
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, :config_error, nil)}
@@ -356,328 +360,457 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
 
   attr :role, :string, required: true
   attr :label, :string, required: true
+  attr :consequence, :string, required: true
   attr :selected, :list, required: true
   attr :available, :list, required: true
   attr :target, :any, required: true
-  attr :hint, :string, default: nil
 
   defp agent_type_editor(assigns) do
     ~H"""
-    <fieldset class="fieldset">
-      <legend class="fieldset-legend">{@label}</legend>
-      <ol class="space-y-1">
-        <li
-          :for={{type, idx} <- Enum.with_index(@selected)}
-          class="flex items-center gap-2 bg-base-100 rounded px-2 py-1 border border-base-300 text-sm"
-        >
-          <span class="text-xs text-base-content/40 font-mono w-4">{idx + 1}</span>
-          <span class="flex-1">{type}</span>
+    <.setting_row name={@label} consequence={@consequence}>
+      <:below>
+        <ol class="m-0 flex flex-col gap-1 p-0">
+          <li
+            :for={{type, idx} <- Enum.with_index(@selected)}
+            class="flex items-center gap-2 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-card)] px-2 py-1 font-[family-name:var(--font-mono)] text-[11.5px]"
+          >
+            <span class="w-4 text-[var(--text-label)]">{idx + 1}</span>
+            <span class="flex-1 text-[var(--arb-text-body)]">{type}</span>
+            <button
+              type="button"
+              phx-target={@target}
+              phx-click="move_agent_type"
+              phx-value-role={@role}
+              phx-value-type={type}
+              phx-value-dir="up"
+              disabled={idx == 0}
+              class={icon_button()}
+              aria-label={"Move #{type} up"}
+            >
+              <Core.icon name="hero-chevron-up" size={12} />
+            </button>
+            <button
+              type="button"
+              phx-target={@target}
+              phx-click="move_agent_type"
+              phx-value-role={@role}
+              phx-value-type={type}
+              phx-value-dir="down"
+              disabled={idx == length(@selected) - 1}
+              class={icon_button()}
+              aria-label={"Move #{type} down"}
+            >
+              <Core.icon name="hero-chevron-down" size={12} />
+            </button>
+            <button
+              type="button"
+              phx-target={@target}
+              phx-click="remove_agent_type"
+              phx-value-role={@role}
+              phx-value-type={type}
+              class={icon_button(:danger)}
+              aria-label={"Remove #{type}"}
+            >
+              <Core.icon name="hero-x-mark" size={12} />
+            </button>
+          </li>
+          <li
+            :if={@selected == []}
+            class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
+          >
+            None selected.
+          </li>
+        </ol>
+        <div :if={@available != []} class="mt-1 flex flex-wrap gap-1">
           <button
+            :for={type <- @available}
             type="button"
             phx-target={@target}
-            phx-click="move_agent_type"
+            phx-click="add_agent_type"
             phx-value-role={@role}
             phx-value-type={type}
-            phx-value-dir="up"
-            disabled={idx == 0}
-            class="btn btn-xs btn-ghost btn-square"
-            aria-label={"Move #{type} up"}
+            class={[
+              value_chip(),
+              "cursor-pointer gap-1 hover:border-[var(--accent-primary)] hover:text-[var(--text-body)]"
+            ]}
           >
-            <.icon name="hero-chevron-up" class="size-3" />
+            <Core.icon name="hero-plus" size={11} /> {type}
           </button>
-          <button
-            type="button"
-            phx-target={@target}
-            phx-click="move_agent_type"
-            phx-value-role={@role}
-            phx-value-type={type}
-            phx-value-dir="down"
-            disabled={idx == length(@selected) - 1}
-            class="btn btn-xs btn-ghost btn-square"
-            aria-label={"Move #{type} down"}
-          >
-            <.icon name="hero-chevron-down" class="size-3" />
-          </button>
-          <button
-            type="button"
-            phx-target={@target}
-            phx-click="remove_agent_type"
-            phx-value-role={@role}
-            phx-value-type={type}
-            class="btn btn-xs btn-ghost btn-square text-error"
-            aria-label={"Remove #{type}"}
-          >
-            <.icon name="hero-x-mark" class="size-3" />
-          </button>
-        </li>
-        <li :if={@selected == []} class="text-xs text-base-content/40 italic">
-          None selected.
-        </li>
-      </ol>
-      <div :if={@available != []} class="flex flex-wrap gap-1 mt-1">
-        <button
-          :for={type <- @available}
-          type="button"
-          phx-target={@target}
-          phx-click="add_agent_type"
-          phx-value-role={@role}
-          phx-value-type={type}
-          class="btn btn-xs btn-outline gap-1"
-        >
-          <.icon name="hero-plus" class="size-3" /> {type}
-        </button>
-      </div>
-      <p :if={@hint} class="text-xs text-base-content/50">{@hint}</p>
-    </fieldset>
+        </div>
+      </:below>
+    </.setting_row>
     """
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <%!-- display:contents keeps these rows in the parent card-body flex
-         flow, so extracting the section changes no layout. --%>
+    <%!-- display:contents keeps both panes as siblings of the other sections'
+         panes in the body column, so the rail can show either without this
+         component nesting one inside the other. --%>
     <div class="contents">
-      <div class="grid sm:grid-cols-2 gap-x-4 gap-y-3">
-        <.agent_type_editor
-          role="agent"
-          target={@myself}
-          label="Worker agent (agent.type)"
-          selected={agent_type_list(@workspace, "agent")}
-          available={@agent_types -- agent_type_list(@workspace, "agent")}
-        />
-        <.agent_type_editor
-          role="review_agent"
-          target={@myself}
-          label="Review agent (review_agent.type)"
-          selected={agent_type_list(@workspace, "review_agent")}
-          available={@agent_types -- agent_type_list(@workspace, "review_agent")}
-          hint="Leave empty to fall back to the worker agent's type."
-        />
-      </div>
-      <.form
-        for={%{}}
-        as={:config}
-        phx-submit="save_config"
-        phx-change="preview_tracker_type"
-        phx-target={@myself}
-        class="grid sm:grid-cols-2 gap-x-4"
-      >
-        <.input
-          type="select"
-          name="config[tracker_type]"
-          label="Tracker type"
-          options={Enum.map(@tracker_types, &{&1, &1})}
-          value={cfg(@workspace, ["tracker", "type"], "none")}
-        />
-        <.input
-          type="select"
-          name="config[merger_strategy]"
-          label="Merger strategy"
-          options={Enum.map(@merger_strategies, &{&1, &1})}
-          value={cfg(@workspace, ["merge", "strategy"], "direct")}
-        />
-        <.input
-          type="select"
-          name="config[routing_policy]"
-          label="Routing policy"
-          options={Enum.map(@routing_policies, &{&1, &1})}
-          value={cfg(@workspace, ["routing", "policy"], "static")}
-        />
-        <.input
-          type="select"
-          name="config[routing_base_policy]"
-          label="Budget base policy (routing.base_policy, by_budget only)"
-          options={[
-            {"(unset — defaults to by_priority)", ""},
-            {"by_priority", "by_priority"},
-            {"by_difficulty", "by_difficulty"}
-          ]}
-          value={cfg(@workspace, ["routing", "base_policy"], "")}
-        />
-        <.input
-          type="text"
-          name="config[routing_budget_usd_per_day]"
-          label="Daily budget USD (routing.budget_usd_per_day, by_budget only)"
-          placeholder="e.g. 25"
-          value={cfg(@workspace, ["routing", "budget_usd_per_day"], "")}
-        />
-        <label class="fieldset flex items-center gap-2 mt-6">
-          <input type="hidden" name="config[review_required]" value="false" />
-          <input
-            type="checkbox"
-            name="config[review_required]"
-            value="true"
-            checked={review_required?(@workspace)}
-            class="toggle toggle-sm toggle-primary"
-          />
-          <span class="text-sm">Code review required before merge</span>
-        </label>
-        <.input
-          type="text"
-          name="config[review_gate_max_rounds]"
-          label="ReviewGate max rounds (review_gate.max_rounds)"
-          placeholder="default: varies by difficulty"
-          value={cfg(@workspace, ["review_gate", "max_rounds"], "")}
-        />
-        <.input
-          type="text"
-          name="config[review_gate_timeout_ms]"
-          label="ReviewGate per-round timeout ms (review_gate.timeout_ms)"
-          placeholder="default: 1200000"
-          value={cfg(@workspace, ["review_gate", "timeout_ms"], "")}
-        />
-        <.input
-          type="select"
-          name="config[review_automation_default]"
-          label="Reviewer dispatch mode (review_automation.default)"
-          options={[{"(unset)", ""} | Enum.map(@review_automation_modes, &{&1, &1})]}
-          value={cfg(@workspace, ["review_automation", "default"], "")}
-        />
-        <.input
-          type="text"
-          name="config[review_automation_auto_authors]"
-          label="Auto-approve authors (review_automation.auto_authors)"
-          placeholder="comma-separated PR authors, e.g. alice, bob"
-          value={auto_authors_text(@workspace)}
-        />
-        <.input
-          type="select"
-          name="config[merge_pr_title_format]"
-          label="PR title format (merge.pr_title_format)"
-          options={[{"Raw (default)", ""}, {"Conventional Commit", "conventional_commit"}]}
-          value={cfg(@workspace, ["merge", "pr_title_format"], "")}
-        />
-        <.input
-          type="text"
-          name="config[merge_watchdog_max_polls]"
-          label="Watchdog max polls (merge.watchdog_max_polls)"
-          placeholder="default: varies by auto_merge mode"
-          value={cfg(@workspace, ["merge", "watchdog_max_polls"], "")}
-        />
-        <label class="fieldset flex items-center gap-2 mt-6">
-          <input type="hidden" name="config[merge_auto_merge]" value="false" />
-          <input
-            type="checkbox"
-            name="config[merge_auto_merge]"
-            value="true"
-            checked={Workspace.auto_merge?(@workspace)}
-            class="toggle toggle-sm toggle-primary"
-          />
-          <span class="text-sm">Auto-merge on review approval (merge.auto_merge)</span>
-        </label>
-        <label class="fieldset flex items-center gap-2 mt-6">
-          <input type="hidden" name="config[merge_watch_pipeline]" value="false" />
-          <input
-            type="checkbox"
-            name="config[merge_watch_pipeline]"
-            value="true"
-            checked={Workspace.watch_pipeline?(@workspace)}
-            class="toggle toggle-sm toggle-primary"
-          />
-          <span class="text-sm">
-            Wait for CI pipeline before merging (merge.watch_pipeline)
-          </span>
-        </label>
-        <label class="fieldset flex items-center gap-2 mt-6">
-          <input type="hidden" name="config[merge_auto_sync_primary]" value="false" />
-          <input
-            type="checkbox"
-            name="config[merge_auto_sync_primary]"
-            value="true"
-            checked={Workspace.auto_sync_primary?(@workspace)}
-            class="toggle toggle-sm toggle-primary"
-          />
-          <span class="text-sm">
-            Fast-forward primary checkout after merge (merge.auto_sync_primary)
-          </span>
-        </label>
-        <.input
-          type="select"
-          name="config[quota_on_exhaustion]"
-          label="On quota exhaustion (quota.on_exhaustion)"
-          options={[{"(unset — defaults to throttle)", ""} | Enum.map(@quota_modes, &{&1, &1})]}
-          value={cfg(@workspace, ["quota", "on_exhaustion"], "")}
-        />
-        <.input
-          type="text"
-          name="config[quota_overage_alert_usd]"
-          label="Overage alert threshold USD (quota.overage_alert_usd)"
-          placeholder="e.g. 50"
-          value={cfg(@workspace, ["quota", "overage_alert_usd"], "")}
-        />
-        <.input
-          type="text"
-          name="config[quota_throttle_threshold]"
-          label="Throttle threshold (quota.throttle_threshold, 0-1]"
-          placeholder="e.g. 0.8"
-          value={cfg(@workspace, ["quota", "throttle_threshold"], "")}
-        />
-        <.input
-          type="text"
-          name="config[conductor_max_concurrent]"
-          label="Max concurrent dispatches (conductor.max_concurrent)"
-          placeholder="default: uncapped"
-          value={cfg(@workspace, ["conductor", "max_concurrent"], "")}
-        />
-        <.input
-          type="text"
-          name="config[pr_patrol_author_logins]"
-          label="PR-patrol authors (pr_patrol.author_logins)"
-          placeholder="comma-separated forge logins; blank = patrol everyone"
-          value={pr_patrol_author_logins_text(@workspace)}
-        />
-        <.input
-          type="text"
-          name="config[review_patrol_our_login]"
-          label="Our forge login (review_patrol.our_login)"
-          placeholder="e.g. arbiter-bot"
-          value={cfg(@workspace, ["review_patrol", "our_login"], "")}
-        />
-        <label class="fieldset flex items-center gap-2 mt-6">
-          <input type="hidden" name="config[pr_patrol_resolve_bot_threads]" value="false" />
-          <input
-            type="checkbox"
-            name="config[pr_patrol_resolve_bot_threads]"
-            value="true"
-            checked={Workspace.pr_patrol_resolve_bot_threads?(@workspace)}
-            class="toggle toggle-sm toggle-primary"
-          />
-          <span class="text-sm">
-            Resolve addressed bot review threads (pr_patrol.resolve_bot_threads)
-          </span>
-        </label>
-        <label class="fieldset flex items-center gap-2 mt-6">
-          <input type="hidden" name="config[pr_patrol_resolve_human_threads]" value="false" />
-          <input
-            type="checkbox"
-            name="config[pr_patrol_resolve_human_threads]"
-            value="true"
-            checked={Workspace.pr_patrol_resolve_human_threads?(@workspace)}
-            class="toggle toggle-sm toggle-primary"
-          />
-          <span class="text-sm">
-            Resolve addressed human review threads (pr_patrol.resolve_human_threads)
-          </span>
-        </label>
-        <div class="sm:col-span-2 flex items-center gap-3 mt-2">
-          <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
-            Save configuration
-          </.button>
-          <p :if={@config_error} class="text-sm text-error">{@config_error}</p>
-        </div>
-      </.form>
-      <p class="text-xs text-base-content/50">
-        Merger host details beyond the tracker below are still set with <code>arb config set</code>. Worker security lives in its own section below.
-      </p>
+      <div class={pane_class("policy", @section)}>
+        <.form
+          for={%{}}
+          as={:config}
+          phx-submit="save_config"
+          phx-change="preview_tracker_type"
+          phx-target={@myself}
+        >
+          <.rows>
+            <.agent_type_editor
+              role="agent"
+              target={@myself}
+              label="Worker agent pool"
+              consequence="agent.type — dispatch takes the first type in this list that is installed and under quota"
+              selected={agent_type_list(@workspace, "agent")}
+              available={@agent_types -- agent_type_list(@workspace, "agent")}
+            />
+            <.agent_type_editor
+              role="review_agent"
+              target={@myself}
+              label="Review agent pool"
+              consequence="review_agent.type — leave empty and reviews run on the worker agent's type"
+              selected={agent_type_list(@workspace, "review_agent")}
+              available={@agent_types -- agent_type_list(@workspace, "review_agent")}
+            />
 
-      <.live_component
-        :if={@tracker_type_preview != "none"}
-        module={ArbiterWeb.WorkspaceDetail.TrackerConfigComponent}
-        id="tracker-config"
-        workspace={@workspace}
-        type_preview={@tracker_type_preview}
-      />
+            <.setting_row
+              name="Tracker type"
+              consequence="which tracker issues sync to; none keeps them local to Arbiter"
+            >
+              <:control>
+                <Forms.select
+                  name="config[tracker_type]"
+                  options={Enum.map(@tracker_types, &{&1, &1})}
+                  value={cfg(@workspace, ["tracker", "type"], "none")}
+                  size="sm"
+                  class="w-[160px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Merger strategy"
+              consequence="how a finished branch reaches the primary branch"
+            >
+              <:control>
+                <Forms.select
+                  name="config[merger_strategy]"
+                  options={Enum.map(@merger_strategies, &{&1, &1})}
+                  value={cfg(@workspace, ["merge", "strategy"], "direct")}
+                  size="sm"
+                  class="w-[160px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Routing policy"
+              consequence="which rule picks the model tier for each dispatch"
+            >
+              <:control>
+                <Forms.select
+                  name="config[routing_policy]"
+                  options={Enum.map(@routing_policies, &{&1, &1})}
+                  value={cfg(@workspace, ["routing", "policy"], "static")}
+                  size="sm"
+                  class="w-[160px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Budget base policy"
+              consequence="routing.base_policy — the tie-breaker inside by_budget; every other policy ignores it"
+            >
+              <:control>
+                <Forms.select
+                  name="config[routing_base_policy]"
+                  options={[
+                    {"(unset — defaults to by_priority)", ""},
+                    {"by_priority", "by_priority"},
+                    {"by_difficulty", "by_difficulty"}
+                  ]}
+                  value={cfg(@workspace, ["routing", "base_policy"], "")}
+                  size="sm"
+                  class="w-[220px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Daily budget USD"
+              consequence="routing.budget_usd_per_day — by_budget drops to cheaper tiers once the day's spend passes this"
+            >
+              <:control>
+                <Forms.input
+                  name="config[routing_budget_usd_per_day]"
+                  value={cfg(@workspace, ["routing", "budget_usd_per_day"], "")}
+                  placeholder="e.g. 25"
+                  size="sm"
+                  class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.toggle_row
+              name="Code review required before merge"
+              consequence="no branch merges until a review round approves it"
+              field="config[review_required]"
+              checked={review_required?(@workspace)}
+            />
+
+            <.setting_row
+              name="ReviewGate max rounds"
+              consequence="the gate stops after this many rounds and hands the issue back unmerged; blank scales it by difficulty"
+            >
+              <:control>
+                <Forms.input
+                  name="config[review_gate_max_rounds]"
+                  value={cfg(@workspace, ["review_gate", "max_rounds"], "")}
+                  placeholder="by difficulty"
+                  size="sm"
+                  class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="ReviewGate per-round timeout"
+              consequence="review_gate.timeout_ms — a round still running past this is failed rather than waited on"
+            >
+              <:control>
+                <Forms.input
+                  name="config[review_gate_timeout_ms]"
+                  value={cfg(@workspace, ["review_gate", "timeout_ms"], "")}
+                  placeholder="1200000"
+                  size="sm"
+                  class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Reviewer dispatch mode"
+              consequence="review_automation.default — whether a reviewer is dispatched for a PR automatically or only on request"
+            >
+              <:control>
+                <Forms.select
+                  name="config[review_automation_default]"
+                  options={[{"(unset)", ""} | Enum.map(@review_automation_modes, &{&1, &1})]}
+                  value={cfg(@workspace, ["review_automation", "default"], "")}
+                  size="sm"
+                  class="w-[160px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Auto-approve authors"
+              consequence="PRs opened by these logins skip the review gate; blank reviews everyone"
+            >
+              <:control>
+                <Forms.input
+                  name="config[review_automation_auto_authors]"
+                  value={auto_authors_text(@workspace)}
+                  placeholder="alice, bob"
+                  size="sm"
+                  class="w-[220px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="PR title format"
+              consequence="merge.pr_title_format — how the merger writes the title of every PR it opens"
+            >
+              <:control>
+                <Forms.select
+                  name="config[merge_pr_title_format]"
+                  options={[{"Raw (default)", ""}, {"Conventional Commit", "conventional_commit"}]}
+                  value={cfg(@workspace, ["merge", "pr_title_format"], "")}
+                  size="sm"
+                  class="w-[200px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Watchdog max polls"
+              consequence="merge.watchdog_max_polls — the watchdog gives up on a PR after this many checks and leaves it for an operator"
+            >
+              <:control>
+                <Forms.input
+                  name="config[merge_watchdog_max_polls]"
+                  value={cfg(@workspace, ["merge", "watchdog_max_polls"], "")}
+                  placeholder="by auto_merge mode"
+                  size="sm"
+                  class="w-[140px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.toggle_row
+              name="Auto-merge on review approval"
+              consequence="merge.auto_merge — an approved PR merges itself instead of waiting for an operator"
+              field="config[merge_auto_merge]"
+              checked={Workspace.auto_merge?(@workspace)}
+            />
+
+            <.toggle_row
+              name="Wait for CI pipeline before merging"
+              consequence="merge.watch_pipeline — the merger holds an approved PR until the pipeline is green"
+              field="config[merge_watch_pipeline]"
+              checked={Workspace.watch_pipeline?(@workspace)}
+            />
+
+            <.toggle_row
+              name="Fast-forward primary checkout after merge"
+              consequence="merge.auto_sync_primary — your local primary checkout is advanced after each merge"
+              field="config[merge_auto_sync_primary]"
+              checked={Workspace.auto_sync_primary?(@workspace)}
+            />
+
+            <.setting_row
+              name="Pause on quota exhaustion"
+              consequence="throttle stops dispatching at 100% of the 5h window; continue keeps dispatching into paid overage"
+            >
+              <:control>
+                <Forms.select
+                  name="config[quota_on_exhaustion]"
+                  options={[
+                    {"(unset — defaults to throttle)", ""} | Enum.map(@quota_modes, &{&1, &1})
+                  ]}
+                  value={cfg(@workspace, ["quota", "on_exhaustion"], "")}
+                  size="sm"
+                  class="w-[220px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Overage alert threshold USD"
+              consequence="quota.overage_alert_usd — you get told once overage spend passes this, dispatch is unaffected"
+            >
+              <:control>
+                <Forms.input
+                  name="config[quota_overage_alert_usd]"
+                  value={cfg(@workspace, ["quota", "overage_alert_usd"], "")}
+                  placeholder="e.g. 50"
+                  size="sm"
+                  class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Throttle threshold"
+              consequence="quota.throttle_threshold — throttling starts at this fraction of the window instead of at 100%"
+            >
+              <:control>
+                <Forms.input
+                  name="config[quota_throttle_threshold]"
+                  value={cfg(@workspace, ["quota", "throttle_threshold"], "")}
+                  placeholder="e.g. 0.8"
+                  size="sm"
+                  class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Max concurrent workers"
+              consequence="conductor.max_concurrent — per workspace; the effective cap is the lowest of this, the system cap and quota headroom"
+            >
+              <:control>
+                <Forms.input
+                  name="config[conductor_max_concurrent]"
+                  value={cfg(@workspace, ["conductor", "max_concurrent"], "")}
+                  placeholder="uncapped"
+                  size="sm"
+                  class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="PR-patrol authors"
+              consequence="pr_patrol.author_logins — the patrol only touches PRs from these logins; blank patrols everyone"
+            >
+              <:control>
+                <Forms.input
+                  name="config[pr_patrol_author_logins]"
+                  value={pr_patrol_author_logins_text(@workspace)}
+                  placeholder="alice, bob"
+                  size="sm"
+                  class="w-[220px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Our forge login"
+              consequence="review_patrol.our_login — how the patrol tells its own review threads from everyone else's"
+            >
+              <:control>
+                <Forms.input
+                  name="config[review_patrol_our_login]"
+                  value={cfg(@workspace, ["review_patrol", "our_login"], "")}
+                  placeholder="arbiter-bot"
+                  size="sm"
+                  class="w-[180px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.toggle_row
+              name="Resolve addressed bot review threads"
+              consequence="pr_patrol.resolve_bot_threads — the patrol closes a bot thread once the worker has answered it"
+              field="config[pr_patrol_resolve_bot_threads]"
+              checked={Workspace.pr_patrol_resolve_bot_threads?(@workspace)}
+            />
+
+            <.toggle_row
+              name="Resolve addressed human review threads"
+              consequence="pr_patrol.resolve_human_threads — the patrol closes a human thread once the worker has answered it"
+              field="config[pr_patrol_resolve_human_threads]"
+              checked={Workspace.pr_patrol_resolve_human_threads?(@workspace)}
+            />
+          </.rows>
+
+          <div class="mt-3 flex items-center gap-3">
+            <Core.button type="submit" variant="primary" size="sm">Save configuration</Core.button>
+            <p :if={@config_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
+              {@config_error}
+            </p>
+          </div>
+        </.form>
+
+        <p class="m-0 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]">
+          Merger host details beyond the tracker are still set with <code>arb config set</code>.
+        </p>
+      </div>
+
+      <%!-- The tracker pane is this component's too: the select above has to
+           reveal the right adapter fields in the *same* diff, which an assign
+           handed up to the parent and back could never do. --%>
+      <div class={pane_class("tracker", @section)}>
+        <.live_component
+          :if={@tracker_type_preview != "none"}
+          module={ArbiterWeb.WorkspaceDetail.TrackerConfigComponent}
+          id="tracker-config"
+          workspace={@workspace}
+          type_preview={@tracker_type_preview}
+        />
+        <Feedback.empty_state
+          :if={@tracker_type_preview == "none"}
+          icon="hero-link-slash"
+          detail="tracker.type is none"
+        >
+          No tracker is configured — pick one under Policy and issues will sync to it.
+        </Feedback.empty_state>
+      </div>
     </div>
     """
   end
