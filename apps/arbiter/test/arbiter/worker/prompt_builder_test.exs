@@ -55,6 +55,20 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            Phoenix hot-reload and cascades to kill every other running worker.
            Always use relative paths or paths rooted at /tmp/wt-golden.
 
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
            READ DISCIPLINE — avoid whole-file reads of large modules: they refill
            the context window faster than autocompact can shed it and can abort your
            session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
@@ -149,6 +163,20 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            If the work genuinely requires inspecting code you may read files, but do
            not author a branch or open a PR.
 
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
            READ DISCIPLINE — avoid whole-file reads of large modules: they refill
            the context window faster than autocompact can shed it and can abort your
            session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
@@ -214,6 +242,19 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            Your current directory is the repo's local checkout. There is
            no per-task branch and no worktree was provisioned — this is a review-only
            directive.
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
 
            READ DISCIPLINE — avoid whole-file reads of large modules: they refill
            the context window faster than autocompact can shed it and can abort your

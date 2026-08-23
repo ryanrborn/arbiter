@@ -143,6 +143,37 @@ defmodule Arbiter.Worker.PromptBuilder do
 
   defp isolation_section(_), do: ""
 
+  # bd-fjlx01: a worker verifying a UI/server change locally (e.g. booting
+  # `mix phx.server`/`rails server`/`npm run dev` to check it in a browser)
+  # sometimes tears that process down with a name- or pattern-matching kill
+  # (`pkill -f "phx.server"`, `killall node`, `fuser -k <port>`). Process
+  # command lines are visible host-wide, not scoped to the worker's own
+  # worktree or session — a pattern broad enough to match your own instance is
+  # also broad enough to match Arbiter's own server (dispatch is frequently
+  # dogfooded: the coordinator that dispatched you may be running the exact
+  # same command on this same host) or another concurrent worker's instance.
+  # This has taken down the coordinator and every in-flight worker with it in
+  # production use. Shared between the work and task prompts for the same
+  # reason `isolation_section/1` is: any dispatch that might shell out to
+  # start a long-running process carries the same hazard.
+  defp process_kill_discipline_section do
+    """
+
+    PROCESS DISCIPLINE — if you start a local server or any other long-running
+    process to verify your work (e.g. booting a dev server to check a page in
+    a browser), you are responsible for stopping ONLY that exact process.
+    NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+    kill — process command lines are visible across the whole host, not just
+    your worktree, and a pattern that matches your own instance can just as
+    easily match the coordinator's own server or another worker's, taking
+    them down too. Capture the exact PID when you start the process (e.g.
+    `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+    If you cannot reliably track that PID across your own tool calls, do not
+    start the process at all — rely on the automated test suite instead of
+    live/manual verification.
+    """
+  end
+
   defp read_discipline_section do
     """
     READ DISCIPLINE — avoid whole-file reads of large modules: they refill
@@ -172,6 +203,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{prior_review_findings_section(task)}
     Your current directory is a fresh git worktree on a per-task branch.
     #{isolation_section}
+    #{process_kill_discipline_section()}
     #{read_discipline_section()}#{skills_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch, and push it.
@@ -251,6 +283,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     This is a `task`-type directive: it has NO branch or pull request of its
     own, and none will be opened for it.
     #{pr_follow_up_note(task)}#{isolation_section(Keyword.get(opts, :worktree_path))}
+    #{process_kill_discipline_section()}
     #{read_discipline_section()}
     Your job:
       1. Do the investigation / ops work the directive describes.
@@ -530,7 +563,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{tracker_line}Your current directory is the repo's local checkout. There is
     no per-task branch and no worktree was provisioned — this is a review-only
     directive.
-
+    #{process_kill_discipline_section()}
     #{read_discipline_section()}
     Steps:
       1. Read the PR/MR diff via the configured tracker's CLI (`gh pr diff

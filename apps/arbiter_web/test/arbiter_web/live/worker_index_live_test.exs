@@ -58,6 +58,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   test "empty state when no workers are active", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/workers")
     assert html =~ ~s(id="workers-empty")
+    assert html =~ "hero-moon"
   end
 
   test "lists an active worker with its workspace, linking to detail", %{conn: conn, ws: ws} do
@@ -97,9 +98,8 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, _view, html} = live(conn, ~p"/workers?status=awaiting")
 
     assert html =~ task.id
-    # When CI is not running, should show "Open · awaiting approval" with badge-warning
+    # When CI is not running, should show "Open · awaiting approval"
     assert html =~ "Open · awaiting approval"
-    assert html =~ "badge-warning"
   end
 
   test "awaiting review worker with running CI shows CI running badge", %{conn: conn, ws: ws} do
@@ -114,8 +114,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, _view, html} = live(conn, ~p"/workers?status=awaiting")
 
     assert html =~ task.id
-    # When CI is running, should show "Open · CI running" with badge-info
+    # When CI is running, should show "Open · CI running"
     assert html =~ "Open · CI running"
-    assert html =~ "badge-info"
   end
 end

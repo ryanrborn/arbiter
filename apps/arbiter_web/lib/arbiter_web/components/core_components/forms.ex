@@ -137,6 +137,7 @@ defmodule ArbiterWeb.CoreComponents.Forms do
   attr :prompt, :string, default: nil, doc: "placeholder option text"
   attr :size, :string, values: ~w(sm md), default: "md"
   attr :mono, :boolean, default: true, doc: "machine values are mono; prose is not"
+  attr :error, :string, default: nil, doc: "inline error message; switches border to fail hue"
   attr :disabled, :boolean, default: false
   attr :multiple, :boolean, default: false
   attr :required, :boolean, default: false
@@ -145,11 +146,15 @@ defmodule ArbiterWeb.CoreComponents.Forms do
 
   def select(assigns) do
     ~H"""
-    <label :if={@label} class="flex flex-col gap-[6px]">
-      <span class="font-medium text-[11.5px] text-[var(--arb-text-body)]">{@label}</span>
+    <label :if={@label || @error} class="flex flex-col gap-[6px]">
+      <span :if={@label} class="font-medium text-[11.5px] text-[var(--arb-text-body)]">
+        {@label}
+      </span>
       <span class={[
         "relative inline-flex items-center w-full rounded-[var(--radius-field)] border border-solid",
-        "bg-[var(--surface-card)] border-[var(--border-strong)]",
+        "bg-[var(--surface-card)]",
+        @error && "border-[var(--arb-fail-edge)]",
+        !@error && "border-[var(--border-strong)]",
         @size == "sm" && "h-[var(--control-sm)]",
         @size == "md" && "h-[var(--control-md)]",
         @class
@@ -182,9 +187,12 @@ defmodule ArbiterWeb.CoreComponents.Forms do
           class="absolute right-[9px] pointer-events-none"
         />
       </span>
+      <span :if={@error} class="font-normal text-[11.5px] text-[var(--arb-fail-text)]">
+        {@error}
+      </span>
     </label>
     <span
-      :if={!@label}
+      :if={!@label && !@error}
       class={[
         "relative inline-flex items-center w-full rounded-[var(--radius-field)] border border-solid",
         "bg-[var(--surface-card)] border-[var(--border-strong)]",
