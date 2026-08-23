@@ -10,8 +10,7 @@ defmodule Arbiter.Board.AutopilotTest do
         %{id: "bd-1", state: :next, reason: "next up — dispatching...", card: %{id: "bd-1"}}
       ],
       running: [],
-      needs_you: [],
-      merge_queue: [],
+      waiting: [],
       closed_today: [],
       promote: promote,
       slots_total: 4,
@@ -162,11 +161,10 @@ defmodule Arbiter.Board.AutopilotTest do
       board = Autopilot.board(pid)
 
       # Every column key present and empty, not a stub map: the caller renders
-      # five columns off this, and a missing key is a crashed page.
+      # four columns off this, and a missing key is a crashed page.
       assert board.ready == []
       assert board.running == []
-      assert board.needs_you == []
-      assert board.merge_queue == []
+      assert board.waiting == []
       assert board.closed_today == []
       assert board.promote == nil
       assert board.slots_free == 0
