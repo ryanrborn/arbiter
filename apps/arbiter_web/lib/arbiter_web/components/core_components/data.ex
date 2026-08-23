@@ -44,6 +44,11 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("open"), do: "badge-success"
   defp status_chip_class("in_progress"), do: "badge-info"
   defp status_chip_class("closed"), do: "badge-ghost"
+  defp status_chip_class("proposed"), do: "badge-warning"
+  defp status_chip_class("hypothesis"), do: "badge-ghost"
+  defp status_chip_class("applied"), do: "badge-success"
+  defp status_chip_class("rejected"), do: "badge-error"
+  defp status_chip_class("superseded"), do: "badge-neutral"
   defp status_chip_class(_), do: "badge-ghost"
 
   @doc """
