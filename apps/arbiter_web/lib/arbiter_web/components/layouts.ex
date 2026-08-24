@@ -145,7 +145,10 @@ defmodule ArbiterWeb.Layouts do
         hidden
       >
         {gettext("Attempting to reconnect")}
-        <ArbiterWeb.CoreComponents.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
+        <ArbiterWeb.CoreComponents.icon
+          name="hero-arrow-path"
+          class="ml-1 size-3 motion-safe:animate-spin"
+        />
       </.flash>
 
       <.flash
@@ -157,7 +160,10 @@ defmodule ArbiterWeb.Layouts do
         hidden
       >
         {gettext("Attempting to reconnect")}
-        <ArbiterWeb.CoreComponents.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
+        <ArbiterWeb.CoreComponents.icon
+          name="hero-arrow-path"
+          class="ml-1 size-3 motion-safe:animate-spin"
+        />
       </.flash>
     </div>
     """

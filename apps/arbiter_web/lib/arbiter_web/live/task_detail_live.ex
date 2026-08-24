@@ -962,7 +962,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                         class="link link-hover text-xs font-mono text-primary inline-flex items-center gap-0.5"
                       >
                         {@task.pr_ref}
-                        <ArbiterWeb.CoreComponents.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                        <ArbiterWeb.CoreComponents.icon
+                          name="hero-arrow-top-right-on-square"
+                          class="size-3"
+                        />
                       </a>
                       <code :if={pr_url == ""} class="text-xs">{@task.pr_ref}</code>
                     </:item>
@@ -984,7 +987,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                           class="link link-hover text-xs font-mono text-primary inline-flex items-center gap-0.5"
                         >
                           {ref}
-                          <ArbiterWeb.CoreComponents.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                          <ArbiterWeb.CoreComponents.icon
+                            name="hero-arrow-top-right-on-square"
+                            class="size-3"
+                          />
                         </a>
                         <code :if={ref_url == ""} class="text-xs">{ref}</code>
                       </li>
@@ -1333,7 +1339,10 @@ defmodule ArbiterWeb.TaskDetailLive do
         <% else %>
           <.panel>
             <div class="flex flex-col items-center gap-2 py-6 text-center">
-              <ArbiterWeb.CoreComponents.icon name="hero-question-mark-circle" class="size-12 text-base-content/30" />
+              <ArbiterWeb.CoreComponents.icon
+                name="hero-question-mark-circle"
+                class="size-12 text-base-content/30"
+              />
               <p class="text-base-content/70">
                 Task <code class="text-sm">{@task_id}</code> not found.
               </p>
@@ -1431,10 +1440,18 @@ defmodule ArbiterWeb.TaskDetailLive do
             </div>
             <p :if={@edit_error} class="sm:col-span-2 text-sm text-error">{@edit_error}</p>
             <div class="sm:col-span-2 modal-action">
-              <ArbiterWeb.CoreComponents.button type="button" phx-click="cancel_edit" class="btn btn-sm btn-ghost">
+              <ArbiterWeb.CoreComponents.button
+                type="button"
+                phx-click="cancel_edit"
+                class="btn btn-sm btn-ghost"
+              >
                 Cancel
               </ArbiterWeb.CoreComponents.button>
-              <ArbiterWeb.CoreComponents.button type="submit" variant="primary" class="btn btn-sm btn-primary">
+              <ArbiterWeb.CoreComponents.button
+                type="submit"
+                variant="primary"
+                class="btn btn-sm btn-primary"
+              >
                 Save
               </ArbiterWeb.CoreComponents.button>
             </div>
@@ -1462,10 +1479,16 @@ defmodule ArbiterWeb.TaskDetailLive do
             />
             <p :if={@close_error} class="text-sm text-error">{@close_error}</p>
             <div class="modal-action">
-              <ArbiterWeb.CoreComponents.button type="button" phx-click="cancel_close" class="btn btn-sm btn-ghost">
+              <ArbiterWeb.CoreComponents.button
+                type="button"
+                phx-click="cancel_close"
+                class="btn btn-sm btn-ghost"
+              >
                 Cancel
               </ArbiterWeb.CoreComponents.button>
-              <ArbiterWeb.CoreComponents.button type="submit" class="btn btn-sm btn-error">Close it</ArbiterWeb.CoreComponents.button>
+              <ArbiterWeb.CoreComponents.button type="submit" class="btn btn-sm btn-error">
+                Close it
+              </ArbiterWeb.CoreComponents.button>
             </div>
           </.form>
         </div>
