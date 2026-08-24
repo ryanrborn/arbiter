@@ -333,6 +333,29 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
+  describe "Running column rendering" do
+    test "displays difficulty on running cards", %{conn: conn, ws: ws} do
+      task = issue(ws, "work with difficulty", %{difficulty: 2})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               ~s(#board-column-running [id="card-#{task.id}"] [aria-label="Difficulty D2"])
+             )
+    end
+
+    test "does not crash when difficulty is not set", %{conn: conn, ws: ws} do
+      task = issue(ws, "no difficulty set")
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ task.id
+    end
+  end
+
   describe "the Waiting column holds everything out of the worker's hands" do
     test "a parked worker and a merge-parked one share the column", %{conn: conn, ws: ws} do
       parked = working_issue(ws, "answer me")
