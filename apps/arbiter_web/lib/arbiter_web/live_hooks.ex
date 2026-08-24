@@ -84,8 +84,10 @@ defmodule ArbiterWeb.LiveHooks do
   def on_mount(:coordinator_inbox, _params, _session, socket) do
     socket =
       socket
+      |> assign(:coordinator_inbox_now, DateTime.utc_now())
       |> refresh_coordinator_inbox()
       |> maybe_subscribe_coordinator_inbox()
+      |> maybe_tick_coordinator_inbox_now()
       |> attach_hook(:coordinator_inbox_events, :handle_event, fn
         "coordinator_mark_read", %{"id" => id}, socket ->
           with {:ok, msg} <- Ash.get(Message, id),
@@ -106,6 +108,25 @@ defmodule ArbiterWeb.LiveHooks do
     {:cont, socket}
   end
 
+  # Independent of any host LiveView's own :tick — the drawer is global chrome,
+  # so its "N ago" timestamps need to advance even on pages with no clock of
+  # their own. A per-minute cadence is plenty for coarse relative labels.
+  defp maybe_tick_coordinator_inbox_now(socket) do
+    if connected?(socket) do
+      :timer.send_interval(60_000, self(), :coordinator_inbox_tick)
+
+      attach_hook(socket, :coordinator_inbox_tick, :handle_info, fn
+        :coordinator_inbox_tick, socket ->
+          {:cont, assign(socket, :coordinator_inbox_now, DateTime.utc_now())}
+
+        _msg, socket ->
+          {:cont, socket}
+      end)
+    else
+      socket
+    end
+  end
+
   defp maybe_subscribe_coordinator_inbox(socket) do
     if connected?(socket) do
       workspaces =
@@ -118,9 +139,9 @@ defmodule ArbiterWeb.LiveHooks do
       for ws <- workspaces, do: Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws.id))
 
       attach_hook(socket, :coordinator_inbox_updates, :handle_info, fn
-        {:new_message, _message}, socket -> {:halt, refresh_coordinator_inbox(socket)}
-        {:message_read, _message}, socket -> {:halt, refresh_coordinator_inbox(socket)}
-        {:mailbox_cleared, _workspace_id}, socket -> {:halt, refresh_coordinator_inbox(socket)}
+        {:new_message, _message}, socket -> {:cont, refresh_coordinator_inbox(socket)}
+        {:message_read, _message}, socket -> {:cont, refresh_coordinator_inbox(socket)}
+        {:mailbox_cleared, _workspace_id}, socket -> {:cont, refresh_coordinator_inbox(socket)}
         _msg, socket -> {:cont, socket}
       end)
     else

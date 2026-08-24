@@ -299,6 +299,7 @@ defmodule ArbiterWeb.UsageLive do
       quotas={@quotas}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-4">
         <Domain.index_header

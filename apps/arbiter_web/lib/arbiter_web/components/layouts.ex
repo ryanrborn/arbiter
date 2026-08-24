@@ -52,6 +52,8 @@ defmodule ArbiterWeb.Layouts do
     doc: "seen-but-not-cleared coordinator messages — the triage queue"
   )
 
+  attr(:coordinator_inbox_now, DateTime, default: nil, doc: "drives the drawer's relative timestamps (ArbiterWeb.LiveHooks)")
+
   slot(:inner_block, required: true)
 
   def app(assigns) do
@@ -70,6 +72,7 @@ defmodule ArbiterWeb.Layouts do
       )
 
     assigns = assign(assigns, :nav_items, nav_items())
+    assigns = assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
 
     ~H"""
     <.top_nav items={@nav_items} current_path={@current_path}>
@@ -114,6 +117,7 @@ defmodule ArbiterWeb.Layouts do
     <.coordinator_inbox_drawer
       inbox={@coordinator_inbox}
       outstanding_count={@coordinator_outstanding_count}
+      now={@coordinator_inbox_now}
     />
 
     <.toast_group flash={@flash} />
@@ -129,7 +133,8 @@ defmodule ArbiterWeb.Layouts do
       id="coordinator-inbox-trigger"
       aria-label="Coordinator mailbox"
       phx-click={
-        JS.toggle(to: "#coordinator-drawer-backdrop") |> JS.toggle(to: "#coordinator-drawer")
+        JS.toggle(to: "#coordinator-drawer-backdrop")
+        |> JS.toggle(to: "#coordinator-drawer", display: "flex")
       }
       class="relative flex items-center justify-center size-[30px] rounded-[var(--radius-pill)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)] cursor-pointer"
     >
@@ -147,6 +152,7 @@ defmodule ArbiterWeb.Layouts do
 
   attr(:inbox, :list, required: true)
   attr(:outstanding_count, :integer, required: true)
+  attr(:now, DateTime, required: true)
 
   # The coordinator's mailbox — the upward channel of `arb inbox` / `arb msg`,
   # live — as an AppShell drawer rather than a board-only panel (bd-3kgb0e).
@@ -247,7 +253,7 @@ defmodule ArbiterWeb.Layouts do
             </div>
             <div class="flex items-center gap-2 shrink-0">
               <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
-                {relative(m.inserted_at)}
+                {relative(m.inserted_at, @now)}
               </span>
               <button
                 type="button"
@@ -278,8 +284,8 @@ defmodule ArbiterWeb.Layouts do
   defp mailbox_border(:flag), do: "border-l-[color:var(--arb-attention)]"
   defp mailbox_border(_), do: "border-l-[color:var(--arb-info)]"
 
-  defp relative(%DateTime{} = ts), do: "#{elapsed(ts, DateTime.utc_now())} ago"
-  defp relative(_), do: ""
+  defp relative(%DateTime{} = ts, %DateTime{} = now), do: "#{elapsed(ts, now)} ago"
+  defp relative(_, _), do: ""
 
   defp elapsed(%DateTime{} = since, %DateTime{} = now) do
     seconds = DateTime.diff(now, since)

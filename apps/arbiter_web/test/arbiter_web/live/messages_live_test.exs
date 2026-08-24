@@ -74,6 +74,29 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
       refute render(view) =~ "ack me"
     end
+
+    test "updates live when mail is broadcast after mount", %{conn: conn, ws: ws} do
+      # Regression: ArbiterWeb.LiveHooks' global :coordinator_inbox on_mount
+      # attaches a :handle_info hook for every live_session and used to
+      # {:halt, ...} on {:new_message, _} — attached hooks run before the
+      # LiveView's own callback, so halting there made
+      # WorkerDetailLive.handle_info/2's own {:new_message, _} clause
+      # unreachable and the mailbox never refreshed live (bd-3kgb0e).
+      {:ok, task} = Ash.create(Issue, %{title: "live-mail", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      refute html =~ "arrived-after-mount"
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          to_ref: task.id,
+          body: "arrived-after-mount"
+        })
+
+      assert render(view) =~ "arrived-after-mount"
+    end
   end
 
   describe "coordinator mailbox panel" do

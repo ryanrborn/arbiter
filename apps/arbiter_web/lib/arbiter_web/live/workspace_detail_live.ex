@@ -234,6 +234,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       quotas={@quotas}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="mx-auto flex max-w-[1100px] flex-col gap-4 p-4 sm:p-6">
         <Feedback.empty_state icon="hero-building-office-2" detail="no workspace with that id">
@@ -253,6 +254,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       quotas={@quotas}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="mx-auto flex max-w-[1100px] flex-col gap-5 p-4 sm:p-6">
         <Domain.index_header

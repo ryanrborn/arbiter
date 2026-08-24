@@ -810,6 +810,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       quotas={@quotas}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="p-4 sm:p-6 max-w-[1400px] mx-auto flex flex-col gap-[var(--space-4)]">
         <%!-- ── Toolbar ──────────────────────────────────────────────────

@@ -593,6 +593,7 @@ defmodule ArbiterWeb.BoardLive do
       quotas={@quotas}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="px-4 py-4 flex flex-col gap-4">
         <div
