@@ -156,11 +156,18 @@ defmodule Arbiter.Board.Snapshot do
     ready_order = Map.get(input, :ready_order) || []
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
-    {authors, reviewers} = Enum.split_with(workers, &(worker_role(&1) != :reviewer))
-    reviewers_by_author = Map.new(reviewers, &{reviews_task(&1), &1})
+
+    {authors, gate_workers} =
+      Enum.split_with(workers, &(worker_role(&1) not in [:reviewer, :implementer]))
+
+    gate_workers_by_author =
+      gate_workers
+      |> Enum.sort_by(&since/1, {:asc, DateTime})
+      |> Map.new(&{gate_author(&1), &1})
+
     worked = MapSet.new(authors, & &1.task_id)
 
-    running = running_cards(authors, issues_by_id, reviewers_by_author)
+    running = running_cards(authors, issues_by_id, gate_workers_by_author)
     slots_free = max(slots_total - Enum.count(authors, &(&1.status in @slot_statuses)), 0)
 
     plan =
@@ -344,7 +351,7 @@ defmodule Arbiter.Board.Snapshot do
 
   # ---- running / waiting ----------------------------------------------------
 
-  defp running_cards(workers, issues_by_id, reviewers_by_author) do
+  defp running_cards(workers, issues_by_id, gate_workers_by_author) do
     workers
     |> Enum.filter(&(&1.status in @running_statuses))
     |> Enum.map(fn w ->
@@ -352,7 +359,7 @@ defmodule Arbiter.Board.Snapshot do
       |> base_card(issues_by_id)
       |> Map.merge(%{
         step: Map.get(w, :current_step),
-        activity: activity(w, Map.get(reviewers_by_author, w.task_id)),
+        activity: activity(w, Map.get(gate_workers_by_author, w.task_id)),
         since: since(w)
       })
     end)
@@ -454,14 +461,54 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp activity(%{status: :awaiting_review_gate}, reviewer) do
-    case reviewer && live_label(reviewer) do
-      nil -> "in review"
-      label -> "in review · #{label}"
+  defp activity(%{status: :awaiting_review_gate} = w, gate_worker) do
+    case gate_worker && round_label(gate_worker.task_id, w.task_id) do
+      nil ->
+        case gate_worker && live_label(gate_worker) do
+          nil -> "in review"
+          label -> "in review · #{label}"
+        end
+
+      phase ->
+        case live_label(gate_worker) do
+          nil -> phase
+          label -> "#{phase} · #{label}"
+        end
     end
   end
 
-  defp activity(worker, _reviewer), do: live_label(worker) || "working"
+  defp activity(worker, _gate_worker), do: live_label(worker) || "working"
+
+  # A reviewer/implementer's synthetic id is always `<base>#<suffix>`
+  # (`Arbiter.Worker.ReviewGate.base_task_id/1`); recovering the base id here
+  # is how its card folds onto the original issue's card instead of rendering
+  # a second one titled with the raw suffixed id.
+  defp gate_author(worker), do: reviews_task(worker) || revises_task(worker)
+
+  # Human-readable round label for a fix-up round actively in progress: a
+  # round-2+ reviewer pass (`#r<N>`) or an implementer revise pass
+  # (`#impl<N>`). A plain first-round reviewer (`#review`, or a same-round
+  # re-prompt `#v<N>`) has no fix-up in progress yet, so it renders as before
+  # ("in review") rather than a manufactured "round 1 review".
+  defp round_label(gate_task_id, base_id) do
+    prefix = base_id <> "#"
+
+    if String.starts_with?(gate_task_id, prefix) do
+      gate_task_id
+      |> String.trim_leading(prefix)
+      |> String.split("#")
+      |> List.first()
+      |> parse_round_suffix()
+    end
+  end
+
+  defp parse_round_suffix(segment) do
+    cond do
+      match = Regex.run(~r/^impl(\d+)$/, segment) -> "round #{Enum.at(match, 1)} implementation"
+      match = Regex.run(~r/^r(\d+)$/, segment) -> "round #{Enum.at(match, 1)} review"
+      true -> nil
+    end
+  end
 
   defp live_label(worker) do
     case get_meta(worker, :activity) do
@@ -486,6 +533,7 @@ defmodule Arbiter.Board.Snapshot do
 
   defp worker_role(worker), do: get_meta(worker, :role)
   defp reviews_task(worker), do: get_meta(worker, :reviews)
+  defp revises_task(worker), do: get_meta(worker, :revises)
 
   defp get_meta(worker, key) do
     case Map.get(worker, :meta) do
