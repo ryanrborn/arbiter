@@ -3046,17 +3046,21 @@ defmodule Arbiter.MCP.ToolsTest do
       # Resume with force_quota: true
       # Note: This will fail because there's no actual worktree to resume from,
       # but we're testing that the flag is accepted in the schema, not the full logic
-      result = Tools.worker_resume(ctx.coordinator, %{
-        "task_id" => task.id,
-        "force_quota" => true
-      })
+      result =
+        Tools.worker_resume(ctx.coordinator, %{
+          "task_id" => task.id,
+          "force_quota" => true
+        })
 
       # The schema should accept force_quota, so we shouldn't get an "additional properties" error
       case result do
-        {:ok, _} -> :ok
+        {:ok, _} ->
+          :ok
+
         {:error, {:invalid, msg}} ->
           # Should not complain about force_quota being unknown
           refute msg =~ "force_quota"
+
         {:error, _} ->
           # Other errors are fine (e.g., no worktree to resume from)
           :ok

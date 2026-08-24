@@ -275,7 +275,12 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       # Try to resume with force_quota — should fail with "no prior session" rather than
       # "no repo" (proving force_quota was processed) but that's the expected error
       # when there's no actual prior session to resume.
-      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"repo" => "test/repo", "force_quota" => true})
+      conn =
+        post(conn, ~p"/api/workers/#{task.id}/resume", %{
+          "repo" => "test/repo",
+          "force_quota" => true
+        })
+
       body = json_response(conn, 400)
       # The specific error varies (no session, no outpost) — the test is that force_quota
       # is accepted without error and the request proceeds to the expected dispatch path.
