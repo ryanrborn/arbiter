@@ -646,7 +646,7 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:closed, visible(assigns, assigns.board.closed_today, "closed"))
 
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
       <div class="px-4 py-4 flex flex-col gap-4">
         <div
           id="board"

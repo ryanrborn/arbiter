@@ -156,4 +156,22 @@ defmodule ArbiterWeb.LiveHooksTest do
       refute html2 =~ "Antigravity"
     end
   end
+
+  describe "on_mount(:live) drives the AppShell navbar badge" do
+    test "dead (pre-connect) render shows stale, not live", %{conn: conn} do
+      # A plain `get/2` never establishes a LiveView socket, so this is the
+      # same HTML a real browser paints before app.js boots the socket —
+      # exactly the state the bug report says got stuck forever.
+      html = conn |> get(~p"/") |> html_response(200)
+
+      assert html =~ "stale — refresh"
+    end
+
+    test "connected render shows live, not stale", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      assert html =~ "appshell-live"
+      refute html =~ "stale — refresh"
+    end
+  end
 end

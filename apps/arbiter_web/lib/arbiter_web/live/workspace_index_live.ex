@@ -27,7 +27,6 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     |> assign(:live, connected?(socket))
      |> assign(:creating, false)
      |> assign(:create_error, nil)
      |> assign(:tracker_types, @valid_tracker_types)
@@ -108,7 +107,7 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
       <div class="mx-auto flex max-w-[1100px] flex-col gap-5 p-4 sm:p-6">
         <Domain.index_header
           icon="hero-cog-6-tooth"

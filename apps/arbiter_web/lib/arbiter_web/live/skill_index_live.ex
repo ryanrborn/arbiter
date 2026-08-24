@@ -33,7 +33,6 @@ defmodule ArbiterWeb.SkillIndexLive do
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     |> assign(:live, connected?(socket))
      |> assign(:selected_id, nil)
      # editing: nil = form closed, :new = create, %Skill{} = editing that row
      |> assign(:editing, nil)
@@ -336,7 +335,7 @@ defmodule ArbiterWeb.SkillIndexLive do
     assigns = assign(assigns, :selected, selected_skill(assigns.skills, assigns.selected_id))
 
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <ArbiterWeb.CoreComponents.Domain.index_header
           icon="hero-clipboard-document-list"

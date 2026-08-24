@@ -9,6 +9,16 @@ defmodule ArbiterWeb.LiveHooks do
   `handle_params` hook. The `Layouts.app` nav reads it to highlight the
   active link.
 
+  ## `:live`
+
+  Assigns `:live` on the socket as `connected?(socket)` — `false` on the
+  initial dead render, `true` once the LiveView process is connected over
+  the socket. `Layouts.app`'s navbar badge (and every page-level
+  `live_badge`) reads this assign; there is no working DOM/JS mechanism for
+  detecting connection state client-side in this app (see
+  `ArbiterWeb.CoreComponents.Feedback.live_badge/1`), so this hook is the
+  single source of truth every call site must be fed from.
+
   ## `:quota`
 
   Loads the latest quota snapshot for every tracked provider on the default
@@ -44,6 +54,10 @@ defmodule ArbiterWeb.LiveHooks do
       end)
 
     {:cont, socket}
+  end
+
+  def on_mount(:live, _params, _session, socket) do
+    {:cont, assign(socket, :live, connected?(socket))}
   end
 
   def on_mount(:quota, _params, _session, socket) do

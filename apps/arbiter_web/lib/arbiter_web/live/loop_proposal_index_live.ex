@@ -40,7 +40,6 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
     {:ok,
      socket
-     |> assign(:live, connected?(socket))
      |> assign(:filter, "live")
      |> assign(:selected_id, nil)
      |> assign(:evidence_bar, Loop.evidence_bar(nil))
@@ -230,7 +229,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
     assigns = assign(assigns, :selected, selected(assigns.rows, assigns.selected_id))
 
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <div :if={@decision_toast} class="fixed top-24 right-4 z-50 w-80 sm:w-96">
           <ArbiterWeb.CoreComponents.Feedback.toast

@@ -37,7 +37,6 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
     {:ok,
      socket
-     |> assign(:live, connected?(socket))
      |> assign(:now, DateTime.utc_now())
      |> assign(:worker_label, "worker")
      |> assign(:issue_label, "issue")
@@ -118,7 +117,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <div class="flex items-start justify-between gap-4">
           <Domain.index_header

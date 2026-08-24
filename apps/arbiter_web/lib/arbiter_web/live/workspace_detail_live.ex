@@ -228,7 +228,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   @impl true
   def render(%{not_found: true} = assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
       <div class="mx-auto flex max-w-[1100px] flex-col gap-4 p-4 sm:p-6">
         <Feedback.empty_state icon="hero-building-office-2" detail="no workspace with that id">
           Workspace not found.
@@ -241,7 +241,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
       <div class="mx-auto flex max-w-[1100px] flex-col gap-5 p-4 sm:p-6">
         <Domain.index_header
           icon="hero-cog-6-tooth"
@@ -252,7 +252,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
             <span class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]">
               {@workspace.prefix}-
             </span>
-            <Feedback.live_badge id="ws-live" live />
+            <Feedback.live_badge id="ws-live" live={@live} />
           </:actions>
         </Domain.index_header>
 
