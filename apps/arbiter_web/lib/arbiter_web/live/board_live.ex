@@ -3,11 +3,33 @@ defmodule ArbiterWeb.BoardLive do
   The board — the home screen, and the only page that answers "what is the
   fleet doing" in one look.
 
-  Four columns for where a piece of work actually sits: **Ready**, **Running**,
-  **Waiting**, **Closed today**. They are stages, not statuses — the task FSM
-  still only knows `open` / `in_progress` / `closed`, and every column is
-  derived from worker state, review state and merge-queue membership by
-  `Arbiter.Board.Snapshot`. Nothing here is stored, so nothing here can drift.
+  Five columns for where a piece of work actually sits: **Backlog**,
+  **Ready**, **Running**, **Waiting**, **Closed today**. They are stages, not
+  statuses — the task FSM still only knows `open` / `in_progress` / `closed`,
+  and every column is derived from worker state, review state, merge-queue
+  membership and the issue's `refined` flag by `Arbiter.Board.Snapshot`.
+  Nothing here is stored, so nothing here can drift.
+
+  ## Backlog is where work is born
+
+  Every new issue lands in Backlog (bd-b5wyjd) — `arb create`, `task_create`,
+  the REST API and the dashboard form alike. It is the pile of things somebody
+  wrote down, ordered newest-first because an unrefined pile is a
+  to-think-about list rather than a second queue; nothing in it is a candidate
+  for dispatch and no card in it carries a scheduler reason.
+
+  There is exactly one door out, and it is not on this screen: the task detail
+  page's **Move to Ready** button, which flips `refined` and nothing else.
+  Backlog cards are deliberately not draggable — promotion is a decision made
+  while looking at the ticket, not while looking at five columns of them, and
+  a drag-to-promote gesture can be added later once the button has taught us
+  what promotion actually needs to check.
+
+  Backlog is a *refinement* surface, not a scheduling one, which is why it
+  ignores dependencies entirely. A refined card whose blocker is still open
+  stays in Ready wearing its `blocked — waiting on bd-9` reason: blocked is a
+  scheduling fact, unrefined is a refinement fact, and a card can be either
+  without being the other.
 
   ## Waiting is one column, and the flag is the only split
 
@@ -89,6 +111,7 @@ defmodule ArbiterWeb.BoardLive do
   @stop_timeout_ms 5_000
 
   @columns [
+    %{key: "backlog", label: "Backlog", tone: nil},
     %{key: "ready", label: "Ready", tone: nil},
     %{key: "running", label: "Running", tone: "live"},
     %{key: "waiting", label: "Waiting", tone: nil},
@@ -616,6 +639,7 @@ defmodule ArbiterWeb.BoardLive do
   def render(assigns) do
     assigns =
       assigns
+      |> assign(:backlog, visible(assigns, assigns.board.backlog, "backlog"))
       |> assign(:ready, visible(assigns, assigns.board.ready, "ready"))
       |> assign(:running, visible(assigns, assigns.board.running, "running"))
       |> assign(:waiting, visible(assigns, assigns.board.waiting, "waiting"))
@@ -700,8 +724,52 @@ defmodule ArbiterWeb.BoardLive do
           <div
             id="board-columns"
             phx-hook=".BoardDrag"
-            class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-px bg-[var(--arb-line-soft)] min-h-[560px]"
+            class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-px bg-[var(--arb-line-soft)] min-h-[560px]"
           >
+            <%!-- Backlog — written down, not yet thought through. No reason
+                 line, no accent, no drag: nothing here is queued for anything,
+                 and the only way out is the detail page's promote button. --%>
+            <div
+              id="board-column-backlog"
+              data-column="backlog"
+              class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+            >
+              <.column_head label="Backlog" count={length(@backlog)} tone={nil} />
+
+              <div
+                :for={card <- Enum.take(@backlog, limit(@expanded, "backlog"))}
+                id={"card-#{card.id}"}
+                class="contents"
+              >
+                <.link navigate={card_href("backlog", card)} class="contents">
+                  <.task_card
+                    id={card.id}
+                    title={card.title || card.id}
+                    priority={card.priority}
+                    type={card.issue_type}
+                    difficulty={card.difficulty}
+                    footer={relative(card.created_at, @now)}
+                    data-card={card.id}
+                    data-column="backlog"
+                  />
+                </.link>
+              </div>
+
+              <.more
+                :if={length(@backlog) > limit(@expanded, "backlog")}
+                column="backlog"
+                count={length(@backlog) - limit(@expanded, "backlog")}
+              />
+
+              <div
+                :if={@backlog == []}
+                id="board-backlog-empty"
+                class="mt-auto px-2 py-2 text-center rounded-[var(--radius-field)] border border-dashed border-[var(--border-strong)] text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+              >
+                nothing waiting to be refined
+              </div>
+            </div>
+
             <%!-- Ready — the queue. Every card says why it is or isn't going. --%>
             <div
               id="board-column-ready"

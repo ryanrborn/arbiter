@@ -31,8 +31,12 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     {:ok, ws: ws}
   end
 
+  # bd-b5wyjd: a created issue is unrefined, i.e. Backlog, and the autopilot
+  # only ever dispatches out of Ready. Every fixture here is meant to be a
+  # queue candidate, so it is promoted on the way out.
   defp issue(ws, title, attrs) do
-    {:ok, issue} = Ash.create(Issue, Map.merge(%{title: title, workspace_id: ws.id}, attrs))
+    {:ok, created} = Ash.create(Issue, Map.merge(%{title: title, workspace_id: ws.id}, attrs))
+    {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
     issue
   end
 
@@ -112,6 +116,32 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
 
     assert :paused = Autopilot.tick(pid)
     refute_receive {:dispatched, _}
+  end
+
+  # bd-b5wyjd — the safety property the Backlog column buys: an unrefined card
+  # is not merely rendered elsewhere, it is invisible to dispatch. Asserted
+  # end to end (database → Snapshot.load → Scheduler.plan → dispatch) rather
+  # than against a hand-built snapshot, because that is the path that would
+  # actually spend credits on an unrefined ticket.
+  test "an unrefined card is never dispatched, however free the fleet is", %{ws: ws} do
+    {:ok, unrefined} =
+      Ash.create(Issue, %{title: "not thought through", workspace_id: ws.id, priority: 0})
+
+    pid = start_autopilot()
+    board = Autopilot.board(pid, [])
+
+    refute unrefined.id in ready_ids(board)
+    assert unrefined.id in Enum.map(board.backlog, & &1.id)
+
+    assert :idle = Autopilot.tick(pid)
+    refute_receive {:dispatched, _}
+
+    # ...and promotion is all it takes.
+    {:ok, _} = Ash.update(unrefined, %{}, action: :promote_to_ready)
+
+    assert {:ok, promoted} = Autopilot.tick(pid)
+    assert promoted == unrefined.id
+    assert_receive {:dispatched, ^promoted}
   end
 
   test "an operator's hand-ranking decides which card goes next", %{ws: ws} do

@@ -44,7 +44,9 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     # task resolves rather than inside the submit itself.
     {path, flash} = assert_redirect(view)
     assert flash["info"] =~ "Created"
-    assert flash["info"] =~ "opening the task"
+    # bd-b5wyjd: the dashboard form is not a shortcut into the queue either —
+    # it lands in Backlog like every other creation path, and says so.
+    assert flash["info"] =~ "Backlog"
 
     [task] =
       Issue
@@ -53,6 +55,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
     assert path == "/tasks/#{task.id}"
     assert task.workspace_id == ws.id
+    refute task.refined
     assert task.issue_type == :bug
     assert task.priority == 1
     assert task.difficulty == 3
