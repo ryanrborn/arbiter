@@ -977,6 +977,9 @@ defmodule Arbiter.MCP.Tools do
   rescue
     e ->
       {:error, {:invalid, "pause failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid, "pause failed: process error #{inspect(reason)}"}}
   end
 
   @doc """
@@ -996,6 +999,9 @@ defmodule Arbiter.MCP.Tools do
   rescue
     e ->
       {:error, {:invalid, "resume failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid, "resume failed: process error #{inspect(reason)}"}}
   end
 
   @doc """
@@ -1009,6 +1015,9 @@ defmodule Arbiter.MCP.Tools do
   rescue
     e ->
       {:error, {:invalid, "status check failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid, "status check failed: process error #{inspect(reason)}"}}
   end
 
   # ---- shared resolution / fetch -----------------------------------------

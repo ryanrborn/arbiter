@@ -31,6 +31,9 @@ defmodule ArbiterWeb.Api.SchedulerController do
   rescue
     e ->
       {:error, {:invalid_request, "pause failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid_request, "pause failed: process error #{inspect(reason)}"}}
   end
 
   @doc """
@@ -49,6 +52,9 @@ defmodule ArbiterWeb.Api.SchedulerController do
   rescue
     e ->
       {:error, {:invalid_request, "resume failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid_request, "resume failed: process error #{inspect(reason)}"}}
   end
 
   @doc """
@@ -62,5 +68,8 @@ defmodule ArbiterWeb.Api.SchedulerController do
   rescue
     e ->
       {:error, {:invalid_request, "status check failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid_request, "status check failed: process error #{inspect(reason)}"}}
   end
 end

@@ -29,6 +29,8 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       if Process.alive?(pid) do
         GenServer.stop(pid)
       end
+      # Reset the global Autopilot singleton to paused state to prevent test pollution
+      Autopilot.pause(Autopilot)
     end)
 
     {:ok, ws: ws, coordinator: coordinator}
