@@ -340,7 +340,10 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       {:ok, view, _html} = live(conn, "/")
 
-      assert has_element?(view, ~s(#board-column-running [id="card-#{task.id}"] [aria-label="Difficulty D2"]))
+      assert has_element?(
+               view,
+               ~s(#board-column-running [id="card-#{task.id}"] [aria-label="Difficulty D2"])
+             )
     end
 
     test "does not crash when difficulty is not set", %{conn: conn, ws: ws} do
