@@ -195,7 +195,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
 
       assert html =~ "P2"
       assert html =~ "chore"
-      # DifficultyMeter: D3 fills 4 of 5 bars.
+      # DifficultyMeter: D3 fills 3 of 5 bars.
       assert html =~ ~s(aria-label="Difficulty D3")
     end
 
