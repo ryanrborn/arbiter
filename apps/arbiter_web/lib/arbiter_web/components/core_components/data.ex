@@ -82,10 +82,10 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp priority_tag_class(_), do: "badge-ghost"
 
   @doc """
-  Renders a difficulty (D0-D4) as a 5-bar meter. For D{n}, n+1 bars are
-  filled — D0 fills one bar, D4 fills all five. Only D4 tints its filled
-  bars red; every other difficulty uses the neutral fill color. `nil`
-  renders all five bars empty.
+  Renders a difficulty (D0-D4) as a 5-bar meter. For D{n}, exactly n bars
+  are filled — D0 fills zero bars (with a thin dashed border), D4 fills four
+  bars. Only D4 tints its filled bars red; every other difficulty uses the
+  neutral fill color. `nil` renders all five bars empty with no border.
 
   ## Examples
 
