@@ -313,6 +313,27 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
       refute html =~ ~s(phx-click="open_edit")
     end
+
+    # The edit/close/dispatch modals still use daisyUI markup (`btn`,
+    # `alert`), on purpose — they haven't been redesigned. bd-3z2txy dropped
+    # the CoreComponents.button/1 & .icon/1 shadowing shim, so `<.button>`
+    # and `<.icon>` now resolve to the design-handoff Core versions; these
+    # call sites must stay explicitly qualified to the old
+    # `ArbiterWeb.CoreComponents` module or they'd silently pick up the
+    # handoff component's markup (a CSS-variable class list and inline
+    # width/height style) instead of daisyUI's.
+    test "the edit modal buttons keep daisyUI markup, not the handoff Core button", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "before", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      assert html =~ ~s(class="btn btn-sm btn-ghost" type="button" phx-click="cancel_edit")
+      assert html =~ ~s(class="btn btn-sm btn-primary" type="submit")
+    end
   end
 
   describe "close" do

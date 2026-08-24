@@ -84,20 +84,19 @@ defmodule ArbiterWeb do
 
       # HTML escaping functionality
       import Phoenix.HTML
-      # Core UI components
-      import ArbiterWeb.CoreComponents
+      # Core UI components. icon/1 and button/1 are excluded: the
+      # design-handoff Core module below now owns the unqualified
+      # `<.icon>`/`<.button>` names. Any remaining call site that needs the
+      # old daisyUI-flavored shape (e.g. icon/1 sized via a Tailwind
+      # `size-N` class, or button/1's `<.link>`-when-`href`/`navigate`
+      # behavior) reaches it fully qualified as
+      # `ArbiterWeb.CoreComponents.icon/1` / `ArbiterWeb.CoreComponents.button/1`.
+      import ArbiterWeb.CoreComponents, except: [icon: 1, button: 1]
       import ArbiterWeb.CoreComponents.Brandmark
       # Data-display primitives (tags, chips, meter, list/table)
       import ArbiterWeb.CoreComponents.Data
       # Design-handoff core primitives (Button, Icon, KeyHint, Toggle, Panel).
-      # icon/1 and button/1 are excluded: CoreComponents already defines both,
-      # and hundreds of existing call sites depend on that shape (e.g. icon/1
-      # sized via a Tailwind `size-N` class, which the handoff Icon's explicit
-      # inline width/height would silently override). Reach the handoff
-      # versions as `ArbiterWeb.CoreComponents.Core.icon/1` /
-      # `ArbiterWeb.CoreComponents.Core.button/1` until a follow-up ticket
-      # migrates call sites and retires the old ones.
-      import ArbiterWeb.CoreComponents.Core, except: [icon: 1, button: 1]
+      import ArbiterWeb.CoreComponents.Core
       # Design-handoff navigation primitives (TopNav, FilterTabs,
       # SegmentedControl, Pager, SeeAllLink, BackLink). filter_tabs/1,
       # pager/1, see_all_link/1, and back_link/1 are excluded: ListComponents
@@ -113,7 +112,7 @@ defmodule ArbiterWeb do
       # Form primitives (Input, Select, Textarea, Checkbox) — not imported directly
       # to avoid shadowing the existing input/1, select/1, textarea/1, checkbox/1 in
       # CoreComponents. Call them fully-qualified: ArbiterWeb.CoreComponents.Forms.input/1
-      # until the cleanup ticket (bd-3z2txy) drops the old versions.
+      # until a follow-up ticket migrates call sites and retires the old ones.
       # Design-handoff feedback primitives (LiveBadge, QuotaBar, WorkerFlow, Toast, EmptyState).
       # live_badge/1 and empty_state/1 are excluded: ArbiterWeb.ListComponents
       # already defines both with a different shape (live_badge/1: a required
