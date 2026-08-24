@@ -26,8 +26,12 @@ defmodule Arbiter.Board.Snapshot do
     * **Waiting** — the worker is done and the outcome now depends on
       something outside it: `:awaiting` (it asked a human a question),
       `:failed` (parked; send it back or close it) and `:awaiting_review` (an
-      MR is open and the Watchdog is polling). Longest wait first, because a
-      stalled card is the thing worth seeing.
+      MR is open and the Watchdog is polling) — plus an `in_progress` issue
+      with **no live worker at all** (e.g. `arb worker stop` on an
+      `:awaiting_review` worker, the documented pre-flight for `arb server
+      deploy`), which always flags `needs_you` since nothing will retry it on
+      its own. Longest wait first, because a stalled card is the thing worth
+      seeing.
     * **Closed today** — issues closed since midnight UTC. The day's evidence
       of progress, and the only column with no action on it.
 
@@ -114,6 +118,11 @@ defmodule Arbiter.Board.Snapshot do
 
   @default_system_max 16
 
+  # Dispatch flips an issue to :in_progress before the worker is registered
+  # (worktree provisioning, fetch, etc. — seconds on a large repo). Below this
+  # age, treat it as mid-dispatch rather than orphaned.
+  @orphan_grace_seconds 60
+
   @type t :: %{
           backlog: [map()],
           ready: [Scheduler.entry()],
@@ -183,7 +192,7 @@ defmodule Arbiter.Board.Snapshot do
       backlog: backlog_cards(issues, worked),
       ready: plan.entries,
       running: running,
-      waiting: waiting_cards(authors, issues_by_id),
+      waiting: waiting(authors, issues, issues_by_id, worked, now),
       closed_today: closed_today_cards(issues, now),
       promote: plan.promote,
       slots_total: slots_total,
@@ -422,9 +431,15 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   # One column, so one card shape: a parked worker's card still carries the
-  # (empty) merge fields and a merge-parked one still carries a (nil) reason.
-  # The view reads whichever it has instead of branching on which half of the
-  # union produced the card.
+  # (empty) merge fields and a merge-parked one still carries a (nil) reason,
+  # and an orphaned issue (no live worker at all) still carries both, nil.
+  # The view reads whichever it has instead of branching on which shape
+  # produced the card.
+  defp waiting(workers, issues, issues_by_id, worked, now) do
+    (waiting_cards(workers, issues_by_id) ++ orphaned_cards(issues, worked, now))
+    |> Enum.sort_by(& &1.since, {:asc, DateTime})
+  end
+
   defp waiting_cards(workers, issues_by_id) do
     workers
     |> Enum.filter(&(&1.status in @waiting_statuses))
@@ -440,7 +455,42 @@ defmodule Arbiter.Board.Snapshot do
         since: since(w)
       })
     end)
-    |> Enum.sort_by(& &1.since, {:asc, DateTime})
+  end
+
+  # bd-2mv3lx: an issue stuck `in_progress` with no live worker — e.g. `arb
+  # worker stop` on an `:awaiting_review` worker, the documented pre-flight
+  # for `arb server deploy` — matches none of the worker-derived or
+  # issue-open filters and used to vanish from the board entirely. It reads
+  # truest as Waiting: the work is out of the machine's hands, and nothing
+  # will retry it on its own, so it always flags `needs_you`.
+  defp orphaned_cards(issues, worked, now) do
+    issues
+    |> Enum.filter(&orphaned?(&1, worked, now))
+    |> Enum.map(fn issue ->
+      %{
+        id: issue.id,
+        title: Map.get(issue, :title),
+        priority: Map.get(issue, :priority),
+        difficulty: Map.get(issue, :difficulty),
+        workspace_id: Map.get(issue, :workspace_id),
+        assignee: Map.get(issue, :assignee),
+        status: :in_progress,
+        reason: "worker stopped — resume or close",
+        mr_ref: Map.get(issue, :pr_ref),
+        merger_url: nil,
+        merger_status: nil,
+        needs_you: true,
+        since: Map.get(issue, :updated_at) || created_at(issue)
+      }
+    end)
+  end
+
+  defp orphaned?(issue, worked, now) do
+    issue.status == :in_progress and
+      Map.get(issue, :issue_type) not in @non_dispatchable_types and
+      not MapSet.member?(worked, issue.id) and
+      DateTime.diff(now, Map.get(issue, :updated_at) || created_at(issue)) >=
+        @orphan_grace_seconds
   end
 
   defp waiting_reason(%{status: :awaiting_review}), do: nil

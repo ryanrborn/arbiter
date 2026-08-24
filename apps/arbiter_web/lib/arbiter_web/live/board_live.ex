@@ -1246,10 +1246,12 @@ defmodule ArbiterWeb.BoardLive do
 
   defp waiting_note(%{status: :awaiting_review} = card), do: merge_status_text(card.merger_status)
   defp waiting_note(%{status: :failed}), do: "failed"
+  defp waiting_note(%{status: :in_progress}), do: "no live worker"
   defp waiting_note(_card), do: "parked"
 
   defp waiting_action(%{status: :awaiting_review}), do: "merge queue"
   defp waiting_action(%{status: :failed}), do: "retry"
+  defp waiting_action(%{status: :in_progress}), do: "resume"
   defp waiting_action(_card), do: "answer"
 
   defp merge_activity(%{mr_ref: ref}) when is_binary(ref) and ref != "", do: ref
