@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Promote do
   @moduledoc """
-  `arb promote <id>` — promote a task from Backlog to Ready.
+  `arb issue promote <id>` — promote a task from Backlog to Ready.
 
   Wraps `POST /api/issues/:id/promote`, which runs the `:promote_to_ready` action:
   it sets `refined: true`, moving the task from Backlog to Ready. Idempotent —
