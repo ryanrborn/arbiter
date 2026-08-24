@@ -390,6 +390,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       # pending card (no block_reason) renders as "checks"
       pending = working_issue(ws, "pending card")
       pending_pid = merge_worker(ws, pending)
+
       :ok =
         Worker.record_merger_status(pending_pid, %{
           status: :open,
@@ -400,6 +401,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       # approved card (no block_reason) renders as "approved"
       approved = working_issue(ws, "approved card")
       approved_pid = merge_worker(ws, approved)
+
       :ok =
         Worker.record_merger_status(approved_pid, %{
           status: :open,
@@ -410,6 +412,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       # merged card renders as "merged"
       merged = working_issue(ws, "merged card")
       merged_pid = merge_worker(ws, merged)
+
       :ok =
         Worker.record_merger_status(merged_pid, %{
           status: :merged,
@@ -420,6 +423,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       # blocked cards with various block_reasons
       conflict_card = working_issue(ws, "conflict card")
       conflict_pid = merge_worker(ws, conflict_card)
+
       :ok =
         Worker.record_merger_status(conflict_pid, %{
           status: :open,
@@ -429,6 +433,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       ci_failed_card = working_issue(ws, "ci failed card")
       ci_failed_pid = merge_worker(ws, ci_failed_card)
+
       :ok =
         Worker.record_merger_status(ci_failed_pid, %{
           status: :open,
@@ -439,6 +444,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       behind_base_card = working_issue(ws, "behind base card")
       behind_base_pid = merge_worker(ws, behind_base_card)
+
       :ok =
         Worker.record_merger_status(behind_base_pid, %{
           status: :open,
@@ -459,7 +465,8 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ behind_base_card.id
 
       # Verify correct merger_status text appears (merge_status_text/1 rendering)
-      assert html =~ "checks" # nil status and pending cards
+      # nil status and pending cards
+      assert html =~ "checks"
       assert html =~ "approved"
       assert html =~ "merged"
       assert html =~ "conflict"
