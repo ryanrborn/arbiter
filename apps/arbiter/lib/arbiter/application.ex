@@ -129,7 +129,12 @@ defmodule Arbiter.Application do
       # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a
       # Conductor once kicked off). The Registry keys them by graph_id.
       {Registry, keys: :unique, name: Arbiter.Workflows.ConductorRegistry},
-      Arbiter.Workflows.ConductorSupervisor
+      Arbiter.Workflows.ConductorSupervisor,
+      # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
+      # install opts in with `config :arbiter, :board_autopilot, enabled: true`
+      # — auto-dispatch spends money, so an upgrade must not discover it by
+      # finding four agents running.
+      Arbiter.Board.Autopilot
     ] ++ boot_tasks(auto_start?)
   end
 

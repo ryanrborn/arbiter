@@ -99,6 +99,87 @@ defmodule Arbiter.Workflows.WorkTest do
       assert match?({:error, _}, result)
     end
 
+    test "bd-7l4f5q: :github-tracked tasks transition without the per-process config pre-warmed" do
+      # Regression test: `run_step(:submit, ...)` used to call
+      # `Trackers.transition/2` directly, without ever calling
+      # `Trackers.prepare/2` first. GitHub's tracker config is resolved from
+      # a per-process dictionary that only `prepare/2` seeds, so this raised
+      # `%Arbiter.Trackers.GitHub.Error{kind: :config_missing}` even when the
+      # workspace's tracker config was valid — unless some earlier, unrelated
+      # call in the same OS process happened to warm the pdict first. Each
+      # ExUnit test runs in its own process, so this test starts with a
+      # guaranteed-empty pdict, reproducing the original bug if `:submit`
+      # doesn't call `prepare/2` itself.
+      env_var = "WORK_TEST_GITHUB_TOKEN"
+      System.put_env(env_var, "test-github-token")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "submit-github-test-#{System.unique_integer([:positive])}",
+          prefix: "wt",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "ryanrborn",
+                "repo" => "arbiter",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "GitHub task",
+          workspace_id: ws.id,
+          tracker_type: :github,
+          tracker_ref: "42"
+        })
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 42, "state" => "open", "labels" => []})
+
+          "PATCH" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 42, "state" => "closed"})
+        end
+      end)
+
+      assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{task_id: task.id})
+    end
+
+    test "bd-1k6d9h: :shortcut-tracked task with nil tracker_ref completes as no-op" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "submit-shortcut-nil-ref-test-#{System.unique_integer([:positive])}",
+          prefix: "wt",
+          config: %{
+            "tracker" => %{
+              "type" => "shortcut",
+              "config" => %{"credentials_ref" => "env:DUMMY_SHORTCUT_TOKEN"}
+            }
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "Shortcut task with nil tracker_ref",
+          workspace_id: ws.id,
+          tracker_type: :shortcut,
+          tracker_ref: nil
+        })
+
+      # This should not raise FunctionClauseError and should succeed as a no-op
+      assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{task_id: task.id})
+    end
+
     defp ws_for_this_test(_) do
       # Helper: return a workspace for the current test process. We can't
       # share setup across describes cleanly without context propagation, so

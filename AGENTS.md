@@ -1,5 +1,31 @@
 This is a web application written using the Phoenix web framework.
 
+## Local server verification — read before booting anything
+
+This repo is **dogfooded**: Arbiter's own coordinator instance (the thing that
+dispatched you as a worker) runs as `mix phx.server` on **this same host**,
+typically on port 4848. If your own verification step boots a local server —
+`mix phx.server`, `iex -S mix phx.server`, or similar — and you tear it down
+with a name/pattern-based kill (`pkill -f "mix phx.server"`, `pkill -f
+"phx.server"`, `killall beam.smp`, or anything that matches by command-line
+substring rather than an exact PID), you will kill the live coordinator
+process too, not just your own instance. This has already happened multiple
+times in production use of this repo and takes the coordinator and every
+other in-flight worker down with it.
+
+**If you boot a local server to verify your change:**
+- Capture its exact PID when you start it (e.g. `mix phx.server & SERVER_PID=$!`)
+  and tear it down with `kill $SERVER_PID` — never a name/pattern match.
+- If you cannot reliably track that PID across your own tool calls (shell
+  state doesn't always persist between calls), **do not boot a server at
+  all** — rely on `mix test` and reading your LiveView/component test
+  assertions instead. That is sufficient verification for this repo; a
+  broken teardown is worse than skipping the live check.
+- Never use `pkill`, `killall`, or any broad process-matching kill command in
+  this repo, for any reason, even if it looks scoped (a port number, an env
+  var) — process command lines are visible host-wide and false-positive
+  matches are exactly what caused this problem before.
+
 ## Project guidelines
 
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues

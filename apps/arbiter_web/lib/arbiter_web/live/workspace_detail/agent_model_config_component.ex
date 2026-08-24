@@ -16,9 +16,12 @@ defmodule ArbiterWeb.WorkspaceDetail.AgentModelConfigComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
 
   alias Arbiter.Agents
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Forms
 
   # The model tiers (`agent.config.tier_models`) and thinking levels
   # (`agent.config.thinking_argv`) every adapter defines. They are only the
@@ -244,127 +247,138 @@ defmodule ArbiterWeb.WorkspaceDetail.AgentModelConfigComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <section id={@id} class="card bg-base-200 border border-base-300 shadow-sm">
-      <div class="card-body p-4 gap-3">
-        <h2 class="font-semibold flex items-center gap-2">
-          <.icon name="hero-cpu-chip" class="size-5 text-base-content/60" /> Agent model config
-        </h2>
-        <p class="text-xs text-base-content/50 -mt-1">
-          <code>agent.config.*</code>
-          — what model a dispatched worker runs and how it authenticates. Blank unsets the
-          override and lets the adapter default apply.
-        </p>
+    <div id={@id} class={pane_class("agent_models", @section)}>
+      <.form for={%{}} as={:agent_config} phx-submit="save_agent_config" phx-target={@myself}>
+        <.rows>
+          <.setting_row
+            name="Model"
+            consequence="agent.config.model — every dispatch runs this model; blank lets the agent CLI pick its own default"
+          >
+            <:control>
+              <Forms.input
+                name="agent_config[model]"
+                value={agent_cfg(@workspace, "model")}
+                size="sm"
+                placeholder="CLI default"
+                class="w-[240px]"
+              />
+            </:control>
+          </.setting_row>
 
-        <.form
-          for={%{}}
-          as={:agent_config}
-          phx-submit="save_agent_config"
-          phx-target={@myself}
-          class="grid sm:grid-cols-2 gap-x-4"
-        >
-          <.input
-            type="text"
-            name="agent_config[model]"
-            label="Model (agent.config.model)"
-            placeholder="default: let the CLI pick"
-            value={agent_cfg(@workspace, "model")}
-          />
-          <.input
-            type="select"
-            name="agent_config[credentials_ref]"
-            label="Credentials (agent.config.credentials_ref)"
-            options={credentials_ref_options(@secret_keys, agent_cfg(@workspace, "credentials_ref"))}
-            value={agent_cfg(@workspace, "credentials_ref")}
-          />
-          <.input
+          <.setting_row
+            name="Credentials"
+            consequence="agent.config.credentials_ref — which stored secret the agent authenticates with; add one under Secrets first"
+          >
+            <:control>
+              <Forms.select
+                name="agent_config[credentials_ref]"
+                options={
+                  credentials_ref_options(@secret_keys, agent_cfg(@workspace, "credentials_ref"))
+                }
+                value={agent_cfg(@workspace, "credentials_ref")}
+                size="sm"
+                class="w-[240px]"
+              />
+            </:control>
+          </.setting_row>
+
+          <.setting_row
             :for={tier <- @model_tiers}
-            type="text"
-            name={"agent_config[tier_#{tier}]"}
-            label={"Tier model — #{tier} (agent.config.tier_models.#{tier})"}
-            placeholder="adapter default"
-            value={tier_model_value(@workspace, tier)}
-          />
-          <.input
+            name={"Tier model — #{tier}"}
+            consequence={"agent.config.tier_models.#{tier} — routing that lands on the #{tier} tier runs this model; blank falls back to the adapter's own"}
+          >
+            <:control>
+              <Forms.input
+                name={"agent_config[tier_#{tier}]"}
+                value={tier_model_value(@workspace, tier)}
+                size="sm"
+                placeholder="adapter default"
+                class="w-[240px]"
+              />
+            </:control>
+          </.setting_row>
+
+          <.setting_row
             :for={level <- @thinking_levels}
-            type="text"
-            name={"agent_config[thinking_#{level}]"}
-            label={"Thinking argv — #{level} (agent.config.thinking_argv.#{level})"}
-            placeholder="adapter default, e.g. --effort medium"
-            value={thinking_argv_value(@workspace, level)}
-          />
-          <div class="sm:col-span-2 flex items-center gap-3 mt-2">
-            <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
-              Save agent config
-            </.button>
-            <p :if={@agent_config_error} class="text-sm text-error">{@agent_config_error}</p>
-          </div>
-        </.form>
+            name={"Thinking argv — #{level}"}
+            consequence={"agent.config.thinking_argv.#{level} — appended to the CLI when routing asks for #{level} thinking; blank uses the adapter's own flag"}
+          >
+            <:control>
+              <Forms.input
+                name={"agent_config[thinking_#{level}]"}
+                value={thinking_argv_value(@workspace, level)}
+                size="sm"
+                placeholder="--effort medium"
+                class="w-[240px]"
+              />
+            </:control>
+          </.setting_row>
+        </.rows>
 
-        <div class="border-t border-base-300 pt-3">
-          <h3 class="font-semibold text-sm flex items-center gap-2">
-            Per-provider model overrides
-            <span class="text-base-content/40 font-normal">({length(@provider_overrides)})</span>
-          </h3>
-          <p class="text-xs text-base-content/50 mt-1">
-            <code>agent.config.&lt;provider&gt;.tier_models.&lt;tier&gt;</code>
-            — scopes a tier to one provider in a multi-provider pool, where the flat
-            <code>tier_models</code>
-            above would otherwise apply to every adapter.
+        <div class="mt-3 flex items-center gap-3">
+          <Core.button type="submit" variant="primary" size="sm">Save agent config</Core.button>
+          <p :if={@agent_config_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
+            {@agent_config_error}
           </p>
-
-          <ul
-            :if={@provider_overrides != []}
-            id="provider-overrides"
-            class="flex flex-col gap-1.5 mt-2"
-          >
-            <li
-              :for={{provider, tier, model} <- @provider_overrides}
-              class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
-            >
-              <code class="text-sm flex-1">{provider} · {tier}</code>
-              <span class="badge badge-sm badge-ghost font-mono">{model}</span>
-              <button
-                type="button"
-                phx-click="rm_provider_override"
-                phx-target={@myself}
-                phx-value-provider={provider}
-                phx-value-tier={tier}
-                class="btn btn-ghost btn-xs text-error shrink-0"
-                aria-label={"Remove #{provider} #{tier} model override"}
-                data-confirm={"Remove the #{provider} #{tier} model override?"}
-              >
-                <.icon name="hero-trash" class="size-4" />
-              </button>
-            </li>
-          </ul>
-
-          <.form
-            for={%{}}
-            as={:provider_override}
-            phx-submit="add_provider_override"
-            phx-target={@myself}
-            class="flex gap-2 items-start mt-2"
-          >
-            <select name="provider_override[provider]" class="select select-sm">
-              <option :for={provider <- @agent_types} value={provider}>{provider}</option>
-            </select>
-            <select name="provider_override[tier]" class="select select-sm">
-              <option :for={tier <- @model_tiers} value={tier}>{tier}</option>
-            </select>
-            <input
-              type="text"
-              name="provider_override[model]"
-              placeholder="model, e.g. gemini-3-pro"
-              class="input input-sm flex-1"
-              required
-            />
-            <.button type="submit" class="btn btn-sm">
-              <.icon name="hero-plus" class="size-4" /> Add
-            </.button>
-          </.form>
         </div>
-      </div>
-    </section>
+      </.form>
+
+      <.rows>
+        <.setting_row
+          name="Per-provider model overrides"
+          consequence="scopes a tier to one provider in a multi-provider pool, where the flat tier models above would apply to every adapter"
+        >
+          <:below>
+            <ul :if={@provider_overrides != []} id="provider-overrides" class={list_class()}>
+              <.list_row :for={{provider, tier, model} <- @provider_overrides}>
+                <span class="flex-1 truncate">{provider} · {tier}</span>
+                <span class={value_chip()}>
+                  {model}
+                </span>
+                <.remove_button
+                  label={"Remove #{provider} #{tier} model override"}
+                  phx-click="rm_provider_override"
+                  phx-target={@myself}
+                  phx-value-provider={provider}
+                  phx-value-tier={tier}
+                  data-confirm={"Remove the #{provider} #{tier} model override?"}
+                />
+              </.list_row>
+            </ul>
+
+            <.form
+              for={%{}}
+              as={:provider_override}
+              phx-submit="add_provider_override"
+              phx-target={@myself}
+              class="mt-2 flex items-center gap-2"
+            >
+              <Forms.select
+                name="provider_override[provider]"
+                options={@agent_types}
+                size="sm"
+                class="w-[130px]"
+              />
+              <Forms.select
+                name="provider_override[tier]"
+                options={@model_tiers}
+                size="sm"
+                class="w-[130px]"
+              />
+              <Forms.input
+                name="provider_override[model]"
+                value=""
+                size="sm"
+                placeholder="gemini-3-pro"
+                class="flex-1"
+                required
+              />
+              <Core.button type="submit" size="sm">Add</Core.button>
+            </.form>
+          </:below>
+        </.setting_row>
+      </.rows>
+    </div>
     """
   end
 end

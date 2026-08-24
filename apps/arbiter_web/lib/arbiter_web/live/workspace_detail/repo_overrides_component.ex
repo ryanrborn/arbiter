@@ -10,7 +10,11 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoOverridesComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
+
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, :repo_override_error, nil)}
@@ -69,59 +73,59 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoOverridesComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <div id={@id} class="border-t border-base-300 pt-3">
-      <h3 class="font-semibold text-sm flex items-center gap-2">
-        Per-repo dispatch overrides
-        <span class="text-base-content/40 font-normal">({length(@repo_overrides)})</span>
-      </h3>
-      <p class="text-xs text-base-content/50 mt-1">
-        <code>review_automation.repo_overrides</code> — overrides the dispatch mode above for
-        a specific repo.
-      </p>
-
-      <ul :if={@repo_overrides != []} id="repo-overrides" class="flex flex-col gap-1.5 mt-2">
-        <li
-          :for={{repo, mode} <- @repo_overrides}
-          class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
+    <div id={@id} class={pane_class("policy", @section)}>
+      <.rows>
+        <.setting_row
+          name="Per-repo dispatch overrides"
+          consequence="review_automation.repo_overrides — these repos ignore the reviewer dispatch mode above and use their own"
         >
-          <code class="text-sm flex-1">{repo}</code>
-          <span class="badge badge-sm badge-ghost font-mono">{mode}</span>
-          <button
-            type="button"
-            phx-click="rm_repo_override"
-            phx-target={@myself}
-            phx-value-repo={repo}
-            class="btn btn-ghost btn-xs text-error shrink-0"
-            aria-label={"Remove override for #{repo}"}
-            data-confirm={"Remove the review_automation override for #{repo}?"}
-          >
-            <.icon name="hero-trash" class="size-4" />
-          </button>
-        </li>
-      </ul>
+          <:below>
+            <ul :if={@repo_overrides != []} id="repo-overrides" class={list_class()}>
+              <.list_row :for={{repo, mode} <- @repo_overrides}>
+                <span class="flex-1 truncate">{repo}</span>
+                <span class={value_chip()}>
+                  {mode}
+                </span>
+                <.remove_button
+                  label={"Remove override for #{repo}"}
+                  phx-click="rm_repo_override"
+                  phx-target={@myself}
+                  phx-value-repo={repo}
+                  data-confirm={"Remove the review_automation override for #{repo}?"}
+                />
+              </.list_row>
+            </ul>
 
-      <.form
-        for={%{}}
-        as={:repo_override}
-        phx-submit="add_repo_override"
-        phx-target={@myself}
-        class="flex gap-2 items-start mt-2"
-      >
-        <input
-          type="text"
-          name="repo_override[repo]"
-          placeholder="owner/repo"
-          class="input input-sm flex-1"
-          required
-        />
-        <select name="repo_override[mode]" class="select select-sm">
-          <option :for={mode <- @review_automation_modes} value={mode}>{mode}</option>
-        </select>
-        <.button type="submit" class="btn btn-sm">
-          <.icon name="hero-plus" class="size-4" /> Add
-        </.button>
-      </.form>
-      <p :if={@repo_override_error} class="text-sm text-error mt-1">{@repo_override_error}</p>
+            <.form
+              for={%{}}
+              as={:repo_override}
+              phx-submit="add_repo_override"
+              phx-target={@myself}
+              class="mt-2 flex items-center gap-2"
+            >
+              <Forms.input
+                name="repo_override[repo]"
+                value=""
+                size="sm"
+                placeholder="owner/repo"
+                class="flex-1"
+                required
+              />
+              <Forms.select
+                name="repo_override[mode]"
+                options={@review_automation_modes}
+                size="sm"
+                class="w-[140px]"
+              />
+              <Core.button type="submit" size="sm">Add</Core.button>
+            </.form>
+          </:below>
+        </.setting_row>
+      </.rows>
+
+      <p :if={@repo_override_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
+        {@repo_override_error}
+      </p>
     </div>
     """
   end

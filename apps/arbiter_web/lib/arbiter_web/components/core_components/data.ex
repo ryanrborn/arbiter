@@ -44,6 +44,16 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("open"), do: "badge-success"
   defp status_chip_class("in_progress"), do: "badge-info"
   defp status_chip_class("closed"), do: "badge-ghost"
+  defp status_chip_class("proposed"), do: "badge-warning"
+  defp status_chip_class("hypothesis"), do: "badge-ghost"
+  defp status_chip_class("applied"), do: "badge-success"
+  defp status_chip_class("rejected"), do: "badge-error"
+  defp status_chip_class("superseded"), do: "badge-neutral"
+  # Worktree state on the workspace config screen: a dirty checkout is not an
+  # error, it is the one thing an operator has to deal with before a worker can
+  # take the repo — so it warns rather than fails.
+  defp status_chip_class("clean"), do: "badge-success"
+  defp status_chip_class("dirty"), do: "badge-warning"
   defp status_chip_class(_), do: "badge-ghost"
 
   @doc """
@@ -129,13 +139,19 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
       <.type_tag type={:bug_fix} />
       <.type_tag type="spike" />
+      <.type_tag type="never invoked" dashed />
+
+  `dashed` marks an add affordance or a dead-state flag (e.g. a skill that
+  has never been invoked) rather than a real category.
   """
   attr :type, :any, required: true
+  attr :dashed, :boolean, default: false
   attr :class, :any, default: nil
+  attr :rest, :global
 
   def type_tag(assigns) do
     ~H"""
-    <span class={["badge badge-ghost", @class]}>{@type}</span>
+    <span class={["badge badge-ghost", @dashed && "border-dashed", @class]} {@rest}>{@type}</span>
     """
   end
 

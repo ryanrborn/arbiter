@@ -55,6 +55,20 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            Phoenix hot-reload and cascades to kill every other running worker.
            Always use relative paths or paths rooted at /tmp/wt-golden.
 
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
            READ DISCIPLINE — avoid whole-file reads of large modules: they refill
            the context window faster than autocompact can shed it and can abort your
            session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
@@ -149,6 +163,20 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            If the work genuinely requires inspecting code you may read files, but do
            not author a branch or open a PR.
 
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
            READ DISCIPLINE — avoid whole-file reads of large modules: they refill
            the context window faster than autocompact can shed it and can abort your
            session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
@@ -215,6 +243,19 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            no per-task branch and no worktree was provisioned — this is a review-only
            directive.
 
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
            READ DISCIPLINE — avoid whole-file reads of large modules: they refill
            the context window faster than autocompact can shed it and can abort your
            session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
@@ -260,6 +301,127 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
                arb done
            """
+  end
+
+  test "review prompt is byte-identical when a review checkout was provisioned (bd-199giy)" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{}),
+        review: true,
+        review_checkout: %{
+          path: "/tmp/arbiter-worktrees/review-abc123def456-1",
+          branch: "bugfix/bd-golden1-fix-null-guard",
+          head_sha: "abc123def456",
+          base_branch: "main"
+        }
+      )
+
+    assert prompt == """
+           You are a reviewer worker. Review the pull/merge request linked to task
+           bd-golden1 and post a verdict. You are not the author; do not modify the
+           branch.
+
+           Title: Fix the null guard
+
+           Description:
+           The parser crashes on empty input.
+
+           Acceptance:
+           Empty input returns {:error, :empty} instead of raising.
+
+           Your current directory (/tmp/arbiter-worktrees/review-abc123def456-1) is a
+           throwaway git worktree checked out DETACHED at `bugfix/bd-golden1-fix-null-guard`
+           head abc123def456 — the exact commit under review. It is yours alone and is
+           destroyed when this review ends. Read, Grep, Glob and Bash work here; Edit,
+           Write and NotebookEdit are denied, so you cannot modify the code you are
+           reviewing and cannot advance the branch.
+
+           Use it: open the real files at the reviewed commit, grep for call sites the
+           diff never shows, and run the tests against the actual tree. The diff is your
+           entry point, not the limit of what you can check. Report findings only on
+           code the diff actually touches — anything the checkout surfaces outside the
+           diff belongs in your summary prose, not as an inline comment.
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
+           READ DISCIPLINE — avoid whole-file reads of large modules: they refill
+           the context window faster than autocompact can shed it and can abort your
+           session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
+           to locate the relevant span first, then read a bounded offset+limit range
+           rather than the entire file. For a large `gh`/API command's output, pipe
+           it to a file and read bounded slices rather than dumping it whole into
+           context.
+
+           Steps:
+             1. Read the diff under review with `git diff origin/main...HEAD` in this
+                worktree (the tracker CLI — `gh pr diff <ref>` for GitHub, `glab mr
+                diff <ref>` for GitLab — is the fallback if that base ref is
+                unavailable). The commit under review is ALREADY checked out here; do
+                not check out or create any other branch.
+             2. Identify real correctness, security, or contract issues against the
+                task's intent. Skip style nits.
+             3. Post inline comments for each finding through the same tracker CLI.
+             4. Post a single review-level verdict — `approve` or `request_changes`
+                — with a one-paragraph summary.
+
+           Forbidden:
+             * Do NOT push code.
+             * Do NOT merge or close the PR/MR.
+             * Do NOT modify any branch, including the PR's head.
+
+           *** ASYNC TOOLS: You may run tests, linters, or any diagnostic tool —
+           including in parallel or with background execution modes. However, you
+           MUST wait for every background task to complete and read its full output
+           before printing `arb done`. Do not signal done while any background task
+           is still running.
+
+           #{Arbiter.Worker.ReviewVerification.anti_stale_reflag_block()}
+           After you post the review to the tracker, print your conclusion on its
+           own line, EXACTLY one of:
+
+               VERDICT: APPROVE
+               VERDICT: REQUEST_CHANGES
+
+           If you REQUEST_CHANGES you MUST have posted an ENUMERATED list of concrete
+           findings through the tracker CLI — each with a severity, a location, and a
+           suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid.
+
+           #{Arbiter.Worker.ReviewVerification.disclosure_block()}
+           Then print, on a line by itself:
+
+               arb done
+           """
+  end
+
+  test "review checkout with no known base branch falls back to the tracker CLI for the diff" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{}),
+        review: true,
+        review_checkout: %{
+          path: "/tmp/wt-review",
+          branch: "bugfix/bd-golden1",
+          head_sha: "abc123def456",
+          base_branch: nil
+        }
+      )
+
+    assert prompt =~ "throwaway git worktree checked out DETACHED"
+
+    assert prompt =~
+             "  1. Read the diff under review via the configured tracker's CLI (`gh pr\n" <>
+               "     diff <ref>` for GitHub, `glab mr diff <ref>` for GitLab)."
+
+    refute prompt =~ "git diff origin/"
   end
 
   test "prompt_for_task/2 delegates through Dispatch identically" do

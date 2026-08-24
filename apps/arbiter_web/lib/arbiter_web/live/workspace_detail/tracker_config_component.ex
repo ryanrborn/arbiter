@@ -10,7 +10,11 @@ defmodule ArbiterWeb.WorkspaceDetail.TrackerConfigComponent do
   """
   use ArbiterWeb, :live_component
 
+  import ArbiterWeb.WorkspaceDetail.Rows
   import ArbiterWeb.WorkspaceDetail.Shared
+
+  alias ArbiterWeb.CoreComponents.Core
+  alias ArbiterWeb.CoreComponents.Forms
 
   @impl true
   def mount(socket), do: {:ok, assign(socket, :tracker_config_error, nil)}
@@ -43,28 +47,45 @@ defmodule ArbiterWeb.WorkspaceDetail.TrackerConfigComponent do
   # {jira,shortcut,linear,github,gitlab}/config.ex`). `credentials_ref` is
   # common to every adapter and rendered separately as a secret select, so it
   # isn't listed here.
+  # `{field, label, consequence}` — the consequence is what the field *does*,
+  # not what it is called, because the label alone never tells an operator
+  # whether leaving it blank is safe.
   defp tracker_adapter_fields("jira") do
-    [{"host", "Host"}, {"project_key", "Project key"}, {"email", "Email (optional)"}]
+    [
+      {"host", "Host", "the Jira site issues are read from and written back to"},
+      {"project_key", "Project key", "new issues are filed under this project"},
+      {"email", "Email", "the account the API token belongs to; blank uses token-only auth"}
+    ]
   end
 
   defp tracker_adapter_fields("shortcut") do
-    [{"workflow_id", "Workflow ID (optional)"}]
+    [
+      {"workflow_id", "Workflow ID",
+       "new stories land in this workflow; blank uses the org's default"}
+    ]
   end
 
   defp tracker_adapter_fields("linear") do
     [
-      {"team_id", "Team ID (optional)"},
-      {"org_url_key", "Org URL key (optional)"},
-      {"base_url", "Base URL (optional)"}
+      {"team_id", "Team ID", "issues are created on this team; blank uses the token's default"},
+      {"org_url_key", "Org URL key", "used to build the issue links shown on the board"},
+      {"base_url", "Base URL", "point at a self-hosted API; blank uses linear.app"}
     ]
   end
 
   defp tracker_adapter_fields("github") do
-    [{"owner", "Owner"}, {"repo", "Repo"}, {"base_url", "Base URL (optional, GHE)"}]
+    [
+      {"owner", "Owner", "the account or org whose issues this workspace syncs"},
+      {"repo", "Repo", "the repository issues are read from and filed in"},
+      {"base_url", "Base URL", "point at a GitHub Enterprise API; blank uses github.com"}
+    ]
   end
 
   defp tracker_adapter_fields("gitlab") do
-    [{"host", "Host"}, {"project_id", "Project ID or path"}]
+    [
+      {"host", "Host", "the GitLab instance issues are read from and written back to"},
+      {"project_id", "Project ID or path", "the project issues are read from and filed in"}
+    ]
   end
 
   defp tracker_adapter_fields(_type), do: []
@@ -98,50 +119,55 @@ defmodule ArbiterWeb.WorkspaceDetail.TrackerConfigComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <div id={@id} class="border-t border-base-300 pt-3">
-      <h3 class="font-semibold text-sm flex items-center gap-2">
-        <.icon name="hero-ticket" class="size-4 text-base-content/60" />
-        {String.capitalize(@type_preview)} tracker config
-      </h3>
-      <p class="text-xs text-base-content/50 mt-1">
-        <code>tracker.config.*</code>
-        — fields the {@type_preview} adapter reads. Switching the tracker
-        type above (before saving it) changes which fields show here; a saved type's
-        config is kept even while another type is selected, so switching back doesn't
-        lose it. Blank unsets the field.
-      </p>
-
-      <.form
-        for={%{}}
-        as={:tracker_config}
-        phx-submit="save_tracker_config"
-        phx-target={@myself}
-        class="grid sm:grid-cols-2 gap-x-4 mt-2"
-      >
+    <div id={@id} class="flex flex-col gap-4">
+      <.form for={%{}} as={:tracker_config} phx-submit="save_tracker_config" phx-target={@myself}>
         <input type="hidden" name="tracker_config[type]" value={@type_preview} />
-        <.input
-          :for={{field, label} <- tracker_adapter_fields(@type_preview)}
-          type="text"
-          name={"tracker_config[#{field}]"}
-          label={"#{label} (tracker.config.#{field})"}
-          value={tracker_cfg(@workspace, field)}
-        />
-        <.input
-          type="select"
-          name="tracker_config[credentials_ref]"
-          label="Credentials (tracker.config.credentials_ref)"
-          options={credentials_ref_options(@secret_keys, tracker_cfg(@workspace, "credentials_ref"))}
-          value={tracker_cfg(@workspace, "credentials_ref")}
-        />
-        <div class="sm:col-span-2 flex items-center gap-3 mt-2">
-          <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
-            Save tracker config
-          </.button>
-          <p :if={@tracker_config_error} class="text-sm text-error">
+        <.rows>
+          <.setting_row
+            :for={{field, label, consequence} <- tracker_adapter_fields(@type_preview)}
+            name={label}
+            consequence={consequence}
+          >
+            <:control>
+              <Forms.input
+                name={"tracker_config[#{field}]"}
+                value={tracker_cfg(@workspace, field)}
+                size="sm"
+                class="w-[240px]"
+              />
+            </:control>
+          </.setting_row>
+
+          <.setting_row
+            name="Credentials"
+            consequence="tracker.config.credentials_ref — which stored secret the adapter authenticates with; add one under Secrets first"
+          >
+            <:control>
+              <Forms.select
+                name="tracker_config[credentials_ref]"
+                options={
+                  credentials_ref_options(@secret_keys, tracker_cfg(@workspace, "credentials_ref"))
+                }
+                value={tracker_cfg(@workspace, "credentials_ref")}
+                size="sm"
+                class="w-[240px]"
+              />
+            </:control>
+          </.setting_row>
+        </.rows>
+
+        <div class="mt-3 flex items-center gap-3">
+          <Core.button type="submit" variant="primary" size="sm">Save tracker config</Core.button>
+          <p :if={@tracker_config_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">
             {@tracker_config_error}
           </p>
         </div>
       </.form>
+
+      <p class="m-0 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]">
+        Picking another tracker type under Policy swaps these fields; a saved type's config is kept
+        while another is selected, so switching back doesn't lose it. Blank unsets a field.
+      </p>
     </div>
     """
   end
