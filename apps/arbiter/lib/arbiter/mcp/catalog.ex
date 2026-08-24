@@ -66,6 +66,9 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
+  | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/1` |
+  | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/1` |
+  | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.paused?/1` |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
   | `repo_show` | coordinator | single repo from `list_repos()` |
   """
@@ -1784,6 +1787,36 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.graph_status/2
+    },
+
+    # ---- board scheduler (autopilot) pause/resume --------------------------
+    %{
+      name: "scheduler_pause",
+      tiers: @coordinator,
+      description:
+        "Pause the board scheduler (autopilot): stop promoting Ready cards to Running. " <>
+          "Workers already dispatched continue to completion; no new dispatches occur " <>
+          "while paused. Resume with `scheduler_resume`. Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.scheduler_pause/2
+    },
+    %{
+      name: "scheduler_resume",
+      tiers: @coordinator,
+      description:
+        "Resume the board scheduler (autopilot): start promoting Ready cards to Running again. " <>
+          "Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.scheduler_resume/2
+    },
+    %{
+      name: "scheduler_status",
+      tiers: @coordinator,
+      description:
+        "Return the current pause state of the board scheduler (autopilot). " <>
+          "Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.scheduler_status/2
     },
 
     # ---- C5: queue resume ---------------------------------------------------

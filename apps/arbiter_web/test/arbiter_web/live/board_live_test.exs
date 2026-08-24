@@ -582,6 +582,12 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert html =~ "scheduler paused"
     end
+
+    test "scheduler toggle button has cursor-pointer class", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s(#board-scheduler-toggle.cursor-pointer))
+    end
   end
 
   describe "toolbar" do
