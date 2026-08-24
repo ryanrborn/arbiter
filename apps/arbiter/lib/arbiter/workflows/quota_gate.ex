@@ -82,21 +82,24 @@ defmodule Arbiter.Workflows.QuotaGate do
     @impl true
     def quota_headroom(workspace_id) do
       ws_id = to_string(workspace_id || "")
+      workspace = safe_workspace(ws_id)
 
       cond do
         # :continue mode — never clamp here; the dispatch/2 quota seam owns the
         # allow/overage decision so :continue graph work proceeds past the cap.
-        continue_workspace?(ws_id) ->
+        # Shared with the board's quota_hold/1 via Arbiter.Quota.continue_mode?/1
+        # (bd-5j6nmn) so both defer to the same seam-resolved mode.
+        Arbiter.Quota.continue_mode?(workspace) ->
           :unlimited
 
         true ->
-          throttle_headroom(ws_id)
+          throttle_headroom(ws_id, workspace)
       end
     end
 
-    defp throttle_headroom(ws_id) do
-      workspace = safe_workspace(ws_id)
-      snapshot = Arbiter.Quota.latest_for_provider(ws_id, Arbiter.Quota.default_provider(ws_id))
+    defp throttle_headroom(ws_id, workspace) do
+      provider = if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
+      snapshot = Arbiter.Quota.latest_for_provider(ws_id, provider)
 
       if Arbiter.Quota.Gate.over_cap?(snapshot, workspace), do: 0, else: :unlimited
     end
@@ -112,21 +115,6 @@ defmodule Arbiter.Workflows.QuotaGate do
       _ -> nil
     catch
       :exit, _ -> nil
-    end
-
-    # Whether the workspace's resolved quota mode is :continue. Best-effort: any
-    # load failure falls through to :throttle (the safe, cap-clamping default).
-    defp continue_workspace?(""), do: false
-
-    defp continue_workspace?(ws_id) do
-      case Ash.get(Arbiter.Tasks.Workspace, ws_id) do
-        {:ok, ws} -> Arbiter.Tasks.Workspace.quota_on_exhaustion(ws) == :continue
-        _ -> false
-      end
-    rescue
-      _ -> false
-    catch
-      :exit, _ -> false
     end
   end
 end

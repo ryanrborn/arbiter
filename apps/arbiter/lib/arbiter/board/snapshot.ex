@@ -314,6 +314,12 @@ defmodule Arbiter.Board.Snapshot do
   Conductor's `Arbiter.Workflows.QuotaGate.Default` and the `dispatch/2`
   quota seam both use (bd-5j6nmn), so Autopilot's one-per-tick promotion gate
   and the Conductor's per-drain cap-clamp agree on the same underlying data.
+
+  A `:continue`-mode workspace (`Arbiter.Quota.continue_mode?/1`) never holds
+  here, mirroring `Arbiter.Workflows.QuotaGate.Default`'s short-circuit: the
+  `dispatch/2` seam is the single choke point for the allow/overage decision,
+  so the board must not show a `blocked — quota exhausted` hold that the
+  dispatcher itself would not honor (reviewer round 1, finding 1).
   """
   @spec quota_hold(String.t() | nil) :: Scheduler.quota()
   def quota_hold(workspace_id \\ nil) do
@@ -321,7 +327,8 @@ defmodule Arbiter.Board.Snapshot do
 
     with ws_id when is_binary(ws_id) <- workspace_id,
          workspace <- safe_workspace(ws_id),
-         snapshot when not is_nil(snapshot) <- latest_quota(ws_id) do
+         false <- Arbiter.Quota.continue_mode?(workspace),
+         snapshot when not is_nil(snapshot) <- latest_quota(ws_id, workspace) do
       describe_quota(snapshot, workspace)
     else
       _ -> :ok
@@ -671,8 +678,9 @@ defmodule Arbiter.Board.Snapshot do
     _ -> nil
   end
 
-  defp latest_quota(ws_id) do
-    Arbiter.Quota.latest_for_provider(ws_id, Arbiter.Quota.default_provider(ws_id))
+  defp latest_quota(ws_id, workspace) do
+    provider = if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
+    Arbiter.Quota.latest_for_provider(ws_id, provider)
   rescue
     _ -> nil
   end

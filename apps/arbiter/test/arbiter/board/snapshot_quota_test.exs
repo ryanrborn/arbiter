@@ -81,4 +81,26 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
       assert board.promote == nil
     end
   end
+
+  describe "quota_hold/1 — :continue mode defers to the dispatch seam (finding 1)" do
+    test "does not hold when the workspace is over cap but configured on_exhaustion: continue" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "board-quota-continue-#{System.unique_integer([:positive])}",
+          prefix: "bqc#{System.unique_integer([:positive])}",
+          config: %{"agent" => %{"type" => "codex"}, "quota" => %{"on_exhaustion" => "continue"}}
+        })
+
+      {:ok, _quota} =
+        Ash.create(CodexQuota, %{
+          workspace_id: ws.id,
+          provider: "codex",
+          session_used_percent: 99.0,
+          session_reset_at: DateTime.utc_now() |> DateTime.add(3600, :second),
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      assert Snapshot.quota_hold(ws.id) == :ok
+    end
+  end
 end
