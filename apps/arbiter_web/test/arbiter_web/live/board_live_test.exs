@@ -381,6 +381,91 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "merge request is untouched"
       refute Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
     end
+
+    test "merge-queue cards render merger_status text correctly", %{conn: conn, ws: ws} do
+      # nil merger_status renders as "checks"
+      nil_status = working_issue(ws, "nil status card")
+      _nil_pid = merge_worker(ws, nil_status)
+
+      # pending card (no block_reason) renders as "checks"
+      pending = working_issue(ws, "pending card")
+      pending_pid = merge_worker(ws, pending)
+      :ok =
+        Worker.record_merger_status(pending_pid, %{
+          status: :open,
+          approved: false,
+          pipeline: :success
+        })
+
+      # approved card (no block_reason) renders as "approved"
+      approved = working_issue(ws, "approved card")
+      approved_pid = merge_worker(ws, approved)
+      :ok =
+        Worker.record_merger_status(approved_pid, %{
+          status: :open,
+          approved: true,
+          pipeline: :success
+        })
+
+      # merged card renders as "merged"
+      merged = working_issue(ws, "merged card")
+      merged_pid = merge_worker(ws, merged)
+      :ok =
+        Worker.record_merger_status(merged_pid, %{
+          status: :merged,
+          approved: true,
+          pipeline: :success
+        })
+
+      # blocked cards with various block_reasons
+      conflict_card = working_issue(ws, "conflict card")
+      conflict_pid = merge_worker(ws, conflict_card)
+      :ok =
+        Worker.record_merger_status(conflict_pid, %{
+          status: :open,
+          approved: true,
+          block_reason: :conflict
+        })
+
+      ci_failed_card = working_issue(ws, "ci failed card")
+      ci_failed_pid = merge_worker(ws, ci_failed_card)
+      :ok =
+        Worker.record_merger_status(ci_failed_pid, %{
+          status: :open,
+          approved: true,
+          pipeline: :failed,
+          block_reason: :ci_failed
+        })
+
+      behind_base_card = working_issue(ws, "behind base card")
+      behind_base_pid = merge_worker(ws, behind_base_card)
+      :ok =
+        Worker.record_merger_status(behind_base_pid, %{
+          status: :open,
+          approved: true,
+          block_reason: :behind_base
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      # The key assertion: rendering doesn't crash when merger_status is a populated map.
+      # All cards appear in the board, proving the render succeeded.
+      assert html =~ nil_status.id
+      assert html =~ pending.id
+      assert html =~ approved.id
+      assert html =~ merged.id
+      assert html =~ conflict_card.id
+      assert html =~ ci_failed_card.id
+      assert html =~ behind_base_card.id
+
+      # Verify correct merger_status text appears (merge_status_text/1 rendering)
+      assert html =~ "checks" # nil status and pending cards
+      assert html =~ "approved"
+      assert html =~ "merged"
+      assert html =~ "conflict"
+      assert html =~ "ci failed"
+      assert html =~ "behind base"
+    end
   end
 
   describe "drops that mean nothing" do
