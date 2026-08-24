@@ -897,6 +897,36 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "task_promote/2" do
+    test "a coordinator promotes a task from Backlog to Ready", ctx do
+      assert ctx.task.refined == false
+
+      assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.refined == true
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.refined == true
+    end
+
+    test "promoting an already-refined task is a no-op success", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      assert ctx.task.refined == false
+      {:ok, task} = Ash.get(Issue, ctx.task.id)
+      assert task.refined == true
+
+      assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.refined == true
+    end
+
+    test "cannot promote a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "pt-other", prefix: "pto"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_promote(ctx.coordinator, %{"id" => foreign.id})
+    end
+  end
+
   describe "notify_list/2" do
     test "lists recent notifications scoped to the workspace (both tiers)", ctx do
       {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})

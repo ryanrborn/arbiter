@@ -173,6 +173,7 @@ defmodule ArbiterCli.Output do
         {"Priority", issue["priority"]},
         {"Difficulty", difficulty_label(issue["difficulty"])},
         {"Type", issue["issue_type"]},
+        {"Backlog", backlog_label(issue)},
         {"Progress", child_progress_label(issue)},
         {"Auto-close", auto_close_label(issue)},
         {"Assignee", issue["assignee"]},
@@ -244,6 +245,11 @@ defmodule ArbiterCli.Output do
   # auto_close=false shouldn't clutter the detail view.
   defp auto_close_label(%{"auto_close" => true}), do: "yes (closes when all children done)"
   defp auto_close_label(_), do: nil
+
+  # Display whether task is in Backlog (refined=false) or Ready (refined=true).
+  defp backlog_label(%{"refined" => true}), do: "Ready"
+  defp backlog_label(%{"refined" => false}), do: "Backlog"
+  defp backlog_label(_), do: nil
 
   defp tracker_label(%{"tracker_type" => nil}), do: nil
   defp tracker_label(%{"tracker_type" => "none"}), do: nil

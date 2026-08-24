@@ -1468,7 +1468,8 @@ defmodule Arbiter.MCP.Tools do
       priority: i.priority,
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),
-      workspace_id: i.workspace_id
+      workspace_id: i.workspace_id,
+      refined: i.refined
     }
   end
 
@@ -1626,6 +1627,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_update(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_reopen(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_promote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task

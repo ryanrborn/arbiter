@@ -171,6 +171,24 @@ defmodule Arbiter.MCP.Tools.Task do
     end
   end
 
+  # ---- task_promote --------------------------------------------------------
+
+  @doc """
+  Promote a task from Backlog to Ready (set `refined: true`) via the
+  `:promote_to_ready` action. Coordinator only. Idempotent by design —
+  promoting an already-refined task is a no-op success, not an error.
+  """
+  @spec task_promote(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_promote(%Scope{} = scope, args) do
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id) do
+      case Ash.update(issue, %{}, action: :promote_to_ready) do
+        {:ok, promoted} -> {:ok, Tools.serialize_task_summary(promoted)}
+        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+      end
+    end
+  end
+
   # ---- task_sync_upstream_close --------------------------------------------
 
   @doc """

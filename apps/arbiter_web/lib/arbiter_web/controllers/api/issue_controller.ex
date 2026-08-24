@@ -201,6 +201,13 @@ defmodule ArbiterWeb.Api.IssueController do
     end
   end
 
+  def promote(conn, %{"id" => id}) do
+    with {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, promoted} <- Ash.update(issue, %{}, action: :promote_to_ready) do
+      render(conn, :show, issue: promoted)
+    end
+  end
+
   # ---- helpers ----
 
   defp build_filters(params) do

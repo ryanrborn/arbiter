@@ -67,6 +67,7 @@ defmodule ArbiterWeb.Router do
     put("/issues/:id", IssueController, :update)
     post("/issues/:id/close", IssueController, :close)
     post("/issues/:id/reopen", IssueController, :reopen)
+    post("/issues/:id/promote", IssueController, :promote)
 
     # Dependencies
     post("/dependencies", DependencyController, :create)

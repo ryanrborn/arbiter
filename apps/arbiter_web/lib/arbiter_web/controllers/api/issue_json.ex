@@ -36,6 +36,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
       pr_body: issue.pr_body,
       target_branch: issue.target_branch,
       workspace_id: issue.workspace_id,
+      refined: issue.refined,
       closed_at: iso(issue.closed_at),
       created_at: iso(issue.created_at),
       updated_at: iso(issue.updated_at)
