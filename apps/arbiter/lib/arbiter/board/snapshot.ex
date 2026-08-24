@@ -199,13 +199,21 @@ defmodule Arbiter.Board.Snapshot do
 
   Options mirror `derive/1`'s inputs and override what would otherwise be
   read: `:now`, `:slots_total`, `:quota`, `:paused`, `:ready_order`,
-  `:issues`, `:workers`, `:changed_files`. Every read is best-effort — a board
-  that renders five columns beats one that raises.
+  `:issues`, `:workers`, `:changed_files`, `:workspace_id`. Every read is
+  best-effort — a board that renders five columns beats one that raises.
+
+  **Workspace-level scoping:** `slots_total` and `quota` are computed for the
+  specified workspace (defaulting to the default workspace if not given).
+  However, `:issues` and `:workers` span all workspaces. Per-workspace
+  concurrency limits are correctly enforced by the Conductor; this board is
+  a global view with workspace-specific slot constraints. Multi-workspace
+  boards with workspace-specific caps are a known limitation (see #1359).
   """
   @spec load(keyword()) :: t()
   def load(opts \\ []) do
     issues = Keyword.get_lazy(opts, :issues, &load_issues/0)
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
+    workspace_id = Keyword.get(opts, :workspace_id) || default_workspace_id()
 
     derive(%{
       issues: issues,
@@ -213,8 +221,8 @@ defmodule Arbiter.Board.Snapshot do
       blocked_by: Keyword.get_lazy(opts, :blocked_by, fn -> load_blockers(issues) end),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
-      slots_total: Keyword.get(opts, :slots_total) || system_max_concurrent(),
-      quota: Keyword.get_lazy(opts, :quota, &quota_hold/0),
+      slots_total: Keyword.get(opts, :slots_total) || effective_max_concurrent(workspace_id),
+      quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
       ready_order: Keyword.get(opts, :ready_order, [])
     })
@@ -257,6 +265,39 @@ defmodule Arbiter.Board.Snapshot do
       Application.get_env(:arbiter, :conductor_system_max_concurrent, @default_system_max)
   rescue
     _ -> @default_system_max
+  end
+
+  @doc """
+  The effective maximum concurrent workers for a workspace: the minimum of the
+  workspace-level cap (if set) and the system-wide cap. Mirrors
+  `Arbiter.Workflows.Conductor.effective_cap/1` (quota_headroom aside).
+
+  When workspace_id is nil, returns the system max.
+  """
+  @spec effective_max_concurrent(String.t() | nil) :: pos_integer()
+  def effective_max_concurrent(nil) do
+    system_max_concurrent()
+  end
+
+  def effective_max_concurrent(workspace_id) when is_binary(workspace_id) do
+    system_max = system_max_concurrent()
+
+    case workspace_config_max(workspace_id) do
+      n when is_integer(n) and n > 0 -> min(n, system_max)
+      _ -> system_max
+    end
+  rescue
+    _ -> system_max_concurrent()
+  end
+
+  # Read the workspace's conductor.max_concurrent config, if set.
+  defp workspace_config_max(workspace_id) do
+    case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
+      {:ok, ws} -> Arbiter.Tasks.Workspace.max_concurrent(ws)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   @doc """
