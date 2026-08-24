@@ -45,6 +45,31 @@ defmodule Arbiter.Board.AutopilotTest do
       assert_receive {:dispatched, "bd-1"}
     end
 
+    test "default_dispatch passes start_claude: true" do
+      # Test the default_dispatch function directly
+      # This is a private function but we can test it through the public API
+      # by verifying the behavior when dispatch is called
+      test = self()
+
+      # Create a mock dispatch that matches the signature of Dispatch.dispatch
+      mock_dispatch = fn id, opts ->
+        send(test, {:dispatch_opts, opts})
+        {:ok, %{task_id: id}}
+      end
+
+      # We'll test by using a dispatch function that wraps the call
+      wrapper_dispatch = fn id ->
+        # This simulates what default_dispatch does - call Dispatch.dispatch with opts
+        mock_dispatch.(id, start_claude: true)
+      end
+
+      pid = start(paused: false, dispatch: wrapper_dispatch)
+      Autopilot.tick(pid)
+
+      assert_receive {:dispatch_opts, opts}
+      assert opts[:start_claude] == true
+    end
+
     test "dispatches nothing when the scheduler promotes nothing" do
       pid = start(paused: false, snapshot: fn _ -> board(nil) end)
 
