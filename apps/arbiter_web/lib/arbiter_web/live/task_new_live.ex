@@ -7,6 +7,13 @@ defmodule ArbiterWeb.TaskNewLive do
   the same `Arbiter.Tasks.Dedup` check the REST API does (with a "Create
   anyway" override).
 
+  That sameness now includes where the issue lands: `refined` defaults to
+  `false`, so a task filed here starts in the board's Backlog column exactly
+  as `arb create` and `task_create` do (bd-b5wyjd). The form deliberately has
+  no "file this straight into Ready" affordance — the flash names Backlog and
+  the redirect drops the operator on the detail page, where the *Move to
+  Ready* button is.
+
   The create itself runs in `start_async/3`: both the dedup check and
   `Issue.create`'s `CreateUpstream` hook talk to the upstream tracker over
   the network, and a LiveView must not block its own process on that. The
@@ -130,7 +137,7 @@ defmodule ArbiterWeb.TaskNewLive do
      socket
      |> assign(submitting: false, created: true, field_errors: %{}, server_error: nil)
      |> assign(create_dup: nil)
-     |> put_flash(:info, "Created #{task.id} — opening the task")
+     |> put_flash(:info, "Created #{task.id} in Backlog — refine it, then Move to Ready")
      |> push_navigate(to: ~p"/tasks/#{task.id}")}
   end
 

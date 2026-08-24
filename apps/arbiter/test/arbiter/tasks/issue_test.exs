@@ -282,6 +282,45 @@ defmodule Arbiter.Tasks.IssueTest do
     end
   end
 
+  # bd-b5wyjd — refinement is a board signal, not an FSM state. `refined`
+  # decides Backlog vs Ready and nothing else; `status` still only ever moves
+  # open → in_progress → closed.
+  describe ":refined and the :promote_to_ready action" do
+    test "a brand-new issue is unrefined — it lands in Backlog, not Ready", %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "raw idea", workspace_id: ws.id})
+
+      assert issue.refined == false
+    end
+
+    test "refined is not create-accepted — no create path can skip refinement", %{ws: ws} do
+      # Rejected outright rather than silently dropped: a caller that thinks it
+      # created a Ready card should hear that it did not.
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Issue, %{title: "sneaky", workspace_id: ws.id, refined: true})
+
+      assert err |> Exception.message() |> String.contains?("refined")
+    end
+
+    test ":promote_to_ready flips the flag and touches nothing else", %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "refine me", workspace_id: ws.id, priority: 1})
+
+      assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
+
+      assert promoted.refined == true
+      assert promoted.status == issue.status
+      assert promoted.priority == issue.priority
+      assert promoted.closed_at == nil
+    end
+
+    test ":promote_to_ready is idempotent — promoting twice is not an error", %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "twice", workspace_id: ws.id})
+
+      {:ok, once} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert {:ok, twice} = Ash.update(once, %{}, action: :promote_to_ready)
+      assert twice.refined == true
+    end
+  end
+
   describe "paper_trail audit" do
     setup %{ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "audited", workspace_id: ws.id})

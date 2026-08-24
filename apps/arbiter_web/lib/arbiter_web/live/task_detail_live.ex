@@ -5,9 +5,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   into one page. Re-renders on `:task_lifecycle` and `:worker_lifecycle`
   events so the page stays current.
 
-  Three operator actions live here, each behind its own hand-rolled modal
-  (the `WorkspaceDetailLive` pattern), all writing through the same domain
-  calls the CLI/MCP use:
+  Four operator actions live here — three behind their own hand-rolled modal
+  (the `WorkspaceDetailLive` pattern), one a bare button — all writing through
+  the same domain calls the CLI/MCP use:
 
     * **Edit** — the fields an operator authors: title, status (open ⇄
       in_progress), priority, difficulty, type, assignee, target branch,
@@ -25,6 +25,26 @@ defmodule ArbiterWeb.TaskDetailLive do
       `start_async/3`, not inline: it shells out to the provider CLI for the
       auth preflight, gates on quota, provisions a worktree and spawns the
       agent, which is far too long to hold the LiveView process for.
+    * **Move to Ready** — the `:promote_to_ready` action (bd-b5wyjd), offered
+      only while the task is unrefined and open. It flips `refined` and does
+      nothing else: the card leaves the board's Backlog column and joins the
+      Ready queue on the queue's own terms.
+
+  ## Why promotion has no modal, and no gate
+
+  The other three actions each destroy or spend something, so each asks first.
+  Promotion spends nothing, and Ready is not a commitment — the scheduler still
+  decides on the merits. So it is one click, and no confirmation is one fewer
+  reason to leave work unrefined. It *is* one-way for now: `refined` is not on
+  any action's accept list but this one's, so there is no de-refine path from
+  the UI, CLI, REST or MCP. A demote path is a separate decision.
+
+  It is deliberately *not* gated on the task being filled in. Backlog is a
+  refinement surface, not a completeness checklist: the button is clickable
+  with an empty description and no acceptance criteria, because the operator
+  reading the ticket is a better judge of "refined enough" than a field count.
+  A softer nudge may earn its place later; a hard gate would only teach people
+  to type something into the box to get past it.
   """
 
   use ArbiterWeb, :live_view
@@ -263,6 +283,33 @@ defmodule ArbiterWeb.TaskDetailLive do
 
           {:error, err} ->
             {:noreply, assign(socket, :close_error, TaskForm.error_message(err))}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  # ---- promote to Ready ----
+  #
+  # One write, no modal. `:promote_to_ready` is idempotent, so a double-click
+  # is harmless, and the button disappears on the re-render either way.
+
+  def handle_event("promote_to_ready", _params, socket) do
+    case socket.assigns.task do
+      %Issue{refined: true} ->
+        {:noreply, socket}
+
+      %Issue{} = task ->
+        case Ash.update(task, %{}, action: :promote_to_ready) do
+          {:ok, _promoted} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Moved to Ready — the scheduler owns it now.")
+             |> refresh_all()}
+
+          {:error, err} ->
+            {:noreply, put_flash(socket, :error, TaskForm.error_message(err))}
         end
 
       _ ->
@@ -779,14 +826,32 @@ defmodule ArbiterWeb.TaskDetailLive do
           <%!-- Operator actions. A closed issue is terminal here: reopening
                it is `arb update` territory, not a dashboard button. --%>
           <div :if={@task && @task.status != :closed} class="flex items-center gap-2">
+            <%!-- The one door out of Backlog. Gone the moment it is used —
+                  there is no un-refine here, and nothing to click twice. --%>
+            <ArbiterWeb.CoreComponents.Core.button
+              :if={!@task.refined}
+              size="sm"
+              variant="primary"
+              phx-click="promote_to_ready"
+              title="Leave Backlog and join the Ready queue"
+            >
+              <%!-- The arrow trails the label ("Move to Ready →"), and the
+                    `icon` slot is documented as a *leading* element, so it
+                    goes in the inner block instead. --%>
+              Move to Ready <ArbiterWeb.CoreComponents.Core.icon name="hero-arrow-right-mini" />
+            </ArbiterWeb.CoreComponents.Core.button>
             <ArbiterWeb.CoreComponents.Core.button size="sm" phx-click="open_edit">
               <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-pencil-square-mini" /></:icon>
               Edit
             </ArbiterWeb.CoreComponents.Core.button>
+            <%!-- Dispatch steps back while the task is unrefined: `Core.button`
+                  allows one primary per region, and on a Backlog card that one
+                  is promotion. Dispatching unrefined work stays possible — it
+                  just stops being the thing the eye lands on. --%>
             <ArbiterWeb.CoreComponents.Core.button
               :if={is_nil(@worker)}
               size="sm"
-              variant="primary"
+              variant={if @task.refined, do: "primary", else: "secondary"}
               phx-click="open_dispatch"
             >
               <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-rocket-launch-mini" /></:icon>

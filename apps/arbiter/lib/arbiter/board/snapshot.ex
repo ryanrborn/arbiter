@@ -1,6 +1,6 @@
 defmodule Arbiter.Board.Snapshot do
   @moduledoc """
-  The board, derived. One read of the world in, four columns and a dispatch
+  The board, derived. One read of the world in, five columns and a dispatch
   decision out.
 
   The operator console's board is not a stored object — Arbiter has no "board"
@@ -8,8 +8,12 @@ defmodule Arbiter.Board.Snapshot do
   that already exists (issues, live workers, merge requests), so the board can
   never drift from the system it describes: there is nothing to keep in sync.
 
-  ## The four columns
+  ## The five columns
 
+    * **Backlog** — open, dispatchable issues nobody is working that nobody has
+      refined yet (`refined == false`). Newest first, deliberately: an
+      unrefined pile is a to-think-about list, not a queue, and ordering it by
+      priority would imply a ranking the refinement hasn't earned.
     * **Ready** — open, dispatchable issues nobody is working. A real queue,
       ordered by priority then age, each card carrying the reason
       `Arbiter.Board.Scheduler` gave it (`next up — dispatching...`,
@@ -26,6 +30,20 @@ defmodule Arbiter.Board.Snapshot do
       stalled card is the thing worth seeing.
     * **Closed today** — issues closed since midnight UTC. The day's evidence
       of progress, and the only column with no action on it.
+
+  ## Backlog, and why refinement is not a status
+
+  `refined` is a boolean on the issue, not a fourth FSM state: the task
+  lifecycle still only knows `open` / `in_progress` / `closed`. It is a
+  *column input*, exactly like a live worker or an open blocker — which is the
+  whole reason the board can keep deriving itself rather than storing a stage.
+
+  Backlog is therefore Ready's filter minus the flag, and nothing else. In
+  particular it is **not** gated on dependency-satisfaction: refinement and
+  dependency-readiness are orthogonal questions, so a refined card whose
+  blocker is still open stays in Ready carrying its own
+  `blocked — waiting on bd-9` reason. Blocked is a scheduling fact; Backlog is
+  a refinement fact, and conflating them would lose both.
 
   ## Waiting, and the needs-you flag
 
@@ -97,6 +115,7 @@ defmodule Arbiter.Board.Snapshot do
   @default_system_max 16
 
   @type t :: %{
+          backlog: [map()],
           ready: [Scheduler.entry()],
           running: [map()],
           waiting: [map()],
@@ -154,6 +173,7 @@ defmodule Arbiter.Board.Snapshot do
       })
 
     %{
+      backlog: backlog_cards(issues, worked),
       ready: plan.entries,
       running: running,
       waiting: waiting_cards(authors, issues_by_id),
@@ -173,7 +193,7 @@ defmodule Arbiter.Board.Snapshot do
   Options mirror `derive/1`'s inputs and override what would otherwise be
   read: `:now`, `:slots_total`, `:quota`, `:paused`, `:ready_order`,
   `:issues`, `:workers`, `:changed_files`. Every read is best-effort — a board
-  that renders four columns beats one that raises.
+  that renders five columns beats one that raises.
   """
   @spec load(keyword()) :: t()
   def load(opts \\ []) do
@@ -194,7 +214,7 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   @doc """
-  A board with four empty columns and nothing to promote.
+  A board with five empty columns and nothing to promote.
 
   What a caller renders when its read of the world failed. It reports itself
   `paused: true` on purpose: a queue nobody could read is not one anything
@@ -204,6 +224,7 @@ defmodule Arbiter.Board.Snapshot do
   @spec empty(DateTime.t() | nil) :: t()
   def empty(now \\ nil) do
     %{
+      backlog: [],
       ready: [],
       running: [],
       waiting: [],
@@ -254,17 +275,48 @@ defmodule Arbiter.Board.Snapshot do
     _ -> :ok
   end
 
-  # ---- ready ---------------------------------------------------------------
+  # ---- backlog / ready ------------------------------------------------------
+
+  # The one filter both columns share: work that exists, is dispatchable in
+  # principle, and nobody has picked up. `refined` is the only thing that
+  # decides which side of it a card falls on.
+  defp queueable?(issue, worked) do
+    issue.status == :open and
+      Map.get(issue, :issue_type) not in @non_dispatchable_types and
+      not MapSet.member?(worked, issue.id)
+  end
+
+  # Absent reads as unrefined. A hand-built map that predates the flag, or a
+  # row mid-migration, belongs in the pile a human still has to look at — the
+  # safe direction to be wrong in, since Backlog dispatches nothing.
+  defp refined?(issue), do: Map.get(issue, :refined) == true
+
+  # Newest first, and only newest first. This is provisional on purpose: the
+  # moment Backlog grows a priority order it starts reading as a second queue,
+  # and there is exactly one queue.
+  defp backlog_cards(issues, worked) do
+    issues
+    |> Enum.filter(&(queueable?(&1, worked) and not refined?(&1)))
+    |> Enum.sort_by(&created_at/1, {:desc, DateTime})
+    |> Enum.map(fn issue ->
+      %{
+        id: issue.id,
+        title: Map.get(issue, :title),
+        priority: Map.get(issue, :priority),
+        difficulty: Map.get(issue, :difficulty),
+        issue_type: Map.get(issue, :issue_type),
+        workspace_id: Map.get(issue, :workspace_id),
+        assignee: Map.get(issue, :assignee),
+        created_at: created_at(issue)
+      }
+    end)
+  end
 
   defp ready_cards(issues, worked, blocked_by, ready_order) do
     ranked = ranking(ready_order)
 
     issues
-    |> Enum.filter(fn issue ->
-      issue.status == :open and
-        Map.get(issue, :issue_type) not in @non_dispatchable_types and
-        not MapSet.member?(worked, issue.id)
-    end)
+    |> Enum.filter(&(queueable?(&1, worked) and refined?(&1)))
     |> Enum.sort_by(&{Map.get(ranked, &1.id, :infinity), priority(&1), created_at(&1)}, :asc)
     |> Enum.map(fn issue ->
       %{

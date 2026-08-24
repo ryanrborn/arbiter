@@ -16,6 +16,10 @@ defmodule Arbiter.Board.SnapshotTest do
         difficulty: 2,
         issue_type: :task,
         workspace_id: "ws-1",
+        # bd-b5wyjd: the fixture is a *refined* issue, because that is what
+        # every column but Backlog is about. Backlog tests pass `refined: false`
+        # explicitly, which is also what a freshly created issue actually is.
+        refined: true,
         description: nil,
         acceptance: nil,
         notes: nil,
@@ -152,6 +156,107 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
+  # bd-b5wyjd — Backlog is Ready minus the refinement flag. Same filter, same
+  # card, different order: newest-first, because an unrefined pile is a
+  # to-think-about list, not a queue.
+  describe "backlog column" do
+    test "an unrefined open issue sits in Backlog, not Ready" do
+      board = derive(issues: [issue("bd-a", %{refined: false}), issue("bd-b")])
+
+      assert ids(board.backlog) == ["bd-a"]
+      assert ids(board.ready) == ["bd-b"]
+    end
+
+    test "an issue with no refined flag at all reads as unrefined" do
+      board = derive(issues: [Map.delete(issue("bd-a"), :refined)])
+
+      assert ids(board.backlog) == ["bd-a"]
+      assert ids(board.ready) == []
+    end
+
+    test "Backlog is newest-first — provisional, not a priority queue" do
+      board =
+        derive(
+          issues: [
+            issue("bd-old", %{refined: false, priority: 1, created_at: @yesterday}),
+            issue("bd-new", %{refined: false, priority: 3, created_at: @now})
+          ]
+        )
+
+      assert ids(board.backlog) == ["bd-new", "bd-old"]
+    end
+
+    test "an unrefined issue with a live worker belongs to Running, not Backlog" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{refined: false})],
+          workers: [worker("bd-a", :running)]
+        )
+
+      assert ids(board.backlog) == []
+      assert ids(board.running) == ["bd-a"]
+    end
+
+    test "a closed issue is not in Backlog, whatever its flag says" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{refined: false, status: :closed, updated_at: @now})],
+          now: @now
+        )
+
+      assert ids(board.backlog) == []
+      assert ids(board.closed_today) == ["bd-a"]
+    end
+
+    test "epics are a rollup, so they never queue in Backlog either" do
+      board =
+        derive(issues: [issue("bd-a", %{refined: false, issue_type: :epic})])
+
+      assert ids(board.backlog) == []
+    end
+
+    test "a refined but dependency-blocked card stays in Ready with its reason" do
+      board =
+        derive(
+          issues: [issue("bd-a"), issue("bd-b")],
+          blocked_by: %{"bd-a" => ["bd-z"]}
+        )
+
+      assert ids(board.backlog) == []
+
+      assert [%{id: "bd-a", state: :blocked, reason: "blocked — waiting on bd-z"}, _] =
+               board.ready
+    end
+
+    test "an unrefined card is never the scheduler's promote, however free the slots" do
+      board = derive(issues: [issue("bd-a", %{refined: false})], slots_total: 8)
+
+      assert board.promote == nil
+    end
+
+    test "cards carry what a Backlog card is read by" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{refined: false, title: "think about caching", assignee: "ryan"})
+          ]
+        )
+
+      assert [
+               %{
+                 id: "bd-a",
+                 title: "think about caching",
+                 priority: 2,
+                 difficulty: 2,
+                 issue_type: :task,
+                 workspace_id: "ws-1",
+                 assignee: "ryan",
+                 created_at: @now
+               }
+             ] = board.backlog
+    end
+  end
+
   describe "manual ready order" do
     test "ids named in :ready_order lead the queue, in that order" do
       board =
@@ -217,6 +322,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "is a full board shape a screen can render, reporting itself paused" do
       board = Arbiter.Board.Snapshot.empty(@now)
 
+      assert board.backlog == []
       assert board.ready == []
       assert board.running == []
       assert board.waiting == []

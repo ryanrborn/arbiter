@@ -306,6 +306,29 @@ defmodule Arbiter.Tasks.Issue do
                {:ok, issue}
              end)
     end
+
+    # bd-b5wyjd: refinement is done — move the card from Backlog to Ready.
+    #
+    # Its own action rather than `:refined` in `:update`'s accept list, for the
+    # same reason `:close` is: promotion is a decision with a name, and a
+    # named action is what the paper_trail version row records. It also keeps
+    # the flag one-way through a single door — no generic partial-update path
+    # (`task_update`, the REST patch, the edit form) can flip a card into the
+    # dispatch queue as a side effect of renaming it.
+    #
+    # No status change, no tracker sync, no worker: the ticket is explicit
+    # that promotion has no other side effects. Idempotent by construction —
+    # promoting an already-refined card is a no-op write, not an error.
+    update :promote_to_ready do
+      require_atomic? false
+
+      change set_attribute(:refined, true)
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
   end
 
   @doc false
@@ -436,6 +459,27 @@ defmodule Arbiter.Tasks.Issue do
       progress flag that replaces the old Convoy `:system_managed` vs `:owned`
       lifecycle: `auto_close: true` ≈ system_managed, `false` ≈ owned (the user
       closes the parent explicitly). Default `false`.
+      """
+    end
+
+    attribute :refined, :boolean do
+      allow_nil? false
+      public? true
+      default false
+
+      description """
+      Whether a human has refined this task enough for it to be dispatchable.
+      Splits the board's Backlog column (`false`) from its Ready queue
+      (`true`) — see `Arbiter.Board.Snapshot`.
+
+      This is NOT a status: the FSM still only knows open/in_progress/closed.
+      It is a derived-column input like any other board signal, which is why
+      it lives here as a plain flag rather than as a fourth state.
+
+      Deliberately absent from `:create`'s accept list — every creation path
+      (`arb create`, `task_create`, the REST API, tracker sync, the dashboard
+      form) lands in Backlog, and the only way out is the `:promote_to_ready`
+      action behind the task detail page's "Move to Ready" button.
       """
     end
 
@@ -739,6 +783,21 @@ defmodule Arbiter.Tasks.Issue do
 
   At our scale (~thousands of issues) this is fine. If the graph grows, push the
   filter into Postgres with a `not exists` subquery as a read action.
+
+  > #### Not the board's Ready column {: .info}
+  >
+  > This answers "whose dependencies are satisfied", which is a narrower
+  > question than the board's Ready column asks. Since bd-b5wyjd that column
+  > also requires `refined == true`; this helper deliberately does not, because
+  > its callers (`Arbiter.Workflows.Conductor`'s graph admission, the
+  > `task_ready` MCP tool, `GET /api/issues?ready=true`) are asking about the
+  > dependency graph, not about the refinement queue. A graph member that is
+  > unrefined is still dispatchable *by its graph* — the graph is the human
+  > decision that promotion would otherwise be.
+  >
+  > If those two ever need to agree, the change belongs here rather than in
+  > `Arbiter.Board.Snapshot`, and it is a behaviour change for three public
+  > surfaces, not a filter tweak.
   """
   def ready(opts \\ []) do
     workspace_id = Keyword.get(opts, :workspace_id)
