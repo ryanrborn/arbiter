@@ -151,7 +151,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
 
-      assert has_element?(view, "#repo-paths thead", "worktree")
+      assert has_element?(view, "#repo-paths", "worktree")
       assert has_element?(view, "#repo-paths", "arbiter")
       assert has_element?(view, ~s(#repo-paths [data-worktree-state]))
     end
