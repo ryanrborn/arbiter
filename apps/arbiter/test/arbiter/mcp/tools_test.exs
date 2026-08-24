@@ -3016,8 +3016,10 @@ defmodule Arbiter.MCP.ToolsTest do
       on_exit(fn -> Worker.stop(task.id, :normal) end)
     end
 
-    test "force_quota: true with force_quota_reason creates audit event with reason via MCP args", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "force quota with reason", workspace_id: ctx.ws.id})
+    test "force_quota: true with force_quota_reason creates audit event with reason via MCP args",
+         ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "force quota with reason", workspace_id: ctx.ws.id})
 
       # Call Tools.worker_dispatch (the MCP tool handler) with force_quota_reason
       assert {:ok, data} =
@@ -3100,8 +3102,10 @@ defmodule Arbiter.MCP.ToolsTest do
       on_exit(fn -> Worker.stop(task.id, :normal) end)
     end
 
-    test "force_quota_reason is accepted in the schema and does not cause additional properties error", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "force quota resume with reason", workspace_id: ctx.ws.id})
+    test "force_quota_reason is accepted in the schema and does not cause additional properties error",
+         ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "force quota resume with reason", workspace_id: ctx.ws.id})
 
       # First dispatch with no_agent to park the task
       {:ok, _dispatch_result} =
