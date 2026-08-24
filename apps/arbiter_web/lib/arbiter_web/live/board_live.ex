@@ -696,7 +696,7 @@ defmodule ArbiterWeb.BoardLive do
                     else: "The scheduler is promoting Ready cards as slots free up."
                 }
                 class={[
-                  "px-2 py-[3px] rounded-[var(--radius-chip)] border border-solid",
+                  "cursor-pointer px-2 py-[3px] rounded-[var(--radius-chip)] border border-solid",
                   "text-[10px] font-medium font-[family-name:var(--font-mono)] uppercase tracking-[0.08em]",
                   if(@board.paused,
                     do:
