@@ -40,9 +40,14 @@ defmodule Arbiter.Worker.Dispatch do
     machine_pid: pid(),
     driver_pid: pid() | nil,     # nil if start_driver: false
     worktree_path: String.t() | nil,  # nil if repo unconfigured / opted out
+    review_checkout: map() | nil,     # reviewer's throwaway checkout, if any
     claude_port: port() | nil    # nil unless start_claude: true
   }}
   ```
+
+  A review dispatch's `:review_checkout` is normally reclaimed by the Driver
+  when the run ends. With `start_driver: false` there is no Driver, so the
+  caller owns it and must `Arbiter.Reviews.Checkout.teardown/1` its `:path`.
 
   Or `{:error, reason}` for any step that fails. On error, partial work is
   best-effort-rolled-back (started worker is stopped; task status revert is
@@ -104,6 +109,10 @@ defmodule Arbiter.Worker.Dispatch do
           machine_pid: pid(),
           driver_pid: pid() | nil,
           worktree_path: String.t() | nil,
+          # The reviewer's throwaway checkout, if one was provisioned
+          # (bd-199giy). Owned by the Driver, which tears it down when the run
+          # ends — EXCEPT under `start_driver: false`, where no Driver exists
+          # and teardown is the caller's job: `Checkout.teardown(result.review_checkout.path)`.
           review_checkout: Checkout.branch_checkout() | nil,
           claude_port: port() | nil
         }
@@ -144,37 +153,54 @@ defmodule Arbiter.Worker.Dispatch do
     # with — the seam where a review dispatch's throwaway checkout (bd-199giy)
     # is provisioned and recorded, so the Driver can tear it down and the
     # caller can see it.
+    #
+    # Two nested `with`s rather than one chain, deliberately: a `with`-clause
+    # binding does NOT leak into that `with`'s own `else`. With a single chain
+    # the error branch would read the *outer* `opts` — the function parameter,
+    # which never carries `:review_checkout` (it is added inside
+    # `resolve_agent_cwd/3`) — so its teardown was a guaranteed no-op and the
+    # throwaway worktree leaked on every post-spawn failure. Nesting puts the
+    # rebound `opts` in scope for the inner `else`, which is the branch that
+    # actually needs it.
     with {:ok, claude_port, opts} <-
-           maybe_start_claude(task, worker_pid, worktree_path, opts),
-         {:ok, machine_id, machine_pid} <-
-           attach_and_start_machine(task, worktree_path, opts),
-         {:ok, driver_pid} <-
-           maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
-         # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
-         # async close (in production, the MergeQueue direct-strategy close of an
-         # in-flight `{:worker_done}` from the just-stopped run) can land in the
-         # window between that guard and `start_worker/3`, flipping the task to
-         # `:closed` AFTER the guard passed but as/just before the new worker is
-         # attached — leaving a live worker orphaned on a `:closed` task (the
-         # close's own StopWorker found no worker to stop). Re-assert here, now
-         # that the worker is live, and realign a raced-closed task.
-         {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
-      {:ok,
-       %{
-         task: task,
-         worker_pid: worker_pid,
-         machine_id: machine_id,
-         machine_pid: machine_pid,
-         driver_pid: driver_pid,
-         worktree_path: worktree_path,
-         review_checkout: Keyword.get(opts, :review_checkout),
-         claude_port: claude_port
-       }}
+           maybe_start_claude(task, worker_pid, worktree_path, opts) do
+      with {:ok, machine_id, machine_pid} <-
+             attach_and_start_machine(task, worktree_path, opts),
+           {:ok, driver_pid} <-
+             maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
+           # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
+           # async close (in production, the MergeQueue direct-strategy close of an
+           # in-flight `{:worker_done}` from the just-stopped run) can land in the
+           # window between that guard and `start_worker/3`, flipping the task to
+           # `:closed` AFTER the guard passed but as/just before the new worker is
+           # attached — leaving a live worker orphaned on a `:closed` task (the
+           # close's own StopWorker found no worker to stop). Re-assert here, now
+           # that the worker is live, and realign a raced-closed task.
+           {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
+        {:ok,
+         %{
+           task: task,
+           worker_pid: worker_pid,
+           machine_id: machine_id,
+           machine_pid: machine_pid,
+           driver_pid: driver_pid,
+           worktree_path: worktree_path,
+           review_checkout: Keyword.get(opts, :review_checkout),
+           claude_port: claude_port
+         }}
+      else
+        {:error, reason} = err ->
+          # A checkout provisioned moments ago has no Driver to reclaim it once
+          # the spawn fails, so tear it down here rather than leak it.
+          Checkout.teardown(review_checkout_path(opts))
+          fail_spawned_worker(worker_pid, reason)
+          err
+      end
     else
+      # `maybe_start_claude/4` is the frame that provisioned the checkout and
+      # tears it down on its own failure path, so there is nothing left to
+      # reclaim here — and nothing reachable to reclaim it with.
       {:error, reason} = err ->
-        # A checkout provisioned moments ago has no Driver to reclaim it once
-        # the spawn fails, so tear it down here rather than leak it.
-        Checkout.teardown(review_checkout_path(opts))
         fail_spawned_worker(worker_pid, reason)
         err
     end
@@ -1569,15 +1595,6 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Resolve the agent for this task through the `Arbiter.Agents` dispatcher
-  # and the configured `Arbiter.Agents.Routing` policy, then assemble the
-  # `ClaudeSession.start/1` options. This is the seam where model-tiering
-  # and key-rotation enter the spawn — both default off, so a workspace
-  # that hasn't opted in sees today's argv + env unchanged.
-  #
-  # The `:claude_command` opt (used by tests to spawn an echo script
-  # instead of the real Claude CLI) bypasses the adapter entirely — it's a
-  # raw argv override and the routing policy has nothing to add.
   @doc """
   Harden a review dispatch's security policy once the reviewer has a real
   checkout to stand in (bd-199giy).
@@ -1608,6 +1625,15 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # Resolve the agent for this task through the `Arbiter.Agents` dispatcher
+  # and the configured `Arbiter.Agents.Routing` policy, then assemble the
+  # `ClaudeSession.start/1` options. This is the seam where model-tiering
+  # and key-rotation enter the spawn — both default off, so a workspace
+  # that hasn't opted in sees today's argv + env unchanged.
+  #
+  # The `:claude_command` opt (used by tests to spawn an echo script
+  # instead of the real Claude CLI) bypasses the adapter entirely — it's a
+  # raw argv override and the routing policy has nothing to add.
   defp build_agent_session_opts(%Issue{} = task, worker_pid, worktree_path, opts) do
     base = [owner: worker_pid, worktree_path: worktree_path]
 

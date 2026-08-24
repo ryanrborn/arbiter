@@ -242,6 +242,64 @@ defmodule Arbiter.Reviews.CheckoutTest do
 
       assert {:error, _reason} = Checkout.provision_branch(not_a_repo, "feature/x")
     end
+
+    test "leaves no temp fetch refs behind" do
+      branch = "feature/bd-199giy-temp-ref"
+      {clone, _head_sha} = origin_and_clone_with_branch(branch)
+
+      assert {:ok, %{path: path}} = Checkout.provision_branch(clone, branch)
+
+      {refs, 0} =
+        System.cmd("git", ["-C", clone, "for-each-ref", "--format=%(refname)", "refs/arbiter/"])
+
+      assert String.trim(refs) == ""
+
+      Checkout.teardown(path)
+    end
+
+    test "resolves the branch's own tip even while other fetches run concurrently" do
+      # bd-199giy review: resolving the fetched tip through the shared
+      # `.git/FETCH_HEAD` raced every other fetch against the same repo (every
+      # dispatch runs `Worktree.fetch_origin/2`), and could silently provision a
+      # worktree at *another* branch's tip. The fetch now lands in a private
+      # per-call ref, so a competing fetch of `main` cannot be mistaken for the
+      # branch under review.
+      branch = "feature/bd-199giy-concurrent"
+      {clone, head_sha} = origin_and_clone_with_branch(branch)
+
+      {main_sha, 0} = System.cmd("git", ["-C", clone, "rev-parse", "refs/remotes/origin/main"])
+      refute String.trim(main_sha) == head_sha
+
+      noise = Task.async(fn -> fetch_noise(clone) end)
+
+      paths =
+        for _ <- 1..5 do
+          assert {:ok, %{path: path, head_sha: ^head_sha}} =
+                   Checkout.provision_branch(clone, branch)
+
+          path
+        end
+
+      send(noise.pid, :stop)
+      Task.shutdown(noise, :brutal_kill)
+
+      Enum.each(paths, &Checkout.teardown/1)
+    end
+  end
+
+  # Hammer the shared repo's `.git/FETCH_HEAD` from another process until told
+  # to stop, so any FETCH_HEAD-based resolution has a real window to lose.
+  defp fetch_noise(clone) do
+    receive do
+      :stop -> :ok
+    after
+      0 ->
+        System.cmd("git", ["-C", clone, "fetch", "--no-tags", "origin", "main"],
+          stderr_to_stdout: true
+        )
+
+        fetch_noise(clone)
+    end
   end
 
   describe "teardown/1" do

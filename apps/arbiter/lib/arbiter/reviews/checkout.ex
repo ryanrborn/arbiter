@@ -122,10 +122,21 @@ defmodule Arbiter.Reviews.Checkout do
 
   def provision_branch(repo_path, branch, opts)
       when is_binary(repo_path) and is_binary(branch) do
-    with {:ok, sha} <- branch_head_sha(repo_path, branch),
-         {:ok, path} <- add_detached(repo_path, sha, opts) do
-      {:ok, %{path: path, head_sha: sha}}
-    end
+    # The fetch lands in a private, per-call ref rather than the shared
+    # `FETCH_HEAD` — see `branch_head_sha/3`. It is deleted only *after* the
+    # worktree exists, so the fetched tip stays reachable (a worktree's HEAD is
+    # a gc root) for the whole window in which it could otherwise be pruned.
+    tmp_ref = temp_fetch_ref()
+
+    result =
+      with {:ok, sha} <- branch_head_sha(repo_path, branch, tmp_ref),
+           {:ok, path} <- add_detached(repo_path, sha, opts) do
+        {:ok, %{path: path, head_sha: sha}}
+      end
+
+    _ = delete_ref(repo_path, tmp_ref)
+
+    result
   end
 
   @doc """
@@ -166,8 +177,7 @@ defmodule Arbiter.Reviews.Checkout do
   end
 
   # `--no-tags` and a single named ref (a SHA or a branch name) keep the fetch
-  # minimal — we only need this one commit, not the whole ref namespace. Either
-  # way the fetched tip lands in `FETCH_HEAD`.
+  # minimal — we only need this one commit, not the whole ref namespace.
   defp fetch_ref(repo_path, ref) do
     case System.cmd("git", ["-C", repo_path, "fetch", "--no-tags", "origin", ref],
            stderr_to_stdout: true
@@ -177,13 +187,38 @@ defmodule Arbiter.Reviews.Checkout do
     end
   end
 
+  # A private, per-call destination for the branch fetch. `refs/arbiter/` is
+  # outside `refs/heads` and `refs/remotes`, so nothing else in the repo (or in
+  # `git branch` / `git worktree` output) ever sees it.
+  defp temp_fetch_ref do
+    "refs/arbiter/review/fetch-#{System.unique_integer([:positive])}"
+  end
+
+  defp delete_ref(repo_path, ref) do
+    case System.cmd("git", ["-C", repo_path, "update-ref", "-d", ref], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, code} -> {:error, {:update_ref_failed, code, String.trim(output)}}
+    end
+  end
+
   # origin first, local ref second. The fetch error is what surfaces when both
   # fail — it names the remote lookup, which is the one the caller cares about
   # (a branch nobody has pushed and nobody has locally is simply not there).
-  defp branch_head_sha(repo_path, branch) do
-    case fetch_ref(repo_path, branch) do
+  #
+  # The fetch writes an explicit refspec into `dest_ref` (unique per call) and
+  # we resolve *that*, never `FETCH_HEAD` (bd-199giy review). `.git/FETCH_HEAD`
+  # is one unlocked file in the **shared** repo that every concurrent fetch
+  # rewrites — `Worker.Worktree.fetch_origin/2` runs on every dispatch, and
+  # `Worktree.create/3` fetches too. A fetch of `main` landing between our
+  # fetch and our `rev-parse` would hand us `main`'s tip; we would then check
+  # out a worktree at the wrong commit and tell the reviewer it was the
+  # branch's head — a silent, undetectable mis-review. A per-call ref cannot be
+  # clobbered by anything else. Also `+`-forced: the ref is fresh, so this only
+  # ever matters if a unique-integer ever did collide.
+  defp branch_head_sha(repo_path, branch, dest_ref) do
+    case fetch_ref(repo_path, "+#{branch}:#{dest_ref}") do
       :ok ->
-        rev_parse(repo_path, "FETCH_HEAD")
+        rev_parse(repo_path, "#{dest_ref}^{commit}")
 
       {:error, fetch_error} ->
         case rev_parse(repo_path, "refs/heads/#{branch}^{commit}") do

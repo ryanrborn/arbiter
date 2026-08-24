@@ -2863,6 +2863,44 @@ defmodule Arbiter.Worker.DispatchTest do
       assert File.dir?(repo)
     end
 
+    test "tears the review checkout down when the dispatch fails after the agent spawns",
+         %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "teardown on failure", workspace_id: ws.id})
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      _sha = push_task_branch(repo, branch)
+
+      before = worktree_paths(repo)
+
+      # Everything through the agent spawn succeeds (so the checkout IS
+      # provisioned); the machine attach then fails on a module that is not a
+      # workflow. That error path is where the throwaway checkout used to leak:
+      # `finish_dispatch/4`'s `else` could not see the rebound opts carrying it.
+      assert {:error, {:machine_start_failed, _}} =
+               Dispatch.dispatch(task.id,
+                 repo: "rv/repo",
+                 review: true,
+                 start_claude: true,
+                 start_driver: false,
+                 claude_command: ["true"],
+                 workflow_module: NotAWorkflowModule
+               )
+
+      # Nothing left behind — neither on disk nor registered in the shared
+      # repo's `.git/worktrees` (which `git worktree list` reads).
+      assert worktree_paths(repo) == before
+      refute Enum.any?(worktree_paths(repo), &(Path.basename(&1) =~ ~r/^review-/))
+    end
+
+    defp worktree_paths(repo) do
+      {out, 0} = System.cmd("git", ["-C", repo, "worktree", "list", "--porcelain"])
+
+      out
+      |> String.split("\n", trim: true)
+      |> Enum.filter(&String.starts_with?(&1, "worktree "))
+      |> Enum.map(&String.trim_leading(&1, "worktree "))
+      |> Enum.sort()
+    end
+
     test "the driver tears the review checkout down when the worker finishes",
          %{ws: ws, repo: repo} do
       {:ok, task} = Ash.create(Issue, %{title: "teardown me", workspace_id: ws.id})
