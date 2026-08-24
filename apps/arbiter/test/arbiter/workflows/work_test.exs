@@ -155,6 +155,31 @@ defmodule Arbiter.Workflows.WorkTest do
       assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{task_id: task.id})
     end
 
+    test "bd-1k6d9h: :shortcut-tracked task with nil tracker_ref completes as no-op" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "submit-shortcut-nil-ref-test-#{System.unique_integer([:positive])}",
+          prefix: "wt",
+          config: %{
+            "tracker" => %{
+              "type" => "shortcut",
+              "config" => %{"credentials_ref" => "env:DUMMY_SHORTCUT_TOKEN"}
+            }
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "Shortcut task with nil tracker_ref",
+          workspace_id: ws.id,
+          tracker_type: :shortcut,
+          tracker_ref: nil
+        })
+
+      # This should not raise FunctionClauseError and should succeed as a no-op
+      assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{task_id: task.id})
+    end
+
     defp ws_for_this_test(_) do
       # Helper: return a workspace for the current test process. We can't
       # share setup across describes cleanly without context propagation, so
