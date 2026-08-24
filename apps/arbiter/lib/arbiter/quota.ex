@@ -117,6 +117,22 @@ defmodule Arbiter.Quota do
     end
   end
 
+  @doc """
+  Whether the workspace's resolved quota gate is `:continue` mode — the
+  `dispatch/2` seam will let work through past the cap (paid overage) rather
+  than holding it.
+
+  Shared by `Arbiter.Workflows.QuotaGate.Default` and
+  `Arbiter.Board.Snapshot.quota_hold/1` (bd-5j6nmn) so both the Conductor's
+  cap-clamp and Autopilot's one-per-tick promotion gate defer to the same
+  seam-resolved mode — including the `:arbiter, :quota, :gate` test/kill-switch
+  override — instead of each independently re-deriving `on_exhaustion`.
+  """
+  @spec continue_mode?(Workspace.t() | nil) :: boolean()
+  def continue_mode?(workspace) do
+    gate_for_workspace(workspace) == Arbiter.Quota.Gate.Continue
+  end
+
   # Quota-provider code for each dispatchable agent type / provider alias. The
   # gate resolves the provider a dispatch will actually run on and reads that
   # provider's snapshot table through `latest_for_provider/2` (bd-2mpo3f).
@@ -167,6 +183,37 @@ defmodule Arbiter.Quota do
 
   def provider_code(provider) when is_binary(provider), do: Map.get(@provider_codes, provider)
   def provider_code(_), do: nil
+
+  @doc """
+  Best-effort resolution of the quota provider a workspace's dispatches run
+  on absent a per-dispatch override — the workspace's default agent provider
+  (`Arbiter.Agents.for_workspace/1`), as an atom.
+
+  Shared by the Conductor's cap-clamp (`Arbiter.Workflows.QuotaGate.Default`)
+  and the board's dispatch gate (`Arbiter.Board.Snapshot.quota_hold/1`,
+  bd-5j6nmn) so both read the same provider's snapshot for a given
+  workspace. Any load failure or unresolvable id falls back to `:claude`
+  (the historical default).
+  """
+  @spec default_provider(Workspace.t() | String.t() | nil) :: atom()
+  def default_provider(%Workspace{} = workspace) do
+    String.to_existing_atom(Arbiter.Agents.for_workspace(workspace).provider())
+  rescue
+    _ -> :claude
+  end
+
+  def default_provider(workspace_id) when is_binary(workspace_id) and workspace_id != "" do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, ws} -> default_provider(ws)
+      _ -> :claude
+    end
+  rescue
+    _ -> :claude
+  catch
+    :exit, _ -> :claude
+  end
+
+  def default_provider(_), do: :claude
 
   # ---- capture -----------------------------------------------------------
 
