@@ -562,6 +562,34 @@ defmodule Arbiter.Workflows.ConductorTest do
       refute_receive {:dispatched, _, _}, 100
     end
 
+    # Regression (bd-5j6nmn): before this fix, Default read its own
+    # `:conductor_quota_ceiling` app-env instead of the shared
+    # `Arbiter.Quota.Gate.threshold/1` the board's `quota_hold/1` and the
+    # dispatch seam both honor — a workspace-level override here was silently
+    # ignored by the Conductor while still applying to Board/Autopilot.
+    test "Default gate honors the shared quota throttle_threshold config", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{config: %{"quota" => %{"throttle_threshold" => 0.5}}})
+
+      {:ok, _quota} =
+        Ash.create(Arbiter.Quota.AnthropicQuota, %{
+          workspace_id: ws.id,
+          utilization_5h: 0.6,
+          status_5h: "allowed",
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      # 0.6 is below the Default-only 0.85 default but above the workspace's
+      # configured 0.5 throttle threshold — the shared threshold must win.
+      kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
+
+      refute_receive {:dispatched, _, _}, 100
+    end
+
     # Regression (reviewer round 1, finding 1): a :continue-mode workspace must
     # dispatch PAST the cap so the dispatch/2 quota seam records overage; the
     # Conductor's cap-clamp must not hold it at the ceiling. Default returns
