@@ -50,7 +50,7 @@ defmodule Arbiter.Workflows.Work do
   use Arbiter.Workflow,
     steps: [:load_context, :design, :implement, :pre_verify, :submit]
 
-  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Trackers
 
   step(:load_context,
@@ -149,7 +149,26 @@ defmodule Arbiter.Workflows.Work do
   end
 
   defp safe_transition(%Issue{tracker_type: :none}), do: :ok
-  defp safe_transition(%Issue{} = task), do: Trackers.transition(task, :closed)
+
+  defp safe_transition(%Issue{} = task) do
+    # Seed the adapter's per-process config (e.g. GitHub owner/repo/token)
+    # from the task's workspace before dispatching. Adapters resolve their
+    # backend config from the process dictionary, which nothing else in
+    # this call chain warms — without this, `Trackers.transition/2` raises
+    # `config_missing` unless some earlier, unrelated call in the same OS
+    # process happened to prime it first.
+    :ok = Trackers.prepare(task, load_workspace(task.workspace_id))
+    Trackers.transition(task, :closed)
+  end
+
+  defp load_workspace(nil), do: nil
+
+  defp load_workspace(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  end
 
   # Tolerate both atom-keyed (direct test callers) and string-keyed
   # (`Workflows.Machine` after JSON roundtrip) state maps.
