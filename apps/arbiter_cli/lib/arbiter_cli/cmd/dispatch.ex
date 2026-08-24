@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
-  `arb dispatch <task-id> [<repo>] [--provider claude|gemini|codex | --no-agent] [--model <name>]`
+  `arb dispatch <task-id> [<repo>] [--provider claude|gemini|codex | --no-agent] [--model <name>] [--force-quota]`
   — spawn a worker to work on a task.
 
   POSTs to `/api/workers/dispatch`. The server transitions the task to
@@ -28,6 +28,10 @@ defmodule ArbiterCli.Cmd.Dispatch do
                      on (`haiku|sonnet|opus`). Takes precedence over the
                      workspace's `agent.config.model` and any routing rule
                      for the task.
+    --force-quota    ADVANCED: bypass the quota gate for this dispatch. Use only
+                     when the gate holds despite judged-important work. Requires
+                     explicit authorization; the quota gate protects against
+                     spend overage.
     --json           emit JSON instead of human-readable text
   """
 
@@ -39,7 +43,8 @@ defmodule ArbiterCli.Cmd.Dispatch do
     with_claude: :boolean,
     with_gemini: :boolean,
     no_agent: :boolean,
-    model: :string
+    model: :string,
+    force_quota: :boolean
   ]
 
   # Mirrors Arbiter.Agents.valid_agent_types/0 (the arbiter app is only a
@@ -78,6 +83,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
         |> Map.merge(worker)
         |> maybe_put("repo", repo)
         |> maybe_put("model", model)
+        |> maybe_put("force_quota", if(opts[:force_quota], do: true))
 
       case Client.post("/api/workers/dispatch", body) do
         {:ok, payload} -> emit(payload, mode)
