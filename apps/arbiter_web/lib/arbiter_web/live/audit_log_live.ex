@@ -315,12 +315,12 @@ defmodule ArbiterWeb.AuditLogLive do
         </Feedback.empty_state>
 
         <Data.data_table :if={@events != []} id="audit-table" rows={@events}>
-          <:col :let={row} label="Time">
+          <:col :let={row} label="Time" width="150px">
             <span class="text-xs text-base-content/60 font-mono tabular-nums whitespace-nowrap">
               {Calendar.strftime(row.at, "%Y-%m-%d %H:%M:%S")}
             </span>
           </:col>
-          <:col :let={row} label="Actor">
+          <:col :let={row} label="Actor" width="110px">
             <span class="font-mono text-xs" style={"color: var(#{actor_hue(row.actor)});"}>
               {row.actor}
             </span>
@@ -328,10 +328,10 @@ defmodule ArbiterWeb.AuditLogLive do
           <:col :let={row} label="Subject">
             <code class="text-xs">{row.subject}</code>
           </:col>
-          <:col :let={row} label="Action">
+          <:col :let={row} label="Action" width="140px">
             <span class="font-mono text-xs">{row.action}</span>
           </:col>
-          <:col :let={row} label="Detail">
+          <:col :let={row} label="Detail" wrap>
             <span class="font-mono text-xs break-words">{detail_text(row)}</span>
           </:col>
         </Data.data_table>
