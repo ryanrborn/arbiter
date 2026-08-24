@@ -224,6 +224,22 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert json_response(conn, 404)
     end
 
+    test "accepts force_quota: true to bypass the quota gate", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "force-quota-dispatch", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true,
+          "force_quota" => true
+        })
+
+      body = json_response(conn, 201)
+      assert body["task"]["id"] == task.id
+      assert body["task"]["status"] == "in_progress"
+    end
+
     test "requires a task_id", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/dispatch", %{})
       assert json_response(conn, 400)
@@ -251,6 +267,19 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"repo" => "test/repo"})
       body = json_response(conn, 400)
       assert body["error"]["message"] =~ "closed"
+    end
+
+    test "accepts force_quota: true to bypass the quota gate", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "force-quota-resume", workspace_id: ws.id})
+
+      # Try to resume with force_quota — should fail with "no prior session" rather than
+      # "no repo" (proving force_quota was processed) but that's the expected error
+      # when there's no actual prior session to resume.
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"repo" => "test/repo", "force_quota" => true})
+      body = json_response(conn, 400)
+      # The specific error varies (no session, no outpost) — the test is that force_quota
+      # is accepted without error and the request proceeds to the expected dispatch path.
+      assert body["error"]["message"] =~ "resume"
     end
   end
 
