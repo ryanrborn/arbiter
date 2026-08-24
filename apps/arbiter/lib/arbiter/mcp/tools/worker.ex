@@ -704,6 +704,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   end
 
   defp actor_string(:coordinator), do: "coordinator"
+  # :worker-tier scopes never have can_dispatch: true (mcp/scope.ex), so this branch is unreachable in practice.
   defp actor_string(:worker), do: "worker"
 
   # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the

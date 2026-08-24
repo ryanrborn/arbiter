@@ -511,6 +511,11 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" =>
               "ADVANCED: bypass the quota gate for this dispatch. Use only for judged-important work when the gate holds despite headroom. Defaults to false (quota-gated)."
+          },
+          "force_quota_reason" => %{
+            "type" => "string",
+            "description" =>
+              "ADVANCED: optional rationale for bypassing the quota gate. Only used when `force_quota: true`."
           }
         },
         "required" => ["task_id"],
@@ -538,6 +543,11 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" =>
               "ADVANCED: bypass the quota gate for this resume. Use only for judged-important work when the gate holds despite headroom. Defaults to false (quota-gated)."
+          },
+          "force_quota_reason" => %{
+            "type" => "string",
+            "description" =>
+              "ADVANCED: optional rationale for bypassing the quota gate. Only used when `force_quota: true`."
           }
         },
         "required" => ["task_id"],
