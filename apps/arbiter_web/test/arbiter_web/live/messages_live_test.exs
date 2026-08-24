@@ -74,9 +74,57 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
       refute render(view) =~ "ack me"
     end
+
+    test "updates live when mail is broadcast after mount", %{conn: conn, ws: ws} do
+      # Regression: ArbiterWeb.LiveHooks' global :coordinator_inbox on_mount
+      # attaches a :handle_info hook for every live_session and used to
+      # {:halt, ...} on {:new_message, _} — attached hooks run before the
+      # LiveView's own callback, so halting there made
+      # WorkerDetailLive.handle_info/2's own {:new_message, _} clause
+      # unreachable and the mailbox never refreshed live (bd-3kgb0e).
+      {:ok, task} = Ash.create(Issue, %{title: "live-mail", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      refute html =~ "arrived-after-mount"
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          to_ref: task.id,
+          body: "arrived-after-mount"
+        })
+
+      assert render(view) =~ "arrived-after-mount"
+    end
   end
 
   describe "coordinator mailbox panel" do
+    # bd-3kgb0e: the coordinator mailbox moved off the board page into the
+    # shared AppShell drawer (ArbiterWeb.Layouts.app/1), so it must surface
+    # on every screen, not just "/".
+    test "surfaces from the AppShell drawer on a page other than the board",
+         %{conn: conn, ws: ws} do
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          subject: "needs a decision off-board",
+          body: "surfaces on the tasks screen too"
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks")
+
+      assert html =~ "Coordinator Mailbox"
+      assert html =~ "needs a decision off-board"
+      assert html =~ "surfaces on the tasks screen too"
+      assert html =~ "1 unread"
+      assert html =~ ~s(id="coordinator-inbox-trigger")
+      assert html =~ ~s(id="coordinator-inbox-unread-badge")
+    end
+
     test "renders unread mailbox-family mail addressed to the coordinator", %{conn: conn, ws: ws} do
       {:ok, _} =
         Message.send_mail(%{
@@ -144,7 +192,9 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert render(view) =~ "ack-this-up"
 
       view
-      |> element(~s(#coordinator-mailbox button[phx-click="mark_read"][phx-value-id="#{msg.id}"]))
+      |> element(
+        ~s(#coordinator-drawer button[phx-click="coordinator_mark_read"][phx-value-id="#{msg.id}"])
+      )
       |> render_click()
 
       refute render(view) =~ "ack-this-up"
@@ -178,7 +228,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert html =~ "still-unread"
 
       view
-      |> element(~s(button[phx-click="clear_coordinator"]))
+      |> element(~s(button[phx-click="coordinator_clear"]))
       |> render_click()
 
       # Read message soft-cleared (retained, cleared_at stamped); unread untouched.
@@ -287,12 +337,48 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert html =~ "2 outstanding"
 
       # Clearing soft-clears the outstanding tail → outstanding drops to 0, rows retained.
-      view |> element(~s(button[phx-click="clear_coordinator"])) |> render_click()
+      view |> element(~s(button[phx-click="coordinator_clear"])) |> render_click()
       html = render(view)
       assert html =~ "0 unread"
       assert html =~ "0 outstanding"
       assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, seen.id)
       assert cleared_at
+    end
+
+    test "a page with no catch-all handle_info survives a coordinator mail broadcast",
+         %{conn: conn, ws: ws} do
+      # Regression (bd-3kgb0e review finding 2): the global :coordinator_inbox
+      # on_mount subscribes every LiveView in live_session :default to every
+      # workspace's mail topic and `:cont`s on {:new_message, _} so the host
+      # view's own handle_info runs. WorkspaceDetailLive has no matching
+      # clause, so without a catch-all it crashed on any mail broadcast.
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          to_ref: "admiral",
+          subject: "unrelated to this page",
+          body: "must not crash the workspace detail view"
+        })
+
+      assert Process.alive?(view.pid)
+      assert render(view) =~ ws.name
+    end
+
+    test "a page with no catch-all handle_info survives the coordinator inbox tick",
+         %{conn: conn, ws: ws} do
+      # Regression (bd-3kgb0e review finding 1): the 60s :coordinator_inbox_tick
+      # used to `:cont` to every LiveView in live_session :default.
+      # WorkspaceDetailLive has no matching clause, so it crashed every
+      # minute. The tick is hook-private state, so it must `:halt`.
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      send(view.pid, :coordinator_inbox_tick)
+
+      assert Process.alive?(view.pid)
+      assert render(view) =~ ws.name
     end
   end
 end

@@ -23,7 +23,8 @@ defmodule ArbiterWeb.Router do
     live_session :default,
       on_mount: [
         {ArbiterWeb.LiveHooks, :current_path},
-        {ArbiterWeb.LiveHooks, :quota}
+        {ArbiterWeb.LiveHooks, :quota},
+        {ArbiterWeb.LiveHooks, :coordinator_inbox}
       ] do
       live("/", BoardLive)
       live("/audit", AuditLogLive)
