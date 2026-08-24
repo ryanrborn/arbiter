@@ -33,8 +33,11 @@ defmodule ArbiterWeb.TaskDetailLive do
   ## Why promotion has no modal, and no gate
 
   The other three actions each destroy or spend something, so each asks first.
-  Promotion spends nothing and is trivially reversed by `arb update`, so it is
-  one click — and no confirmation is one fewer reason to leave work unrefined.
+  Promotion spends nothing, and Ready is not a commitment — the scheduler still
+  decides on the merits. So it is one click, and no confirmation is one fewer
+  reason to leave work unrefined. It *is* one-way for now: `refined` is not on
+  any action's accept list but this one's, so there is no de-refine path from
+  the UI, CLI, REST or MCP. A demote path is a separate decision.
 
   It is deliberately *not* gated on the task being filled in. Backlog is a
   refinement surface, not a completeness checklist: the button is clickable

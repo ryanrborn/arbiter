@@ -276,7 +276,12 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Create a task in the workspace. `title` is required; optional `description`, " <>
           "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, `assignee`, " <>
-          "`tracker_type`, …. The task is always created in the coordinator's own workspace.",
+          "`tracker_type`, …. The task is always created in the coordinator's own workspace. " <>
+          "Created tasks land in the board's Backlog (`refined: false`), not its Ready queue, " <>
+          "and stay there until a human promotes them from the task detail page. " <>
+          "Graph-driven dispatch (`task_ready`, workflow admission) ignores `refined`, so a " <>
+          "task that is part of a workflow graph still runs; a standalone task filed here " <>
+          "waits for that promotion.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
