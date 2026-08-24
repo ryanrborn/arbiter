@@ -93,25 +93,26 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
   end
 
   describe "difficulty_meter/1" do
-    test "D0 fills exactly one of five bars" do
+    test "D0 fills zero of five bars with a dotted border to distinguish from nil" do
       html = render_component(&difficulty_meter/1, difficulty: 0)
 
-      assert count_occurrences(html, "difficulty-bar-filled") == 1
-      assert count_occurrences(html, "difficulty-bar-empty") == 4
+      assert count_occurrences(html, "difficulty-bar-filled") == 0
+      assert count_occurrences(html, "difficulty-bar-empty") == 5
+      assert html =~ "border-dashed"
     end
 
-    test "D2 fills exactly three of five bars (n+1)" do
+    test "D2 fills exactly two of five bars" do
       html = render_component(&difficulty_meter/1, difficulty: 2)
 
-      assert count_occurrences(html, "difficulty-bar-filled") == 3
-      assert count_occurrences(html, "difficulty-bar-empty") == 2
+      assert count_occurrences(html, "difficulty-bar-filled") == 2
+      assert count_occurrences(html, "difficulty-bar-empty") == 3
     end
 
-    test "D4 fills all five bars and tints them red" do
+    test "D4 fills four of five bars and tints them red" do
       html = render_component(&difficulty_meter/1, difficulty: 4)
 
-      assert count_occurrences(html, "difficulty-bar-filled") == 5
-      assert count_occurrences(html, "difficulty-bar-empty") == 0
+      assert count_occurrences(html, "difficulty-bar-filled") == 4
+      assert count_occurrences(html, "difficulty-bar-empty") == 1
       assert html =~ "bg-error"
     end
 
@@ -121,11 +122,12 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       refute html =~ "bg-error"
     end
 
-    test "nil difficulty renders all five bars empty" do
+    test "nil difficulty renders all five bars empty without a border" do
       html = render_component(&difficulty_meter/1, difficulty: nil)
 
       assert count_occurrences(html, "difficulty-bar-filled") == 0
       assert count_occurrences(html, "difficulty-bar-empty") == 5
+      refute html =~ "border-dashed"
     end
 
     test "out-of-range or wrong-type difficulty degrades gracefully instead of crashing" do
@@ -133,10 +135,12 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       assert count_occurrences(html, "difficulty-bar-filled") == 0
       assert count_occurrences(html, "difficulty-bar-empty") == 5
       assert html =~ "Difficulty: not set"
+      refute html =~ "border-dashed"
 
       html = render_component(&difficulty_meter/1, difficulty: "3")
       assert count_occurrences(html, "difficulty-bar-filled") == 0
       assert count_occurrences(html, "difficulty-bar-empty") == 5
+      refute html =~ "border-dashed"
     end
   end
 
