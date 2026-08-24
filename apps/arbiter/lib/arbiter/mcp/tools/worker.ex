@@ -681,16 +681,30 @@ defmodule Arbiter.MCP.Tools.Worker do
   # The opts common to every worker-dispatch tool (dispatch / resume / review):
   # the optional `repo` / `model` overrides plus the child scope depth, minted
   # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
-  defp dispatch_opts(%Scope{depth: depth}, args) do
+  defp dispatch_opts(%Scope{tier: tier, depth: depth}, args) do
     {:ok, force_quota} = Tools.fetch_bool(args, "force_quota", false)
+    quota_bypass_reason = Tools.fetch_string(args, "force_quota_reason")
 
     [depth: depth + 1]
     |> Tools.maybe_put_kw(:repo, Tools.fetch_string(args, "repo"))
     |> Tools.maybe_put_kw(:model, Tools.fetch_string(args, "model"))
     |> then(fn opts ->
-      if force_quota, do: Keyword.put(opts, :skip_quota_gate, true), else: opts
+      if force_quota,
+        do:
+          opts
+          |> Keyword.put(:skip_quota_gate, true)
+          |> Keyword.put(:quota_bypass_actor, actor_string(tier))
+          |> then(fn opts2 ->
+            if quota_bypass_reason,
+              do: Keyword.put(opts2, :quota_bypass_reason, quota_bypass_reason),
+              else: opts2
+          end),
+        else: opts
     end)
   end
+
+  defp actor_string(:coordinator), do: "coordinator"
+  defp actor_string(:worker), do: "worker"
 
   # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the
   # REST `POST /api/workers/dispatch` contract: an explicit `provider` (or deprecated
