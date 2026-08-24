@@ -137,8 +137,15 @@ defmodule Arbiter.Trackers do
   def fetch(%Issue{tracker_ref: ref} = issue), do: for_task(issue).fetch(ref)
 
   @spec transition(Issue.t(), Tracker.status()) :: :ok | {:error, term()}
-  def transition(%Issue{tracker_ref: ref} = issue, status),
-    do: for_task(issue).transition(ref, status)
+  def transition(%Issue{tracker_ref: ref} = issue, status) do
+    cond do
+      not is_binary(ref) or ref == "" ->
+        :ok
+
+      true ->
+        for_task(issue).transition(ref, status)
+    end
+  end
 
   @spec update_fields(Issue.t(), map()) :: :ok | {:error, term()}
   def update_fields(%Issue{tracker_ref: ref} = issue, fields),

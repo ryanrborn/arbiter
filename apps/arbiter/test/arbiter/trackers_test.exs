@@ -137,4 +137,19 @@ defmodule Arbiter.TrackersTest do
       assert :closed in statuses
     end
   end
+
+  describe "nil tracker_ref handling" do
+    test "transition/2 with nil tracker_ref returns :ok (no-op close for unlinked task)" do
+      issue = %Issue{tracker_type: :shortcut, tracker_ref: nil}
+      assert Trackers.transition(issue, :closed) == :ok
+    end
+
+    test "transition/2 with nil tracker_ref works for any tracker type" do
+      issue_github = %Issue{tracker_type: :github, tracker_ref: nil}
+      issue_jira = %Issue{tracker_type: :jira, tracker_ref: nil}
+
+      assert Trackers.transition(issue_github, :closed) == :ok
+      assert Trackers.transition(issue_jira, :closed) == :ok
+    end
+  end
 end
