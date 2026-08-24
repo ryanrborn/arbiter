@@ -171,7 +171,11 @@ defmodule ArbiterWeb.LiveHooksTest do
       {:ok, _view, html} = live(conn, ~p"/")
 
       assert html =~ "appshell-live"
-      refute html =~ "stale — refresh"
+      # The live span renders unhidden; the stale span is present (wired to
+      # flip back via phx-disconnected on a genuine drop, see live_badge/1's
+      # moduledoc) but hidden.
+      refute html =~ ~r/id="appshell-live-live"[^>]*\shidden/
+      assert html =~ ~r/id="appshell-live-stale"[^>]*\shidden/
     end
   end
 end

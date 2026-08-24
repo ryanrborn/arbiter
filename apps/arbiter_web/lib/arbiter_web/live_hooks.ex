@@ -14,10 +14,14 @@ defmodule ArbiterWeb.LiveHooks do
   Assigns `:live` on the socket as `connected?(socket)` — `false` on the
   initial dead render, `true` once the LiveView process is connected over
   the socket. `Layouts.app`'s navbar badge (and every page-level
-  `live_badge`) reads this assign; there is no working DOM/JS mechanism for
-  detecting connection state client-side in this app (see
-  `ArbiterWeb.CoreComponents.Feedback.live_badge/1`), so this hook is the
-  single source of truth every call site must be fed from.
+  `live_badge`) reads this assign; `live_badge/1`'s `live` attr is
+  `required: true` precisely so no call site can fall back to a client-only
+  mechanism instead. The DOM-only join-direction mechanism `live_badge/1`
+  used to default to (`phx-connected` flipping "stale" to "Live" with no
+  server assign) was the root cause of bd-akygjy — see the "Root cause"
+  note on `ArbiterWeb.CoreComponents.Feedback.live_badge/1` for what was
+  and wasn't established about why. This hook is the single source of
+  truth every call site must be fed from.
 
   ## `:quota`
 

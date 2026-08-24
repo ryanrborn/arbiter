@@ -6,24 +6,22 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
   import ArbiterWeb.CoreComponents.Feedback
 
   describe "live_badge/1" do
-    test "with no override, renders both states wired to phx-connected/phx-disconnected" do
-      html = render_component(&live_badge/1, %{id: "lb"})
-
-      assert html =~ "live"
-      assert html =~ "stale"
-      assert html =~ "phx-connected"
-      assert html =~ "phx-disconnected"
-      # Starts on the dead-render assumption: stale visible, live hidden.
-      assert html =~ ~r/id="lb-live"[^>]*hidden/
+    test "`live` is required — omitting it raises" do
+      assert_raise FunctionClauseError, fn ->
+        render_component(&live_badge/1, %{id: "lb"})
+      end
     end
 
-    test "live={true} statically renders only the live state, pinging" do
+    test "live={true} renders the live state, pinging, wired to flip on a genuine disconnect" do
       html = render_component(&live_badge/1, %{id: "lb", live: true})
 
       assert html =~ "var(--arb-live)"
       assert html =~ "arb-ping"
-      refute html =~ "stale"
+      assert html =~ "stale"
+      assert html =~ "phx-disconnected"
       refute html =~ "phx-connected"
+      # Starts on the connected assumption: live visible, stale hidden.
+      assert html =~ ~r/id="lb-stale"[^>]*\shidden/
     end
 
     test "live={false} statically renders the stale state" do
