@@ -78,6 +78,8 @@ defmodule ArbiterCli.Main do
 
       arb queue resume    <task-id>
 
+      arb scheduler pause|resume|status
+
       arb quota           [--workspace <id|name>] [--json]
 
       arb install cli     [--json]
@@ -235,6 +237,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
   defp dispatch_known("loop", args), do: ArbiterCli.Cmd.Loop.run(args)
   defp dispatch_known("queue", args), do: ArbiterCli.Cmd.Queue.run(args)
+  defp dispatch_known("scheduler", args), do: ArbiterCli.Cmd.Scheduler.run(args)
   defp dispatch_known("quota", args), do: ArbiterCli.Cmd.Quota.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)

@@ -155,6 +155,11 @@ defmodule ArbiterWeb.Router do
 
     # Graph queue operations (C5 of #482)
     post("/queue/:task_id/resume", QueueController, :resume)
+
+    # Board scheduler (autopilot) operations
+    post("/scheduler/pause", SchedulerController, :pause)
+    post("/scheduler/resume", SchedulerController, :resume)
+    get("/scheduler/status", SchedulerController, :status)
   end
 
   # Local transparent proxy to api.anthropic.com (bd-5boun6). Workers route
