@@ -201,6 +201,13 @@ defmodule Arbiter.Board.Snapshot do
   read: `:now`, `:slots_total`, `:quota`, `:paused`, `:ready_order`,
   `:issues`, `:workers`, `:changed_files`, `:workspace_id`. Every read is
   best-effort — a board that renders five columns beats one that raises.
+
+  **Workspace-level scoping:** `slots_total` and `quota` are computed for the
+  specified workspace (defaulting to the default workspace if not given).
+  However, `:issues` and `:workers` span all workspaces. Per-workspace
+  concurrency limits are correctly enforced by the Conductor; this board is
+  a global view with workspace-specific slot constraints. Multi-workspace
+  boards with workspace-specific caps are a known limitation (see #1359).
   """
   @spec load(keyword()) :: t()
   def load(opts \\ []) do
