@@ -3167,4 +3167,87 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.whereis(task.id) == nil
     end
   end
+
+  describe "quota gate bypass audit log (bd-2sh0i2)" do
+    test "skip_quota_gate: true produces a quota_gate_bypass event with actor, reason, and quota state",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "quota bypass", workspace_id: ws.id})
+
+      # Dispatch with skip_quota_gate and capture_quota_bypass_reason
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false,
+                 skip_quota_gate: true,
+                 quota_bypass_actor: "coordinator:token-123",
+                 quota_bypass_reason: "manual override for critical task"
+               )
+
+      assert result.task.status == :in_progress
+
+      # Verify the audit event was created
+      events =
+        Arbiter.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ws.id and topic == "quota_gate_bypass")
+        |> Ash.read!()
+
+      assert length(events) == 1
+      event = List.first(events)
+
+      # Verify the event contains all required fields
+      payload = event.payload
+
+      assert payload["task_id"] == task.id
+      assert payload["actor"] == "coordinator:token-123"
+      assert payload["reason"] == "manual override for critical task"
+      assert is_map(payload["quota_state"])
+      assert payload["quota_state"]["provider"] in ["claude", "gemini"]
+      assert is_binary(payload["at"])
+    end
+
+    test "skip_quota_gate: true without reason creates event with nil reason", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "quota bypass no reason", workspace_id: ws.id})
+
+      assert {:ok, _result} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false,
+                 skip_quota_gate: true,
+                 quota_bypass_actor: "loop:proposal-456"
+               )
+
+      events =
+        Arbiter.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ws.id and topic == "quota_gate_bypass")
+        |> Ash.read!()
+
+      assert length(events) == 1
+      event = List.first(events)
+      payload = event.payload
+
+      assert payload["task_id"] == task.id
+      assert payload["actor"] == "loop:proposal-456"
+      assert payload["reason"] == nil
+      assert is_map(payload["quota_state"])
+    end
+
+    test "skip_quota_gate: false does not create an audit event", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "quota not bypassed", workspace_id: ws.id})
+
+      # Dispatch WITHOUT skip_quota_gate
+      assert {:ok, _result} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false
+               )
+
+      # No quota_gate_bypass event should be created
+      events =
+        Arbiter.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ws.id and topic == "quota_gate_bypass")
+        |> Ash.read!()
+
+      assert length(events) == 0
+    end
+  end
 end

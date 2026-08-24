@@ -61,6 +61,7 @@ defmodule Arbiter.Events do
   | `task_state`    | Any task FSM transition (noisier — opt-in only)         |
   | `external_review` | An ExternalReview lifecycle transition (running/completed/failed) |
   | `loop_proposal`  | A loop-engineering proposal is recorded / reinforced / promoted / applied / rejected (opt-in only) |
+  | `quota_gate_bypass` | A quota gate is bypassed via explicit override (force_quota) |
 
   ## Broadcast hooks
 
@@ -89,7 +90,7 @@ defmodule Arbiter.Events do
     resource Record
   end
 
-  @valid_topics ~w(inbox review_gate worker_failed worker_done task_state external_review loop_proposal)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done task_state external_review loop_proposal quota_gate_bypass)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics

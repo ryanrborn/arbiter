@@ -717,7 +717,7 @@ defmodule Arbiter.Worker.Dispatch do
   # rows (e.g. in test). Codex/Google snapshots come from `Quota.CloudProbe`, not
   # the proxy, so their gating does not depend on that flag. A nil snapshot is
   # handled inside each gate impl.
-  defp maybe_quota_gate(%Issue{} = task, opts) do
+  defp maybe_quota_gate(%Issue{workspace_id: ws_id} = task, opts) do
     cond do
       Keyword.get(opts, :skip_quota_gate, false) == true ->
         require Logger
@@ -726,14 +726,53 @@ defmodule Arbiter.Worker.Dispatch do
           "quota gate bypassed for task=#{task.id} — quota_gate was skipped via explicit override"
         )
 
+        # Record the quota gate bypass in the audit log
+        record_quota_gate_bypass(task, opts)
+
         :ok
 
-      not is_binary(task.workspace_id) ->
+      not is_binary(ws_id) ->
         :ok
 
       true ->
         run_quota_gate(task, opts)
     end
+  end
+
+  defp record_quota_gate_bypass(%Issue{id: task_id, workspace_id: ws_id} = task, opts) do
+    workspace = load_workspace(task)
+    provider = quota_gate_provider(task, workspace, opts)
+    quota = safe_quota_latest(ws_id, provider)
+
+    payload = %{
+      "task_id" => task_id,
+      "actor" => Keyword.get(opts, :quota_bypass_actor),
+      "reason" => Keyword.get(opts, :quota_bypass_reason),
+      "quota_state" => %{
+        "provider" => provider,
+        "quota" => format_quota_state(quota)
+      }
+    }
+
+    Arbiter.Events.broadcast(ws_id, "quota_gate_bypass", payload)
+  rescue
+    e ->
+      require Logger
+
+      Logger.error(
+        "Failed to record quota gate bypass audit event for task #{task_id}: #{Exception.message(e)}"
+      )
+  end
+
+  defp format_quota_state(nil), do: nil
+
+  defp format_quota_state(quota) do
+    %{
+      "available_spending_usd" => quota.available_spending_usd,
+      "snapshot_at" => DateTime.to_iso8601(quota.snapshot_at)
+    }
+  rescue
+    _ -> nil
   end
 
   defp run_quota_gate(%Issue{workspace_id: ws_id} = task, opts) do
