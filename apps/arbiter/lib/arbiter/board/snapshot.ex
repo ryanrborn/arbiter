@@ -118,6 +118,11 @@ defmodule Arbiter.Board.Snapshot do
 
   @default_system_max 16
 
+  # Dispatch flips an issue to :in_progress before the worker is registered
+  # (worktree provisioning, fetch, etc. — seconds on a large repo). Below this
+  # age, treat it as mid-dispatch rather than orphaned.
+  @orphan_grace_seconds 60
+
   @type t :: %{
           backlog: [map()],
           ready: [Scheduler.entry()],
@@ -187,7 +192,7 @@ defmodule Arbiter.Board.Snapshot do
       backlog: backlog_cards(issues, worked),
       ready: plan.entries,
       running: running,
-      waiting: waiting(authors, issues, issues_by_id, worked),
+      waiting: waiting(authors, issues, issues_by_id, worked, now),
       closed_today: closed_today_cards(issues, now),
       promote: plan.promote,
       slots_total: slots_total,
@@ -416,8 +421,8 @@ defmodule Arbiter.Board.Snapshot do
   # and an orphaned issue (no live worker at all) still carries both, nil.
   # The view reads whichever it has instead of branching on which shape
   # produced the card.
-  defp waiting(workers, issues, issues_by_id, worked) do
-    (waiting_cards(workers, issues_by_id) ++ orphaned_cards(issues, worked))
+  defp waiting(workers, issues, issues_by_id, worked, now) do
+    (waiting_cards(workers, issues_by_id) ++ orphaned_cards(issues, worked, now))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
 
@@ -444,9 +449,9 @@ defmodule Arbiter.Board.Snapshot do
   # issue-open filters and used to vanish from the board entirely. It reads
   # truest as Waiting: the work is out of the machine's hands, and nothing
   # will retry it on its own, so it always flags `needs_you`.
-  defp orphaned_cards(issues, worked) do
+  defp orphaned_cards(issues, worked, now) do
     issues
-    |> Enum.filter(&(&1.status == :in_progress and not MapSet.member?(worked, &1.id)))
+    |> Enum.filter(&orphaned?(&1, worked, now))
     |> Enum.map(fn issue ->
       %{
         id: issue.id,
@@ -461,9 +466,17 @@ defmodule Arbiter.Board.Snapshot do
         merger_url: nil,
         merger_status: nil,
         needs_you: true,
-        since: Map.get(issue, :updated_at) || Map.get(issue, :created_at)
+        since: Map.get(issue, :updated_at) || created_at(issue)
       }
     end)
+  end
+
+  defp orphaned?(issue, worked, now) do
+    issue.status == :in_progress and
+      Map.get(issue, :issue_type) not in @non_dispatchable_types and
+      not MapSet.member?(worked, issue.id) and
+      DateTime.diff(now, Map.get(issue, :updated_at) || created_at(issue)) >=
+        @orphan_grace_seconds
   end
 
   defp waiting_reason(%{status: :awaiting_review}), do: nil

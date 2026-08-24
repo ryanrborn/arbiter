@@ -518,9 +518,27 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert [%{id: "bd-a", reason: reason, mr_ref: "123", needs_you: true}] = board.waiting
       assert reason =~ "worker stopped"
+
       refute Enum.any?([board.backlog, board.ready, board.running, board.closed_today], fn col ->
                "bd-a" in ids(col)
              end)
+    end
+
+    test "an in_progress epic with no live worker is not treated as orphaned" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{status: :in_progress, updated_at: @yesterday, issue_type: :epic})
+          ]
+        )
+
+      assert board.waiting == []
+    end
+
+    test "an in_progress issue that just started dispatch is not flagged orphaned yet" do
+      board = derive(issues: [issue("bd-a", %{status: :in_progress, updated_at: @now})])
+
+      assert board.waiting == []
     end
 
     test "an in_progress issue with a live worker is not double-counted as orphaned" do
