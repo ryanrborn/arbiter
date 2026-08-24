@@ -77,6 +77,31 @@ defmodule ArbiterWeb.MessagesLiveTest do
   end
 
   describe "coordinator mailbox panel" do
+    # bd-3kgb0e: the coordinator mailbox moved off the board page into the
+    # shared AppShell drawer (ArbiterWeb.Layouts.app/1), so it must surface
+    # on every screen, not just "/".
+    test "surfaces from the AppShell drawer on a page other than the board",
+         %{conn: conn, ws: ws} do
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          subject: "needs a decision off-board",
+          body: "surfaces on the tasks screen too"
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks")
+
+      assert html =~ "Coordinator Mailbox"
+      assert html =~ "needs a decision off-board"
+      assert html =~ "surfaces on the tasks screen too"
+      assert html =~ "1 unread"
+      assert html =~ ~s(id="coordinator-inbox-trigger")
+      assert html =~ ~s(id="coordinator-inbox-unread-badge")
+    end
+
     test "renders unread mailbox-family mail addressed to the coordinator", %{conn: conn, ws: ws} do
       {:ok, _} =
         Message.send_mail(%{
@@ -144,7 +169,9 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert render(view) =~ "ack-this-up"
 
       view
-      |> element(~s(#coordinator-mailbox button[phx-click="mark_read"][phx-value-id="#{msg.id}"]))
+      |> element(
+        ~s(#coordinator-drawer button[phx-click="coordinator_mark_read"][phx-value-id="#{msg.id}"])
+      )
       |> render_click()
 
       refute render(view) =~ "ack-this-up"
@@ -178,7 +205,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert html =~ "still-unread"
 
       view
-      |> element(~s(button[phx-click="clear_coordinator"]))
+      |> element(~s(button[phx-click="coordinator_clear"]))
       |> render_click()
 
       # Read message soft-cleared (retained, cleared_at stamped); unread untouched.
@@ -287,7 +314,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert html =~ "2 outstanding"
 
       # Clearing soft-clears the outstanding tail → outstanding drops to 0, rows retained.
-      view |> element(~s(button[phx-click="clear_coordinator"])) |> render_click()
+      view |> element(~s(button[phx-click="coordinator_clear"])) |> render_click()
       html = render(view)
       assert html =~ "0 unread"
       assert html =~ "0 outstanding"

@@ -108,7 +108,13 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+    >
       <div class="mx-auto flex max-w-[1100px] flex-col gap-5 p-4 sm:p-6">
         <Domain.index_header
           icon="hero-cog-6-tooth"

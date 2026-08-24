@@ -25,15 +25,32 @@ defmodule ArbiterWeb.LiveHooks do
     refreshed; token stales ~1h after app closes (bd-5r6cdy).
 
   Once these are fixed, remove them from @hidden_providers and this comment.
+
+  ## `:coordinator_inbox`
+
+  Lifted off `BoardLive` (bd-3kgb0e) so the coordinator's mailbox — the
+  upward channel of `arb inbox` / `arb msg` — surfaces from the AppShell
+  drawer on every screen instead of only the board. Subscribes to every
+  workspace's message topic and assigns `:coordinator_inbox` (unread) and
+  `:coordinator_outstanding_count` (seen but not cleared) same as the old
+  `BoardLive.refresh_coordinator_inbox/1`. Also owns the drawer's two
+  actions (`coordinator_mark_read`, `coordinator_clear`) via a
+  `:handle_event` hook, so no LiveView needs its own clauses for them —
+  distinct event names from `WorkerDetailLive`'s own `"mark_read"` (a
+  different, per-worker mailbox) avoid a collision.
   """
 
   import Phoenix.Component, only: [assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
 
+  alias Arbiter.Messages.Message
+
   require Logger
 
   # Providers hidden from the UI pending fix; see module docstring for context.
   @hidden_providers ["codex", "gemini_cli", "antigravity"]
+
+  @coordinator_ref Message.coordinator_ref()
 
   def on_mount(:current_path, _params, _session, socket) do
     socket =
@@ -62,6 +79,69 @@ defmodule ArbiterWeb.LiveHooks do
       _ ->
         {:cont, assign(socket, :quotas, [])}
     end
+  end
+
+  def on_mount(:coordinator_inbox, _params, _session, socket) do
+    socket =
+      socket
+      |> refresh_coordinator_inbox()
+      |> maybe_subscribe_coordinator_inbox()
+      |> attach_hook(:coordinator_inbox_events, :handle_event, fn
+        "coordinator_mark_read", %{"id" => id}, socket ->
+          with {:ok, msg} <- Ash.get(Message, id),
+               {:ok, _} <- Message.mark_read(msg) do
+            {:halt, refresh_coordinator_inbox(socket)}
+          else
+            _ -> {:halt, refresh_coordinator_inbox(socket)}
+          end
+
+        "coordinator_clear", _params, socket ->
+          _ = Message.clear_read(@coordinator_ref)
+          {:halt, refresh_coordinator_inbox(socket)}
+
+        _event, _params, socket ->
+          {:cont, socket}
+      end)
+
+    {:cont, socket}
+  end
+
+  defp maybe_subscribe_coordinator_inbox(socket) do
+    if connected?(socket) do
+      workspaces =
+        try do
+          Arbiter.Tasks.Workspace |> Ash.read!()
+        rescue
+          _ -> []
+        end
+
+      for ws <- workspaces, do: Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws.id))
+
+      attach_hook(socket, :coordinator_inbox_updates, :handle_info, fn
+        {:new_message, _message}, socket -> {:halt, refresh_coordinator_inbox(socket)}
+        {:message_read, _message}, socket -> {:halt, refresh_coordinator_inbox(socket)}
+        {:mailbox_cleared, _workspace_id}, socket -> {:halt, refresh_coordinator_inbox(socket)}
+        _msg, socket -> {:cont, socket}
+      end)
+    else
+      socket
+    end
+  end
+
+  # Two figures, not one: pending (unread — never seen) and outstanding (seen
+  # but not cleared — still owes an action). Reading no longer empties the
+  # queue, so "still open" needs its own number.
+  defp refresh_coordinator_inbox(socket) do
+    {inbox, outstanding} =
+      try do
+        {Message.inbox(@coordinator_ref), Message.outstanding(@coordinator_ref)}
+      rescue
+        _ -> {[], []}
+      end
+
+    socket
+    |> assign(:coordinator_inbox, inbox)
+    |> assign(:coordinator_outstanding_count, length(outstanding))
   end
 
   defp maybe_subscribe_quota(socket, workspace_id) do
