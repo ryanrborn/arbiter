@@ -682,9 +682,14 @@ defmodule Arbiter.MCP.Tools.Worker do
   # the optional `repo` / `model` overrides plus the child scope depth, minted
   # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
   defp dispatch_opts(%Scope{depth: depth}, args) do
+    {:ok, force_quota} = Tools.fetch_bool(args, "force_quota", false)
+
     [depth: depth + 1]
     |> Tools.maybe_put_kw(:repo, Tools.fetch_string(args, "repo"))
     |> Tools.maybe_put_kw(:model, Tools.fetch_string(args, "model"))
+    |> then(fn opts ->
+      if force_quota, do: Keyword.put(opts, :skip_quota_gate, true), else: opts
+    end)
   end
 
   # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the

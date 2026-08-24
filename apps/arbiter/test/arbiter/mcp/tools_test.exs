@@ -2998,6 +2998,78 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "worker_dispatch/2 with force_quota: true" do
+    test "force_quota: true is accepted in the schema", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "force quota dispatch", workspace_id: ctx.ws.id})
+
+      # Use no_agent: true to test the force_quota flag without dealing with repo setup
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => true
+               })
+
+      assert data.task.status == "in_progress"
+      assert data.depth == ctx.coordinator.depth + 1
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "force_quota: false is accepted in the schema", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "normal quota dispatch", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => false
+               })
+
+      assert data.task.status == "in_progress"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+  end
+
+  describe "worker_resume/2 with force_quota: true" do
+    test "force_quota: true is accepted in the schema on resume", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "force quota resume", workspace_id: ctx.ws.id})
+
+      # First dispatch with no_agent to park the task
+      {:ok, _dispatch_result} =
+        Tools.worker_dispatch(ctx.coordinator, %{
+          "task_id" => task.id,
+          "no_agent" => true
+        })
+
+      # Resume with force_quota: true
+      # Note: This will fail because there's no actual worktree to resume from,
+      # but we're testing that the flag is accepted in the schema, not the full logic
+      result =
+        Tools.worker_resume(ctx.coordinator, %{
+          "task_id" => task.id,
+          "force_quota" => true
+        })
+
+      # The schema should accept force_quota, so we shouldn't get an "additional properties" error
+      case result do
+        {:ok, _} ->
+          :ok
+
+        {:error, {:invalid, msg}} ->
+          # Should not complain about force_quota being unknown
+          refute msg =~ "force_quota"
+
+        {:error, _} ->
+          # Other errors are fine (e.g., no worktree to resume from)
+          :ok
+      end
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+  end
+
   describe "worker_list/2" do
     test "returns an empty list when no workers are running in the workspace", ctx do
       assert {:ok, %{workers: [], count: 0}} = Tools.worker_list(ctx.coordinator, %{})

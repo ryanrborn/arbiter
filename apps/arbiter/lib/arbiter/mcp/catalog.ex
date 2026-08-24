@@ -503,6 +503,11 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" =>
               "DEPRECATED alias for `provider: \"claude\"`. `true` → start a Claude worker."
+          },
+          "force_quota" => %{
+            "type" => "boolean",
+            "description" =>
+              "ADVANCED: bypass the quota gate for this dispatch. Use only for judged-important work when the gate holds despite headroom. Defaults to false (quota-gated)."
           }
         },
         "required" => ["task_id"],
@@ -525,7 +530,12 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" => "Repo to run in (optional; inherited from the task's last run)."
           },
-          "model" => %{"type" => "string", "description" => "Per-dispatch model override."}
+          "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
+          "force_quota" => %{
+            "type" => "boolean",
+            "description" =>
+              "ADVANCED: bypass the quota gate for this resume. Use only for judged-important work when the gate holds despite headroom. Defaults to false (quota-gated)."
+          }
         },
         "required" => ["task_id"],
         "additionalProperties" => false

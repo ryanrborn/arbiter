@@ -719,9 +719,20 @@ defmodule Arbiter.Worker.Dispatch do
   # handled inside each gate impl.
   defp maybe_quota_gate(%Issue{} = task, opts) do
     cond do
-      Keyword.get(opts, :skip_quota_gate, false) == true -> :ok
-      not is_binary(task.workspace_id) -> :ok
-      true -> run_quota_gate(task, opts)
+      Keyword.get(opts, :skip_quota_gate, false) == true ->
+        require Logger
+
+        Logger.warning(
+          "quota gate bypassed for task=#{task.id} — quota_gate was skipped via explicit override"
+        )
+
+        :ok
+
+      not is_binary(task.workspace_id) ->
+        :ok
+
+      true ->
+        run_quota_gate(task, opts)
     end
   end
 

@@ -449,6 +449,8 @@ defmodule ArbiterWeb.Api.WorkerController do
   #   * none          → use the workspace's `agent.type` config (the default).
   #     Resolves via `Agents.for_workspace`, picking the provider the workspace
   #     is configured for.
+  #   * `force_quota` → ADVANCED: bypass the quota gate for judged-important work.
+  #     Omitting this flag preserves the default quota-gated behavior.
   #
   # Returns `{:ok, opts}`, or `{:error, {:invalid_request, msg, meta}}` when an
   # explicit but unrecognized `provider` is supplied (bd-dcvo3n) — that must fail
@@ -457,6 +459,7 @@ defmodule ArbiterWeb.Api.WorkerController do
     base =
       [repo: params["repo"]]
       |> add_model_override(params["model"])
+      |> maybe_add_skip_quota_gate(params["force_quota"])
 
     with {:ok, worker_opts} <- worker_dispatch_opts(params) do
       opts =
@@ -513,9 +516,12 @@ defmodule ArbiterWeb.Api.WorkerController do
   # Map request params onto `Dispatch.resume_session/2` opts. Repo is optional —
   # resume falls back to the task's most recent run's repo when omitted.
   # `--model` is an optional per-dispatch override, same as dispatch.
+  # `--force-quota` is an ADVANCED option to bypass the quota gate for
+  # judged-important work, same as dispatch.
   defp resume_opts(params) do
     [repo: params["repo"]]
     |> add_model_override(params["model"])
+    |> maybe_add_skip_quota_gate(params["force_quota"])
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 
@@ -527,6 +533,15 @@ defmodule ArbiterWeb.Api.WorkerController do
   end
 
   defp add_model_override(opts, _), do: opts
+
+  # `--force-quota` from the CLI bypasses the quota gate for judged-important work.
+  # Maps to `:skip_quota_gate` in Dispatch opts. Only set when explicitly truthy.
+  defp maybe_add_skip_quota_gate(opts, force_quota) do
+    case truthy(force_quota) do
+      true -> Keyword.put(opts, :skip_quota_gate, true)
+      _ -> opts
+    end
+  end
 
   # Review-only dispatch. `review: true` cascades into Dispatch: it pulls the
   # CodeReview workflow, suppresses worktree provisioning, swaps the prompt,

@@ -7,7 +7,7 @@ defmodule ArbiterCli.Cmd.Worker do
       arb worker runs <task-id>   — list every historical run for the task
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
-      arb worker resume <task-id> [<repo>] [--model <name>] — resume the prior session
+      arb worker resume <task-id> [<repo>] [--model <name>] [--force-quota] — resume the prior session
       arb worker review <task-id> [--repo <repo>] [--model <name>] — spawn a review worker
 
   Use `arb dispatch` to start a worker in the first place.
@@ -38,7 +38,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
   alias ArbiterCli.{Client, Output}
 
-  @switches [json: :boolean, repo: :string, model: :string]
+  @switches [json: :boolean, repo: :string, model: :string, force_quota: :boolean]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -157,6 +157,7 @@ defmodule ArbiterCli.Cmd.Worker do
       %{}
       |> maybe_put("repo", repo || flags[:repo])
       |> maybe_put("model", flags[:model])
+      |> maybe_put("force_quota", if(flags[:force_quota], do: true))
 
     case Client.post("/api/workers/#{task_id}/resume", body) do
       {:ok, payload} -> emit_resume(payload, mode)

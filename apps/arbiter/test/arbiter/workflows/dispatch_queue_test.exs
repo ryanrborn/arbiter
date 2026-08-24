@@ -302,6 +302,24 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  describe "force flag (skip_quota_gate override)" do
+    test "dispatch with force: true bypasses quota gate when over-cap" do
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      task = make_task(ws)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      # Without force, this would be held by the quota gate.
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, start_driver: false)
+
+      # With force: true (via skip_quota_gate internal opt), dispatch proceeds.
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id, repo: "r", start_driver: false, skip_quota_gate: true)
+
+      assert result.task.status == :in_progress
+    end
+  end
+
   describe "restart durability" do
     test "held work survives a queue restart (task recoverable from its status)" do
       ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
