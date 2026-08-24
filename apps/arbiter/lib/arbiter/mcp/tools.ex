@@ -957,6 +957,69 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- scheduler (autopilot) pause/resume --------------------------------
+
+  @doc """
+  Pause the board autopilot: stop promoting Ready cards to Running.
+  Workers already dispatched continue to completion. Resume with `scheduler_resume`.
+  Coordinator only.
+  """
+  @spec scheduler_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def scheduler_pause(%Scope{} = _scope, _args) do
+    case Arbiter.Board.Autopilot.pause() do
+      :ok ->
+        Logger.info("[scheduler_pause] autopilot paused")
+        {:ok, %{paused: true}}
+
+      {:error, reason} ->
+        {:error, {:invalid, "pause failed: #{inspect(reason)}"}}
+    end
+  rescue
+    e ->
+      {:error, {:invalid, "pause failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid, "pause failed: process error #{inspect(reason)}"}}
+  end
+
+  @doc """
+  Resume the board autopilot: start promoting Ready cards to Running again.
+  The autopilot must be in paused state. Coordinator only.
+  """
+  @spec scheduler_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def scheduler_resume(%Scope{} = _scope, _args) do
+    case Arbiter.Board.Autopilot.resume() do
+      :ok ->
+        Logger.info("[scheduler_resume] autopilot resumed")
+        {:ok, %{paused: false}}
+
+      {:error, reason} ->
+        {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
+    end
+  rescue
+    e ->
+      {:error, {:invalid, "resume failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid, "resume failed: process error #{inspect(reason)}"}}
+  end
+
+  @doc """
+  Return the current pause state of the board autopilot.
+  Coordinator only.
+  """
+  @spec scheduler_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def scheduler_status(%Scope{} = _scope, _args) do
+    paused? = Arbiter.Board.Autopilot.paused?()
+    {:ok, %{paused: paused?}}
+  rescue
+    e ->
+      {:error, {:invalid, "status check failed: #{inspect(e)}"}}
+  catch
+    :exit, reason ->
+      {:error, {:invalid, "status check failed: process error #{inspect(reason)}"}}
+  end
+
   # ---- shared resolution / fetch -----------------------------------------
 
   # Resolve + authorize the target task id for this scope from the named arg
