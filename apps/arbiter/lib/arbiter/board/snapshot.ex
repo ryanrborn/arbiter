@@ -206,7 +206,7 @@ defmodule Arbiter.Board.Snapshot do
   def load(opts \\ []) do
     issues = Keyword.get_lazy(opts, :issues, &load_issues/0)
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
-    workspace_id = Keyword.get(opts, :workspace_id)
+    workspace_id = Keyword.get(opts, :workspace_id) || default_workspace_id()
 
     derive(%{
       issues: issues,
