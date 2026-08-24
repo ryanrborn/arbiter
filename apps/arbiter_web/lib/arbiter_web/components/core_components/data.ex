@@ -99,12 +99,13 @@ defmodule ArbiterWeb.CoreComponents.Data do
   def difficulty_meter(assigns) do
     filled_count =
       if is_integer(assigns.difficulty) and assigns.difficulty in 0..4,
-        do: assigns.difficulty + 1,
+        do: assigns.difficulty,
         else: 0
 
     assigns =
       assign(assigns,
         filled_count: filled_count,
+        has_d0_border: is_integer(assigns.difficulty) and assigns.difficulty == 0,
         label: difficulty_meter_label(assigns.difficulty)
       )
 
@@ -116,7 +117,11 @@ defmodule ArbiterWeb.CoreComponents.Data do
           "h-3 w-1.5 rounded-sm",
           if(i <= @filled_count,
             do: ["difficulty-bar-filled", difficulty_fill_class(@difficulty)],
-            else: ["difficulty-bar-empty", "bg-base-content/10"]
+            else: [
+              "difficulty-bar-empty",
+              "bg-base-content/10",
+              if(@has_d0_border, do: "border border-dashed border-base-content/30")
+            ]
           )
         ]}
       />
