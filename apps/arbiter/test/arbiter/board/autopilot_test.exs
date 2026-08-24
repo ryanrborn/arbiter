@@ -232,4 +232,56 @@ defmodule Arbiter.Board.AutopilotTest do
       assert_receive {:board_scheduler, :resumed}
     end
   end
+
+  describe "boot-time defaults from app config" do
+    @tag :no_async
+    test "with no :board_autopilot config, autopilot starts paused" do
+      # Save the current config
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+
+      try do
+        # Clear the config to simulate a fresh install with no config set
+        Application.delete_env(:arbiter, :board_autopilot)
+
+        # Start autopilot without explicit :paused option — should use the app config default
+        pid = start(name: nil, interval_ms: :never, snapshot: fn _ -> board(nil) end)
+
+        # With no config, it should start paused (safe default)
+        assert true === Autopilot.paused?(pid)
+        assert :paused = Autopilot.tick(pid)
+      after
+        # Restore the original config
+        if saved_config == :not_set do
+          Application.delete_env(:arbiter, :board_autopilot)
+        else
+          Application.put_env(:arbiter, :board_autopilot, saved_config)
+        end
+      end
+    end
+
+    @tag :no_async
+    test "with enabled: true in config, autopilot starts unpaused" do
+      # Save the current config
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+
+      try do
+        # Set the config to enable autopilot
+        Application.put_env(:arbiter, :board_autopilot, enabled: true)
+
+        # Start autopilot without explicit :paused option — should use the app config default
+        pid = start(name: nil, interval_ms: :never, snapshot: fn _ -> board("bd-1") end)
+
+        # With enabled: true, it should start unpaused
+        assert false === Autopilot.paused?(pid)
+        assert {:ok, "bd-1"} = Autopilot.tick(pid)
+      after
+        # Restore the original config
+        if saved_config == :not_set do
+          Application.delete_env(:arbiter, :board_autopilot)
+        else
+          Application.put_env(:arbiter, :board_autopilot, saved_config)
+        end
+      end
+    end
+  end
 end
