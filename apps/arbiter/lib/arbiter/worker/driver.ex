@@ -53,6 +53,7 @@ defmodule Arbiter.Worker.Driver do
   use GenServer
   require Logger
 
+  alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
   alias Arbiter.Worker.Worktree
@@ -73,6 +74,7 @@ defmodule Arbiter.Worker.Driver do
           max_ticks: non_neg_integer(),
           worktree_path: String.t() | nil,
           cleanup_worktree: boolean(),
+          review_checkout_path: String.t() | nil,
           claude_driven: boolean()
         ]
 
@@ -112,6 +114,12 @@ defmodule Arbiter.Worker.Driver do
       max_ticks: Keyword.get(opts, :max_ticks, default_max_ticks_for(claude_driven)),
       worktree_path: Keyword.get(opts, :worktree_path),
       cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false),
+      # bd-199giy: a review dispatch's throwaway PR-head checkout, if
+      # `Arbiter.Worker.Dispatch` provisioned one. Distinct from
+      # `worktree_path` — nothing is ever committed here, so it is always
+      # force-removed on the way out rather than run through the
+      # dirty/ahead-of-base guards `maybe_cleanup_worktree/1` applies.
+      review_checkout_path: Keyword.get(opts, :review_checkout_path),
       ticks: 0
     }
 
@@ -265,7 +273,17 @@ defmodule Arbiter.Worker.Driver do
   @impl true
   def terminate(_reason, state) do
     maybe_cleanup_worktree(state)
+    teardown_review_checkout(state)
   end
+
+  # bd-199giy: reclaim the reviewer's throwaway checkout on every exit path —
+  # completion, failure, driver timeout, a dead worker or machine. Unlike a
+  # task worktree there is nothing to preserve: the reviewer cannot write to
+  # it (Edit/Write are denied at spawn) and never commits, so a leftover
+  # directory is pure garbage. `Checkout.teardown/1` is idempotent, nil-safe,
+  # and never raises, so this stays a one-liner on the shutdown path.
+  defp teardown_review_checkout(%{review_checkout_path: path}), do: Checkout.teardown(path)
+  defp teardown_review_checkout(_state), do: :ok
 
   # ---- internals ---------------------------------------------------------
 
