@@ -503,6 +503,35 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert [%{merger_status: %{approved: false}}, %{merger_status: nil}] = board.waiting
     end
+
+    # bd-2mv3lx: `arb worker stop` on an `:awaiting_review` worker (the
+    # documented pre-flight for `arb server deploy`) leaves the issue
+    # `in_progress` with no live worker — a state that used to match none of
+    # the five columns and vanished from the board entirely.
+    test "an in_progress issue with no live worker still shows, flagged for a human" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{status: :in_progress, updated_at: @yesterday, pr_ref: "123"})
+          ]
+        )
+
+      assert [%{id: "bd-a", reason: reason, mr_ref: "123", needs_you: true}] = board.waiting
+      assert reason =~ "worker stopped"
+      refute Enum.any?([board.backlog, board.ready, board.running, board.closed_today], fn col ->
+               "bd-a" in ids(col)
+             end)
+    end
+
+    test "an in_progress issue with a live worker is not double-counted as orphaned" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{status: :in_progress})],
+          workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!7"})]
+        )
+
+      assert ids(board.waiting) == ["bd-a"]
+    end
   end
 
   # The flag is not "which status" — it is "has the system run out of things to
