@@ -52,7 +52,10 @@ defmodule ArbiterWeb.Layouts do
     doc: "seen-but-not-cleared coordinator messages — the triage queue"
   )
 
-  attr(:coordinator_inbox_now, DateTime, default: nil, doc: "drives the drawer's relative timestamps (ArbiterWeb.LiveHooks)")
+  attr(:coordinator_inbox_now, DateTime,
+    default: nil,
+    doc: "drives the drawer's relative timestamps (ArbiterWeb.LiveHooks)"
+  )
 
   slot(:inner_block, required: true)
 
@@ -72,7 +75,9 @@ defmodule ArbiterWeb.Layouts do
       )
 
     assigns = assign(assigns, :nav_items, nav_items())
-    assigns = assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
+
+    assigns =
+      assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
 
     ~H"""
     <.top_nav items={@nav_items} current_path={@current_path}>

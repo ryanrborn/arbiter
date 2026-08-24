@@ -117,7 +117,7 @@ defmodule ArbiterWeb.LiveHooks do
 
       attach_hook(socket, :coordinator_inbox_tick, :handle_info, fn
         :coordinator_inbox_tick, socket ->
-          {:cont, assign(socket, :coordinator_inbox_now, DateTime.utc_now())}
+          {:halt, assign(socket, :coordinator_inbox_now, DateTime.utc_now())}
 
         _msg, socket ->
           {:cont, socket}

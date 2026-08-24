@@ -344,5 +344,41 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, seen.id)
       assert cleared_at
     end
+
+    test "a page with no catch-all handle_info survives a coordinator mail broadcast",
+         %{conn: conn, ws: ws} do
+      # Regression (bd-3kgb0e review finding 2): the global :coordinator_inbox
+      # on_mount subscribes every LiveView in live_session :default to every
+      # workspace's mail topic and `:cont`s on {:new_message, _} so the host
+      # view's own handle_info runs. WorkspaceDetailLive has no matching
+      # clause, so without a catch-all it crashed on any mail broadcast.
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          to_ref: "admiral",
+          subject: "unrelated to this page",
+          body: "must not crash the workspace detail view"
+        })
+
+      assert Process.alive?(view.pid)
+      assert render(view) =~ ws.name
+    end
+
+    test "a page with no catch-all handle_info survives the coordinator inbox tick",
+         %{conn: conn, ws: ws} do
+      # Regression (bd-3kgb0e review finding 1): the 60s :coordinator_inbox_tick
+      # used to `:cont` to every LiveView in live_session :default.
+      # WorkspaceDetailLive has no matching clause, so it crashed every
+      # minute. The tick is hook-private state, so it must `:halt`.
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      send(view.pid, :coordinator_inbox_tick)
+
+      assert Process.alive?(view.pid)
+      assert render(view) =~ ws.name
+    end
   end
 end

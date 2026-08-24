@@ -199,6 +199,14 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     {:noreply, put_flash(socket, kind, message)}
   end
 
+  # Catch-all: this view lives in `live_session :default` alongside AppShell
+  # hooks (coordinator inbox tick/subscription) that broadcast to every
+  # mounted LiveView. Without this clause, any message those hooks don't
+  # `:halt` crashes this view with a FunctionClauseError.
+  def handle_info(_msg, socket) do
+    {:noreply, socket}
+  end
+
   # ---- scheduler ----
 
   # Two questions, not one: `running?/1` answers "is there an autopilot at all"
