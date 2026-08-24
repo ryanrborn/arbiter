@@ -26,12 +26,24 @@ defmodule Arbiter.Board.AutopilotTest do
   defp start(opts) do
     test = self()
 
+    # Check if the test wants to use the real default_dispatch (for testing with mocks)
+    use_real_dispatch = Keyword.get(opts, :use_real_dispatch, false)
+    opts = Keyword.delete(opts, :use_real_dispatch)
+
     defaults = [
       name: nil,
       interval_ms: :never,
-      snapshot: fn opts -> board("bd-1", opts[:paused]) end,
-      dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+      snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
+
+    # Only include the mock dispatch if not using the real one
+    defaults =
+      if use_real_dispatch do
+        defaults
+      else
+        defaults ++
+          [dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end]
+      end
 
     {:ok, pid} = Autopilot.start_link(Keyword.merge(defaults, opts))
     pid
@@ -46,28 +58,28 @@ defmodule Arbiter.Board.AutopilotTest do
     end
 
     test "default_dispatch passes start_claude: true" do
-      # Test the default_dispatch function directly
-      # This is a private function but we can test it through the public API
-      # by verifying the behavior when dispatch is called
       test = self()
 
-      # Create a mock dispatch that matches the signature of Dispatch.dispatch
-      mock_dispatch = fn id, opts ->
+      # Use :meck to stub Arbiter.Worker.Dispatch.dispatch/2 and capture its arguments.
+      # This allows us to verify that default_dispatch/1 calls it with start_claude: true.
+      :meck.new(Arbiter.Worker.Dispatch, [:passthrough])
+
+      :meck.expect(Arbiter.Worker.Dispatch, :dispatch, fn task_id, opts ->
         send(test, {:dispatch_opts, opts})
-        {:ok, %{task_id: id}}
-      end
+        {:ok, %{task_id: task_id}}
+      end)
 
-      # We'll test by using a dispatch function that wraps the call
-      wrapper_dispatch = fn id ->
-        # This simulates what default_dispatch does - call Dispatch.dispatch with opts
-        mock_dispatch.(id, start_claude: true)
-      end
-
-      pid = start(paused: false, dispatch: wrapper_dispatch)
+      # Start without passing dispatch, so Autopilot uses the real default_dispatch/1.
+      # That function will call Dispatch.dispatch/2, which we've stubbed with meck above.
+      # Pass use_real_dispatch: true to signal that the start() helper should not
+      # provide its default mock dispatch.
+      pid = start(paused: false, use_real_dispatch: true)
       Autopilot.tick(pid)
 
       assert_receive {:dispatch_opts, opts}
       assert opts[:start_claude] == true
+
+      :meck.unload(Arbiter.Worker.Dispatch)
     end
 
     test "dispatches nothing when the scheduler promotes nothing" do
