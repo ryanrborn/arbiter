@@ -285,7 +285,14 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
       |> assign(:header_subtitle, header_subtitle(assigns.tab, assigns.pr_label))
 
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <div class="flex items-start justify-between gap-4">
           <Domain.index_header

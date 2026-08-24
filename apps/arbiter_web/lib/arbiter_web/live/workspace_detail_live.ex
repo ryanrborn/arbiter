@@ -199,6 +199,14 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     {:noreply, put_flash(socket, kind, message)}
   end
 
+  # Catch-all: this view lives in `live_session :default` alongside AppShell
+  # hooks (coordinator inbox tick/subscription) that broadcast to every
+  # mounted LiveView. Without this clause, any message those hooks don't
+  # `:halt` crashes this view with a FunctionClauseError.
+  def handle_info(_msg, socket) do
+    {:noreply, socket}
+  end
+
   # ---- scheduler ----
 
   # Two questions, not one: `running?/1` answers "is there an autopilot at all"
@@ -228,7 +236,14 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   @impl true
   def render(%{not_found: true} = assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
       <div class="mx-auto flex max-w-[1100px] flex-col gap-4 p-4 sm:p-6">
         <Feedback.empty_state icon="hero-building-office-2" detail="no workspace with that id">
           Workspace not found.
@@ -241,7 +256,14 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
       <div class="mx-auto flex max-w-[1100px] flex-col gap-5 p-4 sm:p-6">
         <Domain.index_header
           icon="hero-cog-6-tooth"
