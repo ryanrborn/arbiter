@@ -513,6 +513,8 @@ defmodule Arbiter.Worker.PromptBuilder do
   end
 
   defp review_prompt(%Issue{} = task, opts) do
+    checkout = review_checkout(opts)
+
     tracker_line =
       case task.pr_ref do
         pr when is_binary(pr) and pr != "" ->
@@ -560,15 +562,11 @@ defmodule Arbiter.Worker.PromptBuilder do
     Acceptance:
     #{task.acceptance || "(none)"}
     #{tracker_context_section}
-    #{tracker_line}Your current directory is the repo's local checkout. There is
-    no per-task branch and no worktree was provisioned — this is a review-only
-    directive.
+    #{tracker_line}#{review_location_section(checkout)}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
     Steps:
-      1. Read the PR/MR diff via the configured tracker's CLI (`gh pr diff
-         <ref>` for GitHub, `glab mr diff <ref>` for GitLab, `git diff` for
-         the Direct local strategy). Do not check out the branch.
+      1. #{review_diff_instruction(checkout)}
       2. Identify real correctness, security, or contract issues against the
          task's intent. Skip style nits.
       3. Post inline comments for each finding through the same tracker CLI.
@@ -602,5 +600,87 @@ defmodule Arbiter.Worker.PromptBuilder do
 
         arb done
     """
+  end
+
+  # bd-199giy: the review checkout descriptor threaded in by
+  # `Arbiter.Worker.Dispatch` when it managed to provision a throwaway worktree
+  # at the reviewed branch's current `origin` head. `nil` — the pre-bd-199giy
+  # shape, and the fallback whenever provisioning fails — keeps the diff-only
+  # prompt byte-for-byte unchanged.
+  defp review_checkout(opts) do
+    case Keyword.get(opts, :review_checkout) do
+      %{path: path} = checkout when is_binary(path) and path != "" -> checkout
+      _ -> nil
+    end
+  end
+
+  # Where the reviewer is standing, and what it may do there.
+  #
+  # Without a checkout this is the old text: the agent's cwd is the repo's
+  # *shared* local checkout, which is a human contributor's working directory —
+  # hence the "no worktree was provisioned" framing and the "do not check out
+  # the branch" step below.
+  #
+  # With one, the reviewer gets the same deal the external Tier-2 reviewer has
+  # had since bd-6onexk: a disposable, detached worktree at the exact commit
+  # under review, with read-only tool access. The read-only half is enforced in
+  # the spawn (`Dispatch` denies Edit/Write/NotebookEdit), not by this text —
+  # this just tells the reviewer what it is holding.
+  defp review_location_section(nil) do
+    String.trim_trailing("""
+    Your current directory is the repo's local checkout. There is
+    no per-task branch and no worktree was provisioned — this is a review-only
+    directive.
+    """)
+  end
+
+  defp review_location_section(%{path: path} = checkout) do
+    String.trim_trailing("""
+    Your current directory (#{path}) is a
+    throwaway git worktree checked out DETACHED at `#{checkout[:branch]}`
+    head #{checkout[:head_sha]} — the exact commit under review. It is yours alone and is
+    destroyed when this review ends. Read, Grep, Glob and Bash work here; Edit,
+    Write and NotebookEdit are denied, so you cannot modify the code you are
+    reviewing and cannot advance the branch.
+
+    Use it: open the real files at the reviewed commit, grep for call sites the
+    diff never shows, and run the tests against the actual tree. The diff is your
+    entry point, not the limit of what you can check. Report findings only on
+    code the diff actually touches — anything the checkout surfaces outside the
+    diff belongs in your summary prose, not as an inline comment.
+    """)
+  end
+
+  # Step 1 of the review, keyed to what the reviewer actually has in front of
+  # it. Continuation lines carry the 5-space hanging indent the numbered list
+  # uses, since this is interpolated verbatim into the prompt heredoc.
+  defp review_diff_instruction(nil) do
+    String.trim_trailing("""
+    Read the PR/MR diff via the configured tracker's CLI (`gh pr diff
+         <ref>` for GitHub, `glab mr diff <ref>` for GitLab, `git diff` for
+         the Direct local strategy). Do not check out the branch.
+    """)
+  end
+
+  defp review_diff_instruction(%{base_branch: base}) when is_binary(base) and base != "" do
+    String.trim_trailing("""
+    Read the diff under review with `git diff origin/#{base}...HEAD` in this
+         worktree (the tracker CLI — `gh pr diff <ref>` for GitHub, `glab mr
+         diff <ref>` for GitLab — is the fallback if that base ref is
+         unavailable). The commit under review is ALREADY checked out here; do
+         not check out or create any other branch.
+    """)
+  end
+
+  # A checkout with no resolvable base branch: the worktree is still real and
+  # worth exploring, but there is no local ref to diff against, so the tracker
+  # CLI stays the source of the diff.
+  defp review_diff_instruction(%{}) do
+    String.trim_trailing("""
+    Read the diff under review via the configured tracker's CLI (`gh pr
+         diff <ref>` for GitHub, `glab mr diff <ref>` for GitLab). The commit
+         under review is ALREADY checked out here; do not check out or create
+         any other branch.
+    """)
   end
 end

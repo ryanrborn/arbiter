@@ -55,6 +55,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -103,6 +104,7 @@ defmodule Arbiter.Worker.Dispatch do
           machine_pid: pid(),
           driver_pid: pid() | nil,
           worktree_path: String.t() | nil,
+          review_checkout: Checkout.branch_checkout() | nil,
           claude_port: port() | nil
         }
 
@@ -138,7 +140,11 @@ defmodule Arbiter.Worker.Dispatch do
   # `StopReason` and escalate to the coordinator, mirroring the
   # `realign_task_if_orphaned/2` pattern (bd-cgmidt) above.
   defp finish_dispatch(task, worker_pid, worktree_path, opts) do
-    with {:ok, claude_port} <-
+    # `maybe_start_claude/4` hands back the opts it resolved the agent's cwd
+    # with — the seam where a review dispatch's throwaway checkout (bd-199giy)
+    # is provisioned and recorded, so the Driver can tear it down and the
+    # caller can see it.
+    with {:ok, claude_port, opts} <-
            maybe_start_claude(task, worker_pid, worktree_path, opts),
          {:ok, machine_id, machine_pid} <-
            attach_and_start_machine(task, worktree_path, opts),
@@ -161,12 +167,23 @@ defmodule Arbiter.Worker.Dispatch do
          machine_pid: machine_pid,
          driver_pid: driver_pid,
          worktree_path: worktree_path,
+         review_checkout: Keyword.get(opts, :review_checkout),
          claude_port: claude_port
        }}
     else
       {:error, reason} = err ->
+        # A checkout provisioned moments ago has no Driver to reclaim it once
+        # the spawn fails, so tear it down here rather than leak it.
+        Checkout.teardown(review_checkout_path(opts))
         fail_spawned_worker(worker_pid, reason)
         err
+    end
+  end
+
+  defp review_checkout_path(opts) do
+    case Keyword.get(opts, :review_checkout) do
+      %{path: path} when is_binary(path) and path != "" -> path
+      _ -> nil
     end
   end
 
@@ -1325,13 +1342,13 @@ defmodule Arbiter.Worker.Dispatch do
   # or a script instead of the real Claude CLI.
   defp maybe_start_claude(_task, _worker_pid, _worktree_path, opts)
        when not is_list(opts) do
-    {:ok, nil}
+    {:ok, nil, []}
   end
 
   defp maybe_start_claude(%Issue{} = task, worker_pid, worktree_path, opts) do
     case Keyword.get(opts, :start_claude, false) do
       false ->
-        {:ok, nil}
+        {:ok, nil, opts}
 
       true ->
         # Dispatches that provision no branch worktree (task-type audits,
@@ -1342,7 +1359,7 @@ defmodule Arbiter.Worker.Dispatch do
           {:error, reason} ->
             {:error, reason}
 
-          {:ok, path} when is_binary(path) ->
+          {:ok, path, opts} when is_binary(path) ->
             # Inject the per-spawn MCP config (.mcp.json) into the *isolated*
             # worktree so the agent can read its task / mailbox and write
             # completion notes as typed tool calls. Best-effort: never blocks
@@ -1379,9 +1396,11 @@ defmodule Arbiter.Worker.Dispatch do
               # never ticks the Machine, so without this nudge the worker
               # would remain :idle until "arb done" flipped it to :completed.
               _ = Worker.advance(worker_pid, :claude)
-              {:ok, port}
+              {:ok, port, opts}
             else
-              {:error, reason} -> {:error, {:claude_start_failed, reason}}
+              {:error, reason} ->
+                Checkout.teardown(review_checkout_path(opts))
+                {:error, {:claude_start_failed, reason}}
             end
         end
     end
@@ -1407,17 +1426,23 @@ defmodule Arbiter.Worker.Dispatch do
   # month-old tree and false about the repo.
   #
   # So: a task-type dispatch now gets its own detached checkout at
-  # `origin/<target>` (`Worktree.create_detached/3`), and a review dispatch — which
-  # genuinely wants the shared checkout, since it diffs local branches — at least
-  # gets its remote-tracking refs refreshed first. Neither path writes to the
-  # contributor's HEAD, index, or working tree.
+  # `origin/<target>` (`Worktree.create_detached/3`), and a review dispatch — since
+  # bd-199giy — gets its OWN throwaway detached checkout at the reviewed branch's
+  # current `origin` head, falling back to the (refreshed) shared checkout when
+  # that can't be provisioned. Neither path writes to the contributor's HEAD,
+  # index, or working tree.
   #
   # Regular feature/bug/chore dispatches without a worktree still surface
   # `:missing_worktree` rather than silently running from the main checkout.
+  #
+  # Returns the resolved cwd AND the opts it was resolved with: a review
+  # checkout is recorded on them (`:review_checkout`) so the prompt can describe
+  # it, `build_agent_session_opts/4` can harden the spawn's tool access, and the
+  # Driver can tear it down.
   @spec resolve_agent_cwd(Issue.t(), String.t() | nil, keyword()) ::
-          {:ok, String.t()} | {:error, term()}
-  defp resolve_agent_cwd(_task, worktree_path, _opts) when is_binary(worktree_path),
-    do: {:ok, worktree_path}
+          {:ok, String.t(), keyword()} | {:error, term()}
+  defp resolve_agent_cwd(_task, worktree_path, opts) when is_binary(worktree_path),
+    do: {:ok, worktree_path, opts}
 
   defp resolve_agent_cwd(%Issue{issue_type: :task} = task, _nil_worktree, opts) do
     case resolve_repo_path(task, Keyword.get(opts, :repo)) do
@@ -1425,7 +1450,9 @@ defmodule Arbiter.Worker.Dispatch do
         {:error, :missing_worktree}
 
       repo_path when is_binary(repo_path) ->
-        provision_inspect_worktree(task, repo_path, opts)
+        with {:ok, path} <- provision_inspect_worktree(task, repo_path, opts) do
+          {:ok, path, opts}
+        end
     end
   end
 
@@ -1433,14 +1460,72 @@ defmodule Arbiter.Worker.Dispatch do
     with true <- Keyword.get(opts, :review, false),
          repo_path when is_binary(repo_path) <-
            resolve_repo_path(task, Keyword.get(opts, :repo)) do
+      target = resolve_target_branch(task, opts)
+
       # Best-effort: a review that can't reach `origin` is still a useful review
       # of the local branches, and refreshing remote-tracking refs is the only
-      # thing that could have failed — nothing was mutated.
-      _ = Worktree.fetch_origin(repo_path, resolve_target_branch(task, opts))
-      {:ok, repo_path}
+      # thing that could have failed — nothing was mutated. It also gives the
+      # provisioned checkout below a current `origin/<target>` to diff against.
+      _ = Worktree.fetch_origin(repo_path, target)
+
+      case provision_review_checkout(task, repo_path, target) do
+        %{path: path} = checkout ->
+          {:ok, path, Keyword.put(opts, :review_checkout, checkout)}
+
+        nil ->
+          {:ok, repo_path, opts}
+      end
     else
       _ -> {:error, :missing_worktree}
     end
+  end
+
+  # bd-199giy: give the internal reviewer the same fidelity the external Tier-2
+  # reviewer has had since bd-6onexk — a real, disposable checkout at the exact
+  # commit under review, instead of the repo's *shared* local checkout plus a
+  # `gh pr diff`.
+  #
+  # Diff-only review is a strictly weaker review: it cannot open a caller the
+  # diff doesn't show, grep for other uses of a changed function, or run the
+  # test suite against the tree as the branch actually left it. And the shared
+  # checkout it ran from is a human contributor's working directory, sitting on
+  # whatever branch they last touched — so even the file reads it *could* do
+  # were against the wrong tree.
+  #
+  # Best-effort, and deliberately so: this returns `nil` on every failure (no
+  # derivable branch, branch never pushed, no `origin`, git error) and the
+  # caller falls straight back to today's diff-only path. A review that can't
+  # get a worktree is still worth running.
+  defp provision_review_checkout(%Issue{} = task, repo_path, target) do
+    require Logger
+
+    case review_branch(task) do
+      nil ->
+        nil
+
+      branch ->
+        case Checkout.provision_branch(repo_path, branch, prefix: "review") do
+          {:ok, %{path: path, head_sha: sha}} ->
+            %{path: path, branch: branch, head_sha: sha, base_branch: target}
+
+          {:error, reason} ->
+            Logger.info(
+              "Dispatch: no review checkout for task #{task.id} (branch #{branch}): " <>
+                "#{inspect(reason)}; reviewing from #{repo_path} diff-only"
+            )
+
+            nil
+        end
+    end
+  end
+
+  # `BranchNamer.derive/1` raises for an issue with no recognisable type or ref
+  # (a review-only issue minted for an arbitrary PR can be either) — that is a
+  # "no checkout" answer, not a dispatch failure.
+  defp review_branch(%Issue{} = task) do
+    BranchNamer.derive(task)
+  rescue
+    _ -> nil
   end
 
   # An isolated, detached checkout at the tip of `origin/<target>`, at the task's
@@ -1493,6 +1578,36 @@ defmodule Arbiter.Worker.Dispatch do
   # The `:claude_command` opt (used by tests to spawn an echo script
   # instead of the real Claude CLI) bypasses the adapter entirely — it's a
   # raw argv override and the routing policy has nothing to add.
+  @doc """
+  Harden a review dispatch's security policy once the reviewer has a real
+  checkout to stand in (bd-199giy).
+
+  A diff-only reviewer had nothing to write to, so nothing to deny. A
+  worktree-backed one does: it is holding the branch's actual files, and
+  nothing about reviewing needs `Edit`/`Write`/`NotebookEdit`. Denying them
+  makes "you are not the author; do not modify the branch" a property of the
+  spawn rather than a line in a prompt.
+
+  Network stays ON, unlike the external Tier-2 reviewer (`CodeReview.Checks`):
+  this reviewer posts its own inline comments and verdict through `gh`/`glab`,
+  so cutting the network would cut the review's whole output path.
+
+  Public so the posture is assertable without reaching into a spawned
+  session's argv.
+  """
+  @spec review_security_policy(SecurityPolicy.t(), keyword()) :: SecurityPolicy.t()
+  def review_security_policy(%SecurityPolicy{} = policy, opts) do
+    case review_checkout_path(opts) do
+      nil ->
+        policy
+
+      _path ->
+        SecurityPolicy.merge(policy, %{
+          "permissions" => %{"deny" => ["Edit", "Write", "NotebookEdit"]}
+        })
+    end
+  end
+
   defp build_agent_session_opts(%Issue{} = task, worker_pid, worktree_path, opts) do
     base = [owner: worker_pid, worktree_path: worktree_path]
 
@@ -1524,7 +1639,9 @@ defmodule Arbiter.Worker.Dispatch do
         # bakes the right permission-mode + deny/allow into the argv — no
         # inheritance of the operator's ~/.claude (bd-9u10op).
         policy =
-          SecurityPolicy.resolve(workspace, security_override(opts), Keyword.get(opts, :repo))
+          workspace
+          |> SecurityPolicy.resolve(security_override(opts), Keyword.get(opts, :repo))
+          |> review_security_policy(opts)
 
         agent_opts =
           agent_opts_from_choice(choice) ++
@@ -2019,6 +2136,10 @@ defmodule Arbiter.Worker.Dispatch do
             machine_pid: machine_pid,
             worktree_path: worktree_path,
             cleanup_worktree: Keyword.get(opts, :cleanup_worktree, true),
+            # bd-199giy: the reviewer's throwaway checkout, if one was
+            # provisioned. The Driver owns its teardown because it is the
+            # component that outlives the agent session.
+            review_checkout_path: review_checkout_path(opts),
             claude_driven: claude_driven
           ]
           |> maybe_put_opt(opts, :interval_ms)

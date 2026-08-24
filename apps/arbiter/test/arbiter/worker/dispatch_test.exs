@@ -2718,6 +2718,197 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
+  describe "review dispatch worktree checkout (bd-199giy)" do
+    @env_key :repo_paths
+
+    # A source checkout with a real `origin` (a bare repo on disk) and the
+    # task's own branch pushed to it — the production shape of a review
+    # dispatch: the implementer pushed its branch, and the coordinator's
+    # shared checkout may never have fetched it.
+    setup do
+      tmp =
+        Path.join(System.tmp_dir!(), "dispatch-review-wt-#{:erlang.unique_integer([:positive])}")
+
+      remote = Path.join(tmp, "remote.git")
+      repo = Path.join(tmp, "source")
+      File.mkdir_p!(tmp)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+
+      for {k, v} <- [
+            {"user.email", "test@example.com"},
+            {"user.name", "Test User"},
+            {"commit.gpgsign", "false"}
+          ],
+          do: {_, 0} = System.cmd("git", ["-C", repo, "config", k, v])
+
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "-u", "origin", "main"])
+
+      prior = Application.get_env(:arbiter, @env_key)
+      Application.put_env(:arbiter, @env_key, %{"rv/repo" => repo})
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, @env_key, prior),
+          else: Application.delete_env(:arbiter, @env_key)
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{repo: repo, remote: remote, tmp: tmp}
+    end
+
+    # Push `branch` (with one extra commit) to origin, then rewind the source
+    # checkout to main so the branch exists ONLY on the remote.
+    defp push_task_branch(repo, branch) do
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", branch])
+      File.write!(Path.join(repo, "feature.txt"), "work\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "feature.txt"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "the work"])
+      {sha, 0} = System.cmd("git", ["-C", repo, "rev-parse", "HEAD"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", branch])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", "-q", "-D", branch])
+      String.trim(sha)
+    end
+
+    test "provisions a detached worktree at the reviewed branch's origin head",
+         %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "worktree review", workspace_id: ws.id})
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      head_sha = push_task_branch(repo, branch)
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "rv/repo",
+          review: true,
+          start_claude: true,
+          start_driver: false,
+          claude_command: ["true"]
+        )
+
+      assert %{path: path, branch: ^branch, head_sha: ^head_sha, base_branch: "main"} =
+               result.review_checkout
+
+      on_exit(fn -> Arbiter.Reviews.Checkout.teardown(path) end)
+
+      # A real, separate directory — not the shared checkout.
+      assert File.dir?(path)
+      refute path == repo
+      assert File.exists?(Path.join(path, "feature.txt"))
+
+      {out, 0} = System.cmd("git", ["-C", path, "rev-parse", "HEAD"])
+      assert String.trim(out) == head_sha
+
+      # Detached, so the implementer's own worktree keeps the branch.
+      {_, code} = System.cmd("git", ["-C", path, "symbolic-ref", "-q", "HEAD"])
+      assert code != 0
+
+      # No per-task branch worktree was provisioned — the review checkout is
+      # its own thing, not the dispatch worktree.
+      assert result.worktree_path == nil
+    end
+
+    test "the review prompt points at the provisioned checkout", %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "prompt points at checkout", workspace_id: ws.id})
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      _sha = push_task_branch(repo, branch)
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "rv/repo",
+          review: true,
+          start_claude: true,
+          start_driver: false,
+          claude_command: ["true"]
+        )
+
+      checkout = result.review_checkout
+      on_exit(fn -> Arbiter.Reviews.Checkout.teardown(checkout.path) end)
+
+      prompt = Dispatch.prompt_for_task(task, review: true, review_checkout: checkout)
+
+      assert prompt =~ checkout.path
+      assert prompt =~ "throwaway git worktree checked out DETACHED"
+      assert prompt =~ "git diff origin/main...HEAD"
+      refute prompt =~ "Do not check out the branch."
+      refute prompt =~ "no worktree was provisioned"
+
+      # The kill-discipline guidance carries over: a worktree-backed reviewer
+      # can boot servers again.
+      assert prompt =~ "NEVER use `pkill`"
+    end
+
+    test "falls back to the shared checkout when the branch was never pushed",
+         %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "never pushed", workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "rv/repo",
+          review: true,
+          start_claude: true,
+          start_driver: false,
+          claude_command: ["true"]
+        )
+
+      # Provisioning failed (no such branch on origin) — the review still ran.
+      assert result.review_checkout == nil
+      assert is_port(result.claude_port)
+      assert File.dir?(repo)
+    end
+
+    test "the driver tears the review checkout down when the worker finishes",
+         %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "teardown me", workspace_id: ws.id})
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      _sha = push_task_branch(repo, branch)
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "rv/repo",
+          review: true,
+          start_claude: true,
+          claude_command: ["true"],
+          interval_ms: 1
+        )
+
+      path = result.review_checkout.path
+      assert File.dir?(path)
+
+      ref = Process.monitor(result.driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}, 10_000
+
+      refute File.dir?(path)
+    end
+  end
+
+  describe "review security posture (bd-199giy)" do
+    test "denies the mutating tools once the reviewer has a real checkout" do
+      base = Arbiter.Agents.SecurityPolicy.base()
+
+      hardened = Dispatch.review_security_policy(base, review_checkout: %{path: "/tmp/wt"})
+
+      assert "Edit" in hardened.permissions.deny
+      assert "Write" in hardened.permissions.deny
+      assert "NotebookEdit" in hardened.permissions.deny
+      # The reviewer still needs the network to post its review via `gh`/`glab`.
+      assert hardened.sandbox.network == true
+    end
+
+    test "leaves the policy untouched for a diff-only review" do
+      base = Arbiter.Agents.SecurityPolicy.base()
+
+      assert Dispatch.review_security_policy(base, []) == base
+      assert Dispatch.review_security_policy(base, review_checkout: nil) == base
+    end
+  end
+
   describe "real-work repo resolution (bd-1ziw04)" do
     # Tests verify that start_claude: true dispatches fail loudly when no repo
     # can be resolved, and auto-select when exactly one repo is available.
