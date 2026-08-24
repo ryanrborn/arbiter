@@ -838,6 +838,7 @@ defmodule ArbiterWeb.BoardLive do
                     title={card.title || card.id}
                     accent="live"
                     activity={card.activity}
+                    difficulty={card.difficulty}
                     footer={card.step && to_string(card.step)}
                     draggable="true"
                     data-card={card.id}
