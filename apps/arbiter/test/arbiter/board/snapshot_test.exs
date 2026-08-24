@@ -413,12 +413,14 @@ defmodule Arbiter.Board.SnapshotTest do
     end
 
     test "a ReviewGate fix-up round folds into the original issue's card, not a second one" do
+      review_id = Arbiter.Worker.ReviewGate.reviewer_task_id("bd-a")
+
       board =
         derive(
           issues: [issue("bd-a", %{status: :in_progress})],
           workers: [
             worker("bd-a", :awaiting_review_gate),
-            worker("bd-a#impl2", :running, %{meta: %{role: :implementer, revises: "bd-a"}})
+            worker(review_id <> "#impl2", :running, %{meta: %{role: :implementer, revises: "bd-a"}})
           ]
         )
 
@@ -427,11 +429,27 @@ defmodule Arbiter.Board.SnapshotTest do
     end
 
     test "a round-2+ reviewer pass shows a round-aware label on the author's card" do
+      review_id = Arbiter.Worker.ReviewGate.reviewer_task_id("bd-a")
+
       board =
         derive(
           workers: [
             worker("bd-a", :awaiting_review_gate),
-            worker("bd-a#r2", :running, %{meta: %{role: :reviewer, reviews: "bd-a"}})
+            worker(review_id <> "#r2", :running, %{meta: %{role: :reviewer, reviews: "bd-a"}})
+          ]
+        )
+
+      assert [%{id: "bd-a", activity: "round 2 review"}] = board.running
+    end
+
+    test "a re-prompted round-2 reviewer pass still resolves the round label through the chain" do
+      review_id = Arbiter.Worker.ReviewGate.reviewer_task_id("bd-a")
+
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting_review_gate),
+            worker(review_id <> "#r2#v2", :running, %{meta: %{role: :reviewer, reviews: "bd-a"}})
           ]
         )
 

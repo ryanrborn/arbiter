@@ -479,10 +479,12 @@ defmodule Arbiter.Board.Snapshot do
 
   defp activity(worker, _gate_worker), do: live_label(worker) || "working"
 
-  # A reviewer/implementer's synthetic id is always `<base>#<suffix>`
-  # (`Arbiter.Worker.ReviewGate.base_task_id/1`); recovering the base id here
-  # is how its card folds onto the original issue's card instead of rendering
-  # a second one titled with the raw suffixed id.
+  # A reviewer/implementer's synthetic id is `<base>#<suffix>` where suffix
+  # may itself be a chain (e.g. `#review#impl2`, `#review#r2#v2`) —
+  # `Arbiter.Worker.ReviewGate.base_task_id/1` recovers the base id
+  # regardless of chain depth; recovering it here is how its card folds onto
+  # the original issue's card instead of rendering a second one titled with
+  # the raw suffixed id.
   defp gate_author(worker), do: reviews_task(worker) || revises_task(worker)
 
   # Human-readable round label for a fix-up round actively in progress: a
@@ -490,15 +492,19 @@ defmodule Arbiter.Board.Snapshot do
   # (`#impl<N>`). A plain first-round reviewer (`#review`, or a same-round
   # re-prompt `#v<N>`) has no fix-up in progress yet, so it renders as before
   # ("in review") rather than a manufactured "round 1 review".
+  #
+  # ReviewGate's real synthetic ids chain suffixes onto `#review`
+  # (`<base>#review#impl<N>`, `<base>#review#r<N>`, possibly followed by a
+  # re-prompt `#v<N>`), so the round marker is not necessarily the first
+  # `#`-segment after the base id — it's whichever segment in the chain
+  # matches `#impl<N>`/`#r<N>`, found by scanning from the end.
   defp round_label(gate_task_id, base_id) do
-    prefix = base_id <> "#"
-
-    if String.starts_with?(gate_task_id, prefix) do
+    if Arbiter.Worker.ReviewGate.base_task_id(gate_task_id) == base_id do
       gate_task_id
-      |> String.trim_leading(prefix)
       |> String.split("#")
-      |> List.first()
-      |> parse_round_suffix()
+      |> Enum.drop(1)
+      |> Enum.reverse()
+      |> Enum.find_value(&parse_round_suffix/1)
     end
   end
 
