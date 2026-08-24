@@ -420,7 +420,9 @@ defmodule Arbiter.Board.SnapshotTest do
           issues: [issue("bd-a", %{status: :in_progress})],
           workers: [
             worker("bd-a", :awaiting_review_gate),
-            worker(review_id <> "#impl2", :running, %{meta: %{role: :implementer, revises: "bd-a"}})
+            worker(review_id <> "#impl2", :running, %{
+              meta: %{role: :implementer, revises: "bd-a"}
+            })
           ]
         )
 
