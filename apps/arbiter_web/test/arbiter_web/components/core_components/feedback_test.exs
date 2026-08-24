@@ -18,7 +18,8 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
       assert html =~ "var(--arb-live)"
       assert html =~ "arb-ping"
       assert html =~ "stale"
-      assert html =~ "phx-disconnected"
+      assert html =~ ~r/id="lb-live"[^>]*phx-disconnected/
+      refute html =~ ~r/id="lb-stale"[^>]*phx-disconnected/
       refute html =~ "phx-connected"
       # Starts on the connected assumption: live visible, stale hidden.
       assert html =~ ~r/id="lb-stale"[^>]*\shidden/

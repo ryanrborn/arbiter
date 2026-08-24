@@ -103,9 +103,20 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   `phx-connected` firing on join is removed, and `live` is `required: true`
   so a future `<.live_badge id="x" />` call site cannot silently reproduce
   this bug. The one piece of the DOM mechanism kept in use —
-  `phx-disconnected` on the `live={true}` branch (see below) — mirrors the
-  disconnect toasts' pattern, which only needs the reconnect direction, not
-  the join direction that was never confirmed to work.
+  `phx-disconnected={hide_live(@id)}` on the `-live` span in the `live={true}`
+  branch (see below) — mirrors the disconnect toasts' pattern, which only
+  needs the reconnect direction, not the join direction that was never
+  confirmed to work.
+
+  A round-2 review caught that the `-stale` span used to *also* carry
+  `phx-disconnected={show_live(@id)}` — the mirror-image command. LiveView's
+  JS client runs every element matching `[phx-disconnected]` in document
+  order with no visibility filter (`view.js` `execAll` /
+  `dom.js`'s plain `querySelectorAll`), so both handlers fired on a genuine
+  disconnect and the second one undid the first, leaving the badge reading
+  "live" through an outage. That stale-span attribute has been deleted;
+  `hide_live(@id)` on the `-live` span already toggles both spans, so nothing
+  else needs to carry the binding.
   """
   attr :id, :string, default: "live-badge"
   attr :live, :boolean, required: true, doc: "assign-driven state; see moduledoc root cause note"
@@ -117,7 +128,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       <span id={"#{@id}-live"} phx-disconnected={hide_live(@id)}>
         {live_badge_live(%{})}
       </span>
-      <span id={"#{@id}-stale"} hidden phx-disconnected={show_live(@id)}>
+      <span id={"#{@id}-stale"} hidden>
         {live_badge_stale(%{})}
       </span>
     </span>
@@ -129,13 +140,6 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
     <span id={@id} class={@class}>{live_badge_stale(%{})}</span>
     """
   end
-
-  defp show_live(id),
-    do:
-      JS.show(to: "##{id}-live", display: "inline-flex")
-      |> JS.remove_attribute("hidden", to: "##{id}-live")
-      |> JS.hide(to: "##{id}-stale")
-      |> JS.set_attribute({"hidden", ""}, to: "##{id}-stale")
 
   defp hide_live(id),
     do:
