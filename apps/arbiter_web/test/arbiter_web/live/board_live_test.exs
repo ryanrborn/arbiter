@@ -57,7 +57,15 @@ defmodule ArbiterWeb.BoardLiveTest do
     {:ok, ws: ws}
   end
 
+  # bd-b5wyjd: a freshly created issue is unrefined, i.e. Backlog. Almost every
+  # test here is about a card that has already been refined into the queue, so
+  # this helper promotes; `backlog_issue/3` is the un-promoted one.
   defp issue(ws, title, attrs \\ %{}) do
+    {:ok, issue} = Ash.update(backlog_issue(ws, title, attrs), %{}, action: :promote_to_ready)
+    issue
+  end
+
+  defp backlog_issue(ws, title, attrs \\ %{}) do
     {:ok, issue} = Ash.create(Issue, Map.merge(%{title: title, workspace_id: ws.id}, attrs))
     issue
   end
@@ -102,14 +110,16 @@ defmodule ArbiterWeb.BoardLiveTest do
   end
 
   describe "columns" do
-    test "renders the four stage columns", %{conn: conn} do
+    test "renders the five stage columns", %{conn: conn} do
       {:ok, view, html} = live(conn, "/")
 
+      assert html =~ "Backlog"
       assert html =~ "Ready"
       assert html =~ "Running"
       assert html =~ "Waiting"
       assert html =~ "Closed today"
 
+      assert has_element?(view, "#board-column-backlog")
       assert has_element?(view, "#board-column-waiting")
       # The two columns Waiting replaced are gone, not renamed alongside it.
       # ("Merge queue" as a phrase survives in the top nav, so match the
@@ -136,6 +146,57 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(view, ~s(#board-column-closed [id="card-#{task.id}"]))
       refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
+    end
+  end
+
+  # bd-b5wyjd — Backlog is where work is born, and the promote button on the
+  # detail page is the only door out of it.
+  describe "the Backlog column" do
+    test "a brand-new issue lands in Backlog, not Ready", %{conn: conn, ws: ws} do
+      task = backlog_issue(ws, "half an idea")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s(#board-column-backlog [id="card-#{task.id}"]))
+      refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
+    end
+
+    test "promoting moves the card into Ready", %{conn: conn, ws: ws} do
+      task = backlog_issue(ws, "now refined")
+      {:ok, _} = Ash.update(task, %{}, action: :promote_to_ready)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
+      refute has_element?(view, ~s(#board-column-backlog [id="card-#{task.id}"]))
+    end
+
+    test "an unrefined card never claims the head of the queue", %{conn: conn, ws: ws} do
+      backlog_issue(ws, "unrefined")
+
+      {:ok, _view, html} = live(conn, "/")
+
+      refute html =~ "next up — dispatching"
+    end
+
+    test "Backlog is newest-first", %{conn: conn, ws: ws} do
+      first = backlog_issue(ws, "thought one")
+      second = backlog_issue(ws, "thought two")
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert board_position(html, second.id) < board_position(html, first.id)
+    end
+
+    test "the filter box reaches Backlog like every other column", %{conn: conn, ws: ws} do
+      keep = backlog_issue(ws, "caching strategy")
+      drop = backlog_issue(ws, "unrelated")
+
+      {:ok, view, _html} = live(conn, "/")
+      html = render_change(view, "filter", %{"filter" => "caching"})
+
+      assert html =~ keep.id
+      refute html =~ drop.id
     end
   end
 

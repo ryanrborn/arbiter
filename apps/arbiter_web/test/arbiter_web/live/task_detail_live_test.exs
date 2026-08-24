@@ -345,6 +345,63 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
   end
 
+  # bd-b5wyjd — the one door out of Backlog. Deliberately not a checklist gate:
+  # the button is always clickable, whatever fields are still empty.
+  describe "promote to Ready" do
+    test "an unrefined task offers the promote action", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "raw", workspace_id: ws.id})
+      refute task.refined
+
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "Move to Ready"
+      assert has_element?(view, ~s(button[phx-click="promote_to_ready"]))
+    end
+
+    test "clicking it refines the task and the action goes away", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "refine me", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.refined
+      assert reloaded.status == :open
+
+      refute html =~ ~s(phx-click="promote_to_ready")
+    end
+
+    test "an already-refined task offers no promote action", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "already refined", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{}, action: :promote_to_ready)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ ~s(phx-click="promote_to_ready")
+    end
+
+    test "a closed task offers no promote action, refined or not", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "dead idea", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ ~s(phx-click="promote_to_ready")
+    end
+
+    test "an empty task still promotes — Backlog is not a completeness gate",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "no description, no acceptance", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.refined
+    end
+  end
+
   describe "dispatch" do
     test "no dispatch action while a worker is already running", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "busy", workspace_id: ws.id})
