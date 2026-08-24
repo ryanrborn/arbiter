@@ -69,10 +69,49 @@ defmodule ArbiterWeb.UsageLiveTest do
     assert html =~ reworked.id
   end
 
+  test "rework metrics collapse ReviewGate synthetic task ids to the base task", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = new_issue!(ws, "Probe task two")
+    now = DateTime.utc_now()
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      step: :work,
+      cost_usd: 2.0,
+      occurred_at: DateTime.add(now, -20, :minute)
+    })
+
+    event!(%{
+      task_id: "#{task.id}#review",
+      workspace_id: ws.id,
+      step: :work,
+      cost_usd: 1.0,
+      occurred_at: DateTime.add(now, -10, :minute)
+    })
+
+    event!(%{
+      task_id: "#{task.id}#review",
+      workspace_id: ws.id,
+      step: :review,
+      cost_usd: 0.5,
+      occurred_at: now
+    })
+
+    {:ok, _view, html} = live(conn, ~p"/usage")
+
+    assert html =~ "$3.50"
+    assert [_] = Regex.scan(~r/Probe task two/, html)
+    assert html =~ "$1.00"
+    refute html =~ "$2.00"
+  end
+
   test "switching to the By model tab renders per-model bars", %{conn: conn, ws: ws} do
     task = new_issue!(ws, "Some task")
-    event!(%{task_id: task.id, workspace_id: ws.id, model: "sonnet", cost_usd: 1.0})
-    event!(%{task_id: task.id, workspace_id: ws.id, model: "opus", cost_usd: 0.5})
+    event!(%{task_id: task.id, workspace_id: ws.id, model: "claude-sonnet-4-6", cost_usd: 1.0})
+    event!(%{task_id: task.id, workspace_id: ws.id, model: "claude-opus-4-6", cost_usd: 0.5})
 
     {:ok, view, _html} = live(conn, ~p"/usage")
 
@@ -81,8 +120,8 @@ defmodule ArbiterWeb.UsageLiveTest do
       |> element("button[phx-value-tab=by_model]")
       |> render_click()
 
-    assert html =~ "sonnet"
-    assert html =~ "opus"
+    assert html =~ "Sonnet"
+    assert html =~ "Opus"
   end
 
   test "switching to the By repo tab renders per-repo bars", %{conn: conn, ws: ws} do

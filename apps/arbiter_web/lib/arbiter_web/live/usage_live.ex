@@ -25,6 +25,7 @@ defmodule ArbiterWeb.UsageLive do
   use ArbiterWeb, :live_view
   import ArbiterWeb.QuotaHelpers
 
+  alias Arbiter.Agents.ModelDisplay
   alias Arbiter.Tasks.Issue
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
@@ -68,22 +69,50 @@ defmodule ArbiterWeb.UsageLive do
     grand_cost = sum_cost(task_rollup)
     grand_tokens = sum_tokens(task_rollup)
     total_sessions = sum_rows(task_rollup)
+    base_ids = base_ids(task_rollup)
 
-    rework_buckets = rework_buckets(task_rollup, work_sessions)
+    rework_buckets = rework_buckets(base_ids, work_sessions)
     rework_task_count = rework_buckets.two + rework_buckets.three_plus
-    rework_extra_cost = rework_extra_cost(task_rollup, work_sessions)
+    rework_extra_cost = rework_extra_cost(base_ids, work_sessions)
 
     socket
     |> assign(:grand_cost, grand_cost)
     |> assign(:grand_tokens, grand_tokens)
     |> assign(:total_sessions, total_sessions)
-    |> assign(:total_tasks, length(task_rollup))
+    |> assign(:total_tasks, length(base_ids))
     |> assign(:rework_task_count, rework_task_count)
     |> assign(:rework_extra_cost, rework_extra_cost)
     |> assign(:rework_buckets, rework_buckets)
     |> assign(:by_task_rows, build_by_task_rows(task_rollup, work_sessions, titles))
-    |> assign(:model_bars, bar_rows(model_rollup, grand_cost, &model_hue/2))
-    |> assign(:repo_bars, bar_rows(repo_rollup, grand_cost, &repo_hue/2))
+    |> assign(
+      :model_bars,
+      bar_rows(model_rollup, grand_cost, &model_hue/2, &ModelDisplay.short/1)
+    )
+    |> assign(:repo_bars, bar_rows(repo_rollup, grand_cost, &repo_hue/2, &to_string/1))
+    |> assign_overage()
+  end
+
+  # Overage-spend indicator (bd-7cd38f): when the Claude quota snapshot shows
+  # the default workspace is dispatching past the plan cap (`:continue`
+  # mode), surface the windowed overage spend in the Rate limits panel.
+  # Sourced from the same windowed `Usage.summarize/1` sum the gate uses for
+  # the alert threshold.
+  defp assign_overage(socket) do
+    quota = Enum.find(socket.assigns[:quotas] || [], &(&1.provider == "claude"))
+    ws_id = socket.assigns[:_quota_workspace_id]
+
+    {spend, in_overage?} =
+      case {quota, ws_id} do
+        {%{overage_status: "in_overage"} = q, ws} when is_binary(ws) ->
+          {Arbiter.Quota.Overage.windowed_spend(%{id: ws}, q), true}
+
+        _ ->
+          {0.0, false}
+      end
+
+    socket
+    |> assign(:overage_spend, spend)
+    |> assign(:in_overage, in_overage?)
   end
 
   defp summarize!(opts) do
@@ -147,30 +176,38 @@ defmodule ArbiterWeb.UsageLive do
     _ -> %{}
   end
 
+  # Reviewer/implementer sessions write suffixed task ids (`bd-x#review`,
+  # `bd-x#review#impl1`), so `task_rollup` (grouped on the raw task_id) has
+  # one row per synthetic id for what is really a single task. Collapse to
+  # unique base ids before counting tasks or summing rework — otherwise one
+  # real task is counted once per synthetic row.
+  defp base_ids(task_rollup), do: task_rollup |> Enum.map(&base_task_id(&1.group)) |> Enum.uniq()
+
   defp build_by_task_rows(task_rollup, work_sessions, titles) do
     task_rollup
-    |> Enum.take(20)
-    |> Enum.map(fn row ->
-      task_id = to_string(row.group)
-      base_id = base_task_id(task_id)
+    |> Enum.group_by(&base_task_id(&1.group))
+    |> Enum.map(fn {base_id, rows} ->
       ws = Map.get(work_sessions, base_id, %{sessions: 0, extra_cost: 0.0})
 
       %{
-        task_id: task_id,
+        task_id: base_id,
         title: Map.get(titles, base_id, "—"),
         sessions: ws.sessions,
         extra_cost: ws.extra_cost,
-        tokens: (row.tokens_in || 0) + (row.tokens_out || 0),
-        cost_usd: row.total_cost_usd
+        tokens:
+          Enum.reduce(rows, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end),
+        cost_usd: Enum.reduce(rows, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
       }
     end)
+    |> Enum.sort_by(&(-&1.cost_usd))
+    |> Enum.take(20)
   end
 
-  defp rework_buckets(task_rollup, work_sessions) do
+  defp rework_buckets(base_ids, work_sessions) do
     counts =
-      task_rollup
-      |> Enum.map(fn row ->
-        Map.get(work_sessions, base_task_id(row.group), %{sessions: 1}).sessions
+      base_ids
+      |> Enum.map(fn base_id ->
+        Map.get(work_sessions, base_id, %{sessions: 1}).sessions
       end)
       |> Enum.frequencies_by(fn
         n when n <= 1 -> :one
@@ -185,31 +222,32 @@ defmodule ArbiterWeb.UsageLive do
     }
   end
 
-  defp rework_extra_cost(task_rollup, work_sessions) do
-    task_rollup
-    |> Enum.reduce(0.0, fn row, acc ->
-      acc + Map.get(work_sessions, base_task_id(row.group), %{extra_cost: 0.0}).extra_cost
+  defp rework_extra_cost(base_ids, work_sessions) do
+    base_ids
+    |> Enum.reduce(0.0, fn base_id, acc ->
+      acc + Map.get(work_sessions, base_id, %{extra_cost: 0.0}).extra_cost
     end)
   end
 
-  defp bar_rows(rollup, total_cost, hue_fn) do
+  defp bar_rows(rollup, total_cost, hue_fn, label_fn) do
     rollup
     |> Enum.with_index()
     |> Enum.map(fn {row, index} ->
       pct = if total_cost > 0, do: round(row.total_cost_usd / total_cost * 100), else: 0
+      label = label_fn.(to_string(row.group))
 
       %{
-        label: to_string(row.group),
+        label: label,
         value: format_usd(row.total_cost_usd),
         pct: pct,
-        hue: hue_fn.(row.group, index)
+        hue: hue_fn.(label, index)
       }
     end)
   end
 
-  defp model_hue("sonnet", _index), do: "var(--arb-live)"
-  defp model_hue("opus", _index), do: "var(--arb-proposal)"
-  defp model_hue("haiku", _index), do: "var(--arb-info)"
+  defp model_hue("Sonnet", _index), do: "var(--arb-live)"
+  defp model_hue("Opus", _index), do: "var(--arb-proposal)"
+  defp model_hue("Haiku", _index), do: "var(--arb-info)"
   defp model_hue(_model, _index), do: "var(--arb-done)"
 
   defp repo_hue(_repo, 0), do: "var(--arb-live)"
@@ -260,7 +298,7 @@ defmodule ArbiterWeb.UsageLive do
         <Domain.index_header
           icon="hero-clock"
           title="Usage"
-          subtitle="Actual spend over the last 30 days from the usage ledger. Rework is the number to watch — extra sessions on one task."
+          subtitle={"Actual spend over the #{since_label(@range)} from the usage ledger. Rework is the number to watch — extra sessions on one task."}
         >
           <:actions>
             <div class="flex items-center gap-3">
@@ -292,7 +330,7 @@ defmodule ArbiterWeb.UsageLive do
         </div>
 
         <div class="grid grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
-          <.panel title="Spend" meta="by task">
+          <.panel title="Spend" meta={tab_meta(@tab)}>
             <Navigation.filter_tabs
               tabs={[
                 %{label: "By task", value: "by_task"},
@@ -304,7 +342,11 @@ defmodule ArbiterWeb.UsageLive do
               class="mb-3"
             />
 
-            <Data.data_table :if={@tab == "by_task"} id="usage-by-task" rows={@by_task_rows}>
+            <Data.data_table
+              :if={@tab == "by_task" && @by_task_rows != []}
+              id="usage-by-task"
+              rows={@by_task_rows}
+            >
               <:col :let={row} label="task" width="84px">{row.task_id}</:col>
               <:col :let={row} label="title" mono={false}>{row.title}</:col>
               <:col :let={row} label="sessions" width="70px" align="right">
@@ -334,6 +376,9 @@ defmodule ArbiterWeb.UsageLive do
                 {format_usd(row.cost_usd)}
               </:col>
             </Data.data_table>
+            <Feedback.empty_state :if={@tab == "by_task" && @by_task_rows == []} icon={nil}>
+              No usage events yet.
+            </Feedback.empty_state>
 
             <div :if={@tab == "by_model"} class="flex flex-col gap-[10px]">
               <.usage_bar
@@ -395,6 +440,17 @@ defmodule ArbiterWeb.UsageLive do
                 <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
                   The hairline is elapsed time. Bar past the line means you are burning faster than the window.
                 </p>
+                <p
+                  :if={@in_overage}
+                  id="overage-indicator"
+                  class="m-0 text-[11.5px] leading-[1.55] text-[var(--arb-fail)]"
+                >
+                  Paid overage active — approximately
+                  <span class="font-[family-name:var(--font-mono)] font-semibold">
+                    {format_usd(@overage_spend)}
+                  </span>
+                  spent this 5h window past the plan cap.
+                </p>
               </div>
             </.panel>
 
@@ -419,7 +475,7 @@ defmodule ArbiterWeb.UsageLive do
                   hue="var(--arb-fail)"
                 />
                 <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
-                  Extra sessions cost {format_usd(@rework_extra_cost)} this month — the loop pass reads this to propose routing changes.
+                  Extra sessions cost {format_usd(@rework_extra_cost)} over the {since_label(@range)} — the loop pass reads this to propose routing changes.
                 </p>
               </div>
             </.panel>
@@ -440,7 +496,10 @@ defmodule ArbiterWeb.UsageLive do
   defp usage_bar(assigns) do
     ~H"""
     <div class="flex items-center gap-[10px]">
-      <span class="w-[74px] shrink-0 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]">
+      <span
+        class="w-[74px] shrink-0 truncate text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
+        title={@label}
+      >
         {@label}
       </span>
       <span class="relative flex-1 h-[8px] rounded-[var(--radius-pill)] bg-[var(--arb-done-wash)] overflow-hidden">
@@ -459,6 +518,10 @@ defmodule ArbiterWeb.UsageLive do
   defp since_label("7d"), do: "last 7 days"
   defp since_label("30d"), do: "last 30 days"
   defp since_label(_), do: "all time"
+
+  defp tab_meta("by_task"), do: "by task"
+  defp tab_meta("by_model"), do: "by model"
+  defp tab_meta("by_repo"), do: "by repo"
 
   defp bucket_pct(_count, 0), do: 0
   defp bucket_pct(count, total), do: round(count / total * 100)

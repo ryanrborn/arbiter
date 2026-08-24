@@ -187,6 +187,8 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
   Columns without `width` share the remaining space equally (`minmax(0,1fr)`);
   give the one free-text column (e.g. `title`) no width so it absorbs the rest.
+  Cells truncate to a single ellipsised line by default — pass `wrap` on a
+  `:col` slot for text that should wrap instead (e.g. a detail column).
 
   ## Examples
 
@@ -205,6 +207,9 @@ defmodule ArbiterWeb.CoreComponents.Data do
     attr :width, :string, doc: ~s(CSS width, e.g. "84px" — omit for the flexible column)
     attr :align, :string, doc: ~s(pass "right" for numeric columns; defaults left)
     attr :mono, :boolean, doc: "defaults true — pass false for prose columns like title"
+
+    attr :wrap, :boolean,
+      doc: "defaults false (truncate + ellipsis) — pass true to wrap long text instead"
   end
 
   def data_table(assigns) do
@@ -215,10 +220,11 @@ defmodule ArbiterWeb.CoreComponents.Data do
       )
 
     ~H"""
-    <div id={@id} class={["w-full", @class]}>
+    <div id={@id} class={["w-full", @class]} role="table">
       <div
         class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
         style={"grid-template-columns: #{@template_columns};"}
+        role="row"
       >
         <span
           :for={col <- @col}
@@ -226,6 +232,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
             "text-[10.5px] uppercase tracking-[0.06em] font-[family-name:var(--font-mono)] text-[var(--text-label)]",
             data_table_align_class(col)
           ]}
+          role="columnheader"
         >
           {col[:label]}
         </span>
@@ -237,15 +244,18 @@ defmodule ArbiterWeb.CoreComponents.Data do
           index != @last_index && "border-b border-[var(--arb-line-soft)]"
         ]}
         style={"grid-template-columns: #{@template_columns};"}
+        role="row"
       >
         <span
           :for={col <- @col}
           class={[
-            "text-[11.5px] truncate",
+            "text-[11.5px]",
+            if(col[:wrap], do: "break-words", else: "truncate"),
             data_table_mono?(col) && "font-[family-name:var(--font-mono)] tabular-nums",
             !data_table_mono?(col) && "text-[var(--text-body)]",
             data_table_align_class(col)
           ]}
+          role="cell"
         >
           {render_slot(col, row)}
         </span>
