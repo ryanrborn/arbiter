@@ -168,6 +168,31 @@ defmodule Arbiter.Quota do
   def provider_code(provider) when is_binary(provider), do: Map.get(@provider_codes, provider)
   def provider_code(_), do: nil
 
+  @doc """
+  Best-effort resolution of the quota provider a workspace's dispatches run
+  on absent a per-dispatch override — the workspace's default agent provider
+  (`Arbiter.Agents.for_workspace/1`), as an atom.
+
+  Shared by the Conductor's cap-clamp (`Arbiter.Workflows.QuotaGate.Default`)
+  and the board's dispatch gate (`Arbiter.Board.Snapshot.quota_hold/1`,
+  bd-5j6nmn) so both read the same provider's snapshot for a given
+  workspace. Any load failure or unresolvable id falls back to `:claude`
+  (the historical default).
+  """
+  @spec default_provider(String.t() | nil) :: atom()
+  def default_provider(workspace_id) when is_binary(workspace_id) and workspace_id != "" do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, ws} -> String.to_existing_atom(Arbiter.Agents.for_workspace(ws).provider())
+      _ -> :claude
+    end
+  rescue
+    _ -> :claude
+  catch
+    :exit, _ -> :claude
+  end
+
+  def default_provider(_), do: :claude
+
   # ---- capture -----------------------------------------------------------
 
   @doc """

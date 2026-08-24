@@ -307,6 +307,13 @@ defmodule Arbiter.Board.Snapshot do
   one that has crossed the throttle threshold ("we chose to stop here"),
   because the operator's next move differs: wait for the reset, or raise the
   ceiling.
+
+  Reads the workspace's default agent provider's snapshot
+  (`Arbiter.Quota.default_provider/1`) and defers the over-cap decision to
+  `Arbiter.Quota.Gate.over_cap?/2` — the same shared implementation the
+  Conductor's `Arbiter.Workflows.QuotaGate.Default` and the `dispatch/2`
+  quota seam both use (bd-5j6nmn), so Autopilot's one-per-tick promotion gate
+  and the Conductor's per-drain cap-clamp agree on the same underlying data.
   """
   @spec quota_hold(String.t() | nil) :: Scheduler.quota()
   def quota_hold(workspace_id \\ nil) do
@@ -665,7 +672,7 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp latest_quota(ws_id) do
-    Arbiter.Quota.latest_for_provider(ws_id, :claude)
+    Arbiter.Quota.latest_for_provider(ws_id, Arbiter.Quota.default_provider(ws_id))
   rescue
     _ -> nil
   end
