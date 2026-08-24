@@ -48,6 +48,7 @@ defmodule Arbiter.MixProject do
   defp deps do
     [
       {:sourceror, "~> 1.8", only: [:dev, :test]},
+      {:meck, "~> 0.9", only: :test},
       {:ash_phoenix, "~> 2.0"},
       {:ash_paper_trail, "~> 0.5"},
       {:ash_sqlite, "~> 0.2"},

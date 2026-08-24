@@ -282,7 +282,7 @@ defmodule Arbiter.Board.Autopilot do
       Snapshot.empty()
   end
 
-  defp default_dispatch(id), do: Arbiter.Worker.Dispatch.dispatch(id)
+  defp default_dispatch(id), do: Arbiter.Worker.Dispatch.dispatch(id, start_claude: true)
 
   defp announce(message) do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, @topic, message)
