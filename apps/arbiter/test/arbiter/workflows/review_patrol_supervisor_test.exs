@@ -180,6 +180,69 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
     end
   end
 
+  describe "start_patrol/2 — gitlab single-project workspace" do
+    test "starts exactly one patrol registered under the workspace id" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-gl-single-#{System.unique_integer([:positive])}",
+          prefix: "rgs#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "project_id" => 12345,
+                "credentials_ref" => "env:GITLAB_TOKEN"
+              }
+            }
+          }
+        })
+
+      open_engagement!(ws, "!1")
+
+      assert {:ok, pid} = start(ws)
+      assert is_pid(pid) and Process.alive?(pid)
+
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+      assert keys_for_workspace(ws.id) == [ws.id]
+      assert ReviewPatrol.state(pid).repo == "12345"
+    end
+  end
+
+  describe "start_patrol/2 — gitlab multi-repo workspace (emricare/vstim shape)" do
+    test "starts one patrol per repo, derived from repo_paths origin remotes" do
+      repo_a = git_repo_with_origin("git@gitlab.com:emricare/tonic.git")
+      repo_b = git_repo_with_origin("git@gitlab.com:emricare/tonic_device.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-gl-multi-#{System.unique_integer([:positive])}",
+          prefix: "rgm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "credentials_ref" => "env:GITLAB_TOKEN"
+              }
+            },
+            "repo_paths" => %{"tonic" => repo_a, "tonic_device" => repo_b}
+          }
+        })
+
+      open_engagement!(ws, "emricare/tonic#1")
+      open_engagement!(ws, "emricare/tonic_device#1")
+
+      assert {:ok, _pid} = start(ws)
+
+      assert keys_for_workspace(ws.id) ==
+               Enum.sort([
+                 "#{ws.id}:emricare/tonic",
+                 "#{ws.id}:emricare/tonic_device"
+               ])
+    end
+  end
+
   describe "start_patrol/2 — skips" do
     test "skips a workspace with no github merge config (direct strategy)" do
       {:ok, ws} =

@@ -62,8 +62,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
       repos == [] ->
         Logger.info(
           "ReviewPatrolSupervisor: skip workspace #{workspace.id} (#{workspace.name}) — " <>
-            "no repos resolvable (set merge.config.repo, or a repo_paths " <>
-            "map whose repos have a github origin remote)"
+            "no repos resolvable (set merge.config.repo / merge.config.project_id, " <>
+            "or a repo_paths map whose repos have a github/gitlab origin remote)"
         )
 
         :skip
@@ -364,6 +364,13 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
           ["#{owner}/#{repo}"]
         else
           repos_from_repo_paths(config)
+        end
+
+      "gitlab" ->
+        case get_in(config, ["merge", "config", "project_id"]) do
+          v when is_integer(v) -> ["#{v}"]
+          v when is_binary(v) and v != "" -> [v]
+          _ -> repos_from_repo_paths(config)
         end
 
       _ ->
