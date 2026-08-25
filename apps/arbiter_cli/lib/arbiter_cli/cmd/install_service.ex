@@ -57,7 +57,8 @@ defmodule ArbiterCli.Cmd.InstallService do
   ## Secret capture
 
   A boot-time service starts with no interactive shell, so the API keys you
-  normally export (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) are
+  normally export (`GITHUB_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY`, …) are
   not visible to it. To bridge that gap, install captures any of those keys that
   are set in the *installing* shell and writes them to `~/.arbiter/arbiter.env`
   (the same file `EnvironmentFile=` points at). Existing entries are preserved —

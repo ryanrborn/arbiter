@@ -14,6 +14,7 @@ defmodule ArbiterCli.Cmd.InstallService.EnvFile do
   # environment are written.
   @captured_secrets ~w(
     GITHUB_TOKEN
+    CLAUDE_CODE_OAUTH_TOKEN
     ANTHROPIC_API_KEY
     ANTHROPIC_API_KEY_2
     GEMINI_API_KEY

@@ -140,6 +140,33 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assert {:error, :missing_owner} =
                ClaudeSession.start(worktree_path: System.tmp_dir!(), command: [@fixture])
     end
+
+    test "redacts a CLAUDE_CODE_OAUTH_TOKEN carried in the caller-explicit :env from output (bd-2zigo1)" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("cs-oauth-redact")
+      topic = "worker:#{task_id}"
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", ~s(echo "token is $CLAUDE_CODE_OAUTH_TOKEN"; echo arb done)],
+          env: [{"CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-secret-value"}],
+          topic: topic
+        )
+
+      eventually(fn ->
+        case Worker.state(pid) do
+          %{meta: %{exit_status: status}} when not is_nil(status) -> status
+          _ -> nil
+        end
+      end)
+
+      lines = Worker.state(pid).meta.output_lines
+
+      refute Enum.any?(lines, &String.contains?(&1, "sk-ant-oat-secret-value"))
+      assert Enum.any?(lines, &String.contains?(&1, "[REDACTED]"))
+    end
   end
 
   describe "output streaming" do

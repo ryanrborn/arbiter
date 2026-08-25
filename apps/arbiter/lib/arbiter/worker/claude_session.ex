@@ -209,6 +209,15 @@ defmodule Arbiter.Worker.ClaudeSession do
       # child's env, the secret values into the session's redaction list.
       {worker_env, redact_values} = Arbiter.Worker.WorkerEnv.resolve(task_id)
 
+      # bd-2zigo1: the install-wide CLAUDE_CODE_OAUTH_TOKEN (and any
+      # ANTHROPIC_API_KEY) travel in via the caller-explicit `:env` opt
+      # (`Claude.spawn_env/1`'s output), not the workspace's `worker_env`
+      # store — so they're invisible to the redaction list above. Without
+      # this, a worker that runs `env` or whose error output quotes its
+      # environment would emit the long-TTL token verbatim into
+      # worker_runs.output_lines / the dashboard stream / OutputLog.
+      redact_values = redact_values ++ credential_env_values(opts)
+
       session_config =
         build_session_config(task_id, Keyword.get(opts, :topic),
           provider: Keyword.get(opts, :provider),
@@ -1252,6 +1261,27 @@ defmodule Arbiter.Worker.ClaudeSession do
   # caller-explicit `:env` (agent auth) and the always-last ARB_WORKER_BEAD_ID
   # guard, so a user var can never clobber the agent's auth or the
   # self-recursion guard.
+  # bd-2zigo1: secret credential values carried in the caller-explicit `:env`
+  # opt (`Claude.spawn_env/1`'s `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`
+  # pairs) — these never pass through `Arbiter.Worker.WorkerEnv`, so they must
+  # be added to the redaction list separately. Only known credential var names
+  # are scrubbed here; non-secret pairs (`CLAUDE_CONFIG_DIR`,
+  # `ANTHROPIC_BASE_URL`) are left alone.
+  @credential_env_keys ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY)
+
+  defp credential_env_values(opts) do
+    case Keyword.fetch(opts, :env) do
+      {:ok, list} when is_list(list) ->
+        for {key, value} <- list,
+            key in @credential_env_keys,
+            is_binary(value) and value != "",
+            do: value
+
+      _ ->
+        []
+    end
+  end
+
   defp env_pairs(opts, task_id, worker_env) do
     base =
       case Keyword.fetch(opts, :env) do
