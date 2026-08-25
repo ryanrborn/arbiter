@@ -34,7 +34,6 @@ defmodule ArbiterWeb.RunIndexLive do
 
     {:ok,
      socket
-     |> assign(:live, connected?(socket))
      |> assign(:worker_label, "worker")
      |> assign(:filters, @filters)}
   end
@@ -85,6 +84,7 @@ defmodule ArbiterWeb.RunIndexLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
       coordinator_inbox_now={@coordinator_inbox_now}

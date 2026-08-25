@@ -9,6 +9,20 @@ defmodule ArbiterWeb.LiveHooks do
   `handle_params` hook. The `Layouts.app` nav reads it to highlight the
   active link.
 
+  ## `:live`
+
+  Assigns `:live` on the socket as `connected?(socket)` — `false` on the
+  initial dead render, `true` once the LiveView process is connected over
+  the socket. `Layouts.app`'s navbar badge (and every page-level
+  `live_badge`) reads this assign; `live_badge/1`'s `live` attr is
+  `required: true` precisely so no call site can fall back to a client-only
+  mechanism instead. The DOM-only join-direction mechanism `live_badge/1`
+  used to default to (`phx-connected` flipping "stale" to "Live" with no
+  server assign) was the root cause of bd-akygjy — see the "Root cause"
+  note on `ArbiterWeb.CoreComponents.Feedback.live_badge/1` for what was
+  and wasn't established about why. This hook is the single source of
+  truth every call site must be fed from.
+
   ## `:quota`
 
   Loads the latest quota snapshot for every tracked provider on the default
@@ -61,6 +75,10 @@ defmodule ArbiterWeb.LiveHooks do
       end)
 
     {:cont, socket}
+  end
+
+  def on_mount(:live, _params, _session, socket) do
+    {:cont, assign(socket, :live, connected?(socket))}
   end
 
   def on_mount(:quota, _params, _session, socket) do
