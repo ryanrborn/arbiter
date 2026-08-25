@@ -152,6 +152,21 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
       assert element_containing(html, "All") =~ ~s(aria-pressed="true")
       assert element_containing(html, "Open") =~ ~s(aria-pressed="false")
     end
+
+    test "renders with overflow-x-auto to allow horizontal scrolling on narrow viewports" do
+      tabs = [
+        %{label: "Live", value: "live"},
+        %{label: "Proposed", value: "proposed"},
+        %{label: "Hypothesis", value: "hypothesis"},
+        %{label: "Applied", value: "applied"},
+        %{label: "Rejected", value: "rejected"},
+        %{label: "Superseded", value: "superseded"}
+      ]
+
+      html = render_component(&filter_tabs/1, %{tabs: tabs, active: "live", event: "filter"})
+
+      assert html =~ "overflow-x-auto"
+    end
   end
 
   describe "segmented_control/1" do
