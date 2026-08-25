@@ -1,5 +1,7 @@
 defmodule Arbiter.Agents.PreflightTest do
-  use ExUnit.Case, async: true
+  # async: false — the CLAUDE_CODE_OAUTH_TOKEN fallback tests below mutate the
+  # process-global OS environment (bd-2zigo1).
+  use ExUnit.Case, async: false
 
   alias Arbiter.Agents.Claude
   alias Arbiter.Agents.Preflight
@@ -59,6 +61,57 @@ defmodule Arbiter.Agents.PreflightTest do
                )
 
       assert reason.category == :stalled
+    end
+  end
+
+  describe "check/2 CLAUDE_CODE_OAUTH_TOKEN fallback (bd-2zigo1)" do
+    setup do
+      prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      on_exit(fn ->
+        Claude.Config.clear()
+
+        case prev_oauth_token do
+          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+          v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+      end)
+
+      :ok
+    end
+
+    test "probe succeeds via the install-wide CLAUDE_CODE_OAUTH_TOKEN even with no personal API key/session" do
+      # Simulates the incident: the operator's personal ~/.claude/.credentials.json
+      # OAuth session is expired/absent (no api_key configured either), but the
+      # install-wide CLAUDE_CODE_OAUTH_TOKEN is set. `probe_env` is deliberately
+      # NOT overridden here so Preflight computes it itself via
+      # `Claude.spawn_env/1` (`safe_spawn_env/2`, preflight.ex:89) — this proves
+      # the real probe path picks up the token, not just a hand-fed env list.
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-session-token")
+
+      assert :ok =
+               Preflight.check(Claude,
+                 probe_command: [
+                   "sh",
+                   "-c",
+                   ~s(if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo pong; exit 0; else echo '401 invalid authentication credentials'; exit 1; fi)
+                 ]
+               )
+    end
+
+    test "probe fails without CLAUDE_CODE_OAUTH_TOKEN or an api_key (control case)" do
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      assert {:error, reason} =
+               Preflight.check(Claude,
+                 probe_command: [
+                   "sh",
+                   "-c",
+                   ~s(if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo pong; exit 0; else echo '401 invalid authentication credentials'; exit 1; fi)
+                 ]
+               )
+
+      assert reason.category == :auth_expired
     end
   end
 

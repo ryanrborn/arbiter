@@ -191,6 +191,33 @@ database password: back it up and keep it stable — rotating it (re-encrypting
 existing secrets) is a separate runbook and is not yet automated. Losing it
 makes existing encrypted secrets unrecoverable.
 
+### Claude CLI authentication (`CLAUDE_CODE_OAUTH_TOKEN`) — recommended
+
+Real worker spawns and the `CredentialWatchdog`'s health probe both authenticate
+the `claude` CLI via `Arbiter.Agents.Claude.spawn_env/1`. By default that falls
+back to whatever OAuth session is active for the account running the Arbiter
+server (`~/.claude/.credentials.json`) — which means an operator's personal
+session expiring blocks every workspace's dispatch until it's manually
+re-authenticated.
+
+To avoid that, set a long-TTL Claude Code OAuth token once, install-wide, in
+`.arbiter.env` (same file/trust model as `ARBITER_CLOAK_KEY` / `SECRET_KEY_BASE`
+above — loaded via `EnvironmentFile=` when running as a service):
+
+```sh
+echo "CLAUDE_CODE_OAUTH_TOKEN=<your-long-ttl-token>" >> ~/.arbiter/arbiter.env
+# (for a non-service run, put it in the project-root .arbiter.env or export it)
+```
+
+`spawn_env/1` exports this under its own literal name (never remapped to
+`ANTHROPIC_API_KEY` — the two are not interchangeable to the CLI) whenever it's
+present in the OS environment, so the probe and real dispatch always agree.
+Prefer this single install-wide var over configuring the same token as a
+per-workspace `credentials_ref`/`worker_env` secret in each workspace — a
+per-workspace copy only reaches real worker spawns, not the Watchdog's probe,
+and duplicating an identical token across workspaces risks copy-drift if one
+copy is rotated and the others aren't.
+
 ### Storing tracker / merger credentials in the database
 
 Instead of pointing `credentials_ref` at an environment variable
