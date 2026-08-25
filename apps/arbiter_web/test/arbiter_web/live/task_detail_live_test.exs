@@ -421,6 +421,15 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.refined
     end
+
+    test "an in_progress task offers no promote action even if unrefined", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "running now", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ ~s(phx-click="promote_to_ready")
+    end
   end
 
   describe "dispatch" do
