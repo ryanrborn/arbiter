@@ -621,4 +621,36 @@ defmodule ArbiterWeb.BoardLiveTest do
       :nomatch -> flunk("card #{id} is not on the board")
     end
   end
+
+  describe "mobile horizontal scrolling layout" do
+    test "board columns container uses flexbox with horizontal scrolling", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      # Verify the board-columns div has flex and overflow-x-auto for horizontal scrolling
+      assert html =~ ~s(id="board-columns")
+      assert html =~ ~s(flex overflow-x-auto snap-x snap-mandatory)
+    end
+
+    test "each column div has fixed width and prevents shrinking", %{conn: conn, ws: ws} do
+      issue(ws, "test issue")
+      {:ok, _view, html} = live(conn, "/")
+
+      # Each column should have flex-shrink-0 to maintain width while scrolling
+      # and a responsive width (w-[85vw] on mobile, md:w-72 on desktop)
+      assert html =~ ~s(id="board-column-backlog")
+      assert html =~ ~s(flex-shrink-0)
+      assert html =~ ~s(snap-start)
+    end
+
+    test "toolbar dropdowns are responsive and do not have fixed widths", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      # Verify the toolbar form inputs don't have restrictive fixed widths
+      assert html =~ ~s(id="board-workspace-form")
+      assert html =~ ~s(id="board-filter-form")
+      # Should NOT have the old fixed widths
+      refute html =~ ~s(w-[136px])
+      refute html =~ ~s(w-[260px])
+    end
+  end
 end
