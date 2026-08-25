@@ -305,7 +305,7 @@ defmodule ArbiterWeb.AuditLogLive do
             active={@tab}
             tab_path={&audit_path(&1, @query, 1)}
           />
-          <form phx-change="search" class="flex-1 min-w-[240px]">
+          <form phx-change="search" class="flex-1 min-w-0 sm:min-w-[240px]">
             <Forms.input
               type="text"
               name="q"
@@ -333,7 +333,7 @@ defmodule ArbiterWeb.AuditLogLive do
               {row.actor}
             </span>
           </:col>
-          <:col :let={row} label="Subject">
+          <:col :let={row} label="Subject" width="minmax(100px, 1fr)">
             <code class="text-xs">{row.subject}</code>
           </:col>
           <:col :let={row} label="Action" width="140px">
