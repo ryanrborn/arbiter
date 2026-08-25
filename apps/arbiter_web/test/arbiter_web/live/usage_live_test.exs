@@ -180,11 +180,14 @@ defmodule ArbiterWeb.UsageLiveTest do
     assert html =~ "hairline is elapsed time"
   end
 
-  test "stat row and spend/rate-limits panels use responsive grid layouts for mobile", %{conn: conn} do
+  test "stat row and spend/rate-limits panels use responsive grid layouts for mobile", %{
+    conn: conn
+  } do
     {:ok, _view, html} = live(conn, ~p"/usage")
     # Stat row should stack 2x2 on mobile (grid-cols-2) and 4-across on desktop (sm:grid-cols-4)
     assert html =~ "grid-cols-2"
     assert html =~ "sm:grid-cols-4"
+
     # Spend/Rate-limits should stack vertically on mobile (grid-cols-1) and side-by-side on desktop
     assert html =~ "grid-cols-1"
     assert html =~ "lg:grid-cols-[minmax(0,1fr)_320px]"
