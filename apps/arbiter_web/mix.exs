@@ -70,7 +70,9 @@ defmodule ArbiterWeb.MixProject do
       {:arbiter, in_umbrella: true},
       {:jason, "~> 1.2"},
       {:finch, "~> 0.19"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      # finch pins mint "~> 1.8"; force the patched line to clear known CVEs.
+      {:mint, "~> 1.9", override: true}
     ]
   end
 

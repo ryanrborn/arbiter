@@ -80,7 +80,7 @@ defmodule Arbiter.MixProject do
       {:quantum, "~> 3.5"},
 
       # HTTP client (used by Tracker.Jira, Tracker.GitHub adapters in later tasks)
-      {:req, "~> 0.5"},
+      {:req, "~> 0.7.3"},
 
       # GenStateMachine — workflow driver FSM (gte-015 WorkflowMachine)
       {:gen_state_machine, "~> 3.0"}

@@ -59,7 +59,7 @@ defmodule ArbiterCli.MixProject do
 
   defp deps do
     [
-      {:req, "~> 0.5"},
+      {:req, "~> 0.7.3"},
       {:jason, "~> 1.4"},
       # Test-only: Req.Test stubs run a Plug under the hood.
       {:plug, "~> 1.15", only: :test},
