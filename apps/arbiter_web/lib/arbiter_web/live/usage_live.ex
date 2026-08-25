@@ -316,7 +316,7 @@ defmodule ArbiterWeb.UsageLive do
           </:actions>
         </Domain.index_header>
 
-        <div class="grid grid-cols-4 gap-3">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <Domain.stat_card
             label="Total spend"
             value={format_usd(@grand_cost)}
@@ -337,7 +337,7 @@ defmodule ArbiterWeb.UsageLive do
           />
         </div>
 
-        <div class="grid grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
+        <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
           <.panel title="Spend" meta={tab_meta(@tab)}>
             <Navigation.filter_tabs
               tabs={[
