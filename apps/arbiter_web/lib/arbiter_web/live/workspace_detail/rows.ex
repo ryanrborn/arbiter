@@ -113,7 +113,7 @@ defmodule ArbiterWeb.WorkspaceDetail.Rows do
   def setting_row(assigns) do
     ~H"""
     <div data-setting-row={@name} class={["flex flex-col gap-2 py-[10px]", @class]}>
-      <div class="flex items-center justify-between gap-4">
+      <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div class="min-w-0">
           <div class="font-[family-name:var(--font-sans)] text-[12px] font-medium leading-[1.4] text-[var(--text-body)]">
             {@name}
@@ -125,7 +125,7 @@ defmodule ArbiterWeb.WorkspaceDetail.Rows do
             {@consequence}
           </div>
         </div>
-        <div :if={@control != []} class="flex flex-none items-center justify-end gap-2">
+        <div :if={@control != []} class="flex sm:flex-none items-center justify-end gap-2">
           {render_slot(@control)}
         </div>
       </div>
