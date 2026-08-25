@@ -836,7 +836,7 @@ defmodule ArbiterWeb.TaskDetailLive do
             <%!-- The one door out of Backlog. Gone the moment it is used —
                   there is no un-refine here, and nothing to click twice. --%>
             <ArbiterWeb.CoreComponents.Core.button
-              :if={!@task.refined}
+              :if={!@task.refined and @task.status == :open}
               size="sm"
               variant="primary"
               phx-click="promote_to_ready"
