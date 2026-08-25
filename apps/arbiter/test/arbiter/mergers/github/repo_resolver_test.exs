@@ -37,6 +37,14 @@ defmodule Arbiter.Mergers.Github.RepoResolverTest do
                RepoResolver.parse("https://github.example.com/leo/verus_server.git")
     end
 
+    test "parses a GitLab origin (host is not constrained to github.com)" do
+      assert {:ok, {"emricare", "tonic"}} =
+               RepoResolver.parse("git@gitlab.com:emricare/tonic.git")
+
+      assert {:ok, {"emricare", "tonic_device"}} =
+               RepoResolver.parse("https://gitlab.com/emricare/tonic_device.git")
+    end
+
     test "rejects garbage" do
       assert {:error, %Error{kind: :config_missing}} = RepoResolver.parse("not a url")
       assert {:error, %Error{kind: :config_missing}} = RepoResolver.parse("")
