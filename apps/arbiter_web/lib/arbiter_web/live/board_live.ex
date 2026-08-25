@@ -602,7 +602,7 @@ defmodule ArbiterWeb.BoardLive do
           class="border border-solid border-[var(--border-default)] rounded-[var(--radius-panel)] overflow-hidden bg-[var(--surface-page)]"
         >
           <%!-- ── Toolbar ─────────────────────────────────────────────── --%>
-          <div class="flex items-center gap-3 h-[var(--toolbar-height)] px-4 border-b border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)]">
+          <div class="flex flex-wrap items-center gap-3 py-2 px-4 border-b border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)]">
             <form
               id="board-workspace-form"
               phx-change="workspace"
@@ -631,10 +631,10 @@ defmodule ArbiterWeb.BoardLive do
 
             <.segmented_control options={["mine", "all"]} value={@scope} event="scope" />
 
-            <span class="ml-auto flex items-center gap-2.5">
+            <span class="ml-auto flex flex-wrap items-center gap-2.5">
               <span
                 id="board-slots"
-                class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+                class="hidden sm:inline text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
               >
                 {length(@board.running)} {plural(@worker_label)} · {@board.slots_free} slots free
               </span>

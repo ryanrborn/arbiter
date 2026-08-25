@@ -652,5 +652,21 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute html =~ ~s(w-[136px])
       refute html =~ ~s(w-[260px])
     end
+
+    test "toolbar wraps on narrow viewports instead of overflowing", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      # The toolbar outer container must wrap items to multiple rows on mobile
+      assert html =~ ~s(id="board" class="border border-solid)
+      # Verify the toolbar div has flex-wrap for wrapping behavior
+      assert html =~ ~s(flex flex-wrap items-center gap-3)
+      # Verify the ml-auto span also wraps independently
+      assert html =~ ~s(ml-auto flex flex-wrap items-center gap-2.5)
+      # Verify board-slots text is hidden on mobile (sm:inline shows on small+)
+      assert html =~ ~s(hidden sm:inline)
+      # Verify old fixed widths from before #1395 are gone
+      refute html =~ ~s(w-[136px])
+      refute html =~ ~s(w-[260px])
+    end
   end
 end
