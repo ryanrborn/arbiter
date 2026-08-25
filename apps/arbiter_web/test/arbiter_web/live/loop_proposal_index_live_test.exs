@@ -333,4 +333,18 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       assert unchanged.state == :rejected
     end
   end
+
+  describe "responsive design" do
+    test "header includes filter tabs with all state options", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/loop")
+
+      # All filter tabs should be rendered in the header
+      assert html =~ "Live"
+      assert html =~ "Proposed"
+      assert html =~ "Hypothesis"
+      assert html =~ "Applied"
+      assert html =~ "Rejected"
+      assert html =~ "Superseded"
+    end
+  end
 end
