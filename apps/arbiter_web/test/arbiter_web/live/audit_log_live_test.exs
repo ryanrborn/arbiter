@@ -132,4 +132,24 @@ defmodule ArbiterWeb.AuditLogLiveTest do
       assert html =~ target.id
     end
   end
+
+  describe "mobile usability" do
+    test "search input has responsive min-width for mobile viewports", %{conn: conn, ws: _ws} do
+      {:ok, _view, html} = live(conn, "/audit")
+
+      # Should have min-w-0 for mobile and sm:min-w-[240px] for larger screens
+      # instead of fixed min-w-[240px] that pushes tabs to wrap on narrow viewports
+      assert html =~ ~r/class="[^"]*min-w-0[^"]*sm:min-w-\[240px\][^"]*"/
+    end
+
+    test "subject column has defined width to prevent compression", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "width test", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, "/audit")
+
+      # Subject column should have a width attribute to maintain legibility
+      assert html =~ "width="
+      assert html =~ task.id
+    end
+  end
 end
