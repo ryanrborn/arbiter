@@ -191,6 +191,59 @@ database password: back it up and keep it stable — rotating it (re-encrypting
 existing secrets) is a separate runbook and is not yet automated. Losing it
 makes existing encrypted secrets unrecoverable.
 
+### Claude CLI authentication (`CLAUDE_CODE_OAUTH_TOKEN`) — recommended
+
+Real worker spawns and the `CredentialWatchdog`'s health probe both authenticate
+the `claude` CLI via `Arbiter.Agents.Claude.spawn_env/1`. By default that falls
+back to whatever OAuth session is active for the account running the Arbiter
+server (`~/.claude/.credentials.json`) — which means an operator's personal
+session expiring blocks every workspace's dispatch until it's manually
+re-authenticated.
+
+To avoid that, set a long-TTL Claude Code OAuth token once, install-wide, in
+`.arbiter.env` (same file/trust model as `ARBITER_CLOAK_KEY` / `SECRET_KEY_BASE`
+above — loaded via `EnvironmentFile=` when running as a service):
+
+```sh
+echo "CLAUDE_CODE_OAUTH_TOKEN=<your-long-ttl-token>" >> ~/.arbiter/arbiter.env
+# (for a non-service run, put it in the project-root .arbiter.env or export it)
+```
+
+`spawn_env/1` exports this under its own literal name (never remapped to
+`ANTHROPIC_API_KEY` — the two are not interchangeable to the CLI) whenever it's
+present in the OS environment, so the probe and real dispatch always agree.
+Prefer this single install-wide var over configuring the same token as a
+per-workspace `credentials_ref`/`worker_env` secret in each workspace — a
+per-workspace copy only reaches real worker spawns, not the Watchdog's probe,
+and duplicating an identical token across workspaces risks copy-drift if one
+copy is rotated and the others aren't.
+
+`arb install service` also forwards `CLAUDE_CODE_OAUTH_TOKEN` from the
+installing shell into `~/.arbiter/arbiter.env` automatically, same as the
+other captured secrets above.
+
+**Precedence when both are set:** a spawn can end up with both
+`CLAUDE_CODE_OAUTH_TOKEN` (install-wide) and `ANTHROPIC_API_KEY` (workspace
+`credentials_ref`/`api_keys` rotation, or the quota-capturing proxy's
+`ANTHROPIC_BASE_URL`) in its environment at once. Which one the `claude` CLI
+honours is decided by the CLI itself, not by Arbiter — if it prefers the OAuth
+token, a workspace that deliberately configured its own key would silently
+authenticate against the install-wide account instead. If a workspace's
+`ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence before relying
+on it, or unset the install-wide token for that install.
+
+**Redaction:** `Arbiter.Worker.ClaudeSession.start/1` adds
+`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values to the session's
+redaction list alongside the workspace's secret-flagged `worker_env` values —
+both the values carried in the spawn's explicit `:env` (the Dispatch/
+ReviewGate path) and, for the `start/1` callers that pass no `:env` at all
+(the conflict-resolver and CI fix-pass workers, which still inherit the
+install-wide OS environment via `Port.open`'s `{:env, …}` extension
+semantics), the value read directly from the OS environment. So the token is
+scrubbed from worker output (`worker_runs.output_lines`, the live dashboard
+stream, the durable output log) across all `ClaudeSession.start/1` callers,
+even after the per-workspace `worker_env` copies are removed.
+
 ### Storing tracker / merger credentials in the database
 
 Instead of pointing `credentials_ref` at an environment variable

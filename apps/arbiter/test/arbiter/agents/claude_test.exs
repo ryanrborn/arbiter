@@ -239,7 +239,20 @@ defmodule Arbiter.Agents.ClaudeTest do
 
   describe "spawn_env/1 (key rotation)" do
     setup do
-      on_exit(fn -> Claude.Config.clear() end)
+      # Isolate from any real CLAUDE_CODE_OAUTH_TOKEN set in the dev/CI shell
+      # so the ANTHROPIC_API_KEY-focused assertions below stay exact-match.
+      prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      on_exit(fn ->
+        Claude.Config.clear()
+
+        case prev_oauth_token do
+          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+          v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+      end)
+
       :ok
     end
 
@@ -308,6 +321,52 @@ defmodule Arbiter.Agents.ClaudeTest do
     test "omits ANTHROPIC_BASE_URL when the opt is absent or blank" do
       assert Claude.spawn_env(anthropic_base_url: "") == []
       assert Claude.spawn_env([]) == []
+    end
+  end
+
+  describe "spawn_env/1 (CLAUDE_CODE_OAUTH_TOKEN, bd-2zigo1)" do
+    setup do
+      prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      on_exit(fn ->
+        Claude.Config.clear()
+
+        case prev_oauth_token do
+          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+          v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+      end)
+
+      :ok
+    end
+
+    test "omits CLAUDE_CODE_OAUTH_TOKEN when the OS env var is unset" do
+      assert Claude.spawn_env([]) == []
+    end
+
+    test "exports CLAUDE_CODE_OAUTH_TOKEN under its own literal name, unchanged" do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
+
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"}]
+    end
+
+    test "never remaps the OAuth token onto ANTHROPIC_API_KEY" do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
+
+      env = Claude.spawn_env([])
+
+      assert {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"} in env
+      refute List.keyfind(env, "ANTHROPIC_API_KEY", 0)
+    end
+
+    test "composes alongside ANTHROPIC_API_KEY without disturbing it" do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
+
+      assert Claude.spawn_env(api_key: "literal-token") == [
+               {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"},
+               {"ANTHROPIC_API_KEY", "literal-token"}
+             ]
     end
   end
 
