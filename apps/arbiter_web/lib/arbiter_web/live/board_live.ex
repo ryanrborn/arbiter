@@ -146,8 +146,6 @@ defmodule ArbiterWeb.BoardLive do
      |> assign(:issue_label, "issue")
      |> assign(:worker_label, "worker")
      |> load_workspaces()
-     |> subscribe_messages(live?)
-     |> refresh_coordinator_inbox()
      |> refresh_board()}
   end
 
@@ -165,15 +163,6 @@ defmodule ArbiterWeb.BoardLive do
 
   def handle_info({:board_scheduler, _state}, socket),
     do: {:noreply, refresh_board(socket)}
-
-  def handle_info({:new_message, _message}, socket),
-    do: {:noreply, refresh_coordinator_inbox(socket)}
-
-  def handle_info({:message_read, _message}, socket),
-    do: {:noreply, refresh_coordinator_inbox(socket)}
-
-  def handle_info({:mailbox_cleared, _workspace_id}, socket),
-    do: {:noreply, refresh_coordinator_inbox(socket)}
 
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
 
@@ -261,22 +250,6 @@ defmodule ArbiterWeb.BoardLive do
       end
 
     {:noreply, socket |> assign(:confirm_stop, nil) |> refresh_board()}
-  end
-
-  # ---- coordinator mailbox --------------------------------------------------
-
-  def handle_event("mark_read", %{"id" => id}, socket) do
-    with {:ok, msg} <- Ash.get(Message, id),
-         {:ok, _} <- Message.mark_read(msg) do
-      {:noreply, refresh_coordinator_inbox(socket)}
-    else
-      _ -> {:noreply, refresh_coordinator_inbox(socket)}
-    end
-  end
-
-  def handle_event("clear_coordinator", _params, socket) do
-    _ = Message.clear_read(@coordinator_ref)
-    {:noreply, refresh_coordinator_inbox(socket)}
   end
 
   # ---- what a landing means ------------------------------------------------
@@ -497,31 +470,6 @@ defmodule ArbiterWeb.BoardLive do
     assign(socket, :workspaces, workspaces)
   end
 
-  defp subscribe_messages(socket, false), do: socket
-
-  defp subscribe_messages(socket, true) do
-    for ws <- socket.assigns.workspaces,
-        do: Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws.id))
-
-    socket
-  end
-
-  # Two figures, not one: pending (unread — never seen) and outstanding (seen
-  # but not cleared — still owes an action). Reading no longer empties the
-  # queue, so "still open" needs its own number.
-  defp refresh_coordinator_inbox(socket) do
-    {inbox, outstanding} =
-      try do
-        {Message.inbox(@coordinator_ref), Message.outstanding(@coordinator_ref)}
-      rescue
-        _ -> {[], []}
-      end
-
-    socket
-    |> assign(:coordinator_inbox, inbox)
-    |> assign(:coordinator_outstanding_count, length(outstanding))
-  end
-
   # ---- view-level filtering -------------------------------------------------
   #
   # The filter narrows what is *shown*; it never narrows what the scheduler
@@ -626,13 +574,6 @@ defmodule ArbiterWeb.BoardLive do
   defp head_hue("attention"), do: "var(--arb-attention)"
   defp head_hue(_), do: nil
 
-  defp mailbox_border(:escalation), do: "border-l-[color:var(--arb-fail)]"
-  defp mailbox_border(:failure), do: "border-l-[color:var(--arb-fail)]"
-  defp mailbox_border(:completion), do: "border-l-[color:var(--arb-live)]"
-  defp mailbox_border(:direction), do: "border-l-[color:var(--arb-attention)]"
-  defp mailbox_border(:flag), do: "border-l-[color:var(--arb-attention)]"
-  defp mailbox_border(_), do: "border-l-[color:var(--arb-info)]"
-
   # ---- render ---------------------------------------------------------------
 
   @impl true
@@ -646,7 +587,15 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:closed, visible(assigns, assigns.board.closed_today, "closed"))
 
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
       <div class="px-4 py-4 flex flex-col gap-4">
         <div
           id="board"
@@ -696,7 +645,7 @@ defmodule ArbiterWeb.BoardLive do
                     else: "The scheduler is promoting Ready cards as slots free up."
                 }
                 class={[
-                  "px-2 py-[3px] rounded-[var(--radius-chip)] border border-solid",
+                  "cursor-pointer px-2 py-[3px] rounded-[var(--radius-chip)] border border-solid",
                   "text-[10px] font-medium font-[family-name:var(--font-mono)] uppercase tracking-[0.08em]",
                   if(@board.paused,
                     do:
@@ -991,105 +940,6 @@ defmodule ArbiterWeb.BoardLive do
             </ArbiterWeb.CoreComponents.Core.button>
           </span>
         </div>
-
-        <%!-- ── Coordinator mailbox ─────────────────────────────────────
-             Unread mailbox-family mail addressed to the coordinator: the
-             upward channel of `arb inbox` / `arb msg`, live. It is not a
-             board column — none of it is a task sitting in a stage — but it
-             is the other thing addressed to the human, so it sits under the
-             board rather than on another page. --%>
-        <section
-          id="coordinator-mailbox"
-          class="rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--surface-card)]"
-        >
-          <div class="flex items-center justify-between gap-2 px-4 h-[var(--toolbar-height)] border-b border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)]">
-            <h2 class="flex items-center gap-2 text-[12.5px] font-medium text-[var(--text-title)]">
-              Coordinator Mailbox
-              <span class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--arb-attention)]">
-                {length(@coordinator_inbox)} unread
-              </span>
-              <span
-                id="coordinator-mailbox-outstanding"
-                title="Seen but not yet cleared — the triage queue"
-                class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
-              >
-                {@coordinator_outstanding_count} outstanding
-              </span>
-            </h2>
-            <button
-              type="button"
-              phx-click="clear_coordinator"
-              title="Soft-clear the outstanding tail — already-read mail is marked cleared (retained), unread is kept"
-              class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-link)]"
-            >
-              clear read
-            </button>
-          </div>
-
-          <div :if={@coordinator_inbox == []} id="coordinator-mailbox-empty" class="p-4">
-            <ArbiterWeb.CoreComponents.Feedback.empty_state
-              icon="hero-inbox"
-              detail="worker completions, failures and escalations land here in real time"
-            >
-              Inbox clear.
-            </ArbiterWeb.CoreComponents.Feedback.empty_state>
-          </div>
-
-          <ul
-            :if={@coordinator_inbox != []}
-            id="coordinator-mailbox-list"
-            class="flex flex-col gap-2 p-3 max-h-80 overflow-y-auto"
-          >
-            <li
-              :for={m <- @coordinator_inbox}
-              class={[
-                "rounded-[var(--radius-field)] border border-solid border-[var(--arb-line-strong)]",
-                "border-l-[length:var(--border-accent-width)] px-3 py-2 bg-[var(--arb-panel-alt)]",
-                mailbox_border(m.kind)
-              ]}
-            >
-              <div class="flex items-baseline justify-between gap-2">
-                <div class="flex items-baseline gap-2 flex-wrap min-w-0">
-                  <span class="text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
-                    {m.kind}
-                  </span>
-                  <span class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]">
-                    from {m.from_ref || "?"}
-                  </span>
-                  <.link
-                    :if={Message.task_ref(m)}
-                    navigate={~p"/tasks/#{Message.task_ref(m)}"}
-                    class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-link)]"
-                  >
-                    {Message.task_ref(m)}
-                  </.link>
-                  <span :if={m.subject} class="text-[12.5px] font-medium text-[var(--text-title)]">
-                    {m.subject}
-                  </span>
-                </div>
-                <div class="flex items-center gap-2 shrink-0">
-                  <span class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
-                    {relative(m.inserted_at, @now)}
-                  </span>
-                  <button
-                    type="button"
-                    phx-click="mark_read"
-                    phx-value-id={m.id}
-                    class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-link)]"
-                  >
-                    mark read
-                  </button>
-                </div>
-              </div>
-              <p
-                :if={m.body not in [nil, ""]}
-                class="mt-1.5 text-[12px] whitespace-pre-wrap text-[var(--text-secondary)]"
-              >
-                {m.body}
-              </p>
-            </li>
-          </ul>
-        </section>
       </div>
 
       <script :type={Phoenix.LiveView.ColocatedHook} name=".BoardDrag">

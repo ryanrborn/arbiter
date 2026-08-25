@@ -803,7 +803,15 @@ defmodule ArbiterWeb.TaskDetailLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
       <div class="p-4 sm:p-6 max-w-[1400px] mx-auto flex flex-col gap-[var(--space-4)]">
         <%!-- ── Toolbar ──────────────────────────────────────────────────
              Breadcrumb, the id itself and the issue's status chip. The whole
@@ -961,7 +969,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                         class="link link-hover text-xs font-mono text-primary inline-flex items-center gap-0.5"
                       >
                         {@task.pr_ref}
-                        <.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                        <ArbiterWeb.CoreComponents.icon
+                          name="hero-arrow-top-right-on-square"
+                          class="size-3"
+                        />
                       </a>
                       <code :if={pr_url == ""} class="text-xs">{@task.pr_ref}</code>
                     </:item>
@@ -983,7 +994,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                           class="link link-hover text-xs font-mono text-primary inline-flex items-center gap-0.5"
                         >
                           {ref}
-                          <.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                          <ArbiterWeb.CoreComponents.icon
+                            name="hero-arrow-top-right-on-square"
+                            class="size-3"
+                          />
                         </a>
                         <code :if={ref_url == ""} class="text-xs">{ref}</code>
                       </li>
@@ -1332,7 +1346,10 @@ defmodule ArbiterWeb.TaskDetailLive do
         <% else %>
           <.panel>
             <div class="flex flex-col items-center gap-2 py-6 text-center">
-              <.icon name="hero-question-mark-circle" class="size-12 text-base-content/30" />
+              <ArbiterWeb.CoreComponents.icon
+                name="hero-question-mark-circle"
+                class="size-12 text-base-content/30"
+              />
               <p class="text-base-content/70">
                 Task <code class="text-sm">{@task_id}</code> not found.
               </p>
@@ -1430,12 +1447,20 @@ defmodule ArbiterWeb.TaskDetailLive do
             </div>
             <p :if={@edit_error} class="sm:col-span-2 text-sm text-error">{@edit_error}</p>
             <div class="sm:col-span-2 modal-action">
-              <.button type="button" phx-click="cancel_edit" class="btn btn-sm btn-ghost">
+              <ArbiterWeb.CoreComponents.button
+                type="button"
+                phx-click="cancel_edit"
+                class="btn btn-sm btn-ghost"
+              >
                 Cancel
-              </.button>
-              <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
+              </ArbiterWeb.CoreComponents.button>
+              <ArbiterWeb.CoreComponents.button
+                type="submit"
+                variant="primary"
+                class="btn btn-sm btn-primary"
+              >
                 Save
-              </.button>
+              </ArbiterWeb.CoreComponents.button>
             </div>
           </.form>
         </div>
@@ -1461,10 +1486,16 @@ defmodule ArbiterWeb.TaskDetailLive do
             />
             <p :if={@close_error} class="text-sm text-error">{@close_error}</p>
             <div class="modal-action">
-              <.button type="button" phx-click="cancel_close" class="btn btn-sm btn-ghost">
+              <ArbiterWeb.CoreComponents.button
+                type="button"
+                phx-click="cancel_close"
+                class="btn btn-sm btn-ghost"
+              >
                 Cancel
-              </.button>
-              <.button type="submit" class="btn btn-sm btn-error">Close it</.button>
+              </ArbiterWeb.CoreComponents.button>
+              <ArbiterWeb.CoreComponents.button type="submit" class="btn btn-sm btn-error">
+                Close it
+              </ArbiterWeb.CoreComponents.button>
             </div>
           </.form>
         </div>
@@ -1481,7 +1512,7 @@ defmodule ArbiterWeb.TaskDetailLive do
           </p>
 
           <div role="alert" class="alert alert-warning py-2 mb-3">
-            <.icon name="hero-exclamation-triangle" class="size-5 shrink-0" />
+            <ArbiterWeb.CoreComponents.icon name="hero-exclamation-triangle" class="size-5 shrink-0" />
             <span class="text-sm">
               This spends real <strong>API credits</strong>
               and may open a pull request. There is no undo beyond stopping the {@worker_label}.
@@ -1528,22 +1559,22 @@ defmodule ArbiterWeb.TaskDetailLive do
             </p>
             <p :if={@dispatch_error} class="text-sm text-error">{@dispatch_error}</p>
             <div class="modal-action">
-              <.button
+              <ArbiterWeb.CoreComponents.button
                 type="button"
                 phx-click="cancel_dispatch"
                 class="btn btn-sm btn-ghost"
                 disabled={@dispatching}
               >
                 Cancel
-              </.button>
-              <.button
+              </ArbiterWeb.CoreComponents.button>
+              <ArbiterWeb.CoreComponents.button
                 type="submit"
                 variant="primary"
                 class="btn btn-sm btn-primary"
                 disabled={@dispatching}
               >
                 {if @dispatching, do: "Dispatching…", else: "Dispatch"}
-              </.button>
+              </ArbiterWeb.CoreComponents.button>
             </div>
           </.form>
         </div>
@@ -1562,7 +1593,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp dep_edge(assigns) do
     ~H"""
     <div class="flex items-center gap-2">
-      <.icon
+      <ArbiterWeb.CoreComponents.icon
         name={if @direction == :upstream, do: "hero-arrow-up-right", else: "hero-arrow-down-left"}
         class="size-4 text-base-content/40 shrink-0"
       />

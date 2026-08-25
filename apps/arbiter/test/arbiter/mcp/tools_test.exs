@@ -897,6 +897,36 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "task_promote/2" do
+    test "a coordinator promotes a task from Backlog to Ready", ctx do
+      assert ctx.task.refined == false
+
+      assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.refined == true
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.refined == true
+    end
+
+    test "promoting an already-refined task is a no-op success", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      assert ctx.task.refined == false
+      {:ok, task} = Ash.get(Issue, ctx.task.id)
+      assert task.refined == true
+
+      assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.refined == true
+    end
+
+    test "cannot promote a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "pt-other", prefix: "pto"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_promote(ctx.coordinator, %{"id" => foreign.id})
+    end
+  end
+
   describe "notify_list/2" do
     test "lists recent notifications scoped to the workspace (both tiers)", ctx do
       {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})
@@ -3016,6 +3046,39 @@ defmodule Arbiter.MCP.ToolsTest do
       on_exit(fn -> Worker.stop(task.id, :normal) end)
     end
 
+    test "force_quota: true with force_quota_reason creates audit event with reason via MCP args",
+         ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "force quota with reason", workspace_id: ctx.ws.id})
+
+      # Call Tools.worker_dispatch (the MCP tool handler) with force_quota_reason
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => true,
+                 "force_quota_reason" => "critical path test via MCP"
+               })
+
+      assert data.task.status == "in_progress"
+
+      # Verify the audit event was created with the reason from the MCP argument
+      events =
+        Arbiter.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ctx.ws.id and topic == "quota_gate_bypass")
+        |> Ash.read!()
+
+      assert length(events) == 1
+      event = List.first(events)
+      payload = event.payload
+
+      assert payload["task_id"] == task.id
+      assert payload["actor"] == "coordinator"
+      assert payload["reason"] == "critical path test via MCP"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
     test "force_quota: false is accepted in the schema", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "normal quota dispatch", workspace_id: ctx.ws.id})
 
@@ -3060,6 +3123,43 @@ defmodule Arbiter.MCP.ToolsTest do
         {:error, {:invalid, msg}} ->
           # Should not complain about force_quota being unknown
           refute msg =~ "force_quota"
+
+        {:error, _} ->
+          # Other errors are fine (e.g., no worktree to resume from)
+          :ok
+      end
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "force_quota_reason is accepted in the schema and does not cause additional properties error",
+         ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "force quota resume with reason", workspace_id: ctx.ws.id})
+
+      # First dispatch with no_agent to park the task
+      {:ok, _dispatch_result} =
+        Tools.worker_dispatch(ctx.coordinator, %{
+          "task_id" => task.id,
+          "no_agent" => true
+        })
+
+      # Resume with force_quota: true and force_quota_reason
+      result =
+        Tools.worker_resume(ctx.coordinator, %{
+          "task_id" => task.id,
+          "force_quota" => true,
+          "force_quota_reason" => "resume for critical fix via MCP"
+        })
+
+      # The schema should accept force_quota_reason, so we shouldn't get an "additional properties" error
+      case result do
+        {:ok, _} ->
+          :ok
+
+        {:error, {:invalid, msg}} ->
+          # Should not complain about force_quota_reason being unknown
+          refute msg =~ "force_quota_reason"
 
         {:error, _} ->
           # Other errors are fine (e.g., no worktree to resume from)

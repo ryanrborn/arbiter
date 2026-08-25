@@ -314,7 +314,15 @@ defmodule ArbiterWeb.TaskNewLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
       <div class="p-4 sm:p-6 max-w-[900px] mx-auto flex flex-col gap-4">
         <div>
           <h1 class="m-0 font-[600] text-[24px] leading-[1.2] tracking-[-0.025em] text-[var(--text-title)]">

@@ -335,7 +335,15 @@ defmodule ArbiterWeb.SkillIndexLive do
     assigns = assign(assigns, :selected, selected_skill(assigns.skills, assigns.selected_id))
 
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas} live={@live}>
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <ArbiterWeb.CoreComponents.Domain.index_header
           icon="hero-clipboard-document-list"

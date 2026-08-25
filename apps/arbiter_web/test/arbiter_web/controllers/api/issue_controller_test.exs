@@ -451,6 +451,29 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  describe "POST /api/issues/:id/promote" do
+    test "promotes a task from Backlog to Ready", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "promote me", workspace_id: ws.id})
+      assert issue.refined == false
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
+
+      body = json_response(conn, 200)
+      assert body["refined"] == true
+    end
+
+    test "promoting an already-refined task is a no-op success", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert refined.refined == true
+
+      conn = post(conn, ~p"/api/issues/#{refined.id}/promote")
+
+      body = json_response(conn, 200)
+      assert body["refined"] == true
+    end
+  end
+
   describe "GET /api/issues/ready" do
     test "returns only open issues with no open blockers", %{conn: conn, ws: ws} do
       {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})

@@ -24,7 +24,8 @@ defmodule ArbiterWeb.Router do
       on_mount: [
         {ArbiterWeb.LiveHooks, :current_path},
         {ArbiterWeb.LiveHooks, :live},
-        {ArbiterWeb.LiveHooks, :quota}
+        {ArbiterWeb.LiveHooks, :quota},
+        {ArbiterWeb.LiveHooks, :coordinator_inbox}
       ] do
       live("/", BoardLive)
       live("/audit", AuditLogLive)
@@ -68,6 +69,7 @@ defmodule ArbiterWeb.Router do
     put("/issues/:id", IssueController, :update)
     post("/issues/:id/close", IssueController, :close)
     post("/issues/:id/reopen", IssueController, :reopen)
+    post("/issues/:id/promote", IssueController, :promote)
 
     # Dependencies
     post("/dependencies", DependencyController, :create)
@@ -156,6 +158,11 @@ defmodule ArbiterWeb.Router do
 
     # Graph queue operations (C5 of #482)
     post("/queue/:task_id/resume", QueueController, :resume)
+
+    # Board scheduler (autopilot) operations
+    post("/scheduler/pause", SchedulerController, :pause)
+    post("/scheduler/resume", SchedulerController, :resume)
+    get("/scheduler/status", SchedulerController, :status)
   end
 
   # Local transparent proxy to api.anthropic.com (bd-5boun6). Workers route
