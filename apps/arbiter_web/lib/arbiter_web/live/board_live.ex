@@ -603,7 +603,11 @@ defmodule ArbiterWeb.BoardLive do
         >
           <%!-- ── Toolbar ─────────────────────────────────────────────── --%>
           <div class="flex items-center gap-3 h-[var(--toolbar-height)] px-4 border-b border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)]">
-            <form id="board-workspace-form" phx-change="workspace" class="flex-none min-w-[120px] max-w-xs">
+            <form
+              id="board-workspace-form"
+              phx-change="workspace"
+              class="flex-none min-w-[120px] max-w-xs"
+            >
               <ArbiterWeb.CoreComponents.Forms.select
                 name="workspace"
                 size="sm"
