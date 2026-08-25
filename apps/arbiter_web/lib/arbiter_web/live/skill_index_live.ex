@@ -452,7 +452,7 @@ defmodule ArbiterWeb.SkillIndexLive do
 
         <div
           :if={@skills != []}
-          class="grid grid-cols-[minmax(0,320px)_minmax(0,1fr)] gap-px bg-[var(--arb-line)] border border-[var(--arb-line)] rounded-[4px] overflow-hidden"
+          class="grid grid-cols-1 md:grid-cols-[minmax(0,320px)_minmax(0,1fr)] gap-px bg-[var(--arb-line)] border border-[var(--arb-line)] rounded-[4px] overflow-hidden"
         >
           <ul
             id="skills-list"
