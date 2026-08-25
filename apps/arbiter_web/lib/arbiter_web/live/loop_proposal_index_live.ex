@@ -239,7 +239,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
       coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
-        <div :if={@decision_toast} class="fixed top-24 right-4 z-50 w-80 sm:w-96">
+        <div :if={@decision_toast} class="fixed top-24 left-4 right-4 z-50 max-w-96">
           <ArbiterWeb.CoreComponents.Feedback.toast
             id="decision-toast"
             tone="info"
@@ -259,7 +259,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
           subtitle="Queued writes the loop-analysis pass proposed. Nothing applies itself — an operator decides."
         >
           <:actions>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 min-w-0">
               <ArbiterWeb.CoreComponents.Feedback.live_badge live={@live} />
               <ArbiterWeb.CoreComponents.Navigation.filter_tabs
                 tabs={filter_tabs()}

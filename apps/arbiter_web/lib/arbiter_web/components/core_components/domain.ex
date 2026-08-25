@@ -146,7 +146,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           {@subtitle}
         </p>
       </div>
-      <div :if={@actions != []} class="flex items-center gap-2 flex-none">
+      <div :if={@actions != []} class="flex items-center gap-2 min-w-0">
         {render_slot(@actions)}
       </div>
     </div>
