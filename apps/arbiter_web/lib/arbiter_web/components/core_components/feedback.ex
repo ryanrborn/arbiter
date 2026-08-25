@@ -63,10 +63,19 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   `live` override) instead of the assign-driven form every other page used.
   That form started both spans in a `hidden`/visible pair and relied
   entirely on `phx-connected`/`phx-disconnected` special bindings to flip
-  them — including on the *initial join*, which is a stronger requirement
-  than the disconnect-toast pattern it was modeled on (those toasts start
-  hidden and only need `phx-disconnected` to ever fire; a reconnect just
-  restores the already-hidden default state).
+  them — including on the *initial join*, which the assign-driven `:live`
+  now owns instead. The bare form is not being replaced because
+  `phx-connected`/`phx-disconnected` are unreliable in general — the
+  disconnect toasts (`flash_group/1`, below) use the exact same pair
+  reliably. It's replaced because relying on the join-direction firing
+  correctly was never confirmed to work for this badge, and because
+  LiveView's JS commands (`JS.show`/`JS.hide`/`JS.set_attribute`) are
+  *sticky*: they get re-applied on every subsequent DOM patch
+  (`DOM.applyStickyOperations`), so whichever direction's binding is
+  omitted, that direction can never be undone by a fresh server render —
+  only by the matching `phx-connected`/`phx-disconnected` firing again.
+  That means *both* directions need their own binding to stay correct
+  indefinitely, not just the one that runs on join.
 
   Reading the LiveView 1.1.33 client source
   (`deps/phoenix_live_view/assets/js/phoenix_live_view/view.js`) rules out
@@ -102,11 +111,14 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   `connected?(socket)`), the bare/default branch that depended on
   `phx-connected` firing on join is removed, and `live` is `required: true`
   so a future `<.live_badge id="x" />` call site cannot silently reproduce
-  this bug. The one piece of the DOM mechanism kept in use —
-  `phx-disconnected={hide_live(@id)}` on the `-live` span in the `live={true}`
-  branch (see below) — mirrors the disconnect toasts' pattern, which only
-  needs the reconnect direction, not the join direction that was never
-  confirmed to work.
+  this bug. The DOM mechanism is still used in the `live={true}` branch, but
+  now with *both* directions bound on the `-live` span:
+  `phx-connected={show_live(@id)}` and `phx-disconnected={hide_live(@id)}`.
+  The connected binding is not decorative — it is the only thing that undoes
+  `hide_live/1`'s sticky ops after a real disconnect-then-rejoin; without it
+  the badge would get stuck reading "stale — refresh" forever after the
+  first outage, which is the same bug this fix was filed for, just moved
+  from the join direction to the reconnect direction.
 
   A round-2 review caught that the `-stale` span used to *also* carry
   `phx-disconnected={show_live(@id)}` — the mirror-image command. LiveView's
@@ -125,7 +137,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   def live_badge(%{live: true} = assigns) do
     ~H"""
     <span id={@id} class={@class}>
-      <span id={"#{@id}-live"} phx-disconnected={hide_live(@id)}>
+      <span id={"#{@id}-live"} phx-connected={show_live(@id)} phx-disconnected={hide_live(@id)}>
         {live_badge_live(%{})}
       </span>
       <span id={"#{@id}-stale"} hidden>
@@ -147,6 +159,13 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
       |> JS.set_attribute({"hidden", ""}, to: "##{id}-live")
       |> JS.show(to: "##{id}-stale", display: "inline-flex")
       |> JS.remove_attribute("hidden", to: "##{id}-stale")
+
+  defp show_live(id),
+    do:
+      JS.show(to: "##{id}-live", display: "inline-flex")
+      |> JS.remove_attribute("hidden", to: "##{id}-live")
+      |> JS.hide(to: "##{id}-stale")
+      |> JS.set_attribute({"hidden", ""}, to: "##{id}-stale")
 
   defp live_badge_live(assigns) do
     ~H"""
