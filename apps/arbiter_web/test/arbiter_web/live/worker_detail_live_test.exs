@@ -100,6 +100,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
       # Metadata rail grid should be responsive: single column on mobile, two columns on large screens
       assert has_element?(view, "div[class*='grid-cols-1'][class*='lg:grid-cols-']")
     end
