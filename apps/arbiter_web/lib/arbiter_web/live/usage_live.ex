@@ -297,6 +297,7 @@ defmodule ArbiterWeb.UsageLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
       coordinator_inbox_now={@coordinator_inbox_now}
@@ -310,7 +311,7 @@ defmodule ArbiterWeb.UsageLive do
           <:actions>
             <div class="flex items-center gap-3">
               <.segmented_control options={~w(7d 30d all)} value={@range} event="range" />
-              <Feedback.live_badge id="usage-live" />
+              <Feedback.live_badge id="usage-live" live={@live} />
             </div>
           </:actions>
         </Domain.index_header>

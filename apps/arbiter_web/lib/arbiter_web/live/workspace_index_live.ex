@@ -27,7 +27,6 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     |> assign(:live, connected?(socket))
      |> assign(:creating, false)
      |> assign(:create_error, nil)
      |> assign(:tracker_types, @valid_tracker_types)
@@ -112,6 +111,7 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
       coordinator_inbox_now={@coordinator_inbox_now}

@@ -88,7 +88,6 @@ defmodule ArbiterWeb.TaskDetailLive do
     {:ok,
      socket
      |> assign(:task_id, task_id)
-     |> assign(:live, connected?(socket))
      |> assign(:issue_label, "issue")
      |> assign(:worker_label, "worker")
      |> assign(:workspace_label, "workspace")
@@ -808,6 +807,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
       coordinator_inbox_now={@coordinator_inbox_now}

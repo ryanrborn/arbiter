@@ -37,6 +37,12 @@ defmodule ArbiterWeb.Layouts do
 
   attr(:quotas, :list, default: [], doc: "One AnthropicQuota struct per tracked provider")
 
+  attr(:live, :boolean,
+    default: false,
+    doc:
+      "socket-connected state from ArbiterWeb.LiveHooks' :live on_mount; false (never live) for dead controller renders that skip the hook"
+  )
+
   attr(:quota_on_exhaustion, :any,
     default: nil,
     doc: "override for tests/specimens; real callers omit it and get the installation default"
@@ -109,7 +115,7 @@ defmodule ArbiterWeb.Layouts do
             />
           </div>
         </div>
-        <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" />
+        <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" live={@live} />
         <.coordinator_inbox_trigger unread={length(@coordinator_inbox)} />
         <.theme_toggle />
       </:right>

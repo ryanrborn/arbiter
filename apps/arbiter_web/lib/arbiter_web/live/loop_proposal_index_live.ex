@@ -40,7 +40,6 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
     {:ok,
      socket
-     |> assign(:live, connected?(socket))
      |> assign(:filter, "live")
      |> assign(:selected_id, nil)
      |> assign(:evidence_bar, Loop.evidence_bar(nil))
@@ -234,6 +233,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
       coordinator_inbox_now={@coordinator_inbox_now}
