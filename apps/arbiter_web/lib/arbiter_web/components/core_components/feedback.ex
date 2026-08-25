@@ -36,42 +36,114 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
 
   ## Examples
 
-      <.live_badge id="dashboard-live" />
+      <.live_badge id="dashboard-live" live={@live} />
       <.live_badge live={true} />
       <.live_badge live={false} />
 
-  With no `live` override, both states render and CSS/JS (mirroring
-  `flash_group`'s `phx-connected`/`phx-disconnected` pattern) shows whichever
-  matches the actual socket state — starting from "stale", since a page
-  begins on its dead render before the socket connects. Pass `live` to force
-  a state for specimens and docs. The ping animation is the only always-on
-  animation in the system: it means a live socket, nothing else.
+  `live` is required and must be assign-driven — pass the `:live` assign
+  every `live_session` mounts via `ArbiterWeb.LiveHooks.on_mount(:live, ...)`
+  (`connected?(socket)` at mount/reconnect). It used to default to `nil` and
+  render both states wired purely to `phx-connected`/`phx-disconnected`
+  (mirroring `flash_group`'s toast pattern), auto-toggling with no server
+  assign needed — that was the AppShell navbar badge's mechanism, and it was
+  the root cause of bd-akygjy: the badge was permanently stuck on "stale —
+  refresh". See the "Root cause" note below for what was and wasn't
+  established about *why*, and why the fix is "stop depending on this
+  direction of the DOM mechanism" rather than "patch it".
+
+  Pass a literal `true`/`false` only for specimens, docs, or a badge that is
+  known to never reconnect (e.g. a style-guide page). The ping animation is
+  the only always-on animation in the system: it means a live socket,
+  nothing else.
+
+  ## Root cause (bd-akygjy)
+
+  The AppShell instance (`layouts.ex`), and formerly `workspace_detail_live.ex`
+  and `usage_live.ex`, used the bare `<.live_badge id="..." />` form (no
+  `live` override) instead of the assign-driven form every other page used.
+  That form started both spans in a `hidden`/visible pair and relied
+  entirely on `phx-connected`/`phx-disconnected` special bindings to flip
+  them — including on the *initial join*, which the assign-driven `:live`
+  now owns instead. The bare form is not being replaced because
+  `phx-connected`/`phx-disconnected` are unreliable in general — the
+  disconnect toasts (`flash_group/1`, below) use the exact same pair
+  reliably. It's replaced because relying on the join-direction firing
+  correctly was never confirmed to work for this badge, and because
+  LiveView's JS commands (`JS.show`/`JS.hide`/`JS.set_attribute`) are
+  *sticky*: they get re-applied on every subsequent DOM patch
+  (`DOM.applyStickyOperations`), so whichever direction's binding is
+  omitted, that direction can never be undone by a fresh server render —
+  only by the matching `phx-connected`/`phx-disconnected` firing again.
+  That means *both* directions need their own binding to stay correct
+  indefinitely, not just the one that runs on join.
+
+  Reading the LiveView 1.1.33 client source
+  (`deps/phoenix_live_view/assets/js/phoenix_live_view/view.js`) rules out
+  several plausible explanations, but does not land on a single confirmed
+  one — this needed live browser devtools (per the task's own difficulty
+  note), which this fix round could not do:
+
+    * `phx-connected`/`phx-disconnected` are not special-cased anywhere
+      server-side (`grep -rn "phx-connected" deps/phoenix_live_view/lib`
+      returns nothing) — they are plain attributes read entirely by the JS
+      client, so nothing strips or rewrites them between the dead render and
+      the connected patch.
+    * The client fires the `connected` binding via `View.hideLoader()`,
+      which runs from `applyJoinPatch` on *both* the initial join and every
+      reconnect (`view.js:618-620`), and `execAll` scopes its
+      `querySelectorAll("[phx-connected]")` to the view's own root element
+      (`this.el`) — the AppShell badge is rendered via `<Layouts.app>` from
+      inside each LiveView's own template (the app layout, not
+      `put_root_layout`'s `Layouts.root`, which is the one rendered outside
+      `this.el`), so on paper it is in scope.
+    * No CSS in `app.css` overrides the `hidden` attribute (no `[hidden]`
+      rule at all — Tailwind's preflight default has no `!important`), and
+      the JS commands explicitly call `remove_attribute("hidden", ...)`
+      alongside `JS.show`, so a specificity fight was ruled out.
+    * The binding prefix is the framework default `"phx-"`
+      (`live_socket.js:398`), matching the HEEx-emitted attribute names
+      exactly — no prefix mismatch.
+
+  None of that explains the reported "never once shown Live across an
+  entire session" symptom, which is why this fix does not try to repair the
+  DOM-only connect-direction mechanism and ship it as trustworthy again.
+  Instead: `:live` is now assign-driven everywhere (`ArbiterWeb.LiveHooks`,
+  `connected?(socket)`), the bare/default branch that depended on
+  `phx-connected` firing on join is removed, and `live` is `required: true`
+  so a future `<.live_badge id="x" />` call site cannot silently reproduce
+  this bug. The DOM mechanism is still used in the `live={true}` branch, but
+  now with *both* directions bound on the `-live` span:
+  `phx-connected={show_live(@id)}` and `phx-disconnected={hide_live(@id)}`.
+  The connected binding is not decorative — it is the only thing that undoes
+  `hide_live/1`'s sticky ops after a real disconnect-then-rejoin; without it
+  the badge would get stuck reading "stale — refresh" forever after the
+  first outage, which is the same bug this fix was filed for, just moved
+  from the join direction to the reconnect direction.
+
+  A round-2 review caught that the `-stale` span used to *also* carry
+  `phx-disconnected={show_live(@id)}` — the mirror-image command. LiveView's
+  JS client runs every element matching `[phx-disconnected]` in document
+  order with no visibility filter (`view.js` `execAll` /
+  `dom.js`'s plain `querySelectorAll`), so both handlers fired on a genuine
+  disconnect and the second one undid the first, leaving the badge reading
+  "live" through an outage. That stale-span attribute has been deleted;
+  `hide_live(@id)` on the `-live` span already toggles both spans, so nothing
+  else needs to carry the binding.
   """
   attr :id, :string, default: "live-badge"
-  attr :live, :boolean, default: nil, doc: "force a state; omit to bind to the real socket"
+  attr :live, :boolean, required: true, doc: "assign-driven state; see moduledoc root cause note"
   attr :class, :any, default: nil
-
-  def live_badge(%{live: nil} = assigns) do
-    ~H"""
-    <span id={@id} class={@class}>
-      <span
-        id={"#{@id}-live"}
-        hidden
-        phx-connected={show_live(@id)}
-        phx-disconnected={hide_live(@id)}
-      >
-        {live_badge_live(%{})}
-      </span>
-      <span id={"#{@id}-stale"} phx-connected={hide_live(@id)} phx-disconnected={show_live(@id)}>
-        {live_badge_stale(%{})}
-      </span>
-    </span>
-    """
-  end
 
   def live_badge(%{live: true} = assigns) do
     ~H"""
-    <span id={@id} class={@class}>{live_badge_live(%{})}</span>
+    <span id={@id} class={@class}>
+      <span id={"#{@id}-live"} phx-connected={show_live(@id)} phx-disconnected={hide_live(@id)}>
+        {live_badge_live(%{})}
+      </span>
+      <span id={"#{@id}-stale"} hidden>
+        {live_badge_stale(%{})}
+      </span>
+    </span>
     """
   end
 
@@ -81,19 +153,19 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
     """
   end
 
-  defp show_live(id),
-    do:
-      JS.show(to: "##{id}-live", display: "inline-flex")
-      |> JS.remove_attribute("hidden", to: "##{id}-live")
-      |> JS.hide(to: "##{id}-stale")
-      |> JS.set_attribute({"hidden", ""}, to: "##{id}-stale")
-
   defp hide_live(id),
     do:
       JS.hide(to: "##{id}-live")
       |> JS.set_attribute({"hidden", ""}, to: "##{id}-live")
       |> JS.show(to: "##{id}-stale", display: "inline-flex")
       |> JS.remove_attribute("hidden", to: "##{id}-stale")
+
+  defp show_live(id),
+    do:
+      JS.show(to: "##{id}-live", display: "inline-flex")
+      |> JS.remove_attribute("hidden", to: "##{id}-live")
+      |> JS.hide(to: "##{id}-stale")
+      |> JS.set_attribute({"hidden", ""}, to: "##{id}-stale")
 
   defp live_badge_live(assigns) do
     ~H"""

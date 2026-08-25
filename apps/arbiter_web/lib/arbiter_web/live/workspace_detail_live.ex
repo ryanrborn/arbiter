@@ -240,6 +240,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
       coordinator_inbox_now={@coordinator_inbox_now}
@@ -260,6 +261,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}
       coordinator_inbox_now={@coordinator_inbox_now}
@@ -274,7 +276,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
             <span class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]">
               {@workspace.prefix}-
             </span>
-            <Feedback.live_badge id="ws-live" live />
+            <Feedback.live_badge id="ws-live" live={@live} />
           </:actions>
         </Domain.index_header>
 
