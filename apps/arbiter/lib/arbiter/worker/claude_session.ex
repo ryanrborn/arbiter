@@ -1255,33 +1255,73 @@ defmodule Arbiter.Worker.ClaudeSession do
   # a throwaway sqlite file instead of silently inheriting the coordinator's
   # own DATABASE_PATH — the same file the live `arbiter.service` uses.
   #
+  # bd-2zigo1: secret credential values that reach a worker's child process,
+  # whether via the caller-explicit `:env` opt (`Claude.spawn_env/1`'s
+  # `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` pairs) or, for the
+  # `ClaudeSession.start/1` callers that pass no `:env` at all
+  # (`conflict_resolver.ex`, `fix_pass_dispatcher.ex`), via plain OS
+  # environment inheritance through `Port.open`'s `{:env, …}` (which extends
+  # rather than replaces the BEAM's own environment). Neither source passes
+  # through `Arbiter.Worker.WorkerEnv`, so they must be added to the
+  # redaction list separately. Only known credential var names are scrubbed
+  # here; non-secret pairs (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`) are
+  # left alone.
+  @credential_env_keys ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY)
+
+  defp credential_env_values(opts) do
+    from_opts =
+      case Keyword.fetch(opts, :env) do
+        {:ok, list} when is_list(list) ->
+          for {key, value} <- list,
+              key in @credential_env_keys,
+              is_binary(value) and value != "",
+              do: value
+
+        _ ->
+          []
+      end
+
+    from_os =
+      for key <- @credential_env_keys,
+          value = System.get_env(key),
+          value != "",
+          do: value
+
+    Enum.uniq(from_opts ++ from_os)
+  end
+
+  # When the caller passes an explicit `:env` (the workspace-aware Dispatch /
+  # ReviewGate path always does, via the adapter's spawn_env/1) we use it
+  # verbatim. When it's absent (bare ClaudeSession.start/1 callers, the
+  # workspace-less ReviewGate path) we default to the isolated CLAUDE_CONFIG_DIR
+  # so even those spawns don't inherit the operator's ~/.claude. In the test
+  # env config isolation is disabled, so this resolves to [] there.
+  #
+  # bd-crqku8: always inject ARB_WORKER_BEAD_ID so any `arb restart/update/
+  # start` invoked from inside the worker session can detect it and refuse,
+  # preventing an worker from bouncing the live orchestrating server.
+  #
+  # bd-4hkzn3: prepend release-env cleanup pairs so ROOTDIR / BINDIR /
+  # RELEASE_* inherited from the systemd OTP release service unit are unset in
+  # every worker child shell. Without this, `mix test` (and `arb inbox`) in a
+  # worktree tries to boot from the release's ERTS rather than the
+  # per-worktree mise-pinned toolchain, crashing with a missing boot file and
+  # forcing the ReviewGate to static-analysis-only. The cleanup pairs are a
+  # no-op on a plain dev VM (ReleaseEnv.clean_pairs/0 returns [] when no
+  # release vars are detected). Caller-explicit `:env` is appended after the
+  # cleanup so it can always override specific vars if needed.
+  #
+  # bd-bzsqbu: also prepend a task-scoped DATABASE_PATH override so a worker
+  # that starts its own `mix phx.server` for manual verification writes into
+  # a throwaway sqlite file instead of silently inheriting the coordinator's
+  # own DATABASE_PATH — the same file the live `arbiter.service` uses.
+  #
   # `worker_env` is the workspace's user-defined vars (bd-62d3jh), resolved by
   # the caller so one workspace load serves both it and the session's
   # `redact_values`. They sit after the release/dev-server cleanups but before
   # caller-explicit `:env` (agent auth) and the always-last ARB_WORKER_BEAD_ID
   # guard, so a user var can never clobber the agent's auth or the
   # self-recursion guard.
-  # bd-2zigo1: secret credential values carried in the caller-explicit `:env`
-  # opt (`Claude.spawn_env/1`'s `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`
-  # pairs) — these never pass through `Arbiter.Worker.WorkerEnv`, so they must
-  # be added to the redaction list separately. Only known credential var names
-  # are scrubbed here; non-secret pairs (`CLAUDE_CONFIG_DIR`,
-  # `ANTHROPIC_BASE_URL`) are left alone.
-  @credential_env_keys ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY)
-
-  defp credential_env_values(opts) do
-    case Keyword.fetch(opts, :env) do
-      {:ok, list} when is_list(list) ->
-        for {key, value} <- list,
-            key in @credential_env_keys,
-            is_binary(value) and value != "",
-            do: value
-
-      _ ->
-        []
-    end
-  end
-
   defp env_pairs(opts, task_id, worker_env) do
     base =
       case Keyword.fetch(opts, :env) do

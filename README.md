@@ -233,10 +233,15 @@ authenticate against the install-wide account instead. If a workspace's
 on it, or unset the install-wide token for that install.
 
 **Redaction:** `Arbiter.Worker.ClaudeSession.start/1` adds
-`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values carried in the spawn's
-`:env` to the session's redaction list alongside the workspace's secret-flagged
-`worker_env` values, so the token is scrubbed from worker output
-(`worker_runs.output_lines`, the live dashboard stream, the durable output log)
+`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values to the session's
+redaction list alongside the workspace's secret-flagged `worker_env` values —
+both the values carried in the spawn's explicit `:env` (the Dispatch/
+ReviewGate path) and, for the `start/1` callers that pass no `:env` at all
+(the conflict-resolver and CI fix-pass workers, which still inherit the
+install-wide OS environment via `Port.open`'s `{:env, …}` extension
+semantics), the value read directly from the OS environment. So the token is
+scrubbed from worker output (`worker_runs.output_lines`, the live dashboard
+stream, the durable output log) across all `ClaudeSession.start/1` callers,
 even after the per-workspace `worker_env` copies are removed.
 
 ### Storing tracker / merger credentials in the database
