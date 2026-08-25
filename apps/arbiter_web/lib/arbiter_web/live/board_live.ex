@@ -677,7 +677,7 @@ defmodule ArbiterWeb.BoardLive do
           <div
             id="board-columns"
             phx-hook=".BoardDrag"
-            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px]"
+            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] xl:grid xl:grid-cols-5"
           >
             <%!-- Backlog — written down, not yet thought through. No reason
                  line, no accent, no drag: nothing here is queued for anything,
@@ -685,7 +685,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-backlog"
               data-column="backlog"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
             >
               <.column_head label="Backlog" count={length(@backlog)} tone={nil} />
 
@@ -727,7 +727,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-ready"
               data-column="ready"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
             >
               <.column_head label="Ready" count={length(@ready)} tone={nil} />
 
@@ -772,7 +772,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-running"
               data-column="running"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
             >
               <.column_head
                 label="Running"
@@ -821,7 +821,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-waiting"
               data-column="waiting"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
             >
               <.column_head
                 label="Waiting"
@@ -884,7 +884,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-closed"
               data-column="closed"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
             >
               <.column_head label="Closed today" count={length(@closed)} tone={nil} />
 

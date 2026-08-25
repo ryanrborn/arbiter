@@ -668,5 +668,17 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute html =~ ~s(w-[136px])
       refute html =~ ~s(w-[260px])
     end
+
+    test "columns fill the full width on xl breakpoint and above", %{conn: conn, ws: ws} do
+      issue(ws, "test issue")
+      {:ok, _view, html} = live(conn, "/")
+
+      # The board-columns container must switch to grid layout on xl:
+      # xl:grid switches display from flex to grid at that breakpoint
+      assert html =~ "xl:grid xl:grid-cols-5"
+
+      # Each column must have xl:w-auto so grid tracks stretch to fill width
+      assert html =~ "xl:w-auto"
+    end
   end
 end
