@@ -162,7 +162,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
     ~H"""
     <div
       class={[
-        "inline-flex w-fit overflow-x-auto overflow-y-hidden rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)]",
+        "inline-flex w-full min-w-0 overflow-x-auto overflow-y-hidden rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)]",
         @class
       ]}
       {@rest}

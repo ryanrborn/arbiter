@@ -259,7 +259,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
           subtitle="Queued writes the loop-analysis pass proposed. Nothing applies itself — an operator decides."
         >
           <:actions>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 min-w-0">
               <ArbiterWeb.CoreComponents.Feedback.live_badge live={@live} />
               <ArbiterWeb.CoreComponents.Navigation.filter_tabs
                 tabs={filter_tabs()}
