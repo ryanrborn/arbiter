@@ -190,6 +190,21 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       assert html =~ "alpha"
       assert html =~ "beta"
     end
+
+    test "outer wrapper has overflow-x-auto for horizontal scrolling on mobile" do
+      assigns = %{rows: [%{id: "task1"}, %{id: "task2"}]}
+
+      html =
+        rendered_to_string(~H"""
+        <.data_table id="tasks" rows={@rows}>
+          <:col :let={row} label="ID" width="84px">{row.id}</:col>
+          <:col :let={row} label="Name">{row.id}</:col>
+        </.data_table>
+        """)
+
+      # The outer wrapper should have overflow-x-auto for horizontal scrolling
+      assert html =~ "overflow-x-auto"
+    end
   end
 
   defp count_occurrences(haystack, needle) do
