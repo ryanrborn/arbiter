@@ -86,6 +86,24 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ ws.name
     end
 
+    test "toolbar wraps on mobile", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-wrap", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      # Toolbar should have flex-wrap to allow items to wrap on narrow viewports
+      assert has_element?(view, "div[class*='flex-wrap'][class*='gap-\\[14px\\]']")
+    end
+
+    test "metadata rail is responsive on mobile", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-responsive", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      # Metadata rail grid should be responsive: single column on mobile, two columns on large screens
+      assert has_element?(view, "div[class*='grid-cols-1'][class*='lg:grid-cols-']")
+    end
+
     test "Stop signals the worker, stays on the page, and toasts the worktree notice",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-stop", workspace_id: ws.id})

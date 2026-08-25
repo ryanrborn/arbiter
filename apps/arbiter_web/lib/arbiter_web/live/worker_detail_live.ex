@@ -622,7 +622,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
         <%= if @snapshot do %>
           <%!-- ── Worker session — toolbar + log/rail grid (README §5) ──── --%>
           <div class="border border-[var(--border-default)] rounded-[var(--radius-panel)] overflow-hidden">
-            <div class="flex items-center gap-[14px] h-[var(--toolbar-height)] px-4 bg-[var(--surface-chrome)] border-b border-[var(--border-default)]">
+            <div class="flex flex-wrap items-center gap-[14px] gap-y-2 h-auto px-4 py-2 bg-[var(--surface-chrome)] border-b border-[var(--border-default)]">
               <span class="font-medium text-[12px] text-[var(--text-title)] font-[family-name:var(--font-mono)]">
                 {@task_id}
               </span>
@@ -665,10 +665,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
               </span>
             </div>
 
-            <div
-              class="grid gap-px bg-[var(--border-default)]"
-              style="grid-template-columns: minmax(0,1fr) 272px;"
-            >
+            <div class="grid gap-px bg-[var(--border-default)] grid-cols-1 lg:grid-cols-[minmax(0,1fr)_272px]">
               <div class="bg-[var(--arb-canvas-sunken)]">
                 <%= if @output_lines == [] do %>
                   <Feedback.empty_state icon="hero-command-line">
