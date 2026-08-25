@@ -603,7 +603,7 @@ defmodule ArbiterWeb.BoardLive do
         >
           <%!-- ── Toolbar ─────────────────────────────────────────────── --%>
           <div class="flex items-center gap-3 h-[var(--toolbar-height)] px-4 border-b border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)]">
-            <form id="board-workspace-form" phx-change="workspace" class="flex-none w-[136px]">
+            <form id="board-workspace-form" phx-change="workspace" class="flex-none min-w-[120px] max-w-xs">
               <ArbiterWeb.CoreComponents.Forms.select
                 name="workspace"
                 size="sm"
@@ -612,7 +612,7 @@ defmodule ArbiterWeb.BoardLive do
               />
             </form>
 
-            <form id="board-filter-form" phx-change="filter" class="flex-none w-[260px]">
+            <form id="board-filter-form" phx-change="filter" class="flex-none min-w-[180px] max-w-sm">
               <ArbiterWeb.CoreComponents.Forms.input
                 name="filter"
                 size="sm"
@@ -673,7 +673,7 @@ defmodule ArbiterWeb.BoardLive do
           <div
             id="board-columns"
             phx-hook=".BoardDrag"
-            class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-px bg-[var(--arb-line-soft)] min-h-[560px]"
+            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px]"
           >
             <%!-- Backlog — written down, not yet thought through. No reason
                  line, no accent, no drag: nothing here is queued for anything,
@@ -681,7 +681,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-backlog"
               data-column="backlog"
-              class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
             >
               <.column_head label="Backlog" count={length(@backlog)} tone={nil} />
 
@@ -723,7 +723,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-ready"
               data-column="ready"
-              class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
             >
               <.column_head label="Ready" count={length(@ready)} tone={nil} />
 
@@ -768,7 +768,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-running"
               data-column="running"
-              class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
             >
               <.column_head
                 label="Running"
@@ -817,7 +817,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-waiting"
               data-column="waiting"
-              class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
             >
               <.column_head
                 label="Waiting"
@@ -880,7 +880,7 @@ defmodule ArbiterWeb.BoardLive do
             <div
               id="board-column-closed"
               data-column="closed"
-              class="bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px]"
             >
               <.column_head label="Closed today" count={length(@closed)} tone={nil} />
 
