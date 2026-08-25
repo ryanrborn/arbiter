@@ -35,6 +35,17 @@ defmodule ArbiterWeb.SkillIndexLiveTest do
 
       assert html =~ "Collides with a bundled skill name"
     end
+
+    test "list/detail split view stacks to a single column below the md breakpoint", %{
+      conn: conn
+    } do
+      new_skill()
+
+      {:ok, _view, html} = live(conn, ~p"/skills")
+
+      assert html =~
+               ~r/class="[^"]*\bgrid-cols-1\b[^"]*\bmd:grid-cols-\[minmax\(0,320px\)_minmax\(0,1fr\)\][^"]*"/
+    end
   end
 
   describe "detail selection" do
