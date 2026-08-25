@@ -225,7 +225,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
       )
 
     ~H"""
-    <div id={@id} class={["w-full", @class]} role="table">
+    <div id={@id} class={["w-full overflow-x-auto", @class]} role="table">
       <div
         class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
         style={"grid-template-columns: #{@template_columns};"}
