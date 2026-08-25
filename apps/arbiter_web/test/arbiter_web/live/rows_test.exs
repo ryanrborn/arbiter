@@ -18,10 +18,11 @@ defmodule ArbiterWeb.RowsTest do
 
   describe "setting_row/1 responsive layout" do
     test "renders with responsive flex direction for mobile/desktop stacking" do
-      html = render_setting_row(%{
-        name: "Test Setting",
-        consequence: "This changes X"
-      })
+      html =
+        render_setting_row(%{
+          name: "Test Setting",
+          consequence: "This changes X"
+        })
 
       # The row should have flex-col for mobile and sm:flex-row for desktop
       assert html =~ "flex-col"
@@ -31,10 +32,11 @@ defmodule ArbiterWeb.RowsTest do
     end
 
     test "maintains name and consequence data attributes" do
-      html = render_setting_row(%{
-        name: "Enable Feature X",
-        consequence: "Restarts all workers"
-      })
+      html =
+        render_setting_row(%{
+          name: "Enable Feature X",
+          consequence: "Restarts all workers"
+        })
 
       assert html =~ "Enable Feature X"
       assert html =~ "Restarts all workers"
