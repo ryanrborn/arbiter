@@ -58,7 +58,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
       repos == [] ->
         Logger.info(
           "MergedPRFinalizerSupervisor: skip workspace #{workspace.id} (#{workspace.name}) — " <>
-            "no repos resolvable"
+            "no repos resolvable (set merge.config.repo / merge.config.project_id, " <>
+            "or a repo_paths map whose repos have a github/gitlab origin remote)"
         )
 
         :skip
@@ -204,6 +205,13 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
           ["#{owner}/#{repo}"]
         else
           repos_from_repo_paths(config)
+        end
+
+      "gitlab" ->
+        case get_in(config, ["merge", "config", "project_id"]) do
+          v when is_integer(v) -> ["#{v}"]
+          v when is_binary(v) and v != "" -> [v]
+          _ -> repos_from_repo_paths(config)
         end
 
       _ ->
