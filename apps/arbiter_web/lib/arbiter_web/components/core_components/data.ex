@@ -40,6 +40,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("awaiting_review"), do: "badge-warning"
   defp status_chip_class("awaiting_review_gate"), do: "badge-warning"
   defp status_chip_class("completed"), do: "badge-success"
+  defp status_chip_class("completed_unposted"), do: "badge-warning"
   defp status_chip_class("failed"), do: "badge-error"
   defp status_chip_class("open"), do: "badge-success"
   defp status_chip_class("in_progress"), do: "badge-info"
