@@ -1695,6 +1695,32 @@ defmodule Arbiter.Mergers.GithubTest do
     test "tolerates a leading github: strategy prefix on a bare ref" do
       assert Github.link_for("github:#42") == "https://github.com/octo/widget/pull/42"
     end
+
+    test "returns a full HTTPS URL unchanged when pr_ref is already a complete URL" do
+      assert Github.link_for("https://github.com/leo-technologies-llc/verus_server/pull/3713") ==
+               "https://github.com/leo-technologies-llc/verus_server/pull/3713"
+    end
+
+    test "returns a full HTTP URL unchanged when pr_ref is already a complete URL" do
+      assert Github.link_for("http://github.com/owner/repo/pull/99") ==
+               "http://github.com/owner/repo/pull/99"
+    end
+
+    test "returns an empty string for an unparseable ref (fail-safe behavior)" do
+      assert Github.link_for("not-a-valid-ref-format") == ""
+    end
+
+    test "does NOT wrap a full URL in another URL (bd-1413 regression guard)" do
+      # This is the original bug: a full URL should NOT be treated as an invalid
+      # ref and wrapped in the template. It should pass through unchanged.
+      full_url = "https://github.com/leo-technologies-llc/verus_server/pull/3713"
+      result = Github.link_for(full_url)
+
+      # Verify the bug (nested double-URL) is NOT present
+      refute String.contains?(result, "/pull/https://")
+      # Verify the URL is returned unchanged
+      assert result == full_url
+    end
   end
 
   describe "Mergers integration" do
