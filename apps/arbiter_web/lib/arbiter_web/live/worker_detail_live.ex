@@ -572,9 +572,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   defp humanize_tokens(n) when is_integer(n), do: to_string(n)
 
-  defp format_usd(cost) when is_float(cost),
-    do: "$#{:erlang.float_to_binary(cost, decimals: 2)}"
-
   # "sonnet · 38.4k tok · $0.42" — trailing parts drop off as data arrives.
   defp toolbar_summary(snapshot, usage_events) do
     tokens = total_tokens(usage_events)

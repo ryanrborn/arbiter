@@ -312,7 +312,8 @@ defmodule ArbiterWeb.Layouts do
   # Board/Issues/Workers/Merge queue/Workspaces/Skills/Loop/Usage/Audit — the
   # global-chrome nav order (bd-53pfbg). Dashboard renamed to Board, "Loop
   # queue" to Loop, "Audit log" to Audit; About drops out of the nav (it's
-  # still reachable at ~p"/about" directly).
+  # still reachable at ~p"/about" directly). Reviews (bd-amtjxk) sits between
+  # Usage and Audit — cross-cutting operator visibility, like both neighbors.
   defp nav_items do
     [
       %{label: "Board", href: ~p"/"},
@@ -323,6 +324,7 @@ defmodule ArbiterWeb.Layouts do
       %{label: cap_plural("skill"), href: ~p"/skills"},
       %{label: "Loop", href: ~p"/loop"},
       %{label: "Usage", href: ~p"/usage"},
+      %{label: "Reviews", href: ~p"/reviews"},
       %{label: "Audit", href: ~p"/audit"}
     ]
   end

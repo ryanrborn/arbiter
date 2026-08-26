@@ -36,7 +36,7 @@ defmodule ArbiterWeb.LayoutsTest do
   end
 
   describe "app/1 — nav" do
-    test "renders the 9 nav entries in the new order, with renamed labels" do
+    test "renders the 10 nav entries in the new order, with renamed labels" do
       html = render_app()
 
       order = [
@@ -48,6 +48,7 @@ defmodule ArbiterWeb.LayoutsTest do
         "Skills",
         "Loop",
         "Usage",
+        "Reviews",
         "Audit"
       ]
 

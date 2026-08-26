@@ -40,6 +40,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("awaiting_review"), do: "badge-warning"
   defp status_chip_class("awaiting_review_gate"), do: "badge-warning"
   defp status_chip_class("completed"), do: "badge-success"
+  defp status_chip_class("completed_unposted"), do: "badge-warning"
   defp status_chip_class("failed"), do: "badge-error"
   defp status_chip_class("open"), do: "badge-success"
   defp status_chip_class("in_progress"), do: "badge-info"
@@ -271,4 +272,29 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
   defp data_table_align_class(col), do: if(col[:align] == "right", do: "text-right")
   defp data_table_mono?(col), do: col[:mono] != false
+
+  @doc """
+  Formats a USD amount for display, with more decimal places for
+  sub-cent/sub-dollar amounts so small LLM costs don't all round to "$0.00".
+
+  ## Examples
+
+      iex> ArbiterWeb.CoreComponents.Data.format_usd(nil)
+      "—"
+
+      iex> ArbiterWeb.CoreComponents.Data.format_usd(0.0042)
+      "$0.004200"
+  """
+  def format_usd(nil), do: "—"
+
+  def format_usd(amount) when is_float(amount) or is_integer(amount) do
+    f = amount * 1.0
+
+    cond do
+      f == 0.0 -> "$0.00"
+      f < 0.01 -> "$#{:erlang.float_to_binary(f, decimals: 6)}"
+      f < 1.0 -> "$#{:erlang.float_to_binary(f, decimals: 4)}"
+      true -> "$#{:erlang.float_to_binary(f, decimals: 2)}"
+    end
+  end
 end
