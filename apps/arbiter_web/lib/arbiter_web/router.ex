@@ -30,6 +30,7 @@ defmodule ArbiterWeb.Router do
       live("/", BoardLive)
       live("/audit", AuditLogLive)
       live("/usage", UsageLive)
+      live("/reviews", ReviewIndexLive)
 
       # Entity index pages (list everything, filterable + paged) and their
       # detail pages. Literal segments are declared before the dynamic
