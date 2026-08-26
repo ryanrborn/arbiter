@@ -567,18 +567,24 @@ defmodule Arbiter.Mergers.Github do
 
   @impl true
   def link_for(mr_ref) when is_binary(mr_ref) do
-    case parse_mr_ref(mr_ref) do
-      {:embedded, owner, repo, number} ->
-        "https://github.com/#{owner}/#{repo}/pull/#{number}"
+    cond do
+      String.starts_with?(mr_ref, "http://") or String.starts_with?(mr_ref, "https://") ->
+        mr_ref
 
-      {:bare, number} ->
-        case Config.active_repo_slug() do
-          slug when is_binary(slug) -> "https://github.com/#{slug}/pull/#{number}"
-          nil -> "https://github.com/owner/repo/pull/#{number}"
+      true ->
+        case parse_mr_ref(mr_ref) do
+          {:embedded, owner, repo, number} ->
+            "https://github.com/#{owner}/#{repo}/pull/#{number}"
+
+          {:bare, number} ->
+            case Config.active_repo_slug() do
+              slug when is_binary(slug) -> "https://github.com/#{slug}/pull/#{number}"
+              nil -> "https://github.com/owner/repo/pull/#{number}"
+            end
+
+          :invalid ->
+            ""
         end
-
-      :invalid ->
-        "https://github.com/owner/repo/pull/#{String.trim_leading(mr_ref, "#")}"
     end
   end
 
