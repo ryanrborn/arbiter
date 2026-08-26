@@ -29,9 +29,11 @@ The data already exists and is fully queryable — this is a pure UI gap:
   `Arbiter.Reviews.ExternalReview.create_review_record/2` and
   `complete_review_record/3`).
 
-No backend work is needed for a basic page. This document is about layout,
-filtering, live-update wiring, and how far the greenlight workflow should be
-pulled into the UI.
+No backend work is needed for the list/detail view itself — the one piece of
+backend work this page does need is a small extension to the live-update
+event payload, covered in §4. This document is about layout, filtering,
+live-update wiring, and how far the greenlight workflow should be pulled
+into the UI.
 
 ---
 
@@ -131,9 +133,10 @@ Expanded content, conditional on status/mode:
   the state an operator most needs a fast diagnostic path for.
 * **Linked engagement:** when a `review_only` Issue exists for this PR
   (`engagement_id` is already populated on the record when ReviewPatrol
-  adopted it — see `Arbiter.Reviews.ExternalReview`'s `engagement_id` field
-  and the `(source_pr, workspace)` lookup around line ~1208 of
-  `external_review.ex`), render a link to that task's board/detail page.
+  adopted it — see `Arbiter.Reviews.Record`'s `engagement_id` field,
+  `record.ex:271`, and the `(source_pr, workspace)` lookup in
+  `existing_engagement/2`, `external_review.ex:1212`), render a link to that
+  task's board/detail page.
   This is a straight `engagement_id` → task link render, no new lookup
   logic needed — the association is already persisted on the record at
   review-completion time.
@@ -153,13 +156,25 @@ On mount, subscribe to the current workspace-filtered topic (or the global
 `/events` SSE controller already offers both scopes). On `{:event, %{topic:
 "external_review"} = payload}`:
 
-* If the event is a new `running` record and it matches the active filters,
-  prepend it to the list (or increment an "N new — refresh" banner if the
-  operator has scrolled past the top, a pattern worth borrowing from chat-UI
-  conventions but not essential for v1).
+* Re-fetch the single record by `review_record_id` and insert/replace it in
+  the list (prepend if new, replace in place if already visible), rather
+  than trying to render the row directly off the event payload. This is a
+  cheap indexed primary-key read, and it also self-heals against any field
+  the payload doesn't carry.
+* This is necessary because `broadcast_review_event/3`
+  (`apps/arbiter/lib/arbiter/reviews/external_review.ex:1562-1570`) only
+  emits `status`, `pr_ref`, `verdict`, `finding_count`, `mode`,
+  `review_record_id`, and `engagement_id` (plus `topic`/`at`/`cursor` from
+  `Events.broadcast/3`) — it does not carry `link`, `workspace_id`,
+  `strategy`, `started_at`, or `cost_usd`, all of which the columns in §2
+  need to render. Extending the payload to carry those fields directly
+  (avoiding the extra read) is a reasonable alternative implementation
+  should consider, but re-fetching by id is the simpler default and is the
+  one piece of backend-adjacent work this page needs — see the note in
+  "Problem" above.
 * If it's a `completed`/`failed`/`completed_unposted` transition for a
-  record already in the visible page, patch that row in place rather than
-  re-querying.
+  record already in the visible page, the re-fetch-and-replace above
+  handles it the same way — no separate "patch" code path is needed.
 
 Rationale for live over polling: the codebase already has the PubSub
 infrastructure wired end-to-end for this exact topic (it exists *only* to
@@ -182,11 +197,12 @@ cheap) — but design the detail view so it's a natural slot-in, not a
 retrofit.**
 
 Current state: `Arbiter.Reviews.ExternalReview.greenlight/1` takes
-`record_id` + `select` (`:all`, a list of indices, or `[]`), posts the
-approved subset of `proposed_comments`, and optionally submits the
-recommended verdict. It's currently only reachable via the `review_greenlight`
-MCP tool / CLI; `render_report_body/2` already generates the human-readable
-instructions mailed to the coordinator today.
+`record_id` + `select` (`:all`, a list of zero-based indices into
+`proposed_comments`, or `[]`), posts the approved subset of
+`proposed_comments`, and optionally submits the recommended verdict. It's
+currently only reachable via the `review_greenlight` MCP tool / CLI;
+`render_report_body/3` already generates the human-readable instructions
+mailed to the coordinator today.
 
 Proposed UI, for a record with `mode: :report_only` and
 `greenlight_status: :pending`:
