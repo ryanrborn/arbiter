@@ -30,6 +30,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
   require Ash.Query
 
   @statuses Record.statuses()
+  @status_strings Enum.map(@statuses, &Atom.to_string/1)
   @status_options Enum.map(@statuses, &{Atom.to_string(&1), Atom.to_string(&1)})
 
   @impl true
@@ -52,7 +53,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
   @impl true
   def handle_params(params, _uri, socket) do
     workspace_id = present(params["workspace_id"])
-    status = if params["status"] in Enum.map(@statuses, &Atom.to_string/1), do: params["status"]
+    status = if params["status"] in @status_strings, do: params["status"]
     page = Paging.parse_page(params)
 
     {:noreply,
@@ -100,6 +101,12 @@ defmodule ArbiterWeb.ReviewIndexLive do
 
   def handle_info({:event, _payload}, socket), do: {:noreply, socket}
 
+  # Catch-all: `LiveHooks.on_mount(:coordinator_inbox)` subscribes every view
+  # in this live_session to the per-workspace coordinator-mailbox topic and
+  # `:cont`s messages like `{:new_message, _}` on to us, regardless of
+  # whether this view cares about them.
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   defp reviews_path(workspace_id, status, page),
     do: ~p"/reviews?#{[workspace_id: workspace_id, status: status, page: page]}"
 
@@ -129,8 +136,11 @@ defmodule ArbiterWeb.ReviewIndexLive do
   # the design doc's re-fetch-by-id approach (the broadcast payload only
   # carries a handful of fields — not enough to render every column). If the
   # record isn't part of the loaded page (e.g. a brand new running review on
-  # page 1, or one that no longer matches the active filters), a full
-  # `load_records/1` re-derives the correct page/total.
+  # page 1), a full `load_records/1` re-derives the correct page/total. A
+  # record already on the page is patched in place even if its new status no
+  # longer matches an active `?status=` filter — the operator is watching
+  # this row transition, so leaving it visible is preferable to it vanishing
+  # out from under them; it reappears filtered on the next navigation.
   defp patch_record(socket, id) do
     case Ash.get(Record, id) do
       {:ok, record} ->
@@ -157,19 +167,6 @@ defmodule ArbiterWeb.ReviewIndexLive do
 
   defp format_started(nil), do: "—"
   defp format_started(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
-
-  defp format_cost(nil), do: "—"
-
-  defp format_cost(amount) when is_float(amount) or is_integer(amount) do
-    f = amount * 1.0
-
-    cond do
-      f == 0.0 -> "$0.00"
-      f < 0.01 -> "$#{:erlang.float_to_binary(f, decimals: 6)}"
-      f < 1.0 -> "$#{:erlang.float_to_binary(f, decimals: 4)}"
-      true -> "$#{:erlang.float_to_binary(f, decimals: 2)}"
-    end
-  end
 
   defp format_maybe(nil), do: "—"
   defp format_maybe(v), do: to_string(v)
@@ -236,7 +233,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
           Nothing here
         </Feedback.empty_state>
 
-        <div :if={@records != []} id="reviews-table" class="w-full overflow-x-auto">
+        <div :if={@records != []} id="reviews-table" class="w-full overflow-x-auto" role="table">
           <div
             class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
             style="grid-template-columns: 150px minmax(120px,1fr) 140px 90px 130px 90px 120px 80px 90px;"
@@ -260,10 +257,13 @@ defmodule ArbiterWeb.ReviewIndexLive do
               phx-click="toggle"
               phx-value-id={record.id}
             >
-              <span class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums text-[var(--text-body)]">
+              <span
+                role="cell"
+                class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums text-[var(--text-body)]"
+              >
                 {format_started(record.started_at)}
               </span>
-              <span class="text-[11.5px] truncate">
+              <span role="cell" class="text-[11.5px] truncate">
                 <a
                   :if={record.link}
                   href={record.link}
@@ -276,18 +276,26 @@ defmodule ArbiterWeb.ReviewIndexLive do
                 </a>
                 <span :if={!record.link}>{pr_label(record)}</span>
               </span>
-              <span class="text-[11.5px] truncate">
+              <span role="cell" class="text-[11.5px] truncate">
                 {workspace_name(@workspace_names, record.workspace_id)}
               </span>
-              <span class="badge badge-ghost text-[10.5px]">{format_maybe(record.strategy)}</span>
-              <Data.status_chip status={record.status} />
-              <span class="text-[11.5px]">{format_maybe(record.mode)}</span>
-              <span class="text-[11.5px]">{format_maybe(record.verdict)}</span>
-              <span class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums">
+              <span role="cell" class="badge badge-ghost text-[10.5px]">
+                {format_maybe(record.strategy)}
+              </span>
+              <span role="cell"><Data.status_chip status={record.status} /></span>
+              <span role="cell" class="text-[11.5px]">{format_maybe(record.mode)}</span>
+              <span role="cell" class="text-[11.5px]">{format_maybe(record.verdict)}</span>
+              <span
+                role="cell"
+                class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums"
+              >
                 {format_maybe(record.finding_count)}
               </span>
-              <span class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums">
-                {format_cost(record.cost_usd)}
+              <span
+                role="cell"
+                class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums"
+              >
+                {Data.format_usd(record.cost_usd)}
               </span>
             </div>
 

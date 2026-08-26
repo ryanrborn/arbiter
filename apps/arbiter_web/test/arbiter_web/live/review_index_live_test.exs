@@ -37,22 +37,24 @@ defmodule ArbiterWeb.ReviewIndexLiveTest do
     end
 
     test "lists a record's columns", %{conn: conn, ws: ws} do
-      record!(ws, %{
-        pr_ref: "github:acme/widgets#42",
-        pr: "42",
-        status: :completed,
-        verdict: :approve,
-        finding_count: 3,
-        cost_usd: 0.12
-      })
+      record =
+        record!(ws, %{
+          pr_ref: "github:acme/widgets#42",
+          pr: "42",
+          status: :completed,
+          verdict: :approve,
+          finding_count: 3,
+          cost_usd: 0.12
+        })
 
-      {:ok, _view, html} = live(conn, "/reviews")
+      {:ok, view, _html} = live(conn, "/reviews")
+      row = view |> element("#review-row-#{record.id}") |> render()
 
-      assert html =~ "42"
-      assert html =~ ws.name
-      assert html =~ "github"
-      assert html =~ "completed"
-      assert html =~ "approve"
+      assert row =~ "42"
+      assert row =~ ws.name
+      assert row =~ "github"
+      assert row =~ "completed"
+      assert row =~ "approve"
     end
   end
 
@@ -181,8 +183,9 @@ defmodule ArbiterWeb.ReviewIndexLiveTest do
       record =
         record!(ws, %{pr: "live-update", status: :running, verdict: nil, finding_count: nil})
 
-      {:ok, view, html} = live(conn, "/reviews")
-      assert html =~ "running"
+      {:ok, view, _html} = live(conn, "/reviews")
+      row = view |> element("#review-row-#{record.id}") |> render()
+      assert row =~ "running"
 
       {:ok, updated} =
         Ash.update(record, %{status: :completed, verdict: :approve, finding_count: 5},
@@ -199,10 +202,30 @@ defmodule ArbiterWeb.ReviewIndexLiveTest do
         engagement_id: nil
       })
 
-      html = render(view)
+      row = view |> element("#review-row-#{record.id}") |> render()
 
-      assert html =~ "completed"
-      assert html =~ "approve"
+      assert row =~ "completed"
+      assert row =~ "approve"
+      assert row =~ "5"
+    end
+  end
+
+  describe "coordinator inbox broadcasts" do
+    test "surviving a coordinator-mailbox message on the shared PubSub topic", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, view, _html} = live(conn, "/reviews")
+      ref = Process.monitor(view.pid)
+
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        Arbiter.Messages.Message.topic(ws.id),
+        {:new_message, %{id: "msg-1"}}
+      )
+
+      refute_receive {:DOWN, ^ref, :process, _pid, _reason}, 200
+      assert render(view) =~ "Reviews"
     end
   end
 end

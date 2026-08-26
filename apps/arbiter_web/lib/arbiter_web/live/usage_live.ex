@@ -262,19 +262,6 @@ defmodule ArbiterWeb.UsageLive do
 
   defp sum_rows(rollup), do: Enum.reduce(rollup, 0, fn r, acc -> acc + (r.rows || 0) end)
 
-  defp format_usd(nil), do: "—"
-
-  defp format_usd(amount) when is_float(amount) or is_integer(amount) do
-    f = amount * 1.0
-
-    cond do
-      f == 0.0 -> "$0.00"
-      f < 0.01 -> "$#{:erlang.float_to_binary(f, decimals: 6)}"
-      f < 1.0 -> "$#{:erlang.float_to_binary(f, decimals: 4)}"
-      true -> "$#{:erlang.float_to_binary(f, decimals: 2)}"
-    end
-  end
-
   defp format_tokens(nil), do: "—"
   defp format_tokens(n) when n in [0, 0.0], do: "0"
 
