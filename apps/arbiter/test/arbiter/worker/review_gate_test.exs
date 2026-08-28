@@ -29,6 +29,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Worker.ReviewVerification
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
@@ -441,6 +442,85 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # The Coordinator was escalated.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
+    end
+
+    test "REQUEST_CHANGES with a CRITERIA breakdown skips it for failure_summary's top finding",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      findings =
+        "VERDICT: REQUEST_CHANGES\n\nCRITERIA:\n- [MET] does the thing — evidence\n" <>
+          "- [NOT MET] handles the edge case — missing guard\n\n" <>
+          "- [high] feature.txt:1 needs a guard"
+
+      :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      # bd-2ddf2x: the CRITERIA breakdown (header + per-criterion lines) must be
+      # skipped when picking the "top finding" line — otherwise a criteria-bearing
+      # task gets a zero-signal "VERDICT: REQUEST_CHANGES — CRITERIA:" summary.
+      assert Worker.state(pid).meta.failure_summary ==
+               "VERDICT: REQUEST_CHANGES — - [high] feature.txt:1 needs a guard"
+    end
+
+    test "REQUEST_CHANGES with a PARTIAL-verification banner skips the banner for the top finding",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      raw_findings =
+        "VERDICT: REQUEST_CHANGES\nVERIFICATION: PARTIAL — gave up on tests\n" <>
+          "- [high] feature.txt:1 needs a guard"
+
+      # Mirrors what `route_request_changes_verdict` actually hands to
+      # park_rejected on a PARTIAL disclosure (bd-1j5x6u): the ⚠️ banner
+      # prepended right after the VERDICT line.
+      findings = ReviewVerification.prepend_banner(raw_findings)
+
+      :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      # bd-2ddf2x: the banner line must not eat the whole failure_summary budget.
+      assert Worker.state(pid).meta.failure_summary ==
+               "VERDICT: REQUEST_CHANGES — - [high] feature.txt:1 needs a guard"
+    end
+
+    test "a partial-verification APPROVE not honored does not open failure_summary with APPROVE",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      raw_findings = "VERDICT: APPROVE\nVERIFICATION: PARTIAL — gave up on tests\nlgtm otherwise"
+
+      # Mirrors what `route_approve_verdict` actually hands to park_rejected when
+      # it fails closed on a PARTIAL-verification APPROVE (worker.ex ~2409): the
+      # verdict tag becomes :request_changes, but `findings` still opens with the
+      # reviewer's own (not-honored) "VERDICT: APPROVE" line plus the ⚠️ banner.
+      findings = ReviewVerification.prepend_banner(raw_findings)
+
+      :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      # bd-2ddf2x: route_approve_verdict fails closed on VERIFICATION: PARTIAL and
+      # parks as :request_changes (never merges) — the summary must say so, not open
+      # with the reviewer's own (not-honored) "VERDICT: APPROVE".
+      summary = Worker.state(pid).meta.failure_summary
+      assert summary =~ "VERDICT: REQUEST_CHANGES"
+      assert summary =~ "not honored"
+      refute summary =~ ~r/^VERDICT: APPROVE/
     end
 
     test "an inconclusive review (no verdict) escalates and does NOT merge",

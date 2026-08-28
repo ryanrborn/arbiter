@@ -4143,9 +4143,22 @@ defmodule Arbiter.Worker do
       end
 
     {verdict_line, body} =
-      if Regex.match?(~r/^VERDICT:/i, verdict_line),
-        do: {verdict_line, body},
-        else: {review_gate_verdict_label(verdict), findings}
+      cond do
+        not Regex.match?(~r/^VERDICT:/i, verdict_line) ->
+          {review_gate_verdict_label(verdict), findings}
+
+        # park_rejected only ever calls this with verdict :request_changes/:no_verdict,
+        # so a reviewer-authored "VERDICT: APPROVE" line here means the approve was NOT
+        # honored (route_approve_verdict's partial-verification fail-closed path, worker.ex
+        # ~2409). Don't let a rejected run's summary open with "APPROVE" — that reads as a
+        # contradiction in `arb worker runs` output.
+        Regex.match?(~r/^VERDICT:\s*APPROVE\b/i, verdict_line) ->
+          {"#{review_gate_verdict_label(verdict)} (reviewer said \"#{verdict_line}\", not honored)",
+           body}
+
+        true ->
+          {verdict_line, body}
+      end
 
     top_finding =
       body
@@ -4153,8 +4166,12 @@ defmodule Arbiter.Worker do
       |> Enum.map(&String.trim/1)
       |> Enum.reject(fn line ->
         line == "" or
+          line == "CRITERIA:" or
           Regex.match?(~r/\barb done\b/, line) or
-          Regex.match?(~r/^⚙/, line)
+          Regex.match?(~r/^\s*⚙/, line) or
+          Regex.match?(~r/^\s*⚠️/, line) or
+          Regex.match?(~r/^\s*VERIFICATION:\s*(FULL|PARTIAL)\b/i, line) or
+          ReviewVerification.criteria_line?(line)
       end)
       |> List.first()
 
