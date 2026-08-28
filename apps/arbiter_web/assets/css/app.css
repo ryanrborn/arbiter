@@ -27,8 +27,8 @@
   on Elixir colors. Build your own at: https://daisyui.com/theme-generator/ */
 @plugin "../vendor/daisyui-theme" {
   name: "dark";
-  default: true;
-  prefersdark: false;
+  default: false;
+  prefersdark: true;
   color-scheme: "dark";
   --color-base-100: oklch(20.5% 0.014 258);
   --color-base-200: oklch(19% 0.014 258);
@@ -62,7 +62,7 @@
 
 @plugin "../vendor/daisyui-theme" {
   name: "light";
-  default: false;
+  default: true;
   prefersdark: false;
   color-scheme: "light";
   --color-base-100: oklch(100% 0 0);
@@ -100,54 +100,54 @@
    the design system fold; reference/tokens/*.css in the handoff bundle is
    the source of truth. */
 :root {
-  /* --- base ramp (dark) --- */
-  --arb-canvas: oklch(16.5% 0.014 258);
-  --arb-canvas-sunken: oklch(17.5% 0.014 258);
-  --arb-chrome: oklch(19% 0.014 258);
-  --arb-panel: oklch(20.5% 0.014 258);
-  --arb-panel-alt: oklch(22% 0.014 258);
-  --arb-raised: oklch(24.5% 0.015 258);
-  --arb-raised-hover: oklch(28% 0.015 258);
-  --arb-line: oklch(30% 0.014 258);
-  --arb-line-soft: oklch(26% 0.014 258);
-  --arb-line-strong: oklch(38% 0.014 258);
+  /* --- base ramp (light) --- */
+  --arb-canvas: oklch(96.5% 0.005 258);
+  --arb-canvas-sunken: oklch(97% 0.004 258);
+  --arb-chrome: oklch(93.5% 0.006 258);
+  --arb-panel: oklch(100% 0 0);
+  --arb-panel-alt: oklch(100% 0 0);
+  --arb-raised: oklch(100% 0 0);
+  --arb-raised-hover: oklch(95% 0.006 258);
+  --arb-line: oklch(88% 0.008 258);
+  --arb-line-soft: oklch(91% 0.007 258);
+  --arb-line-strong: oklch(84% 0.008 258);
 
-  /* --- text ramp (dark) --- */
-  --arb-text-primary: oklch(96% 0.006 258);
-  --arb-text-body: oklch(85% 0.010 258);
-  --arb-text-muted: oklch(68% 0.012 258);
-  --arb-text-faint: oklch(54% 0.014 258);
-  --arb-text-ghost: oklch(46% 0.014 258);
+  /* --- text ramp (light) --- */
+  --arb-text-primary: oklch(22% 0.014 258);
+  --arb-text-body: oklch(28% 0.014 258);
+  --arb-text-muted: oklch(46% 0.012 258);
+  --arb-text-faint: oklch(56% 0.012 258);
+  --arb-text-ghost: oklch(62% 0.012 258);
 
-  /* --- state hues (dark) --- */
-  --arb-live: oklch(84% 0.19 130);
-  --arb-live-ink: oklch(20% 0.05 130);
-  --arb-live-wash: oklch(84% 0.19 130 / 0.14);
-  --arb-live-edge: oklch(84% 0.19 130 / 0.3);
+  /* --- state hues (light) --- */
+  --arb-live: oklch(58% 0.16 130);
+  --arb-live-ink: oklch(100% 0 0);
+  --arb-live-wash: oklch(58% 0.16 130 / 0.12);
+  --arb-live-edge: oklch(58% 0.16 130 / 0.35);
 
-  --arb-attention: oklch(82% 0.15 78);
-  --arb-attention-ink: oklch(22% 0.05 78);
-  --arb-attention-wash: oklch(82% 0.15 78 / 0.14);
-  --arb-attention-edge: oklch(82% 0.15 78 / 0.3);
+  --arb-attention: oklch(62% 0.14 70);
+  --arb-attention-ink: oklch(100% 0 0);
+  --arb-attention-wash: oklch(62% 0.14 70 / 0.12);
+  --arb-attention-edge: oklch(62% 0.14 70 / 0.4);
 
-  --arb-fail: oklch(70% 0.19 22);
-  --arb-fail-text: oklch(76% 0.19 22);
-  --arb-fail-ink: oklch(18% 0.04 22);
-  --arb-fail-wash: oklch(70% 0.19 22 / 0.14);
-  --arb-fail-edge: oklch(70% 0.19 22 / 0.4);
+  --arb-fail: oklch(55% 0.20 22);
+  --arb-fail-text: oklch(50% 0.20 22);
+  --arb-fail-ink: oklch(100% 0 0);
+  --arb-fail-wash: oklch(55% 0.20 22 / 0.1);
+  --arb-fail-edge: oklch(55% 0.20 22 / 0.35);
 
-  --arb-info: oklch(80% 0.11 215);
-  --arb-info-wash: oklch(80% 0.11 215 / 0.14);
-  --arb-info-edge: oklch(80% 0.11 215 / 0.3);
+  --arb-info: oklch(48% 0.12 240);
+  --arb-info-wash: oklch(52% 0.12 240 / 0.1);
+  --arb-info-edge: oklch(52% 0.12 240 / 0.3);
 
-  --arb-proposal: oklch(76% 0.11 295);
-  --arb-proposal-ink: oklch(20% 0.04 295);
-  --arb-proposal-wash: oklch(76% 0.11 295 / 0.14);
-  --arb-proposal-edge: oklch(76% 0.11 295 / 0.3);
+  --arb-proposal: oklch(50% 0.14 295);
+  --arb-proposal-ink: oklch(100% 0 0);
+  --arb-proposal-wash: oklch(52% 0.14 295 / 0.1);
+  --arb-proposal-edge: oklch(52% 0.14 295 / 0.3);
 
-  --arb-done: oklch(45% 0.014 258);
-  --arb-done-wash: oklch(30% 0.014 258);
-  --arb-done-edge: oklch(36% 0.014 258);
+  --arb-done: oklch(62% 0.012 258);
+  --arb-done-wash: oklch(94% 0.006 258);
+  --arb-done-edge: oklch(88% 0.008 258);
 
   /* --- semantic aliases --- */
   --surface-page: var(--arb-canvas);
@@ -162,10 +162,10 @@
   --text-secondary: var(--arb-text-muted);
   --text-label: var(--arb-text-faint);
   --text-link: var(--arb-info);
-  --text-link-hover: oklch(88% 0.11 215);
+  --text-link-hover: oklch(40% 0.12 240);
   --accent-primary: var(--arb-live);
   --accent-primary-ink: var(--arb-live-ink);
-  --focus-ring: oklch(84% 0.19 130 / 0.25);
+  --focus-ring: oklch(58% 0.16 130 / 0.3);
 
   /* --- fonts --- */
   --font-sans: "Geist", system-ui, -apple-system, sans-serif;
@@ -255,57 +255,117 @@
 @keyframes arb-ping { 0% { transform: scale(1); opacity: 0.6 } 80%, 100% { transform: scale(2.4); opacity: 0 } }
 @keyframes arb-fade-in { from { opacity: 0 } to { opacity: 1 } }
 
-/* Light mode — same hues and roles, lightness moves. Panels go LIGHTER than
-   the canvas here, and the selected row goes one step darker. */
-[data-theme="light"] {
-  --arb-canvas: oklch(96.5% 0.005 258);
-  --arb-canvas-sunken: oklch(97% 0.004 258);
-  --arb-chrome: oklch(93.5% 0.006 258);
-  --arb-panel: oklch(100% 0 0);
-  --arb-panel-alt: oklch(100% 0 0);
-  --arb-raised: oklch(100% 0 0);
-  --arb-raised-hover: oklch(95% 0.006 258);
-  --arb-line: oklch(88% 0.008 258);
-  --arb-line-soft: oklch(91% 0.007 258);
-  --arb-line-strong: oklch(84% 0.008 258);
+/* Dark mode — same hues and roles, lightness moves the other way. Panels go
+   DARKER than the canvas here, and the selected row goes one step lighter.
+   Defined twice, deliberately: once guarded under prefers-color-scheme for
+   "system" theme (an explicit light choice still wins via the :not()
+   guard), and once under the explicit [data-theme="dark"] attribute for a
+   user's direct choice. Both are real, normal-specificity selectors — never
+   a bare/zero-specificity :root — so neither theme is "whatever's left"
+   after the other and the toggle survives anything (e.g. a browser
+   extension) that disturbs the cascade mid-page. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --arb-canvas: oklch(16.5% 0.014 258);
+    --arb-canvas-sunken: oklch(17.5% 0.014 258);
+    --arb-chrome: oklch(19% 0.014 258);
+    --arb-panel: oklch(20.5% 0.014 258);
+    --arb-panel-alt: oklch(22% 0.014 258);
+    --arb-raised: oklch(24.5% 0.015 258);
+    --arb-raised-hover: oklch(28% 0.015 258);
+    --arb-line: oklch(30% 0.014 258);
+    --arb-line-soft: oklch(26% 0.014 258);
+    --arb-line-strong: oklch(38% 0.014 258);
 
-  --arb-text-primary: oklch(22% 0.014 258);
-  --arb-text-body: oklch(28% 0.014 258);
-  --arb-text-muted: oklch(46% 0.012 258);
-  --arb-text-faint: oklch(56% 0.012 258);
-  --arb-text-ghost: oklch(62% 0.012 258);
+    --arb-text-primary: oklch(96% 0.006 258);
+    --arb-text-body: oklch(85% 0.010 258);
+    --arb-text-muted: oklch(68% 0.012 258);
+    --arb-text-faint: oklch(54% 0.014 258);
+    --arb-text-ghost: oklch(46% 0.014 258);
 
-  --arb-live: oklch(58% 0.16 130);
-  --arb-live-ink: oklch(100% 0 0);
-  --arb-live-wash: oklch(58% 0.16 130 / 0.12);
-  --arb-live-edge: oklch(58% 0.16 130 / 0.35);
+    --arb-live: oklch(84% 0.19 130);
+    --arb-live-ink: oklch(20% 0.05 130);
+    --arb-live-wash: oklch(84% 0.19 130 / 0.14);
+    --arb-live-edge: oklch(84% 0.19 130 / 0.3);
 
-  --arb-attention: oklch(62% 0.14 70);
-  --arb-attention-ink: oklch(100% 0 0);
-  --arb-attention-wash: oklch(62% 0.14 70 / 0.12);
-  --arb-attention-edge: oklch(62% 0.14 70 / 0.4);
+    --arb-attention: oklch(82% 0.15 78);
+    --arb-attention-ink: oklch(22% 0.05 78);
+    --arb-attention-wash: oklch(82% 0.15 78 / 0.14);
+    --arb-attention-edge: oklch(82% 0.15 78 / 0.3);
 
-  --arb-fail: oklch(55% 0.20 22);
-  --arb-fail-text: oklch(50% 0.20 22);
-  --arb-fail-ink: oklch(100% 0 0);
-  --arb-fail-wash: oklch(55% 0.20 22 / 0.1);
-  --arb-fail-edge: oklch(55% 0.20 22 / 0.35);
+    --arb-fail: oklch(70% 0.19 22);
+    --arb-fail-text: oklch(76% 0.19 22);
+    --arb-fail-ink: oklch(18% 0.04 22);
+    --arb-fail-wash: oklch(70% 0.19 22 / 0.14);
+    --arb-fail-edge: oklch(70% 0.19 22 / 0.4);
 
-  --arb-info: oklch(48% 0.12 240);
-  --arb-info-wash: oklch(52% 0.12 240 / 0.1);
-  --arb-info-edge: oklch(52% 0.12 240 / 0.3);
+    --arb-info: oklch(80% 0.11 215);
+    --arb-info-wash: oklch(80% 0.11 215 / 0.14);
+    --arb-info-edge: oklch(80% 0.11 215 / 0.3);
 
-  --arb-proposal: oklch(50% 0.14 295);
-  --arb-proposal-ink: oklch(100% 0 0);
-  --arb-proposal-wash: oklch(52% 0.14 295 / 0.1);
-  --arb-proposal-edge: oklch(52% 0.14 295 / 0.3);
+    --arb-proposal: oklch(76% 0.11 295);
+    --arb-proposal-ink: oklch(20% 0.04 295);
+    --arb-proposal-wash: oklch(76% 0.11 295 / 0.14);
+    --arb-proposal-edge: oklch(76% 0.11 295 / 0.3);
 
-  --arb-done: oklch(62% 0.012 258);
-  --arb-done-wash: oklch(94% 0.006 258);
-  --arb-done-edge: oklch(88% 0.008 258);
+    --arb-done: oklch(45% 0.014 258);
+    --arb-done-wash: oklch(30% 0.014 258);
+    --arb-done-edge: oklch(36% 0.014 258);
 
-  --text-link-hover: oklch(40% 0.12 240);
-  --focus-ring: oklch(58% 0.16 130 / 0.3);
+    --text-link-hover: oklch(88% 0.11 215);
+    --focus-ring: oklch(84% 0.19 130 / 0.25);
+  }
+}
+
+[data-theme="dark"] {
+  --arb-canvas: oklch(16.5% 0.014 258);
+  --arb-canvas-sunken: oklch(17.5% 0.014 258);
+  --arb-chrome: oklch(19% 0.014 258);
+  --arb-panel: oklch(20.5% 0.014 258);
+  --arb-panel-alt: oklch(22% 0.014 258);
+  --arb-raised: oklch(24.5% 0.015 258);
+  --arb-raised-hover: oklch(28% 0.015 258);
+  --arb-line: oklch(30% 0.014 258);
+  --arb-line-soft: oklch(26% 0.014 258);
+  --arb-line-strong: oklch(38% 0.014 258);
+
+  --arb-text-primary: oklch(96% 0.006 258);
+  --arb-text-body: oklch(85% 0.010 258);
+  --arb-text-muted: oklch(68% 0.012 258);
+  --arb-text-faint: oklch(54% 0.014 258);
+  --arb-text-ghost: oklch(46% 0.014 258);
+
+  --arb-live: oklch(84% 0.19 130);
+  --arb-live-ink: oklch(20% 0.05 130);
+  --arb-live-wash: oklch(84% 0.19 130 / 0.14);
+  --arb-live-edge: oklch(84% 0.19 130 / 0.3);
+
+  --arb-attention: oklch(82% 0.15 78);
+  --arb-attention-ink: oklch(22% 0.05 78);
+  --arb-attention-wash: oklch(82% 0.15 78 / 0.14);
+  --arb-attention-edge: oklch(82% 0.15 78 / 0.3);
+
+  --arb-fail: oklch(70% 0.19 22);
+  --arb-fail-text: oklch(76% 0.19 22);
+  --arb-fail-ink: oklch(18% 0.04 22);
+  --arb-fail-wash: oklch(70% 0.19 22 / 0.14);
+  --arb-fail-edge: oklch(70% 0.19 22 / 0.4);
+
+  --arb-info: oklch(80% 0.11 215);
+  --arb-info-wash: oklch(80% 0.11 215 / 0.14);
+  --arb-info-edge: oklch(80% 0.11 215 / 0.3);
+
+  --arb-proposal: oklch(76% 0.11 295);
+  --arb-proposal-ink: oklch(20% 0.04 295);
+  --arb-proposal-wash: oklch(76% 0.11 295 / 0.14);
+  --arb-proposal-edge: oklch(76% 0.11 295 / 0.3);
+
+  --arb-done: oklch(45% 0.014 258);
+  --arb-done-wash: oklch(30% 0.014 258);
+  --arb-done-edge: oklch(36% 0.014 258);
+
+  --text-link-hover: oklch(88% 0.11 215);
+  --focus-ring: oklch(84% 0.19 130 / 0.25);
 }
 
 /* Minimal element defaults so the console look applies without repeating
