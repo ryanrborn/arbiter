@@ -247,6 +247,7 @@ defmodule ArbiterCli.Cmd.Worker do
       )
 
       if r["failure_reason"], do: IO.puts("      failure: #{r["failure_reason"]}")
+      if r["failure_summary"], do: IO.puts("      summary: #{r["failure_summary"]}")
     end)
   end
 

@@ -844,6 +844,12 @@ defmodule Arbiter.Worker do
     # on any run that did not end in a classified subprocess stop.
     attrs = maybe_put(attrs, :stop_category, stop_category(meta))
 
+    # bd-2ddf2x: a bounded human-readable twin of `failure_reason` for the
+    # ReviewGate-rejection path, where failure_reason itself must stay the
+    # short atom-as-string other modules pattern-match on literally. Absent
+    # on any run that didn't fail via ReviewGate.
+    attrs = maybe_put(attrs, :failure_summary, Map.get(meta, :failure_summary))
+
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
       # bd-61hnbb: Parse transcript for skill invocations and update usage counters.
@@ -4097,10 +4103,14 @@ defmodule Arbiter.Worker do
   end
 
   # Reject path: record findings, escalate to the coordinator, and park the worker
-  # at :failed WITHOUT merging. failure_reason stays a short atom; the full
-  # findings live in meta + the escalation message + `Arbiter.ReviewGate.Round`
-  # (queryable via review_gate_rounds_list) — task notes only get a short
-  # summary line (bd-dp7hiw).
+  # at :failed WITHOUT merging. failure_reason stays a short atom (still pattern-
+  # matched literally by Loop.FailureClassifier / Loop.Corpus.rejected?/1 /
+  # Loop.Analysis — do not change its content); the full findings live in meta
+  # + the escalation message + `Arbiter.ReviewGate.Round` (queryable via
+  # review_gate_rounds_list) — task notes only get a short summary line
+  # (bd-dp7hiw). bd-2ddf2x adds `failure_summary`, a bounded human-readable
+  # twin (VERDICT line + top finding) so `worker_runs` alone answers "why did
+  # this fail" without a second review_gate_rounds_list call.
   defp park_rejected(%State{} = state, verdict, findings) do
     record_review_gate_outcome(state, verdict, findings)
     escalate_review_gate(state, verdict, findings)
@@ -4109,12 +4119,64 @@ defmodule Arbiter.Worker do
       state.meta
       |> Map.put(:review_gate_verdict, verdict)
       |> Map.put(:review_gate_findings, findings)
+      |> Map.put(:failure_summary, review_gate_failure_summary(verdict, findings))
 
     fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
   end
 
   defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
   defp fail_reason_for(_), do: :review_gate_rejected
+
+  @max_failure_summary_chars 280
+
+  # A short, bounded human-readable line for the `failure_summary` column:
+  # the reviewer's VERDICT line plus the first substantive finding, truncated.
+  # `findings` is the reviewer's raw text (VERDICT line first, per
+  # `ReviewGate.findings_from/2`) for :request_changes/:no_verdict-with-text,
+  # or a plain synthesized string (e.g. "no parseable VERDICT line") when the
+  # reviewer produced nothing usable.
+  defp review_gate_failure_summary(verdict, findings) when is_binary(findings) do
+    {verdict_line, body} =
+      case String.split(findings, "\n", parts: 2) do
+        [first, rest] -> {String.trim(first), rest}
+        [first] -> {String.trim(first), ""}
+      end
+
+    {verdict_line, body} =
+      if Regex.match?(~r/^VERDICT:/i, verdict_line),
+        do: {verdict_line, body},
+        else: {review_gate_verdict_label(verdict), findings}
+
+    top_finding =
+      body
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(fn line ->
+        line == "" or
+          Regex.match?(~r/\barb done\b/, line) or
+          Regex.match?(~r/^⚙/, line)
+      end)
+      |> List.first()
+
+    [verdict_line, top_finding]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" — ")
+    |> truncate_failure_summary()
+  end
+
+  defp review_gate_failure_summary(verdict, _findings),
+    do: truncate_failure_summary(review_gate_verdict_label(verdict))
+
+  defp review_gate_verdict_label(:no_verdict), do: "VERDICT: INCONCLUSIVE (no parseable verdict)"
+  defp review_gate_verdict_label(_), do: "VERDICT: REQUEST_CHANGES"
+
+  defp truncate_failure_summary(text) do
+    if String.length(text) > @max_failure_summary_chars do
+      String.slice(text, 0, @max_failure_summary_chars - 1) <> "…"
+    else
+      text
+    end
+  end
 
   # Append a short verdict summary line to the task's notes so it surfaces in
   # `arb show` / the UI. Best-effort: a DB hiccup is logged, never fatal.

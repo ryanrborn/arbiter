@@ -425,6 +425,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.review_gate_verdict == :request_changes
       assert snap.meta.review_gate_findings =~ "needs a guard"
 
+      # bd-2ddf2x: failure_summary is a bounded human-readable twin —
+      # failure_reason itself stays the short atom other modules pattern-match on.
+      assert snap.meta.failure_summary ==
+               "VERDICT: REQUEST_CHANGES — - [high] feature.txt:1 needs a guard"
+
       # Task parked (still in_progress, not closed) with a short verdict
       # summary on its notes (bd-dp7hiw) — the full findings text lives in
       # `Arbiter.ReviewGate.Round`, not duplicated into notes.
@@ -451,6 +456,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+      # bd-2ddf2x: no VERDICT line in "reviewer crashed" — falls back to a
+      # synthesized label plus the raw text as the "top finding" line.
+      assert Worker.state(pid).meta.failure_summary ==
+               "VERDICT: INCONCLUSIVE (no parseable verdict) — reviewer crashed"
     end
 
     test "review-off (default) bypasses the gate and merges immediately",

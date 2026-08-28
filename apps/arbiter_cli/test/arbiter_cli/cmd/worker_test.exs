@@ -100,7 +100,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
             "status" => "failed",
             "started_at" => "2026-05-20T19:00:00Z",
             "completed_at" => "2026-05-20T19:05:00Z",
-            "failure_reason" => "exit code 2"
+            "failure_reason" => "exit code 2",
+            "failure_summary" => "VERDICT: REQUEST_CHANGES — needs a guard"
           }
         ]
       })
@@ -112,6 +113,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "type=main"
       assert out =~ "model=claude-opus-4-8"
       assert out =~ "failure: exit code 2"
+      assert out =~ "summary: VERDICT: REQUEST_CHANGES — needs a guard"
       # Newest-first ordering is preserved from the API: review run before main.
       assert :binary.match(out, "run-2") < :binary.match(out, "run-1")
     end

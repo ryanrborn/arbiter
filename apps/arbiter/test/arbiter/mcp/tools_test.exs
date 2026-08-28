@@ -2254,7 +2254,8 @@ defmodule Arbiter.MCP.ToolsTest do
           started_at: newer,
           completed_at: newer,
           exit_code: 2,
-          failure_reason: "claude_crashed",
+          failure_reason: "review_gate_rejected",
+          failure_summary: "VERDICT: REQUEST_CHANGES — needs a guard",
           output_lines: ["a", "b", "boom"]
         })
 
@@ -2264,7 +2265,11 @@ defmodule Arbiter.MCP.ToolsTest do
       assert first.id == new_run.id
       assert first.status == "failed"
       assert first.exit_code == 2
-      assert first.failure_reason == "claude_crashed"
+      assert first.failure_reason == "review_gate_rejected"
+      # bd-2ddf2x: `worker_runs` surfaces failure_summary directly, so a
+      # ReviewGate rejection doesn't require a separate review_gate_rounds_list
+      # call just to see why.
+      assert first.failure_summary == "VERDICT: REQUEST_CHANGES — needs a guard"
       refute Map.has_key?(first, :output_lines)
 
       assert second.id == old_run.id
