@@ -821,7 +821,9 @@ defmodule Arbiter.MCP.Catalog do
         "List every historical run recorded for a task, newest first (`arb worker runs " <>
           "<task-id>`). Each entry is a run summary (no output lines — use `worker_log` for " <>
           "the transcript): id, task_id, task_title, repo, workspace_id, worker_type, status, " <>
-          "model, started_at, completed_at, exit_code, failure_reason. Optional `limit` " <>
+          "model, started_at, completed_at, exit_code, failure_reason, failure_summary " <>
+          "(a bounded human-readable ReviewGate VERDICT + top finding, when the run failed " <>
+          "via a ReviewGate rejection; nil otherwise). Optional `limit` " <>
           "(default 20, max 200). `task_id` may be a ReviewGate synthetic id " <>
           "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`) — those aren't `issues` " <>
           "rows, but the run lookup still resolves (authorization checks the base task).",

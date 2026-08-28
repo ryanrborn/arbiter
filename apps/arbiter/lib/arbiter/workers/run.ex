@@ -89,6 +89,7 @@ defmodule Arbiter.Workers.Run do
         :exit_code,
         :output_lines,
         :failure_reason,
+        :failure_summary,
         :resumed_from_run_id,
         :mr_ref,
         :merger_url,
@@ -117,6 +118,7 @@ defmodule Arbiter.Workers.Run do
         :exit_code,
         :output_lines,
         :failure_reason,
+        :failure_summary,
         :task_title,
         :mr_ref,
         :merger_url,
@@ -217,6 +219,23 @@ defmodule Arbiter.Workers.Run do
     attribute :failure_reason, :string do
       public? true
       constraints max_length: 2000
+    end
+
+    # bd-2ddf2x: `failure_reason` is a short atom-as-string for the
+    # ReviewGate-rejection path ("review_gate_rejected" / "review_gate_inconclusive"),
+    # kept that way deliberately — `Loop.FailureClassifier`, `Loop.Corpus.rejected?/1`,
+    # and `Loop.Analysis` all pattern-match its exact value. `failure_summary` is
+    # the bounded human-readable twin (VERDICT line + top finding, ~280 chars) so
+    # "why did this fail" is answerable from `worker_runs` alone, without a
+    # separate `review_gate_rounds_list` call. Nil on any run that didn't fail
+    # via ReviewGate.
+    attribute :failure_summary, :string do
+      public? true
+      constraints max_length: 300
+
+      description "Bounded human-readable failure summary (ReviewGate VERDICT line + " <>
+                    "top finding, truncated). Twin of failure_reason's short atom for " <>
+                    "runs that failed via ReviewGate rejection; nil otherwise."
     end
 
     attribute :resumed_from_run_id, :uuid do

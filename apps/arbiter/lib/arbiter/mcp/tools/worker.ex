@@ -492,6 +492,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       completed_at: Tools.iso(run.completed_at),
       exit_code: run.exit_code,
       failure_reason: run.failure_reason,
+      failure_summary: run.failure_summary,
       resolved_skills: run.resolved_skills || [],
       standing_orders_digest: run.standing_orders_digest,
       routing_policy: run.routing_policy,
@@ -910,6 +911,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       exited_at: Tools.iso(Map.get(meta, :exited_at)),
       result: Map.get(meta, :result),
       failure_reason: stringify_reason(Map.get(meta, :failure_reason)),
+      failure_summary: Map.get(meta, :failure_summary),
       resumable: resumable,
       blocked_reason: blocked_reason
     }
@@ -935,7 +937,8 @@ defmodule Arbiter.MCP.Tools.Worker do
       completed_at: Tools.iso(run.completed_at),
       exit_status: run.exit_code,
       output_lines: output_lines,
-      failure_reason: run.failure_reason
+      failure_reason: run.failure_reason,
+      failure_summary: run.failure_summary
     }
   end
 
