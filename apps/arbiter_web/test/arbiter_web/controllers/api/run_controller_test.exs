@@ -159,5 +159,23 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       conn = get(conn, ~p"/api/workers/history/00000000-0000-0000-0000-000000000000")
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
+
+    # bd-2ddf2x: failure_summary is a bounded human-readable twin of
+    # failure_reason for the ReviewGate-rejection path, surfaced alongside it.
+    test "includes failure_summary for a ReviewGate-rejected run", %{conn: conn} do
+      run =
+        insert_run!(%{
+          task_id: "bd-rg-rejected",
+          status: :failed,
+          completed_at: DateTime.utc_now(),
+          failure_reason: "review_gate_rejected",
+          failure_summary: "VERDICT: REQUEST_CHANGES — needs a guard"
+        })
+
+      conn = get(conn, ~p"/api/workers/history/#{run.id}")
+      data = json_response(conn, 200)["data"]
+      assert data["failure_reason"] == "review_gate_rejected"
+      assert data["failure_summary"] == "VERDICT: REQUEST_CHANGES — needs a guard"
+    end
   end
 end
