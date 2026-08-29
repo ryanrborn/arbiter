@@ -1515,9 +1515,26 @@ defmodule Arbiter.Worker.ReviewGate do
   defp report(state, verdict) do
     normalized = normalize_verdict(verdict)
     safe(fn -> Worker.report(state.author, :review_gate_rounds, state.round) end)
-    delivered = safe(fn -> Worker.review_gate_verdict(state.author, normalized) end)
+    delivered = safe_delivery(fn -> Worker.review_gate_verdict(state.author, normalized) end)
     warn_undelivered(state, normalized, delivered)
     :ok
+  end
+
+  # `safe/1` for the verdict hand-off, except a raise/exit is REPORTED rather
+  # than flattened to `:ok`. `Worker.review_gate_verdict/2` ends in a
+  # `GenServer.call` on a raw pid, so an author that died or a node that
+  # restarted between the round finishing and the report exits here — which is
+  # the single most likely way a verdict lands nowhere in production. Under
+  # plain `safe/1` that case looked identical to a successful delivery and was
+  # silently swallowed; it now reaches `warn_undelivered/3` like any other
+  # failure. Still never raises out of `report/2`: reporting is best-effort and
+  # must not take the gate down.
+  defp safe_delivery(fun) do
+    fun.()
+  rescue
+    e -> {:error, {:raised, e}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # bd-3wumco: `safe/1` only shields against a raise/exit — an author that
@@ -1525,7 +1542,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # terminal, e.g. on an earlier round's rejection) used to pass through here
   # unexamined, so a review that converged to APPROVE could vanish with no trace
   # at all beyond the merge that never happened. The Worker now reconciles a late
-  # APPROVE forward, but any verdict that still lands nowhere must be loud.
+  # APPROVE forward, but any verdict that still lands nowhere must be loud —
+  # including the raise/exit cases `safe_delivery/1` above now surfaces.
   defp warn_undelivered(_state, _verdict, :ok), do: :ok
 
   defp warn_undelivered(state, verdict, reason) do

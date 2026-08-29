@@ -1,3 +1,26 @@
+defmodule Arbiter.Worker.ReviewGateReconcileTest.VanishingAuthor do
+  @moduledoc """
+  An author that is alive when the ReviewGate starts and gone by the time the
+  gate's verdict call runs — the shape of a worker that crashed (or whose node
+  restarted) between the round finishing and `report/2`.
+
+  Stops normally on the first call it receives, so the caller *exits* rather
+  than getting a reply or an `{:error, _}` return. `ReviewGate.report/2` makes
+  its two author calls back to back with no message processing in between, so
+  the first (`Worker.report/3`) kills this process and the second
+  (`Worker.review_gate_verdict/2`) deterministically exits `:noproc`.
+  """
+  use GenServer
+
+  def start, do: GenServer.start(__MODULE__, :ok)
+
+  @impl true
+  def init(:ok), do: {:ok, %{}}
+
+  @impl true
+  def handle_call(_msg, _from, state), do: {:stop, :normal, state}
+end
+
 defmodule Arbiter.Worker.ReviewGateReconcileTest do
   @moduledoc """
   bd-3wumco: a ReviewGate round that converges to APPROVE *after* an earlier
@@ -28,8 +51,10 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
 
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Test.StubMerger
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Worker.ReviewGateReconcileTest.VanishingAuthor
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
 
@@ -121,18 +146,22 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
 
   # An author parked at :awaiting_review_gate with `review_spawn: false`, so the
   # rounds' verdicts can be delivered directly (exactly as the gate would).
-  defp start_parked_author(task, repo) do
+  defp start_parked_author(task, repo, extra_meta \\ %{}) do
     branch = "feature/rev"
     :ok = seed_feature_branch(repo, branch)
 
-    meta = %{
-      branch: branch,
-      repo_path: repo,
-      target_branch: "main",
-      merge_title: "Merge #{task.id}",
-      review_required: true,
-      review_spawn: false
-    }
+    meta =
+      Map.merge(
+        %{
+          branch: branch,
+          repo_path: repo,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          review_spawn: false
+        },
+        extra_meta
+      )
 
     {:ok, pid} =
       Worker.start(
@@ -215,6 +244,57 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       assert reconciled.status == :completed
       assert is_nil(reconciled.failure_reason)
       assert is_nil(reconciled.failure_summary)
+    end
+
+    # The Direct merger completes *inside* `merge_branch/3`, so the test above
+    # only proves the row is clean once `record_run_finished/1` has rewritten it
+    # terminally. The reported configuration (GitLab `ryanborn/vstim!154`) never
+    # gets there: `finalize_opened_mr/5` parks at `:awaiting_review` with the MR
+    # open and records only the PR ref. Without an explicit write-back the row
+    # keeps the rejection's `:failed` / `:review_gate_rejected` /
+    # `failure_summary` / `completed_at` for as long as the MR stays open —
+    # indefinitely on this `auto_merge: false` workspace — which is exactly what
+    # `worker_show`'s historical fallback and the `worker_runs` failure surface
+    # read.
+    test "clears the rejection off the run row when the merge parks at :awaiting_review",
+         %{repo: repo, ws: ws} do
+      StubMerger.reset()
+      task = new_task(ws)
+
+      {pid, _branch} =
+        start_parked_author(task, repo, %{
+          # A hosted-forge adapter: open/4 returns an MR ref and the worker
+          # parks; nothing merges locally.
+          merger_adapter_override: StubMerger,
+          # Park the Watchdog far in the future — the row must already be
+          # reconciled while the MR is merely open, with no poll having run.
+          watchdog_initial_delay_ms: 5_000_000,
+          watchdog_interval_ms: 5_000_000
+        })
+
+      :ok = reject_round_one(pid)
+
+      failed_run = run_for(task.id)
+      assert failed_run.status == :failed
+      assert failed_run.failure_reason == ":review_gate_rejected"
+      assert is_binary(failed_run.failure_summary)
+      assert failed_run.completed_at
+
+      :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
+      wait_until(fn -> match?(%{status: :awaiting_review}, Worker.state(pid)) end)
+
+      # Nothing merged locally — the MR is open on the forge, which is the whole
+      # window in which the stale row was visible.
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).mr_ref == "!stub"
+
+      reconciled = run_for(task.id)
+      assert reconciled.id == failed_run.id
+      refute reconciled.status == :failed
+      assert reconciled.status == :running
+      assert is_nil(reconciled.failure_reason)
+      assert is_nil(reconciled.failure_summary)
+      assert is_nil(reconciled.completed_at)
     end
 
     test "tells the coordinator the earlier rejection was overturned", %{repo: repo, ws: ws} do
@@ -371,6 +451,52 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       assert log =~ "could not deliver"
       assert log =~ task.id
       assert log =~ "invalid_transition"
+    end
+
+    # The `{:error, _}` return above is only half of it. `Worker.review_gate_verdict/2`
+    # bottoms out in `GenServer.call/2` on a raw pid, so an author that died
+    # between the round finishing and the report — process crash, node restart —
+    # makes that call *exit*. Plain `safe/1` flattens an exit to `:ok`, which is
+    # indistinguishable from a delivered verdict, so the most likely production
+    # orphan was the one case that stayed silent.
+    test "is logged when the author process is gone, not swallowed as delivered",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      # Alive when the gate starts (so the gate does not stop on an immediate
+      # :DOWN), and gone by the time the verdict call runs — the same window a
+      # crashed author leaves. `report/2` makes both author calls back to back
+      # with no message processing in between, so the exit is deterministic.
+      {:ok, author} = VanishingAuthor.start()
+      on_exit(fn -> if Process.alive?(author), do: Process.exit(author, :kill) end)
+
+      log =
+        capture_log(fn ->
+          {:ok, gate} =
+            ReviewGate.start(
+              author: author,
+              task_id: task.id,
+              workspace_id: ws.id,
+              repo: "trib/repo",
+              worktree_path: repo,
+              branch: branch,
+              target_branch: "main",
+              rounds: 1,
+              timeout_ms: 5_000,
+              command: [@reviewer, "APPROVE"]
+            )
+
+          ref = Process.monitor(gate)
+          assert_receive {:DOWN, ^ref, :process, ^gate, _}, 8_000
+        end)
+
+      refute Process.alive?(author)
+      assert log =~ "could not deliver"
+      assert log =~ "APPROVE"
+      assert log =~ task.id
+      assert log =~ "The review outcome is orphaned"
     end
   end
 end

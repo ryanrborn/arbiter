@@ -4187,10 +4187,18 @@ defmodule Arbiter.Worker do
     do: Map.get(meta, :failure_reason) in @review_gate_failure_reasons
 
   # Undo a ReviewGate rejection that a later round overturned, then run the
-  # ordinary approve path. The run row is rewritten by `merge_branch/3`'s own
-  # terminal transition, so the stale `failure_reason` / `failure_summary` are
-  # dropped from meta here rather than patched afterwards; `record_run_finished/1`
-  # clears the columns for any run that no longer ends `:failed`.
+  # ordinary approve path. The stale `failure_reason` / `failure_summary` are
+  # dropped from meta here so any later terminal write starts clean, but meta
+  # alone is not enough: only the merge paths that finish terminally (the Direct
+  # merger completing inside `merge_branch/3`) reach `record_run_finished/1` and
+  # rewrite the durable row. On a hosted forge, `merge_branch/3` ->
+  # `do_open_mr/5` -> `finalize_opened_mr/5` parks at `:awaiting_review` and only
+  # records the PR ref — so without the explicit write-back below, the
+  # `worker_runs` row would keep reading `:failed` / `:review_gate_rejected` for
+  # the entire (possibly indefinite, on an `auto_merge: false` workspace) life of
+  # the open MR. That is exactly the surface `worker_show`'s historical fallback,
+  # `Loop.Corpus.rejected?/1` and `Loop.Analysis` read, so an overturned
+  # rejection would still be counted and displayed as a real one.
   #
   # `:review_gate_reconciled_from` is left behind deliberately: "this task merged
   # after being parked as rejected" is exactly the shape an operator reading
@@ -4221,8 +4229,37 @@ defmodule Arbiter.Worker do
         verdict
       )
 
+    clear_run_rejection_if_parked(merged)
     notify_review_gate_reconciled(merged, prior)
     merged
+  end
+
+  # Write the reconciliation through to the durable `worker_runs` row when the
+  # approve path parked NON-terminally (hosted forge: MR opened, worker sitting
+  # at `:awaiting_review` while the Watchdog polls). A terminal outcome
+  # (`:completed` from a Direct merge, or `:failed` from a merge that then
+  # conflicted) is left alone — `record_run_finished/1` has already written the
+  # row and its state is the accurate one.
+  #
+  # `completed_at` is nulled along with the failure columns: it was stamped by
+  # the rejection's terminal write and a run that is running again has not
+  # completed. All four columns are in the `:update` accept list.
+  defp clear_run_rejection_if_parked(%State{run_id: nil}), do: :ok
+
+  defp clear_run_rejection_if_parked(%State{status: status}) when status in [:completed, :failed],
+    do: :ok
+
+  defp clear_run_rejection_if_parked(%State{run_id: run_id, task_id: task_id}) do
+    attrs = %{status: :running, failure_reason: nil, failure_summary: nil, completed_at: nil}
+
+    with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
+         {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("reconcile", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("reconcile", task_id, e)
   end
 
   # Tell the coordinator the earlier escalation is void. `escalate_review_gate/3`
