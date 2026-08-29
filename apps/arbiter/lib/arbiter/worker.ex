@@ -25,6 +25,9 @@ defmodule Arbiter.Worker do
       :running           → :awaiting_review_gate (arb-done when review is required)
       :awaiting_review_gate → :awaiting_review   (review_gate_verdict/2 :approve → merge)
       :awaiting_review_gate → :failed            (review_gate_verdict/2 reject → parked)
+      :failed            → :awaiting_review_gate (review_gate_verdict/2 :approve, and the
+                                              run is terminal *only* because of an earlier
+                                              ReviewGate rejection — bd-3wumco)
       :running           → :awaiting_review   (open_mr/5 — MR opened, parked for review)
       :awaiting_review   → :completed         (complete/2 — MR merged)
       :awaiting_review   → :failed            (fail/2 — MR closed/rejected)
@@ -45,6 +48,24 @@ defmodule Arbiter.Worker do
   same merge path), REQUEST_CHANGES (or an inconclusive review) parks the task
   with the findings and escalates to the coordinator without merging. When review is
   not required (the default) completion routes straight to the merger as before.
+
+  ### Late approvals reconcile a rejection (bd-3wumco)
+
+  The gate's revise loop can outlive the round that parked the author: an early
+  round requests changes, the author goes terminal with
+  `failure_reason: :review_gate_rejected`, and a later round then converges to
+  APPROVE. That approval used to arrive at a worker already at `:failed`, be
+  refused as an invalid transition, and be discarded by the gate — leaving an
+  approved branch with green CI and no merge handoff at all.
+
+  A `{:approve, _}` verdict is therefore accepted from `:failed` **when the only
+  reason the run is terminal is the review gate** (`failure_reason` is
+  `:review_gate_rejected` or `:review_gate_inconclusive`). The rejection's meta is
+  cleared, `:review_gate_reconciled_from` records what was overturned, the
+  coordinator is told its earlier escalation is superseded, and the ordinary
+  approve path runs. Any other failure reason, and any late REQUEST_CHANGES /
+  inconclusive verdict, is still refused — reconciliation only moves a task
+  forward.
 
   ## Merge-request review (`:awaiting_review`)
 
@@ -848,7 +869,17 @@ defmodule Arbiter.Worker do
     # ReviewGate-rejection path, where failure_reason itself must stay the
     # short atom-as-string other modules pattern-match on literally. Absent
     # on any run that didn't fail via ReviewGate.
-    attrs = maybe_put(attrs, :failure_summary, Map.get(meta, :failure_summary))
+    #
+    # bd-3wumco: a run can be written terminal twice — once as `:failed` for a
+    # ReviewGate rejection, then again once a later round overturns it. On that
+    # second write the row is no longer a failure, so the summary is cleared
+    # outright rather than left behind by `maybe_put/3`'s nil-skip.
+    attrs =
+      if state.status == :failed do
+        maybe_put(attrs, :failure_summary, Map.get(meta, :failure_summary))
+      else
+        Map.put(attrs, :failure_summary, Map.get(meta, :failure_summary))
+      end
 
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
@@ -1354,6 +1385,26 @@ defmodule Arbiter.Worker do
         %State{status: :awaiting_review_gate} = state
       ) do
     {:reply, :ok, apply_review_gate_verdict(state, verdict)}
+  end
+
+  # bd-3wumco: a ReviewGate round that converges to APPROVE *after* an earlier
+  # round already parked the author reports that approval to a worker sitting at
+  # :failed. Refusing it there froze the task on the stale rejection: the branch
+  # had a passing re-review and green CI, but nothing ever handed it to the
+  # merger, so the MR sat open until a human merged it by hand (vstim vs-33ulbf).
+  # Reconcile forward instead — but ONLY when the rejection is the sole reason
+  # this run is terminal. A run that failed for any other reason (a merge
+  # conflict, a stopped subprocess) must not be resurrected by a stray verdict.
+  def handle_call(
+        {:review_gate_verdict, {:approve, _findings} = verdict},
+        _from,
+        %State{status: :failed} = state
+      ) do
+    if review_gate_failure?(state) do
+      {:reply, :ok, reconcile_review_gate_approval(state, verdict)}
+    else
+      {:reply, {:error, {:invalid_transition, :failed, :review_gate_verdict}}, state}
+    end
   end
 
   def handle_call({:review_gate_verdict, _verdict}, _from, %State{status: status} = state) do
@@ -4126,6 +4177,94 @@ defmodule Arbiter.Worker do
 
   defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
   defp fail_reason_for(_), do: :review_gate_rejected
+
+  # The two terminal reasons `park_rejected/3` can stamp. A run parked for one of
+  # these is terminal *only* because of the review gate — so a later round of the
+  # same gate is entitled to overturn it (bd-3wumco).
+  @review_gate_failure_reasons [:review_gate_rejected, :review_gate_inconclusive]
+
+  defp review_gate_failure?(%State{meta: meta}),
+    do: Map.get(meta, :failure_reason) in @review_gate_failure_reasons
+
+  # Undo a ReviewGate rejection that a later round overturned, then run the
+  # ordinary approve path. The run row is rewritten by `merge_branch/3`'s own
+  # terminal transition, so the stale `failure_reason` / `failure_summary` are
+  # dropped from meta here rather than patched afterwards; `record_run_finished/1`
+  # clears the columns for any run that no longer ends `:failed`.
+  #
+  # `:review_gate_reconciled_from` is left behind deliberately: "this task merged
+  # after being parked as rejected" is exactly the shape an operator reading
+  # `worker show` needs to see, and without it the reversal is invisible.
+  defp reconcile_review_gate_approval(%State{} = state, {:approve, findings} = verdict) do
+    prior = Map.get(state.meta, :failure_reason)
+
+    Logger.info(
+      "Worker: ReviewGate approved task=#{state.task_id} after it was parked " <>
+        "#{inspect(prior)}; reconciling the run forward and resuming the merge handoff"
+    )
+
+    # The rejection's own meta (`review_gate_verdict` / `review_gate_findings`,
+    # written by park_rejected/3) is overwritten rather than dropped: the gate
+    # still has a verdict on record for this task, it is just the approving one
+    # now. Leaving the old pair in place made `worker show` read as a rejection
+    # on a task that had merged.
+    meta =
+      state.meta
+      |> Map.drop([:failure_reason, :failure_summary, :stop_reason])
+      |> Map.put(:review_gate_verdict, :approve)
+      |> Map.put(:review_gate_findings, findings)
+      |> Map.put(:review_gate_reconciled_from, prior)
+
+    merged =
+      apply_review_gate_verdict(
+        %State{state | status: :awaiting_review_gate, meta: meta},
+        verdict
+      )
+
+    notify_review_gate_reconciled(merged, prior)
+    merged
+  end
+
+  # Tell the coordinator the earlier escalation is void. `escalate_review_gate/3`
+  # already paged it when the round rejected; without this the mailbox keeps only
+  # the rejection and the reversal has to be rediscovered from round rows. Sent
+  # AFTER the approve path has run so the note reports where the task actually
+  # landed — a reconciliation whose merge then conflicted must not claim the
+  # handoff succeeded.
+  defp notify_review_gate_reconciled(%State{workspace_id: ws_id} = state, prior)
+       when is_binary(ws_id) do
+    task_id = state.task_id
+    subject = "ReviewGate: #{task_id} reconciled to APPROVE (was #{inspect(prior)})"
+
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :info,
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: subject,
+      body:
+        "A later ReviewGate round approved this work after an earlier round parked it as " <>
+          "#{inspect(prior)}. The run was reconciled forward and the merge handoff resumed; " <>
+          "the earlier escalation for this task is superseded. " <>
+          "The worker is now `#{state.status}`."
+    })
+
+    Arbiter.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.notify_review_gate_reconciled swallowed for task=#{state.task_id}: #{inspect(e)}"
+      )
+
+      :error
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp notify_review_gate_reconciled(_state, _prior), do: :ok
 
   @max_failure_summary_chars 280
 

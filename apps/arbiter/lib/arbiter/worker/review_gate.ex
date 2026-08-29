@@ -18,6 +18,13 @@ defmodule Arbiter.Worker.ReviewGate do
       the author parks the task with the findings and escalates to the coordinator;
       the branch is **not** merged.
 
+  The verdict is terminal but the *author's* terminal state is not the last word:
+  a gate whose later round converges to APPROVE after an earlier round already
+  parked the author reports that approval to a worker sitting at `:failed`, and
+  `Arbiter.Worker` reconciles the run forward rather than refusing it (bd-3wumco).
+  A verdict that still lands nowhere is logged loudly by `report/2` — an orphaned
+  review outcome must never be silent.
+
   ## The reviewer
 
   Each review pass spawns a **distinct** reviewer worker — a second
@@ -1506,10 +1513,31 @@ defmodule Arbiter.Worker.ReviewGate do
   # (`:no_verdict`) is forwarded as such; the author's safe default for it is to
   # escalate without merging.
   defp report(state, verdict) do
+    normalized = normalize_verdict(verdict)
     safe(fn -> Worker.report(state.author, :review_gate_rounds, state.round) end)
-    safe(fn -> Worker.review_gate_verdict(state.author, normalize_verdict(verdict)) end)
+    delivered = safe(fn -> Worker.review_gate_verdict(state.author, normalized) end)
+    warn_undelivered(state, normalized, delivered)
     :ok
   end
+
+  # bd-3wumco: `safe/1` only shields against a raise/exit — an author that
+  # *answers* `{:error, {:invalid_transition, ...}}` (it has already parked
+  # terminal, e.g. on an earlier round's rejection) used to pass through here
+  # unexamined, so a review that converged to APPROVE could vanish with no trace
+  # at all beyond the merge that never happened. The Worker now reconciles a late
+  # APPROVE forward, but any verdict that still lands nowhere must be loud.
+  defp warn_undelivered(_state, _verdict, :ok), do: :ok
+
+  defp warn_undelivered(state, verdict, reason) do
+    Logger.warning(
+      "ReviewGate: could not deliver #{verdict_label(verdict)} verdict for " <>
+        "task=#{state.task_id} (round #{state.round}): #{inspect(reason)}. " <>
+        "The review outcome is orphaned — nothing downstream will act on it."
+    )
+  end
+
+  defp verdict_label({label, _findings}), do: label |> Atom.to_string() |> String.upcase()
+  defp verdict_label(label) when is_atom(label), do: label |> Atom.to_string() |> String.upcase()
 
   defp normalize_verdict({:approve, _} = v), do: v
   defp normalize_verdict({:request_changes, _} = v), do: v
