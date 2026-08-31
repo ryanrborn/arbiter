@@ -20,6 +20,13 @@ defmodule Arbiter.Reviews do
 
   or schedule an equivalent job. No automatic purge is wired up by default —
   the audit history is meant to be durable.
+
+  Each row is the *summary* of a review. Its full session — the composed
+  prompt, the raw stream-json transcript, the tool calls and their results —
+  lives on disk beside the worker-run corpus, keyed on the record id
+  (`Arbiter.Reviews.Transcript`, bd-7efini). Purging rows as above leaves
+  those files orphaned; delete `<output_log_root>/<record_id>.{log,prompt}`
+  for the same window if you want both gone.
   """
 
   use Ash.Domain

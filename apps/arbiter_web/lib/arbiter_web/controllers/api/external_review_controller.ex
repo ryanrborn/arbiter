@@ -13,11 +13,23 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
         * `status`       — filter by `running` | `completed` | `failed`.
         * `since`        — ISO8601 lower bound on `started_at`.
         * `limit`        — max rows (default 50, max 500).
+
+    * `GET /api/external_reviews/:id/transcript` — the durable corpus of one review
+      (bd-7efini): the composed prompt, the raw stream-json transcript its reviewer
+      emitted, and every tool call paired with the result it returned. The REST
+      counterpart of `GET /api/workers/:task_id/log` for a review, which — not being
+      task-linked — has no run row to look up. Wrapped under "data".
+      Optional query params:
+        * `tail`           — return only the last N transcript lines (`truncated`).
+        * `include_prompt` — `false` to omit the (large) composed prompt.
+      `exists: false` (200, empty `lines`) distinguishes "never captured" from
+      "captured but empty"; only an unknown record id 404s.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Reviews.Record
+  alias Arbiter.Reviews.Transcript
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -39,6 +51,56 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
         |> Ash.read!()
 
       json(conn, %{data: Enum.map(records, &render_record/1)})
+    end
+  end
+
+  def transcript(conn, %{"id" => id} = params) do
+    with {:ok, tail} <- parse_tail(params["tail"]),
+         {:ok, record} <- fetch_record(id) do
+      # One read + one decode pass for every projection — a tool-heavy review
+      # runs to thousands of JSONL lines and this endpoint wants all of them.
+      corpus = Transcript.corpus(record.id, preview: Transcript.default_preview())
+      summary = corpus.summary
+      {lines, truncated} = Transcript.tail(corpus.lines, tail)
+
+      json(conn, %{
+        data: %{
+          record_id: record.id,
+          pr_ref: record.pr_ref,
+          pr: record.pr,
+          workspace_id: record.workspace_id,
+          status: record.status,
+          model: record.model,
+          path: summary.path,
+          prompt_path: summary.prompt_path,
+          exists: summary.exists,
+          prompt_exists: summary.prompt_exists,
+          prompt: maybe_prompt(record.id, params["include_prompt"]),
+          line_count: summary.line_count,
+          lines: lines,
+          truncated: truncated,
+          tool_use_count: summary.tool_use_count,
+          tools_used: summary.tools_used,
+          tool_uses: corpus.tool_uses
+        }
+      })
+    end
+  end
+
+  defp fetch_record(id) do
+    case Ash.get(Record, id) do
+      {:ok, %Record{} = record} -> {:ok, record}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp maybe_prompt(_id, "false"), do: nil
+  defp maybe_prompt(_id, false), do: nil
+
+  defp maybe_prompt(id, _) do
+    case Transcript.prompt(id) do
+      {:ok, prompt} -> prompt
+      {:error, _} -> nil
     end
   end
 
@@ -124,4 +186,17 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
 
   defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, min(n, @max_limit)}
   defp parse_limit(_), do: {:error, {:invalid_request, "limit must be a positive integer"}}
+
+  defp parse_tail(nil), do: {:ok, nil}
+  defp parse_tail(""), do: {:ok, nil}
+
+  defp parse_tail(raw) when is_binary(raw) do
+    case Integer.parse(raw) do
+      {n, ""} when n > 0 -> {:ok, n}
+      _ -> {:error, {:invalid_request, "tail must be a positive integer"}}
+    end
+  end
+
+  defp parse_tail(n) when is_integer(n) and n > 0, do: {:ok, n}
+  defp parse_tail(_), do: {:error, {:invalid_request, "tail must be a positive integer"}}
 end

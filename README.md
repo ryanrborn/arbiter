@@ -73,7 +73,7 @@ The primary integration path for a coordinator agent (e.g. a dedicated Claude Co
 
 - **Skills** — `skill_list`/`skill_get`/`skill_create`/`skill_update`/`skill_delete` for managing reusable skill content.
 - **Graph/Conductor** — `graph_create`, `graph_add_directive`, `graph_add_edge`, `graph_start`, `graph_status`, `graph_pause`, `graph_resume` for auto-dispatch chains of issues wired together by dependency edges, distinct from dispatching a single issue.
-- **ExternalReview** — `external_review_list`, `external_review_show`, `review_greenlight` for inspecting and unblocking worktree-backed external code review.
+- **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not task-linked.
 
 See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
 

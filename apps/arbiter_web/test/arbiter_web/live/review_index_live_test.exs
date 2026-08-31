@@ -100,6 +100,91 @@ defmodule ArbiterWeb.ReviewIndexLiveTest do
     end
   end
 
+  describe "transcript in the detail view (bd-7efini)" do
+    setup do
+      prev = Application.get_env(:arbiter, :output_log_root)
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "review-transcript-live-#{System.unique_integer([:positive])}"
+        )
+
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    @stream_json Enum.join(
+                   [
+                     ~s({"type":"system","subtype":"init","model":"claude-opus-5","session_id":"s-1"}),
+                     ~s({"type":"assistant","message":{"content":[{"type":"text","text":"Checking the nil guard."}]}}),
+                     ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/foo.ex"}}]}}),
+                     ~s({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"defmodule Foo do"}]}}),
+                     ~s({"type":"result","subtype":"success","result":"one finding"})
+                   ],
+                   "\n"
+                 )
+
+    test "expanding a review renders its prompt, tool uses and transcript", %{conn: conn, ws: ws} do
+      record = record!(ws, %{pr: "with-transcript"})
+
+      :ok =
+        Arbiter.Worker.PromptLog.write(record.id, "You are a code reviewer. Review this diff.")
+
+      :ok = Arbiter.Reviews.Transcript.write(record.id, @stream_json)
+
+      {:ok, view, _html} = live(conn, "/reviews")
+      html = view |> element("#review-row-#{record.id}") |> render_click()
+
+      # prompt
+      assert html =~ "You are a code reviewer. Review this diff."
+      # tool-use record: name, input and what came back
+      assert html =~ "Read"
+      assert html =~ "lib/foo.ex"
+      assert html =~ "defmodule Foo do"
+      # transcript body
+      assert html =~ "Checking the nil guard."
+      assert html =~ "one finding"
+      assert html =~ "claude-opus-5"
+      # size of the corpus
+      assert html =~ "5 lines"
+    end
+
+    test "a review with no captured transcript says so instead of rendering an empty shell", %{
+      conn: conn,
+      ws: ws
+    } do
+      record = record!(ws, %{pr: "no-transcript"})
+
+      {:ok, view, _html} = live(conn, "/reviews")
+      html = view |> element("#review-row-#{record.id}") |> render_click()
+
+      assert html =~ "No transcript captured"
+    end
+
+    test "collapsing the row drops the loaded transcript", %{conn: conn, ws: ws} do
+      record = record!(ws, %{pr: "toggles"})
+      :ok = Arbiter.Reviews.Transcript.write(record.id, @stream_json)
+
+      {:ok, view, _html} = live(conn, "/reviews")
+
+      assert view |> element("#review-row-#{record.id}") |> render_click() =~
+               "Checking the nil guard."
+
+      refute view |> element("#review-row-#{record.id}") |> render_click() =~
+               "Checking the nil guard."
+    end
+  end
+
   describe "detail expansion" do
     test "shows findings summary and failure diagnostics for a failed review", %{
       conn: conn,

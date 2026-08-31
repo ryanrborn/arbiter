@@ -10,6 +10,7 @@ defmodule Arbiter.Workflows.CodeReview.ChecksTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.CodeReview.Checks
   alias Arbiter.Worker.PromptLog
+  alias Arbiter.Reviews.Transcript
 
   @diff """
   diff --git a/lib/foo.ex b/lib/foo.ex
@@ -73,5 +74,76 @@ defmodule Arbiter.Workflows.CodeReview.ChecksTest do
   test "does nothing when state carries no review_record_id (unchanged behavior)" do
     state = %{}
     assert {:ok, []} = Checks.run(@diff, state)
+  end
+
+  describe "transcript persistence (bd-7efini)" do
+    @stream_json Enum.join(
+                   [
+                     ~s({"type":"system","subtype":"init","model":"claude-opus-5","session_id":"sess-9"}),
+                     ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"tok_reviewsecret"}}]}}),
+                     ~s({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"one hit"}]}}),
+                     ~s({"type":"result","subtype":"success","result":"{\\"findings\\": []}"})
+                   ],
+                   "\n"
+                 )
+
+    test "persists the reviewer's raw stream-json transcript, keyed by review_record_id" do
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:ok, ~s({"findings": []}), %{model: "claude-opus-5"}, @stream_json}
+      end)
+
+      record_id = "review-record-#{System.unique_integer([:positive])}"
+
+      assert {:ok, [], %{model: "claude-opus-5"}} =
+               Checks.run(@diff, %{review_record_id: record_id})
+
+      assert Transcript.exists?(record_id)
+      assert %{line_count: 4, tool_use_count: 1} = Transcript.summary(record_id)
+      assert [%{name: "Grep", result: "one hit"}] = Transcript.tool_uses(record_id)
+    end
+
+    test "redacts workspace secrets out of the transcript before it hits disk" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "checks-transcript-ws-#{System.unique_integer([:positive])}",
+          worker_env: %{
+            "MCP_SCOPE_TOKEN" => %{"value" => "tok_reviewsecret", "secret" => true}
+          }
+        })
+
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:ok, ~s({"findings": []}), %{}, @stream_json}
+      end)
+
+      record_id = "review-record-#{System.unique_integer([:positive])}"
+
+      assert {:ok, [], %{}} =
+               Checks.run(@diff, %{review_record_id: record_id, workspace: ws})
+
+      {:ok, lines} = Transcript.read_lines(record_id)
+      refute Enum.any?(lines, &(&1 =~ "tok_reviewsecret"))
+      assert Enum.any?(lines, &(&1 =~ "[REDACTED]"))
+    end
+
+    test "captures the output of a failed reviewer invocation too" do
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:error, {:claude_failed, 1, "boom"}, "boom\ncrashed"}
+      end)
+
+      record_id = "review-record-#{System.unique_integer([:positive])}"
+
+      assert {:error, {:claude_failed, 1, "boom"}} =
+               Checks.run(@diff, %{review_record_id: record_id})
+
+      assert {:ok, ["boom", "crashed"]} = Transcript.read_lines(record_id)
+    end
+
+    test "an invoker that returns no raw output writes no transcript (unchanged behavior)" do
+      record_id = "review-record-#{System.unique_integer([:positive])}"
+
+      assert {:ok, []} = Checks.run(@diff, %{review_record_id: record_id})
+
+      refute Transcript.exists?(record_id)
+    end
   end
 end

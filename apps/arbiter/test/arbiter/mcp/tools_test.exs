@@ -3408,6 +3408,185 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "external_review transcript retrieval (bd-7efini)" do
+    setup ctx do
+      prev = Application.get_env(:arbiter, :output_log_root)
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "review-transcript-mcp-#{System.unique_integer([:positive])}"
+        )
+
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+      end)
+
+      {:ok, record} =
+        Ash.create(Arbiter.Reviews.Record, %{
+          pr_ref: "github:acme/here#77",
+          pr: "77",
+          workspace_id: ctx.ws.id,
+          strategy: "github",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      stream_json =
+        Enum.join(
+          [
+            ~s({"type":"system","subtype":"init","model":"claude-opus-5","session_id":"s-1"}),
+            ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+            ~s({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"contents"}]}}),
+            ~s({"type":"result","subtype":"success","result":"done"})
+          ],
+          "\n"
+        )
+
+      {:ok, Map.merge(ctx, %{record: record, stream_json: stream_json})}
+    end
+
+    test "external_review_show reports transcript capture state and the tool histogram", ctx do
+      :ok = Arbiter.Worker.PromptLog.write(ctx.record.id, "You are a code reviewer.")
+      :ok = Arbiter.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      assert data.transcript_exists
+      assert data.prompt_exists
+      assert data.transcript_line_count == 4
+      assert data.tool_use_count == 1
+      assert data.tools_used == [%{name: "Read", count: 1}]
+    end
+
+    test "external_review_show reports absence for a review with no captured transcript", ctx do
+      assert {:ok, data} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      refute data.transcript_exists
+      refute data.prompt_exists
+      assert data.transcript_line_count == 0
+      assert data.tools_used == []
+    end
+
+    test "external_review_list stays summary-only (no per-row disk reads)", ctx do
+      :ok = Arbiter.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, %{external_reviews: [record | _]}} =
+               Tools.external_review_list(ctx.coordinator, %{})
+
+      refute Map.has_key?(record, :transcript_line_count)
+    end
+
+    test "external_review_transcript returns the prompt, the raw lines and the tool uses", ctx do
+      :ok = Arbiter.Worker.PromptLog.write(ctx.record.id, "You are a code reviewer.")
+      :ok = Arbiter.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      assert data.record_id == ctx.record.id
+      assert data.pr_ref == ctx.record.pr_ref
+      assert data.exists
+      assert data.path == Arbiter.Reviews.Transcript.path_for(ctx.record.id)
+      assert data.prompt == "You are a code reviewer."
+      assert data.line_count == 4
+      assert length(data.lines) == 4
+      assert [%{name: "Read", tool_use_id: "t1", result: "contents"}] = data.tool_uses
+    end
+
+    test "external_review_transcript survives a multibyte tool result straddling the preview cutoff",
+         ctx do
+      # A `Read` of a real source file: ASCII right up to the 2000-char preview
+      # cap, then an em-dash spanning it. A byte-offset slice would hand
+      # `Jason.encode!/1` (ArbiterWeb.MCP.Plug) invalid UTF-8 — a transport
+      # failure the handler's own `rescue` never sees.
+      long = String.duplicate("a", 1999) <> "— rest of the file " <> String.duplicate("b", 200)
+
+      stream_json =
+        Enum.join(
+          [
+            ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+            Jason.encode!(%{
+              "type" => "user",
+              "message" => %{
+                "content" => [
+                  %{"type" => "tool_result", "tool_use_id" => "t1", "content" => long}
+                ]
+              }
+            })
+          ],
+          "\n"
+        )
+
+      :ok = Arbiter.Reviews.Transcript.write(ctx.record.id, stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      assert [%{name: "Read", result: result}] = data.tool_uses
+      assert String.valid?(result)
+      assert String.ends_with?(result, "… [truncated]")
+      # What the MCP plug does with the handler's return value.
+      assert is_binary(Jason.encode!(data))
+    end
+
+    test "external_review_transcript can omit the prompt and tail the lines", ctx do
+      :ok = Arbiter.Worker.PromptLog.write(ctx.record.id, "You are a code reviewer.")
+      :ok = Arbiter.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{
+                 "record_id" => ctx.record.id,
+                 "include_prompt" => false,
+                 "tail" => 2
+               })
+
+      assert data.prompt == nil
+      assert data.line_count == 4
+      assert length(data.lines) == 2
+      assert data.truncated
+      assert List.last(data.lines) =~ ~s("type":"result")
+    end
+
+    test "external_review_transcript distinguishes uncaptured from empty", ctx do
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      refute data.exists
+      assert data.lines == []
+      assert data.line_count == 0
+      assert data.tool_uses == []
+    end
+
+    test "external_review_transcript is not-found for an unknown record", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => "nope"})
+
+      assert msg =~ "no external review record"
+    end
+
+    test "external_review_transcript requires record_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.external_review_transcript(ctx.coordinator, %{})
+      assert msg =~ "record_id"
+    end
+
+    test "the catalog advertises external_review_transcript to coordinators", _ctx do
+      tool = Enum.find(Catalog.all(), &(&1.name == "external_review_transcript"))
+      assert tool, "external_review_transcript missing from the MCP catalog"
+      assert "record_id" in tool.input_schema["required"]
+      assert is_map(tool.input_schema["properties"]["tail"])
+      assert is_map(tool.input_schema["properties"]["include_prompt"])
+    end
+  end
+
   describe "review_gate_rounds_list/2 (bd-aqyjuc)" do
     test "returns rounds for a task, oldest-first, distinguishing round-1 reject from round-2 approve",
          ctx do

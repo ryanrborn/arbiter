@@ -26,10 +26,24 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   ## Test override
 
   Set `Application.put_env(:arbiter, :code_review_invoker, fun)` where
-  `fun` is a `(prompt, state) -> {:ok, raw_output} | {:error, term()}`
-  function. This bypasses Claude entirely. The default invoker shells out
-  to `claude --print ... --output-format text`. Tests should always set
+  `fun` is a `(prompt, state) -> result` function. This bypasses Claude
+  entirely. The default invoker shells out to
+  `claude --print ... --output-format stream-json`. Tests should always set
   an override to avoid hitting the real CLI.
+
+  `result` is one of:
+
+      {:ok, text}
+      {:ok, text, usage}
+      {:ok, text, usage, raw_output}
+      {:error, reason}
+      {:error, reason, raw_output}
+
+  where `raw_output` is the reviewer's unparsed stdout. When present — and
+  the state carries a `:review_record_id` — it is persisted as the review's
+  durable transcript (`Arbiter.Reviews.Transcript`, bd-7efini) before being
+  stripped from the return value, so `run/2`'s callers only ever see the
+  3-element shapes.
 
   ## Output contract from Claude
 
@@ -87,10 +101,30 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
 
   # ---- internals --------------------------------------------------------
 
+  # The invoker contract has two shapes. The 3-element ones
+  # (`{:ok, text}` / `{:ok, text, usage}` / `{:error, reason}`) are what a
+  # non-Claude runner or a test stub returns. The default invoker additionally
+  # hands back the reviewer's RAW stdout as a trailing element
+  # (`{:ok, text, usage, raw}` / `{:error, reason, raw}`); that raw corpus is
+  # persisted here as the review's durable transcript (bd-7efini) and then
+  # dropped from the return value, so `run/2` and the workflow see exactly the
+  # shapes they always did.
   defp invoke_reviewer(prompt, state) do
     persist_review_prompt(prompt, state)
     invoker = Application.get_env(:arbiter, :code_review_invoker) || (&default_invoke/2)
-    invoker.(prompt, state)
+
+    case invoker.(prompt, state) do
+      {:ok, text, usage, raw} ->
+        persist_review_transcript(raw, state)
+        {:ok, text, usage}
+
+      {:error, reason, raw} ->
+        persist_review_transcript(raw, state)
+        {:error, reason}
+
+      other ->
+        other
+    end
   end
 
   # bd-9rdwe4 (#1017 gap G5): this is the shared invoker for BOTH
@@ -118,6 +152,35 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
       Logger.warning("CodeReview.Checks: persist_review_prompt/2 failed: #{Exception.message(e)}")
       :ok
   end
+
+  # bd-7efini (#1425): an external review is not task-linked, so it has no
+  # `Arbiter.Workers.Run` row and gets none of the `OutputLog`/`ClaudeSession`
+  # transcript capture a regular worker run does — the raw `stream-json` corpus
+  # (every model turn, every tool call and its result) used to be parsed for
+  # text + usage here and then discarded. `Arbiter.Reviews.Transcript` keys the
+  # same corpus on the review record id, beside the prompt file above. Written
+  # on the failure path too: a reviewer that exited non-zero is exactly when
+  # someone needs to read what it actually did. Callers with no
+  # `review_record_id` (the diff-only `CodeReview` workflow, most tests) are
+  # unaffected. Redacted with the same values as the prompt.
+  defp persist_review_transcript(raw, state) when is_binary(raw) do
+    case Map.get(state, :review_record_id) do
+      id when is_binary(id) and id != "" ->
+        Arbiter.Reviews.Transcript.write(id, raw, review_redact_values(state))
+
+      _ ->
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "CodeReview.Checks: persist_review_transcript/2 failed: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp persist_review_transcript(_raw, _state), do: :ok
 
   defp review_redact_values(%{workspace: %Arbiter.Tasks.Workspace{} = ws}) do
     Arbiter.Tasks.Workspace.worker_env_secret_values(ws)
@@ -238,9 +301,16 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
           if(env == [], do: [], else: [{:env, env}]) ++
           if(cwd, do: [{:cd, cwd}], else: [])
 
+      # The raw `output` rides back to `invoke_reviewer/2` as a trailing
+      # element on both branches so it can be persisted as the review's
+      # durable transcript (bd-7efini) before being reduced to text + usage.
       case System.cmd("sh", ["-c", shell], opts) do
-        {output, 0} -> extract_text_and_usage(output)
-        {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
+        {output, 0} ->
+          {:ok, text, usage} = extract_text_and_usage(output)
+          {:ok, text, usage, output}
+
+        {output, code} ->
+          {:error, {:claude_failed, code, String.trim(output)}, output}
       end
     after
       File.rm(tmp)

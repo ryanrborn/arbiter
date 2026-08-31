@@ -43,6 +43,7 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for one run (by `run_id` or the task's most recent) |
   | `worker_prompt` | coordinator | `Arbiter.Worker.PromptLog.read/1` for one run (by `run_id` or the task's most recent) |
   | `run_log_list` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: … or …#…)`, task + synthetic children |
+  | `external_review_transcript` | coordinator | `Arbiter.Reviews.Transcript.read_lines/1` + `tool_uses/1` for one non-task-linked review (by review record id) |
   | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, capture rate over Claude-driven runs |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
@@ -1012,6 +1013,42 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.external_review_show/2
+    },
+    %{
+      name: "external_review_transcript",
+      tiers: @coordinator,
+      description:
+        "Full durable corpus of one external review (bd-7efini): the composed prompt it was " <>
+          "given, the raw stream-json transcript its reviewer emitted, and every tool call in " <>
+          "that transcript paired with the result it returned. `worker_log`'s counterpart for a " <>
+          "review — an external review is not task-linked, so it has no run row and can't be " <>
+          "reached via `run_log_list`/`worker_log`; it is keyed on its own review record id. " <>
+          "Returns record_id, pr_ref, path, prompt_path, exists, prompt_exists, prompt, " <>
+          "line_count, lines, truncated, tool_use_count, tools_used, tool_uses. Workspace-" <>
+          "agnostic, like `external_review_show`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "record_id" => %{
+            "type" => "string",
+            "description" => "ExternalReview record id whose transcript to read (required)."
+          },
+          "tail" => %{
+            "type" => "integer",
+            "description" =>
+              "Return only the last N transcript lines (`truncated: true` when lines were " <>
+                "dropped). Omit for the whole transcript — a tool-heavy review runs to " <>
+                "thousands of JSONL lines."
+          },
+          "include_prompt" => %{
+            "type" => "boolean",
+            "description" => "Set false to skip the (large) composed prompt. Default true."
+          }
+        },
+        "required" => ["record_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.external_review_transcript/2
     },
     %{
       name: "review_gate_rounds_list",

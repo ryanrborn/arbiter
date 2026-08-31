@@ -148,6 +148,13 @@ defmodule Arbiter.MCP.Tools do
   before `review_greenlight`. Coordinator only. Workspace-agnostic: looked up
   directly by id, with no workspace filter, since the caller already has the
   specific record id (e.g. from a dispatch response or `external_review_list`).
+
+  Also reports this review's durable-corpus state (bd-7efini):
+  `transcript_exists`, `prompt_exists`, `transcript_line_count`,
+  `tool_use_count` and `tools_used` — the same "is it retrievable, and how
+  big" signal `run_log_list` gives a regular worker run. Fetch the corpus
+  itself with `external_review_transcript`. The list tool deliberately does
+  NOT carry these: they cost a disk read per record.
   """
   @spec external_review_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def external_review_show(%Scope{} = _scope, args) do
@@ -156,7 +163,7 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, record_id} <- require_string(args, "record_id") do
       case Ash.get(ExternalReviewRecord, record_id) do
         {:ok, %ExternalReviewRecord{} = record} ->
-          {:ok, serialize_external_review(record, proposed_comments: true)}
+          {:ok, serialize_external_review(record, proposed_comments: true, transcript: true)}
 
         _ ->
           {:error, {:not_found, "no external review record found for #{record_id}"}}
@@ -164,6 +171,83 @@ defmodule Arbiter.MCP.Tools do
     end
   rescue
     e -> {:error, {:internal, "external_review_show failed: #{Exception.message(e)}"}}
+  end
+
+  # ---- external_review_transcript ------------------------------------------
+
+  @doc """
+  Full durable corpus of one external review (bd-7efini, #1425): the composed
+  prompt it was given, the raw `stream-json` transcript its reviewer emitted,
+  and every tool call in that transcript paired with the result it returned.
+
+  This is `worker_log`'s counterpart for a review. An external review is not
+  task-linked — it has no `Arbiter.Workers.Run` row — so it can't be reached
+  through `run_log_list`/`worker_log`'s task-scoped lookup; it is keyed on its
+  own `Arbiter.Reviews.Record` id instead (see `Arbiter.Reviews.Transcript`).
+
+  Coordinator only. Workspace-agnostic, like `external_review_show`.
+
+    * `record_id` (required) — the review to read.
+    * `tail` — return only the last N transcript lines (`truncated: true` when
+      lines were dropped). Omit for the whole transcript; a tool-heavy review
+      runs to thousands of JSONL lines.
+    * `include_prompt` — set false to skip the (large) prompt.
+
+  `exists` distinguishes "never captured" (a review that predates capture, or
+  whose reviewer produced nothing) from "captured but empty".
+  """
+  @spec external_review_transcript(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def external_review_transcript(%Scope{} = _scope, args) do
+    alias Arbiter.Reviews.Record, as: ExternalReviewRecord
+    alias Arbiter.Reviews.Transcript
+
+    with {:ok, record_id} <- require_string(args, "record_id"),
+         {:ok, tail} <- optional_positive_integer(args, "tail") do
+      case Ash.get(ExternalReviewRecord, record_id) do
+        {:ok, %ExternalReviewRecord{} = record} ->
+          # One read + one decode pass for summary, lines and tool uses alike.
+          corpus = Transcript.corpus(record.id, preview: Transcript.default_preview())
+          summary = corpus.summary
+          {lines, truncated} = Transcript.tail(corpus.lines, tail)
+
+          prompt =
+            if fetch_optional_bool!(args, "include_prompt") == false do
+              nil
+            else
+              case Transcript.prompt(record.id) do
+                {:ok, prompt} -> prompt
+                {:error, _} -> nil
+              end
+            end
+
+          {:ok,
+           %{
+             record_id: record.id,
+             pr_ref: record.pr_ref,
+             pr: record.pr,
+             workspace_id: record.workspace_id,
+             status: record.status,
+             model: record.model,
+             path: summary.path,
+             prompt_path: summary.prompt_path,
+             exists: summary.exists,
+             prompt_exists: summary.prompt_exists,
+             prompt: prompt,
+             line_count: summary.line_count,
+             lines: lines,
+             truncated: truncated,
+             tool_use_count: summary.tool_use_count,
+             tools_used: summary.tools_used,
+             tool_uses: corpus.tool_uses
+           }}
+
+        _ ->
+          {:error, {:not_found, "no external review record found for #{record_id}"}}
+      end
+    end
+  rescue
+    e -> {:error, {:internal, "external_review_transcript failed: #{Exception.message(e)}"}}
   end
 
   # ---- review_gate_rounds_list ---------------------------------------------
@@ -329,8 +413,26 @@ defmodule Arbiter.MCP.Tools do
       completed_at: iso_dt(r.completed_at)
     }
 
-    if Keyword.get(opts, :proposed_comments, false) do
-      Map.put(base, :proposed_comments, proposed)
+    base =
+      if Keyword.get(opts, :proposed_comments, false) do
+        Map.put(base, :proposed_comments, proposed)
+      else
+        base
+      end
+
+    # bd-7efini: capture state of the review's durable corpus. Show-only —
+    # each call stats/reads files, which a 200-record list must not do.
+    if Keyword.get(opts, :transcript, false) do
+      summary = Arbiter.Reviews.Transcript.summary(r.id)
+
+      Map.merge(base, %{
+        transcript_exists: summary.exists,
+        transcript_path: summary.path,
+        transcript_line_count: summary.line_count,
+        prompt_exists: summary.prompt_exists,
+        tool_use_count: summary.tool_use_count,
+        tools_used: summary.tools_used
+      })
     else
       base
     end
