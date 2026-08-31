@@ -256,11 +256,26 @@ defmodule Arbiter.Board.Autopilot do
   defp promote(%{dispatching: %{id: id}} = state), do: {{:busy, id}, state}
 
   defp promote(state) do
-    case read_board(state, []) do
+    snapshot = read_board(state, [])
+    state = prune_failures(state, snapshot)
+
+    case snapshot do
       %{promote: id} when is_binary(id) -> {:started, start_dispatch(state, id)}
       _ -> {:idle, state}
     end
   end
+
+  # A card only leaves `state.failures` on a successful dispatch of that same
+  # card (`clear_failure/2`). One that instead gets closed, deleted, or
+  # deprioritized out of Ready would otherwise sit in the map for the life of
+  # this singleton process. Ready is small and re-read every tick, so pruning
+  # against it here is cheap and keeps the map bounded.
+  defp prune_failures(%{failures: failures} = state, %{ready: ready}) when map_size(failures) > 0 do
+    ready_ids = MapSet.new(ready, & &1.id)
+    %{state | failures: Map.filter(failures, fn {id, _} -> MapSet.member?(ready_ids, id) end)}
+  end
+
+  defp prune_failures(state, _snapshot), do: state
 
   # The task, not this process, does the slow work. It never raises: the
   # result — good, bad or thrown — comes back as a plain term so the
@@ -343,6 +358,7 @@ defmodule Arbiter.Board.Autopilot do
 
   defp escalate_dispatch_failure?(_shape, count), do: count >= @dispatch_failure_retry_threshold
 
+  defp error_shape(%module{}), do: module
   defp error_shape(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
   defp error_shape(reason), do: reason
 

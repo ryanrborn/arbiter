@@ -169,10 +169,10 @@ defmodule Arbiter.Board.AutopilotTest do
       {:ok, counter} = Agent.start_link(fn -> 0 end)
 
       dispatch_fun = fn _ ->
-        if Agent.get_and_update(counter, &{&1, &1 + 1}) == 0 do
-          {:error, :no_repo_configured}
-        else
-          {:ok, %{task_id: "bd-1"}}
+        case Agent.get_and_update(counter, &{&1, &1 + 1}) do
+          0 -> {:error, :no_repo_configured}
+          1 -> {:ok, %{task_id: "bd-1"}}
+          _ -> {:error, :no_repo_configured}
         end
       end
 
@@ -188,15 +188,8 @@ defmodule Arbiter.Board.AutopilotTest do
 
       assert {:ok, "bd-1"} = Autopilot.tick(pid)
 
-      pid2 =
-        start(
-          paused: false,
-          dispatch: fn _ -> {:error, :no_repo_configured} end,
-          escalate: fn id, reason, attempts -> send(test, {:escalated2, id, reason, attempts}) end
-        )
-
-      Autopilot.tick(pid2)
-      assert_receive {:escalated2, "bd-1", :no_repo_configured, 1}
+      Autopilot.tick(pid)
+      assert_receive {:escalated, "bd-1", :no_repo_configured, 1}
     end
   end
 
