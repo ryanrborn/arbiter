@@ -206,9 +206,10 @@ defmodule Arbiter.MCP.Tools do
          {:ok, tail} <- optional_positive_integer(args, "tail") do
       case Ash.get(ExternalReviewRecord, record_id) do
         {:ok, %ExternalReviewRecord{} = record} ->
-          summary = Transcript.summary(record.id)
-          all_lines = Transcript.read_lines(record.id) |> lines_or_empty()
-          {lines, truncated} = tail_lines(all_lines, tail)
+          # One read + one decode pass for summary, lines and tool uses alike.
+          corpus = Transcript.corpus(record.id, preview: Transcript.default_preview())
+          summary = corpus.summary
+          {lines, truncated} = Transcript.tail(corpus.lines, tail)
 
           prompt =
             if fetch_optional_bool!(args, "include_prompt") == false do
@@ -238,7 +239,7 @@ defmodule Arbiter.MCP.Tools do
              truncated: truncated,
              tool_use_count: summary.tool_use_count,
              tools_used: summary.tools_used,
-             tool_uses: Enum.map(Transcript.tool_uses(record.id), &serialize_tool_use/1)
+             tool_uses: corpus.tool_uses
            }}
 
         _ ->
@@ -247,39 +248,6 @@ defmodule Arbiter.MCP.Tools do
     end
   rescue
     e -> {:error, {:internal, "external_review_transcript failed: #{Exception.message(e)}"}}
-  end
-
-  # A tool result is unbounded (a whole file, a grep over a repo). The record
-  # of *which* tools ran and roughly what came back is what makes a review
-  # auditable; the raw bytes stay on disk (`path`) for anyone who needs them.
-  @tool_result_preview 2_000
-
-  defp serialize_tool_use(%{} = tool_use) do
-    %{
-      name: tool_use.name,
-      tool_use_id: tool_use.tool_use_id,
-      input: tool_use.input,
-      result: truncate_preview(tool_use.result)
-    }
-  end
-
-  defp truncate_preview(nil), do: nil
-
-  defp truncate_preview(text) when is_binary(text) do
-    if byte_size(text) > @tool_result_preview do
-      binary_part(text, 0, @tool_result_preview) <> "… [truncated]"
-    else
-      text
-    end
-  end
-
-  defp lines_or_empty({:ok, lines}), do: lines
-  defp lines_or_empty({:error, _}), do: []
-
-  defp tail_lines(lines, nil), do: {lines, false}
-
-  defp tail_lines(lines, n) when is_integer(n) do
-    if length(lines) > n, do: {Enum.take(lines, -n), true}, else: {lines, false}
   end
 
   # ---- review_gate_rounds_list ---------------------------------------------

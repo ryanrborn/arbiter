@@ -43,9 +43,9 @@ defmodule Arbiter.Reviews.Transcript do
   raw JSONL exactly as the CLI emitted it (redacted), one event per line: the
   `system/init` handshake, each assistant turn, each `tool_use` and the
   matching `tool_result`, and the terminal `result`. Storing the raw corpus
-  keeps the tool-use record lossless; `events/1`, `tool_uses/1` and
-  `summary/1` derive the readable views from it, so nothing that mattered has
-  to be decided at write time.
+  keeps the tool-use record lossless; `events/1`, `tool_uses/2` and
+  `summary/1` (or `corpus/2`, all three from one read) derive the readable
+  views from it, so nothing that mattered has to be decided at write time.
 
   ## Retention
 
@@ -68,6 +68,12 @@ defmodule Arbiter.Reviews.Transcript do
           input: map(),
           result: String.t() | nil
         }
+
+  # A tool result is unbounded (a whole file, a grep over a repo). Callers that
+  # serialize tool uses into a response cap them at this many *characters* —
+  # characters, not bytes, so a cut never lands mid-codepoint and hands
+  # `Jason.encode!/1` invalid UTF-8.
+  @tool_result_preview 2_000
 
   @doc "Absolute path of the transcript file for `record_id`."
   @spec path_for(String.t()) :: String.t()
@@ -142,19 +148,24 @@ defmodule Arbiter.Reviews.Transcript do
   An absent or unreadable transcript yields `[]`.
   """
   @spec events(String.t()) :: [event()]
-  def events(record_id) do
-    case read_lines(record_id) do
-      {:ok, lines} -> Enum.flat_map(lines, &line_events/1)
-      {:error, _} -> []
-    end
-  end
+  def events(record_id), do: record_id |> lines_or_empty() |> events_from_lines()
 
   @doc """
   Every tool call the reviewer made, in order, paired with the result it got
   back (`nil` when the transcript ends before the result arrived).
+
+  Options:
+
+    * `:preview` — cap each `:result` at N *characters*, appending
+      `"… [truncated]"`. A tool result is unbounded (a whole file, a
+      repo-wide grep); the record of which tools ran and roughly what came
+      back is what makes a review auditable, and the raw bytes stay on disk.
+      Defaults to `nil` (lossless). Use `default_preview/0` for the limit the
+      MCP tool and the REST endpoint share.
   """
-  @spec tool_uses(String.t()) :: [tool_use()]
-  def tool_uses(record_id), do: record_id |> events() |> pair_tool_uses()
+  @spec tool_uses(String.t(), keyword()) :: [tool_use()]
+  def tool_uses(record_id, opts \\ []),
+    do: record_id |> events() |> pair_tool_uses() |> preview_tool_uses(opts[:preview])
 
   @doc """
   Capture state and shape of one review's durable corpus, without reading the
@@ -167,26 +178,102 @@ defmodule Arbiter.Reviews.Transcript do
   """
   @spec summary(String.t()) :: map()
   def summary(record_id) when is_binary(record_id) and record_id != "" do
-    lines =
-      case read_lines(record_id) do
-        {:ok, lines} -> lines
-        {:error, _} -> []
-      end
+    lines = lines_or_empty(record_id)
+    summary_from(record_id, lines, lines |> events_from_lines() |> pair_tool_uses())
+  end
 
-    tools = lines |> Enum.flat_map(&line_events/1) |> pair_tool_uses()
+  @doc """
+  Every projection of one review's transcript from a **single** read and a
+  single JSON-decode pass: `:lines` (raw JSONL), `:events`, `:tool_uses` and
+  `:summary`.
 
+  `summary/1`, `events/1` and `tool_uses/2` each re-read and re-decode the
+  file, so a caller that wants more than one of them — the REST endpoint, the
+  MCP tool, the `/reviews` detail view, all of which want all of them — should
+  use this instead. A tool-heavy agentic review runs to thousands of JSONL
+  lines and the LiveView decodes them synchronously in its own process.
+
+  Takes the same `:preview` option as `tool_uses/2`.
+  """
+  @spec corpus(String.t(), keyword()) :: %{
+          lines: [String.t()],
+          events: [event()],
+          tool_uses: [tool_use()],
+          summary: map()
+        }
+  def corpus(record_id, opts \\ []) when is_binary(record_id) and record_id != "" do
+    lines = lines_or_empty(record_id)
+    events = events_from_lines(lines)
+    tool_uses = pair_tool_uses(events)
+
+    %{
+      lines: lines,
+      events: events,
+      tool_uses: preview_tool_uses(tool_uses, opts[:preview]),
+      summary: summary_from(record_id, lines, tool_uses)
+    }
+  end
+
+  @doc """
+  The last `n` of `lines` plus whether anything was dropped —
+  `{lines, truncated?}`. `nil` means "all of it".
+
+  Shared by every surface that offers a `tail` parameter.
+  """
+  @spec tail([String.t()], pos_integer() | nil) :: {[String.t()], boolean()}
+  def tail(lines, nil), do: {lines, false}
+
+  def tail(lines, n) when is_integer(n) do
+    if length(lines) > n, do: {Enum.take(lines, -n), true}, else: {lines, false}
+  end
+
+  @doc """
+  Default `:preview` cap (in characters) for a serialized tool result — what
+  the `external_review_transcript` MCP tool and the REST transcript endpoint
+  both apply.
+  """
+  @spec default_preview() :: pos_integer()
+  def default_preview, do: @tool_result_preview
+
+  # ---- internals ----------------------------------------------------------
+
+  defp lines_or_empty(record_id) do
+    case read_lines(record_id) do
+      {:ok, lines} -> lines
+      {:error, _} -> []
+    end
+  end
+
+  defp events_from_lines(lines), do: Enum.flat_map(lines, &line_events/1)
+
+  defp summary_from(record_id, lines, tool_uses) do
     %{
       path: path_for(record_id),
       prompt_path: prompt_path_for(record_id),
       exists: exists?(record_id),
       prompt_exists: File.regular?(prompt_path_for(record_id)),
       line_count: length(lines),
-      tool_use_count: length(tools),
-      tools_used: histogram(tools)
+      tool_use_count: length(tool_uses),
+      tools_used: histogram(tool_uses)
     }
   end
 
-  # ---- internals ----------------------------------------------------------
+  defp preview_tool_uses(tool_uses, nil), do: tool_uses
+
+  defp preview_tool_uses(tool_uses, limit) when is_integer(limit) and limit > 0,
+    do: Enum.map(tool_uses, &%{&1 | result: preview_text(&1.result, limit)})
+
+  defp preview_text(nil, _limit), do: nil
+
+  # Slice by codepoint: `binary_part/3` at a fixed byte offset can land inside
+  # a multibyte character, and the invalid UTF-8 that produces blows up at
+  # `Jason.encode!/1` — a 500 from the endpoint, or a transport-level failure
+  # for the MCP tool, on any review whose reviewer read a file with an em-dash
+  # in it.
+  defp preview_text(text, limit) when is_binary(text) do
+    head = String.slice(text, 0, limit)
+    if head == text, do: text, else: head <> "… [truncated]"
+  end
 
   defp histogram(tool_uses) do
     tool_uses

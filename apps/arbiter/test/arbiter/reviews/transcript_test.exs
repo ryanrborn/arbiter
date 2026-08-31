@@ -41,6 +41,28 @@ defmodule Arbiter.Reviews.TranscriptTest do
     )
   end
 
+  # A `Read` of a real source file: ASCII up to the preview cutoff, then a
+  # multibyte character straddling it. Byte 2000 lands *inside* the em-dash,
+  # so a byte-offset slice yields invalid UTF-8 and blows up at encode time.
+  defp multibyte_stream_json do
+    long = String.duplicate("a", 1999) <> "— rest of the file " <> String.duplicate("b", 200)
+
+    Enum.join(
+      [
+        ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+        Jason.encode!(%{
+          "type" => "user",
+          "message" => %{
+            "content" => [
+              %{"type" => "tool_result", "tool_use_id" => "toolu_1", "content" => long}
+            ]
+          }
+        })
+      ],
+      "\n"
+    )
+  end
+
   describe "path scheme" do
     test "keys the transcript by review record id under the shared log root", %{
       root: root,
@@ -183,6 +205,93 @@ defmodule Arbiter.Reviews.TranscriptTest do
                tool_use_count: 0,
                tools_used: []
              } = Transcript.summary(id)
+    end
+  end
+
+  describe "tool_uses/2 :preview" do
+    test "caps a long result and marks it truncated", %{record_id: id} do
+      :ok = Transcript.write(id, multibyte_stream_json())
+
+      assert [read] = Transcript.tool_uses(id, preview: 2_000)
+      assert String.ends_with?(read.result, "… [truncated]")
+      assert String.length(read.result) == 2_000 + String.length("… [truncated]")
+    end
+
+    test "slices by codepoint, so a straddling multibyte character stays encodable",
+         %{record_id: id} do
+      :ok = Transcript.write(id, multibyte_stream_json())
+
+      assert [read] = Transcript.tool_uses(id, preview: 2_000)
+      assert String.valid?(read.result)
+      # The em-dash sits at character 2000 — kept whole, not cut in half.
+      assert String.ends_with?(String.slice(read.result, 0, 2_000), "—")
+      # The whole point: this is what the API surfaces hand to Jason.
+      assert {:ok, _} = Jason.encode(%{tool_uses: [read]})
+    end
+
+    test "leaves a result shorter than the cap alone, and nil results nil", %{record_id: id} do
+      :ok = Transcript.write(id, stream_json())
+
+      assert [read, grep] = Transcript.tool_uses(id, preview: 2_000)
+      assert read.result == "defmodule A do"
+      assert grep.result == "no matches"
+    end
+
+    test "is lossless without the option", %{record_id: id} do
+      :ok = Transcript.write(id, multibyte_stream_json())
+
+      assert [read] = Transcript.tool_uses(id)
+      refute String.contains?(read.result, "[truncated]")
+      assert String.length(read.result) == 1999 + String.length("— rest of the file ") + 200
+    end
+
+    test "default_preview/0 is the cap the API surfaces share" do
+      assert Transcript.default_preview() == 2_000
+    end
+  end
+
+  describe "corpus/2" do
+    test "returns lines, events, tool uses and summary from one read", %{record_id: id} do
+      :ok = Arbiter.Worker.PromptLog.write(id, "prompt bytes")
+      :ok = Transcript.write(id, stream_json())
+
+      corpus = Transcript.corpus(id)
+
+      assert corpus.lines == Transcript.read_lines(id) |> elem(1)
+      assert corpus.events == Transcript.events(id)
+      assert corpus.tool_uses == Transcript.tool_uses(id)
+      assert corpus.summary == Transcript.summary(id)
+    end
+
+    test "threads :preview through to the tool uses", %{record_id: id} do
+      :ok = Transcript.write(id, multibyte_stream_json())
+
+      corpus = Transcript.corpus(id, preview: 2_000)
+
+      assert [read] = corpus.tool_uses
+      assert String.valid?(read.result)
+      assert String.ends_with?(read.result, "… [truncated]")
+      # The summary still counts the whole corpus, not the previewed slice.
+      assert corpus.summary.tool_use_count == 1
+    end
+
+    test "an uncaptured review yields empty projections, not a crash", %{record_id: id} do
+      assert %{lines: [], events: [], tool_uses: [], summary: %{exists: false}} =
+               Transcript.corpus(id)
+    end
+  end
+
+  describe "tail/2" do
+    test "nil returns everything untruncated" do
+      assert Transcript.tail(["a", "b", "c"], nil) == {["a", "b", "c"], false}
+    end
+
+    test "takes the last n and flags the drop" do
+      assert Transcript.tail(["a", "b", "c"], 2) == {["b", "c"], true}
+    end
+
+    test "a tail wider than the corpus is not truncated" do
+      assert Transcript.tail(["a", "b"], 5) == {["a", "b"], false}
     end
   end
 end

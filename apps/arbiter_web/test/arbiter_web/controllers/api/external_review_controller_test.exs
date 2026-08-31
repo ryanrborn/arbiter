@@ -237,6 +237,40 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
       assert [%{"name" => "Read", "result" => "contents"}] = body["tool_uses"]
     end
 
+    test "does not 500 on a multibyte tool result straddling the preview cutoff",
+         %{conn: conn} do
+      # A `Read` of a real source file: ASCII right up to the 2000-char preview
+      # cap, then an em-dash spanning it. A byte-offset slice would hand
+      # `json/2` invalid UTF-8 and raise `Jason.EncodeError`.
+      long = String.duplicate("a", 1999) <> "— rest of the file " <> String.duplicate("b", 200)
+
+      stream_json =
+        Enum.join(
+          [
+            ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+            Jason.encode!(%{
+              "type" => "user",
+              "message" => %{
+                "content" => [
+                  %{"type" => "tool_result", "tool_use_id" => "t1", "content" => long}
+                ]
+              }
+            })
+          ],
+          "\n"
+        )
+
+      rec = insert_record!(%{})
+      :ok = Arbiter.Reviews.Transcript.write(rec.id, stream_json)
+
+      conn = get(conn, ~p"/api/external_reviews/#{rec.id}/transcript")
+      body = json_response(conn, 200)["data"]
+
+      assert [%{"name" => "Read", "result" => result}] = body["tool_uses"]
+      assert String.valid?(result)
+      assert String.ends_with?(result, "… [truncated]")
+    end
+
     test "supports tail= and include_prompt=false", %{conn: conn} do
       rec = insert_record!(%{})
       :ok = Arbiter.Worker.PromptLog.write(rec.id, "You are a code reviewer.")

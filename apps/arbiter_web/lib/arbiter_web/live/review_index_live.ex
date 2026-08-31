@@ -150,15 +150,18 @@ defmodule ArbiterWeb.ReviewIndexLive do
   # capture, or whose file was reaped, renders as "no transcript captured"
   # rather than taking the page down.
   defp load_transcript(record_id) do
-    summary = Transcript.summary(record_id)
-    all_events = Transcript.events(record_id)
+    # One read + one decode pass for summary, events and tool uses alike: this
+    # runs synchronously in the LiveView process on every row expand, and the
+    # corpus it is decoding is thousands of JSONL lines.
+    corpus = Transcript.corpus(record_id)
+    all_events = corpus.events
     shown = Enum.take(all_events, -@event_limit)
 
     %{
       record_id: record_id,
-      summary: summary,
+      summary: corpus.summary,
       prompt: transcript_prompt(record_id),
-      tool_uses: Transcript.tool_uses(record_id),
+      tool_uses: corpus.tool_uses,
       events: shown,
       event_count: length(all_events),
       truncated: length(all_events) > length(shown)

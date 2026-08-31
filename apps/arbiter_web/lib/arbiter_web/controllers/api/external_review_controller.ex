@@ -57,9 +57,11 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
   def transcript(conn, %{"id" => id} = params) do
     with {:ok, tail} <- parse_tail(params["tail"]),
          {:ok, record} <- fetch_record(id) do
-      summary = Transcript.summary(record.id)
-      all_lines = read_lines(record.id)
-      {lines, truncated} = tail_lines(all_lines, tail)
+      # One read + one decode pass for every projection — a tool-heavy review
+      # runs to thousands of JSONL lines and this endpoint wants all of them.
+      corpus = Transcript.corpus(record.id, preview: Transcript.default_preview())
+      summary = corpus.summary
+      {lines, truncated} = Transcript.tail(corpus.lines, tail)
 
       json(conn, %{
         data: %{
@@ -79,7 +81,7 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
           truncated: truncated,
           tool_use_count: summary.tool_use_count,
           tools_used: summary.tools_used,
-          tool_uses: Enum.map(Transcript.tool_uses(record.id), &render_tool_use/1)
+          tool_uses: corpus.tool_uses
         }
       })
     end
@@ -92,13 +94,6 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
     end
   end
 
-  defp read_lines(id) do
-    case Transcript.read_lines(id) do
-      {:ok, lines} -> lines
-      {:error, _} -> []
-    end
-  end
-
   defp maybe_prompt(_id, "false"), do: nil
   defp maybe_prompt(_id, false), do: nil
 
@@ -106,35 +101,6 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
     case Transcript.prompt(id) do
       {:ok, prompt} -> prompt
       {:error, _} -> nil
-    end
-  end
-
-  defp tail_lines(lines, nil), do: {lines, false}
-
-  defp tail_lines(lines, n) do
-    if length(lines) > n, do: {Enum.take(lines, -n), true}, else: {lines, false}
-  end
-
-  # A tool result is unbounded (a whole file, a repo-wide grep). Keep the
-  # record of what ran and roughly what came back; the raw bytes stay on disk.
-  @tool_result_preview 2_000
-
-  defp render_tool_use(%{} = tool_use) do
-    %{
-      name: tool_use.name,
-      tool_use_id: tool_use.tool_use_id,
-      input: tool_use.input,
-      result: truncate_preview(tool_use.result)
-    }
-  end
-
-  defp truncate_preview(nil), do: nil
-
-  defp truncate_preview(text) when is_binary(text) do
-    if byte_size(text) > @tool_result_preview do
-      binary_part(text, 0, @tool_result_preview) <> "… [truncated]"
-    else
-      text
     end
   end
 

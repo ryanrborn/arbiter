@@ -3502,6 +3502,42 @@ defmodule Arbiter.MCP.ToolsTest do
       assert [%{name: "Read", tool_use_id: "t1", result: "contents"}] = data.tool_uses
     end
 
+    test "external_review_transcript survives a multibyte tool result straddling the preview cutoff",
+         ctx do
+      # A `Read` of a real source file: ASCII right up to the 2000-char preview
+      # cap, then an em-dash spanning it. A byte-offset slice would hand
+      # `Jason.encode!/1` (ArbiterWeb.MCP.Plug) invalid UTF-8 — a transport
+      # failure the handler's own `rescue` never sees.
+      long = String.duplicate("a", 1999) <> "— rest of the file " <> String.duplicate("b", 200)
+
+      stream_json =
+        Enum.join(
+          [
+            ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+            Jason.encode!(%{
+              "type" => "user",
+              "message" => %{
+                "content" => [
+                  %{"type" => "tool_result", "tool_use_id" => "t1", "content" => long}
+                ]
+              }
+            })
+          ],
+          "\n"
+        )
+
+      :ok = Arbiter.Reviews.Transcript.write(ctx.record.id, stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      assert [%{name: "Read", result: result}] = data.tool_uses
+      assert String.valid?(result)
+      assert String.ends_with?(result, "… [truncated]")
+      # What the MCP plug does with the handler's return value.
+      assert is_binary(Jason.encode!(data))
+    end
+
     test "external_review_transcript can omit the prompt and tail the lines", ctx do
       :ok = Arbiter.Worker.PromptLog.write(ctx.record.id, "You are a code reviewer.")
       :ok = Arbiter.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
