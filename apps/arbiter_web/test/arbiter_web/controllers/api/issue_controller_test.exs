@@ -45,6 +45,18 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert %{"difficulty" => 3} = json_response(conn, 200)
     end
 
+    test "accepts, persists, and renders `repo` (bd-2jum8j)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{title: "assigned", workspace_id: ws.id, repo: "org/tonic"})
+
+      assert %{"id" => id, "repo" => "org/tonic"} = json_response(conn, 201)
+      assert Ash.get!(Issue, id).repo == "org/tonic"
+
+      conn = patch(conn, ~p"/api/issues/#{id}", %{repo: "org/tonic_device"})
+      assert %{"repo" => "org/tonic_device"} = json_response(conn, 200)
+      assert Ash.get!(Issue, id).repo == "org/tonic_device"
+    end
+
     test "leaves difficulty nil when omitted", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/issues", %{

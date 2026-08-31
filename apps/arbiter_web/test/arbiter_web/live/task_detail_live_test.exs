@@ -239,6 +239,69 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
   end
 
+  describe "repo assignment (bd-2jum8j)" do
+    test "the detail rail names the task's own repo over any run/workspace guess",
+         %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rail-repo-ws-#{System.unique_integer([:positive])}",
+          prefix: "rrw",
+          config: %{"repo_paths" => %{"org/alpha" => "/tmp/arb-a", "org/beta" => "/tmp/arb-b"}}
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "assigned", workspace_id: ws.id, repo: "org/beta"})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      assert html =~ "org/beta"
+    end
+
+    test "the dispatch modal's blank repo choice names the task's assignment",
+         %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "modal-repo-ws-#{System.unique_integer([:positive])}",
+          prefix: "mrw",
+          config: %{"repo_paths" => %{"org/alpha" => "/tmp/arb-a", "org/beta" => "/tmp/arb-b"}}
+        })
+
+      {:ok, assigned} =
+        Ash.create(Issue, %{title: "assigned", workspace_id: ws.id, repo: "org/beta"})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{assigned.id}")
+      html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+      assert html =~ "Task default (org/beta)"
+
+      {:ok, unassigned} = Ash.create(Issue, %{title: "unassigned", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{unassigned.id}")
+      html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+      assert html =~ "Workspace default"
+    end
+
+    test "the ambiguous-repo failure points at assigning the task a repo", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ambig-repo-ws-#{System.unique_integer([:positive])}",
+          prefix: "arw",
+          config: %{"repo_paths" => %{"org/alpha" => "/tmp/arb-a", "org/beta" => "/tmp/arb-b"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "ambiguous", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      view
+      |> form("#task-dispatch-form", %{
+        "dispatch" => %{"provider" => "", "repo" => "", "acknowledge" => "true"}
+      })
+      |> render_submit()
+
+      assert render_async(view) =~ "assign this task a repo"
+    end
+  end
+
   describe "edit" do
     test "the Edit button opens the modal and saving writes the fields", %{conn: conn, ws: ws} do
       {:ok, task} =
@@ -280,6 +343,47 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert reloaded.assignee == "ada"
       assert reloaded.target_branch == "release/x"
       assert reloaded.acceptance == "it works"
+    end
+
+    test "the edit modal assigns the task's repo from the configured repo list (bd-2jum8j)",
+         %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "edit-repo-ws-#{System.unique_integer([:positive])}",
+          prefix: "erw",
+          config: %{
+            "repo_paths" => %{
+              "org/alpha" => "/tmp/arb-resolvable",
+              "pathless-repo" => %{"target_branch" => "main"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "unassigned", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      # Same source of truth as the dispatch modal: an unresolvable repo_paths
+      # entry must never be offered as an assignment.
+      assert html =~ "org/alpha"
+      refute html =~ "pathless-repo"
+
+      view
+      |> form("#task-edit-form", %{"task" => %{"title" => "unassigned", "repo" => "org/alpha"}})
+      |> render_submit()
+
+      assert Ash.get!(Issue, task.id).repo == "org/alpha"
+
+      # And clearing it back to "no assignment" nulls the column rather than
+      # storing an empty string.
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      view
+      |> form("#task-edit-form", %{"task" => %{"title" => "unassigned", "repo" => ""}})
+      |> render_submit()
+
+      assert Ash.get!(Issue, task.id).repo == nil
     end
 
     test "a blank title is refused and the modal stays open", %{conn: conn, ws: ws} do

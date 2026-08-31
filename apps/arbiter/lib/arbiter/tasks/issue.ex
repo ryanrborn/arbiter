@@ -89,6 +89,7 @@ defmodule Arbiter.Tasks.Issue do
         :tracker_context_ref,
         :source_pr,
         :target_branch,
+        :repo,
         :workspace_id,
         # ReviewPatrol engagement fields (bd-2ovun1): let a review_only
         # engagement be created atomically with its baseline/cursor + automation
@@ -151,6 +152,7 @@ defmodule Arbiter.Tasks.Issue do
         :pr_ref,
         :pr_body,
         :target_branch,
+        :repo,
         :review_only,
         :last_reviewed_sha,
         :last_seen_comment_id,
@@ -558,6 +560,20 @@ defmodule Arbiter.Tasks.Issue do
       landed — and filling the repo's PR template when one exists. The MergeQueue
       opens the single canonical PR with this body, so the worker never opens
       its own PR. Distinct from `description` (the originating ticket spec).
+      """
+    end
+
+    attribute :repo, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description """
+      The repo this task belongs to, as a `repo_paths` key (e.g. "org/tonic").
+      Nullable; when unset, dispatch keeps its old behaviour of auto-selecting
+      the workspace's sole configured repo (and erroring `{:ambiguous_repo, _}`
+      when there is more than one). When set, it is the default repo for every
+      dispatch of this task — an explicit per-dispatch `repo:` opt still wins.
+      See `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
       """
     end
 

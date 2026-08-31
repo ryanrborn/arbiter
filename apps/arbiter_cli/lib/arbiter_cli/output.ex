@@ -180,6 +180,7 @@ defmodule ArbiterCli.Output do
         {"Workspace", issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
         {"Target", issue["target_branch"]},
+        {"Repo", issue["repo"]},
         {"Created", issue["created_at"]},
         {"Updated", issue["updated_at"]},
         {"Closed", issue["closed_at"]}

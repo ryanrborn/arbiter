@@ -539,6 +539,27 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, _}} = Tools.task_create(ctx.coordinator, %{"priority" => 1})
     end
 
+    test "accepts a repo assignment, and task_update can retarget it (bd-2jum8j)", ctx do
+      assert {:ok, created} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "belongs to tonic",
+                 "repo" => "emricare/tonic"
+               })
+
+      assert Ash.get!(Issue, created.id).repo == "emricare/tonic"
+
+      {:ok, shown} = Tools.task_show(ctx.coordinator, %{"id" => created.id, "full" => true})
+      assert shown.repo == "emricare/tonic"
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => created.id,
+                 "repo" => "emricare/tonic_device"
+               })
+
+      assert Ash.get!(Issue, created.id).repo == "emricare/tonic_device"
+    end
+
     test "rejects an unknown enum value", ctx do
       assert {:error, {:invalid, msg}} =
                Tools.task_create(ctx.coordinator, %{"title" => "x", "issue_type" => "nope"})

@@ -308,7 +308,8 @@ defmodule Arbiter.MCP.Tools.Task do
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
       {"tracker_context_ref", :string},
-      {"target_branch", :string}
+      {"target_branch", :string},
+      {"repo", :string}
     ]
   end
 
@@ -331,7 +332,8 @@ defmodule Arbiter.MCP.Tools.Task do
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
       {"tracker_context_ref", :string},
       {"pr_ref", :string},
-      {"target_branch", :string}
+      {"target_branch", :string},
+      {"repo", :string}
     ]
   end
 

@@ -28,6 +28,7 @@ defmodule ArbiterWeb.TaskNewLive do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.Dispatch
   alias ArbiterWeb.TaskForm
   require Ash.Query
 
@@ -104,7 +105,8 @@ defmodule ArbiterWeb.TaskNewLive do
         difficulty: difficulty_value(params),
         issue_type: TaskForm.trimmed(params["issue_type"]) || "feature",
         description: TaskForm.trimmed(params["description"]),
-        acceptance: TaskForm.trimmed(params["acceptance"])
+        acceptance: TaskForm.trimmed(params["acceptance"]),
+        repo: TaskForm.trimmed(params["repo"])
       }
 
       socket
@@ -232,6 +234,21 @@ defmodule ArbiterWeb.TaskNewLive do
     end
   end
 
+  # Repo choices for the workspace currently picked in the form (bd-2jum8j).
+  # Blank means "unassigned", which is what a single-repo workspace wants — it
+  # auto-selects at dispatch anyway. Delegated to `Dispatch.all_available_repos/1`
+  # so the form can't offer a repo whose configured path no longer resolves.
+  defp repo_options(params, workspaces) do
+    ws_id =
+      TaskForm.trimmed(params["workspace_id"]) ||
+        case workspaces do
+          [%{id: id} | _] -> id
+          _ -> nil
+        end
+
+    [{"— unassigned —", ""}] ++ Enum.map(Dispatch.all_available_repos(ws_id), &{&1, &1})
+  end
+
   defp difficulty_value(params) do
     case TaskForm.parse_int(params["difficulty"]) do
       {:ok, difficulty} -> difficulty
@@ -262,6 +279,7 @@ defmodule ArbiterWeb.TaskNewLive do
     |> maybe_flag("--type", TaskForm.trimmed(params["issue_type"]), "feature")
     |> maybe_flag("--priority", TaskForm.trimmed(params["priority"]), "2")
     |> maybe_flag("--difficulty", TaskForm.trimmed(params["difficulty"]), nil)
+    |> maybe_flag("--repo", TaskForm.trimmed(params["repo"]), nil)
     |> maybe_flag("--description", TaskForm.trimmed(params["description"]), nil, quote?: true)
     |> maybe_workspace_flag(workspace_name)
     |> Enum.join(" ")
@@ -386,6 +404,12 @@ defmodule ArbiterWeb.TaskNewLive do
               options={@difficulty_options}
               value={TaskForm.value(@form_params, "difficulty")}
               error={@field_errors[:difficulty]}
+            />
+            <ArbiterWeb.CoreComponents.Forms.select
+              name="task[repo]"
+              label="Repo (optional)"
+              options={repo_options(@form_params, @workspaces)}
+              value={TaskForm.value(@form_params, "repo")}
             />
             <div class="sm:col-span-2">
               <ArbiterWeb.CoreComponents.Forms.textarea

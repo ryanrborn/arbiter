@@ -65,6 +65,61 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     assert html =~ "filed without the CLI"
   end
 
+  test "the create form assigns a repo, offering the selected workspace's repos (bd-2jum8j)",
+       %{conn: conn} do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "new-repo-ws-#{System.unique_integer([:positive])}",
+        prefix: "nrw",
+        config: %{
+          "repo_paths" => %{
+            "org/alpha" => "/tmp/arb-resolvable",
+            "pathless-repo" => %{"target_branch" => "main"}
+          }
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/tasks/new")
+
+    # The repo choices track the workspace select, which starts unset.
+    html =
+      view
+      |> form("#task-new-form", %{"task" => %{"title" => "x", "workspace_id" => ws.id}})
+      |> render_change()
+
+    assert html =~ "org/alpha"
+    refute html =~ "pathless-repo"
+
+    # The footer's copy-pasteable command has to carry the choice too.
+    html =
+      view
+      |> form("#task-new-form", %{
+        "task" => %{"title" => "x", "workspace_id" => ws.id, "repo" => "org/alpha"}
+      })
+      |> render_change()
+
+    assert html =~ "--repo org/alpha"
+
+    view
+    |> form("#task-new-form", %{
+      "task" => %{
+        "title" => "filed-against-alpha",
+        "workspace_id" => ws.id,
+        "repo" => "org/alpha"
+      }
+    })
+    |> render_submit()
+
+    assert_redirect(view)
+
+    [task] =
+      Issue
+      |> Ash.Query.filter(title == "filed-against-alpha")
+      |> Ash.read!()
+
+    assert task.repo == "org/alpha"
+  end
+
   # `issue_type` is only defaulted on a *missing* key; a blank one used to
   # survive as "" and reach Ash as a bad atom cast.
   test "a blank issue_type falls back to the default rather than erroring",

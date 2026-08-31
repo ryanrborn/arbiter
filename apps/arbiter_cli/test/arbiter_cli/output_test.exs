@@ -76,6 +76,16 @@ defmodule ArbiterCli.OutputTest do
       issue_nil = Map.put(issue, "difficulty", nil)
       refute Output.format_issue_detail(issue_nil) =~ "Difficulty:"
     end
+
+    test "renders the task's repo assignment, and omits the line when unassigned (bd-2jum8j)" do
+      issue = %{"id" => "x", "title" => "T", "status" => "open", "repo" => "emricare/tonic"}
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Repo:"
+      assert out =~ "emricare/tonic"
+
+      refute Output.format_issue_detail(Map.delete(issue, "repo")) =~ "Repo:"
+      refute Output.format_issue_detail(Map.put(issue, "repo", nil)) =~ "Repo:"
+    end
   end
 
   describe "mode/1" do
