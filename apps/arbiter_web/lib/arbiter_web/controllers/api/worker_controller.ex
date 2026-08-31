@@ -86,6 +86,16 @@ defmodule ArbiterWeb.Api.WorkerController do
           "task is already awaiting review; the Watchdog will close it on MR merge",
           %{task_id: task_id}}}
 
+      # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose
+      # worker is mid-session used to silently open a second paid CLI inside the
+      # same worker run. It is now refused, with a message that names the live
+      # session so a retrying caller can tell "still busy" from a bad request.
+      {:error, {:agent_session_active, _}} ->
+        {:error,
+         {:invalid_request,
+          "task already has a live agent session; wait for it to finish or stop the " <>
+            "worker before dispatching again", %{task_id: task_id}}}
+
       {:error, :no_repo_configured} ->
         {:error,
          {:invalid_request,
@@ -155,6 +165,13 @@ defmodule ArbiterWeb.Api.WorkerController do
              {:invalid_request,
               "task is already awaiting review; a Watchdog is active and will close it on MR merge",
               %{task_id: task_id}}}
+
+          # bd-2aslx6 (#1428): see the dispatch action above.
+          {:error, {:agent_session_active, _}} ->
+            {:error,
+             {:invalid_request,
+              "task already has a live agent session; wait for it to finish or stop the " <>
+                "worker before dispatching a review", %{task_id: task_id}}}
 
           {:error, reason} ->
             {:error, {:server_error, "review dispatch failed", %{reason: inspect(reason)}}}

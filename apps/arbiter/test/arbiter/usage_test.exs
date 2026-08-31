@@ -605,6 +605,12 @@ defmodule Arbiter.UsageTest do
       assert ev.provider == "claude"
       assert ev.session_id == session_id
       assert ev.step == :work
+
+      # bd-2aslx6 (#1428): a row with real token counts and a silently-nil
+      # `cost_usd` reads as a cost-capture bug. The JSONL carries no dollar
+      # figure, so say so on the row itself — same affordance the Gemini
+      # adapter already uses for its own unpriceable runs.
+      assert ev.cost_note =~ "session JSONL"
     end
 
     test "a second session with no init of its own never borrows the first session's file" do

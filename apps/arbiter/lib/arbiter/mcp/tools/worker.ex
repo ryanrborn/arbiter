@@ -807,6 +807,15 @@ defmodule Arbiter.MCP.Tools.Worker do
   defp dispatch_error_message({:task_awaiting_review, id}),
     do: "task #{id} is already awaiting review"
 
+  # bd-2aslx6 (#1428): without a named message this surfaced as a raw tuple, and
+  # the refusal reads as a failure rather than "your first dispatch is still
+  # working". Say which worker holds the session and what to do about it.
+  defp dispatch_error_message({:agent_session_active, id}),
+    do:
+      "task #{id} already has a live agent session; a second dispatch would open " <>
+        "another paid CLI in the same worker run. Wait for it, or stop the worker " <>
+        "(`arb worker stop #{id}`) before dispatching again"
+
   # Resume-specific (`Dispatch.resume/2`).
   defp dispatch_error_message(:no_outpost),
     do: "no preserved worktree for this task — nothing to resume; dispatch it fresh instead"

@@ -124,6 +124,7 @@ defmodule Arbiter.Worker.Dispatch do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_awaiting_review(task_id),
+         :ok <- ensure_no_live_agent_session(task_id, opts),
          :ok <- maybe_quota_gate(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
@@ -667,6 +668,47 @@ defmodule Arbiter.Worker.Dispatch do
           :awaiting_review -> {:error, {:task_awaiting_review, task_id}}
           _ -> :ok
         end
+    end
+  end
+
+  # bd-2aslx6 (#1428): refuse to open a SECOND paid agent session on a task
+  # whose worker is already running one.
+  #
+  # `start_worker/3` deliberately hands back a live worker's pid on
+  # `{:already_started, pid}` — attaching to a running worker is the correct
+  # behaviour for a no-agent dispatch. But `maybe_start_claude/4` then spawns a
+  # whole new CLI subprocess into that same worker: same `worker_run_id`, a
+  # second `usage_events` row, and (when the two dispatches named different
+  # providers) two providers billed against one run. That is how bd-f7j7eh
+  # ended up with an `agy` session and a `claude-haiku` session racing inside
+  # run d71ea5d5; the Claude one was killed unfinished at worker teardown after
+  # ~127k tokens, its `worker_runs.model` overwriting the agy run's.
+  #
+  # Scoped to agent-spawning dispatches: a `start_claude: false` dispatch (the
+  # hand-off / park path) spends nothing and keeps today's attach semantics.
+  #
+  # A worker that has already reached a terminal status is exempt: `start_worker/3`
+  # evicts it (bd-d70whv) and `Worker.stop/2` kills every still-open session port
+  # on the way out (`terminate/2`, bd-bmmj4w), so the re-dispatch cannot inherit a
+  # live agent. Guarding it here would do the opposite of this task's intent — a
+  # terminal worker that still holds a session (`complete_now/2` and
+  # `fail_missing_worktree/1` mark the run terminal WITHOUT calling
+  # `terminate_live_sessions/1`, unlike `fail_now/2`) would refuse re-dispatch
+  # forever and leave the stray, spending session alive with nothing able to reap
+  # it short of a manual `worker_stop`.
+  defp ensure_no_live_agent_session(task_id, opts) do
+    cond do
+      not Keyword.get(opts, :start_claude, false) -> :ok
+      terminal_worker?(task_id) -> :ok
+      Worker.agent_session_live?(task_id) -> {:error, {:agent_session_active, task_id}}
+      true -> :ok
+    end
+  end
+
+  defp terminal_worker?(task_id) do
+    case Worker.whereis(task_id) do
+      nil -> false
+      pid -> safe_worker_status(pid) in [:failed, :completed]
     end
   end
 

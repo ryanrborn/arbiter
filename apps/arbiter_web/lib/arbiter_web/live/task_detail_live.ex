@@ -480,6 +480,15 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp dispatch_failure({:ambiguous_repo, repos}),
     do: "several repos are configured (#{Enum.join(repos, ", ")}) — pick one explicitly."
 
+  # bd-2aslx6 (#1428): the Dispatch button always sets `start_claude: true`
+  # (see provider_opts/1), so this is the surface an operator hits when a task
+  # already has a live agent session. Without a named message it rendered as a
+  # raw `Dispatch failed: {:agent_session_active, "bd-..."}` tuple.
+  defp dispatch_failure({:agent_session_active, _task_id}),
+    do:
+      "this task already has a live agent session — wait for it to finish, or stop " <>
+        "the worker before dispatching again."
+
   defp dispatch_failure(reason), do: inspect(reason)
 
   # ---- data ----

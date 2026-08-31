@@ -3033,6 +3033,79 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  # bd-2aslx6 (#1428): `Dispatch.dispatch/2` refuses a second agent-spawning
+  # dispatch onto a task whose worker is already mid-session. The coordinator
+  # calls this tool, so the refusal has to arrive as a sentence it can act on —
+  # not the raw `{:agent_session_active, id}` tuple the generic fallback renders.
+  describe "worker_dispatch/2 onto a task with a live agent session" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "mcp-live-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      # Answers the cheap `claude --print ping` auth pre-flight immediately, then
+      # stays alive for the real session — so the first dispatch's agent is still
+      # running when the second one lands.
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do
+        if [ "$a" = "ping" ]; then echo pong; exit 0; fi
+      done
+      sleep 30
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      remote = Path.join(tmp, "repo-remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+      put_app_env(:arbiter, :repo_paths, %{"mcp/live-repo" => repo})
+
+      :ok
+    end
+
+    test "the refusal names the live session and how to clear it", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "live session dispatch", workspace_id: ctx.ws.id})
+
+      args = %{
+        "task_id" => task.id,
+        "provider" => "claude",
+        "repo" => "mcp/live-repo"
+      }
+
+      assert {:ok, _} = Tools.worker_dispatch(ctx.coordinator, args)
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      :ok =
+        wait_until(fn -> Worker.agent_session_live?(task.id) end)
+
+      assert {:error, {:invalid, msg}} = Tools.worker_dispatch(ctx.coordinator, args)
+
+      assert msg =~ "live agent session"
+      assert msg =~ "arb worker stop #{task.id}"
+    end
+  end
+
   describe "worker_dispatch/2 with force_quota: true" do
     test "force_quota: true is accepted in the schema", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "force quota dispatch", workspace_id: ctx.ws.id})
@@ -4008,6 +4081,25 @@ defmodule Arbiter.MCP.ToolsTest do
                Catalog.call(ctx.coordinator, "task_show", %{"id" => "bd-does-not-exist"})
 
       assert message =~ "not found"
+    end
+  end
+
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait(fun, deadline)
     end
   end
 end
