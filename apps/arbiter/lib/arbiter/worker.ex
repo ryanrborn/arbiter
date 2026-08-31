@@ -204,6 +204,10 @@ defmodule Arbiter.Worker do
   # advances to `:running` on the first step, exactly like `:idle`.
   @live_statuses [:idle, :resuming, :running, :awaiting]
 
+  # bd-2aslx6: stamped on a usage row whose tokens came from the on-disk session
+  # JSONL (the killed/crashed-session fallback), which records no dollar figure.
+  @disk_reconciled_cost_note "cost unavailable: tokens reconciled from the on-disk session JSONL, which carries no cost figure"
+
   # Grace after a subprocess exit before we classify+escalate a stop. This drains
   # any in-flight `arb done` message that the port's exit_status raced ahead of
   # (the done marker is enqueued while processing the data line; the exit_status
@@ -405,6 +409,33 @@ defmodule Arbiter.Worker do
     case whereis(task_id) do
       nil -> nil
       pid -> state(pid)
+    end
+  end
+
+  @doc """
+  Does this worker currently own an agent subprocess that has not exited?
+
+  bd-2aslx6 (#1428): the dispatch path reuses a live worker's registration, so
+  without this question a re-dispatch opens a SECOND paid CLI session inside
+  the same `worker_run`. A session counts as live while the worker has not
+  stamped its `:exited_at` AND its port is still open — the port check keeps a
+  session whose exit was somehow never observed from blocking re-dispatch
+  forever.
+
+  `false` for an unknown task id or a worker that is gone: nothing is running,
+  so nothing is blocked.
+  """
+  @spec agent_session_live?(ref()) :: boolean()
+  def agent_session_live?(pid) when is_pid(pid) do
+    GenServer.call(pid, :agent_session_live?)
+  catch
+    :exit, _ -> false
+  end
+
+  def agent_session_live?(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> false
+      pid -> agent_session_live?(pid)
     end
   end
 
@@ -1218,8 +1249,9 @@ defmodule Arbiter.Worker do
   end
 
   # Overlay deduped on-disk token totals onto the (token-less) usage map. Model
-  # is only backfilled if the stream never reported one; cost is left untouched
-  # (nil). `raw` is tagged so the ledger row is auditable as disk-reconciled.
+  # is only backfilled if the stream never reported one; cost stays nil — the
+  # JSONL carries no dollar figure. `raw` is tagged so the ledger row is
+  # auditable as disk-reconciled.
   defp merge_disk_totals(usage, totals) do
     usage
     |> Map.put(:tokens_in, totals.tokens_in)
@@ -1227,7 +1259,20 @@ defmodule Arbiter.Worker do
     |> Map.put(:cache_creation_tokens, totals.cache_creation_tokens)
     |> Map.put(:cache_read_tokens, totals.cache_read_tokens)
     |> maybe_put_model(totals.model)
+    |> maybe_put_cost_note(@disk_reconciled_cost_note)
     |> Map.put(:raw, reconciled_raw(Map.get(usage, :raw), totals))
+  end
+
+  # bd-2aslx6 (#1428): a ledger row carrying six-figure token counts next to a
+  # bare `cost_usd: nil` reads as a cost-capture bug every time someone audits
+  # spend. Name the reason on the row, the way the Gemini adapter already does
+  # for its own unpriceable runs, so "no cost here" is a recorded fact rather
+  # than a hole.
+  defp maybe_put_cost_note(usage, note) do
+    case Map.get(usage, :cost_note) do
+      existing when is_binary(existing) and existing != "" -> usage
+      _ -> Map.put(usage, :cost_note, note)
+    end
   end
 
   defp maybe_put_model(usage, nil), do: usage
@@ -1273,6 +1318,16 @@ defmodule Arbiter.Worker do
 
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
+
+  # bd-2aslx6: see `agent_session_live?/1`.
+  def handle_call(:agent_session_live?, _from, %State{claude_sessions: sessions} = state) do
+    live? =
+      Enum.any?(sessions, fn {port, session} ->
+        is_nil(Map.get(session, :exited_at)) and is_port(port) and Port.info(port) != nil
+      end)
+
+    {:reply, live?, state}
+  end
 
   def handle_call({:advance, step}, _from, %State{status: status} = state)
       when status in [:idle, :resuming, :failed] do
@@ -1537,8 +1592,7 @@ defmodule Arbiter.Worker do
   defp resume_spawn_args(%State{meta: meta} = state, port_args) do
     case meta && Map.get(meta, :resume_session_id) do
       sid when is_binary(sid) and sid != "" ->
-        routing_config = (meta && Map.get(meta, :routing_config)) || %{}
-        provider = Map.get(routing_config, :provider) || "claude"
+        {provider, _model} = respawn_routing(state)
 
         case inject_resume_argv(port_args, sid, continue_prompt(state), provider) do
           {:ok, resumed_args} ->
@@ -2804,9 +2858,7 @@ defmodule Arbiter.Worker do
     label = Keyword.get(opts, :label, "gate")
     spawn_args = meta && Map.get(meta, :claude_spawn)
 
-    routing_config = (meta && Map.get(meta, :routing_config)) || %{}
-    provider = Map.get(routing_config, :provider) || "claude"
-    model = Map.get(routing_config, :model)
+    {provider, model} = respawn_routing(state)
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_nudge_argv(port_args, nudge, provider),
@@ -2892,7 +2944,13 @@ defmodule Arbiter.Worker do
         {:error, :no_print_slot} -> {:ok, port_args}
       end
     else
-      {:ok, port_args}
+      # bd-2aslx6: no `splice_prompt/2` means we cannot rewrite this provider's
+      # argv at all, so the only thing a "relaunch" could do is re-run the
+      # ORIGINAL prompt verbatim — the whole task again, at full price, with the
+      # agent never told what it got wrong. Refuse; the caller parks and
+      # escalates with a concrete cause instead. Mirrors
+      # `inject_resume_argv/4`'s handling of the same condition.
+      {:error, :unsupported_provider}
     end
   end
 
@@ -3172,9 +3230,7 @@ defmodule Arbiter.Worker do
     spawn_args = meta && Map.get(meta, :claude_spawn)
     prompt = continue_prompt(state)
 
-    routing_config = (meta && Map.get(meta, :routing_config)) || %{}
-    provider = Map.get(routing_config, :provider) || "claude"
-    model = Map.get(routing_config, :model)
+    {provider, model} = respawn_routing(state)
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_resume_argv(port_args, session_id, prompt, provider),
@@ -3339,6 +3395,47 @@ defmodule Arbiter.Worker do
   end
 
   def inject_resume_argv(_port_args, _session_id, _prompt, _provider), do: {:error, :missing_argv}
+
+  # bd-2aslx6 (#1428): which provider is this run actually driving?
+  #
+  # `meta[:routing_config]` is only ever reported by `Arbiter.Worker.Dispatch`.
+  # A worker spawned by the ReviewGate, the MergeQueue fix-pass dispatcher or
+  # the conflict resolver never has one, so the old
+  # `Map.get(routing_config, :provider) || "claude"` made every gate-nudge and
+  # auto-resume respawn on those paths pick the *Claude* adapter to rewrite the
+  # argv with — and stamp `provider: "claude"` on the respawned session's ledger
+  # row — no matter which CLI the run was really driving. The sessions the
+  # worker already owns know their own provider (threaded in at spawn), so fall
+  # back to the most recent one before falling back to Claude.
+  defp respawn_routing(%State{meta: meta} = state) do
+    routing_config = (meta && Map.get(meta, :routing_config)) || %{}
+    model = Map.get(routing_config, :model)
+
+    case Map.get(routing_config, :provider) do
+      provider when is_binary(provider) and provider != "" ->
+        {provider, model}
+
+      _ ->
+        case latest_session(state) do
+          %{} = session ->
+            {Map.get(session, :provider) || "claude", model || Map.get(session, :model)}
+
+          nil ->
+            {"claude", model}
+        end
+    end
+  end
+
+  # The most recently STARTED session this worker owns, or nil when it owns
+  # none (a respawn before any session opened can't happen — `:claude_spawn` is
+  # stashed by the same handler that records the session — but nil-safety keeps
+  # `respawn_routing/1` total).
+  defp latest_session(%State{claude_sessions: sessions}) do
+    sessions
+    |> Map.values()
+    |> Enum.filter(&is_struct(Map.get(&1, :started_at), DateTime))
+    |> Enum.max_by(&Map.get(&1, :started_at), DateTime, fn -> nil end)
+  end
 
   defp agent_adapter_for_provider(provider) do
     case provider do

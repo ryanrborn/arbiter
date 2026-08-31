@@ -423,6 +423,24 @@ defmodule Arbiter.Worker.DispatchTest do
       :ok
     end
 
+    # Same shim, but it stays alive after recording its argv — a stand-in for a
+    # provider CLI that is still working, so the dispatch guard sees a live
+    # session rather than one that already exited (bd-2aslx6).
+    defp stub_sleeping_on_path(tmp, name, argv_file) do
+      :ok = stub_named_on_path(tmp, name, argv_file)
+
+      stub = Path.join([tmp, "stub-bin", name])
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      sleep 30
+      """)
+
+      File.chmod!(stub, 0o755)
+      :ok
+    end
+
     # Flip the per-spawn `.mcp.json` injection on (config/test.exs disables it by
     # default) and restore the prior config when the test ends. The signing
     # secret falls back to the Phoenix endpoint's :secret_key_base, so no secret
@@ -1621,6 +1639,147 @@ defmodule Arbiter.Worker.DispatchTest do
       true ->
         Process.sleep(15)
         do_wait(fun, deadline)
+    end
+  end
+
+  # bd-2aslx6 (#1428): a second dispatch landing on a task whose worker is
+  # already running an agent session used to open a SECOND paid CLI subprocess
+  # inside the SAME worker — `start_worker/3` deliberately reuses a live
+  # worker's registration, and `maybe_start_claude/4` then spawned again into
+  # it. Observed in production on bd-f7j7eh: one `worker_runs` row carrying an
+  # `agy` session and a `claude-haiku` session at once, the Claude one killed
+  # unfinished at worker teardown after burning ~127k tokens for no result.
+  describe "concurrent agent sessions are refused (bd-2aslx6)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "dispatch-dup-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      %{tmp: tmp}
+    end
+
+    test "a second start_claude dispatch onto a live agent session is refused",
+         %{ws: ws, tmp: tmp} do
+      {:ok, task} = Ash.create(Issue, %{title: "dup dispatch", workspace_id: ws.id})
+
+      repo = seed_repo!(tmp, "dup-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "dup-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"dup/repo" => repo})
+
+      opts = [
+        repo: "dup/repo",
+        start_driver: false,
+        start_claude: true,
+        preflight: false,
+        # Stand-in for a `claude --print` session that is still working.
+        claude_command: ["sleep", "30"]
+      ]
+
+      {:ok, first} = Dispatch.dispatch(task.id, opts)
+      assert is_port(first.claude_port)
+
+      assert {:error, {:agent_session_active, task_id}} = Dispatch.dispatch(task.id, opts)
+      assert task_id == task.id
+
+      # The live session is untouched: same worker, same port, still running.
+      assert Worker.whereis(task.id) == first.worker_pid
+      assert Worker.state(first.worker_pid).status not in [:failed, :completed]
+      assert Port.info(first.claude_port) != nil
+
+      Worker.stop(first.worker_pid, :normal)
+    end
+
+    test "a cross-provider re-dispatch never spawns the second CLI (bd-f7j7eh repro)",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_sleeping_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "dup-gem-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "dup-gwt"))
+      put_app_env(:arbiter, :repo_paths, %{"dg/repo" => repo})
+
+      {:ok, ws} = Ash.update(ws, %{config: %{"agent" => %{"type" => "claude"}}})
+      {:ok, task} = Ash.create(Issue, %{title: "dup gemini task", workspace_id: ws.id})
+
+      base = [repo: "dg/repo", start_driver: false, start_claude: true, preflight: false]
+
+      {:ok, first} = Dispatch.dispatch(task.id, base ++ [agent_type: :gemini])
+      _ = wait_for_argv!(gemini_file)
+
+      # The follow-up dispatch carries no `agent_type`, so it resolves the
+      # workspace default (Claude) — the exact shape that put an agy session and
+      # a Claude session in one run.
+      assert {:error, {:agent_session_active, _}} = Dispatch.dispatch(task.id, base)
+
+      # No Claude CLI was ever spawned for this task.
+      refute File.exists?(claude_file)
+
+      snap = Worker.state(first.worker_pid)
+      assert snap.meta[:routing_config].provider == "gemini"
+
+      Worker.stop(first.worker_pid, :normal)
+    end
+
+    test "a dispatch with no agent (start_claude: false) still attaches to a live worker",
+         %{ws: ws, tmp: tmp} do
+      {:ok, task} = Ash.create(Issue, %{title: "park dispatch", workspace_id: ws.id})
+
+      repo = seed_repo!(tmp, "park-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "park-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"park/repo" => repo})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          repo: "park/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["sleep", "30"]
+        )
+
+      # A no-agent dispatch spends nothing, so it keeps today's attach semantics.
+      assert {:ok, second} =
+               Dispatch.dispatch(task.id, repo: "park/repo", start_driver: false)
+
+      assert second.worker_pid == first.worker_pid
+      assert second.claude_port == nil
+
+      Worker.stop(first.worker_pid, :normal)
+    end
+
+    test "once the live session exits, a re-dispatch is allowed again",
+         %{ws: ws, tmp: tmp} do
+      {:ok, task} = Ash.create(Issue, %{title: "redispatch after exit", workspace_id: ws.id})
+
+      repo = seed_repo!(tmp, "again-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "again-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"again/repo" => repo})
+
+      {:ok, first} =
+        Dispatch.dispatch(task.id,
+          repo: "again/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["true"]
+        )
+
+      # Wait for the port to exit and the worker to stamp `:exited_at`.
+      wait_until(fn -> not Arbiter.Worker.agent_session_live?(first.worker_pid) end)
+
+      assert {:ok, second} =
+               Dispatch.dispatch(task.id,
+                 repo: "again/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false,
+                 claude_command: ["sleep", "30"]
+               )
+
+      assert is_port(second.claude_port)
+
+      Worker.stop(second.worker_pid, :normal)
     end
   end
 
