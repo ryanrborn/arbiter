@@ -199,7 +199,8 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   def handle_call({:board, opts}, _from, state) do
-    {:reply, read_board(state, opts), state}
+    {_status, snapshot} = read_board(state, opts)
+    {:reply, snapshot, state}
   end
 
   def handle_call(:paused?, _from, state), do: {:reply, state.paused?, state}
@@ -256,8 +257,8 @@ defmodule Arbiter.Board.Autopilot do
   defp promote(%{dispatching: %{id: id}} = state), do: {{:busy, id}, state}
 
   defp promote(state) do
-    snapshot = read_board(state, [])
-    state = prune_failures(state, snapshot)
+    {read_status, snapshot} = read_board(state, [])
+    state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
     case snapshot do
       %{promote: id} when is_binary(id) -> {:started, start_dispatch(state, id)}
@@ -384,12 +385,17 @@ defmodule Arbiter.Board.Autopilot do
 
   # The board always reports *this* process's pause state, so a caller can
   # never render "2 ahead in queue" against a scheduler that is stopped.
+  #
+  # Tags the result so `promote/1` can tell a genuinely-empty Ready list
+  # apart from a failed read that only *looks* empty (`Snapshot.empty/0`
+  # has `ready: []` too) — pruning `state.failures` against the latter
+  # would wipe every card's retry count and escalation latch on a blip.
   defp read_board(state, opts) do
-    state.snapshot.(Keyword.put(opts, :paused, state.paused?))
+    {:ok, state.snapshot.(Keyword.put(opts, :paused, state.paused?))}
   rescue
     e ->
       Logger.warning("board autopilot: board read failed: #{inspect(e)}")
-      Snapshot.empty()
+      {:error, Snapshot.empty()}
   end
 
   defp default_dispatch(id), do: Arbiter.Worker.Dispatch.dispatch(id, start_claude: true)

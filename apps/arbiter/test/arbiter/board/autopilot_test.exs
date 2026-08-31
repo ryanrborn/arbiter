@@ -191,6 +191,70 @@ defmodule Arbiter.Board.AutopilotTest do
       Autopilot.tick(pid)
       assert_receive {:escalated, "bd-1", :no_repo_configured, 1}
     end
+
+    # A transient board-read failure must not be mistaken for "Ready is
+    # genuinely empty" — `Snapshot.empty/0` has `ready: []` too. If it were,
+    # pruning against it would wipe every card's failure entry on a blip,
+    # dropping the once-escalated latch and re-paging on the very next
+    # failure instead of staying silent.
+    test "a board-read blip does not re-arm an already-escalated card" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      snapshot_fun = fn opts ->
+        case Agent.get_and_update(counter, &{&1, &1 + 1}) do
+          1 -> raise "transient board read failure"
+          _ -> board("bd-1", opts[:paused])
+        end
+      end
+
+      pid =
+        start(
+          paused: false,
+          snapshot: snapshot_fun,
+          dispatch: fn _ -> {:error, :no_repo_configured} end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      Autopilot.tick(pid)
+      assert_receive {:escalated, "bd-1", :no_repo_configured, 1}
+
+      # tick 2: the board read blows up — the failure entry, and its latch,
+      # must survive this untouched.
+      assert :idle = Autopilot.tick(pid)
+      refute_receive {:escalated, _, _, _}, 50
+
+      # tick 3: same card, same error shape — still latched, so no re-page.
+      Autopilot.tick(pid)
+      refute_receive {:escalated, _, _, _}, 50
+    end
+
+    # Same hazard, the other direction: a retry budget must not be defeated
+    # by read blips resetting a non-deterministic error's count back to
+    # zero before it reaches the threshold.
+    test "a board-read blip does not reset a non-deterministic retry budget" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      snapshot_fun = fn opts ->
+        case Agent.get_and_update(counter, &{&1, &1 + 1}) do
+          n when rem(n, 3) == 1 -> raise "transient board read failure"
+          _ -> board("bd-1", opts[:paused])
+        end
+      end
+
+      pid =
+        start(
+          paused: false,
+          snapshot: snapshot_fun,
+          dispatch: fn _ -> {:error, :timeout} end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      for _ <- 1..9, do: Autopilot.tick(pid)
+
+      assert_receive {:escalated, "bd-1", :timeout, _attempts}
+    end
   end
 
   describe "a dispatch does not take the process with it" do
