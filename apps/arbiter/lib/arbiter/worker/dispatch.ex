@@ -1277,7 +1277,9 @@ defmodule Arbiter.Worker.Dispatch do
   #   * Explicit repo that does NOT resolve     → {:error, {:repo_not_found, repo}}.
   #   * No repo, exactly one repo in :repo_paths  → auto-select, update opts.
   #   * No repo, zero repos in :repo_paths        → {:error, :no_repo_configured}.
-  #   * No repo, multiple repos in :repo_paths    → {:error, {:ambiguous_repo, repos}}.
+  #   * No repo, multiple repos, workspace config
+  #     `default_repo` set to one of them (bd-5pctey) → auto-select it.
+  #   * No repo, multiple repos, no usable default → {:error, {:ambiguous_repo, repos}}.
   #
   # The check fires only for `start_claude: true` dispatches; a dry/manual dispatch
   # (no agent) is allowed to park without a repo.
@@ -1300,8 +1302,25 @@ defmodule Arbiter.Worker.Dispatch do
         case all_available_repos(task) do
           [] -> {:error, :no_repo_configured}
           [sole] -> {:ok, Keyword.put(opts, :repo, sole)}
-          repos -> {:error, {:ambiguous_repo, repos}}
+          repos -> resolve_via_default_repo(task, opts, repos)
         end
+    end
+  end
+
+  # bd-5pctey: a multi-repo workspace can declare a `default_repo` in its
+  # `config` (same precedent as `agent`/`merge`/`tracker`) so an otherwise
+  # ambiguous dispatch — e.g. Autopilot auto-dispatching a standalone task
+  # with no explicit repo — has a fallback instead of always erroring. Only
+  # used if the configured value actually resolves in :repo_paths; an unset
+  # or dangling default_repo falls through to the pre-existing ambiguous
+  # error rather than silently picking something else.
+  defp resolve_via_default_repo(%Issue{workspace_id: ws_id}, opts, repos) do
+    with %{"default_repo" => default_repo} when is_binary(default_repo) and default_repo != "" <-
+           load_workspace_config(ws_id) || %{},
+         true <- default_repo in repos do
+      {:ok, Keyword.put(opts, :repo, default_repo)}
+    else
+      _ -> {:error, {:ambiguous_repo, repos}}
     end
   end
 
