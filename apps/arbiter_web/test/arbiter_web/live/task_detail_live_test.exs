@@ -30,6 +30,27 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
   end
 
+  # A worker double that reports a live agent session, so `Dispatch.dispatch/2`
+  # hits the bd-2aslx6 guard without a real CLI subprocess. `:running` keeps it
+  # out of the terminal-worker exemption the guard grants a stale worker.
+  defmodule FakeLiveAgentWorker do
+    use GenServer
+
+    def start_link(task_id) do
+      GenServer.start_link(__MODULE__, :ok, name: Arbiter.Worker.Registry.via_tuple(task_id))
+    end
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(:agent_session_live?, _from, state), do: {:reply, true, state}
+
+    def handle_call(:snapshot, _from, state) do
+      {:reply, %{status: :running, started_at: DateTime.utc_now(), meta: %{}}, state}
+    end
+  end
+
   setup do
     for snap <- Worker.list_children() do
       Worker.stop(snap.task_id)
@@ -502,6 +523,33 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "Dispatch failed"
       assert html =~ "repo"
       refute html =~ ~s(id="task-dispatch-pending")
+    end
+
+    # bd-2aslx6 (#1428): the Dispatch button hides once a worker is registered,
+    # so the refusal is reached by the race the guard exists for — a worker with
+    # a live agent session appears between the page render and the submit (a
+    # second tab, the scheduler, a CLI dispatch). The operator must read prose,
+    # not the raw `{:agent_session_active, "bd-..."}` tuple.
+    test "a live agent session is refused with a readable message",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "already live", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      # The worker (and its live session) shows up after the modal is open.
+      {:ok, _pid} = FakeLiveAgentWorker.start_link(task.id)
+
+      view
+      |> form("#task-dispatch-form", %{
+        "dispatch" => %{"provider" => "claude", "repo" => "", "acknowledge" => "true"}
+      })
+      |> render_submit()
+
+      html = render_async(view)
+
+      assert html =~ "already has a live agent session"
+      refute html =~ "agent_session_active"
     end
 
     # The dropdown must not offer a repo `Dispatch` would then reject with
