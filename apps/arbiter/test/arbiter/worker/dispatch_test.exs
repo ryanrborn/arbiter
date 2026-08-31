@@ -3253,6 +3253,64 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.whereis(task.id) == nil
     end
 
+    test "multi-repo: workspace default_repo resolves the ambiguity (bd-5pctey)",
+         %{ws: ws, repo: repo} do
+      Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
+      {:ok, ws} = Ash.update(ws, %{config: %{"default_repo" => "repo/b"}}, action: :update)
+      {:ok, task} = Ash.create(Issue, %{title: "multi repos with default", workspace_id: ws.id})
+
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert is_binary(result.worktree_path)
+      assert File.dir?(result.worktree_path)
+    end
+
+    test "multi-repo: workspace default_repo that doesn't resolve still fails loudly (bd-5pctey)",
+         %{ws: ws, repo: repo} do
+      Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
+
+      {:ok, ws} =
+        Ash.update(ws, %{config: %{"default_repo" => "repo/nonexistent"}}, action: :update)
+
+      {:ok, task} = Ash.create(Issue, %{title: "multi repos with bad default", workspace_id: ws.id})
+
+      assert {:error, {:ambiguous_repo, repos}} =
+               Dispatch.dispatch(task.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert "repo/a" in repos
+      assert "repo/b" in repos
+    end
+
+    test "multi-repo: explicit :repo opt overrides workspace default_repo (bd-5pctey)",
+         %{ws: ws, repo: repo} do
+      Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
+      {:ok, ws} = Ash.update(ws, %{config: %{"default_repo" => "repo/b"}}, action: :update)
+      {:ok, task} = Ash.create(Issue, %{title: "explicit beats default", workspace_id: ws.id})
+
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id,
+                 repo: "repo/a",
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert is_binary(result.worktree_path)
+      assert File.dir?(result.worktree_path)
+    end
+
     test "explicit repo not in :repo_paths fails with {:repo_not_found, repo}",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"real/repo" => repo})
