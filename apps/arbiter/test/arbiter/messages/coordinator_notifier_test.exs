@@ -965,4 +965,70 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
              |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
     end
   end
+
+  describe "dispatch_stuck/3 (bd-a40f4q)" do
+    test "an ambiguous_repo escalation names the candidate repos" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.dispatch_stuck(
+                 %{task_id: task_id, workspace_id: ws},
+                 {:ambiguous_repo, ["tonic", "tonic_device"]},
+                 1
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "coordinator"
+      assert escalation.directive_ref == task_id
+      assert escalation.subject =~ "dispatch stuck"
+      assert escalation.body =~ "tonic"
+      assert escalation.body =~ "tonic_device"
+      assert escalation.body =~ "default repo"
+    end
+
+    test "a no_repo_configured escalation says so and how to fix it" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.dispatch_stuck(
+                 %{task_id: task_id, workspace_id: ws},
+                 :no_repo_configured,
+                 1
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.body =~ "no repo"
+      assert escalation.body =~ "configure"
+    end
+
+    test "a transient-looking reason names the attempt count without claiming it's permanent" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.dispatch_stuck(
+                 %{task_id: task_id, workspace_id: ws},
+                 :quota_held,
+                 3
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.subject =~ "3"
+      assert escalation.body =~ "3 consecutive"
+    end
+
+    test "a dispatch_stuck escalation with no workspace posts nothing" do
+      assert :ok =
+               CoordinatorNotifier.dispatch_stuck(
+                 %{task_id: "bd-noworkspace", workspace_id: nil},
+                 :no_repo_configured,
+                 1
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
 end
