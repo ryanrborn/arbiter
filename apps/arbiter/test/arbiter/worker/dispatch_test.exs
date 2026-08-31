@@ -3278,7 +3278,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, ws} =
         Ash.update(ws, %{config: %{"default_repo" => "repo/nonexistent"}}, action: :update)
 
-      {:ok, task} = Ash.create(Issue, %{title: "multi repos with bad default", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "multi repos with bad default", workspace_id: ws.id})
 
       assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(task.id,
