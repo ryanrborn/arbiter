@@ -97,6 +97,109 @@ defmodule Arbiter.Board.AutopilotTest do
     end
   end
 
+  describe "escalating a stuck card (bd-a40f4q)" do
+    # `:ambiguous_repo` (and its siblings `:no_repo_configured`,
+    # `:repo_not_found`) is deterministic — retrying dispatch never changes
+    # the answer — so it escalates on the very first failure rather than
+    # waiting for a retry budget to exhaust.
+    test "a deterministic dispatch error escalates on the first failure" do
+      test = self()
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn _ -> {:error, {:ambiguous_repo, ["tonic", "tonic_device"]}} end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      Autopilot.tick(pid)
+
+      assert_receive {:escalated, "bd-1", {:ambiguous_repo, ["tonic", "tonic_device"]}, 1}
+    end
+
+    # A repeat of the identical error on the same card is not fresh news —
+    # escalating on every tick would flood the coordinator's inbox with a page
+    # for a card that already has one outstanding.
+    test "the same card failing the same way again does not re-escalate" do
+      test = self()
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn _ -> {:error, :no_repo_configured} end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      Autopilot.tick(pid)
+      Autopilot.tick(pid)
+      Autopilot.tick(pid)
+
+      assert_receive {:escalated, "bd-1", :no_repo_configured, 1}
+      refute_receive {:escalated, _, _, _}
+    end
+
+    # An error shape with no known deterministic classification (a network
+    # blip, a quota gate) gets a retry budget before Autopilot pages a human —
+    # it might just resolve on its own.
+    test "a non-deterministic error only escalates after repeated failures" do
+      test = self()
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn _ -> {:error, :timeout} end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      Autopilot.tick(pid)
+      refute_receive {:escalated, _, _, _}, 50
+
+      Autopilot.tick(pid)
+      refute_receive {:escalated, _, _, _}, 50
+
+      Autopilot.tick(pid)
+      assert_receive {:escalated, "bd-1", :timeout, _attempts}
+    end
+
+    # A successful dispatch clears whatever failure history the card had, so
+    # a later, unrelated failure gets its own fresh escalation rather than
+    # being silently swallowed by a stale latch.
+    test "a successful dispatch resets the failure count for that card" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      dispatch_fun = fn _ ->
+        if Agent.get_and_update(counter, &{&1, &1 + 1}) == 0 do
+          {:error, :no_repo_configured}
+        else
+          {:ok, %{task_id: "bd-1"}}
+        end
+      end
+
+      pid =
+        start(
+          paused: false,
+          dispatch: dispatch_fun,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      Autopilot.tick(pid)
+      assert_receive {:escalated, "bd-1", :no_repo_configured, 1}
+
+      assert {:ok, "bd-1"} = Autopilot.tick(pid)
+
+      pid2 =
+        start(
+          paused: false,
+          dispatch: fn _ -> {:error, :no_repo_configured} end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated2, id, reason, attempts}) end
+        )
+
+      Autopilot.tick(pid2)
+      assert_receive {:escalated2, "bd-1", :no_repo_configured, 1}
+    end
+  end
+
   describe "a dispatch does not take the process with it" do
     # The board refreshes *because* a dispatch is happening — Worker.init
     # broadcasts :started mid-flight — so the one moment every open board asks
