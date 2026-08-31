@@ -686,11 +686,29 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # Scoped to agent-spawning dispatches: a `start_claude: false` dispatch (the
   # hand-off / park path) spends nothing and keeps today's attach semantics.
+  #
+  # A worker that has already reached a terminal status is exempt: `start_worker/3`
+  # evicts it (bd-d70whv) and `Worker.stop/2` kills every still-open session port
+  # on the way out (`terminate/2`, bd-bmmj4w), so the re-dispatch cannot inherit a
+  # live agent. Guarding it here would do the opposite of this task's intent — a
+  # terminal worker that still holds a session (`complete_now/2` and
+  # `fail_missing_worktree/1` mark the run terminal WITHOUT calling
+  # `terminate_live_sessions/1`, unlike `fail_now/2`) would refuse re-dispatch
+  # forever and leave the stray, spending session alive with nothing able to reap
+  # it short of a manual `worker_stop`.
   defp ensure_no_live_agent_session(task_id, opts) do
     cond do
       not Keyword.get(opts, :start_claude, false) -> :ok
+      terminal_worker?(task_id) -> :ok
       Worker.agent_session_live?(task_id) -> {:error, {:agent_session_active, task_id}}
       true -> :ok
+    end
+  end
+
+  defp terminal_worker?(task_id) do
+    case Worker.whereis(task_id) do
+      nil -> false
+      pid -> safe_worker_status(pid) in [:failed, :completed]
     end
   end
 

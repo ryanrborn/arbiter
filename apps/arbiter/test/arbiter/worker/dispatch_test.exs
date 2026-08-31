@@ -1748,6 +1748,47 @@ defmodule Arbiter.Worker.DispatchTest do
       Worker.stop(first.worker_pid, :normal)
     end
 
+    # The guard must not out-rank `start_worker/3`'s bd-d70whv eviction of a
+    # terminal worker. `complete_now/2` and `fail_missing_worktree/1` mark a run
+    # terminal WITHOUT killing its sessions (unlike `fail_now/2`), so a terminal
+    # worker can still hold a live — possibly hung — agent. Refusing there would
+    # pin exactly the stray, spending session this task is about.
+    test "a terminal worker still holding a live session is evicted, not refused",
+         %{ws: ws, tmp: tmp} do
+      {:ok, task} = Ash.create(Issue, %{title: "terminal redispatch", workspace_id: ws.id})
+
+      repo = seed_repo!(tmp, "term-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "term-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"term/repo" => repo})
+
+      opts = [
+        repo: "term/repo",
+        start_driver: false,
+        start_claude: true,
+        preflight: false,
+        claude_command: ["sleep", "30"]
+      ]
+
+      {:ok, first} = Dispatch.dispatch(task.id, opts)
+
+      # Drive the worker to :completed the way the `arb done` path does — via
+      # complete_now/2, which leaves the session port open.
+      :ok = Worker.advance(first.worker_pid, :work)
+      :ok = Worker.complete(first.worker_pid, :test)
+      assert Worker.state(first.worker_pid).status == :completed
+      assert Worker.agent_session_live?(first.worker_pid)
+
+      assert {:ok, second} = Dispatch.dispatch(task.id, opts)
+      assert second.worker_pid != first.worker_pid
+      assert is_port(second.claude_port)
+
+      # The stale worker (and with it the session it was still holding) is gone.
+      refute Process.alive?(first.worker_pid)
+      wait_until(fn -> Port.info(first.claude_port) == nil end)
+
+      Worker.stop(second.worker_pid, :normal)
+    end
+
     test "once the live session exits, a re-dispatch is allowed again",
          %{ws: ws, tmp: tmp} do
       {:ok, task} = Ash.create(Issue, %{title: "redispatch after exit", workspace_id: ws.id})
