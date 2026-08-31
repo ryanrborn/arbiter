@@ -3,8 +3,8 @@ defmodule ArbiterCli.Cmd.Create do
   `arb create <title> [--description ...] [--priority N] [--difficulty N]
                        [--type T] [--deps id1,id2] [--labels a,b]
                        [--assignee a] [--tracker-ref REF] [--no-tracker]
-                       [--target-branch NAME] [--parent <parent-id>]
-                       [--ticket-only]`
+                       [--target-branch NAME] [--repo owner/name]
+                       [--parent <parent-id>] [--ticket-only]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
@@ -34,6 +34,13 @@ defmodule ArbiterCli.Cmd.Create do
   one-line justification in the task's description. Routing maps the value
   to abstract `{model_tier, thinking}` (see `Arbiter.Agents.Routing.ByDifficulty`).
 
+  `--repo owner/name` assigns the issue to one of the workspace's configured
+  `repo_paths` keys. Optional, and unnecessary in a single-repo workspace —
+  dispatch auto-selects the sole repo. In a multi-repo workspace it is what
+  stops every dispatch from having to name the repo (or failing with
+  `{:ambiguous_repo, _}`); an explicit `arb dispatch <id> <repo>` still wins
+  for that one run.
+
   `--parent <parent-id>` attaches the new issue as a child of an existing parent
   task immediately after creation, by adding a `parent_of` dependency edge
   (`<parent-id> parent_of <new-id>`). The parent then rolls up child progress
@@ -58,7 +65,7 @@ defmodule ArbiterCli.Cmd.Create do
       `--local-only` (opposite intent).
       Honored: `--title`, `--description`, `--priority`, `--type`, `--assignee`.
       Not honored (warning emitted): `--difficulty`, `--deps`, `--parent`,
-      `--tracker-ref`, `--target-branch`, `--labels`.
+      `--tracker-ref`, `--target-branch`, `--repo`, `--labels`.
 
   `--deps id1,id2` is a convenience that creates `blocks` dependencies for
   each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
@@ -84,6 +91,7 @@ defmodule ArbiterCli.Cmd.Create do
     assignee: :string,
     tracker_ref: :string,
     target_branch: :string,
+    repo: :string,
     no_tracker: :boolean,
     local_only: :boolean,
     ticket_only: :boolean,
@@ -139,6 +147,7 @@ defmodule ArbiterCli.Cmd.Create do
         {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
         {"--target-branch", opts[:target_branch]},
+        {"--repo", opts[:repo]},
         {"--labels", opts[:labels]}
       ]
       |> Enum.filter(fn {_flag, val} -> not is_nil(val) end)
@@ -182,6 +191,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("assignee", opts[:assignee])
       |> maybe_put("tracker_ref", opts[:tracker_ref])
       |> maybe_put("target_branch", opts[:target_branch])
+      |> maybe_put("repo", opts[:repo])
       |> maybe_put_flag("auto_close", opts[:auto_close] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
       |> maybe_put_flag("force", force?)

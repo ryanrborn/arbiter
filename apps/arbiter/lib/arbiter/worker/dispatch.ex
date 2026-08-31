@@ -122,6 +122,7 @@ defmodule Arbiter.Worker.Dispatch do
     opts = normalize_opts(opts)
 
     with {:ok, task} <- load_task(task_id),
+         opts = apply_issue_repo_default(task, opts),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_awaiting_review(task_id),
          :ok <- ensure_no_live_agent_session(task_id, opts),
@@ -1269,6 +1270,20 @@ defmodule Arbiter.Worker.Dispatch do
     _ -> nil
   end
 
+  # An issue that declares its own repo (bd-2jum8j) supplies the default for
+  # EVERY dispatch of it, not just `start_claude: true` ones — a dry dispatch
+  # of an assigned task should provision a worktree from that repo rather than
+  # park with none. A caller's explicit `repo:` opt is left untouched.
+  defp apply_issue_repo_default(%Issue{repo: repo}, opts)
+       when is_binary(repo) and repo != "" do
+    case Keyword.get(opts, :repo) do
+      given when is_binary(given) and given != "" -> opts
+      _ -> Keyword.put(opts, :repo, repo)
+    end
+  end
+
+  defp apply_issue_repo_default(_task, opts), do: opts
+
   # Real-work repo resolution (bd-1ziw04): when start_claude: true the dispatch
   # MUST bind a repo — a no-repo idle stub does nothing and looks dispatched.
   #
@@ -1288,6 +1303,12 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # `opts[:repo]` here has already absorbed the issue's own `repo` assignment
+  # (see `apply_issue_repo_default/2`), so the precedence this enforces is:
+  # explicit per-dispatch override > the issue's stored repo > sole-configured
+  # repo auto-select > `{:ambiguous_repo, _}`. A named repo that doesn't
+  # resolve is an error either way — a stale assignment must not silently
+  # dispatch the work into some other checkout.
   defp resolve_repo_for_dispatch(%Issue{} = task, opts) do
     case Keyword.get(opts, :repo) do
       repo when is_binary(repo) and repo != "" ->
@@ -1318,10 +1339,14 @@ defmodule Arbiter.Worker.Dispatch do
   with `{:repo_not_found, repo}`.
 
   Public so the dashboard's dispatch modal can populate its repo select from
-  the same list dispatch itself resolves against (bd-2cv4ws).
+  the same list dispatch itself resolves against (bd-2cv4ws). Also accepts a
+  bare workspace id, for the create form (bd-2jum8j) — which has to offer repo
+  choices before any `Issue` exists to ask.
   """
-  @spec all_available_repos(Issue.t()) :: [String.t()]
-  def all_available_repos(%Issue{workspace_id: ws_id}) do
+  @spec all_available_repos(Issue.t() | String.t() | nil) :: [String.t()]
+  def all_available_repos(%Issue{workspace_id: ws_id}), do: all_available_repos(ws_id)
+
+  def all_available_repos(ws_id) when is_binary(ws_id) or is_nil(ws_id) do
     ws_repos =
       case load_workspace_config(ws_id) do
         %{"repo_paths" => rp} when is_map(rp) ->

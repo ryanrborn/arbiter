@@ -1599,6 +1599,7 @@ defmodule Arbiter.MCP.Tools do
       pr_ref: i.pr_ref,
       pr_body: i.pr_body,
       target_branch: i.target_branch,
+      repo: i.repo,
       workspace_id: i.workspace_id,
       closed_at: iso(i.closed_at),
       created_at: iso(i.created_at),

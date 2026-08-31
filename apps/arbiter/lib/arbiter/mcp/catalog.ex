@@ -131,7 +131,7 @@ defmodule Arbiter.MCP.Catalog do
           "`child_closed`/`child_total` over its `parent_of` children). A worker reads its " <>
           "own task (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
-          "pr_body, pr_ref, tracker_ref, target_branch, assignee, auto_close, timestamps).",
+          "pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, auto_close, timestamps).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -144,7 +144,7 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" =>
               "When true, return the complete record including notes, qa_notes, " <>
-                "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, assignee, " <>
+                "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, " <>
                 "auto_close, and timestamps. Defaults to false (slim payload for workers)."
           }
         },
@@ -332,7 +332,15 @@ defmodule Arbiter.MCP.Catalog do
                 "description is fetched at review dispatch and injected into the reviewer's " <>
                 "prompt. No assignment check, no write-back."
           },
-          "target_branch" => %{"type" => "string"}
+          "target_branch" => %{"type" => "string"},
+          "repo" => %{
+            "type" => "string",
+            "description" =>
+              "The repo this task belongs to, as a configured `repo_paths` key " <>
+                "(e.g. \"emricare/tonic\"). Optional — only needed in a multi-repo " <>
+                "workspace, where dispatch otherwise can't tell which checkout the work " <>
+                "is for. Every dispatch of the task uses it unless one names another repo."
+          }
         },
         "required" => ["title"],
         "additionalProperties" => false
@@ -369,7 +377,13 @@ defmodule Arbiter.MCP.Catalog do
           "tracker_context_type" => %{"type" => "string"},
           "tracker_context_ref" => %{"type" => "string"},
           "pr_ref" => %{"type" => "string"},
-          "target_branch" => %{"type" => "string"}
+          "target_branch" => %{"type" => "string"},
+          "repo" => %{
+            "type" => "string",
+            "description" =>
+              "The repo this task belongs to, as a configured `repo_paths` key " <>
+                "(e.g. \"emricare/tonic\")."
+          }
         },
         "required" => ["id"],
         "additionalProperties" => false
@@ -508,7 +522,13 @@ defmodule Arbiter.MCP.Catalog do
         "type" => "object",
         "properties" => %{
           "task_id" => %{"type" => "string", "description" => "Task to dispatch (required)."},
-          "repo" => %{"type" => "string", "description" => "Repo to run in (optional)."},
+          "repo" => %{
+            "type" => "string",
+            "description" =>
+              "Repo to run in. Optional, and a one-shot override: it beats the task's own " <>
+                "`repo` assignment, which in turn beats auto-selecting the workspace's sole " <>
+                "configured repo."
+          },
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "provider" => %{
             "type" => "string",

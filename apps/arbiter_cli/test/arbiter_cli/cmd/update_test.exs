@@ -90,6 +90,26 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert exit_code == 0
   end
 
+  test "--repo is sent as the repo field (bd-2jum8j)" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         decoded = Jason.decode!(body)
+         assert decoded["repo"] == "emricare/tonic_device"
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "bd-001", "repo" => decoded["repo"]})
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Update.run(["bd-001", "--repo", "emricare/tonic_device"]) end)
+
+    assert exit_code == 0
+  end
+
   test "no fields supplied → error" do
     {_out, err, exit_code} = capture(fn -> Update.run(["bd-001"]) end)
     assert exit_code == 1
