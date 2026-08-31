@@ -16,6 +16,13 @@ defmodule ArbiterWeb.ReviewIndexLive do
   reload. See `Arbiter.Reviews.ExternalReview`'s `broadcast_review_event/3`
   for the (deliberately partial) event payload shape.
 
+  Expanding a row also loads that review's durable corpus (bd-7efini): the
+  composed prompt it was given, the tool calls its reviewer made and what they
+  returned, and the transcript itself — the same class of data a regular
+  worker run's `worker_log` exposes. Loaded lazily on expand (one row at a
+  time, dropped on collapse) rather than per row on render, since each read
+  hits disk. See `Arbiter.Reviews.Transcript`.
+
   Greenlight-from-UI is out of scope for v1 per the design doc — this is a
   read-only view.
   """
@@ -24,6 +31,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
 
   alias Arbiter.Events
   alias Arbiter.Reviews.Record
+  alias Arbiter.Reviews.Transcript
   alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.CoreComponents.{Core, Data, Feedback, Forms, Navigation}
   alias ArbiterWeb.Paging
@@ -47,7 +55,8 @@ defmodule ArbiterWeb.ReviewIndexLive do
      |> assign(:workspaces, workspaces)
      |> assign(:workspace_names, Map.new(workspaces, &{&1.id, &1.name}))
      |> assign(:status_options, @status_options)
-     |> assign(:expanded, nil)}
+     |> assign(:expanded, nil)
+     |> assign(:transcript, nil)}
   end
 
   @impl true
@@ -90,7 +99,11 @@ defmodule ArbiterWeb.ReviewIndexLive do
 
   def handle_event("toggle", %{"id" => id}, socket) do
     expanded = if socket.assigns.expanded == id, do: nil, else: id
-    {:noreply, assign(socket, :expanded, expanded)}
+
+    {:noreply,
+     socket
+     |> assign(:expanded, expanded)
+     |> assign(:transcript, expanded && load_transcript(expanded))}
   end
 
   @impl true
@@ -124,6 +137,41 @@ defmodule ArbiterWeb.ReviewIndexLive do
     socket
     |> assign(:records, page.entries)
     |> assign(:page_info, page)
+  end
+
+  # Cap on rendered transcript events: an agentic review over a large PR runs
+  # to thousands of JSONL lines, and the whole point of the durable file is
+  # that the UI never has to be the complete record. The tail is what an
+  # operator reads first (verdict, last tool calls); the full corpus stays on
+  # disk and is reachable via `external_review_transcript` / the REST endpoint.
+  @event_limit 300
+
+  # Read one review's corpus off disk. Never raises: a review that predates
+  # capture, or whose file was reaped, renders as "no transcript captured"
+  # rather than taking the page down.
+  defp load_transcript(record_id) do
+    summary = Transcript.summary(record_id)
+    all_events = Transcript.events(record_id)
+    shown = Enum.take(all_events, -@event_limit)
+
+    %{
+      record_id: record_id,
+      summary: summary,
+      prompt: transcript_prompt(record_id),
+      tool_uses: Transcript.tool_uses(record_id),
+      events: shown,
+      event_count: length(all_events),
+      truncated: length(all_events) > length(shown)
+    }
+  rescue
+    _ -> nil
+  end
+
+  defp transcript_prompt(record_id) do
+    case Transcript.prompt(record_id) do
+      {:ok, prompt} -> prompt
+      {:error, _} -> nil
+    end
   end
 
   defp filter_workspace(query, nil), do: query
@@ -180,7 +228,124 @@ defmodule ArbiterWeb.ReviewIndexLive do
   defp comment_field(comment, key) when is_map(comment),
     do: Map.get(comment, key) || Map.get(comment, to_string(key))
 
+  # ---- transcript formatting ----
+
+  # The transcript assign belongs to whichever row is expanded; guard against
+  # rendering a stale one after a live patch swapped the record out.
+  defp transcript_for(%{record_id: id} = transcript, id), do: transcript
+  defp transcript_for(_transcript, _id), do: nil
+
+  defp event_label(%{kind: :system}), do: "init"
+  defp event_label(%{kind: :assistant_text}), do: "assistant"
+  defp event_label(%{kind: :tool_use}), do: "tool"
+  defp event_label(%{kind: :tool_result}), do: "result"
+  defp event_label(%{kind: :result}), do: "final"
+  defp event_label(_event), do: "raw"
+
+  defp event_text(%{kind: :system} = e),
+    do: Enum.join(Enum.reject([e[:model], e[:session_id]], &is_nil/1), " · ")
+
+  defp event_text(%{kind: :tool_use} = e), do: "#{e.name} #{compact_json(e.input)}"
+  defp event_text(%{text: text}) when is_binary(text), do: truncate(text, 2_000)
+  defp event_text(_event), do: ""
+
+  defp compact_json(map) when map_size(map) == 0, do: ""
+
+  defp compact_json(map) do
+    case Jason.encode(map) do
+      {:ok, json} -> truncate(json, 300)
+      _ -> inspect(map)
+    end
+  end
+
+  defp truncate(text, limit) when is_binary(text) do
+    if String.length(text) > limit, do: String.slice(text, 0, limit) <> "…", else: text
+  end
+
+  defp truncate(text, _limit), do: text
+
   # ---- render ----
+
+  # The durable corpus of one review (bd-7efini): what the reviewer was told,
+  # which tools it reached for and what came back, and the transcript itself.
+  attr :transcript, :map, default: nil
+
+  defp review_transcript(assigns) do
+    ~H"""
+    <div :if={@transcript} class="flex flex-col gap-3 border-t border-[var(--border-default)] pt-3">
+      <div :if={!@transcript.summary.exists && !@transcript.summary.prompt_exists}>
+        <p class="text-[11.5px] text-base-content/60">
+          No transcript captured for this review — it ran before durable review
+          capture existed, or its reviewer produced no output.
+        </p>
+      </div>
+
+      <details :if={@transcript.prompt} class="text-[11.5px]">
+        <summary class="cursor-pointer font-medium text-[var(--text-label)]">
+          Prompt ({byte_size(@transcript.prompt)} bytes)
+        </summary>
+        <pre class="mt-1 max-h-72 overflow-auto whitespace-pre-wrap break-words font-[family-name:var(--font-mono)] text-[11px] leading-relaxed bg-base-200/40 rounded-[var(--radius-field)] p-2">{@transcript.prompt}</pre>
+      </details>
+
+      <div :if={@transcript.tool_uses != []} class="flex flex-col gap-1">
+        <p class="text-[11.5px] font-medium text-[var(--text-label)]">
+          Tools used ({@transcript.summary.tool_use_count})
+        </p>
+        <div class="flex flex-wrap gap-1">
+          <span
+            :for={tool <- @transcript.summary.tools_used}
+            class="badge badge-ghost text-[10px] font-[family-name:var(--font-mono)]"
+          >
+            {tool.name} ×{tool.count}
+          </span>
+        </div>
+        <details class="text-[11.5px]">
+          <summary class="cursor-pointer text-[var(--text-label)]">Calls and results</summary>
+          <div class="mt-1 flex flex-col gap-1 max-h-72 overflow-auto">
+            <div
+              :for={tool <- @transcript.tool_uses}
+              class="border-l-2 border-[var(--border-default)] pl-2"
+            >
+              <span class="font-[family-name:var(--font-mono)] text-[var(--text-label)]">
+                {tool.name}
+              </span>
+              <span class="font-[family-name:var(--font-mono)] text-[11px] break-all">
+                {compact_json(tool.input)}
+              </span>
+              <p
+                :if={tool.result}
+                class="mt-0.5 text-base-content/70 whitespace-pre-wrap break-words font-[family-name:var(--font-mono)] text-[11px]"
+              >
+                {truncate(tool.result, 600)}
+              </p>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <details :if={@transcript.summary.exists} class="text-[11.5px]">
+        <summary class="cursor-pointer font-medium text-[var(--text-label)]">
+          Transcript ({@transcript.summary.line_count} lines{if @transcript.truncated,
+            do: ", showing the last #{length(@transcript.events)} events",
+            else: ""})
+        </summary>
+        <div class="mt-1 max-h-96 overflow-auto flex flex-col gap-0.5 bg-base-200/40 rounded-[var(--radius-field)] p-2">
+          <div :for={event <- @transcript.events} class="flex gap-2 items-start">
+            <span class="shrink-0 w-14 text-[10px] uppercase tracking-wide text-base-content/50 font-[family-name:var(--font-mono)]">
+              {event_label(event)}
+            </span>
+            <span class="whitespace-pre-wrap break-words font-[family-name:var(--font-mono)] text-[11px] leading-relaxed">
+              {event_text(event)}
+            </span>
+          </div>
+        </div>
+        <p class="mt-1 text-[10px] text-base-content/50 break-all">
+          {@transcript.summary.path}
+        </p>
+      </details>
+    </div>
+    """
+  end
 
   @impl true
   def render(assigns) do
@@ -329,6 +494,8 @@ defmodule ArbiterWeb.ReviewIndexLive do
                 </p>
                 <p class="text-base-content/70">{record.failure_reason || "no reason recorded"}</p>
               </div>
+
+              <.review_transcript transcript={transcript_for(@transcript, record.id)} />
 
               <div :if={show_proposed_comments?(record)} class="flex flex-col gap-2">
                 <p class="text-[11.5px] font-medium text-[var(--text-label)]">

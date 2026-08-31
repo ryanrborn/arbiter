@@ -186,4 +186,91 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
       assert show_result.failure_reason == "forbidden 403: rate limited"
     end
   end
+
+  describe "GET /api/external_reviews/:id/transcript (bd-7efini)" do
+    setup do
+      prev = Application.get_env(:arbiter, :output_log_root)
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "review-transcript-api-#{System.unique_integer([:positive])}"
+        )
+
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    @stream_json Enum.join(
+                   [
+                     ~s({"type":"system","subtype":"init","model":"claude-opus-5","session_id":"s-1"}),
+                     ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+                     ~s({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"contents"}]}}),
+                     ~s({"type":"result","subtype":"success","result":"done"})
+                   ],
+                   "\n"
+                 )
+
+    test "returns the prompt, raw transcript lines and tool uses", %{conn: conn} do
+      rec = insert_record!(%{})
+      :ok = Arbiter.Worker.PromptLog.write(rec.id, "You are a code reviewer.")
+      :ok = Arbiter.Reviews.Transcript.write(rec.id, @stream_json)
+
+      conn = get(conn, ~p"/api/external_reviews/#{rec.id}/transcript")
+      body = json_response(conn, 200)["data"]
+
+      assert body["record_id"] == rec.id
+      assert body["exists"] == true
+      assert body["prompt"] == "You are a code reviewer."
+      assert body["line_count"] == 4
+      assert length(body["lines"]) == 4
+      assert body["tools_used"] == [%{"name" => "Read", "count" => 1}]
+      assert [%{"name" => "Read", "result" => "contents"}] = body["tool_uses"]
+    end
+
+    test "supports tail= and include_prompt=false", %{conn: conn} do
+      rec = insert_record!(%{})
+      :ok = Arbiter.Worker.PromptLog.write(rec.id, "You are a code reviewer.")
+      :ok = Arbiter.Reviews.Transcript.write(rec.id, @stream_json)
+
+      conn =
+        get(conn, ~p"/api/external_reviews/#{rec.id}/transcript", %{
+          tail: "2",
+          include_prompt: "false"
+        })
+
+      body = json_response(conn, 200)["data"]
+
+      assert body["prompt"] == nil
+      assert length(body["lines"]) == 2
+      assert body["truncated"] == true
+    end
+
+    test "reports absence rather than 404 for a review with no captured transcript", %{
+      conn: conn
+    } do
+      rec = insert_record!(%{})
+
+      conn = get(conn, ~p"/api/external_reviews/#{rec.id}/transcript")
+      body = json_response(conn, 200)["data"]
+
+      assert body["exists"] == false
+      assert body["lines"] == []
+      assert body["tool_uses"] == []
+    end
+
+    test "404s for an unknown record", %{conn: conn} do
+      conn = get(conn, ~p"/api/external_reviews/no-such-record/transcript")
+      assert json_response(conn, 404)
+    end
+  end
 end

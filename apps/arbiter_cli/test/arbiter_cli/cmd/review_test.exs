@@ -156,4 +156,76 @@ defmodule ArbiterCli.Cmd.ReviewTest do
       assert decoded["data"]["pr"] == "#5"
     end
   end
+
+  describe "arb review --transcript (bd-7efini)" do
+    @payload %{
+      "data" => %{
+        "record_id" => "rec-1",
+        "pr_ref" => "github:acme/widgets#42",
+        "status" => "completed",
+        "model" => "claude-opus-5",
+        "path" => "/logs/rec-1.log",
+        "prompt_path" => "/logs/rec-1.prompt",
+        "exists" => true,
+        "prompt_exists" => true,
+        "prompt" => "You are a code reviewer.",
+        "line_count" => 4,
+        "lines" => [~s({"type":"result","result":"done"})],
+        "truncated" => false,
+        "tool_use_count" => 1,
+        "tools_used" => [%{"name" => "Read", "count" => 1}],
+        "tool_uses" => [
+          %{"name" => "Read", "input" => %{"file_path" => "lib/a.ex"}, "result" => "contents"}
+        ]
+      }
+    }
+
+    test "fetches and renders one review's durable corpus" do
+      stub_get("/api/external_reviews/rec-1/transcript", @payload)
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Review.run(["--transcript", "rec-1"]) end)
+
+      assert code == 0
+      assert out =~ "github:acme/widgets#42"
+      assert out =~ "You are a code reviewer."
+      assert out =~ "Read ×1"
+      assert out =~ "lib/a.ex"
+      assert out =~ "/logs/rec-1.log"
+    end
+
+    test "--json emits the raw payload" do
+      stub_get("/api/external_reviews/rec-1/transcript", @payload)
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Review.run(["--transcript", "rec-1", "--json"]) end)
+
+      assert code == 0
+      assert {:ok, decoded} = Jason.decode(out)
+      assert decoded["data"]["record_id"] == "rec-1"
+    end
+
+    test "says so when nothing was captured" do
+      stub_get("/api/external_reviews/rec-2/transcript", %{
+        "data" =>
+          Map.merge(@payload["data"], %{
+            "record_id" => "rec-2",
+            "exists" => false,
+            "prompt_exists" => false,
+            "prompt" => nil,
+            "line_count" => 0,
+            "lines" => [],
+            "tool_use_count" => 0,
+            "tools_used" => [],
+            "tool_uses" => []
+          })
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Review.run(["--transcript", "rec-2"]) end)
+
+      assert code == 0
+      assert out =~ "no transcript captured"
+    end
+  end
 end

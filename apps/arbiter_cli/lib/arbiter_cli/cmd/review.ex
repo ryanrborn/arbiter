@@ -27,6 +27,14 @@ defmodule ArbiterCli.Cmd.Review do
   number (with `--repo` so a number can be resolved to owner/repo via the
   checkout's `origin` remote).
 
+  `arb review --transcript <record-id> [--tail N] [--no-prompt] [--json]` —
+  read back the durable corpus of one already-dispatched **external** review
+  (bd-7efini): the prompt its reviewer was given, the tools it used and what
+  they returned, and the transcript itself. `arb worker log`'s counterpart for
+  a review, which — not being task-linked — has no run to look up. GETs
+  `/api/external_reviews/:id/transcript`. Record ids come from
+  `arb review --pr` output or the `/reviews` page.
+
   ## Flags
 
     --pr <url|number>  Review an external PR/MR (no task id needed).
@@ -37,6 +45,10 @@ defmodule ArbiterCli.Cmd.Review do
                        defaults to the installation's sole/`default` workspace.
     --model <name>     (task review only) one-shot model override
                        (`haiku|sonnet|opus`).
+    --transcript <id>  Read one external review's persisted corpus instead of
+                       dispatching anything.
+    --tail <n>         (`--transcript` only) only the last N transcript lines.
+    --no-prompt        (`--transcript` only) omit the (large) review prompt.
     --json             emit JSON instead of human-readable text
 
   ## What this does NOT do
@@ -47,7 +59,16 @@ defmodule ArbiterCli.Cmd.Review do
 
   alias ArbiterCli.{Client, Output}
 
-  @switches [json: :boolean, repo: :string, model: :string, pr: :string, workspace: :string]
+  @switches [
+    json: :boolean,
+    repo: :string,
+    model: :string,
+    pr: :string,
+    workspace: :string,
+    transcript: :string,
+    tail: :integer,
+    prompt: :boolean
+  ]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -57,6 +78,7 @@ defmodule ArbiterCli.Cmd.Review do
       mode = if opts[:json], do: :json, else: :text
 
       cond do
+        opts[:transcript] not in [nil, ""] -> run_transcript(opts, mode)
         opts[:pr] not in [nil, ""] -> run_external(opts, mode)
         true -> run_task(opts, rest, mode)
       end
@@ -100,6 +122,83 @@ defmodule ArbiterCli.Cmd.Review do
       {:ok, payload} -> emit(payload, mode)
       {:error, err} -> Output.die(err)
     end
+  end
+
+  # Read-back path: no dispatch, just this review's persisted corpus.
+  defp run_transcript(opts, mode) do
+    query =
+      []
+      |> then(fn q -> if opts[:tail], do: [{"tail", opts[:tail]} | q], else: q end)
+      |> then(fn q ->
+        if opts[:prompt] == false, do: [{"include_prompt", "false"} | q], else: q
+      end)
+
+    path =
+      "/api/external_reviews/#{opts[:transcript]}/transcript" <>
+        if query == [], do: "", else: "?" <> URI.encode_query(query)
+
+    case Client.get(path) do
+      {:ok, payload} -> emit_transcript(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_transcript(payload, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_transcript(payload, :text) do
+    data = payload["data"] || payload
+
+    IO.puts("Review #{data["record_id"]} — #{data["pr_ref"]} (#{data["status"]})")
+    IO.puts("  Model:    #{data["model"] || "—"}")
+    IO.puts("  Path:     #{data["path"]}")
+
+    if data["exists"] || data["prompt_exists"] do
+      emit_transcript_prompt(data["prompt"])
+      emit_transcript_tools(data)
+      emit_transcript_lines(data)
+    else
+      IO.puts("  (no transcript captured for this review)")
+    end
+  end
+
+  defp emit_transcript_prompt(nil), do: :ok
+
+  defp emit_transcript_prompt(prompt) do
+    IO.puts("\n--- prompt ---")
+    IO.puts(prompt)
+  end
+
+  defp emit_transcript_tools(data) do
+    tools = data["tools_used"] || []
+
+    if tools != [] do
+      summary = Enum.map_join(tools, ", ", &"#{&1["name"]} ×#{&1["count"]}")
+      IO.puts("\n--- tools (#{data["tool_use_count"]}) ---")
+      IO.puts(summary)
+
+      for tool_use <- data["tool_uses"] || [] do
+        IO.puts("  #{tool_use["name"]} #{Jason.encode!(tool_use["input"] || %{})}")
+
+        case tool_use["result"] do
+          r when is_binary(r) and r != "" -> IO.puts("    → #{first_line(r)}")
+          _ -> :ok
+        end
+      end
+    end
+  end
+
+  defp emit_transcript_lines(data) do
+    lines = data["lines"] || []
+
+    if lines != [] do
+      shown = if data["truncated"], do: " (last #{length(lines)})", else: ""
+      IO.puts("\n--- transcript: #{data["line_count"]} lines#{shown} ---")
+      Enum.each(lines, &IO.puts/1)
+    end
+  end
+
+  defp first_line(text) do
+    text |> String.split("\n", parts: 2) |> hd() |> String.slice(0, 200)
   end
 
   defp maybe_put(map, _key, nil), do: map
