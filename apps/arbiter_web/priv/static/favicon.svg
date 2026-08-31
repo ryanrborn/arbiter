@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Arbiter">
-  <rect width="64" height="64" rx="8" fill="oklch(84% 0.19 130)"></rect>
-  <path d="M25 47 L39 17" fill="none" stroke="oklch(20% 0.05 130)" stroke-width="8" stroke-linecap="butt"></path>
+  <rect width="64" height="64" rx="8" fill="oklch(16.5% 0.014 258)"></rect>
+  <path d="M23 13 H17 V51 H23" fill="none" stroke="oklch(84% 0.19 130)" stroke-width="7" stroke-linecap="square"></path>
+  <path d="M41 13 H47 V51 H41" fill="none" stroke="oklch(84% 0.19 130)" stroke-width="7" stroke-linecap="square"></path>
+  <path d="M29 44 L35 20" fill="none" stroke="oklch(96% 0.006 258)" stroke-width="5" stroke-linecap="butt"></path>
 </svg>
