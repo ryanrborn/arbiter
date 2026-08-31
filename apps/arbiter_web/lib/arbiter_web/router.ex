@@ -137,6 +137,8 @@ defmodule ArbiterWeb.Router do
 
     # External review audit records (bd-31fh9e)
     get("/external_reviews", ExternalReviewController, :index)
+    # Durable per-review corpus: prompt + raw transcript + tool uses (bd-7efini)
+    get("/external_reviews/:id/transcript", ExternalReviewController, :transcript)
 
     # Internal ReviewGate structured round outcomes (bd-aqyjuc)
     get("/review_gate_rounds", ReviewGateRoundController, :index)
