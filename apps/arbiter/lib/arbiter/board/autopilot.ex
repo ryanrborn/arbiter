@@ -52,16 +52,49 @@ defmodule Arbiter.Board.Autopilot do
   While paused the board still renders a full plan — every Ready card reads
   `scheduler paused` rather than a queue position, because a position implies
   a queue that is moving.
+
+  ## A dispatch that keeps failing gets escalated (bd-a40f4q)
+
+  `finish_dispatch/3`'s log-and-move-on above is right for a card's *first*
+  failure — it might be transient, and the next tick re-reads a world that
+  may have changed. It stops being right once the same card keeps failing the
+  same way tick after tick: nothing distinguishes "hasn't been picked up yet"
+  from "will never dispatch until a human intervenes," and the only trace is
+  a `Logger.warning` line that this fleet's own experience says is not a
+  reliable place to notice it after the fact.
+
+  So `state.failures` tracks, per card id, the shape of its most recent
+  dispatch error and how many consecutive ticks have produced that same
+  shape. A handful of error classes — `:ambiguous_repo`, `:no_repo_configured`,
+  `:repo_not_found` — are deterministic: retrying dispatch can never change
+  the answer, so they escalate to the coordinator inbox on the very first
+  occurrence. Every other shape gets a small retry budget first, in case it
+  is transient (a quota gate, a network blip), and only escalates once that
+  budget is exhausted. Either way, escalating is a one-shot latch per
+  (card, error shape): once sent, it does not repeat on every tick — a
+  successful dispatch or a change in error shape is what re-arms it. See
+  `Arbiter.Messages.CoordinatorNotifier.dispatch_stuck/3`.
   """
 
   use GenServer
 
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.Tasks.Issue
 
   require Logger
 
   @topic "board"
   @default_interval_ms 15_000
+
+  # Dispatch error shapes that are deterministic — retrying can never change
+  # the outcome, so these escalate on the first failure rather than waiting
+  # out a retry budget. See `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
+  @deterministic_dispatch_errors [:ambiguous_repo, :no_repo_configured, :repo_not_found]
+
+  # How many consecutive same-shape failures a non-deterministic error (a
+  # quota gate, a network blip) gets before Autopilot escalates it too.
+  @dispatch_failure_retry_threshold 3
 
   @typedoc "What one tick did."
   @type outcome :: {:ok, String.t()} | {:error, term()} | :idle | :paused | {:busy, String.t()}
@@ -85,6 +118,8 @@ defmodule Arbiter.Board.Autopilot do
     * `:interval_ms` — tick period, or `:never` to only tick when asked.
     * `:snapshot` / `:dispatch` — seams for tests; default to
       `Snapshot.load/1` and `Arbiter.Worker.Dispatch.dispatch/1`.
+    * `:escalate` — seam for tests; defaults to `default_escalate/3`, which
+      posts through `Arbiter.Messages.CoordinatorNotifier.dispatch_stuck/3`.
   """
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -141,8 +176,12 @@ defmodule Arbiter.Board.Autopilot do
       interval_ms: interval,
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
+      escalate: Keyword.get(opts, :escalate, &default_escalate/3),
       # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
-      dispatching: nil
+      dispatching: nil,
+      # Per-card dispatch failure tracking: id => %{count:, shape:, escalated?:}.
+      # See "A dispatch that keeps failing gets escalated" above.
+      failures: %{}
     }
 
     schedule(interval)
@@ -160,7 +199,8 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   def handle_call({:board, opts}, _from, state) do
-    {:reply, read_board(state, opts), state}
+    {_status, snapshot} = read_board(state, opts)
+    {:reply, snapshot, state}
   end
 
   def handle_call(:paused?, _from, state), do: {:reply, state.paused?, state}
@@ -186,7 +226,8 @@ defmodule Arbiter.Board.Autopilot do
   def handle_info({ref, result}, %{dispatching: %{ref: ref} = in_flight} = state)
       when is_reference(ref) do
     Process.demonitor(ref, [:flush])
-    reply_all(in_flight.waiters, finish_dispatch(in_flight.id, result))
+    {outcome, state} = finish_dispatch(state, in_flight.id, result)
+    reply_all(in_flight.waiters, outcome)
     {:noreply, %{state | dispatching: nil}}
   end
 
@@ -199,6 +240,7 @@ defmodule Arbiter.Board.Autopilot do
       ) do
     Logger.warning("board autopilot: dispatch of #{in_flight.id} died: #{inspect(reason)}")
 
+    state = record_failure(state, in_flight.id, {:exit, reason})
     reply_all(in_flight.waiters, {:error, {:exit, reason}})
     {:noreply, %{state | dispatching: nil}}
   end
@@ -215,11 +257,27 @@ defmodule Arbiter.Board.Autopilot do
   defp promote(%{dispatching: %{id: id}} = state), do: {{:busy, id}, state}
 
   defp promote(state) do
-    case read_board(state, []) do
+    {read_status, snapshot} = read_board(state, [])
+    state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
+
+    case snapshot do
       %{promote: id} when is_binary(id) -> {:started, start_dispatch(state, id)}
       _ -> {:idle, state}
     end
   end
+
+  # A card only leaves `state.failures` on a successful dispatch of that same
+  # card (`clear_failure/2`). One that instead gets closed, deleted, or
+  # deprioritized out of Ready would otherwise sit in the map for the life of
+  # this singleton process. Ready is small and re-read every tick, so pruning
+  # against it here is cheap and keeps the map bounded.
+  defp prune_failures(%{failures: failures} = state, %{ready: ready})
+       when map_size(failures) > 0 do
+    ready_ids = MapSet.new(ready, & &1.id)
+    %{state | failures: Map.filter(failures, fn {id, _} -> MapSet.member?(ready_ids, id) end)}
+  end
+
+  defp prune_failures(state, _snapshot), do: state
 
   # The task, not this process, does the slow work. It never raises: the
   # result — good, bad or thrown — comes back as a plain term so the
@@ -249,22 +307,76 @@ defmodule Arbiter.Board.Autopilot do
     end
   end
 
-  defp finish_dispatch(id, {:ok, _}) do
+  defp finish_dispatch(state, id, {:ok, _}) do
     announce({:board_dispatched, id})
-    {:ok, id}
+    {{:ok, id}, clear_failure(state, id)}
   end
 
   # A dispatch that fails is a fact about that card, not about the scheduler:
   # log it and let the next tick re-read the world. The card is still Ready,
-  # so it is simply reconsidered — no retry bookkeeping.
-  defp finish_dispatch(id, {:error, reason} = error) do
+  # so it is simply reconsidered — no retry bookkeeping to *decide what to
+  # dispatch next*. There is still bookkeeping to decide *whether a human
+  # needs to hear about it*: `record_failure/3` tracks the failure and, past
+  # its threshold, escalates.
+  defp finish_dispatch(state, id, {:error, reason} = error) do
     Logger.warning("board autopilot: dispatch of #{id} failed: #{inspect(reason)}")
-    error
+    {error, record_failure(state, id, reason)}
   end
 
-  defp finish_dispatch(id, other) do
+  defp finish_dispatch(state, id, other) do
     Logger.warning("board autopilot: dispatch of #{id} returned #{inspect(other)}")
-    {:error, other}
+    {{:error, other}, record_failure(state, id, other)}
+  end
+
+  defp clear_failure(state, id), do: %{state | failures: Map.delete(state.failures, id)}
+
+  # Update this card's failure entry and, if it just crossed the escalation
+  # bar for the first time, fire the escalation and latch it so a card stuck
+  # failing the same way does not re-page every tick.
+  defp record_failure(state, id, reason) do
+    shape = error_shape(reason)
+    previous = Map.get(state.failures, id)
+
+    entry =
+      if previous && previous.shape == shape do
+        %{previous | count: previous.count + 1}
+      else
+        %{count: 1, shape: shape, escalated?: false}
+      end
+
+    entry =
+      if not entry.escalated? and escalate_dispatch_failure?(shape, entry.count) do
+        state.escalate.(id, reason, entry.count)
+        %{entry | escalated?: true}
+      else
+        entry
+      end
+
+    %{state | failures: Map.put(state.failures, id, entry)}
+  end
+
+  defp escalate_dispatch_failure?(shape, _count) when shape in @deterministic_dispatch_errors,
+    do: true
+
+  defp escalate_dispatch_failure?(_shape, count), do: count >= @dispatch_failure_retry_threshold
+
+  defp error_shape(%module{}), do: module
+  defp error_shape(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
+  defp error_shape(reason), do: reason
+
+  # Resolves the card's workspace so `CoordinatorNotifier.dispatch_stuck/3`
+  # has somewhere to post — a card with no readable Issue/workspace has
+  # nowhere to escalate to, so it is silently skipped rather than raising.
+  defp default_escalate(id, reason, attempts) do
+    case Ash.get(Issue, id) do
+      {:ok, %{workspace_id: ws_id}} when is_binary(ws_id) ->
+        CoordinatorNotifier.dispatch_stuck(%{task_id: id, workspace_id: ws_id}, reason, attempts)
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   defp park(%{dispatching: %{waiters: waiters} = in_flight} = state, from),
@@ -274,12 +386,17 @@ defmodule Arbiter.Board.Autopilot do
 
   # The board always reports *this* process's pause state, so a caller can
   # never render "2 ahead in queue" against a scheduler that is stopped.
+  #
+  # Tags the result so `promote/1` can tell a genuinely-empty Ready list
+  # apart from a failed read that only *looks* empty (`Snapshot.empty/0`
+  # has `ready: []` too) — pruning `state.failures` against the latter
+  # would wipe every card's retry count and escalation latch on a blip.
   defp read_board(state, opts) do
-    state.snapshot.(Keyword.put(opts, :paused, state.paused?))
+    {:ok, state.snapshot.(Keyword.put(opts, :paused, state.paused?))}
   rescue
     e ->
       Logger.warning("board autopilot: board read failed: #{inspect(e)}")
-      Snapshot.empty()
+      {:error, Snapshot.empty()}
   end
 
   # No `repo:` opt on purpose: `Dispatch.dispatch/2` loads the task and binds

@@ -802,7 +802,9 @@ defmodule Arbiter.MCP.Tools.Worker do
     do: "repo #{inspect(repo)} is not configured"
 
   defp dispatch_error_message({:ambiguous_repo, repos}),
-    do: "multiple repos available (#{Enum.join(repos, ", ")}); pass `repo` explicitly"
+    do:
+      "multiple repos available (#{Enum.join(repos, ", ")}); pass `repo` explicitly, or set " <>
+        "`default_repo` in the workspace config via workspace_config_set"
 
   defp dispatch_error_message({:task_awaiting_review, id}),
     do: "task #{id} is already awaiting review"

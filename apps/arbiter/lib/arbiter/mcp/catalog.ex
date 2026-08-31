@@ -1735,8 +1735,9 @@ defmodule Arbiter.MCP.Catalog do
           "Directives must be in the same workspace as the graph. " <>
           "In a workspace with more than one configured repo, pass `repo` so the " <>
           "Conductor can auto-dispatch this directive when it becomes ready — " <>
-          "without it, dispatch fails with `ambiguous_repo` and the directive stays " <>
-          "`ready` forever.",
+          "without it, dispatch falls back to the workspace's `default_repo` config " <>
+          "(if set via workspace_config_set) or else fails with `ambiguous_repo` and " <>
+          "the directive stays `ready` forever.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
