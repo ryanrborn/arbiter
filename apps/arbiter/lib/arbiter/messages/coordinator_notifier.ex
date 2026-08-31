@@ -401,6 +401,77 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 
   @doc """
+  Escalate a card that Autopilot cannot get out of Ready (bd-a40f4q).
+
+  Fired by `Arbiter.Board.Autopilot` when a promoted card's dispatch keeps
+  returning the same error shape. `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`
+  can fail with `:ambiguous_repo`, `:no_repo_configured` or `:repo_not_found` —
+  none of those self-heal by retrying, so Autopilot escalates the first time
+  it sees one. Any other dispatch error gets an Autopilot-owned retry budget
+  first, in case it is transient (a quota gate, a network blip); the
+  escalation only fires once that budget is exhausted. Same addressed
+  `:escalation` **mailbox** shape as the other escalations here.
+
+  Dedupe lives in `Arbiter.Board.Autopilot`'s own process state (an
+  `escalated?` latch per card, cleared on the next successful dispatch or when
+  the error shape changes) rather than the message table: a card either keeps
+  failing the same way, in which case one page is enough, or the error
+  changes, in which case a fresh page is exactly right.
+
+  `snapshot` carries `:task_id` + `:workspace_id`; `reason` is the raw
+  dispatch error term; `attempts` is the consecutive-failure count. Best-effort,
+  returns `:ok`.
+  """
+  @spec dispatch_stuck(map(), term(), pos_integer()) :: :ok
+  def dispatch_stuck(snapshot, reason, attempts) do
+    escalate_event("dispatch_stuck/3", snapshot, fn task_id ->
+      subject = "#{task_id} dispatch stuck (#{attempts}× #{dispatch_stuck_label(reason)})"
+
+      body =
+        [
+          "Autopilot has tried to dispatch #{title_for(task_id)} #{attempts} consecutive " <>
+            "time(s) and gotten the same error every time: #{dispatch_stuck_label(reason)}.",
+          "The card is still in Ready and Autopilot keeps reconsidering it every tick, but " <>
+            "it will not succeed on its own: #{dispatch_stuck_action(reason)}",
+          "This escalation is raised once per failure episode — it will not repeat while " <>
+            "the same error keeps recurring."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  defp dispatch_stuck_label({:ambiguous_repo, repos}) when is_list(repos),
+    do: "ambiguous repo — #{Enum.join(repos, ", ")} are all configured"
+
+  defp dispatch_stuck_label(:no_repo_configured), do: "no repo configured for this workspace"
+
+  defp dispatch_stuck_label({:repo_not_found, repo}),
+    do: "configured repo #{inspect(repo)} not found"
+
+  defp dispatch_stuck_label(reason), do: describe_reason(reason)
+
+  defp dispatch_stuck_action({:ambiguous_repo, _repos}) do
+    "set a default repo for this workspace, or the issue's own repo attribute, and the " <>
+      "next tick will dispatch it."
+  end
+
+  defp dispatch_stuck_action(:no_repo_configured) do
+    "configure at least one repo for this workspace and the next tick will dispatch it."
+  end
+
+  defp dispatch_stuck_action({:repo_not_found, _repo}) do
+    "fix the workspace's repo config so it resolves and the next tick will dispatch it."
+  end
+
+  defp dispatch_stuck_action(_reason) do
+    "this may be transient (quota, network) — inspect the error above; if it recurs it " <>
+      "likely needs a config or account fix."
+  end
+
+  @doc """
   Escalate a blocked merge the Watchdog tried — and failed — to auto-resolve
   (#354, Phase 2a).
 

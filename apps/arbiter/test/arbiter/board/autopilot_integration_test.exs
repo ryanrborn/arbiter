@@ -15,6 +15,7 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
 
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Dependency, Issue, Workspace}
 
   setup do
@@ -152,5 +153,30 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
 
     assert %{promote: promoted} = Autopilot.board(pid, ready_order: [underdog.id])
     assert promoted == underdog.id
+  end
+
+  # `Arbiter.Board.AutopilotTest` covers the retry/escalation bookkeeping
+  # against a stubbed `:escalate` seam; this exercises the real
+  # `default_escalate/3` path (an `Ash.get(Issue, id)` lookup for the
+  # workspace, then a real `CoordinatorNotifier.dispatch_stuck/3` post) so the
+  # end-to-end wiring — dispatch failure -> Issue lookup -> coordinator inbox
+  # — is proven, not just the seam it plugs into (bd-a40f4q).
+  test "a card stuck on a deterministic dispatch error lands in the coordinator inbox", %{
+    ws: ws
+  } do
+    task = issue(ws, "ambiguous repo victim", %{priority: 0})
+
+    pid =
+      start_autopilot(
+        dispatch: fn _id -> {:error, {:ambiguous_repo, ["tonic", "tonic_device"]}} end
+      )
+
+    assert {:error, {:ambiguous_repo, _}} = Autopilot.tick(pid)
+
+    assert [escalation] = Message.inbox("admiral", workspace_id: ws.id)
+    assert escalation.kind == :escalation
+    assert escalation.directive_ref == task.id
+    assert escalation.subject =~ "dispatch stuck"
+    assert escalation.body =~ "tonic"
   end
 end
