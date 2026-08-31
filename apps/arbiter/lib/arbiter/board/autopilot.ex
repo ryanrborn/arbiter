@@ -271,7 +271,8 @@ defmodule Arbiter.Board.Autopilot do
   # deprioritized out of Ready would otherwise sit in the map for the life of
   # this singleton process. Ready is small and re-read every tick, so pruning
   # against it here is cheap and keeps the map bounded.
-  defp prune_failures(%{failures: failures} = state, %{ready: ready}) when map_size(failures) > 0 do
+  defp prune_failures(%{failures: failures} = state, %{ready: ready})
+       when map_size(failures) > 0 do
     ready_ids = MapSet.new(ready, & &1.id)
     %{state | failures: Map.filter(failures, fn {id, _} -> MapSet.member?(ready_ids, id) end)}
   end
