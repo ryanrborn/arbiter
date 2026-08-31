@@ -187,6 +187,32 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert body["target_branch"] == "dolphin"
   end
 
+  test "--repo forwards as repo in the POST body (bd-2jum8j)" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"id" => "bd-011", "title" => "T", "repo" => "org/tonic"})
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Create.run(["T", "--repo", "org/tonic"]) end)
+
+    assert exit_code == 0
+
+    assert_received {:posted, body}
+    assert body["repo"] == "org/tonic"
+  end
+
   test "--difficulty forwards as difficulty in the POST body" do
     parent = self()
 

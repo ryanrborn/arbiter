@@ -40,7 +40,7 @@ defmodule ArbiterCli.Cmd.Update do
       arb update <id> [--priority N] [--append-notes text] [--status s]
                       [--description d] [--assignee a] [--acceptance a]
                       [--qa-notes text] [--deployment-notes text]
-                      [--pr-body text]
+                      [--pr-body text] [--repo owner/name]
 
   `--acceptance` sets the acceptance criteria field, which guides the worker
   in implementing and testing the change.
@@ -48,6 +48,11 @@ defmodule ArbiterCli.Cmd.Update do
   `--qa-notes` / `--deployment-notes` set the gated completion-notes fields
   a worker produces for tracker-backed work (QA Testing Notes / Deployment
   Notes on the Jira ticket). They overwrite the field (unlike `--append-notes`).
+
+  `--repo` assigns the task to a repo (a configured `repo_paths` key). Every
+  dispatch of the task then binds that repo, so a multi-repo workspace no longer
+  needs `repo` passed per dispatch. An explicit `arb dispatch <id> <repo>` still
+  overrides it for that one run.
 
   `--pr-body` sets the worker-authored PR/MR description the MergeQueue opens
   the task's single canonical PR with (Summary / Test plan / References). It
@@ -95,6 +100,7 @@ defmodule ArbiterCli.Cmd.Update do
     description: :string,
     title: :string,
     assignee: :string,
+    repo: :string,
     json: :boolean
   ]
 
@@ -260,6 +266,7 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("description", opts[:description])
       |> put_if("title", opts[:title])
       |> put_if("assignee", opts[:assignee])
+      |> put_if("repo", opts[:repo])
       |> maybe_append_notes(opts[:append_notes], existing)
 
     if map_size(payload) == 0 do

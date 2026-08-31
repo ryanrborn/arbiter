@@ -3364,6 +3364,149 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
+  describe "issue-level repo assignment (bd-2jum8j)" do
+    @env_key :repo_paths
+
+    # Two distinguishable source repos so a test can prove *which* one the
+    # worktree was cut from by looking for its marker file.
+    defp init_repo!(tmp, name) do
+      repo = Path.join(tmp, name)
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "MARKER-#{name}"), "#{name}\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "."])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+      remote = Path.join(tmp, "#{name}-remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      repo
+    end
+
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "issue-repo-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+
+      repo_a = init_repo!(tmp, "alpha")
+      repo_b = init_repo!(tmp, "beta")
+
+      worktree_root = Path.join(tmp, "worktrees")
+      File.mkdir_p!(worktree_root)
+
+      prior_wt_root = Application.get_env(:arbiter, :worktree_root)
+      prior_repo_paths = Application.get_env(:arbiter, @env_key)
+
+      Application.put_env(:arbiter, :worktree_root, worktree_root)
+      Application.put_env(:arbiter, @env_key, %{"org/alpha" => repo_a, "org/beta" => repo_b})
+
+      on_exit(fn ->
+        if prior_wt_root,
+          do: Application.put_env(:arbiter, :worktree_root, prior_wt_root),
+          else: Application.delete_env(:arbiter, :worktree_root)
+
+        if prior_repo_paths,
+          do: Application.put_env(:arbiter, @env_key, prior_repo_paths),
+          else: Application.delete_env(:arbiter, @env_key)
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{repo_a: repo_a, repo_b: repo_b}
+    end
+
+    test "an Issue persists a repo assignment", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "carries a repo", workspace_id: ws.id, repo: "org/beta"})
+
+      assert task.repo == "org/beta"
+      assert Ash.get!(Issue, task.id).repo == "org/beta"
+
+      {:ok, updated} = Ash.update(task, %{repo: "org/alpha"})
+      assert updated.repo == "org/alpha"
+    end
+
+    test "multi-repo workspace: the issue's own repo resolves dispatch instead of erroring",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "issue repo wins", workspace_id: ws.id, repo: "org/beta"})
+
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert File.exists?(Path.join(result.worktree_path, "MARKER-beta"))
+      assert latest_run(task.id).repo == "org/beta"
+    end
+
+    test "an explicit per-dispatch repo overrides the issue's stored repo", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "override", workspace_id: ws.id, repo: "org/beta"})
+
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id,
+                 repo: "org/alpha",
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert File.exists?(Path.join(result.worktree_path, "MARKER-alpha"))
+      assert latest_run(task.id).repo == "org/alpha"
+    end
+
+    test "an issue repo that no longer resolves fails loudly rather than picking another",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "stale repo", workspace_id: ws.id, repo: "org/gone"})
+
+      assert {:error, {:repo_not_found, "org/gone"}} =
+               Dispatch.dispatch(task.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert Ash.get!(Issue, task.id).status == :open
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "an issue with no repo still falls through to the ambiguous-repo error", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no issue repo", workspace_id: ws.id})
+
+      assert {:error, {:ambiguous_repo, repos}} =
+               Dispatch.dispatch(task.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert "org/alpha" in repos
+      assert "org/beta" in repos
+    end
+
+    test "a dry dispatch (no start_claude) still binds the issue's repo", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "dry with issue repo", workspace_id: ws.id, repo: "org/beta"})
+
+      assert {:ok, result} = Dispatch.dispatch(task.id, start_driver: false)
+      assert result.task.status == :in_progress
+      assert File.exists?(Path.join(result.worktree_path, "MARKER-beta"))
+    end
+  end
+
   defmodule StubMigrationsPending do
     @moduledoc false
     def count_pending, do: {:ok, 3}

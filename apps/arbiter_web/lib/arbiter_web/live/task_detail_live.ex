@@ -103,6 +103,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:dispatch_params, %{})
      |> assign(:dispatching, false)
      |> assign(:repo_options, [])
+     |> assign(:repo_assignment_options, [])
      |> assign(:priority_options, TaskForm.priority_options())
      |> assign(:difficulty_options, TaskForm.difficulty_options())
      |> assign(:issue_type_options, TaskForm.issue_type_options())
@@ -207,7 +208,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   # ---- edit ----
 
   def handle_event("open_edit", _params, socket) do
-    {:noreply, assign(socket, edit_modal: true, edit_error: nil, edit_params: %{})}
+    {:noreply,
+     socket
+     |> assign(edit_modal: true, edit_error: nil, edit_params: %{})
+     |> assign(:repo_assignment_options, repo_assignment_options(socket.assigns.task))}
   end
 
   def handle_event("cancel_edit", _params, socket) do
@@ -233,7 +237,8 @@ defmodule ArbiterWeb.TaskDetailLive do
           description: TaskForm.trimmed(params["description"]),
           acceptance: TaskForm.trimmed(params["acceptance"]),
           assignee: TaskForm.trimmed(params["assignee"]),
-          target_branch: TaskForm.trimmed(params["target_branch"])
+          target_branch: TaskForm.trimmed(params["target_branch"]),
+          repo: TaskForm.trimmed(params["repo"])
         }
         |> put_given(:status, params["status"])
         |> put_given(:issue_type, params["issue_type"])
@@ -464,10 +469,38 @@ defmodule ArbiterWeb.TaskDetailLive do
   # resolves — dispatch would reject it with `{:repo_not_found, repo}` after
   # the operator had already acknowledged the credit spend.
   defp repo_options(%Issue{} = task) do
-    [{"Workspace default", ""}] ++ Enum.map(Dispatch.all_available_repos(task), &{&1, &1})
+    [{blank_repo_label(task), ""}] ++ Enum.map(Dispatch.all_available_repos(task), &{&1, &1})
   end
 
   defp repo_options(_), do: [{"Workspace default", ""}]
+
+  # What "leave it blank" actually means for THIS task. Once a task carries its
+  # own repo (bd-2jum8j), an empty per-dispatch choice binds that repo rather
+  # than the workspace's sole-repo auto-select, and the label must say so —
+  # otherwise the modal reads as if it were about to ignore the assignment.
+  defp blank_repo_label(%Issue{repo: repo}) when is_binary(repo) and repo != "",
+    do: "Task default (#{repo})"
+
+  defp blank_repo_label(_), do: "Workspace default"
+
+  # The edit modal's "which repo does this task belong to?" select (bd-2jum8j).
+  # Same resolvable-only source as `repo_options/1`, but blank means "no
+  # assignment" rather than "let dispatch decide this once". The task's own
+  # current repo is always kept in the list even when it no longer resolves —
+  # otherwise opening the modal on a task with a stale assignment would render
+  # a select that silently clears it on save.
+  defp repo_assignment_options(%Issue{repo: current} = task) do
+    available = Dispatch.all_available_repos(task)
+
+    names =
+      if present?(current) and current not in available,
+        do: available ++ [current],
+        else: available
+
+    [{"— unassigned —", ""}] ++ Enum.map(names, &{&1, &1})
+  end
+
+  defp repo_assignment_options(_), do: [{"— unassigned —", ""}]
 
   defp dispatch_failure(:no_repo_configured),
     do:
@@ -478,7 +511,9 @@ defmodule ArbiterWeb.TaskDetailLive do
     do: "repo #{inspect(repo)} isn't in any configured repo_paths."
 
   defp dispatch_failure({:ambiguous_repo, repos}),
-    do: "several repos are configured (#{Enum.join(repos, ", ")}) — pick one explicitly."
+    do:
+      "several repos are configured (#{Enum.join(repos, ", ")}) — pick one explicitly, " <>
+        "or Edit to assign this task a repo so every dispatch binds it."
 
   # bd-2aslx6 (#1428): the Dispatch button always sets `start_claude: true`
   # (see provider_opts/1), so this is the surface an operator hits when a task
@@ -697,10 +732,13 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> resync_live_run()
   end
 
-  # §4's right rail leads with `repo`. An `Issue` carries no repo column — the
-  # checkout is chosen at dispatch — so the honest source is the most recent
-  # run that recorded one, falling back to the workspace's configured repo
-  # when there is exactly one and the answer is therefore unambiguous.
+  # §4's right rail leads with `repo`. The task's own assignment (bd-2jum8j) is
+  # the authoritative answer when it has one — it's what every future dispatch
+  # will bind. Otherwise fall back to the most recent run that recorded a repo,
+  # then to the workspace's configured repo when there is exactly one and the
+  # answer is therefore unambiguous.
+  defp issue_repo(_runs, %Issue{repo: repo}) when is_binary(repo) and repo != "", do: repo
+
   defp issue_repo(runs, %Issue{} = task) do
     case Enum.find_value(runs, &(present?(&1.repo) && &1.repo)) do
       repo when is_binary(repo) ->
@@ -1435,6 +1473,13 @@ defmodule ArbiterWeb.TaskDetailLive do
               label="Target branch (optional)"
               value={TaskForm.value(@edit_params, "target_branch", @task.target_branch || "")}
               placeholder="defaults to the repo's main"
+            />
+            <.input
+              type="select"
+              name="task[repo]"
+              label="Repo (optional)"
+              options={@repo_assignment_options}
+              value={TaskForm.value(@edit_params, "repo", @task.repo || "")}
             />
             <div class="sm:col-span-2">
               <.input

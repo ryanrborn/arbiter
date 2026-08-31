@@ -399,6 +399,11 @@ defmodule Arbiter.Board.Autopilot do
       {:error, Snapshot.empty()}
   end
 
+  # No `repo:` opt on purpose: `Dispatch.dispatch/2` loads the task and binds
+  # the task's own `repo` assignment when it has one (bd-2jum8j), so passing it
+  # again from here would only duplicate that resolution — and get it wrong the
+  # moment the precedence rules change. A task with no assignment still relies
+  # on the sole-configured-repo auto-select, exactly as before.
   defp default_dispatch(id), do: Arbiter.Worker.Dispatch.dispatch(id, start_claude: true)
 
   defp announce(message) do
