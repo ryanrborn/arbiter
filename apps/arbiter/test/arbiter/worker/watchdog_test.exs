@@ -737,6 +737,33 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> :sys.get_state(wpid).park_reason == nil end)
       assert :sys.get_state(wpid).max_auto_resolve_attempts == 1
     end
+
+    test "parked_on/1 and retry_auto_resolve/1 degrade to a safe result instead of crashing the caller when the Watchdog is unresponsive" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rar5", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      wpid =
+        start_watchdog(pid, task_id, "!rar5",
+          auto_merge: true,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      wait_until(fn -> Process.alive?(wpid) end)
+
+      # Simulate a Watchdog wedged in a long-running poll (e.g. dispatching a
+      # fresh fix-pass) that can't answer a GenServer.call within the 1s
+      # budget these reads use.
+      :sys.suspend(wpid)
+
+      on_exit(fn ->
+        if Process.alive?(wpid), do: :sys.resume(wpid)
+      end)
+
+      assert Watchdog.parked_on(task_id) == nil
+      assert Watchdog.retry_auto_resolve(task_id) == {:error, :not_found}
+
+      :sys.resume(wpid)
+    end
   end
 
   describe "conflict auto-resolve (#354, Phase 2b)" do

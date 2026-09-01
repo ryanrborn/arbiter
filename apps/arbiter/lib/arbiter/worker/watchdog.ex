@@ -410,8 +410,10 @@ defmodule Arbiter.Worker.Watchdog do
   def retry_auto_resolve(task_id) when is_binary(task_id) do
     case whereis(task_id) do
       nil -> {:error, :not_found}
-      pid -> GenServer.call(pid, :retry_auto_resolve)
+      pid -> GenServer.call(pid, :retry_auto_resolve, 1_000)
     end
+  catch
+    :exit, _ -> {:error, :not_found}
   end
 
   @doc """
@@ -427,8 +429,10 @@ defmodule Arbiter.Worker.Watchdog do
   def parked_on(task_id) when is_binary(task_id) do
     case whereis(task_id) do
       nil -> nil
-      pid -> GenServer.call(pid, :parked_on)
+      pid -> GenServer.call(pid, :parked_on, 1_000)
     end
+  catch
+    :exit, _ -> nil
   end
 
   # ---- GenServer ----------------------------------------------------------
