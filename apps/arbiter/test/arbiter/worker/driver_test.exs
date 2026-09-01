@@ -667,7 +667,11 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
 
       {:ok, watchdog_pid} =
-        Worker.start(task_id: task.id, registry_key: task.id <> ":watchdog", repo: "r")
+        Worker.start(
+          task_id: task.id,
+          registry_key: task.id <> Arbiter.Worker.Watchdog.registry_suffix(),
+          repo: "r"
+        )
 
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)

@@ -636,6 +636,12 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :conflict})
 
+      # Not waiting on `parked_on/1` here: a `:conflict` block only parks
+      # after exhausting its own bounded rebase-attempt budget, which is not
+      # guaranteed to land inside a short poll window. Waiting for the
+      # Watchdog to exist and letting one poll interval elapse is enough to
+      # observe the button's render decision either way — it must not appear
+      # for a `:conflict` reason regardless of whether the block has parked.
       wait_until(fn -> Watchdog.whereis(task.id) != nil end)
       Process.sleep(50)
 
@@ -650,6 +656,8 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       park_awaiting_review(pid, task, %{status: :open, approved: false})
 
+      # See the :conflict test above for why this waits on Watchdog liveness
+      # plus one poll interval rather than on `parked_on/1`.
       wait_until(fn -> Watchdog.whereis(task.id) != nil end)
       Process.sleep(50)
 
@@ -671,8 +679,10 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       html = render_click(view, "retry_auto_resolve")
 
-      assert html =~ "isn&#39;t parked on an exhausted CI-failed block yet" or
-               html =~ "No merge watchdog is currently running"
+      # No Watchdog was started for this task, so `retry_auto_resolve/1`
+      # deterministically returns `{:error, :not_found}` — this pins that
+      # specific soft-failure message rather than accepting either branch.
+      assert html =~ "No merge watchdog is currently running"
     end
   end
 

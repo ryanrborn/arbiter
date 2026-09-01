@@ -461,9 +461,11 @@ defmodule Arbiter.Worker.Driver do
   # Without this it would leak the worktree on every reap while a parked
   # Watchdog is still watching for an out-of-band fix.
   defp blocking_workers(%{task_id: task_id, worker_pid: own_pid}) do
+    watchdog_key = task_id <> Arbiter.Worker.Watchdog.registry_suffix()
+
     Arbiter.Worker.Registry.live_for(task_id)
     |> Enum.reject(fn {key, pid} ->
-      (pid == own_pid and agent_terminal?(pid)) or key == task_id <> ":watchdog"
+      (pid == own_pid and agent_terminal?(pid)) or key == watchdog_key
     end)
     |> Enum.map(fn {key, _pid} -> key end)
   rescue

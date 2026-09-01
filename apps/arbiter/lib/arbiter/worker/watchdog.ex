@@ -378,6 +378,14 @@ defmodule Arbiter.Worker.Watchdog do
     do: PRegistry.whereis(task_id <> @watchdog_registry_suffix)
 
   @doc """
+  Registry key suffix the Watchdog registers under, so callers that need to
+  recognize a `<task_id><suffix>` registry key (e.g. `Driver.blocking_workers/1`
+  exempting the Watchdog from worktree ownership) don't have to hardcode it.
+  """
+  @spec registry_suffix() :: String.t()
+  def registry_suffix, do: @watchdog_registry_suffix
+
+  @doc """
   Re-arm one more auto-resolve attempt for a task parked indefinitely after
   exhausting `max_auto_resolve_attempts` on a `:ci_failed` block (bd-bspakl).
 
