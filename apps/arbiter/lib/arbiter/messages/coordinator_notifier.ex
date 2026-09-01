@@ -773,13 +773,16 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       "actual workflow (see Arbiter.Trackers.Jira.Config) and re-run the sync."
   end
 
-  # BFS planned a path, but a hop's named transition isn't in the live
-  # workflow when executed (e.g. renamed upstream since the graph was set).
+  # BFS planned a route, but when the hop ran, no live transition landed on its
+  # destination status — the route passes through a status the issue can't
+  # reach from where it is. Hops match by destination, so a stale transition
+  # *name* in the graph is harmless; the destination is what needs fixing.
   defp sync_hint(%{kind: :transition_unavailable}) do
-    "A planned transition in the configured `transition_graph` is no longer available " <>
-      "in the tracker's live workflow. Reconcile the workspace `transition_graph` with " <>
-      "the tracker's actual transition names (see Arbiter.Trackers.Jira.Config) and " <>
-      "re-run the sync."
+    "A hop in the configured `transition_graph` has no live transition landing on its " <>
+      "destination status. The error lists the transitions actually available now — " <>
+      "correct that hop's destination status (or route the graph through a status the " <>
+      "issue can reach) to match the tracker's real workflow " <>
+      "(see Arbiter.Trackers.Jira.Config) and re-run the sync."
   end
 
   # Catch-all for any other unexpected error: demote the config hint to a
