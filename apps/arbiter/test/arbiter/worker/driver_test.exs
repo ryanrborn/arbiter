@@ -653,6 +653,53 @@ defmodule Arbiter.Worker.DriverTest do
       Worker.stop(fixpass_pid)
     end
 
+    # bd-bspakl: the Watchdog registers under `<task_id>:watchdog` in this same
+    # registry (so `retry_auto_resolve/1` can look it up by task_id), but it
+    # owns no worktree — only the forge poll loop and dispatching sub-workers,
+    # which register (and block) under their own keys. Unlike a real
+    # `:fixpass` sub-worker above, a live watchdog entry must NOT block reap.
+    test "does not skip cleanup for a live :watchdog registry entry", %{
+      ws: ws,
+      wt_path: wt_path
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "cw-live-watchdog", workspace_id: ws.id})
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, watchdog_pid} =
+        Worker.start(
+          task_id: task.id,
+          registry_key: task.id <> Arbiter.Worker.Watchdog.registry_suffix(),
+          repo: "r"
+        )
+
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true,
+          worktree_path: wt_path,
+          cleanup_worktree: true
+        )
+
+      ref = Process.monitor(driver_pid)
+      :ok = Worker.fail(worker_pid, :claude_crashed)
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      assert Process.alive?(watchdog_pid)
+      refute File.dir?(wt_path), "worktree leaked while only a :watchdog entry was still live"
+
+      Worker.stop(watchdog_pid)
+    end
+
     test "skips cleanup when the worktree has commits ahead of base", %{ws: ws, wt_path: wt_path} do
       # Commit a new file in the worktree, then have a clean working tree.
       File.write!(Path.join(wt_path, "new.txt"), "claude wrote me\n")

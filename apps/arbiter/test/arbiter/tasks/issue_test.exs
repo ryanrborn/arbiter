@@ -3,6 +3,7 @@ defmodule Arbiter.Tasks.IssueTest do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "test-ws", prefix: "test"})
@@ -221,6 +222,22 @@ defmodule Arbiter.Tasks.IssueTest do
 
       assert {:ok, closed} = Ash.update(borrowed, %{close_upstream: true}, action: :close)
       assert closed.close_upstream_expected == false
+    end
+
+    # bd-bspakl: `StopWorker` sweeps every registry entry for the task,
+    # including synthetic sub-worker keys — the Watchdog now registers under
+    # `<task_id>:watchdog` too (so `retry_auto_resolve/1` can find it by
+    # task_id), so :close must stop it like any other sub-worker rather than
+    # leaving it running past task teardown.
+    test "stops a live :watchdog registry entry on close", %{issue: issue} do
+      {:ok, watchdog_pid} =
+        Worker.start(task_id: issue.id, registry_key: issue.id <> ":watchdog", repo: "r")
+
+      assert Process.alive?(watchdog_pid)
+
+      assert {:ok, _closed} = Ash.update(issue, %{}, action: :close)
+
+      refute Process.alive?(watchdog_pid)
     end
   end
 

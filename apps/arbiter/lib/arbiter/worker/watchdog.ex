@@ -114,6 +114,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   alias Arbiter.Mergers
   alias Arbiter.Worker
+  alias Arbiter.Worker.Registry, as: PRegistry
 
   @default_interval_ms 60_000
   # Watchdog ceiling on consecutive :pending polls before we escalate and stop.
@@ -159,6 +160,11 @@ defmodule Arbiter.Worker.Watchdog do
   # Registry suffix the fix-pass worker registers under — MUST match
   # `FixPassDispatcher.registry_suffix/0` so we can detect an in-flight fix pass.
   @fix_pass_registry_suffix ":fixpass"
+
+  # Registry suffix the Watchdog itself registers under, so an external caller
+  # (CLI / MCP tool / dashboard) can find the Watchdog for a task by task_id
+  # alone and message it directly — needed for `retry_auto_resolve/1` (bd-bspakl).
+  @watchdog_registry_suffix ":watchdog"
   # Bounded rebase attempts before the Watchdog gives up auto-resolving a
   # `:conflict` block and escalates to the coordinator (#354, Phase 2b). Each
   # attempt is one dispatched rebase-resolve worker; if two consecutive passes
@@ -238,7 +244,8 @@ defmodule Arbiter.Worker.Watchdog do
 
   @spec start_link(opts()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
-    GenServer.start_link(__MODULE__, opts)
+    task_id = Keyword.fetch!(opts, :task_id)
+    GenServer.start_link(__MODULE__, opts, name: registry_name(task_id))
   end
 
   @doc false
@@ -363,6 +370,94 @@ defmodule Arbiter.Worker.Watchdog do
 
   def effective_block_reason(_state, _result), do: nil
 
+  @doc """
+  Look up the Watchdog registered for `task_id`, or `nil` if none is running.
+  """
+  @spec whereis(String.t()) :: pid() | nil
+  def whereis(task_id) when is_binary(task_id),
+    do: PRegistry.whereis(task_id <> @watchdog_registry_suffix)
+
+  @doc """
+  Registry key suffix the Watchdog registers under, so callers that need to
+  recognize a `<task_id><suffix>` registry key (e.g. `Driver.blocking_workers/1`
+  exempting the Watchdog from worktree ownership) don't have to hardcode it.
+  """
+  @spec registry_suffix() :: String.t()
+  def registry_suffix, do: @watchdog_registry_suffix
+
+  @doc """
+  Re-arm one more auto-resolve attempt for a task parked indefinitely after
+  exhausting `max_auto_resolve_attempts` on a `:ci_failed` block (bd-bspakl).
+
+  Once exhausted, `handle_block/3` never calls `auto_resolve/3` again on its
+  own — by design, so a structurally-broken PR can't burn cost forever. This
+  is the supported external trigger for a human to say "try once more": it
+  bumps this episode's budget by exactly one attempt. The already-pending
+  poll timer picks this up within `interval_ms` (no immediate poll is fired
+  — see the comment in the `:retry_auto_resolve` handle_call clause), which
+  re-invokes the ordinary `resolve_ci_failed/2` path (dispatching a fresh
+  fix-pass worker) if the block is still `:ci_failed`, or picks up whatever
+  the MR's current state actually is otherwise.
+
+  No cap on how many times a human calls this — they're presumably watching
+  and will notice non-convergence — but it is never called automatically; the
+  Watchdog itself only ever re-arms via this explicit external call.
+
+  Only bumps the budget for *this* block episode: the configured ceiling
+  (`base_max_auto_resolve_attempts`) is restored once the episode clears, so
+  a later, unrelated block on the same lane doesn't inherit the bump.
+
+  Returns:
+    * `:ok` — re-armed; a poll will pick it up on the already-pending
+      schedule (within `interval_ms`).
+    * `{:error, :not_found}` — no Watchdog is registered for `task_id`.
+    * `{:error, :not_parked_on_ci_failed}` — the Watchdog isn't parked on an
+      exhausted `:ci_failed` block (e.g. still running, or parked for a
+      different reason), so there is nothing to re-arm.
+    * `{:error, :busy}` — the Watchdog is running (e.g. mid-poll) and didn't
+      reply within the call timeout. This is *not* the same as "not found":
+      the `:retry_auto_resolve` message is still queued in its mailbox and
+      will be processed once it's free, so retrying immediately can stack
+      more than one bump. Wait and check `parked_on/1` before retrying.
+  """
+  @spec retry_auto_resolve(String.t()) ::
+          :ok | {:error, :not_found | :not_parked_on_ci_failed | :busy}
+  def retry_auto_resolve(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> {:error, :not_found}
+      pid -> GenServer.call(pid, :retry_auto_resolve, 1_000)
+    end
+  catch
+    :exit, {:timeout, _} -> {:error, :busy}
+    :exit, _ -> {:error, :not_found}
+  end
+
+  @doc """
+  Read-only lookup of the reason a task's Watchdog is currently parked on
+  (e.g. `:ci_failed`), or `nil` if it isn't parked or no Watchdog is running
+  for `task_id`.
+
+  This is the authoritative signal for whether `retry_auto_resolve/1` would
+  accept a re-arm — unlike `effective_block_reason/1`, which infers from the
+  forge's own approval state and can't see a ReviewGate-driven park (bd-bspakl).
+
+  Returns `:busy` (rather than `nil`) if the Watchdog is registered but didn't
+  reply within the call timeout (e.g. mid-poll) — callers deciding whether to
+  show a "Retry auto-resolve" affordance should treat `:busy` as "don't know
+  yet, don't hide it" rather than "not parked", since a `nil` here would make
+  the button flicker out at exactly the moment an operator needs it.
+  """
+  @spec parked_on(String.t()) :: block_reason() | :busy | nil
+  def parked_on(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> nil
+      pid -> GenServer.call(pid, :parked_on, 1_000)
+    end
+  catch
+    :exit, {:timeout, _} -> :busy
+    :exit, _ -> nil
+  end
+
   # ---- GenServer ----------------------------------------------------------
 
   @impl true
@@ -451,6 +546,12 @@ defmodule Arbiter.Worker.Watchdog do
           # `max_auto_resolve_attempts` the Watchdog escalates instead of retrying.
           auto_resolve_attempts: 0,
           max_auto_resolve_attempts: max_auto_resolve_attempts,
+          # The configured ceiling as passed at start, mirroring `base_max_polls`.
+          # `retry_auto_resolve/1` bumps `max_auto_resolve_attempts` for the
+          # current block episode only; this is restored into it once the
+          # episode clears so the bump doesn't leak into a later, unrelated
+          # block (bd-bspakl).
+          base_max_auto_resolve_attempts: max_auto_resolve_attempts,
           fix_pass_dispatcher: fix_pass_dispatcher,
           # Latches the exhausted-retry escalation so it fires once per block
           # episode rather than on every subsequent poll (#354, Phase 2a). While
@@ -528,6 +629,41 @@ defmodule Arbiter.Worker.Watchdog do
         schedule(self(), Keyword.get(opts, :initial_delay_ms, 0))
         {:ok, state}
     end
+  end
+
+  defp registry_name(task_id), do: PRegistry.via_tuple(task_id <> @watchdog_registry_suffix)
+
+  @impl true
+  def handle_call(:retry_auto_resolve, _from, %{park_reason: :ci_failed} = state) do
+    Logger.warning(
+      "Worker.Watchdog: manual auto-resolve re-arm for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref} (was #{state.auto_resolve_attempts}/#{state.max_auto_resolve_attempts} attempts)"
+    )
+
+    state = %{
+      state
+      | max_auto_resolve_attempts: state.auto_resolve_attempts + 1,
+        unresolved_escalated: false,
+        last_escalated_poll: state.poll_count
+    }
+
+    # Deliberately not scheduling an immediate poll here: a `:poll` timer is
+    # already pending from the last `reschedule/1` (there is no timer ref
+    # tracked in state, so we can't cancel-and-replace it), and firing a
+    # second one starts a permanent, independent poll chain that never merges
+    # back — each re-arm would multiply the effective poll rate. The already-
+    # pending timer picks this up within `interval_ms`, which a human re-arm
+    # can tolerate.
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:retry_auto_resolve, _from, state) do
+    {:reply, {:error, :not_parked_on_ci_failed}, state}
+  end
+
+  @impl true
+  def handle_call(:parked_on, _from, state) do
+    {:reply, state.park_reason, state}
   end
 
   @impl true
@@ -1054,6 +1190,7 @@ defmodule Arbiter.Worker.Watchdog do
           state
           | last_block_reason: nil,
             auto_resolve_attempts: 0,
+            max_auto_resolve_attempts: state.base_max_auto_resolve_attempts,
             unresolved_escalated: false
         }
 

@@ -22,8 +22,9 @@ defmodule Arbiter.MCP.Tools do
     * `{:ok, map}` — structured result (serialized to `structuredContent`);
     * `{:error, {:unauthorized, msg}}` — a scope violation (the transport maps it
       to a JSON-RPC error, per `docs/mcp-server-design.md` §4.2);
-    * `{:error, {:not_found | :invalid, msg}}` — an operational failure (returned
-      as an `isError: true` tool result so the agent gets a usable message).
+    * `{:error, {:not_found | :invalid | :busy, msg}}` — an operational failure
+      (returned as an `isError: true` tool result so the agent gets a usable
+      message).
 
   Tier-level visibility (which tier may call which tool) is enforced upstream in
   `Arbiter.MCP.Catalog`; these handlers enforce the *data-level* rules —
@@ -659,6 +660,53 @@ defmodule Arbiter.MCP.Tools do
 
         {:error, reason} ->
           {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
+      end
+    end
+  end
+
+  # ---- queue_retry_auto_resolve --------------------------------------------
+
+  @doc """
+  Re-arm one more auto-resolve attempt on a task's merge Watchdog after it
+  has exhausted `max_auto_resolve_attempts` on a `:ci_failed` block and
+  parked indefinitely (bd-bspakl).
+
+  Without this, once exhausted there is no supported way to try again short
+  of pushing a fix to the branch by hand, outside Arbiter's normal
+  worker/review flow. Calls `Arbiter.Worker.Watchdog.retry_auto_resolve/1`,
+  which bumps this episode's budget by exactly one attempt; the next
+  watchdog poll (within its poll interval) picks it up. No cap on how many
+  times a coordinator calls this — but the Watchdog itself never re-arms on
+  its own.
+
+  Returns `%{retried: true, task_id: task_id}` on success, or an error if no
+  Watchdog is running for the task, it isn't parked on an exhausted
+  `:ci_failed` block, or the Watchdog is busy (e.g. mid-poll) and didn't
+  reply in time — in the last case, wait and retry rather than repeating the
+  call immediately, since the original request may still land.
+  """
+  @spec queue_retry_auto_resolve(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def queue_retry_auto_resolve(%Scope{} = _scope, args) do
+    with {:ok, task_id} <- require_string(args, "task_id") do
+      case Arbiter.Worker.Watchdog.retry_auto_resolve(task_id) do
+        :ok ->
+          {:ok, %{retried: true, task_id: task_id}}
+
+        {:error, :not_found} ->
+          {:error, {:not_found, "no merge watchdog is currently running for task #{task_id}"}}
+
+        {:error, :not_parked_on_ci_failed} ->
+          {:error,
+           {:invalid,
+            "task #{task_id} is not currently parked on an exhausted :ci_failed block " <>
+              "— there is nothing to re-arm"}}
+
+        {:error, :busy} ->
+          {:error,
+           {:busy,
+            "task #{task_id}'s watchdog is busy polling — try again in a moment rather " <>
+              "than repeating the call, since the original request may still land"}}
       end
     end
   end

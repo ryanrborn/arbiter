@@ -39,11 +39,18 @@ defmodule Arbiter.Test.StubMerger do
         failing_checks: %{},
         merge_result: :ok,
         inline_comments: [],
-        submitted_reviews: []
+        submitted_reviews: [],
+        get_counts: %{}
       }
     end)
 
     :ok
+  end
+
+  @doc "How many times `get/1` has been called for `ref` (bd-bspakl: pins the poll rate)."
+  def get_count(ref) do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s.get_counts, ref, 0) end)
   end
 
   @doc "All inline comments posted via post_inline_comment/3 (newest first)."
@@ -158,6 +165,8 @@ defmodule Arbiter.Test.StubMerger do
 
     result =
       Agent.get_and_update(@name, fn s ->
+        s = update_in(s, [:get_counts, ref], &((&1 || 0) + 1))
+
         case Map.get(s.gets, ref, []) do
           [only] -> {Map.merge(defaults, only), s}
           [head | rest] -> {Map.merge(defaults, head), put_in(s, [:gets, ref], rest)}
@@ -273,7 +282,8 @@ defmodule Arbiter.Test.StubMerger do
                    failing_checks: %{},
                    merge_result: :ok,
                    inline_comments: [],
-                   submitted_reviews: []
+                   submitted_reviews: [],
+                   get_counts: %{}
                  }
                end,
                name: @name

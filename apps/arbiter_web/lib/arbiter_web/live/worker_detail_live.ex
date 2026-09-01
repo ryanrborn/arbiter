@@ -202,6 +202,50 @@ defmodule ArbiterWeb.WorkerDetailLive do
      |> start_async(:retry, fn -> Dispatch.resume(task_id) end)}
   end
 
+  # Re-arm one more auto-resolve attempt on a task's merge Watchdog once it's
+  # exhausted its bounded retries on a :ci_failed block and parked (bd-bspakl).
+  # Unlike "retry"/Resume above, this is a plain GenServer call into the
+  # already-running Watchdog — no auth preflight, no agent spawn — so it runs
+  # inline rather than via start_async.
+  def handle_event("retry_auto_resolve", _params, socket) do
+    task_id = socket.assigns.task_id
+
+    case Watchdog.retry_auto_resolve(task_id) do
+      :ok ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           "Re-armed auto-resolve for #{task_id}; a fresh fix-pass will start on the next watchdog poll."
+         )
+         |> refresh_all()}
+
+      {:error, :not_found} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "No merge watchdog is currently running for #{task_id}."
+         )}
+
+      {:error, :not_parked_on_ci_failed} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{task_id} isn't parked on an exhausted CI-failed block yet — nothing to re-arm."
+         )}
+
+      {:error, :busy} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{task_id}'s watchdog is busy polling — try again in a moment."
+         )}
+    end
+  end
+
   def handle_event("compose_change", %{"body" => body}, socket) do
     {:noreply, assign(socket, :compose_body, body)}
   end
@@ -372,6 +416,24 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp retryable?(%Issue{}, nil), do: true
   defp retryable?(%Issue{}, %{status: status}), do: status not in @active_statuses
   defp retryable?(_task, _snapshot), do: false
+
+  # Whether the "Retry auto-resolve" action makes sense to show at all — a
+  # Watchdog parked on an exhausted :ci_failed block (bd-bspakl). Reads the
+  # Watchdog's own `park_reason` (via `parked_on/1`) rather than inferring
+  # from the merger-status snapshot: `effective_block_reason/1` (arity-1)
+  # hardcodes `via_review_gate: false` and so never sees a park reached
+  # through the ReviewGate-aware poll loop — exactly the standard Arbiter
+  # flow this action targets. `parked_on/1` is authoritative and needs no
+  # such inference.
+  defp retry_auto_resolve_available?(task_id, %{status: :awaiting_review}) do
+    # `:busy` (mid-poll, `parked_on/1` timed out) is treated as available
+    # rather than hidden: hiding it would make the button flicker out at
+    # exactly the moment an operator is likely to reach for it, and clicking
+    # through to a busy Watchdog surfaces a clear "try again" flash instead.
+    Watchdog.parked_on(task_id) in [:ci_failed, :busy]
+  end
+
+  defp retry_auto_resolve_available?(_task_id, _snapshot), do: false
 
   defp resume_failure(:no_outpost),
     do:
@@ -737,6 +799,16 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
                     Actions
                   </span>
+                  <Core.button
+                    :if={retry_auto_resolve_available?(@task_id, @snapshot)}
+                    id="worker-retry-auto-resolve-btn"
+                    phx-click="retry_auto_resolve"
+                    data-confirm={"Re-arm one more auto-resolve attempt for #{@task_id}? This dispatches a fresh fix-pass worker."}
+                    size="sm"
+                  >
+                    <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
+                    Retry auto-resolve
+                  </Core.button>
                   <Core.button
                     id="worker-resume-note-btn"
                     phx-click="open_retry"
