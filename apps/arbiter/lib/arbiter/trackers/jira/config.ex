@@ -117,6 +117,16 @@ defmodule Arbiter.Trackers.Jira.Config do
   # -> To Do on a Task but "Won't complete" -> Closed on a Story), so resolving
   # by id would close tickets it meant to advance.
   #
+  # Destination matching fixes hops whose *name* was wrong; it cannot conjure a
+  # route that doesn't exist. `Code Complete -> Done` is one such: no VR
+  # transition from Code Complete lands on Done at all — the only forward edge
+  # is "Release branch cut" -> Release Ready for QA, and reaching Done means
+  # traversing the whole deploy pipeline. The fabricated edge is therefore NOT
+  # listed below; the shipped `closed => "Done"` mapping fails from Code
+  # Complete with the honest `:no_transition_path` ("the graph has no route")
+  # rather than a `:transition_unavailable` that implies the route is merely
+  # stale. Mapping the real deploy-pipeline route is bd-c4cfuv.
+  #
   # A workspace whose workflow routes through different *statuses* overrides
   # this via `tracker.config.transition_graph`.
   @default_transition_graph %{
@@ -128,8 +138,7 @@ defmodule Arbiter.Trackers.Jira.Config do
     "In Code Review" => [
       %{"transition" => "Approved and merged", "to" => "Code Complete"},
       %{"transition" => "Approved and not merged", "to" => "Pending Merge"}
-    ],
-    "Code Complete" => [%{"transition" => "Done", "to" => "Done"}]
+    ]
   }
 
   # The QA / Deployment custom-field IDs default to LeoTech's verified VR

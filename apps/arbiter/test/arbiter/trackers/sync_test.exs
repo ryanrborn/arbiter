@@ -329,14 +329,13 @@ defmodule Arbiter.Trackers.SyncTest do
       assert summons.body =~ "status_map"
     end
 
-    test "a planned hop's transition missing from the live workflow raises an escalation (bd-77yl45)" do
+    test "a planned hop with no live transition to its destination raises an escalation (bd-77yl45)" do
       # Backlog -> In Progress requires two hops via the default transition
-      # graph ("To do next" then "Start work"). The live workflow no longer
-      # offers "To do next" from Backlog (e.g. renamed upstream) — BFS still
-      # plans a path, but executing the first hop can't find that transition
-      # by name. This is exactly the dispatch-time swallow from bd-77yl45:
-      # find_transition_id/2 builds a precise, actionable error, but it never
-      # reached the mailbox.
+      # graph (Backlog -> "To Do" -> "In Progress"). Nothing in the live
+      # workflow lands on "To Do" from Backlog, so BFS still plans the route
+      # but the first hop has no transition to invoke. This is exactly the
+      # dispatch-time swallow from bd-77yl45: hop_transition_id/2 builds a
+      # precise, actionable error, but it never reached the mailbox.
       ws = jira_workspace(%{"in_progress" => "In Progress"})
       issue = jira_issue(ws)
 
@@ -346,7 +345,9 @@ defmodule Arbiter.Trackers.SyncTest do
           |> Plug.Conn.put_status(200)
           |> Req.Test.json(%{
             "transitions" => [
-              %{"id" => "1", "name" => "What's Next", "to" => %{"name" => "To Do"}}
+              # Lands on "Icebox", not on the planned hop's "To Do" — so the
+              # *first* hop is the dead one.
+              %{"id" => "1", "name" => "Put on ice", "to" => %{"name" => "Icebox"}}
             ]
           })
         else
@@ -365,7 +366,10 @@ defmodule Arbiter.Trackers.SyncTest do
       assert summons.to_ref == "coordinator"
       assert summons.directive_ref == issue.id
       assert summons.subject =~ "tracker sync failed"
-      assert summons.body =~ "To do next"
+      # The message names the unreachable destination status and the kind —
+      # :transition_unavailable is deliberately NOT in @benign_kinds.
+      assert summons.body =~ "To Do"
+      assert summons.body =~ "transition_unavailable"
     end
 
     test "a benign unmapped event is skipped without an escalation" do

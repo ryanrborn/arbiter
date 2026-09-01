@@ -438,7 +438,10 @@ defmodule Arbiter.Trackers.JiraTest do
         end
       end)
 
-      assert {:error, %Error{kind: :transition_not_found} = err} =
+      # :transition_unavailable, NOT :transition_not_found — the latter is a
+      # github/gitlab/linear kind and is in Sync's @benign_kinds, so asserting
+      # it here would document the very swallow bd-77yl45 fixed.
+      assert {:error, %Error{kind: :transition_unavailable} = err} =
                Jira.transition(@ref, :in_progress)
 
       assert err.message =~ "To Do"

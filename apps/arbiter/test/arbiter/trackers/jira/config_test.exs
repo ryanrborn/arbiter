@@ -54,7 +54,7 @@ defmodule Arbiter.Trackers.Jira.ConfigTest do
       assert cfg.transition_graph == %{"Backlog" => [%{"to" => "To Do"}]}
     end
 
-    test "the shipped default routes Backlog to In Progress without naming a dead end" do
+    test "the shipped default routes Backlog to In Progress, every edge declaring a destination" do
       cfg = resolve!(%{})
       graph = cfg.transition_graph
 
@@ -67,6 +67,20 @@ defmodule Arbiter.Trackers.Jira.ConfigTest do
                Arbiter.Trackers.Jira.plan_transition_path(graph, "Backlog", "In Progress")
 
       assert Enum.map(hops, & &1["to"]) == ["To Do", "In Progress"]
+    end
+
+    test "the shipped default does not fabricate a Code Complete -> Done edge" do
+      # No VR transition from Code Complete lands on Done, so claiming that hop
+      # would fail as :transition_unavailable ("the route is stale") when the
+      # truth is :no_transition_path ("there is no route"). Routing Code
+      # Complete onward through the deploy pipeline is bd-c4cfuv.
+      cfg = resolve!(%{})
+      graph = cfg.transition_graph
+
+      refute Map.has_key?(graph, "Code Complete")
+
+      assert {:error, %Arbiter.Trackers.Jira.Error{kind: :no_transition_path}} =
+               Arbiter.Trackers.Jira.plan_transition_path(graph, "Code Complete", "Done")
     end
   end
 end
