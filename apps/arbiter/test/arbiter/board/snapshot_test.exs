@@ -552,6 +552,130 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
+  # bd-8jixav: a task's own `:awaiting_review` row and a subordinate
+  # `:fixpass` / `:conflict` pass's `:failed` row are BOTH in
+  # `@waiting_statuses`, so one task rendered as two cards in the Waiting
+  # column — read at a glance as two different stuck tickets.
+  describe "waiting column, one card per task" do
+    test "a subordinate pass does not add a second card for the same task" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting_review, %{
+              mr_ref: "!42",
+              step_started_at: @yesterday
+            }),
+            worker("bd-a", :failed, %{
+              registry_key: "bd-a:fixpass",
+              role: :fix_pass,
+              step_started_at: @now,
+              meta: %{stop_reason: %{category: :exited_without_done, summary: "fix pass died"}}
+            })
+          ]
+        )
+
+      assert ids(board.waiting) == ["bd-a"]
+    end
+
+    test "the primary row's fields win over the subordinate pass's" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :failed, %{
+              registry_key: "bd-a:conflict",
+              role: :conflict,
+              step_started_at: @now
+            }),
+            worker("bd-a", :awaiting_review, %{
+              mr_ref: "!42",
+              merger_url: "https://example.test/42",
+              step_started_at: @yesterday
+            })
+          ]
+        )
+
+      assert [%{id: "bd-a", status: :awaiting_review, mr_ref: "!42", since: @yesterday}] =
+               board.waiting
+    end
+
+    test "a subordinate pass with no primary row still gets its own card" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :failed, %{registry_key: "bd-a:fixpass", role: :fix_pass})
+          ]
+        )
+
+      assert [%{id: "bd-a", status: :failed}] = board.waiting
+    end
+
+    test "distinct tasks are never collapsed" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting_review, %{mr_ref: "!1", step_started_at: @yesterday}),
+            worker("bd-b", :awaiting_review, %{mr_ref: "!2", step_started_at: @now})
+          ]
+        )
+
+      assert ids(board.waiting) == ["bd-a", "bd-b"]
+    end
+  end
+
+  # bd-8jixav: a Watchdog is a :temporary child — when it crashes it is gone
+  # for good, silently, and the parked card looks exactly like a healthy one.
+  describe "watchdog liveness on a waiting card" do
+    test "an :awaiting_review card whose watchdog is gone says so, and flags for a human" do
+      board =
+        derive(
+          workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!42"})],
+          watchdog_live: MapSet.new()
+        )
+
+      assert [%{id: "bd-a", watchdog_alive: false, needs_you: true}] = board.waiting
+    end
+
+    test "an :awaiting_review card with a live watchdog is unflagged and marked alive" do
+      board =
+        derive(
+          workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!42"})],
+          watchdog_live: MapSet.new(["bd-a"])
+        )
+
+      assert [%{id: "bd-a", watchdog_alive: true, needs_you: false}] = board.waiting
+    end
+
+    # A :failed / :awaiting worker has no MR and is not supposed to have a
+    # Watchdog, so "no watchdog" is not a finding about it.
+    test "a non-review park reports liveness as unknown, not missing" do
+      board =
+        derive(
+          workers: [worker("bd-a", :failed, %{})],
+          watchdog_live: MapSet.new()
+        )
+
+      assert [%{id: "bd-a", watchdog_alive: nil}] = board.waiting
+    end
+
+    # `derive/1` is pure: liveness is a Registry read, so it is an *input*.
+    # Callers that don't supply it get "unknown" rather than a false alarm.
+    test "omitting the liveness input reports unknown rather than missing" do
+      board = derive(workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!42"})])
+
+      assert [%{id: "bd-a", watchdog_alive: nil, needs_you: false}] = board.waiting
+    end
+
+    test "an orphaned issue card carries the field too, as unknown" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{status: :in_progress, updated_at: @yesterday})],
+          watchdog_live: MapSet.new()
+        )
+
+      assert [%{id: "bd-a", watchdog_alive: nil}] = board.waiting
+    end
+  end
+
   # The flag is not "which status" — it is "has the system run out of things to
   # try on its own", read off each Waiting card.
   defp flags(board), do: Map.new(board.waiting, &{&1.id, &1.needs_you})

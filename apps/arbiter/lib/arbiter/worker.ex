@@ -236,6 +236,14 @@ defmodule Arbiter.Worker do
   @resume_backoff_default_base_ms 1_000
   @resume_backoff_max_ms 30_000
 
+  # Ceiling on `restart_watchdog/1`'s call into the worker (bd-8jixav). The
+  # worker is parked at `:awaiting_review` — idle by definition — but the
+  # handler runs `Mergers.prepare_with_repo/2`, which for a hosted forge
+  # rewrites per-process adapter config and can shell out. Generous enough that
+  # a slow forge config step doesn't read as a failure; bounded so a wedged
+  # worker degrades to `{:error, :busy}` instead of taking its caller down.
+  @restart_watchdog_timeout_ms 15_000
+
   # Ceiling on `start_or_reap_terminal/1`'s stop of a terminal worker. Its
   # `terminate/2` only finalizes a run row and flushes session usage, so this is
   # generous; the point is that a wedged teardown can't block a merge-queue tick.
@@ -416,6 +424,71 @@ defmodule Arbiter.Worker do
     case whereis(task_id) do
       nil -> nil
       pid -> state(pid)
+    end
+  end
+
+  @doc """
+  Mint a **fresh** `Arbiter.Worker.Watchdog` for a worker parked at
+  `:awaiting_review` whose Watchdog is no longer running (bd-8jixav).
+
+  A Watchdog is a `:temporary` child: if it crashes it is gone for good, with
+  no notification and no supervisor restart. The worker stays parked at
+  `:awaiting_review` with a genuinely-open MR that nothing is polling, and the
+  board renders it identically to a healthily-parked one. This is the
+  recovery.
+
+  It is *not* `Watchdog.retry_auto_resolve/1`, which messages an
+  already-running Watchdog to re-arm its auto-resolve budget and is a no-op
+  (`{:error, :not_found}`) once the process is gone. Nor is it
+  `Dispatch.resume/2`, which stops the worker and re-runs the whole review
+  gate from round 1 at real cost — here the MR is fine and only the watcher
+  died.
+
+  The new Watchdog is built by the same `build_watchdog_opts/3` the original
+  used, from the worker's own live state (`mr_ref`, `merger_adapter`, `repo`,
+  `workspace_id`) plus the `:watchdog_opts` slice recorded in meta when the MR
+  was opened — so the replacement watches the same MR on the same lane, and
+  starts its poll count from scratch.
+
+  Returns:
+
+    * `:ok` — a fresh Watchdog is registered and polling.
+    * `{:error, :no_worker}` — no worker is registered for `task_id`. Nothing
+      to attach a Watchdog to; the task needs a dispatch/resume, not this.
+    * `{:error, {:not_parked, status}}` — the worker is alive but not parked
+      at `:awaiting_review`, so there is no open MR for a Watchdog to watch.
+    * `{:error, :already_running}` — a Watchdog is already live for this task.
+      Refused rather than stacked: two Watchdogs polling one MR would race on
+      the merge and double-dispatch fix passes. The `<task_id>:watchdog`
+      registry name makes this atomic — a start that loses the race is
+      rejected by the registry, not by the (racy) liveness pre-check.
+    * `{:error, :no_mr_ref}` / `{:error, :no_adapter}` — the worker parked
+      without recording what to watch (shouldn't happen; surfaced rather than
+      papered over).
+    * `{:error, {:start_failed, reason}}` — `Watchdog.start/1` refused.
+    * `{:error, :busy}` — the worker didn't answer in time.
+  """
+  @spec restart_watchdog(ref()) ::
+          :ok
+          | {:error,
+             :no_worker
+             | :already_running
+             | :no_mr_ref
+             | :no_adapter
+             | :busy
+             | {:not_parked, atom()}
+             | {:start_failed, term()}}
+  def restart_watchdog(pid) when is_pid(pid) do
+    GenServer.call(pid, :restart_watchdog, @restart_watchdog_timeout_ms)
+  catch
+    :exit, {:timeout, _} -> {:error, :busy}
+    :exit, _ -> {:error, :no_worker}
+  end
+
+  def restart_watchdog(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> {:error, :no_worker}
+      pid -> restart_watchdog(pid)
     end
   end
 
@@ -1325,6 +1398,10 @@ defmodule Arbiter.Worker do
 
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
+
+  # bd-8jixav: see `restart_watchdog/1`.
+  def handle_call(:restart_watchdog, _from, %State{} = state),
+    do: {:reply, do_restart_watchdog(state), state}
 
   # bd-2aslx6: see `agent_session_live?/1`.
   def handle_call(:agent_session_live?, _from, %State{claude_sessions: sessions} = state) do
@@ -2639,7 +2716,10 @@ defmodule Arbiter.Worker do
         mr_ref: pr_ref,
         merger_url: merger_url,
         merger_adapter: adapter,
-        step_started_at: DateTime.utc_now()
+        step_started_at: DateTime.utc_now(),
+        # bd-8jixav: remember the lane this Watchdog is started on, so
+        # `restart_watchdog/1` can mint an identical replacement if it dies.
+        meta: record_watchdog_opts(state.meta, opts)
     }
 
     watchdog_ok? =
@@ -4898,6 +4978,9 @@ defmodule Arbiter.Worker do
           state.meta
           |> Map.put(:mr_ref, mr_ref)
           |> Map.put(:merger_url, merger_url)
+          # bd-8jixav: remember the lane this Watchdog is started on, so
+          # `restart_watchdog/1` can mint an identical replacement if it dies.
+          |> record_watchdog_opts(opts)
     }
 
     # Guard: MR already exists on the forge. Watchdog startup failure must
@@ -5296,34 +5379,7 @@ defmodule Arbiter.Worker do
   end
 
   defp do_start_watchdog(%State{} = state, workspace, opts) do
-    via_review_gate = Map.get(opts, :via_review_gate, false)
-
-    auto_merge =
-      cond do
-        Map.get(opts, :force_merge, false) -> true
-        Map.has_key?(opts, :auto_merge) -> Map.fetch!(opts, :auto_merge)
-        true -> workspace_auto_merge?(workspace)
-      end
-
-    watchdog_opts =
-      [
-        task_id: state.task_id,
-        worker: self(),
-        mr_ref: state.mr_ref,
-        adapter: state.merger_adapter,
-        workspace: workspace,
-        repo: state.repo,
-        auto_merge: auto_merge,
-        via_review_gate: via_review_gate
-      ]
-      |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
-      |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
-      |> maybe_opt(
-        :max_polls,
-        Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace)
-      )
-
-    case Arbiter.Worker.Watchdog.start(watchdog_opts) do
+    case Arbiter.Worker.Watchdog.start(build_watchdog_opts(state, workspace, opts)) do
       {:ok, _pid} ->
         :ok
 
@@ -5342,6 +5398,140 @@ defmodule Arbiter.Worker do
         :error
     end
   end
+
+  # The full opt list handed to `Watchdog.start/1`. Split out of
+  # `do_start_watchdog/3` (bd-8jixav) so the restart path builds the *same*
+  # lane from the *same* code rather than a parallel reconstruction that can
+  # drift: a restarted Watchdog differing from the original in `auto_merge` or
+  # `via_review_gate` is worse than no Watchdog at all.
+  #
+  # `worker: self()` is deliberate — every caller runs inside the worker
+  # process, and the Watchdog monitors that pid.
+  defp build_watchdog_opts(%State{} = state, workspace, opts) do
+    via_review_gate = Map.get(opts, :via_review_gate, false)
+
+    auto_merge =
+      cond do
+        Map.get(opts, :force_merge, false) -> true
+        Map.has_key?(opts, :auto_merge) -> Map.fetch!(opts, :auto_merge)
+        true -> workspace_auto_merge?(workspace)
+      end
+
+    [
+      task_id: state.task_id,
+      worker: self(),
+      mr_ref: state.mr_ref,
+      adapter: state.merger_adapter,
+      workspace: workspace,
+      repo: state.repo,
+      auto_merge: auto_merge,
+      via_review_gate: via_review_gate
+    ]
+    |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
+    |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
+    |> maybe_opt(
+      :max_polls,
+      Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace)
+    )
+  end
+
+  # The slice of the MR-open-time `opts` a later Watchdog restart cannot
+  # re-derive from the worker's own state or the workspace config (bd-8jixav).
+  #
+  # `:via_review_gate` is the one that matters in production: it records *how*
+  # this MR was approved — the ReviewGate already approved it, so no
+  # hosted-forge approval is ever coming — and nothing durable stores that
+  # fact. A restart that guessed `false` would mint a Watchdog that parks
+  # forever waiting on an approval that never arrives, which is the vs-3vlaqi
+  # failure mode wearing a different hat. The rest are advanced/test overrides,
+  # replayed for the same reason.
+  #
+  # Deliberately an allowlist: `:watchdog_start_error` (the test escape hatch
+  # that simulates a startup failure) must never be replayed, or a restart of
+  # exactly the worker that hit it would be a guaranteed no-op.
+  @watchdog_restart_opt_keys [
+    :via_review_gate,
+    :force_merge,
+    :auto_merge,
+    :interval_ms,
+    :initial_delay_ms,
+    :max_polls
+  ]
+
+  defp record_watchdog_opts(meta, opts) when is_map(opts),
+    do: Map.put(meta || %{}, :watchdog_opts, Map.take(opts, @watchdog_restart_opt_keys))
+
+  # bd-8jixav: mint a fresh Watchdog for a worker parked at `:awaiting_review`
+  # whose Watchdog is gone. Runs inside the worker process so `self()` is the
+  # pid the new Watchdog monitors, and so the MR ref / adapter come from live
+  # state rather than a guess.
+  defp do_restart_watchdog(%State{status: :awaiting_review, task_id: task_id} = state) do
+    cond do
+      not (is_binary(state.mr_ref) and state.mr_ref != "") ->
+        {:error, :no_mr_ref}
+
+      is_nil(state.merger_adapter) ->
+        {:error, :no_adapter}
+
+      # Cheap pre-check for a clear answer. It is NOT the safety guard — the
+      # Watchdog registers under a `<task_id>:watchdog` via-tuple, so a racing
+      # second start loses the name atomically and comes back
+      # `{:already_started, pid}` below. Two live Watchdogs on one MR cannot
+      # happen even if this check reads stale.
+      is_pid(Arbiter.Worker.Watchdog.whereis(task_id)) ->
+        {:error, :already_running}
+
+      true ->
+        start_replacement_watchdog(state)
+    end
+  end
+
+  defp do_restart_watchdog(%State{status: status}), do: {:error, {:not_parked, status}}
+
+  defp start_replacement_watchdog(%State{} = state) do
+    workspace = load_workspace(state.workspace_id)
+    opts = Map.get(state.meta || %{}, :watchdog_opts) || %{}
+
+    Arbiter.Mergers.prepare_with_repo(workspace, state.repo)
+
+    case Arbiter.Worker.Watchdog.start(build_watchdog_opts(state, workspace, opts)) do
+      {:ok, _pid} ->
+        Logger.info(
+          "Worker: restarted Watchdog for task=#{state.task_id} mr=#{state.mr_ref} " <>
+            "(opts=#{inspect(opts)})"
+        )
+
+        :ok
+
+      # `init/1` returns :ignore only when the worker pid is dead — impossible
+      # here (we ARE that pid), but map it honestly rather than claiming :ok.
+      :ignore ->
+        {:error, :no_worker}
+
+      {:error, {:already_started, _pid}} ->
+        {:error, :already_running}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: Watchdog restart failed for task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        {:error, {:start_failed, reason}}
+    end
+  rescue
+    e -> {:error, {:start_failed, Exception.message(e)}}
+  end
+
+  defp load_workspace(id) when is_binary(id) and id != "" do
+    case Ash.get(Arbiter.Tasks.Workspace, id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp load_workspace(_), do: nil
 
   # An MR was opened but the Watchdog failed to start. The worker stays at
   # :awaiting_review (the MR is real and must not be discarded), but the coordinator

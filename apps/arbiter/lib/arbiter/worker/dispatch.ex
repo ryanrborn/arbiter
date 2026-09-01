@@ -75,6 +75,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
+  alias Arbiter.Worker.Watchdog
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.CodeReview
@@ -403,7 +404,22 @@ defmodule Arbiter.Worker.Dispatch do
   failed was some other pass running alongside it (see `Arbiter.Worker.subordinate?/1`).
   """
   @spec worker_active_message(atom(), String.t()) :: String.t()
-  def worker_active_message(:awaiting_review_gate, task_id) do
+  def worker_active_message(status, task_id),
+    do: worker_active_message(status, task_id, Watchdog.alive?(task_id))
+
+  @doc """
+  `worker_active_message/2` with the Watchdog-liveness answer supplied rather
+  than looked up.
+
+  bd-8jixav: the `:awaiting_review` wording used to assert "the watchdog is
+  polling it to completion" from nothing but the worker's static status. A
+  Watchdog is a `:temporary` child — when it crashes it is gone silently — so
+  for the abandoned task that motivated this ticket the sentence an operator
+  read was the precise opposite of the truth, for hours. Only
+  `:awaiting_review` consults the flag; every other status is unaffected.
+  """
+  @spec worker_active_message(atom(), String.t(), boolean()) :: String.t()
+  def worker_active_message(:awaiting_review_gate, task_id, _watchdog_alive?) do
     "#{task_id}'s worker is parked at awaiting_review_gate — the review gate is " <>
       "judging its diff right now. It is not stalled and must not be stopped: " <>
       "stopping it discards the review in flight and the next dispatch restarts " <>
@@ -411,7 +427,16 @@ defmodule Arbiter.Worker.Dispatch do
       "a subordinate pass (`#{task_id}:fixpass` / `:conflict`) if something else failed."
   end
 
-  def worker_active_message(:awaiting_review, task_id) do
+  def worker_active_message(:awaiting_review, task_id, false) do
+    "#{task_id}'s worker is parked at awaiting_review with its MR/PR open, but " <>
+      "no watchdog is running for it — nothing is polling that MR, and nothing " <>
+      "will move this task on its own. Re-attach one with " <>
+      "`arb queue restart-watchdog #{task_id}` (cheap: it watches the existing " <>
+      "MR and does not re-run the review gate). Resuming instead would stop the " <>
+      "worker and restart the whole gate from round 1."
+  end
+
+  def worker_active_message(:awaiting_review, task_id, _watchdog_alive?) do
     "#{task_id}'s worker is parked at awaiting_review — its MR/PR is open and the " <>
       "watchdog is polling it to completion. It is not stalled and must not be " <>
       "stopped: stopping it drops the watchdog and the next dispatch re-runs the " <>
@@ -419,7 +444,7 @@ defmodule Arbiter.Worker.Dispatch do
       "pass (`#{task_id}:fixpass` / `:conflict`) if something else failed."
   end
 
-  def worker_active_message(status, _task_id),
+  def worker_active_message(status, _task_id, _watchdog_alive?),
     do: "a worker is still active for this task (#{status}); stop it before resuming"
 
   @doc """

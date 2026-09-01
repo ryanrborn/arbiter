@@ -378,6 +378,50 @@ defmodule Arbiter.Worker.Watchdog do
     do: PRegistry.whereis(task_id <> @watchdog_registry_suffix)
 
   @doc """
+  Is a Watchdog currently running for `task_id`?
+
+  The proactive liveness signal (bd-8jixav). A Watchdog is a `:temporary`
+  child: when it crashes it is gone for good, with no supervisor restart and
+  no notification, while the worker stays parked at `:awaiting_review` holding
+  a genuinely-open MR. Nothing about that state looks different from a
+  healthily-parked one until somebody tries an action against it, so the board
+  and the worker detail page read this to say so out loud.
+  """
+  @spec alive?(String.t()) :: boolean()
+  def alive?(task_id) when is_binary(task_id), do: is_pid(whereis(task_id))
+
+  @doc """
+  Mint a **fresh** Watchdog for a task whose Watchdog has died, attached to
+  the MR its worker already has open (bd-8jixav).
+
+  Delegates to `Arbiter.Worker.restart_watchdog/1`, which runs inside the
+  parked worker process — the one place that holds the MR ref, the resolved
+  adapter and the lane the original Watchdog was started on. See that
+  function for the full return contract.
+
+  This is a distinct capability from the two neighbouring recoveries, not a
+  variant of either:
+
+    * `retry_auto_resolve/1` (bd-bspakl) re-arms an *already-running*
+      Watchdog's exhausted auto-resolve budget. Once the process is gone it
+      answers `{:error, :not_found}` and can do nothing.
+    * `Arbiter.Worker.Dispatch.resume/2` restarts the whole worker, which
+      re-runs the review gate from round 1 at real cost. Here the MR is fine
+      and only the watcher died, so that is a large bill for a small problem.
+  """
+  @spec restart(String.t()) ::
+          :ok
+          | {:error,
+             :no_worker
+             | :already_running
+             | :no_mr_ref
+             | :no_adapter
+             | :busy
+             | {:not_parked, atom()}
+             | {:start_failed, term()}}
+  def restart(task_id) when is_binary(task_id), do: Worker.restart_watchdog(task_id)
+
+  @doc """
   Registry key suffix the Watchdog registers under, so callers that need to
   recognize a `<task_id><suffix>` registry key (e.g. `Driver.blocking_workers/1`
   exempting the Watchdog from worktree ownership) don't have to hardcode it.
