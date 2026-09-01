@@ -57,9 +57,11 @@ defmodule Arbiter.Trackers.Jira do
 
   A lifecycle event with no `status_map` entry yields `:status_unmapped` (a
   benign "this tracker doesn't model that" skip); a *mapped* target that can't
-  be reached yields `:no_transition_path` / `:transition_not_found`, which the
-  sync layer surfaces loudly. See `Arbiter.Trackers.Jira.Config` and
-  `Arbiter.Trackers.Sync`.
+  be reached yields `:no_transition_path` (BFS found no path in the configured
+  graph) or `:transition_unavailable` (BFS planned a path, but a hop's named
+  transition isn't in the live workflow when executed — e.g. renamed
+  upstream), both of which the sync layer surfaces loudly. See
+  `Arbiter.Trackers.Jira.Config` and `Arbiter.Trackers.Sync`.
 
   ## Tests
 
@@ -917,7 +919,7 @@ defmodule Arbiter.Trackers.Jira do
       _ ->
         {:error,
          %Error{
-           kind: :transition_not_found,
+           kind: :transition_unavailable,
            status: nil,
            message:
              "no Jira transition to #{inspect(hop["to"])} available in current state; " <>
