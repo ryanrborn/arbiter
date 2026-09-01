@@ -216,7 +216,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
          socket
          |> put_flash(
            :info,
-           "Re-armed auto-resolve for #{task_id}; a fresh fix-pass is starting."
+           "Re-armed auto-resolve for #{task_id}; a fresh fix-pass will start on the next watchdog poll."
          )
          |> refresh_all()}
 
@@ -234,6 +234,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
            socket,
            :error,
            "#{task_id} isn't parked on an exhausted CI-failed block yet — nothing to re-arm."
+         )}
+
+      {:error, :busy} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{task_id}'s watchdog is busy polling — try again in a moment."
          )}
     end
   end
@@ -418,7 +426,11 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # flow this action targets. `parked_on/1` is authoritative and needs no
   # such inference.
   defp retry_auto_resolve_available?(task_id, %{status: :awaiting_review}) do
-    Watchdog.parked_on(task_id) == :ci_failed
+    # `:busy` (mid-poll, `parked_on/1` timed out) is treated as available
+    # rather than hidden: hiding it would make the button flicker out at
+    # exactly the moment an operator is likely to reach for it, and clicking
+    # through to a busy Watchdog surfaces a clear "try again" flash instead.
+    Watchdog.parked_on(task_id) in [:ci_failed, :busy]
   end
 
   defp retry_auto_resolve_available?(_task_id, _snapshot), do: false

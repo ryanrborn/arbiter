@@ -392,10 +392,12 @@ defmodule Arbiter.Worker.Watchdog do
   Once exhausted, `handle_block/3` never calls `auto_resolve/3` again on its
   own — by design, so a structurally-broken PR can't burn cost forever. This
   is the supported external trigger for a human to say "try once more": it
-  bumps this episode's budget by exactly one attempt and immediately re-polls,
-  which re-invokes the ordinary `resolve_ci_failed/2` path (dispatching a
-  fresh fix-pass worker) if the block is still `:ci_failed`, or picks up
-  whatever the MR's current state actually is otherwise.
+  bumps this episode's budget by exactly one attempt. The already-pending
+  poll timer picks this up within `interval_ms` (no immediate poll is fired
+  — see the comment in the `:retry_auto_resolve` handle_call clause), which
+  re-invokes the ordinary `resolve_ci_failed/2` path (dispatching a fresh
+  fix-pass worker) if the block is still `:ci_failed`, or picks up whatever
+  the MR's current state actually is otherwise.
 
   No cap on how many times a human calls this — they're presumably watching
   and will notice non-convergence — but it is never called automatically; the
@@ -412,15 +414,21 @@ defmodule Arbiter.Worker.Watchdog do
     * `{:error, :not_parked_on_ci_failed}` — the Watchdog isn't parked on an
       exhausted `:ci_failed` block (e.g. still running, or parked for a
       different reason), so there is nothing to re-arm.
+    * `{:error, :busy}` — the Watchdog is running (e.g. mid-poll) and didn't
+      reply within the call timeout. This is *not* the same as "not found":
+      the `:retry_auto_resolve` message is still queued in its mailbox and
+      will be processed once it's free, so retrying immediately can stack
+      more than one bump. Wait and check `parked_on/1` before retrying.
   """
   @spec retry_auto_resolve(String.t()) ::
-          :ok | {:error, :not_found | :not_parked_on_ci_failed}
+          :ok | {:error, :not_found | :not_parked_on_ci_failed | :busy}
   def retry_auto_resolve(task_id) when is_binary(task_id) do
     case whereis(task_id) do
       nil -> {:error, :not_found}
       pid -> GenServer.call(pid, :retry_auto_resolve, 1_000)
     end
   catch
+    :exit, {:timeout, _} -> {:error, :busy}
     :exit, _ -> {:error, :not_found}
   end
 
@@ -432,14 +440,21 @@ defmodule Arbiter.Worker.Watchdog do
   This is the authoritative signal for whether `retry_auto_resolve/1` would
   accept a re-arm — unlike `effective_block_reason/1`, which infers from the
   forge's own approval state and can't see a ReviewGate-driven park (bd-bspakl).
+
+  Returns `:busy` (rather than `nil`) if the Watchdog is registered but didn't
+  reply within the call timeout (e.g. mid-poll) — callers deciding whether to
+  show a "Retry auto-resolve" affordance should treat `:busy` as "don't know
+  yet, don't hide it" rather than "not parked", since a `nil` here would make
+  the button flicker out at exactly the moment an operator needs it.
   """
-  @spec parked_on(String.t()) :: block_reason() | nil
+  @spec parked_on(String.t()) :: block_reason() | :busy | nil
   def parked_on(task_id) when is_binary(task_id) do
     case whereis(task_id) do
       nil -> nil
       pid -> GenServer.call(pid, :parked_on, 1_000)
     end
   catch
+    :exit, {:timeout, _} -> :busy
     :exit, _ -> nil
   end
 
@@ -627,7 +642,7 @@ defmodule Arbiter.Worker.Watchdog do
 
     state = %{
       state
-      | max_auto_resolve_attempts: state.max_auto_resolve_attempts + 1,
+      | max_auto_resolve_attempts: state.auto_resolve_attempts + 1,
         unresolved_escalated: false,
         last_escalated_poll: state.poll_count
     }

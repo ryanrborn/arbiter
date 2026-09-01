@@ -666,6 +666,28 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute has_element?(view, "#worker-retry-auto-resolve-btn")
     end
 
+    test "clicking Retry auto-resolve re-arms the Watchdog and reports the next-poll timing accurately",
+         %{conn: conn, ws: ws} do
+      ws = set_max_auto_resolve_attempts(ws, 0)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-retry-flash", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      html = render_click(view, "retry_auto_resolve")
+
+      # Pins the accurate claim (round-1 review: the old copy claimed "a
+      # fresh fix-pass is starting" / "a poll fired now", which is false —
+      # `handle_call(:retry_auto_resolve, ...)` deliberately does not
+      # schedule an immediate poll, so the fix-pass only starts once the
+      # already-pending poll timer next fires).
+      assert html =~ "will start on the next watchdog poll"
+      refute html =~ "is starting"
+    end
+
     test "the retry_auto_resolve event shows a friendly error when nothing is parked",
          %{conn: conn, ws: ws} do
       # The button itself no longer renders unless the Watchdog is genuinely

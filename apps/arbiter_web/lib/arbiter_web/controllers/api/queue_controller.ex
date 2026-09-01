@@ -86,6 +86,9 @@ defmodule ArbiterWeb.Api.QueueController do
         {:error,
          {:invalid_request,
           "task #{task_id} isn't parked on an exhausted :ci_failed block — nothing to re-arm"}}
+
+      {:error, :busy} ->
+        {:error, {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
     end
   end
 

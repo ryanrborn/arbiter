@@ -48,6 +48,18 @@ defmodule ArbiterCli.Cmd.QueueTest do
       assert err =~ "no merge watchdog is currently running"
     end
 
+    test "reports a friendly error when the watchdog is busy (mid-poll)" do
+      stub_routes([
+        {{"post", "/api/queue/bd-5/retry_auto_resolve"},
+         {%{"error" => %{"message" => "busy"}}, 503}}
+      ])
+
+      {_out, err, exit_code} = capture(fn -> Queue.run(["retry-auto-resolve", "bd-5"]) end)
+
+      assert exit_code != 0
+      assert err =~ "busy polling"
+    end
+
     test "retry_auto_resolve (underscored) is still accepted as an alias" do
       stub_routes([
         {{"post", "/api/queue/bd-4/retry_auto_resolve"},

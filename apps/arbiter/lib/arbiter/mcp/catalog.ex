@@ -1936,10 +1936,10 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Re-arm one more auto-resolve attempt on a task's merge Watchdog after it has " <>
           "exhausted max_auto_resolve_attempts on a :ci_failed block and parked indefinitely " <>
-          "(bd-bspakl). Bumps this episode's budget by exactly one attempt and re-polls " <>
-          "immediately, which dispatches a fresh fix-pass worker if the block is still " <>
-          "ci_failed. Use after an 'auto-resolve exhausted' escalation in the coordinator " <>
-          "inbox, when you've confirmed a fresh fix-pass is worth trying.",
+          "(bd-bspakl). Bumps this episode's budget by exactly one attempt; the next " <>
+          "watchdog poll (within its poll interval) dispatches a fresh fix-pass worker if " <>
+          "the block is still ci_failed. Use after an 'auto-resolve exhausted' escalation " <>
+          "in the coordinator inbox, when you've confirmed a fresh fix-pass is worth trying.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

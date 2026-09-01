@@ -738,7 +738,52 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert :sys.get_state(wpid).max_auto_resolve_attempts == 1
     end
 
-    test "parked_on/1 and retry_auto_resolve/1 degrade to a safe result instead of crashing the caller when the Watchdog is unresponsive" do
+    test "a duplicate re-arm delivered before the next poll is a no-op, not a stack" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rar6", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      wpid =
+        start_watchdog(pid, task_id, "!rar6",
+          auto_merge: true,
+          max_auto_resolve_attempts: 1,
+          max_polls: 1000,
+          interval_ms: 15,
+          fix_pass_dispatcher: StubFixPassDispatcher,
+          workspace: test_workspace()
+        )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed end)
+
+      # Suspend the Watchdog so neither the pending poll timer nor either
+      # `:retry_auto_resolve` call can be processed until we resume — this
+      # deterministically reproduces a late/duplicate re-arm delivery
+      # (round-1 review: e.g. a caller that saw a false :not_found on
+      # timeout and retried) landing back-to-back before any poll has run,
+      # rather than relying on both calls racing a real 15ms poll interval.
+      :sys.suspend(wpid)
+
+      on_exit(fn ->
+        if Process.alive?(wpid), do: :sys.resume(wpid)
+      end)
+
+      task1 = Task.async(fn -> Watchdog.retry_auto_resolve(task_id) end)
+      task2 = Task.async(fn -> Watchdog.retry_auto_resolve(task_id) end)
+      # Give both calls time to land in the Watchdog's mailbox before resuming.
+      Process.sleep(50)
+
+      :sys.resume(wpid)
+
+      assert Task.await(task1) == :ok
+      assert Task.await(task2) == :ok
+
+      # Both calls were queued before either was processed (attempts is
+      # still 1, matching the pre-bump budget for both), so the budget must
+      # land at 2, not stack to 3.
+      assert :sys.get_state(wpid).max_auto_resolve_attempts == 2
+    end
+
+    test "parked_on/1 and retry_auto_resolve/1 report :busy (not :not_found) when the Watchdog is unresponsive" do
       {pid, task_id} = running_worker()
       StubMerger.queue_get("!rar5", [%{status: :open, approved: true, block_reason: :ci_failed}])
 
@@ -752,15 +797,19 @@ defmodule Arbiter.Worker.WatchdogTest do
 
       # Simulate a Watchdog wedged in a long-running poll (e.g. dispatching a
       # fresh fix-pass) that can't answer a GenServer.call within the 1s
-      # budget these reads use.
+      # budget these reads use. A timeout does not cancel delivery — the
+      # call stays queued in the Watchdog's mailbox and is processed once it
+      # frees up — so this must NOT be reported the same as :not_found
+      # (round-1 review finding: a caller told :not_found would reasonably
+      # conclude nothing happened, when in fact the queued call still lands).
       :sys.suspend(wpid)
 
       on_exit(fn ->
         if Process.alive?(wpid), do: :sys.resume(wpid)
       end)
 
-      assert Watchdog.parked_on(task_id) == nil
-      assert Watchdog.retry_auto_resolve(task_id) == {:error, :not_found}
+      assert Watchdog.parked_on(task_id) == :busy
+      assert Watchdog.retry_auto_resolve(task_id) == {:error, :busy}
 
       :sys.resume(wpid)
     end

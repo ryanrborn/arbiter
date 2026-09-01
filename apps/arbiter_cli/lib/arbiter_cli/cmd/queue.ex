@@ -85,7 +85,10 @@ defmodule ArbiterCli.Cmd.Queue do
         if mode == :json do
           IO.puts(Jason.encode!(body))
         else
-          IO.puts("Re-armed: #{task_id} auto-resolve budget bumped by one and a poll fired now.")
+          IO.puts(
+            "Re-armed: #{task_id} auto-resolve budget bumped by one; the next watchdog " <>
+              "poll (within the poll interval) will dispatch a fresh fix-pass."
+          )
         end
 
       {:error, %Client.Error{kind: :http, status: 404}} ->
@@ -98,6 +101,14 @@ defmodule ArbiterCli.Cmd.Queue do
         Output.die(
           "task #{task_id} is not currently parked on an exhausted :ci_failed block " <>
             "— there is nothing to re-arm."
+        )
+
+      {:error, %Client.Error{kind: :http, status: 503}} ->
+        Output.die(
+          "task #{task_id}'s watchdog is busy polling — try again in a moment.\n" <>
+            "This request may still be delivered once the current poll finishes, so wait " <>
+            "and check the escalation clears before re-running this command — repeating it " <>
+            "immediately risks bumping the budget more than once."
         )
 
       {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
