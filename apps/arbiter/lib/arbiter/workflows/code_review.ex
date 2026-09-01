@@ -88,6 +88,8 @@ defmodule Arbiter.Workflows.CodeReview do
   use Arbiter.Workflow,
     steps: [:load_pr, :read_diff, :run_checks, :file_findings, :verdict]
 
+  require Logger
+
   alias Arbiter.Mergers
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workflows.CodeReview.{Checks, ConsumerTrace, DiffScope, LocalMode}
@@ -184,6 +186,7 @@ defmodule Arbiter.Workflows.CodeReview do
   # diff rather than guessing a base and silently producing the wrong diff.
   def run_step(:read_diff, %{mode: :adapter, worktree_path: wt} = state) when is_binary(wt) do
     with base when is_binary(base) <- Map.get(state, :base),
+         :ok <- refresh_base_ref(wt, base),
          {:ok, ref} <- resolve_base_ref(wt, base) do
       case System.cmd("git", ["-C", wt, "diff", "#{ref}...HEAD"], stderr_to_stdout: true) do
         {output, 0} -> {:ok, Map.put(state, :diff, output)}
@@ -570,6 +573,45 @@ defmodule Arbiter.Workflows.CodeReview do
     case safe_adapter_call(adapter, :get_diff, [mr_ref, opts]) do
       {:ok, diff} when is_binary(diff) -> {:ok, Map.put(state, :diff, diff)}
       {:error, _} = err -> err
+    end
+  end
+
+  # bd-ch8zbp: `Checkout.provision/2` only ever fetches the PR head SHA, so
+  # the worktree's `origin/<base>` remote-tracking ref is whatever the
+  # shared clone last happened to have — which can be many commits behind
+  # the real base on origin. Diffing against that stale ref silently pulls
+  # in every commit the local base is missing, inflating the diff by
+  # orders of magnitude (a 2-file PR read as 528 files, observed on
+  # v0.1.61). Force-refresh `origin/<base>` from origin immediately before
+  # resolving/diffing.
+  #
+  # Best-effort: any failure (offline, base branch renamed/deleted) is
+  # swallowed — `resolve_base_ref/2` then falls back to whatever ref (stale
+  # or absent) it can still find, and the caller falls back further to the
+  # adapter's REST diff if nothing resolves at all.
+  defp refresh_base_ref(wt, base) do
+    case System.cmd(
+           "git",
+           [
+             "-C",
+             wt,
+             "fetch",
+             "--no-tags",
+             "origin",
+             "+refs/heads/#{base}:refs/remotes/origin/#{base}"
+           ],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} ->
+        :ok
+
+      {output, status} ->
+        Logger.warning(
+          "bd-ch8zbp: refresh of origin/#{base} in #{wt} failed (exit #{status}): #{output} " <>
+            "— diff will fall back to whatever ref is already present, which may be stale"
+        )
+
+        :ok
     end
   end
 
