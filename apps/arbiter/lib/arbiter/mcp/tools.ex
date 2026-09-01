@@ -773,6 +773,182 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- ci_rerun / ci_mark_external (bd-5mzzww / #1448) ---------------------
+
+  @rerun_modes %{
+    "auto" => :auto,
+    "failed_jobs" => :failed_jobs,
+    "all_jobs" => :all_jobs,
+    "workflow" => :workflow
+  }
+
+  @doc """
+  Re-run CI for a task's PR, choosing the *granularity* of the re-run.
+
+  Arbiter had no CI-retry verb at all: the only retries available were whatever
+  a human clicked in the forge UI. Worse, the affordance a human reaches for
+  first — GitHub's "re-run failed jobs" — reuses every job that already
+  succeeded, so on a pipeline where the failing check tests an artifact an
+  *earlier job in the same run* built (a review app, a container image), it
+  re-tests the identical stale input and is deterministically guaranteed to fail
+  again.
+
+  Modes: `auto` (default — `Arbiter.Mergers.CIRerun.choose/1` picks the cheapest
+  re-run that could actually tell you something new), `failed_jobs`, `all_jobs`,
+  `workflow` (a fresh `workflow_dispatch`, the only mode that can carry
+  `inputs`).
+
+  Prefers the task's running Watchdog (it already holds the adapter, the PR ref
+  and the per-repo config); falls back to resolving the adapter from the task's
+  workspace when no Watchdog is running, so a PR whose Watchdog has died is
+  still retryable.
+  """
+  @spec ci_rerun(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def ci_rerun(%Scope{} = scope, args) do
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, mode} <- parse_rerun_mode(args),
+         {:ok, inputs} <- parse_rerun_inputs(args) do
+      opts =
+        %{mode: mode, inputs: inputs}
+        |> maybe_put(:workflow, fetch_string(args, "workflow"))
+
+      case Arbiter.Worker.Watchdog.rerun_ci(task_id, opts) do
+        {:ok, result} ->
+          {:ok, Map.merge(%{task_id: task_id, via: "watchdog"}, result)}
+
+        {:error, :not_found} ->
+          rerun_via_workspace(scope, args, task_id, opts)
+
+        {:error, :unsupported} ->
+          {:error, {:invalid, unsupported_rerun_message(task_id)}}
+
+        {:error, :busy} ->
+          {:error,
+           {:busy,
+            "task #{task_id}'s watchdog is busy polling — try again in a moment rather " <>
+              "than repeating the call, since the original request may still land"}}
+
+        {:error, reason} ->
+          {:error, {:invalid, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
+      end
+    end
+  end
+
+  # No live Watchdog: resolve the adapter straight off the task's workspace and
+  # re-run against the PR ref recorded on the task. This is the #1447 shape (a
+  # dead Watchdog on a genuinely-open PR) — the CI retry must not be a privilege
+  # of tasks that still happen to have a poller alive.
+  defp rerun_via_workspace(scope, args, task_id, opts) do
+    with {:ok, issue} <- fetch_task(scope, args, task_id),
+         {:ok, pr_ref} <- require_pr_ref(issue),
+         {:ok, workspace} <- fetch_workspace_for(issue) do
+      adapter = Arbiter.Mergers.for_workspace(workspace)
+
+      if function_exported?(adapter, :rerun_ci, 2) do
+        Arbiter.Mergers.prepare_with_repo(workspace, issue.repo)
+
+        case adapter.rerun_ci(pr_ref, opts) do
+          {:ok, result} ->
+            {:ok, Map.merge(%{task_id: task_id, via: "workspace"}, result)}
+
+          {:error, reason} ->
+            {:error, {:invalid, "CI re-run failed for #{task_id}: #{inspect(reason)}"}}
+        end
+      else
+        {:error, {:invalid, unsupported_rerun_message(task_id)}}
+      end
+    end
+  end
+
+  defp unsupported_rerun_message(task_id) do
+    "task #{task_id}'s merger adapter does not support re-running CI — only " <>
+      "hosted forges with a workflow API do (the `direct` strategy has no CI to re-run)"
+  end
+
+  @doc """
+  Record a "this CI failure is infrastructure, not my diff" verdict on a task
+  parked on a `:ci_failed` block, reclassifying the park as
+  `:ci_failed_external`.
+
+  A worker that works this out — "the last four runs of this workflow across
+  four unrelated branches all failed the same way, and nothing in this diff
+  touches that code" — previously had nowhere to put the conclusion but its own
+  task notes, and the Watchdog went on parking the PR under a generic
+  `:ci_failed`, indistinguishable from genuinely broken code. This gives the
+  verdict somewhere to go: the coordinator escalation reads "CI is broken
+  repo-wide, not on this branch" and carries `note` as the evidence.
+
+  `note` is required — an unevidenced verdict is not actionable, and this is
+  precisely the claim an operator will want to check before force-merging.
+  """
+  @spec ci_mark_external(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def ci_mark_external(%Scope{} = scope, args) do
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, note} <- require_string(args, "note") do
+      case Arbiter.Worker.Watchdog.mark_ci_external(task_id, note) do
+        :ok ->
+          {:ok, %{task_id: task_id, park_reason: "ci_failed_external", note: note}}
+
+        {:error, :not_found} ->
+          {:error, {:not_found, "no merge watchdog is currently running for task #{task_id}"}}
+
+        {:error, :not_parked_on_ci_failed} ->
+          {:error,
+           {:invalid,
+            "task #{task_id} is not parked on a :ci_failed block — there is no CI failure " <>
+              "to reclassify as external"}}
+
+        {:error, :busy} ->
+          {:error,
+           {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
+      end
+    end
+  end
+
+  defp parse_rerun_mode(args) do
+    case fetch_string(args, "mode") do
+      nil -> {:ok, :auto}
+      raw -> Map.fetch(@rerun_modes, raw) |> mode_result(raw)
+    end
+  end
+
+  defp mode_result({:ok, mode}, _raw), do: {:ok, mode}
+
+  defp mode_result(:error, raw) do
+    {:error,
+     {:invalid,
+      "unknown mode #{inspect(raw)} — expected one of " <>
+        (@rerun_modes |> Map.keys() |> Enum.sort() |> Enum.join(", "))}}
+  end
+
+  defp parse_rerun_inputs(args) do
+    case Map.get(args, "inputs") do
+      nil ->
+        {:ok, %{}}
+
+      inputs when is_map(inputs) ->
+        {:ok, Map.new(inputs, fn {k, v} -> {to_string(k), to_string(v)} end)}
+
+      other ->
+        {:error, {:invalid, "`inputs` must be an object of string values, got #{inspect(other)}"}}
+    end
+  end
+
+  defp require_pr_ref(%Issue{id: id, pr_ref: ref}) when ref in [nil, ""] do
+    {:error,
+     {:invalid,
+      "task #{id} has no PR recorded (no `pr_ref`), so there is no CI run to re-run"}}
+  end
+
+  defp require_pr_ref(%Issue{pr_ref: ref}), do: {:ok, ref}
+
+  defp fetch_workspace_for(%Issue{id: id, workspace_id: ws_id}) do
+    case ws_id && Ash.get(Arbiter.Tasks.Workspace, ws_id) do
+      {:ok, ws} -> {:ok, ws}
+      _ -> {:error, {:invalid, "task #{id} has no readable workspace to resolve a merger from"}}
+    end
+  end
+
   # ---- repo_list ----------------------------------------------------------
 
   @doc """

@@ -4249,4 +4249,69 @@ defmodule Arbiter.MCP.ToolsTest do
         do_wait(fun, deadline)
     end
   end
+
+  describe "ci_rerun/2 (bd-5mzzww / #1448)" do
+    test "a worker may not re-run CI for another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.ci_rerun(ctx.worker, %{"task_id" => other.id})
+    end
+
+    test "an unknown mode is rejected before any forge call", ctx do
+      assert {:error, {:invalid, msg}} = Tools.ci_rerun(ctx.worker, %{"mode" => "nuke"})
+      assert msg =~ "mode"
+    end
+
+    test "a task with no open PR is a clear error, not a crash", ctx do
+      assert {:error, {:invalid, msg}} = Tools.ci_rerun(ctx.worker, %{})
+      assert msg =~ "no PR"
+    end
+
+    test "a workspace whose merger has no re-run primitive says so", ctx do
+      {:ok, task} =
+        Ash.update(ctx.task, %{pr_ref: "#7"}, action: :update)
+
+      assert {:error, {:invalid, msg}} =
+               Tools.ci_rerun(%{ctx.worker | task_id: task.id}, %{})
+
+      assert msg =~ "does not support"
+    end
+
+    test "the coordinator must name a task", ctx do
+      assert {:error, {:invalid, _}} = Tools.ci_rerun(ctx.coordinator, %{})
+    end
+  end
+
+  describe "ci_mark_external/2 (bd-5mzzww / #1448)" do
+    test "with no watchdog running it reports not-found rather than silently succeeding", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.ci_mark_external(ctx.worker, %{"note" => "day-wide infra outage"})
+
+      assert msg =~ "watchdog"
+    end
+
+    test "a note is required — an unevidenced verdict is not actionable", ctx do
+      assert {:error, {:invalid, msg}} = Tools.ci_mark_external(ctx.worker, %{})
+      assert msg =~ "note"
+    end
+
+    test "a worker may not mark another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.ci_mark_external(ctx.worker, %{"task_id" => other.id, "note" => "infra"})
+    end
+  end
+
+  describe "catalog: CI-retry tools (bd-5mzzww / #1448)" do
+    test "ci_rerun and ci_mark_external are visible to a worker, not just the coordinator" do
+      names =
+        %Scope{tier: :worker, workspace_id: "ws", task_id: "t"}
+        |> Catalog.visible()
+        |> Enum.map(& &1.name)
+      assert "ci_rerun" in names
+      assert "ci_mark_external" in names
+    end
+  end
 end
