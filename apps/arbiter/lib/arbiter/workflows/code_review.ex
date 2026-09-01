@@ -88,6 +88,8 @@ defmodule Arbiter.Workflows.CodeReview do
   use Arbiter.Workflow,
     steps: [:load_pr, :read_diff, :run_checks, :file_findings, :verdict]
 
+  require Logger
+
   alias Arbiter.Mergers
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workflows.CodeReview.{Checks, ConsumerTrace, DiffScope, LocalMode}
@@ -588,13 +590,29 @@ defmodule Arbiter.Workflows.CodeReview do
   # or absent) it can still find, and the caller falls back further to the
   # adapter's REST diff if nothing resolves at all.
   defp refresh_base_ref(wt, base) do
-    System.cmd(
-      "git",
-      ["-C", wt, "fetch", "--no-tags", "origin", "+refs/heads/#{base}:refs/remotes/origin/#{base}"],
-      stderr_to_stdout: true
-    )
+    case System.cmd(
+           "git",
+           [
+             "-C",
+             wt,
+             "fetch",
+             "--no-tags",
+             "origin",
+             "+refs/heads/#{base}:refs/remotes/origin/#{base}"
+           ],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} ->
+        :ok
 
-    :ok
+      {output, status} ->
+        Logger.warning(
+          "bd-ch8zbp: refresh of origin/#{base} in #{wt} failed (exit #{status}): #{output} " <>
+            "— diff will fall back to whatever ref is already present, which may be stale"
+        )
+
+        :ok
+    end
   end
 
   # `Checkout.provision/2` only fetches the PR head SHA, not the base
