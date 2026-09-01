@@ -1566,6 +1566,23 @@ defmodule Arbiter.Mergers.GithubTest do
       assert_received {:posted, "/repos/octo/widget/actions/runs/9001/rerun-failed-jobs"}
     end
 
+    test "inputs paired with a mode that cannot carry them is a validation error" do
+      # Silently degrading to rerun-failed-jobs would drop `force_deploy` — the
+      # exact non-informative retry this verb exists to prevent. Reject instead,
+      # before any API call.
+      stub(fn conn ->
+        flunk("no request should be made, got #{conn.method} #{conn.request_path}")
+      end)
+
+      for mode <- [:failed_jobs, :all_jobs] do
+        assert {:error, %Error{kind: :validation_failed} = err} =
+                 Github.rerun_ci(@ref, %{mode: mode, inputs: %{"force_deploy" => "true"}})
+
+        assert err.message =~ "workflow_dispatch"
+        assert err.message =~ to_string(mode)
+      end
+    end
+
     test "the workflow option selects among several failed runs on the head SHA" do
       test_pid = self()
 

@@ -1940,6 +1940,57 @@ defmodule Arbiter.Worker.WatchdogTest do
 
       wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed end, 2_000)
     end
+
+    test "a :ci_failed_external park still restores the finite poll ceiling when it clears" do
+      # Review round 1: `clear_stale_ci_external/2` runs *before* the
+      # park-revocation branch, so nilling `park_reason` there disarmed that
+      # branch's `park_reason != nil` guard on the mainline recovery poll
+      # (infra fixed, CI green, PR approved). `max_polls` stayed `:infinity`
+      # and the stall latches stayed stale — the worker went immortal for the
+      # rest of its life rather than just for that episode (bd-krg7ci). A plain
+      # `:ci_failed` park on the identical poll restores correctly, so the
+      # asymmetry existed only for the new reason.
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!ce5", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      wpid =
+        start_watchdog(pid, task_id, "!ce5",
+          auto_merge: true,
+          max_auto_resolve_attempts: 0,
+          max_polls: 1000,
+          # Keep the *separate* merge-stall park (which lifts max_polls without
+          # ever setting park_reason) out of the way — the failing merges below
+          # exist only to keep the watchdog alive long enough to inspect.
+          merge_fail_notify_threshold: 100_000,
+          interval_ms: 15,
+          workspace: test_workspace()
+        )
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed end)
+      :ok = Watchdog.mark_ci_external(task_id, "infra")
+      wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed_external end)
+      assert :sys.get_state(wpid).max_polls == :infinity
+
+      # Poll on the park for a while so `poll_count` climbs well past whatever
+      # it can reach in the moment between the clearing poll and the assertion.
+      Process.sleep(300)
+      parked_poll_count = :sys.get_state(wpid).poll_count
+      assert parked_poll_count > 5
+
+      # The mainline recovery: infra fixed, CI green, PR approved. Merge is
+      # forced to fail purely so the watchdog survives to be inspected.
+      StubMerger.set_merge_result({:error, :conflict})
+      StubMerger.queue_get("!ce5", [%{status: :open, approved: true, block_reason: nil}])
+
+      wait_until(fn -> :sys.get_state(wpid).max_polls == 1000 end, 2_000)
+
+      state = :sys.get_state(wpid)
+      assert state.park_reason == nil
+      assert state.ci_external_note == nil
+      assert state.poll_count < parked_poll_count
+      refute state.merge_stall_notified
+      assert state.last_merge_stall_poll == 0
+    end
   end
 
   describe "park heartbeat (bd-5mzzww / #1448 ask 4)" do

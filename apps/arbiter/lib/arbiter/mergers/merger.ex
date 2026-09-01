@@ -290,7 +290,9 @@ defmodule Arbiter.Mergers.Merger do
       head commit has more than one failed run.
     * `:inputs` — string-keyed workflow inputs (e.g. `%{"force_deploy" => "true"}`).
       Supplying any input forces `:workflow` mode, since only a fresh dispatch
-      can carry them.
+      can carry them. Combining inputs with an explicit `:failed_jobs` /
+      `:all_jobs` mode is a validation error rather than a silent drop — those
+      endpoints replay the original run's inputs and cannot carry new ones.
 
   Returns `{:ok, map()}` describing what was re-run (`:mode`, `:run_id`,
   `:workflow`, `:run_attempt`, `:reused_jobs`, `:rationale`, `:url`) or

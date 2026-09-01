@@ -392,7 +392,8 @@ defmodule Arbiter.Mergers.Github do
   def rerun_ci(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
     inputs = string_inputs(Map.get(opts, :inputs))
 
-    with {:ok, cfg} <- Config.resolve(),
+    with :ok <- check_inputs_mode(inputs, Map.get(opts, :mode)),
+         {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
          {:ok, pr} <-
            request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json(),
@@ -406,6 +407,10 @@ defmodule Arbiter.Mergers.Github do
           inputs: inputs
         })
 
+      # An explicit mode wins over the heuristic — except that
+      # `check_inputs_mode/2` has already rejected the one combination that
+      # would silently drop the operator's intent (inputs + a re-run mode that
+      # cannot carry them).
       mode = Map.get(opts, :mode) || :auto
       mode = if mode in [:failed_jobs, :all_jobs, :workflow], do: mode, else: decision.mode
 
@@ -425,6 +430,28 @@ defmodule Arbiter.Mergers.Github do
       end
     end
   end
+
+  # Only a fresh `workflow_dispatch` can carry inputs; `rerun`/`rerun-failed-jobs`
+  # replay the original run's inputs and would drop these on the floor. The
+  # documented contract (`Merger.rerun_ci/2`, the MCP catalog, `arb queue
+  # rerun-ci --help`) is that supplying inputs forces `:workflow`, so reject the
+  # contradiction outright rather than silently honouring one half of it —
+  # re-running the failed jobs *without* `force_deploy` is the exact
+  # non-informative retry this verb exists to avoid (bd-5mzzww).
+  defp check_inputs_mode(inputs, mode)
+       when map_size(inputs) > 0 and mode in [:failed_jobs, :all_jobs] do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: nil,
+       message:
+         "cannot re-run CI: `inputs` can only be carried by a workflow_dispatch, " <>
+           "but mode is #{inspect(mode)} — use mode `workflow` (or `auto`)",
+       raw: nil
+     }}
+  end
+
+  defp check_inputs_mode(_inputs, _mode), do: :ok
 
   # Pick the workflow run to re-run: a *settled failure* on the PR's head SHA.
   # `workflow` (name or file basename) disambiguates when several workflows ran

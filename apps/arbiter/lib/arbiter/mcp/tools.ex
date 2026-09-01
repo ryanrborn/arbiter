@@ -796,7 +796,8 @@ defmodule Arbiter.MCP.Tools do
   Modes: `auto` (default — `Arbiter.Mergers.CIRerun.choose/1` picks the cheapest
   re-run that could actually tell you something new), `failed_jobs`, `all_jobs`,
   `workflow` (a fresh `workflow_dispatch`, the only mode that can carry
-  `inputs`).
+  `inputs`) — passing `inputs` alongside `failed_jobs`/`all_jobs` is rejected
+  rather than silently dropping them.
 
   Prefers the task's running Watchdog (it already holds the adapter, the PR ref
   and the per-repo config); falls back to resolving the adapter from the task's

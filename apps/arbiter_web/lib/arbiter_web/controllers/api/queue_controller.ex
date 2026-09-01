@@ -188,7 +188,9 @@ defmodule ArbiterWeb.Api.QueueController do
     * `mode` — `auto` (default), `failed_jobs`, `all_jobs`, `workflow`.
     * `workflow` — workflow name or file basename, when several runs failed.
     * `inputs` — `workflow_dispatch` inputs; supplying any forces `workflow`
-      mode, because only a fresh dispatch can carry them.
+      mode, because only a fresh dispatch can carry them. Pairing inputs with
+      an explicit `failed_jobs`/`all_jobs` mode is rejected (422) rather than
+      silently dropping them.
 
   Returns `{"rerun": true, "task_id": ..., "mode": ..., "run_id": ...}`.
 

@@ -1538,6 +1538,16 @@ defmodule Arbiter.Worker.Watchdog do
   defp clear_stale_ci_external(%{ci_external_note: nil} = state, _reason), do: state
   defp clear_stale_ci_external(state, :ci_failed), do: state
 
+  # A *cleared* block is not a demotion — it's a resolution, and revoking the
+  # park is `do_maybe_escalate_merge_block/2`'s job (it restores `max_polls`,
+  # resets `poll_count` and the merge-stall latches, and nils `park_reason`
+  # together). Nilling `park_reason` here would run *before* that branch and
+  # silently disarm its `park_reason != nil` guard, leaving a
+  # `:ci_failed_external` park immortal at `max_polls: :infinity` with stale
+  # stall latches — the very case bd-krg7ci's guard exists to prevent. Only drop
+  # the note (which that branch clears anyway); leave the park alone.
+  defp clear_stale_ci_external(state, nil), do: %{state | ci_external_note: nil}
+
   defp clear_stale_ci_external(state, reason) do
     Logger.info(
       "Worker.Watchdog: clearing external-CI mark for task=#{state.task_id} " <>

@@ -2026,7 +2026,8 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "object",
             "description" =>
               "workflow_dispatch inputs, e.g. {\"force_deploy\": \"true\"}. Supplying any " <>
-                "input forces `workflow` mode, since only a fresh dispatch can carry them.",
+                "input forces `workflow` mode, since only a fresh dispatch can carry them. " <>
+                "Combining inputs with mode `failed_jobs`/`all_jobs` is rejected.",
             "additionalProperties" => %{"type" => "string"}
           }
         },

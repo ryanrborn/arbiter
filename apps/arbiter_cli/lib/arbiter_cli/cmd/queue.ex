@@ -58,7 +58,9 @@ defmodule ArbiterCli.Cmd.Queue do
       --mode failed_jobs  re-run only the failed jobs (reuses upstream output)
       --mode all_jobs     re-run the whole run, REBUILDING upstream jobs
       --mode workflow     fresh workflow_dispatch; the only mode that can
-                          carry --input k=v pairs (e.g. force_deploy=true)
+                          carry --input k=v pairs (e.g. force_deploy=true).
+                          Pairing --input with --mode failed_jobs/all_jobs is
+                          an error, not a silent drop.
 
   `mark-ci-external` is where an "infrastructure is broken repo-wide, this is
   not my diff" verdict goes. It reclassifies a `:ci_failed` park as
