@@ -381,10 +381,17 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       {_, 0} = System.cmd("git", ["clone", "-q", origin, clone])
       {_, 0} = System.cmd("git", ["-C", clone, "remote", "set-url", "origin", origin])
 
+      # The PR's content lives on its own branch, cut from (and left ahead
+      # of) "main" — "main" itself never advances past "init", so a diff
+      # against the (possibly freshly-refetched) base still shows the PR's
+      # change rather than nothing (bd-ch8zbp: :read_diff now refreshes
+      # origin/<base> from origin before diffing).
+      {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "-b", "pr-branch"])
       File.write!(Path.join(origin, "b.txt"), "pr head content")
       {_, 0} = System.cmd("git", ["-C", origin, "add", "-A"])
       {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "pr head"])
       {head_sha, 0} = System.cmd("git", ["-C", origin, "rev-parse", "HEAD"])
+      {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "main"])
 
       on_exit(fn -> File.rm_rf(root) end)
 

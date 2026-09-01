@@ -468,6 +468,60 @@ defmodule Arbiter.Workflows.CodeReviewTest do
     %{repo: repo, tmp: tmp, base_extra_commit_file: base_extra_commit_file}
   end
 
+  # bd-ch8zbp: mirrors a clone whose local `origin/<base>` remote-tracking
+  # ref was fetched *before* the base branch advanced upstream — the exact
+  # staleness `Checkout.provision/2` leaves behind, since it only ever
+  # fetches the PR head SHA. The PR branch is cut from the *advanced*
+  # base, so a diff computed against the stale `origin/dolphin` would
+  # include the base's own unrelated advance commits, not just the PR's
+  # real change.
+  defp setup_repo_with_stale_local_base do
+    unique = "gte021-stale-base-#{:erlang.unique_integer([:positive])}"
+    tmp = Path.join(System.tmp_dir!(), unique)
+    File.mkdir_p!(tmp)
+
+    origin = Path.join(tmp, "origin")
+    File.mkdir_p!(origin)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", origin])
+    {_, 0} = System.cmd("git", ["-C", origin, "config", "user.email", "test@example.com"])
+    {_, 0} = System.cmd("git", ["-C", origin, "config", "user.name", "Test User"])
+    {_, 0} = System.cmd("git", ["-C", origin, "config", "commit.gpgsign", "false"])
+    File.write!(Path.join(origin, "README.md"), "hello\n")
+    {_, 0} = System.cmd("git", ["-C", origin, "add", "README.md"])
+    {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "initial"])
+    {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "-b", "dolphin"])
+
+    # Clone now, while "dolphin" is still at the initial commit — this
+    # freezes the clone's `origin/dolphin` at the pre-advance state.
+    repo = Path.join(tmp, "clone")
+    {_, 0} = System.cmd("git", ["clone", "-q", origin, repo])
+
+    # Advance "dolphin" upstream with commits unrelated to the PR — the
+    # clone's `origin/dolphin` has no idea these happened.
+    unrelated_file = "unrelated_base_advance.txt"
+    File.write!(Path.join(origin, unrelated_file), "noise\n")
+    {_, 0} = System.cmd("git", ["-C", origin, "add", unrelated_file])
+    {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "unrelated base advance"])
+
+    # The PR branch is cut from the *advanced* base and carries only the
+    # real change.
+    {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "-b", "feature/x"])
+    File.write!(Path.join(origin, "added.txt"), "line one\n")
+    {_, 0} = System.cmd("git", ["-C", origin, "add", "added.txt"])
+    {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "add file"])
+    {head_sha, 0} = System.cmd("git", ["-C", origin, "rev-parse", "HEAD"])
+    head_sha = String.trim(head_sha)
+
+    # Mirrors `Checkout.provision/2`: only the head SHA is ever fetched
+    # into the clone, never the base branch.
+    {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "--no-tags", "origin", head_sha])
+    {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "--detach", head_sha])
+
+    on_exit(fn -> File.rm_rf!(tmp) end)
+
+    %{repo: repo, unrelated_file: unrelated_file}
+  end
+
   # A repo checkout with a function definition (`sign/1`) plus a second file
   # that calls it — used to prove repo-scoped review can trace a consumer a
   # diff-only review would never see.
@@ -688,6 +742,24 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       # the diff (bd-5yp6yn finding #2) — two-dot `dolphin..HEAD` would
       # include it.
       refute diff =~ base_extra_commit_file
+    end
+
+    test "adapter mode with a worktree_path refreshes a stale local origin/<base> before diffing (bd-ch8zbp)" do
+      %{repo: repo, unrelated_file: unrelated_file} = setup_repo_with_stale_local_base()
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.DiffMustNotBeCalled,
+        mr_ref: "#99",
+        worktree_path: repo,
+        base: "dolphin"
+      }
+
+      assert {:ok, %{diff: diff}} = CodeReview.run_step(:read_diff, state)
+      assert diff =~ "added.txt"
+
+      refute diff =~ unrelated_file,
+             "diff included the base's own unrelated advance commit — computed against a stale local origin/<base> instead of refreshing it from origin first"
     end
   end
 
