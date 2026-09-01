@@ -66,6 +66,18 @@ defmodule Arbiter.Worker.StopReason do
       signature.
     * `:exited_without_done` — clean exit (status 0) but the worker never
       emitted `arb done`. It quit early without completing the task.
+    * `:async_wait_abandoned` — a *refinement* of `:exited_without_done`
+      (bd-606zlr): the clean exit happened immediately after the agent armed
+      an asynchronous wait — a `Monitor`, a `ScheduleWakeup`, or a
+      backgrounded `Bash` — and then yielded the turn to await the
+      notification. `claude --print` is non-interactive: the agent loop ends
+      the instant a turn produces no tool call, so that notification can never
+      be delivered — there is no session left to deliver it to. The agent was
+      doing the *right* thing (recognising a command that won't finish inside
+      the tool-call timeout) with a primitive this harness cannot honour.
+      Distinct from a plain early quit because the remediation is a
+      `--resume` carrying corrective guidance, never a re-dispatch: the
+      worktree usually holds real, uncommitted work.
     * `:stalled` — no exit at all; the subprocess is alive but produced no
       output within the watchdog window (caller passes `exit_status: nil`).
     * `:missing_worktree` — the worker signalled `arb done` on a reviewable
@@ -108,6 +120,7 @@ defmodule Arbiter.Worker.StopReason do
           | :crashed
           | :stream_schema_drift
           | :exited_without_done
+          | :async_wait_abandoned
           | :stalled
           | :missing_worktree
           | :spawn_failed
@@ -223,6 +236,37 @@ defmodule Arbiter.Worker.StopReason do
   # loosely on "autocompact" + "thrash" rather than the exact N/N wording so a
   # future CLI phrasing tweak doesn't silently fall through to :crashed.
   @context_thrash_signature ~r/autocompact[^\n]{0,20}thrash/i
+
+  # bd-606zlr: the harness's OWN markers for "an asynchronous wait is now
+  # armed". Every one of them is text this Arbiter build did not write and the
+  # agent did not choose the wording of — they are emitted by the CLI tool
+  # harness when a `Bash` call is backgrounded (either up front or after
+  # blowing its tool timeout), when a `Monitor` starts, or when a
+  # `ScheduleWakeup` is booked. Matching the harness's phrasing rather than the
+  # agent's prose ("I'll wait for the notification") is deliberate: the prose
+  # is unbounded paraphrase, the markers are fixed strings.
+  @async_arm_signature ~r/
+      you[ _]will[ _]be[ _]notified
+    | moved[ _]to[ _]the[ _]background[ _]\(id:
+    | running[ _]in[ _]the[ _]background[ _]with[ _]id:
+    | command[ _]running[ _]in[ _]background[ _]with[ _]id:
+    | monitor[ _]started[ _]\(task
+    | wakeup[ _]scheduled
+  /ix
+
+  # The counterpart: evidence the agent actually *drained* what it armed, in
+  # the same session, before the run ended. A blocking `TaskOutput` /
+  # `BashOutput` read (or a `TaskStop`) after the arm marker means the wait was
+  # honoured synchronously and the run ended for some other reason — the
+  # correct pattern, not this bug.
+  @async_drain_signature ~r/\b(TaskOutput|BashOutput|TaskStop)\(/i
+
+  # How many lines back from the END of the run to look for an un-drained arm.
+  # Deliberately much tighter than @tail_lines (80): a background task armed
+  # mid-run and properly drained is separated from the run's end by the drain
+  # call plus its output, so a narrow terminal window is what distinguishes
+  # "armed and abandoned" from "armed and handled".
+  @async_arm_window 12
 
   @doc """
   Classify a stop from the subprocess exit status and captured output.
@@ -389,6 +433,29 @@ defmodule Arbiter.Worker.StopReason do
           signal: nil
         }
 
+      # bd-606zlr. Ordered AFTER every provider-error signature (a genuine
+      # 401/429 in the same tail is the better diagnosis) but ahead of the
+      # plain clean-exit clause it refines. Scoped to `exit_status == 0`
+      # because a crash that happens to have backgrounded something earlier is
+      # a crash — the exit status stays authoritative.
+      exit_status == 0 and abandoned_async_wait?(output_lines) ->
+        %__MODULE__{
+          category: :async_wait_abandoned,
+          summary:
+            "agent armed an asynchronous wait (Monitor / ScheduleWakeup / backgrounded " <>
+              "command) and yielded the turn to await the notification — but a " <>
+              "non-interactive `--print` session ends on the first turn with no tool " <>
+              "call, so that notification could never be delivered",
+          remediation:
+            "Not a task failure and not the agent's judgement — the command genuinely " <>
+              "exceeded the tool-call timeout. The worktree usually still holds real, " <>
+              "uncommitted work, so resume the session in place with corrective guidance " <>
+              "(drain background tasks with a blocking `TaskOutput` in the SAME turn; " <>
+              "never wait on `Monitor`/`ScheduleWakeup`) rather than discarding it.",
+          exit_status: 0,
+          signal: nil
+        }
+
       exit_status == 0 ->
         %__MODULE__{
           category: :exited_without_done,
@@ -452,6 +519,7 @@ defmodule Arbiter.Worker.StopReason do
         :crashed -> "crashed"
         :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"
         :exited_without_done -> "exited without completing"
+        :async_wait_abandoned -> "abandoned an async wait (background task never drained)"
         :stalled -> "stalled (no output)"
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
         :spawn_failed -> "spawn failed (dispatch error after worker registration)"
@@ -509,6 +577,38 @@ defmodule Arbiter.Worker.StopReason do
   # line-buffering, so trim before checking for emptiness.
   defp blank_output?(output_lines) do
     Enum.all?(output_lines, fn line -> is_binary(line) and String.trim(line) == "" end)
+  end
+
+  # bd-606zlr: did the run end with an asynchronous wait armed and never
+  # drained? `output_lines` is oldest-first (every caller reverses its
+  # newest-first accumulator before calling in), so the terminal window is the
+  # LAST @async_arm_window entries.
+  #
+  # "Abandoned" means: an arm marker appears in that window, and nothing after
+  # it drains the thing it armed. The drain check is what keeps the correct
+  # pattern — background a command, then block on `TaskOutput` in the same
+  # turn — from being misread as this failure.
+  defp abandoned_async_wait?(output_lines) do
+    window = Enum.take(output_lines, -@async_arm_window)
+
+    case last_index_matching(window, @async_arm_signature) do
+      nil ->
+        false
+
+      idx ->
+        window
+        |> Enum.drop(idx + 1)
+        |> Enum.any?(&Regex.match?(@async_drain_signature, &1))
+        |> Kernel.not()
+    end
+  end
+
+  defp last_index_matching(lines, regex) do
+    lines
+    |> Enum.with_index()
+    |> Enum.reduce(nil, fn {line, idx}, acc ->
+      if is_binary(line) and Regex.match?(regex, line), do: idx, else: acc
+    end)
   end
 
   # Opportunistically pull the unix-epoch-seconds reset time the Claude CLI

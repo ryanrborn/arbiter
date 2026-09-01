@@ -145,6 +145,13 @@ defmodule Arbiter.Loop.FailureClassifier do
     spawn_failed: {:operational, :spawn_failure},
     context_thrash: {:agent_quality, :context_exhaustion},
     exited_without_done: {:agent_quality, :never_signalled_done},
+    # bd-606zlr: the pass armed a Monitor/ScheduleWakeup/backgrounded command
+    # and yielded the turn to await a notification a non-interactive `--print`
+    # session can never deliver. Conclusive on its own and deliberately NOT
+    # folded into :never_signalled_done — the remedy is prompt guidance about
+    # which waiting primitives work here, which is only actionable if the
+    # cause is visible as its own bucket.
+    async_wait_abandoned: {:agent_quality, :async_wait_abandoned},
     # Commit-gate parks (bd-apwfmy). Not `StopReason` categories — the
     # subprocess exited cleanly and the *work* is what failed — but they share
     # the column because they are the run's typed terminal cause, and they are

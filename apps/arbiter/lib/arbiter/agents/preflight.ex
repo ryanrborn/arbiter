@@ -138,6 +138,10 @@ defmodule Arbiter.Agents.Preflight do
 
     case reason.category do
       :exited_without_done -> :ok
+      # bd-606zlr: also a clean exit with no failure signature — the probe's
+      # auth verdict must not flip just because its output happened to refine
+      # into the async-wait category.
+      :async_wait_abandoned -> :ok
       _ -> {:error, reason}
     end
   end
