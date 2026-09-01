@@ -7,11 +7,15 @@ defmodule ArbiterWeb.Api.QueueController do
     * `POST /api/queue/:task_id/resume` — resume a paused branch by re-dispatching
       the failed task. The Conductor that owns this task is found automatically via
       the `ConductorSupervisor` Registry.
+    * `POST /api/queue/:task_id/retry_auto_resolve` — re-arm one more auto-resolve
+      attempt for a task whose merge Watchdog is parked after exhausting
+      `max_auto_resolve_attempts` on a `:ci_failed` block (bd-bspakl).
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Workflows.Conductor
+  alias Arbiter.Worker.Watchdog
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -50,6 +54,45 @@ defmodule ArbiterWeb.Api.QueueController do
   end
 
   def resume(_conn, _params) do
+    {:error, {:invalid_request, "task_id path parameter is required"}}
+  end
+
+  @doc """
+  Re-arm one more auto-resolve attempt on a task's merge Watchdog.
+
+  Only meaningful once the Watchdog has exhausted `max_auto_resolve_attempts`
+  on a `:ci_failed` block and parked indefinitely (bd-bspakl) — the dashboard's
+  "Retry" action for that escalation calls this instead of the worker resume
+  action, which is correctly refused in this state.
+
+  Returns `{"retried": true, "task_id": "..."}` on success.
+
+  Errors:
+
+    * 404 — no Watchdog is currently running for this task.
+    * 400 — the Watchdog exists but isn't parked on an exhausted `:ci_failed`
+      block, so there's nothing to re-arm.
+  """
+  def retry_auto_resolve(conn, %{"task_id" => task_id})
+      when is_binary(task_id) and task_id != "" do
+    case Watchdog.retry_auto_resolve(task_id) do
+      :ok ->
+        json(conn, %{retried: true, task_id: task_id})
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, :not_parked_on_ci_failed} ->
+        {:error,
+         {:invalid_request,
+          "task #{task_id} isn't parked on an exhausted :ci_failed block — nothing to re-arm"}}
+
+      {:error, :busy} ->
+        {:error, {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
+    end
+  end
+
+  def retry_auto_resolve(_conn, _params) do
     {:error, {:invalid_request, "task_id path parameter is required"}}
   end
 end

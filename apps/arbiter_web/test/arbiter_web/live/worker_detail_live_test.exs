@@ -535,6 +535,179 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     end
   end
 
+  describe "retry auto-resolve (bd-bspakl)" do
+    alias Arbiter.Test.StubMerger
+    alias Arbiter.Worker.Watchdog
+
+    setup do
+      StubMerger.reset()
+      :ok
+    end
+
+    # Actually drives the task's real Watchdog to the state under test, rather
+    # than just faking the merger-status meta — the button now gates on the
+    # Watchdog's own `park_reason` (`parked_on/1`), which is only set once the
+    # Watchdog itself processes a poll (bd-bspakl review round 1). Setting
+    # `max_auto_resolve_attempts: 0` on the workspace makes the very first
+    # `:ci_failed` poll exhaust immediately, so no fix-pass worker is ever
+    # dispatched.
+    defp park_awaiting_review(pid, task, merger_status, opts \\ []) do
+      :ok = Worker.advance(pid, :implement)
+      ref = "!bd-bspakl-#{System.unique_integer([:positive])}"
+      StubMerger.next_open_ref(ref)
+      StubMerger.queue_get(ref, [merger_status])
+
+      {:ok, workspace} = Ash.get(Workspace, task.workspace_id)
+
+      {:ok, _} =
+        Worker.open_mr(
+          pid,
+          "feature/x",
+          "Add x",
+          "desc",
+          Map.merge(
+            %{
+              adapter: StubMerger,
+              workspace: workspace,
+              auto_merge: true,
+              interval_ms: 15,
+              initial_delay_ms: 0
+            },
+            Map.new(opts)
+          )
+        )
+
+      ref
+    end
+
+    defp set_max_auto_resolve_attempts(ws, n) do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"merge" => %{"max_auto_resolve_attempts" => n}}},
+          action: :patch_config
+        )
+
+      ws
+    end
+
+    test "offers Retry auto-resolve once the Watchdog genuinely parks on exhausted :ci_failed",
+         %{conn: conn, ws: ws} do
+      ws = set_max_auto_resolve_attempts(ws, 0)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-ci-failed", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert has_element?(view, "#worker-retry-auto-resolve-btn")
+      assert html =~ "Retry auto-resolve"
+    end
+
+    test "offers Retry auto-resolve for a ReviewGate lane even though the forge shows approved: false",
+         %{conn: conn, ws: ws} do
+      # The exact gap this ticket closed: on a ReviewGate-driven lane the forge
+      # never sees the in-process approval, so `approved` stays false even
+      # though the Watchdog (using the ReviewGate-aware poll path) genuinely
+      # parks on the block. The old arity-1 `effective_block_reason/1` gate
+      # hardcoded `via_review_gate: false` and could never see this.
+      ws = set_max_auto_resolve_attempts(ws, 0)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-ci-failed-gate", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+
+      park_awaiting_review(
+        pid,
+        task,
+        %{status: :open, approved: false, block_reason: :ci_failed},
+        via_review_gate: true
+      )
+
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert has_element?(view, "#worker-retry-auto-resolve-btn")
+      assert html =~ "Retry auto-resolve"
+    end
+
+    test "does not offer Retry auto-resolve for an approved MR blocked on something else",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-conflict", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :conflict})
+
+      # Not waiting on `parked_on/1` here: a `:conflict` block only parks
+      # after exhausting its own bounded rebase-attempt budget, which is not
+      # guaranteed to land inside a short poll window. Waiting for the
+      # Watchdog to exist and letting one poll interval elapse is enough to
+      # observe the button's render decision either way — it must not appear
+      # for a `:conflict` reason regardless of whether the block has parked.
+      wait_until(fn -> Watchdog.whereis(task.id) != nil end)
+      Process.sleep(50)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "#worker-retry-auto-resolve-btn")
+    end
+
+    test "does not offer Retry auto-resolve while still awaiting approval",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-pending", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, task, %{status: :open, approved: false})
+
+      # See the :conflict test above for why this waits on Watchdog liveness
+      # plus one poll interval rather than on `parked_on/1`.
+      wait_until(fn -> Watchdog.whereis(task.id) != nil end)
+      Process.sleep(50)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "#worker-retry-auto-resolve-btn")
+    end
+
+    test "clicking Retry auto-resolve re-arms the Watchdog and reports the next-poll timing accurately",
+         %{conn: conn, ws: ws} do
+      ws = set_max_auto_resolve_attempts(ws, 0)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-retry-flash", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      html = render_click(view, "retry_auto_resolve")
+
+      # Pins the accurate claim (round-1 review: the old copy claimed "a
+      # fresh fix-pass is starting" / "a poll fired now", which is false —
+      # `handle_call(:retry_auto_resolve, ...)` deliberately does not
+      # schedule an immediate poll, so the fix-pass only starts once the
+      # already-pending poll timer next fires).
+      assert html =~ "will start on the next watchdog poll"
+      refute html =~ "is starting"
+    end
+
+    test "the retry_auto_resolve event shows a friendly error when nothing is parked",
+         %{conn: conn, ws: ws} do
+      # The button itself no longer renders unless the Watchdog is genuinely
+      # parked (see above), but the event handler is still reachable directly
+      # (e.g. a stale page, or a race between render and the block clearing)
+      # and must still fail soft rather than crash the LiveView.
+      {:ok, task} = Ash.create(Issue, %{title: "pd-click-error", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      html = render_click(view, "retry_auto_resolve")
+
+      # No Watchdog was started for this task, so `retry_auto_resolve/1`
+      # deterministically returns `{:error, :not_found}` — this pins that
+      # specific soft-failure message rather than accepting either branch.
+      assert html =~ "No merge watchdog is currently running"
+    end
+  end
+
   defp tool_use_event(name, input) do
     Jason.encode!(%{
       "type" => "assistant",
