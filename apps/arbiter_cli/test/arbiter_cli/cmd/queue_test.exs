@@ -193,4 +193,120 @@ defmodule ArbiterCli.Cmd.QueueTest do
       assert out =~ "restart-watchdog"
     end
   end
+
+  describe "rerun-ci (bd-5mzzww / #1448)" do
+    test "posts to the rerun_ci endpoint and reports the granularity actually used" do
+      stub_routes([
+        {{"post", "/api/queue/bd-r1/rerun_ci"},
+         {%{
+            "rerun" => true,
+            "task_id" => "bd-r1",
+            "mode" => "all_jobs",
+            "run_id" => 42,
+            "workflow" => "CI",
+            "rationale" => "2 completed upstream job(s) would be reused"
+          }, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Queue.run(["rerun-ci", "bd-r1"]) end)
+
+      assert exit_code == 0
+      assert out =~ "bd-r1"
+      assert out =~ "all_jobs"
+      # The operator must be able to see WHY, or they will reach for the
+      # failed-jobs button again next time.
+      assert out =~ "reused"
+    end
+
+    test "passes an explicit --mode through" do
+      stub_routes([
+        {{"post", "/api/queue/bd-r2/rerun_ci"},
+         {%{"rerun" => true, "task_id" => "bd-r2", "mode" => "workflow"}, 200}}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn -> Queue.run(["rerun-ci", "bd-r2", "--mode", "workflow"]) end)
+
+      assert exit_code == 0
+      assert out =~ "workflow"
+    end
+
+    test "requires a task id" do
+      {_out, err, exit_code} = capture(fn -> Queue.run(["rerun-ci"]) end)
+
+      assert exit_code != 0
+      assert err =~ "requires: <task-id>"
+    end
+
+    test "reports a friendly error when no watchdog is running" do
+      stub_routes([
+        {{"post", "/api/queue/bd-r3/rerun_ci"}, {%{"errors" => %{"detail" => "Not Found"}}, 404}}
+      ])
+
+      {_out, err, exit_code} = capture(fn -> Queue.run(["rerun-ci", "bd-r3"]) end)
+
+      assert exit_code != 0
+      assert err =~ "no merge watchdog"
+      assert err =~ "restart-watchdog"
+    end
+
+    test "emits the raw body in --json mode" do
+      stub_routes([
+        {{"post", "/api/queue/bd-r4/rerun_ci"},
+         {%{"rerun" => true, "task_id" => "bd-r4", "mode" => "failed_jobs"}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Queue.run(["rerun-ci", "bd-r4", "--json"]) end)
+
+      assert exit_code == 0
+      assert {:ok, %{"mode" => "failed_jobs"}} = Jason.decode(String.trim(out))
+    end
+
+    test "--help documents the subcommand and the granularity trap" do
+      {out, _err, exit_code} = capture(fn -> Queue.run(["--help"]) end)
+
+      assert exit_code == 0
+      assert out =~ "rerun-ci"
+      assert out =~ "all_jobs"
+    end
+  end
+
+  describe "mark-ci-external (bd-5mzzww / #1448)" do
+    test "posts the note and confirms the reclassification" do
+      stub_routes([
+        {{"post", "/api/queue/bd-x1/mark_ci_external"},
+         {%{"marked" => true, "task_id" => "bd-x1", "park_reason" => "ci_failed_external"}, 200}}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn -> Queue.run(["mark-ci-external", "bd-x1", "shared runner outage"]) end)
+
+      assert exit_code == 0
+      assert out =~ "bd-x1"
+      assert out =~ "ci_failed_external"
+    end
+
+    test "requires a task id and a note" do
+      {_out, err, code} = capture(fn -> Queue.run(["mark-ci-external"]) end)
+      assert code != 0
+      assert err =~ "requires: <task-id> <note>"
+
+      {_out, err2, code2} = capture(fn -> Queue.run(["mark-ci-external", "bd-x2"]) end)
+      assert code2 != 0
+      assert err2 =~ "requires: <task-id> <note>"
+    end
+
+    test "reports a friendly error when the task is not parked on :ci_failed" do
+      stub_routes([
+        {{"post", "/api/queue/bd-x3/mark_ci_external"},
+         {%{"error" => %{"message" => "nothing to reclassify"}}, 400}}
+      ])
+
+      {_out, err, exit_code} =
+        capture(fn -> Queue.run(["mark-ci-external", "bd-x3", "infra down"]) end)
+
+      assert exit_code != 0
+      assert err =~ "nothing to reclassify"
+    end
+  end
 end

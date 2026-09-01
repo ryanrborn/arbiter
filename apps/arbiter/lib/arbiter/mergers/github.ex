@@ -71,7 +71,7 @@ defmodule Arbiter.Mergers.Github do
   require Logger
 
   alias Arbiter.Http.Client
-  alias Arbiter.Mergers.{Merger, Github.Config, Github.Error, Github.RepoResolver}
+  alias Arbiter.Mergers.{CIRerun, Merger, Github.Config, Github.Error, Github.RepoResolver}
   alias Arbiter.Providers.Github, as: Provider
 
   @stub_name Arbiter.Mergers.Github.HTTP
@@ -387,6 +387,201 @@ defmodule Arbiter.Mergers.Github do
       fetch_failing_checks(cfg, owner, repo, get_in(pr, ["head", "sha"]))
     end
   end
+
+  @impl true
+  def rerun_ci(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
+    inputs = string_inputs(Map.get(opts, :inputs))
+
+    with :ok <- check_inputs_mode(inputs, Map.get(opts, :mode)),
+         {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json(),
+         {:ok, run} <-
+           failed_run_for(cfg, owner, repo, get_in(pr, ["head", "sha"]), Map.get(opts, :workflow)),
+         {:ok, jobs} <- run_jobs(cfg, owner, repo, Map.get(run, "id")) do
+      decision =
+        CIRerun.choose(%{
+          run_attempt: Map.get(run, "run_attempt"),
+          jobs: jobs,
+          inputs: inputs
+        })
+
+      # An explicit mode wins over the heuristic — except that
+      # `check_inputs_mode/2` has already rejected the one combination that
+      # would silently drop the operator's intent (inputs + a re-run mode that
+      # cannot carry them).
+      mode = Map.get(opts, :mode) || :auto
+      mode = if mode in [:failed_jobs, :all_jobs, :workflow], do: mode, else: decision.mode
+
+      head_ref = get_in(pr, ["head", "ref"])
+
+      with :ok <- post_rerun(cfg, owner, repo, run, mode, head_ref, inputs) do
+        {:ok,
+         %{
+           mode: mode,
+           run_id: Map.get(run, "id"),
+           workflow: Map.get(run, "name"),
+           run_attempt: decision.run_attempt,
+           reused_jobs: decision.reused_jobs,
+           rationale: decision.rationale,
+           url: Map.get(run, "html_url")
+         }}
+      end
+    end
+  end
+
+  # Only a fresh `workflow_dispatch` can carry inputs; `rerun`/`rerun-failed-jobs`
+  # replay the original run's inputs and would drop these on the floor. The
+  # documented contract (`Merger.rerun_ci/2`, the MCP catalog, `arb queue
+  # rerun-ci --help`) is that supplying inputs forces `:workflow`, so reject the
+  # contradiction outright rather than silently honouring one half of it —
+  # re-running the failed jobs *without* `force_deploy` is the exact
+  # non-informative retry this verb exists to avoid (bd-5mzzww).
+  defp check_inputs_mode(inputs, mode)
+       when map_size(inputs) > 0 and mode in [:failed_jobs, :all_jobs] do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: nil,
+       message:
+         "cannot re-run CI: `inputs` can only be carried by a workflow_dispatch, " <>
+           "but mode is #{inspect(mode)} — use mode `workflow` (or `auto`)",
+       raw: nil
+     }}
+  end
+
+  defp check_inputs_mode(_inputs, _mode), do: :ok
+
+  # Pick the workflow run to re-run: a *settled failure* on the PR's head SHA.
+  # `workflow` (name or file basename) disambiguates when several workflows ran
+  # on the same commit — the incident repo has both a `CI` and a `Deploy Review
+  # App` workflow, and only one of them was red.
+  defp failed_run_for(_cfg, _owner, _repo, sha, _workflow) when sha in [nil, ""] do
+    {:error,
+     %Error{
+       kind: :not_found,
+       status: nil,
+       message: "cannot re-run CI: the PR has no head SHA",
+       raw: nil
+     }}
+  end
+
+  defp failed_run_for(cfg, owner, repo, sha, workflow) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/runs",
+           params: [head_sha: sha, per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"workflow_runs" => runs}} when is_list(runs) ->
+        runs
+        |> Enum.filter(&failed_run?/1)
+        |> Enum.filter(&matches_workflow?(&1, workflow))
+        |> List.first()
+        |> case do
+          nil ->
+            {:error,
+             %Error{
+               kind: :not_found,
+               status: nil,
+               message:
+                 "cannot re-run CI: no failed workflow run on head SHA #{sha}" <>
+                   if(workflow, do: " matching #{inspect(workflow)}", else: ""),
+               raw: nil
+             }}
+
+          run ->
+            {:ok, run}
+        end
+
+      {:ok, _} ->
+        {:error,
+         %Error{
+           kind: :not_found,
+           status: nil,
+           message: "cannot re-run CI: no failed workflow run on head SHA #{sha}",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp failed_run?(run) do
+    Map.get(run, "status") == "completed" and Map.get(run, "conclusion") in @failing_conclusions
+  end
+
+  defp matches_workflow?(_run, nil), do: true
+
+  defp matches_workflow?(run, workflow) do
+    wanted = String.downcase(workflow)
+
+    [Map.get(run, "name"), Path.basename(Map.get(run, "path") || ""), Map.get(run, "path")]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.any?(&(String.downcase(&1) == wanted))
+  end
+
+  # Best-effort: the job list only feeds the granularity policy, so an API error
+  # degrades to "no known upstream jobs" (the cheapest re-run) rather than
+  # failing the whole verb.
+  defp run_jobs(cfg, owner, repo, run_id) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/runs/#{run_id}/jobs",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"jobs" => jobs}} when is_list(jobs) -> {:ok, jobs}
+      _ -> {:ok, []}
+    end
+  end
+
+  defp post_rerun(cfg, owner, repo, run, :failed_jobs, _head_ref, _inputs) do
+    request(
+      cfg,
+      :post,
+      "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun-failed-jobs",
+      json: %{}
+    )
+    |> expect_ok()
+  end
+
+  defp post_rerun(cfg, owner, repo, run, :all_jobs, _head_ref, _inputs) do
+    request(cfg, :post, "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun",
+      json: %{}
+    )
+    |> expect_ok()
+  end
+
+  defp post_rerun(cfg, owner, repo, run, :workflow, head_ref, inputs)
+       when is_binary(head_ref) and head_ref != "" do
+    workflow_id = Map.get(run, "workflow_id") || Map.get(run, "path")
+
+    request(cfg, :post, "/repos/#{owner}/#{repo}/actions/workflows/#{workflow_id}/dispatches",
+      json: %{ref: head_ref, inputs: inputs}
+    )
+    |> expect_ok()
+  end
+
+  defp post_rerun(_cfg, _owner, _repo, _run, :workflow, _head_ref, _inputs) do
+    {:error,
+     %Error{
+       kind: :not_found,
+       status: nil,
+       message:
+         "cannot workflow_dispatch: the PR has no head ref (a cross-fork PR cannot be " <>
+           "re-dispatched on this repository)",
+       raw: nil
+     }}
+  end
+
+  # workflow_dispatch inputs are string->string over the wire.
+  defp string_inputs(inputs) when is_map(inputs) and map_size(inputs) > 0 do
+    Map.new(inputs, fn {k, v} -> {to_string(k), stringify_input(v)} end)
+  end
+
+  defp string_inputs(_), do: %{}
+
+  defp stringify_input(v) when is_binary(v), do: v
+  defp stringify_input(v), do: to_string(v)
 
   @impl true
   def list_required_check_failures(mr_ref) when is_binary(mr_ref) do

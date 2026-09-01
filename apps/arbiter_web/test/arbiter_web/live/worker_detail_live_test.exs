@@ -604,6 +604,26 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ "Retry auto-resolve"
     end
 
+    test "keeps offering Retry auto-resolve after an :ci_failed_external verdict (bd-5mzzww)",
+         %{conn: conn, ws: ws} do
+      # Marking the park external reclassifies it but does not make it any less
+      # retryable — once the infrastructure is fixed, re-arming is exactly the
+      # right move. Hiding the button here would strand the task.
+      ws = set_max_auto_resolve_attempts(ws, 0)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-ci-ext", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
+      assert :ok = Watchdog.mark_ci_external(task.id, "shared runners down repo-wide today")
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed_external end)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert has_element?(view, "#worker-retry-auto-resolve-btn")
+      assert html =~ "Retry auto-resolve"
+    end
+
     test "offers Retry auto-resolve for a ReviewGate lane even though the forge shows approved: false",
          %{conn: conn, ws: ws} do
       # The exact gap this ticket closed: on a ReviewGate-driven lane the forge

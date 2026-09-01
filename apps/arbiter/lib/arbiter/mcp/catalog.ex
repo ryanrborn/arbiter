@@ -70,6 +70,8 @@ defmodule Arbiter.MCP.Catalog do
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
   | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/1` (bd-8jixav) |
+  | `ci_rerun` | worker, coordinator | `Arbiter.Worker.Watchdog.rerun_ci/2` → `Merger.rerun_ci/2` (bd-5mzzww) |
+  | `ci_mark_external` | worker, coordinator | `Arbiter.Worker.Watchdog.mark_ci_external/2` (bd-5mzzww) |
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/1` |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/1` |
   | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.paused?/1` |
@@ -1980,6 +1982,90 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.queue_restart_watchdog/2
+    },
+    # ---- CI retry (bd-5mzzww / #1448) ---------------------------------------
+    %{
+      name: "ci_rerun",
+      tiers: @both,
+      description:
+        "Re-run CI for a task's PR, choosing the GRANULARITY of the re-run (bd-5mzzww). " <>
+          "Arbiter previously had no CI-retry verb at all — every retry was a human clicking " <>
+          "the forge UI, and the button a human reaches for first ('re-run failed jobs') " <>
+          "reuses every job that already succeeded. When the failing check tests an artifact " <>
+          "an EARLIER job in the same run produced (a review app, a built image), that re-run " <>
+          "re-tests the identical stale input and is deterministically guaranteed to fail " <>
+          "again. Modes: `auto` (default — picks the cheapest re-run that could actually tell " <>
+          "you something new: it escalates past failed_jobs whenever completed upstream jobs " <>
+          "would be reused, or the run is already on attempt 2+), `failed_jobs`, `all_jobs` " <>
+          "(re-runs the whole run, rebuilding upstream jobs), `workflow` (a fresh " <>
+          "workflow_dispatch — the only mode that can carry `inputs` such as force_deploy). " <>
+          "A worker may re-run its own task's CI; a coordinator must name `task_id`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" =>
+              "Task whose PR to re-run CI for. A worker may omit this (its own task) and may " <>
+                "not name another; a coordinator must supply it."
+          },
+          "mode" => %{
+            "type" => "string",
+            "enum" => ["auto", "failed_jobs", "all_jobs", "workflow"],
+            "description" =>
+              "Re-run granularity (default `auto`). Never pick `failed_jobs` for a second " <>
+                "consecutive attempt — a repeat of an identical re-run is never informative."
+          },
+          "workflow" => %{
+            "type" => "string",
+            "description" =>
+              "Workflow name or file basename (e.g. \"review-app.yml\"), when the head " <>
+                "commit has more than one failed run."
+          },
+          "inputs" => %{
+            "type" => "object",
+            "description" =>
+              "workflow_dispatch inputs, e.g. {\"force_deploy\": \"true\"}. Supplying any " <>
+                "input forces `workflow` mode, since only a fresh dispatch can carry them. " <>
+                "Combining inputs with mode `failed_jobs`/`all_jobs` is rejected.",
+            "additionalProperties" => %{"type" => "string"}
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.ci_rerun/2
+    },
+    %{
+      name: "ci_mark_external",
+      tiers: @both,
+      description:
+        "Record a 'this CI failure is infrastructure, not my diff' verdict on a task parked " <>
+          "on a :ci_failed block, reclassifying the park as :ci_failed_external (bd-5mzzww). " <>
+          "Use when you have EVIDENCE the failure is repo-wide — e.g. the same check failing " <>
+          "on unrelated branches today, and nothing in this diff touching the failing code. " <>
+          "The coordinator escalation then reads 'CI is broken repo-wide, not on this branch' " <>
+          "and carries your note, instead of a generic ci_failed park indistinguishable from " <>
+          "genuinely broken code. The mark is scoped to the current block episode and clears " <>
+          "as soon as the block reason changes, so a later real failure is never mislabelled.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" =>
+              "Task parked on the :ci_failed block. A worker may omit this (its own task)."
+          },
+          "note" => %{
+            "type" => "string",
+            "description" =>
+              "Required. The evidence for the verdict, in one or two sentences — an operator " <>
+                "will read this before deciding to force-merge."
+          }
+        },
+        "required" => ["note"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.ci_mark_external/2
     },
     %{
       name: "repo_list",

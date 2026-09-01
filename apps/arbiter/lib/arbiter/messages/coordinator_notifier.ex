@@ -483,10 +483,12 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   the autonomous path was tried first. Same addressed `:escalation` **mailbox**
   shape. Best-effort, returns `:ok`.
   """
-  @spec merge_block_unresolved(map(), String.t() | nil, atom(), non_neg_integer()) :: :ok
-  def merge_block_unresolved(snapshot, mr_ref, reason, attempts) do
+  @spec merge_block_unresolved(map(), String.t() | nil, atom(), non_neg_integer(), keyword()) ::
+          :ok
+  def merge_block_unresolved(snapshot, mr_ref, reason, attempts, opts \\ []) do
     escalate_event("merge_block_unresolved/4", snapshot, fn task_id ->
       ws_id = snapshot.workspace_id
+      note = Keyword.get(opts, :note)
 
       subject = "#{task_id} auto-resolve exhausted (#{attempts}×) — #{block_label(reason)}"
 
@@ -497,10 +499,57 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
           mr_ref && "PR/MR: #{mr_ref}",
           "Reason: #{reason}",
           "Auto-resolve attempts: #{attempts}",
+          note && "Worker's diagnosis: #{note}",
           "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
           "The Watchdog auto-resolved this block #{attempts} time(s) without success " <>
             "and has stopped retrying. Resolve it manually (or force-merge) and the " <>
             "next poll will pick it up."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
+  Re-raise a park that has seen no state change — the low-frequency heartbeat
+  for an indefinitely-parked PR (bd-5mzzww / #1448 ask 4).
+
+  `merge_blocked/3` fires **once per block episode** by design (#1226): a block
+  the fleet cannot resolve on its own is re-detected on every poll, and paging
+  every time drowned the mailbox. That dedupe is correct, but on its own it
+  turns an indefinite park into permanent silence — there is no repeat signal
+  and, for a non-auto-resolvable block, no automated remediation either. The
+  incident PR sat 19 hours on a single page with a live Watchdog polling it
+  throughout.
+
+  So a park that has not changed reason re-pages on a cadence measured in
+  half-days (`Arbiter.Worker.Watchdog`'s `park_heartbeat_polls`). The subject
+  carries the elapsed poll count, which makes each heartbeat a *distinct*
+  subject — deliberately outside `merge_blocked/3`'s uncleared-page latch, since
+  the whole point is to speak again about something already in the inbox. That
+  is a considered tension with #1226, not a regression of it: 12 hours apart,
+  not once a minute.
+  """
+  @spec merge_park_heartbeat(map(), String.t() | nil, atom(), non_neg_integer()) :: :ok
+  def merge_park_heartbeat(snapshot, mr_ref, reason, polls) do
+    escalate_event("merge_park_heartbeat/4", snapshot, fn task_id ->
+      ws_id = snapshot.workspace_id
+
+      subject = "#{task_id} still parked after #{polls} polls — #{block_label(reason)}"
+
+      body =
+        [
+          "#{title_for(task_id)} has been parked on the same block for #{polls} " <>
+            "consecutive Watchdog polls with no state change: #{block_label(reason)}.",
+          mr_ref && "PR/MR: #{mr_ref}",
+          "Reason: #{reason}",
+          "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
+          "This is a heartbeat, not a new block — the original escalation is " <>
+            "already in this inbox and fires only once per episode. Nothing about " <>
+            "this PR has moved since; the Watchdog is alive and still polling, but " <>
+            "it has no automated path forward and is waiting on you."
         ]
         |> Enum.reject(&is_nil/1)
         |> Enum.join("\n")
@@ -643,6 +692,12 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp block_label(:conflict), do: "merge conflict with the base branch"
   defp block_label(:behind_base), do: "branch is behind the base branch"
   defp block_label(:ci_failed), do: "required CI checks are failing"
+
+  defp block_label(:ci_failed_external),
+    do:
+      "required CI checks are failing for reasons outside this branch " <>
+        "(reported as broken infrastructure, not this diff)"
+
   defp block_label(:needs_approval), do: "required approval is missing"
 
   defp block_label(:needs_nonauthor_approval),
@@ -663,6 +718,18 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp block_remediation(:ci_failed, _auto_merge?),
     do: "fix the failing checks (or re-run flaky ones), then re-push."
+
+  # Pointedly different advice from `:ci_failed`: pushing a fix to *this* branch
+  # cannot clear a failure that isn't this branch's fault, and re-running only
+  # the failed job re-tests the same broken upstream artifact. The two things
+  # that do work are fixing CI repo-wide and forcing a full rebuild.
+  defp block_remediation(:ci_failed_external, _auto_merge?),
+    do:
+      "a worker diagnosed this failure as repo-wide/infrastructure, not caused by " <>
+        "this diff — pushing another fix to this branch will not clear it. Fix CI " <>
+        "itself, force a full pipeline re-run (`ci_rerun` with mode all_jobs or " <>
+        "workflow, NOT a failed-jobs re-run, which reuses the same broken upstream " <>
+        "artifact), or force-merge if the failing check is genuinely unrelated."
 
   defp block_remediation(:needs_approval, auto_merge?),
     do:

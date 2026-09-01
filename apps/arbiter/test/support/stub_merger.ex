@@ -37,6 +37,8 @@ defmodule Arbiter.Test.StubMerger do
         update_branches: %{},
         update_branch_result: :ok,
         failing_checks: %{},
+        ci_reruns: [],
+        rerun_result: :default,
         merge_result: :ok,
         inline_comments: [],
         submitted_reviews: [],
@@ -202,6 +204,36 @@ defmodule Arbiter.Test.StubMerger do
     ensure_started()
     checks = Agent.get(@name, fn s -> Map.get(s.failing_checks, ref, []) end)
     {:ok, checks}
+  end
+
+  @doc "All `rerun_ci/2` calls, newest first (bd-5mzzww)."
+  def ci_reruns do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :ci_reruns, []) end)
+  end
+
+  @doc "Force `rerun_ci/2` to return this result instead of the default {:ok, _}."
+  def set_rerun_result(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.put(s, :rerun_result, result) end)
+    :ok
+  end
+
+  @impl true
+  def rerun_ci(ref, opts) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      s = Map.update(s, :ci_reruns, [{ref, opts}], &[{ref, opts} | &1])
+
+      result =
+        case Map.get(s, :rerun_result, :default) do
+          :default -> {:ok, %{mode: Map.get(opts, :mode) || :auto, run_id: 1, workflow: "CI"}}
+          other -> other
+        end
+
+      {result, s}
+    end)
   end
 
   @impl true
