@@ -340,6 +340,72 @@ defmodule Arbiter.Trackers.JiraTest do
       assert {"Code Complete", ["51", "61"]} = Agent.get(agent, & &1)
     end
 
+    test "shipped defaults dispatch a Task out of Backlog (VR replay, bd-bwwkvr)" do
+      # End-to-end replay of the reported failure: no workspace transition_graph
+      # override, so the SHIPPED default graph is in play, and the live
+      # /transitions payloads are the Task-flavoured ones observed on VR-18639.
+      # Before the destination-status fix this halted in Backlog.
+      {:ok, agent} = Agent.start_link(fn -> {"Backlog", []} end)
+      on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
+
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com"
+      })
+
+      transitions_for = fn
+        "Backlog" ->
+          [
+            %{"id" => "11", "name" => "Prioritize", "to" => %{"name" => "What's Next"}},
+            %{"id" => "131", "name" => "Ready to work (2)", "to" => %{"name" => "To Do"}},
+            %{"id" => "141", "name" => "Groom", "to" => %{"name" => "Groomed"}}
+          ]
+
+        "To Do" ->
+          [%{"id" => "41", "name" => "Start work", "to" => %{"name" => "In Progress"}}]
+
+        _ ->
+          []
+      end
+
+      advance = fn
+        "131" -> "To Do"
+        "41" -> "In Progress"
+      end
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        {cur, _posted} = Agent.get(agent, & &1)
+
+        cond do
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"transitions" => transitions_for.(cur)})
+
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            id = Jason.decode!(body)["transition"]["id"]
+            Agent.update(agent, fn {_c, posted} -> {advance.(id), posted ++ [id]} end)
+
+            conn
+            |> Plug.Conn.put_status(204)
+            |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = Jira.transition(@ref, :in_progress)
+
+      # Not id 141 ("Groom" here, but "To do next" on a Story) — routed by status.
+      assert {"In Progress", ["131", "41"]} = Agent.get(agent, & &1)
+    end
+
     test "multi-hop: a hop with no live transition to its destination halts loudly" do
       Config.put_active(%{
         "host" => @host,
