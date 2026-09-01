@@ -163,6 +163,11 @@ defmodule Arbiter.Board.Snapshot do
     quota = Map.get(input, :quota) || :ok
     paused? = Map.get(input, :paused) == true
     ready_order = Map.get(input, :ready_order) || []
+    # bd-8jixav: which tasks have a live Watchdog. A Registry read, so it is an
+    # *input* here rather than something `derive/1` goes and looks up — the
+    # pure half stays pure and a caller that can't answer passes nothing, which
+    # reads as "unknown" on the card rather than a false "no watchdog" alarm.
+    watchdog_live = Map.get(input, :watchdog_live)
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
 
@@ -192,7 +197,7 @@ defmodule Arbiter.Board.Snapshot do
       backlog: backlog_cards(issues, worked),
       ready: plan.entries,
       running: running,
-      waiting: waiting(authors, issues, issues_by_id, worked, now),
+      waiting: waiting(authors, issues, issues_by_id, worked, now, watchdog_live),
       closed_today: closed_today_cards(issues, now),
       promote: plan.promote,
       slots_total: slots_total,
@@ -233,8 +238,23 @@ defmodule Arbiter.Board.Snapshot do
       slots_total: Keyword.get(opts, :slots_total) || effective_max_concurrent(workspace_id),
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
-      ready_order: Keyword.get(opts, :ready_order, [])
+      ready_order: Keyword.get(opts, :ready_order, []),
+      watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> load_watchdog_live(workers) end)
     })
+  end
+
+  # Which of these workers still has a live Watchdog (bd-8jixav). One Registry
+  # lookup per parked worker — cheap, and only for the `:awaiting_review` rows,
+  # which are the only ones the question means anything for.
+  defp load_watchdog_live(workers) do
+    workers
+    |> Enum.filter(&(Map.get(&1, :status) == :awaiting_review))
+    |> Enum.filter(&Watchdog.alive?(&1.task_id))
+    |> MapSet.new(& &1.task_id)
+  rescue
+    # A board that renders five columns beats one that raises: an unreadable
+    # registry degrades to "unknown", not to a false alarm on every card.
+    _ -> nil
   end
 
   @doc """
@@ -435,15 +455,18 @@ defmodule Arbiter.Board.Snapshot do
   # and an orphaned issue (no live worker at all) still carries both, nil.
   # The view reads whichever it has instead of branching on which shape
   # produced the card.
-  defp waiting(workers, issues, issues_by_id, worked, now) do
-    (waiting_cards(workers, issues_by_id) ++ orphaned_cards(issues, worked, now))
+  defp waiting(workers, issues, issues_by_id, worked, now, watchdog_live) do
+    (waiting_cards(workers, issues_by_id, watchdog_live) ++ orphaned_cards(issues, worked, now))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
 
-  defp waiting_cards(workers, issues_by_id) do
+  defp waiting_cards(workers, issues_by_id, watchdog_live) do
     workers
     |> Enum.filter(&(&1.status in @waiting_statuses))
-    |> Enum.map(fn w ->
+    |> one_row_per_task()
+    |> Enum.map(fn {w, group} ->
+      alive = watchdog_alive(w, watchdog_live)
+
       w
       |> base_card(issues_by_id)
       |> Map.merge(%{
@@ -451,11 +474,67 @@ defmodule Arbiter.Board.Snapshot do
         mr_ref: Map.get(w, :mr_ref),
         merger_url: Map.get(w, :merger_url),
         merger_status: get_meta(w, :last_merger_status),
-        needs_you: needs_you?(w),
+        watchdog_alive: alive,
+        # The collapsed rows keep their vote: a dead fix pass under a
+        # legitimately-parked primary still needs a human, even though the
+        # primary row alone reads as "the machine has this".
+        needs_you: Enum.any?(group, &needs_you?(&1, watchdog_alive(&1, watchdog_live))),
+        collapsed_note: collapsed_note(w, group),
         since: since(w)
       })
     end)
   end
+
+  # What the collapsed subordinate rows say that the primary row's own fields
+  # cannot: a `:failed` fix pass / conflict pass under the card. Nil when
+  # nothing was collapsed away, or when the surviving row is itself the
+  # subordinate (its own status already says it).
+  defp collapsed_note(primary, group) do
+    group
+    |> Enum.reject(&(&1 == primary))
+    |> Enum.filter(&(Map.get(&1, :status) == :failed))
+    |> Enum.map(&(Arbiter.Worker.subordinate_label(&1) || "subordinate pass"))
+    |> Enum.uniq()
+    |> case do
+      [] -> nil
+      labels -> Enum.join(labels, ", ") <> " failed"
+    end
+  end
+
+  # One task, one card (bd-8jixav). A task's primary row and a subordinate
+  # `:fixpass` / `:conflict` pass's row are both in `@waiting_statuses` — a
+  # parked `:awaiting_review` primary alongside a `:failed` fix pass is the
+  # ordinary shape of a task the merge queue is working on — so the column used
+  # to render one task as two cards that read at a glance as two different
+  # stuck tickets.
+  #
+  # The primary row (`role: nil`) wins where both exist: it is the one holding
+  # the MR, and the one whose fields the card's actions address. `Enum.min_by`
+  # returns the first row of the minimal rank, so among rows of the same rank
+  # the caller's order survives.
+  #
+  # Returns `{primary_row, all_rows_for_the_task}`: the card renders the
+  # primary's fields, but the whole group is still there for the signals a
+  # collapsed row would otherwise take with it (its `needs_you?` vote, its
+  # failure).
+  defp one_row_per_task(workers) do
+    workers
+    |> Enum.group_by(& &1.task_id)
+    |> Enum.map(fn {_task_id, group} -> {Enum.min_by(group, &subordinate_rank/1), group} end)
+  end
+
+  defp subordinate_rank(worker), do: if(is_nil(Map.get(worker, :role)), do: 0, else: 1)
+
+  # Whether a live Watchdog exists for this card's task — `true`/`false` only
+  # where the question means something (an `:awaiting_review` park is the one
+  # state that is *supposed* to have a Watchdog), and `nil` = unknown wherever
+  # it doesn't, including when the caller supplied no liveness input at all.
+  # A `:failed` or `:awaiting` worker holds no MR, so "no watchdog" is not a
+  # finding about it.
+  defp watchdog_alive(%{status: :awaiting_review} = worker, live) when is_struct(live, MapSet),
+    do: MapSet.member?(live, worker.task_id)
+
+  defp watchdog_alive(_worker, _live), do: nil
 
   # bd-2mv3lx: an issue stuck `in_progress` with no live worker — e.g. `arb
   # worker stop` on an `:awaiting_review` worker, the documented pre-flight
@@ -479,7 +558,11 @@ defmodule Arbiter.Board.Snapshot do
         mr_ref: Map.get(issue, :pr_ref),
         merger_url: nil,
         merger_status: nil,
+        # No live worker at all, so no Watchdog is expected either — the card
+        # already says "worker stopped", which is the stronger statement.
+        watchdog_alive: nil,
         needs_you: true,
+        collapsed_note: nil,
         since: Map.get(issue, :updated_at) || created_at(issue)
       }
     end)
@@ -496,14 +579,20 @@ defmodule Arbiter.Board.Snapshot do
   defp waiting_reason(%{status: :awaiting_review}), do: nil
   defp waiting_reason(worker), do: halt_reason(worker)
 
+  # bd-8jixav: the MR is open and *nothing is polling it*. This outranks every
+  # block-reason nuance below — a `:ci_failed` block the Watchdog would
+  # ordinarily clear by itself is not getting cleared by a process that no
+  # longer exists.
+  defp needs_you?(_worker, false), do: true
+
   # A question has no retry, so it is always the human's.
-  defp needs_you?(%{status: :awaiting}), do: true
+  defp needs_you?(%{status: :awaiting}, _alive), do: true
 
   # A parked worker is terminal — the system has exhausted itself by
   # definition, whatever its last poll happened to record.
-  defp needs_you?(%{status: :failed}), do: true
+  defp needs_you?(%{status: :failed}, _alive), do: true
 
-  defp needs_you?(worker) do
+  defp needs_you?(worker, _alive) do
     case Watchdog.effective_block_reason(get_meta(worker, :last_merger_status) || %{}) do
       # No block the forge will admit to: the MR is simply mid-review, which is
       # still the machine's turn.

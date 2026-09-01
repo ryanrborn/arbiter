@@ -2100,6 +2100,72 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "queue_restart_watchdog/2 (bd-8jixav)" do
+    alias Arbiter.Worker.Watchdog
+    alias Arbiter.Test.StubMerger
+
+    setup do
+      StubMerger.reset()
+      :ok
+    end
+
+    test "requires task_id", ctx do
+      assert {:error, {:invalid, _}} = Tools.queue_restart_watchdog(ctx.coordinator, %{})
+    end
+
+    test "reports not-found when no worker is registered for the task", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ "no worker"
+    end
+
+    test "mints a fresh watchdog for a parked worker whose watchdog is gone", ctx do
+      {:ok, wpid} =
+        Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      :ok = Worker.advance(wpid, :implement)
+      on_exit(fn -> Process.alive?(wpid) && Worker.stop(wpid, :normal) end)
+
+      StubMerger.next_open_ref("!rw1")
+      StubMerger.queue_get("!rw1", [%{status: :open, approved: false}])
+
+      {:ok, "!rw1"} =
+        Worker.open_mr(wpid, "feature/rw1", "MR", "desc", %{
+          adapter: StubMerger,
+          workspace: nil,
+          interval_ms: 20,
+          initial_delay_ms: 0,
+          watchdog_start_error: true
+        })
+
+      refute Watchdog.alive?(ctx.task.id)
+
+      assert {:ok, %{restarted: true, task_id: task_id}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert task_id == ctx.task.id
+      wait_until(fn -> Watchdog.alive?(ctx.task.id) end)
+
+      on_exit(fn ->
+        Watchdog.whereis(ctx.task.id) |> then(&(&1 && GenServer.stop(&1, :normal)))
+      end)
+    end
+
+    test "refuses a worker that is not parked awaiting review", ctx do
+      {:ok, wpid} =
+        Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      :ok = Worker.advance(wpid, :implement)
+      on_exit(fn -> Process.alive?(wpid) && Worker.stop(wpid, :normal) end)
+
+      assert {:error, {:invalid, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ "awaiting_review"
+    end
+  end
+
   describe "worker_stop/2" do
     test "stops a running worker in the workspace", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "stop target", workspace_id: ctx.ws.id})
