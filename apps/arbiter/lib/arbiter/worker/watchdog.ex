@@ -374,7 +374,8 @@ defmodule Arbiter.Worker.Watchdog do
   Look up the Watchdog registered for `task_id`, or `nil` if none is running.
   """
   @spec whereis(String.t()) :: pid() | nil
-  def whereis(task_id) when is_binary(task_id), do: PRegistry.whereis(task_id <> @watchdog_registry_suffix)
+  def whereis(task_id) when is_binary(task_id),
+    do: PRegistry.whereis(task_id <> @watchdog_registry_suffix)
 
   @doc """
   Re-arm one more auto-resolve attempt for a task parked indefinitely after
@@ -392,8 +393,13 @@ defmodule Arbiter.Worker.Watchdog do
   and will notice non-convergence — but it is never called automatically; the
   Watchdog itself only ever re-arms via this explicit external call.
 
+  Only bumps the budget for *this* block episode: the configured ceiling
+  (`base_max_auto_resolve_attempts`) is restored once the episode clears, so
+  a later, unrelated block on the same lane doesn't inherit the bump.
+
   Returns:
-    * `:ok` — re-armed; a poll has been scheduled immediately.
+    * `:ok` — re-armed; a poll will pick it up on the already-pending
+      schedule (within `interval_ms`).
     * `{:error, :not_found}` — no Watchdog is registered for `task_id`.
     * `{:error, :not_parked_on_ci_failed}` — the Watchdog isn't parked on an
       exhausted `:ci_failed` block (e.g. still running, or parked for a
@@ -405,6 +411,23 @@ defmodule Arbiter.Worker.Watchdog do
     case whereis(task_id) do
       nil -> {:error, :not_found}
       pid -> GenServer.call(pid, :retry_auto_resolve)
+    end
+  end
+
+  @doc """
+  Read-only lookup of the reason a task's Watchdog is currently parked on
+  (e.g. `:ci_failed`), or `nil` if it isn't parked or no Watchdog is running
+  for `task_id`.
+
+  This is the authoritative signal for whether `retry_auto_resolve/1` would
+  accept a re-arm — unlike `effective_block_reason/1`, which infers from the
+  forge's own approval state and can't see a ReviewGate-driven park (bd-bspakl).
+  """
+  @spec parked_on(String.t()) :: block_reason() | nil
+  def parked_on(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> nil
+      pid -> GenServer.call(pid, :parked_on)
     end
   end
 
@@ -496,6 +519,12 @@ defmodule Arbiter.Worker.Watchdog do
           # `max_auto_resolve_attempts` the Watchdog escalates instead of retrying.
           auto_resolve_attempts: 0,
           max_auto_resolve_attempts: max_auto_resolve_attempts,
+          # The configured ceiling as passed at start, mirroring `base_max_polls`.
+          # `retry_auto_resolve/1` bumps `max_auto_resolve_attempts` for the
+          # current block episode only; this is restored into it once the
+          # episode clears so the bump doesn't leak into a later, unrelated
+          # block (bd-bspakl).
+          base_max_auto_resolve_attempts: max_auto_resolve_attempts,
           fix_pass_dispatcher: fix_pass_dispatcher,
           # Latches the exhausted-retry escalation so it fires once per block
           # episode rather than on every subsequent poll (#354, Phase 2a). While
@@ -591,12 +620,23 @@ defmodule Arbiter.Worker.Watchdog do
         last_escalated_poll: state.poll_count
     }
 
-    schedule(self(), 0)
+    # Deliberately not scheduling an immediate poll here: a `:poll` timer is
+    # already pending from the last `reschedule/1` (there is no timer ref
+    # tracked in state, so we can't cancel-and-replace it), and firing a
+    # second one starts a permanent, independent poll chain that never merges
+    # back — each re-arm would multiply the effective poll rate. The already-
+    # pending timer picks this up within `interval_ms`, which a human re-arm
+    # can tolerate.
     {:reply, :ok, state}
   end
 
   def handle_call(:retry_auto_resolve, _from, state) do
     {:reply, {:error, :not_parked_on_ci_failed}, state}
+  end
+
+  @impl true
+  def handle_call(:parked_on, _from, state) do
+    {:reply, state.park_reason, state}
   end
 
   @impl true
@@ -1123,6 +1163,7 @@ defmodule Arbiter.Worker.Watchdog do
           state
           | last_block_reason: nil,
             auto_resolve_attempts: 0,
+            max_auto_resolve_attempts: state.base_max_auto_resolve_attempts,
             unresolved_escalated: false
         }
 

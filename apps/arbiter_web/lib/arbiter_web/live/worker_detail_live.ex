@@ -214,7 +214,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
       :ok ->
         {:noreply,
          socket
-         |> put_flash(:info, "Re-armed auto-resolve for #{task_id}; a fresh fix-pass is starting.")
+         |> put_flash(
+           :info,
+           "Re-armed auto-resolve for #{task_id}; a fresh fix-pass is starting."
+         )
          |> refresh_all()}
 
       {:error, :not_found} ->
@@ -407,22 +410,18 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp retryable?(_task, _snapshot), do: false
 
   # Whether the "Retry auto-resolve" action makes sense to show at all — a
-  # parked, approved MR still reporting :ci_failed (bd-bspakl). This is a
-  # necessary but not sufficient condition: the Watchdog only actually accepts
-  # the re-arm once its bounded retries are *exhausted and parked*, which this
-  # page can't see directly (that's internal Watchdog state, not part of the
-  # merger-status snapshot). Clicking it before exhaustion gets a clear
-  # "nothing to re-arm yet" flash from the backend rather than silently doing
-  # nothing, which is still strictly better than the old dead-end Resume
-  # button for this state.
-  defp retry_auto_resolve_available?(%{status: :awaiting_review, meta: meta}) do
-    case Map.get(meta || %{}, :last_merger_status) do
-      %{} = merger_status -> Watchdog.effective_block_reason(merger_status) == :ci_failed
-      _ -> false
-    end
+  # Watchdog parked on an exhausted :ci_failed block (bd-bspakl). Reads the
+  # Watchdog's own `park_reason` (via `parked_on/1`) rather than inferring
+  # from the merger-status snapshot: `effective_block_reason/1` (arity-1)
+  # hardcodes `via_review_gate: false` and so never sees a park reached
+  # through the ReviewGate-aware poll loop — exactly the standard Arbiter
+  # flow this action targets. `parked_on/1` is authoritative and needs no
+  # such inference.
+  defp retry_auto_resolve_available?(task_id, %{status: :awaiting_review}) do
+    Watchdog.parked_on(task_id) == :ci_failed
   end
 
-  defp retry_auto_resolve_available?(_snapshot), do: false
+  defp retry_auto_resolve_available?(_task_id, _snapshot), do: false
 
   defp resume_failure(:no_outpost),
     do:
@@ -789,7 +788,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                     Actions
                   </span>
                   <Core.button
-                    :if={retry_auto_resolve_available?(@snapshot)}
+                    :if={retry_auto_resolve_available?(@task_id, @snapshot)}
                     id="worker-retry-auto-resolve-btn"
                     phx-click="retry_auto_resolve"
                     data-confirm={"Re-arm one more auto-resolve attempt for #{@task_id}? This dispatches a fresh fix-pass worker."}

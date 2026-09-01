@@ -669,6 +669,74 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert Watchdog.retry_auto_resolve("no-such-task-#{System.unique_integer([:positive])}") ==
                {:error, :not_found}
     end
+
+    test "does not start a second, permanent poll chain per re-arm" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rar3", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!rar3",
+        auto_merge: true,
+        max_auto_resolve_attempts: 1,
+        max_polls: 1000,
+        interval_ms: 20,
+        fix_pass_dispatcher: StubFixPassDispatcher,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      # Let the budget exhaust and the park kick in.
+      Process.sleep(60)
+
+      baseline = StubMerger.get_count("!rar3")
+      assert Watchdog.retry_auto_resolve(task_id) == :ok
+      assert Watchdog.retry_auto_resolve(task_id) == :ok
+      assert Watchdog.retry_auto_resolve(task_id) == :ok
+
+      # Four re-arms deep (1 original chain + 3 re-arms), the poll rate must
+      # still be ~1 poll per interval_ms, not 4x — a second, independent
+      # `Process.send_after/3` chain per re-arm would multiply it (bd-bspakl
+      # review round 1).
+      Process.sleep(200)
+      after_rearm = StubMerger.get_count("!rar3") - baseline
+
+      assert after_rearm <= 15,
+             "expected roughly one poll chain (~10 polls/200ms at interval_ms=20), " <>
+               "got #{after_rearm} — looks like re-arming started an extra poll chain"
+    end
+
+    test "the re-arm bump doesn't leak into a later, unrelated block episode" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rar4", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      wpid =
+        start_watchdog(pid, task_id, "!rar4",
+          auto_merge: true,
+          max_auto_resolve_attempts: 1,
+          max_polls: 1000,
+          interval_ms: 15,
+          fix_pass_dispatcher: StubFixPassDispatcher,
+          workspace: test_workspace()
+        )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      Process.sleep(60)
+
+      assert Watchdog.retry_auto_resolve(task_id) == :ok
+      assert :sys.get_state(wpid).max_auto_resolve_attempts == 2
+
+      # The episode now clears entirely (approved + no block reason). Force
+      # the merge attempt to fail so the watchdog stays alive to inspect
+      # (a successful auto-merge stops it immediately) — what matters here is
+      # that the bumped budget is restored to what was configured before the
+      # next merge attempt, not left at the re-armed value, so a later
+      # unrelated block on this same lane doesn't silently inherit an extra
+      # automatic attempt (bd-bspakl).
+      StubMerger.set_merge_result({:error, :conflict})
+      StubMerger.queue_get("!rar4", [%{status: :open, approved: true, block_reason: nil}])
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == nil end)
+      assert :sys.get_state(wpid).max_auto_resolve_attempts == 1
+    end
   end
 
   describe "conflict auto-resolve (#354, Phase 2b)" do

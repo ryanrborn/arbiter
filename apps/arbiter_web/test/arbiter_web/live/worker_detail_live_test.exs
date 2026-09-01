@@ -537,34 +537,92 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
   describe "retry auto-resolve (bd-bspakl)" do
     alias Arbiter.Test.StubMerger
+    alias Arbiter.Worker.Watchdog
 
     setup do
       StubMerger.reset()
       :ok
     end
 
-    defp park_awaiting_review(pid, merger_status) do
+    # Actually drives the task's real Watchdog to the state under test, rather
+    # than just faking the merger-status meta — the button now gates on the
+    # Watchdog's own `park_reason` (`parked_on/1`), which is only set once the
+    # Watchdog itself processes a poll (bd-bspakl review round 1). Setting
+    # `max_auto_resolve_attempts: 0` on the workspace makes the very first
+    # `:ci_failed` poll exhaust immediately, so no fix-pass worker is ever
+    # dispatched.
+    defp park_awaiting_review(pid, task, merger_status, opts \\ []) do
       :ok = Worker.advance(pid, :implement)
-      StubMerger.next_open_ref("!bd-bspakl")
+      ref = "!bd-bspakl-#{System.unique_integer([:positive])}"
+      StubMerger.next_open_ref(ref)
+      StubMerger.queue_get(ref, [merger_status])
+
+      {:ok, workspace} = Ash.get(Workspace, task.workspace_id)
 
       {:ok, _} =
-        Worker.open_mr(pid, "feature/x", "Add x", "desc", %{
-          adapter: StubMerger,
-          workspace: nil,
-          # Park far in the future so the auto-started Watchdog doesn't poll
-          # during the test and race the assertion.
-          interval_ms: 1_000_000,
-          initial_delay_ms: 1_000_000
-        })
+        Worker.open_mr(
+          pid,
+          "feature/x",
+          "Add x",
+          "desc",
+          Map.merge(
+            %{
+              adapter: StubMerger,
+              workspace: workspace,
+              auto_merge: true,
+              interval_ms: 15,
+              initial_delay_ms: 0
+            },
+            Map.new(opts)
+          )
+        )
 
-      :ok = Worker.record_merger_status(pid, merger_status)
+      ref
     end
 
-    test "offers Retry auto-resolve when the MR is approved but ci_failed",
+    defp set_max_auto_resolve_attempts(ws, n) do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"merge" => %{"max_auto_resolve_attempts" => n}}},
+          action: :patch_config
+        )
+
+      ws
+    end
+
+    test "offers Retry auto-resolve once the Watchdog genuinely parks on exhausted :ci_failed",
          %{conn: conn, ws: ws} do
+      ws = set_max_auto_resolve_attempts(ws, 0)
       {:ok, task} = Ash.create(Issue, %{title: "pd-ci-failed", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, %{status: :open, approved: true, block_reason: :ci_failed})
+      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert has_element?(view, "#worker-retry-auto-resolve-btn")
+      assert html =~ "Retry auto-resolve"
+    end
+
+    test "offers Retry auto-resolve for a ReviewGate lane even though the forge shows approved: false",
+         %{conn: conn, ws: ws} do
+      # The exact gap this ticket closed: on a ReviewGate-driven lane the forge
+      # never sees the in-process approval, so `approved` stays false even
+      # though the Watchdog (using the ReviewGate-aware poll path) genuinely
+      # parks on the block. The old arity-1 `effective_block_reason/1` gate
+      # hardcoded `via_review_gate: false` and could never see this.
+      ws = set_max_auto_resolve_attempts(ws, 0)
+      {:ok, task} = Ash.create(Issue, %{title: "pd-ci-failed-gate", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+
+      park_awaiting_review(
+        pid,
+        task,
+        %{status: :open, approved: false, block_reason: :ci_failed},
+        via_review_gate: true
+      )
+
+      wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
 
       {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
 
@@ -576,7 +634,10 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-conflict", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, %{status: :open, approved: true, block_reason: :conflict})
+      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :conflict})
+
+      wait_until(fn -> Watchdog.whereis(task.id) != nil end)
+      Process.sleep(50)
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
 
@@ -587,24 +648,31 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-pending", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, %{status: :open, approved: false})
+      park_awaiting_review(pid, task, %{status: :open, approved: false})
+
+      wait_until(fn -> Watchdog.whereis(task.id) != nil end)
+      Process.sleep(50)
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
 
       refute has_element?(view, "#worker-retry-auto-resolve-btn")
     end
 
-    test "clicking Retry auto-resolve when nothing is parked shows a friendly error",
+    test "the retry_auto_resolve event shows a friendly error when nothing is parked",
          %{conn: conn, ws: ws} do
+      # The button itself no longer renders unless the Watchdog is genuinely
+      # parked (see above), but the event handler is still reachable directly
+      # (e.g. a stale page, or a race between render and the block clearing)
+      # and must still fail soft rather than crash the LiveView.
       {:ok, task} = Ash.create(Issue, %{title: "pd-click-error", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, %{status: :open, approved: true, block_reason: :ci_failed})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
 
-      html = view |> element("#worker-retry-auto-resolve-btn") |> render_click()
+      html = render_click(view, "retry_auto_resolve")
 
-      assert html =~ "isn&#39;t parked on an exhausted CI-failed block yet"
+      assert html =~ "isn&#39;t parked on an exhausted CI-failed block yet" or
+               html =~ "No merge watchdog is currently running"
     end
   end
 

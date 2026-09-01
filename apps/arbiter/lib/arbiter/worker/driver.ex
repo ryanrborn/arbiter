@@ -453,9 +453,18 @@ defmodule Arbiter.Worker.Driver do
   # both cases its agent is provably dead even though the GenServer may linger.
   # A non-terminal own worker — the max_ticks giving-up branch, where nothing
   # failed it — is NOT exempt: its agent can still be running.
+  #
+  # The `<task_id>:watchdog` entry (bd-bspakl) is also exempt: it registers
+  # under this same registry so `retry_auto_resolve/1` can look it up by
+  # task_id, but it never touches the worktree — it only polls the forge and
+  # dispatches sub-workers, which register (and block) under their own keys.
+  # Without this it would leak the worktree on every reap while a parked
+  # Watchdog is still watching for an out-of-band fix.
   defp blocking_workers(%{task_id: task_id, worker_pid: own_pid}) do
     Arbiter.Worker.Registry.live_for(task_id)
-    |> Enum.reject(fn {_key, pid} -> pid == own_pid and agent_terminal?(pid) end)
+    |> Enum.reject(fn {key, pid} ->
+      (pid == own_pid and agent_terminal?(pid)) or key == task_id <> ":watchdog"
+    end)
     |> Enum.map(fn {key, _pid} -> key end)
   rescue
     # A registry that isn't running (a bare unit-test Driver) must not crash

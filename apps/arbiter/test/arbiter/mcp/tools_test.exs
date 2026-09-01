@@ -2069,7 +2069,9 @@ defmodule Arbiter.MCP.ToolsTest do
       :ok = Worker.advance(wpid, :implement)
       on_exit(fn -> Process.alive?(wpid) && Worker.stop(wpid, :normal) end)
 
-      StubMerger.queue_get(ctx.task.id, [%{status: :open, approved: true, block_reason: :ci_failed}])
+      StubMerger.queue_get(ctx.task.id, [
+        %{status: :open, approved: true, block_reason: :ci_failed}
+      ])
 
       {:ok, watchdog_pid} =
         Watchdog.start(

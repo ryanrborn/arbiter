@@ -2,24 +2,25 @@ defmodule ArbiterCli.Cmd.Queue do
   @moduledoc """
   Graph-queue subcommand router (C5 of #482):
 
-      arb queue resume <task-id>               — resume a paused branch by
-                                                  re-dispatching the failed
-                                                  task that blocked it
-      arb queue retry_auto_resolve <task-id>   — re-arm one more auto-resolve
-                                                  attempt on a task's merge
-                                                  Watchdog after it exhausted
-                                                  its budget on a :ci_failed
-                                                  block and parked (bd-bspakl)
+      arb queue resume <task-id>                — resume a paused branch by
+                                                   re-dispatching the failed
+                                                   task that blocked it
+      arb queue retry-auto-resolve <task-id>    — re-arm one more auto-resolve
+                                                   attempt on a task's merge
+                                                   Watchdog after it exhausted
+                                                   its budget on a :ci_failed
+                                                   block and parked (bd-bspakl)
 
   When a graph member's worker fails, the Conductor pauses all tasks downstream
   of the failure and posts an escalation to the coordinator inbox. `resume` clears
   the failed state, re-dispatches the task, and allows the branch to continue.
 
-  `retry_auto_resolve` is the supported way to force a fresh fix-pass once the
+  `retry-auto-resolve` is the supported way to force a fresh fix-pass once the
   Watchdog's bounded auto-resolve retries are exhausted: without it, a task
   parked on a genuine `:ci_failed` block after exhaustion had no way to try
   again short of pushing a fix to the branch by hand, outside Arbiter's normal
-  worker/review flow.
+  worker/review flow. `retry_auto_resolve` (underscored) is accepted as an
+  undocumented alias for back-compat.
   """
 
   alias ArbiterCli.{Client, Output}
@@ -38,11 +39,11 @@ defmodule ArbiterCli.Cmd.Queue do
         ["resume" | _] ->
           Output.die("queue resume requires: <task-id>")
 
-        ["retry_auto_resolve", task_id | _] ->
+        [cmd, task_id | _] when cmd in ["retry-auto-resolve", "retry_auto_resolve"] ->
           retry_auto_resolve(task_id, mode)
 
-        ["retry_auto_resolve" | _] ->
-          Output.die("queue retry_auto_resolve requires: <task-id>")
+        [cmd | _] when cmd in ["retry-auto-resolve", "retry_auto_resolve"] ->
+          Output.die("queue retry-auto-resolve requires: <task-id>")
 
         _ ->
           IO.puts(:stderr, "arb: unknown queue subcommand")
@@ -84,9 +85,7 @@ defmodule ArbiterCli.Cmd.Queue do
         if mode == :json do
           IO.puts(Jason.encode!(body))
         else
-          IO.puts(
-            "Re-armed: #{task_id} auto-resolve budget bumped by one and a poll fired now."
-          )
+          IO.puts("Re-armed: #{task_id} auto-resolve budget bumped by one and a poll fired now.")
         end
 
       {:error, %Client.Error{kind: :http, status: 404}} ->
