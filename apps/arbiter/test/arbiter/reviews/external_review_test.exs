@@ -381,10 +381,17 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       {_, 0} = System.cmd("git", ["clone", "-q", origin, clone])
       {_, 0} = System.cmd("git", ["-C", clone, "remote", "set-url", "origin", origin])
 
+      # The PR's content lives on its own branch, cut from (and left ahead
+      # of) "main" — "main" itself never advances past "init", so a diff
+      # against the (possibly freshly-refetched) base still shows the PR's
+      # change rather than nothing (bd-ch8zbp: :read_diff now refreshes
+      # origin/<base> from origin before diffing).
+      {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "-b", "pr-branch"])
       File.write!(Path.join(origin, "b.txt"), "pr head content")
       {_, 0} = System.cmd("git", ["-C", origin, "add", "-A"])
       {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "pr head"])
       {head_sha, 0} = System.cmd("git", ["-C", origin, "rev-parse", "HEAD"])
+      {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "main"])
 
       on_exit(fn -> File.rm_rf(root) end)
 
@@ -2502,6 +2509,78 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert record.status == :completed
       assert is_nil(record.failure_stage)
       assert is_nil(record.failure_reason)
+    end
+
+    test "a run_checks failure persists status=failed and failure details (bd-2sfl2f)" do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+
+      ws = github_ws("er-run-checks-fail")
+      stub_full_review(head_sha: "sha-run-checks-fail", author: "dev", max_comment_id: 1)
+
+      # Inject a check_runner that fails with a Claude prompt-too-long error
+      failing_runner = fn _diff, _state ->
+        {:error,
+         {:claude_failed, 1,
+          "Prompt is too long — the request is ~1083694 tokens (limit 1000000) but this conversation is only ~632831 tokens"}}
+      end
+
+      assert {:error, _reason} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: failing_runner
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      # The record should be marked as failed, not stuck in :running
+      assert rec.status == :failed
+      # And the failure details should be captured for diagnosis
+      assert rec.failure_stage == "run_checks"
+      assert is_binary(rec.failure_reason)
+      assert String.contains?(rec.failure_reason, "Prompt is too long")
+      # Other fields should be nil/empty on a run_checks failure
+      assert is_nil(rec.verdict)
+      assert is_nil(rec.finding_count)
+    end
+
+    test "dispatch async: a run_checks failure is persisted as failed (bd-2sfl2f)" do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+
+      ws = github_ws("er-dispatch-run-checks-fail")
+      stub_full_review(head_sha: "sha-dispatch-run-checks-fail", author: "dev", max_comment_id: 1)
+
+      # Inject a check_runner that fails with a Claude prompt-too-long error
+      failing_runner = fn _diff, _state ->
+        {:error,
+         {:claude_failed, 1,
+          "Prompt is too long — the request is ~1083694 tokens (limit 1000000) but this conversation is only ~632831 tokens"}}
+      end
+
+      # Subscribe to async events so we can wait for completion
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+      assert {:ok, ack} =
+               ExternalReview.dispatch(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: failing_runner
+               )
+
+      # Wait for the async Task to complete by listening for the event
+      assert_receive {:event, %{topic: "external_review", status: "running"}}, 1000
+      assert_receive {:event, %{topic: "external_review", status: "failed"}}, 5000
+
+      # Verify the record was updated with failure details
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.status == :failed
+      assert rec.failure_stage == "run_checks"
+      assert is_binary(rec.failure_reason)
+      assert String.contains?(rec.failure_reason, "Prompt is too long")
     end
   end
 
