@@ -528,6 +528,12 @@ defmodule ArbiterWeb.BoardLive do
 
   # A card sitting on a merge request is a merge-queue row; anything else in
   # Waiting is a worker you open and answer.
+  #
+  # bd-8jixav: unless its Watchdog is gone. The merge queue can do nothing
+  # about a dead Watchdog — the restart lives on the worker page, so send the
+  # operator there instead of to a screen that will only repeat the lie that
+  # the MR is being polled.
+  defp card_href("waiting", %{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
   defp card_href("waiting", %{status: :awaiting_review}), do: ~p"/merge_queue"
   defp card_href("waiting", card), do: ~p"/workers/#{card.id}"
 
@@ -1098,11 +1104,18 @@ defmodule ArbiterWeb.BoardLive do
     end
   end
 
+  # bd-8jixav: a Watchdog is a `:temporary` child — when it dies the worker
+  # stays parked on a genuinely open MR that nothing polls, and every other
+  # field on the card keeps reading like an ordinary review wait. This note is
+  # the whole difference between "the machine is working on it" and "this will
+  # sit here forever", so it outranks the merge status it replaces.
+  defp waiting_note(%{watchdog_alive: false}), do: "no watchdog polling"
   defp waiting_note(%{status: :awaiting_review} = card), do: merge_status_text(card.merger_status)
   defp waiting_note(%{status: :failed}), do: "failed"
   defp waiting_note(%{status: :in_progress}), do: "no live worker"
   defp waiting_note(_card), do: "parked"
 
+  defp waiting_action(%{watchdog_alive: false}), do: "restart watchdog"
   defp waiting_action(%{status: :awaiting_review}), do: "merge queue"
   defp waiting_action(%{status: :failed}), do: "retry"
   defp waiting_action(%{status: :in_progress}), do: "resume"
