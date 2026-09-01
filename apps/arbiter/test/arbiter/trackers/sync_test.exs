@@ -329,6 +329,45 @@ defmodule Arbiter.Trackers.SyncTest do
       assert summons.body =~ "status_map"
     end
 
+    test "a planned hop's transition missing from the live workflow raises an escalation (bd-77yl45)" do
+      # Backlog -> In Progress requires two hops via the default transition
+      # graph ("To do next" then "Start work"). The live workflow no longer
+      # offers "To do next" from Backlog (e.g. renamed upstream) — BFS still
+      # plans a path, but executing the first hop can't find that transition
+      # by name. This is exactly the dispatch-time swallow from bd-77yl45:
+      # find_transition_id/2 builds a precise, actionable error, but it never
+      # reached the mailbox.
+      ws = jira_workspace(%{"in_progress" => "In Progress"})
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        if conn.method == "GET" and String.ends_with?(conn.request_path, "/transitions") do
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "transitions" => [
+              %{"id" => "1", "name" => "What's Next", "to" => %{"name" => "To Do"}}
+            ]
+          })
+        else
+          # current-status fetch
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{"fields" => %{"status" => %{"name" => "Backlog"}}})
+        end
+      end)
+
+      assert :ok = Sync.lifecycle(issue, :in_progress)
+
+      escalations = escalations_for(ws.id)
+      assert length(escalations) == 1
+      [summons] = escalations
+      assert summons.to_ref == "coordinator"
+      assert summons.directive_ref == issue.id
+      assert summons.subject =~ "tracker sync failed"
+      assert summons.body =~ "To do next"
+    end
+
     test "a benign unmapped event is skipped without an escalation" do
       # The tracker explicitly does not model :merged (blank mapping overrides
       # the default). map_status -> :status_unmapped, which is a quiet skip.
