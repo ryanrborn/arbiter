@@ -127,11 +127,29 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            to stop without having printed `arb done`, keep working.
 
            *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
-           tool — including in parallel or with background execution modes. However,
-           you MUST wait for every background task to complete and read its full
-           output before printing `arb done`. Do not signal done while any background
-           task is still running — the work is incomplete until every tool you launched
-           has finished and you have read its result.
+           tool — including in parallel or with background execution modes. But this
+           session is NON-INTERACTIVE: the agent loop ends the instant one of your
+           turns contains no tool call. An asynchronous notification can therefore
+           never reach you — `Monitor` events, `ScheduleWakeup` wakeups and
+           background-task completion notices are all delivered to a session that has
+           already exited. Ending a turn to "wait" for one is not waiting: it ends the
+           run on the spot and discards any uncommitted work. So:
+
+             * COMMIT correct work BEFORE running any long verification. Verification
+               confirms work; it must never be the thing that loses it.
+             * Make the command fit inside one tool call: raise the `Bash` tool's own
+               `timeout` parameter (up to 600000 ms / 10 minutes), or narrow the
+               command — the specific failing test files, not the whole suite.
+             * If a command is backgrounded anyway, drain it in the SAME turn: call
+               `TaskOutput` with `"block": true` and a generous `timeout`, repeatedly
+               if needed, until it reports the task finished. `Read` its output file
+               if you want interim progress.
+             * NEVER wait via `Monitor` or `ScheduleWakeup`, and NEVER end a turn
+               while a background task is still pending.
+
+           You MUST read every background task's full output before you print `arb done` —
+           the work is incomplete until every tool you launched has
+           finished and you have read its result.
 
            When you are completely done, print the line:
 
@@ -210,9 +228,28 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            directory. If it exists, read it, act on any coordinator instructions it
            contains, then delete the file to acknowledge receipt.
 
-           *** ASYNC TOOLS: You may run any diagnostic tool — including in parallel or
-           with background execution modes. However, you MUST wait for every background
-           task to complete and read its full output before printing `arb done`.
+           *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
+           tool — including in parallel or with background execution modes. But this
+           session is NON-INTERACTIVE: the agent loop ends the instant one of your
+           turns contains no tool call. An asynchronous notification can therefore
+           never reach you — `Monitor` events, `ScheduleWakeup` wakeups and
+           background-task completion notices are all delivered to a session that has
+           already exited. Ending a turn to "wait" for one is not waiting: it ends the
+           run on the spot and discards any uncommitted work. So:
+
+             * COMMIT correct work BEFORE running any long verification. Verification
+               confirms work; it must never be the thing that loses it.
+             * Make the command fit inside one tool call: raise the `Bash` tool's own
+               `timeout` parameter (up to 600000 ms / 10 minutes), or narrow the
+               command — the specific failing test files, not the whole suite.
+             * If a command is backgrounded anyway, drain it in the SAME turn: call
+               `TaskOutput` with `"block": true` and a generous `timeout`, repeatedly
+               if needed, until it reports the task finished. `Read` its output file
+               if you want interim progress.
+             * NEVER wait via `Monitor` or `ScheduleWakeup`, and NEVER end a turn
+               while a background task is still pending.
+
+           You MUST read every background task's full output before you print `arb done`.
 
            When you are completely done — findings written to `notes` — print the line:
 
@@ -279,11 +316,26 @@ defmodule Arbiter.Worker.PromptBuilderTest do
              * Do NOT merge or close the PR/MR.
              * Do NOT modify any branch, including the PR's head.
 
-           *** ASYNC TOOLS: You may run tests, linters, or any diagnostic tool —
-           including in parallel or with background execution modes. However, you
-           MUST wait for every background task to complete and read its full output
-           before printing `arb done`. Do not signal done while any background task
-           is still running.
+           *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
+           tool — including in parallel or with background execution modes. But this
+           session is NON-INTERACTIVE: the agent loop ends the instant one of your
+           turns contains no tool call. An asynchronous notification can therefore
+           never reach you — `Monitor` events, `ScheduleWakeup` wakeups and
+           background-task completion notices are all delivered to a session that has
+           already exited. Ending a turn to "wait" for one is not waiting: it ends the
+           run on the spot and discards any uncommitted work. So:
+
+             * Make the command fit inside one tool call: raise the `Bash` tool's own
+               `timeout` parameter (up to 600000 ms / 10 minutes), or narrow the
+               command — the specific failing test files, not the whole suite.
+             * If a command is backgrounded anyway, drain it in the SAME turn: call
+               `TaskOutput` with `"block": true` and a generous `timeout`, repeatedly
+               if needed, until it reports the task finished. `Read` its output file
+               if you want interim progress.
+             * NEVER wait via `Monitor` or `ScheduleWakeup`, and NEVER end a turn
+               while a background task is still pending.
+
+           You MUST read every background task's full output before you print `arb done`.
 
            #{Arbiter.Worker.ReviewVerification.anti_stale_reflag_block()}
            After you post the review to the tracker, print your conclusion on its
@@ -379,11 +431,26 @@ defmodule Arbiter.Worker.PromptBuilderTest do
              * Do NOT merge or close the PR/MR.
              * Do NOT modify any branch, including the PR's head.
 
-           *** ASYNC TOOLS: You may run tests, linters, or any diagnostic tool —
-           including in parallel or with background execution modes. However, you
-           MUST wait for every background task to complete and read its full output
-           before printing `arb done`. Do not signal done while any background task
-           is still running.
+           *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
+           tool — including in parallel or with background execution modes. But this
+           session is NON-INTERACTIVE: the agent loop ends the instant one of your
+           turns contains no tool call. An asynchronous notification can therefore
+           never reach you — `Monitor` events, `ScheduleWakeup` wakeups and
+           background-task completion notices are all delivered to a session that has
+           already exited. Ending a turn to "wait" for one is not waiting: it ends the
+           run on the spot and discards any uncommitted work. So:
+
+             * Make the command fit inside one tool call: raise the `Bash` tool's own
+               `timeout` parameter (up to 600000 ms / 10 minutes), or narrow the
+               command — the specific failing test files, not the whole suite.
+             * If a command is backgrounded anyway, drain it in the SAME turn: call
+               `TaskOutput` with `"block": true` and a generous `timeout`, repeatedly
+               if needed, until it reports the task finished. `Read` its output file
+               if you want interim progress.
+             * NEVER wait via `Monitor` or `ScheduleWakeup`, and NEVER end a turn
+               while a background task is still pending.
+
+           You MUST read every background task's full output before you print `arb done`.
 
            #{Arbiter.Worker.ReviewVerification.anti_stale_reflag_block()}
            After you post the review to the tracker, print your conclusion on its

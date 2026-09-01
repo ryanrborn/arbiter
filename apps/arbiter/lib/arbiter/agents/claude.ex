@@ -286,14 +286,15 @@ defmodule Arbiter.Agents.Claude do
 
   @impl true
   def async_tool_instruction do
-    "*** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic\n" <>
-      "    tool — including in parallel or with background execution modes. However,\n" <>
-      "    you MUST wait for every background task to complete and read its full\n" <>
-      "    output before producing your VERDICT. A VERDICT issued while any\n" <>
-      "    background task is still running is invalid: you would be judging on\n" <>
-      "    incomplete evidence. Do not exit, do not print your VERDICT, and do not\n" <>
-      "    print `arb done` until every tool you launched has finished and you have\n" <>
-      "    read its result."
+    # bd-606zlr: one shared source for all four ASYNC TOOLS blocks. A reviewer
+    # that armed a Monitor to await a long suite would die exactly like an
+    # author worker does, and lose its verdict.
+    Arbiter.Worker.PromptBuilder.async_tools_section(
+      "your VERDICT",
+      "a VERDICT issued while a background task is still running is invalid,\n" <>
+        "you would be judging on incomplete evidence",
+      commit_first: false
+    )
   end
 
   @impl true

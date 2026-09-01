@@ -225,7 +225,14 @@ defmodule Arbiter.Worker do
   # category-specific base — a gateway blip warrants a longer initial wait than a
   # model that merely narrated-and-stopped (no infra to recover). attempt is the
   # 0-based count of resumes already made for this run.
-  @resume_backoff_base_ms %{gateway_error: 2_000, exited_without_done: 1_000}
+  @resume_backoff_base_ms %{
+    gateway_error: 2_000,
+    exited_without_done: 1_000,
+    # bd-606zlr: nothing infrastructural to wait out — the session died on a
+    # notification that was never coming. Resume as promptly as the plain
+    # early-quit case.
+    async_wait_abandoned: 1_000
+  }
   @resume_backoff_default_base_ms 1_000
   @resume_backoff_max_ms 30_000
 
@@ -1594,7 +1601,12 @@ defmodule Arbiter.Worker do
       sid when is_binary(sid) and sid != "" ->
         {provider, _model} = respawn_routing(state)
 
-        case inject_resume_argv(port_args, sid, continue_prompt(state), provider) do
+        case inject_resume_argv(
+               port_args,
+               sid,
+               resume_continue_prompt(:manual_resume, state.task_id),
+               provider
+             ) do
           {:ok, resumed_args} ->
             Logger.info("Worker: bd-1z7624 session-resume task=#{state.task_id} session=#{sid}")
 
@@ -1735,7 +1747,7 @@ defmodule Arbiter.Worker do
         %State{status: status} = state
       )
       when status in @live_statuses do
-    case respawn_with_resume(state, session_id, fingerprint) do
+    case respawn_with_resume(state, session_id, fingerprint, session) do
       {:ok, new_state} -> {:noreply, new_state}
       {:error, _why} -> {:noreply, fail_stopped(state, session)}
     end
@@ -3151,7 +3163,18 @@ defmodule Arbiter.Worker do
   # billing failure — the account provably has capacity again once the window
   # resets, so a resume (rather than a permanent :failed) is the correct
   # outcome. Distinct backoff: see resume_backoff_for/2.
-  @resumable_stop_categories [:exited_without_done, :gateway_error, :quota_exhausted]
+  # async_wait_abandoned (bd-606zlr): the pass armed a Monitor/ScheduleWakeup/
+  # backgrounded command and yielded the turn to await a notification that a
+  # non-interactive `--print` session can never deliver. The session context and
+  # the worktree are both intact — this is the *most* resumable category there
+  # is, and the resume carries corrective guidance so the retry doesn't repeat
+  # the mistake (see resume_continue_prompt/2).
+  @resumable_stop_categories [
+    :exited_without_done,
+    :gateway_error,
+    :quota_exhausted,
+    :async_wait_abandoned
+  ]
 
   defp maybe_resume_continuation(%State{meta: meta} = state, session) do
     exit_status = Map.get(session, :exit_status)
@@ -3216,19 +3239,37 @@ defmodule Arbiter.Worker do
       category not in @resumable_stop_categories -> {:fail, :not_resumable_category}
       is_nil(session_id) -> {:fail, :no_session_id}
       attempts >= cap -> {:fail, :cap_exhausted}
-      attempts > 0 and not is_nil(prev_fp) and cur_fp == prev_fp -> {:fail, :no_progress}
+      no_progress?(category, attempts, prev_fp, cur_fp) -> {:fail, :no_progress}
       true -> :resume
     end
   end
 
-  # Re-spawn Claude against the SAME session id with a terse "keep going" prompt,
-  # in the same worktree. Mirrors respawn_with_commit_nudge/2 but injects
+  # The no-progress guard reads "the resumed session changed nothing in the
+  # worktree, so it is stuck". That inference is sound for a stop whose cause is
+  # unknown — but it is exactly wrong for `:async_wait_abandoned` (bd-606zlr).
+  # A pass that dies arming an async wait is, by construction, in its
+  # *verification* phase: the code change is already on disk and the remaining
+  # work (run the suite, run the audit) legitimately writes no files. Its
+  # fingerprint is identical across the resume every single time, so the guard
+  # fired on attempt 2 and failed the worker with the correct, uncommitted fix
+  # still sitting in the worktree — the exact loss this bug is about
+  # (emr-20e8kp, runs beeaac80… then 5b372d81…). Exempt it; the hard attempt
+  # cap above still bounds the retries.
+  defp no_progress?(:async_wait_abandoned, _attempts, _prev_fp, _cur_fp), do: false
+
+  defp no_progress?(_category, attempts, prev_fp, cur_fp),
+    do: attempts > 0 and not is_nil(prev_fp) and cur_fp == prev_fp
+
+  # Re-spawn Claude against the SAME session id with a continue prompt chosen by
+  # the classified stop category (bd-606zlr — a terse "keep going" for most
+  # stops, corrective guidance for an abandoned async wait), in the same
+  # worktree. Mirrors respawn_with_commit_nudge/2 but injects
   # `--resume <session_id>` and does NOT persist the resume argv onto
   # :claude_spawn — each resume rebuilds from the pristine spawn args + the
   # latest session id, so we never stack multiple `--resume` flags.
-  defp respawn_with_resume(%State{meta: meta} = state, session_id, fingerprint) do
+  defp respawn_with_resume(%State{meta: meta} = state, session_id, fingerprint, session) do
     spawn_args = meta && Map.get(meta, :claude_spawn)
-    prompt = continue_prompt(state)
+    prompt = resume_continue_prompt(session_stop_category(session), state.task_id)
 
     {provider, model} = respawn_routing(state)
 
@@ -3453,7 +3494,64 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp continue_prompt(%State{task_id: task_id}) do
+  # Re-classify the session that just exited so the resume nudge can address
+  # the actual cause. Mirrors `clean_exit_without_done?/1`.
+  defp session_stop_category(session) when is_map(session) do
+    Arbiter.Worker.StopReason.classify(
+      Map.get(session, :exit_status),
+      Enum.reverse(Map.get(session, :output_lines, []))
+    ).category
+  end
+
+  defp session_stop_category(_), do: :exited_without_done
+
+  @doc """
+  The follow-up instruction sent with a `--resume`, chosen by the classified
+  stop category.
+
+  Public for the same reason as `resume_decision/6`: it is pure, and the
+  corrective wording is the actual fix for bd-606zlr, so it deserves a test
+  that does not have to spawn a session.
+  """
+  @spec resume_continue_prompt(atom(), String.t()) :: String.t()
+  def resume_continue_prompt(:async_wait_abandoned, task_id) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+
+    It ended because of a specific, avoidable mistake, and you must not repeat
+    it: you armed an asynchronous wait — a `Monitor`, a `ScheduleWakeup`, or a
+    backgrounded `Bash` command — and then ended your turn to wait for the
+    notification. This session is NON-INTERACTIVE (`claude --print`). The agent
+    loop ends the instant a turn contains no tool call, so your process exited
+    right there and that notification could never be delivered. Nothing was
+    waiting to wake you up. Any uncommitted work would have been thrown away.
+
+    Recognising that the command exceeds the tool-call timeout was correct. The
+    way you waited was not. Do this instead:
+
+      1. FIRST, commit whatever correct work is already in the worktree, before
+         running any long verification. Verification confirms work; it must
+         never be the thing that loses it. A commit you later amend costs
+         nothing.
+      2. Prefer a command that fits: raise the `Bash` tool's own `timeout`
+         parameter (up to 600000 ms / 10 minutes), or narrow the command —
+         run the specific failing test files rather than the whole suite.
+      3. If a command DOES get backgrounded, drain it synchronously in the SAME
+         turn: call `TaskOutput` with `"block": true` and a generous `timeout`,
+         and keep calling it until it reports the task finished. Read its
+         output file with `Read` if you need interim progress.
+      4. NEVER use `Monitor` or `ScheduleWakeup` to wait for anything. Their
+         notifications cannot reach you here.
+      5. NEVER end a turn while a background task is still pending. A turn with
+         no tool call ends your session permanently.
+
+    Now pick up exactly where you left off, complete the remaining work, and
+    when the task is fully done print `arb done` on its own line.
+    """
+  end
+
+  def resume_continue_prompt(_category, task_id) do
     """
     Your previous session for task #{task_id} ended before you finished — you
     did not print `arb done`. Your work so far is preserved in this worktree.
