@@ -201,6 +201,183 @@ defmodule Arbiter.Trackers.JiraTest do
       assert Agent.get(agent, & &1) == "In Progress"
     end
 
+    test "multi-hop: resolves each hop by DESTINATION status, not transition name" do
+      # Regression for bd-bwwkvr / #1284. On Jira projects whose workflow (and
+      # therefore transition *names*) diverge per issue type, a graph edge that
+      # names "To do next" is correct for Story/Bug but wrong for Task, where
+      # the same Backlog -> To Do move is called "Ready to work (2)". Matching
+      # the hop by its destination status makes the graph type-agnostic.
+      {:ok, agent} = Agent.start_link(fn -> "Backlog" end)
+      on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
+
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "status_map" => %{"in_progress" => "In Progress"},
+        # Names below are the *Story/Bug* names — this issue is a Task.
+        "transition_graph" => %{
+          "Backlog" => [%{"transition" => "To do next", "to" => "To Do"}],
+          "To Do" => [%{"transition" => "Start work", "to" => "In Progress"}]
+        }
+      })
+
+      transitions_for = fn
+        # Task-flavoured names: "To do next" does not exist here.
+        "Backlog" ->
+          [%{"id" => "131", "name" => "Ready to work (2)", "to" => %{"name" => "To Do"}}]
+
+        "To Do" ->
+          [%{"id" => "200", "name" => "Start work", "to" => %{"name" => "In Progress"}}]
+
+        _ ->
+          []
+      end
+
+      advance = fn
+        "131" -> "To Do"
+        "200" -> "In Progress"
+      end
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        cur = Agent.get(agent, & &1)
+
+        cond do
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"transitions" => transitions_for.(cur)})
+
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            id = Jason.decode!(body)["transition"]["id"]
+            Agent.update(agent, fn _ -> advance.(id) end)
+
+            conn
+            |> Plug.Conn.put_status(204)
+            |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = Jira.transition(@ref, :in_progress)
+      assert Agent.get(agent, & &1) == "In Progress"
+    end
+
+    test "multi-hop: prefers the edge's named transition when several land on the same status" do
+      {:ok, agent} = Agent.start_link(fn -> {"In Progress", []} end)
+      on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
+
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "status_map" => %{"merged" => "Code Complete"},
+        "transition_graph" => %{
+          "In Progress" => [%{"transition" => "Pull request created", "to" => "In Code Review"}],
+          "In Code Review" => [%{"transition" => "Approved and merged", "to" => "Code Complete"}]
+        }
+      })
+
+      transitions_for = fn
+        "In Progress" ->
+          [
+            %{
+              "id" => "51",
+              "name" => "Pull request created",
+              "to" => %{"name" => "In Code Review"}
+            }
+          ]
+
+        "In Code Review" ->
+          # Two live edges land on Code Complete; the graph names the second.
+          [
+            %{"id" => "60", "name" => "Skip review", "to" => %{"name" => "Code Complete"}},
+            %{"id" => "61", "name" => "Approved and merged", "to" => %{"name" => "Code Complete"}}
+          ]
+
+        _ ->
+          []
+      end
+
+      advance = fn
+        "51" -> "In Code Review"
+        _ -> "Code Complete"
+      end
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        {cur, _posted} = Agent.get(agent, & &1)
+
+        cond do
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"transitions" => transitions_for.(cur)})
+
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            id = Jason.decode!(body)["transition"]["id"]
+            Agent.update(agent, fn {_c, posted} -> {advance.(id), posted ++ [id]} end)
+
+            conn
+            |> Plug.Conn.put_status(204)
+            |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = Jira.transition(@ref, :merged)
+      assert {"Code Complete", ["51", "61"]} = Agent.get(agent, & &1)
+    end
+
+    test "multi-hop: a hop with no live transition to its destination halts loudly" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "status_map" => %{"in_progress" => "In Progress"},
+        "transition_graph" => %{
+          "Backlog" => [%{"transition" => "To do next", "to" => "To Do"}],
+          "To Do" => [%{"transition" => "Start work", "to" => "In Progress"}]
+        }
+      })
+
+      stub(fn conn ->
+        assert conn.method == "GET"
+
+        if String.ends_with?(conn.request_path, "/transitions") do
+          # Nothing from Backlog lands on "To Do" — the planned first hop is dead.
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "transitions" => [
+              %{"id" => "101", "name" => "Put on ice", "to" => %{"name" => "Icebox"}}
+            ]
+          })
+        else
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{"fields" => %{"status" => %{"name" => "Backlog"}}})
+        end
+      end)
+
+      assert {:error, %Error{kind: :transition_not_found} = err} =
+               Jira.transition(@ref, :in_progress)
+
+      assert err.message =~ "To Do"
+    end
+
     test "no-ops (no POST) when the issue is already at the target status" do
       stub(fn conn ->
         assert conn.method == "GET"
@@ -516,9 +693,22 @@ defmodule Arbiter.Trackers.JiraTest do
       "In Progress" => [%{"transition" => "Pull request created", "to" => "In Code Review"}]
     }
 
-    test "finds the shortest multi-hop path (Backlog -> To Do -> In Progress)" do
-      assert {:ok, ["To do next", "Start work"]} =
-               Jira.plan_transition_path(@graph, "Backlog", "In Progress")
+    test "returns the route as hop edges (Backlog -> To Do -> In Progress)" do
+      # The plan is a *route* — the destination status of each hop, with the
+      # configured transition name kept only as a tie-break hint.
+      assert {:ok, hops} = Jira.plan_transition_path(@graph, "Backlog", "In Progress")
+      assert Enum.map(hops, & &1["to"]) == ["To Do", "In Progress"]
+      assert Enum.map(hops, & &1["transition"]) == ["To do next", "Start work"]
+    end
+
+    test "plans a route through name-less edges (destination-only graph)" do
+      graph = %{
+        "Backlog" => [%{"to" => "To Do"}],
+        "To Do" => [%{"to" => "In Progress"}]
+      }
+
+      assert {:ok, hops} = Jira.plan_transition_path(graph, "Backlog", "In Progress")
+      assert Enum.map(hops, & &1["to"]) == ["To Do", "In Progress"]
     end
 
     test "returns an empty path when already at the target" do
