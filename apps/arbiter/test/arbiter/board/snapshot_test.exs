@@ -609,6 +609,42 @@ defmodule Arbiter.Board.SnapshotTest do
       assert [%{id: "bd-a", status: :failed}] = board.waiting
     end
 
+    test "a collapsed dead fix pass still flags the card and names itself" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting_review, %{
+              mr_ref: "!42",
+              registry_key: "bd-a",
+              meta: %{last_merger_status: %{status: :ci_failed}}
+            }),
+            worker("bd-a", :failed, %{registry_key: "bd-a:fixpass", role: :fix_pass})
+          ],
+          watchdog_live: MapSet.new(["bd-a"])
+        )
+
+      # The primary alone would read as "the machine is clearing a CI block" —
+      # but the pass that clears it is dead.
+      assert [%{id: "bd-a", status: :awaiting_review, needs_you: true, collapsed_note: note}] =
+               board.waiting
+
+      assert note =~ "fix pass"
+      assert note =~ "failed"
+    end
+
+    test "a collapsed healthy row adds no note and no flag" do
+      board =
+        derive(
+          workers: [
+            worker("bd-a", :awaiting_review, %{mr_ref: "!42", registry_key: "bd-a"}),
+            worker("bd-a", :awaiting_review, %{registry_key: "bd-a:fixpass", role: :fix_pass})
+          ],
+          watchdog_live: MapSet.new(["bd-a"])
+        )
+
+      assert [%{id: "bd-a", needs_you: false, collapsed_note: nil}] = board.waiting
+    end
+
     test "distinct tasks are never collapsed" do
       board =
         derive(

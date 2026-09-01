@@ -1099,10 +1099,22 @@ defmodule ArbiterWeb.BoardLive do
   # a worker that stopped with no summary reports "failed" for both.
   defp waiting_note(card, activity) do
     case waiting_note(card) do
-      ^activity -> nil
-      note -> note
+      ^activity -> with_collapsed(nil, card)
+      note -> with_collapsed(note, card)
     end
   end
+
+  # bd-8jixav: one task is one card, but a collapsed subordinate row's failure
+  # is not the primary row's to swallow — a dead fix pass under a parked
+  # primary is exactly the invisibility this ticket is about.
+  defp with_collapsed(note, %{collapsed_note: extra}) when is_binary(extra) and extra != "" do
+    case note do
+      nil -> extra
+      note -> note <> " · " <> extra
+    end
+  end
+
+  defp with_collapsed(note, _card), do: note
 
   # bd-8jixav: a Watchdog is a `:temporary` child — when it dies the worker
   # stays parked on a genuinely open MR that nothing polls, and every other

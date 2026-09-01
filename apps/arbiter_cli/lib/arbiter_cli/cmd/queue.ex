@@ -159,7 +159,7 @@ defmodule ArbiterCli.Cmd.Queue do
         Output.die(
           "no worker is running for task #{task_id}, so there is nothing to attach a " <>
             "watchdog to.\n" <>
-            "The worker process is gone too — recover the task with `arb task resume " <>
+            "The worker process is gone too — recover the task with `arb worker resume " <>
             "#{task_id}` instead."
         )
 

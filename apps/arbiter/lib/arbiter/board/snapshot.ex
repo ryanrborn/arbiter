@@ -464,7 +464,7 @@ defmodule Arbiter.Board.Snapshot do
     workers
     |> Enum.filter(&(&1.status in @waiting_statuses))
     |> one_row_per_task()
-    |> Enum.map(fn w ->
+    |> Enum.map(fn {w, group} ->
       alive = watchdog_alive(w, watchdog_live)
 
       w
@@ -475,10 +475,30 @@ defmodule Arbiter.Board.Snapshot do
         merger_url: Map.get(w, :merger_url),
         merger_status: get_meta(w, :last_merger_status),
         watchdog_alive: alive,
-        needs_you: needs_you?(w, alive),
+        # The collapsed rows keep their vote: a dead fix pass under a
+        # legitimately-parked primary still needs a human, even though the
+        # primary row alone reads as "the machine has this".
+        needs_you: Enum.any?(group, &needs_you?(&1, watchdog_alive(&1, watchdog_live))),
+        collapsed_note: collapsed_note(w, group),
         since: since(w)
       })
     end)
+  end
+
+  # What the collapsed subordinate rows say that the primary row's own fields
+  # cannot: a `:failed` fix pass / conflict pass under the card. Nil when
+  # nothing was collapsed away, or when the surviving row is itself the
+  # subordinate (its own status already says it).
+  defp collapsed_note(primary, group) do
+    group
+    |> Enum.reject(&(&1 == primary))
+    |> Enum.filter(&(Map.get(&1, :status) == :failed))
+    |> Enum.map(&(Arbiter.Worker.subordinate_label(&1) || "subordinate pass"))
+    |> Enum.uniq()
+    |> case do
+      [] -> nil
+      labels -> Enum.join(labels, ", ") <> " failed"
+    end
   end
 
   # One task, one card (bd-8jixav). A task's primary row and a subordinate
@@ -489,12 +509,18 @@ defmodule Arbiter.Board.Snapshot do
   # stuck tickets.
   #
   # The primary row (`role: nil`) wins where both exist: it is the one holding
-  # the MR, and the one whose fields the card's actions address. `Enum.sort_by`
-  # is stable, so among rows of the same rank the caller's order survives.
+  # the MR, and the one whose fields the card's actions address. `Enum.min_by`
+  # returns the first row of the minimal rank, so among rows of the same rank
+  # the caller's order survives.
+  #
+  # Returns `{primary_row, all_rows_for_the_task}`: the card renders the
+  # primary's fields, but the whole group is still there for the signals a
+  # collapsed row would otherwise take with it (its `needs_you?` vote, its
+  # failure).
   defp one_row_per_task(workers) do
     workers
-    |> Enum.sort_by(&subordinate_rank/1)
-    |> Enum.uniq_by(& &1.task_id)
+    |> Enum.group_by(& &1.task_id)
+    |> Enum.map(fn {_task_id, group} -> {Enum.min_by(group, &subordinate_rank/1), group} end)
   end
 
   defp subordinate_rank(worker), do: if(is_nil(Map.get(worker, :role)), do: 0, else: 1)
@@ -536,6 +562,7 @@ defmodule Arbiter.Board.Snapshot do
         # already says "worker stopped", which is the stronger statement.
         watchdog_alive: nil,
         needs_you: true,
+        collapsed_note: nil,
         since: Map.get(issue, :updated_at) || created_at(issue)
       }
     end)

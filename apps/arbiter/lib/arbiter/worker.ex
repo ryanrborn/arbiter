@@ -5520,6 +5520,17 @@ defmodule Arbiter.Worker do
     end
   rescue
     e -> {:error, {:start_failed, Exception.message(e)}}
+  catch
+    # An exit here (DBConnection pool timeout, merger config, Watchdog init)
+    # must not take the parked worker down with it — losing the
+    # :awaiting_review park + mr_ref is exactly what this restart exists to
+    # avoid. Mirrors the guards on the two other start_watchdog call sites.
+    :exit, reason ->
+      Logger.warning(
+        "Worker: Watchdog restart exited for task=#{state.task_id}: #{inspect(reason)}"
+      )
+
+      {:error, {:start_failed, reason}}
   end
 
   defp load_workspace(id) when is_binary(id) and id != "" do
@@ -5529,6 +5540,8 @@ defmodule Arbiter.Worker do
     end
   rescue
     _ -> nil
+  catch
+    :exit, _reason -> nil
   end
 
   defp load_workspace(_), do: nil

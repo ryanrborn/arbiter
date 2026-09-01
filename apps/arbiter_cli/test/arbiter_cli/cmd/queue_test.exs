@@ -130,6 +130,10 @@ defmodule ArbiterCli.Cmd.QueueTest do
 
       assert exit_code != 0
       assert err =~ "no worker is running"
+      # The fallback it names has to be a command that exists: `arb resume` /
+      # `arb worker resume`, never `arb task resume` (there is no task resource).
+      assert err =~ "arb worker resume bd-2"
+      refute err =~ "arb task resume"
     end
 
     # Refusing is the point: two watchdogs on one MR race the merge.
