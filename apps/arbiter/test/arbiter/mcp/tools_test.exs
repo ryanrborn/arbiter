@@ -2040,6 +2040,64 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "queue_retry_auto_resolve/2 (bd-bspakl)" do
+    alias Arbiter.Worker.Watchdog
+    alias Arbiter.Test.StubFixPassDispatcher
+    alias Arbiter.Test.StubMerger
+
+    setup do
+      StubMerger.reset()
+      StubFixPassDispatcher.reset()
+      :ok
+    end
+
+    test "requires task_id", ctx do
+      assert {:error, {:invalid, _}} = Tools.queue_retry_auto_resolve(ctx.coordinator, %{})
+    end
+
+    test "reports not-found when no watchdog is running for the task", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ "no merge watchdog"
+    end
+
+    test "re-arms a watchdog parked on an exhausted :ci_failed block", ctx do
+      {:ok, wpid} =
+        Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      :ok = Worker.advance(wpid, :implement)
+      on_exit(fn -> Process.alive?(wpid) && Worker.stop(wpid, :normal) end)
+
+      StubMerger.queue_get(ctx.task.id, [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      {:ok, watchdog_pid} =
+        Watchdog.start(
+          task_id: ctx.task.id,
+          worker: wpid,
+          mr_ref: ctx.task.id,
+          adapter: StubMerger,
+          auto_merge: true,
+          max_auto_resolve_attempts: 1,
+          max_polls: 3,
+          interval_ms: 15,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      on_exit(fn -> Process.alive?(watchdog_pid) && GenServer.stop(watchdog_pid, :normal) end)
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      Process.sleep(60)
+
+      assert {:ok, %{retried: true, task_id: task_id}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert task_id == ctx.task.id
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 2 end)
+    end
+  end
+
   describe "worker_stop/2" do
     test "stops a running worker in the workspace", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "stop target", workspace_id: ctx.ws.id})

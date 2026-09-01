@@ -202,6 +202,39 @@ defmodule ArbiterWeb.WorkerDetailLive do
      |> start_async(:retry, fn -> Dispatch.resume(task_id) end)}
   end
 
+  # Re-arm one more auto-resolve attempt on a task's merge Watchdog once it's
+  # exhausted its bounded retries on a :ci_failed block and parked (bd-bspakl).
+  # Unlike "retry"/Resume above, this is a plain GenServer call into the
+  # already-running Watchdog — no auth preflight, no agent spawn — so it runs
+  # inline rather than via start_async.
+  def handle_event("retry_auto_resolve", _params, socket) do
+    task_id = socket.assigns.task_id
+
+    case Watchdog.retry_auto_resolve(task_id) do
+      :ok ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Re-armed auto-resolve for #{task_id}; a fresh fix-pass is starting.")
+         |> refresh_all()}
+
+      {:error, :not_found} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "No merge watchdog is currently running for #{task_id}."
+         )}
+
+      {:error, :not_parked_on_ci_failed} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{task_id} isn't parked on an exhausted CI-failed block yet — nothing to re-arm."
+         )}
+    end
+  end
+
   def handle_event("compose_change", %{"body" => body}, socket) do
     {:noreply, assign(socket, :compose_body, body)}
   end
@@ -372,6 +405,24 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp retryable?(%Issue{}, nil), do: true
   defp retryable?(%Issue{}, %{status: status}), do: status not in @active_statuses
   defp retryable?(_task, _snapshot), do: false
+
+  # Whether the "Retry auto-resolve" action makes sense to show at all — a
+  # parked, approved MR still reporting :ci_failed (bd-bspakl). This is a
+  # necessary but not sufficient condition: the Watchdog only actually accepts
+  # the re-arm once its bounded retries are *exhausted and parked*, which this
+  # page can't see directly (that's internal Watchdog state, not part of the
+  # merger-status snapshot). Clicking it before exhaustion gets a clear
+  # "nothing to re-arm yet" flash from the backend rather than silently doing
+  # nothing, which is still strictly better than the old dead-end Resume
+  # button for this state.
+  defp retry_auto_resolve_available?(%{status: :awaiting_review, meta: meta}) do
+    case Map.get(meta || %{}, :last_merger_status) do
+      %{} = merger_status -> Watchdog.effective_block_reason(merger_status) == :ci_failed
+      _ -> false
+    end
+  end
+
+  defp retry_auto_resolve_available?(_snapshot), do: false
 
   defp resume_failure(:no_outpost),
     do:
@@ -737,6 +788,16 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
                     Actions
                   </span>
+                  <Core.button
+                    :if={retry_auto_resolve_available?(@snapshot)}
+                    id="worker-retry-auto-resolve-btn"
+                    phx-click="retry_auto_resolve"
+                    data-confirm={"Re-arm one more auto-resolve attempt for #{@task_id}? This dispatches a fresh fix-pass worker."}
+                    size="sm"
+                  >
+                    <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
+                    Retry auto-resolve
+                  </Core.button>
                   <Core.button
                     id="worker-resume-note-btn"
                     phx-click="open_retry"

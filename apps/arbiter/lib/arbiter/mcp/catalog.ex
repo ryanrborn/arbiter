@@ -68,6 +68,7 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
+  | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/1` |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/1` |
   | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.paused?/1` |
@@ -1928,6 +1929,29 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.queue_resume/2
+    },
+    %{
+      name: "queue_retry_auto_resolve",
+      tiers: @coordinator,
+      description:
+        "Re-arm one more auto-resolve attempt on a task's merge Watchdog after it has " <>
+          "exhausted max_auto_resolve_attempts on a :ci_failed block and parked indefinitely " <>
+          "(bd-bspakl). Bumps this episode's budget by exactly one attempt and re-polls " <>
+          "immediately, which dispatches a fresh fix-pass worker if the block is still " <>
+          "ci_failed. Use after an 'auto-resolve exhausted' escalation in the coordinator " <>
+          "inbox, when you've confirmed a fresh fix-pass is worth trying.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "The parked task ID to re-arm (required)."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.queue_retry_auto_resolve/2
     },
     %{
       name: "repo_list",

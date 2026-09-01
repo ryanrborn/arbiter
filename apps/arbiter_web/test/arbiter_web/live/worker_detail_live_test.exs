@@ -535,6 +535,79 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     end
   end
 
+  describe "retry auto-resolve (bd-bspakl)" do
+    alias Arbiter.Test.StubMerger
+
+    setup do
+      StubMerger.reset()
+      :ok
+    end
+
+    defp park_awaiting_review(pid, merger_status) do
+      :ok = Worker.advance(pid, :implement)
+      StubMerger.next_open_ref("!bd-bspakl")
+
+      {:ok, _} =
+        Worker.open_mr(pid, "feature/x", "Add x", "desc", %{
+          adapter: StubMerger,
+          workspace: nil,
+          # Park far in the future so the auto-started Watchdog doesn't poll
+          # during the test and race the assertion.
+          interval_ms: 1_000_000,
+          initial_delay_ms: 1_000_000
+        })
+
+      :ok = Worker.record_merger_status(pid, merger_status)
+    end
+
+    test "offers Retry auto-resolve when the MR is approved but ci_failed",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-ci-failed", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, %{status: :open, approved: true, block_reason: :ci_failed})
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert has_element?(view, "#worker-retry-auto-resolve-btn")
+      assert html =~ "Retry auto-resolve"
+    end
+
+    test "does not offer Retry auto-resolve for an approved MR blocked on something else",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-conflict", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, %{status: :open, approved: true, block_reason: :conflict})
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "#worker-retry-auto-resolve-btn")
+    end
+
+    test "does not offer Retry auto-resolve while still awaiting approval",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-pending", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, %{status: :open, approved: false})
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute has_element?(view, "#worker-retry-auto-resolve-btn")
+    end
+
+    test "clicking Retry auto-resolve when nothing is parked shows a friendly error",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-click-error", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_awaiting_review(pid, %{status: :open, approved: true, block_reason: :ci_failed})
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      html = view |> element("#worker-retry-auto-resolve-btn") |> render_click()
+
+      assert html =~ "isn&#39;t parked on an exhausted CI-failed block yet"
+    end
+  end
+
   defp tool_use_event(name, input) do
     Jason.encode!(%{
       "type" => "assistant",

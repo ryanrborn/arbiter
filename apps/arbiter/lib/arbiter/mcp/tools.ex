@@ -663,6 +663,44 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- queue_retry_auto_resolve --------------------------------------------
+
+  @doc """
+  Re-arm one more auto-resolve attempt on a task's merge Watchdog after it
+  has exhausted `max_auto_resolve_attempts` on a `:ci_failed` block and
+  parked indefinitely (bd-bspakl).
+
+  Without this, once exhausted there is no supported way to try again short
+  of pushing a fix to the branch by hand, outside Arbiter's normal
+  worker/review flow. Calls `Arbiter.Worker.Watchdog.retry_auto_resolve/1`,
+  which bumps this episode's budget by exactly one attempt and immediately
+  re-polls. No cap on how many times a coordinator calls this — but the
+  Watchdog itself never re-arms on its own.
+
+  Returns `%{retried: true, task_id: task_id}` on success, or an error if no
+  Watchdog is running for the task or it isn't parked on an exhausted
+  `:ci_failed` block.
+  """
+  @spec queue_retry_auto_resolve(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def queue_retry_auto_resolve(%Scope{} = _scope, args) do
+    with {:ok, task_id} <- require_string(args, "task_id") do
+      case Arbiter.Worker.Watchdog.retry_auto_resolve(task_id) do
+        :ok ->
+          {:ok, %{retried: true, task_id: task_id}}
+
+        {:error, :not_found} ->
+          {:error, {:not_found, "no merge watchdog is currently running for task #{task_id}"}}
+
+        {:error, :not_parked_on_ci_failed} ->
+          {:error,
+           {:invalid,
+            "task #{task_id} is not currently parked on an exhausted :ci_failed block " <>
+              "— there is nothing to re-arm"}}
+      end
+    end
+  end
+
   # ---- repo_list ----------------------------------------------------------
 
   @doc """

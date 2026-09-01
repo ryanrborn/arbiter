@@ -627,6 +627,50 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "retry_auto_resolve/1 (bd-bspakl)" do
+    test "re-arms one more fix-pass attempt once auto-resolve is exhausted and parked" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rar1", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!rar1",
+        auto_merge: true,
+        max_auto_resolve_attempts: 1,
+        max_polls: 3,
+        interval_ms: 15,
+        fix_pass_dispatcher: StubFixPassDispatcher,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      # Let the budget actually exhaust and the park kick in before re-arming.
+      Process.sleep(60)
+
+      assert Watchdog.retry_auto_resolve(task_id) == :ok
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 2 end)
+    end
+
+    test "refuses to re-arm a watchdog that isn't parked on :ci_failed" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rar2", [%{status: :open, approved: false}])
+
+      wpid =
+        start_watchdog(pid, task_id, "!rar2",
+          auto_merge: true,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      wait_until(fn -> Process.alive?(wpid) end)
+
+      assert Watchdog.retry_auto_resolve(task_id) == {:error, :not_parked_on_ci_failed}
+    end
+
+    test "returns :not_found when no watchdog is registered for the task" do
+      assert Watchdog.retry_auto_resolve("no-such-task-#{System.unique_integer([:positive])}") ==
+               {:error, :not_found}
+    end
+  end
+
   describe "conflict auto-resolve (#354, Phase 2b)" do
     test "dispatches the rebase worker with the task id + mr ref" do
       {pid, task_id} = running_worker()
