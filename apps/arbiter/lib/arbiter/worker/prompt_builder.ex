@@ -102,6 +102,85 @@ defmodule Arbiter.Worker.PromptBuilder do
   # agent continues from the preserved worktree instead of redoing finished
   # steps. `:resume_context` is built by `Arbiter.Worker.ResumeContext`; it's
   # absent (empty prefix) on a normal fresh dispatch.
+  @doc """
+  The shared "ASYNC TOOLS" block, granting background execution *and* naming
+  the only waiting primitive that works in a non-interactive session.
+
+  `completion_signal` is the marker this prompt's completion protocol ends on
+  (e.g. ``"`arb done`"`` or `"your VERDICT"`); `coda` is an optional extra
+  clause appended to the final sentence.
+
+  Public because `Arbiter.Agents.Claude.async_tool_instruction/0` — the review
+  gate's copy — must stay byte-identical to the three prompts here. Four
+  independently-worded copies is how the guidance drifted in the first place.
+
+  ## Why this block says more than "you may background things" (bd-606zlr)
+
+  It used to say only that: background what you like, but wait for every task
+  before signalling done. A worker that correctly spots a command exceeding
+  the tool-call timeout, backgrounds it, and arms a `Monitor` or
+  `ScheduleWakeup` to await the result is, on that reading, *waiting properly*.
+  It is not. `claude --print` ends the agent loop on the first turn that
+  contains no tool call, so the process is gone before the notification fires
+  and the notification is delivered to nothing. Observed three times in one day
+  across two repos (runs 028759f4…, beeaac80…, 5b372d81…), twice discarding a
+  correct but uncommitted fix. Permission to background is only safe when it
+  arrives with the drain that actually works.
+  """
+  @spec async_tools_section(String.t(), String.t() | nil, keyword()) :: String.t()
+  def async_tools_section(completion_signal, coda \\ nil, opts \\ []) do
+    tail =
+      case coda do
+        nil -> "before you print #{completion_signal}."
+        extra -> "before you print #{completion_signal} —\n#{extra}."
+      end
+
+    # A reviewer is forbidden from pushing code, so "commit before verifying"
+    # is meaningless (and contradictory) guidance on that surface.
+    commit_bullet =
+      if Keyword.get(opts, :commit_first, true) do
+        """
+          * COMMIT correct work BEFORE running any long verification. Verification
+            confirms work; it must never be the thing that loses it.
+        """
+      else
+        ""
+      end
+
+    """
+    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
+    tool — including in parallel or with background execution modes. But this
+    session is NON-INTERACTIVE: the agent loop ends the instant one of your
+    turns contains no tool call. An asynchronous notification can therefore
+    never reach you — `Monitor` events, `ScheduleWakeup` wakeups and
+    background-task completion notices are all delivered to a session that has
+    already exited. Ending a turn to "wait" for one is not waiting: it ends the
+    run on the spot and discards any uncommitted work. So:
+
+    #{commit_bullet}\
+      * Make the command fit inside one tool call: raise the `Bash` tool's own
+        `timeout` parameter (up to 600000 ms / 10 minutes), or narrow the
+        command — the specific failing test files, not the whole suite.
+      * If a command is backgrounded anyway, drain it in the SAME turn: call
+        `TaskOutput` with `"block": true` and a generous `timeout`, repeatedly
+        if needed, until it reports the task finished. `Read` its output file
+        if you want interim progress.
+      * NEVER wait via `Monitor` or `ScheduleWakeup`, and NEVER end a turn
+        while a background task is still pending.
+
+    You MUST read every background task's full output #{tail}\
+    """
+  end
+
+  # The authoring prompts' coda, kept out of the interpolation line so the
+  # sentence stays readable at source width.
+  defp work_async_tools_section do
+    async_tools_section(
+      "`arb done`",
+      "the work is incomplete until every tool you launched has\nfinished and you have read its result"
+    )
+  end
+
   defp work_prompt(%Issue{} = task, opts) do
     resume_prefix = Keyword.get(opts, :resume_context) || ""
     resume_prefix <> base_work_prompt(task, opts)
@@ -237,12 +316,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     finish is to print `arb done` once the work is complete — if you are about
     to stop without having printed `arb done`, keep working.
 
-    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
-    tool — including in parallel or with background execution modes. However,
-    you MUST wait for every background task to complete and read its full
-    output before printing `arb done`. Do not signal done while any background
-    task is still running — the work is incomplete until every tool you launched
-    has finished and you have read its result.
+    #{work_async_tools_section()}
 
     When you are completely done, print the line:
 
@@ -310,9 +384,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     directory. If it exists, read it, act on any coordinator instructions it
     contains, then delete the file to acknowledge receipt.
 
-    *** ASYNC TOOLS: You may run any diagnostic tool — including in parallel or
-    with background execution modes. However, you MUST wait for every background
-    task to complete and read its full output before printing `arb done`.
+    #{async_tools_section("`arb done`", nil)}
 
     When you are completely done — findings written to `notes` — print the line:
 
@@ -578,11 +650,7 @@ defmodule Arbiter.Worker.PromptBuilder do
       * Do NOT merge or close the PR/MR.
       * Do NOT modify any branch, including the PR's head.
 
-    *** ASYNC TOOLS: You may run tests, linters, or any diagnostic tool —
-    including in parallel or with background execution modes. However, you
-    MUST wait for every background task to complete and read its full output
-    before printing `arb done`. Do not signal done while any background task
-    is still running.
+    #{async_tools_section("`arb done`", nil, commit_first: false)}
 
     #{ReviewVerification.anti_stale_reflag_block()}
     After you post the review to the tracker, print your conclusion on its
