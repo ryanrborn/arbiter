@@ -899,8 +899,7 @@ defmodule Arbiter.MCP.Tools do
               "to reclassify as external"}}
 
         {:error, :busy} ->
-          {:error,
-           {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
+          {:error, {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}
       end
     end
   end
@@ -936,8 +935,7 @@ defmodule Arbiter.MCP.Tools do
 
   defp require_pr_ref(%Issue{id: id, pr_ref: ref}) when ref in [nil, ""] do
     {:error,
-     {:invalid,
-      "task #{id} has no PR recorded (no `pr_ref`), so there is no CI run to re-run"}}
+     {:invalid, "task #{id} has no PR recorded (no `pr_ref`), so there is no CI run to re-run"}}
   end
 
   defp require_pr_ref(%Issue{pr_ref: ref}), do: {:ok, ref}

@@ -1420,11 +1420,12 @@ defmodule Arbiter.Mergers.GithubTest do
     # A run whose failing check sits downstream of jobs that already succeeded —
     # the incident shape: re-running only the failed job reuses the stale deploy.
     defp stub_rerun_run(conn, opts \\ []) do
-      jobs = Keyword.get(opts, :jobs, [
-        %{"name" => "build-and-push", "conclusion" => "success"},
-        %{"name" => "deploy-frontend", "conclusion" => "success"},
-        %{"name" => "playwright-smoke", "conclusion" => "failure"}
-      ])
+      jobs =
+        Keyword.get(opts, :jobs, [
+          %{"name" => "build-and-push", "conclusion" => "success"},
+          %{"name" => "deploy-frontend", "conclusion" => "success"},
+          %{"name" => "playwright-smoke", "conclusion" => "failure"}
+        ])
 
       attempt = Keyword.get(opts, :run_attempt, 1)
 

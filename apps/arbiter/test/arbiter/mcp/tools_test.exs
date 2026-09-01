@@ -4310,6 +4310,7 @@ defmodule Arbiter.MCP.ToolsTest do
         %Scope{tier: :worker, workspace_id: "ws", task_id: "t"}
         |> Catalog.visible()
         |> Enum.map(& &1.name)
+
       assert "ci_rerun" in names
       assert "ci_mark_external" in names
     end

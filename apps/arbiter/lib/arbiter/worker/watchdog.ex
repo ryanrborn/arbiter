@@ -51,6 +51,34 @@ defmodule Arbiter.Worker.Watchdog do
   remaining reasons (`:conflict`, `:needs_approval`, `:draft`, `:blocked_other`)
   keep the Phase 1 behaviour: escalate once and park.
 
+  ## Clearing an indefinite `:ci_failed` park (bd-5mzzww)
+
+  A parked `:ci_failed` block used to have exactly one exit: push a code fix.
+  That is the wrong exit when the failing check tests an artifact an *earlier
+  job in the same CI run* produced — a per-branch review app, a built image —
+  because nothing in the diff is broken and the forge's own "re-run failed
+  jobs" affordance REUSES that stale artifact, so it fails identically every
+  time. One PR sat parked for 19 hours on exactly this shape. Three additions:
+
+    * `rerun_ci/2` delegates to the adapter's optional `rerun_ci/2` and chooses
+      the *granularity* (`Arbiter.Mergers.CIRerun`): `:failed_jobs` reuses
+      upstream output, `:all_jobs` rebuilds it, `:workflow` fires a fresh
+      dispatch that can carry inputs. `:auto` escalates past `:failed_jobs`
+      whenever completed upstream jobs would be reused, or the run is already
+      on attempt 2+ — repeating an identical re-run tells nobody anything.
+    * `mark_ci_external/2` records an "infrastructure, not this diff" verdict,
+      promoting the park to `:ci_failed_external` so the coordinator escalation
+      reads as broken CI rather than broken code and carries the diagnosing
+      worker's note. Scoped to the current block episode: it clears as soon as
+      the block reason changes, so a later genuine failure is never mislabelled.
+    * `:park_heartbeat_polls` re-pings the coordinator on a park that has gone
+      that many polls with no state change at all (default 720 ≈ 12h at the
+      default interval; 0 disables; workspace override
+      `config["merge"]["park_heartbeat_polls"]`). This is deliberately in
+      tension with the once-per-episode escalation dedupe (#1226): dedupe is
+      right for a block that is being worked, and wrong for one that has been
+      silently abandoned.
+
   ## Non-author-approval block (bd-c3lchp)
 
   A fleet-authored PR that is fully green but parked on a required *non-author*
@@ -636,6 +664,7 @@ defmodule Arbiter.Worker.Watchdog do
           Keyword.get(opts, :park_heartbeat_polls) ||
             park_heartbeat_from_workspace(workspace) ||
             @default_park_heartbeat_polls
+
         max_conflict_attempts = resolve_max_conflict_attempts(opts, workspace)
         max_auto_resumes = resolve_max_auto_resumes(opts, workspace)
 

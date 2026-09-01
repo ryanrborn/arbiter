@@ -224,7 +224,8 @@ defmodule ArbiterCli.Cmd.QueueTest do
          {%{"rerun" => true, "task_id" => "bd-r2", "mode" => "workflow"}, 200}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Queue.run(["rerun-ci", "bd-r2", "--mode", "workflow"]) end)
+      {out, _err, exit_code} =
+        capture(fn -> Queue.run(["rerun-ci", "bd-r2", "--mode", "workflow"]) end)
 
       assert exit_code == 0
       assert out =~ "workflow"

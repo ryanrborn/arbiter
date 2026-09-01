@@ -508,14 +508,19 @@ defmodule Arbiter.Mergers.Github do
   end
 
   defp post_rerun(cfg, owner, repo, run, :failed_jobs, _head_ref, _inputs) do
-    request(cfg, :post, "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun-failed-jobs",
+    request(
+      cfg,
+      :post,
+      "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun-failed-jobs",
       json: %{}
     )
     |> expect_ok()
   end
 
   defp post_rerun(cfg, owner, repo, run, :all_jobs, _head_ref, _inputs) do
-    request(cfg, :post, "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun", json: %{})
+    request(cfg, :post, "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun",
+      json: %{}
+    )
     |> expect_ok()
   end
 
