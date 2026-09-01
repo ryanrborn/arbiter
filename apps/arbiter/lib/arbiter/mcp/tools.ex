@@ -711,6 +711,68 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- queue_restart_watchdog ----------------------------------------------
+
+  @doc """
+  Mint a **fresh** merge Watchdog for a task whose Watchdog has died, attached
+  to the MR its worker already has open (bd-8jixav).
+
+  A Watchdog is a `:temporary` process: when it crashes it is gone for good,
+  silently, and the worker sits at `:awaiting_review` with a genuinely-open MR
+  that nothing is polling. `queue_retry_auto_resolve` cannot help — it messages
+  an already-running Watchdog and answers "not found" once the process is gone.
+  This is the recovery for that state, and it is far cheaper than
+  `worker_resume`, which restarts the review gate from round 1.
+
+  Returns `%{restarted: true, task_id: task_id}` on success. Errors: no worker
+  registered for the task; the worker is alive but not parked at
+  `:awaiting_review` (nothing to watch); a Watchdog is already running (refused
+  rather than stacked — two Watchdogs on one MR would race the merge); or the
+  worker didn't answer in time.
+  """
+  @spec queue_restart_watchdog(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def queue_restart_watchdog(%Scope{} = _scope, args) do
+    with {:ok, task_id} <- require_string(args, "task_id") do
+      case Arbiter.Worker.Watchdog.restart(task_id) do
+        :ok ->
+          {:ok, %{restarted: true, task_id: task_id}}
+
+        {:error, :no_worker} ->
+          {:error,
+           {:not_found,
+            "no worker is registered for task #{task_id} — there is nothing to attach a " <>
+              "watchdog to. Dispatch or resume the task instead."}}
+
+        {:error, {:not_parked, status}} ->
+          {:error,
+           {:invalid,
+            "task #{task_id}'s worker is #{status}, not awaiting_review — it has no open " <>
+              "MR for a watchdog to watch"}}
+
+        {:error, :already_running} ->
+          {:error,
+           {:invalid,
+            "a merge watchdog is already running for task #{task_id} — restarting would " <>
+              "put two of them on one MR. Use queue_retry_auto_resolve if it is parked."}}
+
+        {:error, reason} when reason in [:no_mr_ref, :no_adapter] ->
+          {:error,
+           {:invalid,
+            "task #{task_id}'s worker is parked at awaiting_review but recorded no " <>
+              "#{if reason == :no_mr_ref, do: "MR ref", else: "merger adapter"} — there is " <>
+              "nothing to watch"}}
+
+        {:error, :busy} ->
+          {:error,
+           {:busy, "task #{task_id}'s worker did not answer in time — try again in a moment"}}
+
+        {:error, {:start_failed, reason}} ->
+          {:error, {:internal, "watchdog restart failed for #{task_id}: #{inspect(reason)}"}}
+      end
+    end
+  end
+
   # ---- repo_list ----------------------------------------------------------
 
   @doc """

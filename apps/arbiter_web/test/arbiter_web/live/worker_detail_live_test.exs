@@ -708,6 +708,113 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     end
   end
 
+  describe "dead watchdog (bd-8jixav)" do
+    alias Arbiter.Test.StubMerger
+    alias Arbiter.Worker.Watchdog
+
+    setup do
+      StubMerger.reset()
+      :ok
+    end
+
+    # Reproduces the incident exactly: the MR is genuinely open, the worker is
+    # parked at :awaiting_review, and no Watchdog is registered. The
+    # `watchdog_start_error` escape hatch gets us there without killing a real
+    # process mid-poll.
+    defp park_without_watchdog(pid, task, ref) do
+      :ok = Worker.advance(pid, :implement)
+      StubMerger.next_open_ref(ref)
+      {:ok, workspace} = Ash.get(Workspace, task.workspace_id)
+
+      {:ok, _} =
+        Worker.open_mr(pid, "feature/x", "Add x", "desc", %{
+          adapter: StubMerger,
+          workspace: workspace,
+          auto_merge: true,
+          interval_ms: 15,
+          initial_delay_ms: 0,
+          watchdog_start_error: true
+        })
+
+      ref
+    end
+
+    test "warns that no watchdog is running and offers a restart", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-dead-wd", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_without_watchdog(pid, task, "!wd-dead-1")
+
+      refute Watchdog.alive?(task.id)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ "No watchdog is running"
+      assert has_element?(view, "#worker-restart-watchdog-btn")
+    end
+
+    test "shows neither warning nor button while a watchdog is alive", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-live-wd", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.advance(pid, :implement)
+      StubMerger.next_open_ref("!wd-live-1")
+      # Never resolves, so the Watchdog stays alive polling.
+      StubMerger.queue_get("!wd-live-1", [%{status: :open, approved: false}])
+      {:ok, workspace} = Ash.get(Workspace, task.workspace_id)
+
+      {:ok, _} =
+        Worker.open_mr(pid, "feature/x", "Add x", "desc", %{
+          adapter: StubMerger,
+          workspace: workspace,
+          auto_merge: false,
+          interval_ms: 10_000,
+          initial_delay_ms: 10_000
+        })
+
+      wait_until(fn -> Watchdog.alive?(task.id) end)
+
+      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      refute html =~ "No watchdog is running"
+      refute has_element?(view, "#worker-restart-watchdog-btn")
+    end
+
+    test "the restart_watchdog event starts a real replacement watchdog", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-restart-wd", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      ref = park_without_watchdog(pid, task, "!wd-dead-2")
+      # The replacement's first poll finds it still open, so it keeps running.
+      StubMerger.queue_get(ref, [%{status: :open, approved: false}])
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      render_click(view, "restart_watchdog")
+      # The handler runs via `start_async`, so wait for the reply to land
+      # rather than assuming render_click drained it.
+      wait_until(fn -> render(view) =~ "Restarted the merge watchdog" end)
+
+      assert Watchdog.alive?(task.id)
+      # And the page stops warning, since the snapshot is refreshed.
+      refute render(view) =~ "No watchdog is running"
+    end
+
+    test "the restart_watchdog event fails soft when there is no worker", %{conn: conn, ws: ws} do
+      # Reachable from a stale page after the worker exited.
+      {:ok, task} = Ash.create(Issue, %{title: "pd-restart-noworker", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      park_without_watchdog(pid, task, "!wd-dead-3")
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+
+      Worker.stop(pid)
+      wait_until(fn -> is_nil(Worker.whereis(task.id)) end)
+
+      render_click(view, "restart_watchdog")
+      wait_until(fn -> render(view) =~ "No worker is running" end)
+
+      refute Watchdog.alive?(task.id)
+    end
+  end
+
   defp tool_use_event(name, input) do
     Jason.encode!(%{
       "type" => "assistant",

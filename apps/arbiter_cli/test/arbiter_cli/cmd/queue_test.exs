@@ -60,6 +60,19 @@ defmodule ArbiterCli.Cmd.QueueTest do
       assert err =~ "busy polling"
     end
 
+    # bd-8jixav: this is the exact dead end the incident hit — the watchdog had
+    # died, so re-arming 404s. The message must name the command that recovers.
+    test "the no-watchdog error points at restart-watchdog" do
+      stub_routes([
+        {{"post", "/api/queue/bd-9/retry_auto_resolve"},
+         {%{"error" => %{"message" => "not found"}}, 404}}
+      ])
+
+      {_out, err, _exit_code} = capture(fn -> Queue.run(["retry-auto-resolve", "bd-9"]) end)
+
+      assert err =~ "arb queue restart-watchdog bd-9"
+    end
+
     test "retry_auto_resolve (underscored) is still accepted as an alias" do
       stub_routes([
         {{"post", "/api/queue/bd-4/retry_auto_resolve"},
@@ -70,6 +83,114 @@ defmodule ArbiterCli.Cmd.QueueTest do
 
       assert exit_code == 0
       assert out =~ "Re-armed"
+    end
+  end
+
+  describe "restart-watchdog (bd-8jixav)" do
+    test "posts to the restart_watchdog endpoint and prints confirmation" do
+      stub_routes([
+        {{"post", "/api/queue/bd-1/restart_watchdog"},
+         {%{"restarted" => true, "task_id" => "bd-1"}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Queue.run(["restart-watchdog", "bd-1"]) end)
+
+      assert exit_code == 0
+      assert out =~ "bd-1"
+      assert out =~ "Restarted"
+    end
+
+    test "emits the raw body in --json mode" do
+      stub_routes([
+        {{"post", "/api/queue/bd-1/restart_watchdog"},
+         {%{"restarted" => true, "task_id" => "bd-1"}, 200}}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn -> Queue.run(["restart-watchdog", "bd-1", "--json"]) end)
+
+      assert exit_code == 0
+      assert Jason.decode!(out) == %{"restarted" => true, "task_id" => "bd-1"}
+    end
+
+    test "requires a task id" do
+      {_out, err, exit_code} = capture(fn -> Queue.run(["restart-watchdog"]) end)
+
+      assert exit_code != 0
+      assert err =~ "requires: <task-id>"
+    end
+
+    test "reports a friendly error when no worker is registered" do
+      stub_routes([
+        {{"post", "/api/queue/bd-2/restart_watchdog"},
+         {%{"error" => %{"message" => "no worker"}}, 404}}
+      ])
+
+      {_out, err, exit_code} = capture(fn -> Queue.run(["restart-watchdog", "bd-2"]) end)
+
+      assert exit_code != 0
+      assert err =~ "no worker is running"
+      # The fallback it names has to be a command that exists: `arb resume` /
+      # `arb worker resume`, never `arb task resume` (there is no task resource).
+      assert err =~ "arb worker resume bd-2"
+      refute err =~ "arb task resume"
+    end
+
+    # Refusing is the point: two watchdogs on one MR race the merge.
+    test "reports a friendly error when a watchdog is already running" do
+      stub_routes([
+        {{"post", "/api/queue/bd-3/restart_watchdog"},
+         {%{"error" => %{"message" => "already running"}}, 409}}
+      ])
+
+      {_out, err, exit_code} = capture(fn -> Queue.run(["restart-watchdog", "bd-3"]) end)
+
+      assert exit_code != 0
+      assert err =~ "already running"
+      assert err =~ "Nothing to restart"
+    end
+
+    test "surfaces the server message when the worker is not parked" do
+      stub_routes([
+        {{"post", "/api/queue/bd-4/restart_watchdog"},
+         {%{"error" => %{"message" => "task bd-4's worker is running, not awaiting_review"}}, 400}}
+      ])
+
+      {_out, err, exit_code} = capture(fn -> Queue.run(["restart-watchdog", "bd-4"]) end)
+
+      assert exit_code != 0
+      assert err =~ "not awaiting_review"
+    end
+
+    test "reports a friendly error when the worker is busy" do
+      stub_routes([
+        {{"post", "/api/queue/bd-5/restart_watchdog"},
+         {%{"error" => %{"message" => "busy"}}, 503}}
+      ])
+
+      {_out, err, exit_code} = capture(fn -> Queue.run(["restart-watchdog", "bd-5"]) end)
+
+      assert exit_code != 0
+      assert err =~ "did not answer in time"
+    end
+
+    test "restart_watchdog (underscored) is accepted as an alias" do
+      stub_routes([
+        {{"post", "/api/queue/bd-6/restart_watchdog"},
+         {%{"restarted" => true, "task_id" => "bd-6"}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Queue.run(["restart_watchdog", "bd-6"]) end)
+
+      assert exit_code == 0
+      assert out =~ "Restarted"
+    end
+
+    test "--help documents the subcommand" do
+      {out, _err, exit_code} = capture(fn -> Queue.run(["--help"]) end)
+
+      assert exit_code == 0
+      assert out =~ "restart-watchdog"
     end
   end
 end

@@ -55,6 +55,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:retry_modal, false)
       |> assign(:retry_error, nil)
       |> assign(:retrying, false)
+      |> assign(:restarting_watchdog, false)
       |> assign(:stop_notice, false)
       |> assign(:stopped_flow_step, nil)
       |> refresh_all()
@@ -246,6 +247,25 @@ defmodule ArbiterWeb.WorkerDetailLive do
     end
   end
 
+  # Mint a fresh Watchdog for a task whose Watchdog died outright (bd-8jixav).
+  # Unlike "retry_auto_resolve" above, this is not a cheap message to a live
+  # process: the parked worker re-prepares its merger adapter, which for a
+  # hosted forge rewrites config and can shell out. Run it async so a slow
+  # forge can't stall the LiveView (and with it the `:worker_lifecycle`
+  # stream) for the whole of `@restart_watchdog_timeout_ms`.
+  def handle_event("restart_watchdog", _params, %{assigns: %{restarting_watchdog: true}} = socket) do
+    {:noreply, socket}
+  end
+
+  def handle_event("restart_watchdog", _params, socket) do
+    task_id = socket.assigns.task_id
+
+    {:noreply,
+     socket
+     |> assign(:restarting_watchdog, true)
+     |> start_async(:restart_watchdog, fn -> Watchdog.restart(task_id) end)}
+  end
+
   def handle_event("compose_change", %{"body" => body}, socket) do
     {:noreply, assign(socket, :compose_body, body)}
   end
@@ -316,6 +336,56 @@ defmodule ArbiterWeb.WorkerDetailLive do
      socket
      |> assign(:retrying, false)
      |> assign(:retry_error, "Resume failed: #{resume_failure(reason)}")
+     |> refresh_all()}
+  end
+
+  def handle_async(:restart_watchdog, {:ok, result}, socket) do
+    task_id = socket.assigns.task_id
+
+    {kind, message} =
+      case result do
+        :ok ->
+          {:info,
+           "Restarted the merge watchdog for #{task_id}; it is polling the open " <>
+             "#{socket.assigns.pr_label} again."}
+
+        {:error, :no_worker} ->
+          {:error,
+           "No worker is running for #{task_id}, so there is nothing to attach a watchdog to."}
+
+        {:error, :already_running} ->
+          {:error, "A merge watchdog is already running for #{task_id} — nothing to restart."}
+
+        {:error, {:not_parked, status}} ->
+          {:error,
+           "#{task_id}'s worker is #{status}, not awaiting review — it has no open " <>
+             "#{socket.assigns.pr_label} to watch."}
+
+        {:error, reason} when reason in [:no_mr_ref, :no_adapter] ->
+          {:error,
+           "#{task_id} is parked at awaiting review but recorded no " <>
+             "#{if reason == :no_mr_ref, do: "#{socket.assigns.pr_label} ref", else: "merger adapter"} " <>
+             "— there is nothing to watch."}
+
+        {:error, :busy} ->
+          {:error, "#{task_id}'s worker didn't answer in time — try again in a moment."}
+
+        {:error, {:start_failed, reason}} ->
+          {:error, "Watchdog restart failed: #{inspect(reason)}"}
+      end
+
+    {:noreply,
+     socket
+     |> assign(:restarting_watchdog, false)
+     |> put_flash(kind, message)
+     |> refresh_all()}
+  end
+
+  def handle_async(:restart_watchdog, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:restarting_watchdog, false)
+     |> put_flash(:error, "Watchdog restart crashed: #{inspect(reason)}")
      |> refresh_all()}
   end
 
@@ -434,6 +504,17 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   defp retry_auto_resolve_available?(_task_id, _snapshot), do: false
+
+  # A Watchdog is a `:temporary` child: when it crashes it is gone for good and
+  # nothing announces it. The worker stays parked at `:awaiting_review` with an
+  # open MR nothing is polling — invisible until someone notices the task never
+  # merged (bd-8jixav). Surface it here and offer the restart.
+  #
+  # Only `:awaiting_review` is checked: at every other status there is no
+  # Watchdog expected, so "missing" would be noise.
+  defp watchdog_missing?(task_id, %{status: :awaiting_review}), do: not Watchdog.alive?(task_id)
+
+  defp watchdog_missing?(_task_id, _snapshot), do: false
 
   defp resume_failure(:no_outpost),
     do:
@@ -800,6 +881,17 @@ defmodule ArbiterWeb.WorkerDetailLive do
                     Actions
                   </span>
                   <Core.button
+                    :if={watchdog_missing?(@task_id, @snapshot)}
+                    id="worker-restart-watchdog-btn"
+                    phx-click="restart_watchdog"
+                    data-confirm={"Start a fresh merge watchdog for #{@task_id}, attached to its open #{@pr_label}? Nothing is polling it right now."}
+                    size="sm"
+                    disabled={@restarting_watchdog}
+                  >
+                    <:icon><Core.icon name="hero-bolt" size={12} /></:icon>
+                    {if @restarting_watchdog, do: "Restarting watchdog…", else: "Restart watchdog"}
+                  </Core.button>
+                  <Core.button
                     :if={retry_auto_resolve_available?(@task_id, @snapshot)}
                     id="worker-retry-auto-resolve-btn"
                     phx-click="retry_auto_resolve"
@@ -989,6 +1081,31 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
           <%!-- ── Merge request ──────────────────────────────────────── --%>
           <.panel :if={@snapshot.mr_ref} title="Merge request">
+            <%!-- bd-8jixav: a Watchdog is a :temporary process — when it dies --%>
+            <%!-- it is gone silently, and the fields below go stale forever --%>
+            <%!-- while still looking live. Say so before showing them. --%>
+            <div
+              :if={watchdog_missing?(@task_id, @snapshot)}
+              id="worker-no-watchdog-warning"
+              class="flex items-start gap-2 mb-3 rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] bg-[color-mix(in_oklab,var(--arb-attention)_12%,transparent)] px-[10px] py-2"
+            >
+              <Core.icon
+                name="hero-exclamation-triangle"
+                size={14}
+                class="mt-[2px] text-[var(--arb-attention)]"
+              />
+              <div class="text-[12.5px] leading-[1.5]">
+                <span class="font-medium text-[var(--text-title)]">
+                  No watchdog is running for this task.
+                </span>
+                <span class="text-[var(--text-secondary)]">
+                  The {@pr_label} is still open but nothing is polling it, so it will never
+                  merge on its own. The values below are frozen at the last poll. Use
+                  <span class="font-medium">Restart watchdog</span>
+                  to start a replacement on the same {@pr_label}.
+                </span>
+              </div>
+            </div>
             <.data_list class="text-sm">
               <:item label="MR">
                 <%= if @snapshot.merger_url do %>

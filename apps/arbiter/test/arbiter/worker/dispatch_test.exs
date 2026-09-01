@@ -2737,6 +2737,27 @@ defmodule Arbiter.Worker.DispatchTest do
       assert msg =~ "stop it before resuming"
     end
 
+    # bd-8jixav: the :awaiting_review text confidently claimed "the watchdog is
+    # polling it to completion" off nothing but the static worker status. When
+    # the Watchdog has crashed that sentence is the exact opposite of the
+    # truth, and it was the message an operator read while the task sat
+    # abandoned for hours.
+    test "the :awaiting_review refusal says the watchdog is dead when it is" do
+      msg = Dispatch.worker_active_message(:awaiting_review, "vs-6jrn9m", false)
+
+      refute msg =~ "polling it to completion"
+      assert msg =~ "no watchdog"
+      assert msg =~ "restart-watchdog"
+      assert msg =~ "vs-6jrn9m"
+    end
+
+    test "the :awaiting_review refusal keeps the polling wording when the watchdog is alive" do
+      msg = Dispatch.worker_active_message(:awaiting_review, "vs-6jrn9m", true)
+
+      assert msg =~ "polling it to completion"
+      refute msg =~ "no watchdog"
+    end
+
     test "inherits the repo from the prior run when omitted", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "repo inherit", workspace_id: ws.id})
       _ = stop_worker_with_outpost(task.id)

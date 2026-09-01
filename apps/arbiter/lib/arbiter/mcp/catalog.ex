@@ -69,6 +69,7 @@ defmodule Arbiter.MCP.Catalog do
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
+  | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/1` (bd-8jixav) |
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/1` |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/1` |
   | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.paused?/1` |
@@ -1952,6 +1953,33 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.queue_retry_auto_resolve/2
+    },
+    %{
+      name: "queue_restart_watchdog",
+      tiers: @coordinator,
+      description:
+        "Mint a FRESH merge Watchdog for a task whose Watchdog has died, attached to the MR " <>
+          "its worker already has open (bd-8jixav). A Watchdog is a temporary process: when " <>
+          "it crashes it is gone for good, silently, and the task sits at awaiting_review " <>
+          "with an open MR nobody is polling. Use this when a parked task shows 'no watchdog " <>
+          "running', or when queue_retry_auto_resolve answered 'no merge watchdog is " <>
+          "currently running' on a task whose PR is genuinely still open. Refused if a " <>
+          "watchdog is already running (two on one MR would race the merge). Much cheaper " <>
+          "than worker_resume, which restarts the review gate from round 1.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" =>
+              "The task whose parked worker needs a new watchdog (required). Its worker must " <>
+                "be alive and parked at awaiting_review."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.queue_restart_watchdog/2
     },
     %{
       name: "repo_list",

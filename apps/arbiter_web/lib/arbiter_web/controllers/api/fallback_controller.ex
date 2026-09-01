@@ -12,6 +12,9 @@ defmodule ArbiterWeb.Api.FallbackController do
     * `"validation_error"` — 422 — `%Ash.Error.Invalid{}` (validation failures)
     * `"not_found"` — 404 — `%Ash.Error.Query.NotFound{}`
     * `"invalid_request"` — 400 — malformed params (bad atom values etc.)
+    * `"conflict"` — 409 — the request is well-formed but the resource is
+      already in the state it asks for, and doing it twice would be harmful
+      (e.g. starting a second merge Watchdog on one MR).
     * `"busy"` — 503 — a transient failure to reach an in-process resource
       (e.g. a `GenServer.call` timeout) — safe to retry after a short wait.
     * `"tracker_error"` — varies — a normalised error struct from any tracker
@@ -80,6 +83,14 @@ defmodule ArbiterWeb.Api.FallbackController do
     |> put_status(:bad_request)
     |> json(%{
       error: %{type: "invalid_request", message: message, details: details}
+    })
+  end
+
+  def call(conn, {:error, {:conflict, message}}) when is_binary(message) do
+    conn
+    |> put_status(:conflict)
+    |> json(%{
+      error: %{type: "conflict", message: message, details: %{}}
     })
   end
 

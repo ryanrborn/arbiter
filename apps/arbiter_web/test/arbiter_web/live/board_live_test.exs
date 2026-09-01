@@ -357,6 +357,79 @@ defmodule ArbiterWeb.BoardLiveTest do
   end
 
   describe "the Waiting column holds everything out of the worker's hands" do
+    # bd-8jixav: the Watchdog is a :temporary process, so a crash leaves the
+    # worker parked at :awaiting_review with an open MR nothing polls. The
+    # board used to keep showing an ordinary merge card.
+    defp merge_worker_without_watchdog(ws, task) do
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+
+      {:ok, _} =
+        Worker.open_mr(pid, "feature/x", "Integrate x", "", %{
+          adapter: BoardMerger,
+          workspace: nil,
+          auto_merge: false,
+          interval_ms: 600_000,
+          initial_delay_ms: 600_000,
+          watchdog_start_error: true
+        })
+
+      pid
+    end
+
+    test "a card whose watchdog died says so and offers the restart", %{conn: conn, ws: ws} do
+      dead = working_issue(ws, "nobody is watching this")
+      merge_worker_without_watchdog(ws, dead)
+
+      {:ok, view, html} = live(conn, "/")
+
+      assert has_element?(view, ~s(#board-column-waiting [id="card-#{dead.id}"]))
+      assert html =~ "no watchdog"
+      # A dead watchdog means nothing is left for the system to try.
+      assert has_element?(view, ~s([id="card-#{dead.id}"] [data-needs-you]))
+      # And the card routes to the worker page — where the restart lives —
+      # rather than to the merge queue, which can do nothing about it.
+      assert has_element?(view, ~s([id="card-#{dead.id}"] a[href="/workers/#{dead.id}"]))
+    end
+
+    test "a card with a live watchdog says nothing about one", %{conn: conn, ws: ws} do
+      polling = working_issue(ws, "still in review")
+      merge_worker(ws, polling)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      refute html =~ "no watchdog"
+    end
+
+    # The other half of bd-8jixav: a task with both a primary :awaiting_review
+    # row and a subordinate failed fix-pass row rendered as two cards.
+    test "a task with a subordinate pass renders one card, not two", %{conn: conn, ws: ws} do
+      task = working_issue(ws, "one card please")
+      merge_worker(ws, task)
+
+      # A subordinate pass registers under `<task_id>:fixpass` and carries its
+      # role in meta — the same shape MergeQueue.FixPassDispatcher starts.
+      {:ok, fixpass} =
+        Worker.start(
+          task_id: task.id,
+          repo: "r",
+          workspace_id: ws.id,
+          registry_key: "#{task.id}:fixpass",
+          meta: %{role: :fix_pass}
+        )
+
+      :ok = Worker.fail(fixpass, "fix pass blew up")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
+
+      assert view
+             |> render()
+             |> then(&Regex.scan(~r/id="card-#{task.id}"/, &1))
+             |> length() == 1
+    end
+
     test "a parked worker and a merge-parked one share the column", %{conn: conn, ws: ws} do
       parked = working_issue(ws, "answer me")
       parked_worker(ws, parked)

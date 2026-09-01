@@ -162,6 +162,7 @@ defmodule ArbiterWeb.Router do
     # Graph queue operations (C5 of #482)
     post("/queue/:task_id/resume", QueueController, :resume)
     post("/queue/:task_id/retry_auto_resolve", QueueController, :retry_auto_resolve)
+    post("/queue/:task_id/restart_watchdog", QueueController, :restart_watchdog)
 
     # Board scheduler (autopilot) operations
     post("/scheduler/pause", SchedulerController, :pause)
