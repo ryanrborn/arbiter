@@ -1815,4 +1815,211 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert Worker.state(pid).mr_ref == "!oom1"
     end
   end
+
+  describe "rerun_ci/2 (bd-5mzzww / #1448)" do
+    test "delegates to the adapter with the watched mr_ref and the caller's options" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rr1", [%{status: :open, approved: false}])
+      start_watchdog(pid, task_id, "!rr1", [])
+
+      assert {:ok, %{mode: :all_jobs}} =
+               Watchdog.rerun_ci(task_id, %{mode: :all_jobs, inputs: %{"force_deploy" => "true"}})
+
+      assert [{"!rr1", opts} | _] = StubMerger.ci_reruns()
+      assert opts.mode == :all_jobs
+      assert opts.inputs == %{"force_deploy" => "true"}
+    end
+
+    test "surfaces the adapter's error rather than swallowing it" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rr2", [%{status: :open, approved: false}])
+      start_watchdog(pid, task_id, "!rr2", [])
+      StubMerger.set_rerun_result({:error, :no_failed_run})
+
+      assert {:error, :no_failed_run} = Watchdog.rerun_ci(task_id, %{})
+    end
+
+    test "no watchdog for the task is :not_found, not a crash" do
+      assert {:error, :not_found} = Watchdog.rerun_ci("nope-#{System.unique_integer()}", %{})
+    end
+
+    test "an adapter with no re-run primitive answers :unsupported" do
+      defmodule NoRerunMerger do
+        @moduledoc false
+        def get(_ref), do: {:ok, %{status: :open, approved: false}}
+        def link_for(ref), do: ref
+      end
+
+      {pid, task_id} = running_worker()
+      start_watchdog(pid, task_id, "!rr3", adapter: NoRerunMerger)
+
+      assert {:error, :unsupported} = Watchdog.rerun_ci(task_id, %{})
+    end
+  end
+
+  describe "mark_ci_external/2 (bd-5mzzww / #1448)" do
+    test "reclassifies a parked :ci_failed block as :ci_failed_external" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!ce1", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!ce1",
+        auto_merge: true,
+        max_auto_resolve_attempts: 0,
+        interval_ms: 15,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed end)
+
+      assert :ok =
+               Watchdog.mark_ci_external(
+                 task_id,
+                 "4 unrelated branches failed the same admin-panel-switcher timeout today"
+               )
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed_external end)
+    end
+
+    test "the escalation names the external diagnosis and the worker's evidence" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!ce2", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!ce2",
+            auto_merge: true,
+            max_auto_resolve_attempts: 0,
+            interval_ms: 15,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed end)
+          :ok = Watchdog.mark_ci_external(task_id, "day-wide infra outage, not this diff")
+          wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed_external end)
+          Process.sleep(60)
+        end)
+
+      assert log =~ "ci_failed_external"
+    end
+
+    test "refuses when the task is not parked on a CI block" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!ce3", [%{status: :open, approved: false}])
+      start_watchdog(pid, task_id, "!ce3", [])
+
+      assert {:error, :not_parked_on_ci_failed} = Watchdog.mark_ci_external(task_id, "infra")
+    end
+
+    test "no watchdog for the task is :not_found" do
+      assert {:error, :not_found} =
+               Watchdog.mark_ci_external("nope-#{System.unique_integer()}", "infra")
+    end
+
+    test "the external mark clears when the CI block clears, so a later real failure is not mislabelled" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!ce4", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!ce4",
+        auto_merge: true,
+        max_auto_resolve_attempts: 0,
+        interval_ms: 15,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed end)
+      :ok = Watchdog.mark_ci_external(task_id, "infra")
+      wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed_external end)
+
+      # The block clears (the infra fix lands) and then a genuine, unrelated
+      # CI failure appears. It must page as :ci_failed, not inherit the stale
+      # "not my diff" verdict.
+      StubMerger.queue_get("!ce4", [
+        %{status: :open, approved: false},
+        %{status: :open, approved: true, block_reason: :ci_failed}
+      ])
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed end, 2_000)
+    end
+  end
+
+  describe "park heartbeat (bd-5mzzww / #1448 ask 4)" do
+    test "re-pages a non-auto-resolvable park on the heartbeat cadence instead of latching silent" do
+      # The once-per-episode dedupe (#1226) is right for avoiding an escalation
+      # storm, but a park with no automated remediation AND no repeat signal is
+      # easy to lose — ours sat 19 hours on a single page. A low-frequency
+      # heartbeat re-raises a block that has seen no state change.
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!hb1", [
+        %{status: :open, approved: true, block_reason: :needs_nonauthor_approval}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!hb1",
+            auto_merge: false,
+            interval_ms: 15,
+            park_heartbeat_polls: 3,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!hb1") >= 10 end, 2_000)
+        end)
+
+      occurrences =
+        log
+        |> String.split("still parked")
+        |> length()
+        |> Kernel.-(1)
+
+      assert occurrences >= 2
+    end
+
+    test "a heartbeat of 0 disables the reminder (pre-existing once-per-episode behaviour)" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!hb2", [
+        %{status: :open, approved: true, block_reason: :needs_nonauthor_approval}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!hb2",
+            auto_merge: false,
+            interval_ms: 15,
+            park_heartbeat_polls: 0,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!hb2") >= 10 end, 2_000)
+        end)
+
+      refute log =~ "still parked"
+    end
+
+    test "a block that changes reason re-pages immediately and restarts the heartbeat clock" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!hb3", [
+        %{status: :open, approved: true, block_reason: :needs_nonauthor_approval},
+        %{status: :open, approved: true, block_reason: :draft}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!hb3",
+            auto_merge: false,
+            interval_ms: 15,
+            park_heartbeat_polls: 1000,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!hb3") >= 5 end, 2_000)
+        end)
+
+      assert log =~ "merge blocked (needs_nonauthor_approval)"
+      assert log =~ "merge blocked (draft)"
+      refute log =~ "still parked"
+    end
+  end
 end

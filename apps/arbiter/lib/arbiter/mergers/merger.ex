@@ -270,6 +270,38 @@ defmodule Arbiter.Mergers.Merger do
   @callback failing_check_logs(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
 
   @doc """
+  Re-run CI for `mr_ref`, choosing the *granularity* of the re-run
+  (bd-5mzzww / #1448).
+
+  Arbiter had no CI-retry verb at all: every retry was a human clicking the
+  forge UI, and the affordance a human reaches for first — GitHub's "re-run
+  failed jobs" — reuses every job that already succeeded. When the failing
+  check consumes an artifact an earlier job in the same run produced (a review
+  app, a built image), that re-run re-tests the identical stale input and is
+  deterministically guaranteed to fail again. Ours did, twice, 19 hours apart.
+
+  `opts` is a map:
+
+    * `:mode` — `:auto` (default), `:failed_jobs`, `:all_jobs` or `:workflow`.
+      `:auto` delegates to `Arbiter.Mergers.CIRerun.choose/1`, which prefers a
+      full rebuild whenever a failed-jobs re-run would reuse completed upstream
+      jobs, or whenever one has already been tried.
+    * `:workflow` — name or file basename of the workflow to re-run, when the
+      head commit has more than one failed run.
+    * `:inputs` — string-keyed workflow inputs (e.g. `%{"force_deploy" => "true"}`).
+      Supplying any input forces `:workflow` mode, since only a fresh dispatch
+      can carry them.
+
+  Returns `{:ok, map()}` describing what was re-run (`:mode`, `:run_id`,
+  `:workflow`, `:run_attempt`, `:reused_jobs`, `:rationale`, `:url`) or
+  `{:error, term()}`.
+
+  Optional — adapters with no re-run primitive simply don't implement it;
+  callers guard with `function_exported?/3`.
+  """
+  @callback rerun_ci(mr_ref, opts :: map()) :: {:ok, map()} | {:error, term()}
+
+  @doc """
   List open merge requests / pull requests in the configured repository.
 
   Returns `{:ok, [open_mr()]}` (an empty list when no open MRs exist — not
@@ -446,6 +478,7 @@ defmodule Arbiter.Mergers.Merger do
 
   @optional_callbacks update_branch: 1,
                       failing_check_logs: 1,
+                      rerun_ci: 2,
                       ref_for_pr: 2,
                       list_open: 0,
                       list_open_review_threads: 1,

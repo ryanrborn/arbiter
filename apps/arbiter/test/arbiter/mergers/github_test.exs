@@ -1416,6 +1416,234 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "rerun_ci/2 (bd-5mzzww / #1448)" do
+    # A run whose failing check sits downstream of jobs that already succeeded —
+    # the incident shape: re-running only the failed job reuses the stale deploy.
+    defp stub_rerun_run(conn, opts \\ []) do
+      jobs = Keyword.get(opts, :jobs, [
+        %{"name" => "build-and-push", "conclusion" => "success"},
+        %{"name" => "deploy-frontend", "conclusion" => "success"},
+        %{"name" => "playwright-smoke", "conclusion" => "failure"}
+      ])
+
+      attempt = Keyword.get(opts, :run_attempt, 1)
+
+      case {conn.method, conn.request_path} do
+        {"GET", "/repos/octo/widget/pulls/42"} ->
+          Req.Test.json(conn, %{"head" => %{"sha" => "deadbeef", "ref" => "feature/x"}})
+
+        {"GET", "/repos/octo/widget/actions/runs"} ->
+          Req.Test.json(conn, %{
+            "workflow_runs" => [
+              %{
+                "id" => 9001,
+                "workflow_id" => 77,
+                "name" => "Deploy Review App",
+                "path" => ".github/workflows/review-app.yml",
+                "status" => "completed",
+                "conclusion" => "failure",
+                "run_attempt" => attempt,
+                "html_url" => "https://github.com/octo/widget/actions/runs/9001"
+              }
+            ]
+          })
+
+        {"GET", "/repos/octo/widget/actions/runs/9001/jobs"} ->
+          Req.Test.json(conn, %{"jobs" => jobs})
+
+        _ ->
+          nil
+      end
+    end
+
+    test "auto mode re-runs ALL jobs when the failing check has successful upstream jobs" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case stub_rerun_run(conn) do
+          nil ->
+            assert {"POST", "/repos/octo/widget/actions/runs/9001/rerun"} ==
+                     {conn.method, conn.request_path}
+
+            send(test_pid, :rerun_all)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          conn ->
+            conn
+        end
+      end)
+
+      assert {:ok, result} = Github.rerun_ci(@ref, %{})
+      assert_received :rerun_all
+      assert result.mode == :all_jobs
+      assert result.run_id == 9001
+      assert result.workflow == "Deploy Review App"
+      assert result.reused_jobs == ["build-and-push", "deploy-frontend"]
+      assert result.rationale =~ "reused"
+    end
+
+    test "auto mode re-runs only the failed jobs when nothing upstream succeeded" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case stub_rerun_run(conn, jobs: [%{"name" => "mix test", "conclusion" => "failure"}]) do
+          nil ->
+            assert {"POST", "/repos/octo/widget/actions/runs/9001/rerun-failed-jobs"} ==
+                     {conn.method, conn.request_path}
+
+            send(test_pid, :rerun_failed)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          conn ->
+            conn
+        end
+      end)
+
+      assert {:ok, %{mode: :failed_jobs}} = Github.rerun_ci(@ref, %{})
+      assert_received :rerun_failed
+    end
+
+    test "auto mode escalates to a full re-run on a second attempt" do
+      stub(fn conn ->
+        case stub_rerun_run(conn,
+               run_attempt: 2,
+               jobs: [%{"name" => "mix test", "conclusion" => "failure"}]
+             ) do
+          nil -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          conn -> conn
+        end
+      end)
+
+      assert {:ok, %{mode: :all_jobs, run_attempt: 2}} = Github.rerun_ci(@ref, %{})
+    end
+
+    test "inputs force a workflow_dispatch on the PR head ref" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case stub_rerun_run(conn) do
+          nil ->
+            assert {"POST", "/repos/octo/widget/actions/workflows/77/dispatches"} ==
+                     {conn.method, conn.request_path}
+
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+            assert Jason.decode!(body) == %{
+                     "ref" => "feature/x",
+                     "inputs" => %{"force_deploy" => "true"}
+                   }
+
+            send(test_pid, :dispatched)
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn ->
+            conn
+        end
+      end)
+
+      assert {:ok, %{mode: :workflow}} =
+               Github.rerun_ci(@ref, %{inputs: %{"force_deploy" => "true"}})
+
+      assert_received :dispatched
+    end
+
+    test "an explicit mode overrides the auto policy" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case stub_rerun_run(conn) do
+          nil ->
+            send(test_pid, {:posted, conn.request_path})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          conn ->
+            conn
+        end
+      end)
+
+      assert {:ok, %{mode: :failed_jobs}} = Github.rerun_ci(@ref, %{mode: :failed_jobs})
+      assert_received {:posted, "/repos/octo/widget/actions/runs/9001/rerun-failed-jobs"}
+    end
+
+    test "the workflow option selects among several failed runs on the head SHA" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            Req.Test.json(conn, %{"head" => %{"sha" => "deadbeef", "ref" => "feature/x"}})
+
+          {"GET", "/repos/octo/widget/actions/runs"} ->
+            Req.Test.json(conn, %{
+              "workflow_runs" => [
+                %{
+                  "id" => 1,
+                  "workflow_id" => 10,
+                  "name" => "CI",
+                  "path" => ".github/workflows/ci.yml",
+                  "status" => "completed",
+                  "conclusion" => "failure",
+                  "run_attempt" => 1
+                },
+                %{
+                  "id" => 2,
+                  "workflow_id" => 20,
+                  "name" => "Deploy Review App",
+                  "path" => ".github/workflows/review-app.yml",
+                  "status" => "completed",
+                  "conclusion" => "failure",
+                  "run_attempt" => 1
+                }
+              ]
+            })
+
+          {"GET", "/repos/octo/widget/actions/runs/2/jobs"} ->
+            Req.Test.json(conn, %{"jobs" => [%{"name" => "smoke", "conclusion" => "failure"}]})
+
+          {"POST", path} ->
+            send(test_pid, {:posted, path})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, %{run_id: 2}} = Github.rerun_ci(@ref, %{workflow: "review-app.yml"})
+      assert_received {:posted, "/repos/octo/widget/actions/runs/2/rerun-failed-jobs"}
+    end
+
+    test "no failed workflow run on the head SHA is an error, not a silent no-op" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            Req.Test.json(conn, %{"head" => %{"sha" => "deadbeef", "ref" => "feature/x"}})
+
+          {"GET", "/repos/octo/widget/actions/runs"} ->
+            Req.Test.json(conn, %{"workflow_runs" => []})
+        end
+      end)
+
+      assert {:error, %Error{kind: :not_found} = err} = Github.rerun_ci(@ref, %{})
+      assert err.message =~ "no failed workflow run"
+    end
+
+    test "a still-running workflow run is not re-run" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            Req.Test.json(conn, %{"head" => %{"sha" => "deadbeef", "ref" => "feature/x"}})
+
+          {"GET", "/repos/octo/widget/actions/runs"} ->
+            Req.Test.json(conn, %{
+              "workflow_runs" => [
+                %{"id" => 3, "workflow_id" => 30, "name" => "CI", "status" => "in_progress"}
+              ]
+            })
+        end
+      end)
+
+      assert {:error, %Error{kind: :not_found}} = Github.rerun_ci(@ref, %{})
+    end
+  end
+
   describe "failing_check_logs/1 (#354 Phase 2a)" do
     test "returns the failing checks (name + output tail + url), skipping passing ones" do
       stub(fn conn ->

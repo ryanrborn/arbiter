@@ -161,6 +161,17 @@ defmodule Arbiter.Worker.Watchdog do
   # `FixPassDispatcher.registry_suffix/0` so we can detect an in-flight fix pass.
   @fix_pass_registry_suffix ":fixpass"
 
+  # Polls between low-frequency re-pages of a park that has seen no state change
+  # (bd-5mzzww / #1448 ask 4). The once-per-block-episode dedupe (#1226) is right
+  # for avoiding an escalation storm, but a park with no automated remediation
+  # AND no repeat signal is easy to lose: the incident PR sat 19 hours on a
+  # single page while a live Watchdog polled it the whole time. 720 polls is 12h
+  # at the default 60s interval — low enough not to be noise, soon enough that a
+  # morning park is still surfaced the same evening. 0 disables the heartbeat and
+  # restores the strict once-per-episode behaviour. Override via opt
+  # `:park_heartbeat_polls` or workspace config["merge"]["park_heartbeat_polls"].
+  @default_park_heartbeat_polls 720
+
   # Registry suffix the Watchdog itself registers under, so an external caller
   # (CLI / MCP tool / dashboard) can find the Watchdog for a task by task_id
   # alone and message it directly — needed for `retry_auto_resolve/1` (bd-bspakl).
@@ -209,6 +220,7 @@ defmodule Arbiter.Worker.Watchdog do
           | {:max_auto_resumes, non_neg_integer()}
           | {:auto_resume_dispatcher, module()}
           | {:merge_fail_notify_threshold, pos_integer()}
+          | {:park_heartbeat_polls, non_neg_integer()}
 
   @type opts :: [opt()]
 
@@ -477,6 +489,76 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   @doc """
+  Re-run CI for the watched PR, choosing the re-run *granularity*
+  (bd-5mzzww / #1448 asks 1 & 2).
+
+  Arbiter had no CI-retry verb at all: the only retries available were whatever
+  a human clicked in the forge UI, and the affordance a human reaches for first
+  — GitHub's "re-run failed jobs" — reuses every job that already succeeded. On
+  a pipeline where the failing check tests an artifact an *earlier job in the
+  same run* produced (a review app, a built image), that re-run re-tests the
+  identical stale input and is deterministically guaranteed to fail again. In
+  the incident it did, twice, 19 hours apart, before anyone realised only a full
+  re-dispatch could clear it.
+
+  Delegates to the adapter's optional `rerun_ci/2`. `opts` is passed through
+  (`:mode`, `:workflow`, `:inputs` — see `Arbiter.Mergers.Merger.rerun_ci/2`);
+  with no `:mode` the adapter applies `Arbiter.Mergers.CIRerun.choose/1`, which
+  escalates past a failed-jobs re-run whenever one would reuse completed
+  upstream jobs or has already been tried once.
+
+  Errors: `{:error, :not_found}` (no Watchdog running for the task),
+  `{:error, :unsupported}` (the adapter has no re-run primitive),
+  `{:error, :busy}` (the Watchdog didn't answer in time), or whatever the
+  adapter returned.
+  """
+  @spec rerun_ci(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def rerun_ci(task_id, opts \\ %{}) when is_binary(task_id) and is_map(opts) do
+    case whereis(task_id) do
+      nil -> {:error, :not_found}
+      pid -> GenServer.call(pid, {:rerun_ci, opts}, 30_000)
+    end
+  catch
+    :exit, {:timeout, _} -> {:error, :busy}
+    :exit, _ -> {:error, :not_found}
+  end
+
+  @doc """
+  Record a worker's "this CI failure is infrastructure, not my diff" verdict on
+  a parked `:ci_failed` block, reclassifying the park as `:ci_failed_external`
+  (bd-5mzzww / #1448 ask 3).
+
+  In the incident the correct diagnosis was reached — by a follow-up worker,
+  hours before the human got there, with good evidence (the last four runs of
+  the same workflow across four unrelated branches all failed the same way, and
+  nothing in the diff touched that code). It went into task notes and the worker
+  completed. The Watchdog went on parking the PR on a generic `:ci_failed`,
+  indistinguishable from a PR with genuinely broken code. The signal existed and
+  was thrown away.
+
+  This gives that verdict somewhere to go: `parked_on/1` starts reporting
+  `:ci_failed_external`, and the coordinator escalation says "CI is broken
+  repo-wide, not on this branch" and carries `note` as the evidence. The mark is
+  scoped to the current block episode — it clears as soon as the block reason
+  changes — so a later, genuine failure on the same PR is never mislabelled.
+
+  Errors: `{:error, :not_found}` (no Watchdog running),
+  `{:error, :not_parked_on_ci_failed}` (the Watchdog isn't parked on a CI
+  block), `{:error, :busy}`.
+  """
+  @spec mark_ci_external(String.t(), String.t() | nil) ::
+          :ok | {:error, :not_found | :not_parked_on_ci_failed | :busy}
+  def mark_ci_external(task_id, note \\ nil) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> {:error, :not_found}
+      pid -> GenServer.call(pid, {:mark_ci_external, note}, 1_000)
+    end
+  catch
+    :exit, {:timeout, _} -> {:error, :busy}
+    :exit, _ -> {:error, :not_found}
+  end
+
+  @doc """
   Read-only lookup of the reason a task's Watchdog is currently parked on
   (e.g. `:ci_failed`), or `nil` if it isn't parked or no Watchdog is running
   for `task_id`.
@@ -549,6 +631,11 @@ defmodule Arbiter.Worker.Watchdog do
           Keyword.get(opts, :fix_pass_dispatcher, @default_fix_pass_dispatcher)
 
         auto_resolve_conflict = resolve_auto_resolve_conflict(opts, workspace)
+
+        park_heartbeat_polls =
+          Keyword.get(opts, :park_heartbeat_polls) ||
+            park_heartbeat_from_workspace(workspace) ||
+            @default_park_heartbeat_polls
         max_conflict_attempts = resolve_max_conflict_attempts(opts, workspace)
         max_auto_resumes = resolve_max_auto_resumes(opts, workspace)
 
@@ -666,7 +753,19 @@ defmodule Arbiter.Worker.Watchdog do
           # other than `:not_started`. Once it reaches `@not_started_grace_polls`,
           # the Watchdog stops deferring and falls through to a merge attempt —
           # see `apply_outcome(:approved, result, %{auto_merge: true})`.
-          not_started_polls: 0
+          not_started_polls: 0,
+          # Low-frequency re-page of an unchanged park (bd-5mzzww ask 4).
+          # `last_block_escalated_poll` is the poll_count at which the current
+          # block reason was last paged — the heartbeat clock, reset whenever the
+          # reason changes (a genuinely different block is fresh news and pages
+          # immediately, exactly as before).
+          park_heartbeat_polls: park_heartbeat_polls,
+          last_block_escalated_poll: 0,
+          # A worker's "this CI failure is infrastructure, not my diff" verdict
+          # (bd-5mzzww ask 3), set via `mark_ci_external/2`. Scoped to the
+          # current `:ci_failed` episode: cleared the moment the block reason
+          # changes, so a later genuine failure is never mislabelled.
+          ci_external_note: nil
         }
 
         Process.monitor(worker_pid)
@@ -678,7 +777,8 @@ defmodule Arbiter.Worker.Watchdog do
   defp registry_name(task_id), do: PRegistry.via_tuple(task_id <> @watchdog_registry_suffix)
 
   @impl true
-  def handle_call(:retry_auto_resolve, _from, %{park_reason: :ci_failed} = state) do
+  def handle_call(:retry_auto_resolve, _from, %{park_reason: park} = state)
+      when park in [:ci_failed, :ci_failed_external] do
     Logger.warning(
       "Worker.Watchdog: manual auto-resolve re-arm for task=#{state.task_id} " <>
         "mr=#{state.mr_ref} (was #{state.auto_resolve_attempts}/#{state.max_auto_resolve_attempts} attempts)"
@@ -702,6 +802,50 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   def handle_call(:retry_auto_resolve, _from, state) do
+    {:reply, {:error, :not_parked_on_ci_failed}, state}
+  end
+
+  @impl true
+  def handle_call({:rerun_ci, opts}, _from, state) do
+    if function_exported?(state.adapter, :rerun_ci, 2) do
+      result = state.adapter.rerun_ci(state.mr_ref, opts)
+
+      Logger.info(
+        "Worker.Watchdog: CI re-run requested for task=#{state.task_id} " <>
+          "mr=#{state.mr_ref} opts=#{inspect(opts)} -> #{inspect(result)}"
+      )
+
+      {:reply, result, state}
+    else
+      {:reply, {:error, :unsupported}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:mark_ci_external, note}, _from, %{park_reason: park} = state)
+      when park in [:ci_failed, :ci_failed_external] do
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} :ci_failed block marked " <>
+        "EXTERNAL (infra, not this diff) — re-escalating as :ci_failed_external" <>
+        if(note, do: ": #{note}", else: "")
+    )
+
+    # Re-arm the escalation latch so the next poll pages with the new, more
+    # actionable reason instead of staying silent behind the old `:ci_failed`
+    # page — the whole point is that the coordinator learns CI is broken
+    # repo-wide rather than reading a generic park.
+    state = %{
+      state
+      | ci_external_note: note || "reported external by a worker",
+        park_reason: :ci_failed_external,
+        unresolved_escalated: false,
+        last_escalated_poll: state.poll_count
+    }
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:mark_ci_external, _note}, _from, state) do
     {:reply, {:error, :not_parked_on_ci_failed}, state}
   end
 
@@ -1111,6 +1255,10 @@ defmodule Arbiter.Worker.Watchdog do
   # review the author can't satisfy — so an ordinary "awaiting first review" PR
   # still flows through the normal pending path.
   defp maybe_escalate_merge_block(state, result) do
+    # Scope a worker's "infra, not my diff" verdict to the CI block episode it
+    # was raised against, before any routing decision reads it (bd-5mzzww).
+    state = clear_stale_ci_external(state, block_reason(result))
+
     if block_reason(result) == :needs_nonauthor_approval do
       handle_nonauthor_approval(state, result)
     else
@@ -1235,7 +1383,8 @@ defmodule Arbiter.Worker.Watchdog do
           | last_block_reason: nil,
             auto_resolve_attempts: 0,
             max_auto_resolve_attempts: state.base_max_auto_resolve_attempts,
-            unresolved_escalated: false
+            unresolved_escalated: false,
+            ci_external_note: nil
         }
 
         apply_outcome(effective_outcome(state, result), result, state)
@@ -1274,13 +1423,14 @@ defmodule Arbiter.Worker.Watchdog do
       # eventually tripped the ordinary ceiling anyway, failing the worker and
       # killing the only process still watching the MR (bd-krg7ci).
       state.auto_resolve_attempts >= state.max_auto_resolve_attempts ->
-        state = maybe_escalate_unresolved(state, reason)
+        effective = effective_park_reason(state, reason)
+        state = maybe_escalate_unresolved(state, effective)
 
         reschedule(%{
           state
           | last_block_reason: reason,
             max_polls: :infinity,
-            park_reason: reason
+            park_reason: effective
         })
 
       true ->
@@ -1290,7 +1440,40 @@ defmodule Arbiter.Worker.Watchdog do
 
   # The Phase 1 debounced escalation: a given block reason escalates once when it
   # first appears (or changes), not on every poll. Best-effort.
-  defp debounce_escalate_block(%{last_block_reason: reason} = state, reason), do: state
+  #
+  # Once-per-episode is the right shape for avoiding the #1226 escalation storm,
+  # but on its own it turns an indefinite park into permanent silence: a block
+  # the fleet cannot auto-resolve has no repeat signal and no automated
+  # remediation, so if the coordinator doesn't happen to read the one page, the
+  # PR sits. Ours sat 19 hours. So an *unchanged* park re-pages on a low
+  # frequency (`park_heartbeat_polls`, 12h at the default interval) with a
+  # distinct "still parked" heartbeat — deliberately in tension with the #1226
+  # dedupe, at a cadence three orders of magnitude below the once-a-minute flood
+  # that motivated it (bd-5mzzww / #1448 ask 4).
+  defp debounce_escalate_block(%{last_block_reason: reason} = state, reason) do
+    if park_heartbeat_due?(state) do
+      polls = state.poll_count - state.last_block_escalated_poll
+
+      Logger.warning(
+        "Worker.Watchdog: still parked (#{reason}) for task=#{state.task_id} " <>
+          "mr=#{state.mr_ref} after #{polls} poll(s) with no state change; " <>
+          "re-pinging coordinator"
+      )
+
+      safe(fn ->
+        Arbiter.Messages.CoordinatorNotifier.merge_park_heartbeat(
+          snapshot(state),
+          state.mr_ref,
+          reason,
+          polls
+        )
+      end)
+
+      %{state | last_block_escalated_poll: state.poll_count}
+    else
+      state
+    end
+  end
 
   defp debounce_escalate_block(state, reason) do
     Logger.warning(
@@ -1302,7 +1485,38 @@ defmodule Arbiter.Worker.Watchdog do
       Arbiter.Messages.CoordinatorNotifier.merge_blocked(snapshot(state), state.mr_ref, reason)
     end)
 
-    %{state | last_block_reason: reason}
+    %{state | last_block_reason: reason, last_block_escalated_poll: state.poll_count}
+  end
+
+  defp park_heartbeat_due?(%{park_heartbeat_polls: n}) when not is_integer(n) or n <= 0, do: false
+
+  defp park_heartbeat_due?(state),
+    do: state.poll_count - state.last_block_escalated_poll >= state.park_heartbeat_polls
+
+  # The reason a `:ci_failed` block is *escalated and parked* under: a worker's
+  # "infra, not my diff" verdict (`mark_ci_external/2`) promotes it to
+  # `:ci_failed_external`, which reads very differently in the coordinator inbox
+  # — "CI is broken repo-wide" rather than "this PR's checks are red".
+  defp effective_park_reason(%{ci_external_note: note}, :ci_failed) when is_binary(note),
+    do: :ci_failed_external
+
+  defp effective_park_reason(_state, reason), do: reason
+
+  # The external verdict is scoped to one `:ci_failed` episode. The moment the
+  # block reason changes, drop it — otherwise a genuine failure appearing later
+  # on the same PR would inherit a stale "not my diff" label and be escalated as
+  # someone else's problem.
+  defp clear_stale_ci_external(%{ci_external_note: nil} = state, _reason), do: state
+  defp clear_stale_ci_external(state, :ci_failed), do: state
+
+  defp clear_stale_ci_external(state, reason) do
+    Logger.info(
+      "Worker.Watchdog: clearing external-CI mark for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref} — block reason moved to #{inspect(reason)}"
+    )
+
+    park_reason = if state.park_reason == :ci_failed_external, do: nil, else: state.park_reason
+    %{state | ci_external_note: nil, park_reason: park_reason}
   end
 
   # The two mechanically auto-resolvable block reasons (#354, Phase 2a).
@@ -1444,10 +1658,20 @@ defmodule Arbiter.Worker.Watchdog do
         snapshot(state),
         state.mr_ref,
         reason,
-        state.auto_resolve_attempts
+        state.auto_resolve_attempts,
+        note: state.ci_external_note
       )
     end)
   end
+
+  defp park_heartbeat_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
+    case get_in(config, ["merge", "park_heartbeat_polls"]) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp park_heartbeat_from_workspace(_), do: nil
 
   defp max_auto_resolve_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
     case get_in(config, ["merge", "max_auto_resolve_attempts"]) do
