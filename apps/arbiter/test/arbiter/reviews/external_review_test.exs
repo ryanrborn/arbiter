@@ -2513,7 +2513,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       # Inject a check_runner that fails with a Claude prompt-too-long error
       failing_runner = fn _diff, _state ->
-        {:error, {:claude_failed, 1, "Prompt is too long — the request is ~1083694 tokens (limit 1000000) but this conversation is only ~632831 tokens"}}
+        {:error,
+         {:claude_failed, 1,
+          "Prompt is too long — the request is ~1083694 tokens (limit 1000000) but this conversation is only ~632831 tokens"}}
       end
 
       assert {:error, _reason} =
@@ -2546,7 +2548,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       # Inject a check_runner that fails with a Claude prompt-too-long error
       failing_runner = fn _diff, _state ->
-        {:error, {:claude_failed, 1, "Prompt is too long — the request is ~1083694 tokens (limit 1000000) but this conversation is only ~632831 tokens"}}
+        {:error,
+         {:claude_failed, 1,
+          "Prompt is too long — the request is ~1083694 tokens (limit 1000000) but this conversation is only ~632831 tokens"}}
       end
 
       # Subscribe to async events so we can wait for completion
