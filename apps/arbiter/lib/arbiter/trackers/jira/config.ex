@@ -40,8 +40,10 @@ defmodule Arbiter.Trackers.Jira.Config do
           "closed" => "Done"
         },
         # Optional transition graph used for multi-hop path-finding. Keys are
-        # the *source* status name; each edge names the transition to invoke
-        # and the status it lands on. The single-hop fast path (a live
+        # the *source* status name; each edge names the status the hop lands on
+        # (plus an optional `"transition"` tie-break hint). Hops are resolved
+        # against the live transitions by destination status, so the graph is
+        # portable across issue types. The single-hop fast path (a live
         # transition whose `to` already equals the target) needs no graph —
         # only multi-hop targets do. See `@default_transition_graph`.
         "transition_graph" => %{
@@ -96,22 +98,37 @@ defmodule Arbiter.Trackers.Jira.Config do
   }
 
   # Default multi-hop transition graph for LeoTech's VR (Verus) workflow,
-  # keyed by SOURCE status name. Each edge is the transition to invoke and the
-  # status it lands on. Only multi-hop targets need a graph entry — a target
+  # keyed by SOURCE status name. Each edge declares the status the hop lands on;
+  # `"transition"` is an optional hint, used only to break a tie when several
+  # live transitions land on that same status. The graph is therefore a *route*,
+  # and `Jira.execute_path/3` resolves each hop against the live `/transitions`
+  # response by destination status. This matters because Jira workflows — and
+  # so transition *names* — can differ per issue type on one project: the
+  # Backlog -> To Do move is "To do next" on a Story/Bug but "Ready to work (2)"
+  # on a Task, and a name-matched graph silently failed to move Tasks
+  # (bd-bwwkvr). Only multi-hop targets need a graph entry — a target
   # reachable by a single live transition is resolved directly from the
   # `/transitions` response (its `to` field), no graph required.
   #
-  # The verified edges (transition ids in parens) come from the VR workflow
-  # discovery in bd-c4cfuv:
-  #   Backlog --Pull request created--> n/a; Backlog --To do next--> To Do (141)
-  #   In Progress --Pull request created--> In Code Review (51)
-  #   In Code Review --Approved and merged--> Code Complete (61)
-  #   In Code Review --Approved and not merged--> Pending Merge (111)
+  # The names below come from the VR *Story/Bug* workflow discovery in bd-c4cfuv
+  # and are retained purely as tie-break hints — they are no longer required to
+  # match. Transition ids are deliberately NOT used: ids collide across issue
+  # types with opposite meanings on this project (id 131 is "Ready to work (2)"
+  # -> To Do on a Task but "Won't complete" -> Closed on a Story), so resolving
+  # by id would close tickets it meant to advance.
   #
-  # The "To Do -> In Progress" and "Code Complete -> Done" edges were not
-  # captured by the discovery pass; the names below are best-guess and should
-  # be confirmed against a live `/transitions` probe and overridden per
-  # workspace via `tracker.config.transition_graph` if they differ.
+  # Destination matching fixes hops whose *name* was wrong; it cannot conjure a
+  # route that doesn't exist. `Code Complete -> Done` is one such: no VR
+  # transition from Code Complete lands on Done at all — the only forward edge
+  # is "Release branch cut" -> Release Ready for QA, and reaching Done means
+  # traversing the whole deploy pipeline. The fabricated edge is therefore NOT
+  # listed below; the shipped `closed => "Done"` mapping fails from Code
+  # Complete with the honest `:no_transition_path` ("the graph has no route")
+  # rather than a `:transition_unavailable` that implies the route is merely
+  # stale. Mapping the real deploy-pipeline route is bd-c4cfuv.
+  #
+  # A workspace whose workflow routes through different *statuses* overrides
+  # this via `tracker.config.transition_graph`.
   @default_transition_graph %{
     "Backlog" => [%{"transition" => "To do next", "to" => "To Do"}],
     "What's Next" => [%{"transition" => "To do next", "to" => "To Do"}],
@@ -121,8 +138,7 @@ defmodule Arbiter.Trackers.Jira.Config do
     "In Code Review" => [
       %{"transition" => "Approved and merged", "to" => "Code Complete"},
       %{"transition" => "Approved and not merged", "to" => "Pending Merge"}
-    ],
-    "Code Complete" => [%{"transition" => "Done", "to" => "Done"}]
+    ]
   }
 
   # The QA / Deployment custom-field IDs default to LeoTech's verified VR
@@ -347,7 +363,8 @@ defmodule Arbiter.Trackers.Jira.Config do
   end
 
   # The transition graph drives multi-hop path-finding. Workspaces may supply
-  # their own (string-keyed status -> list of %{"transition","to"} edges); the
+  # their own (string-keyed status -> list of %{"to"} edges, each optionally
+  # carrying a `"transition"` name as a tie-break hint); the
   # VR default is used when none is configured. A workspace that sets an empty
   # map opts out of graph-based multi-hop (single-hop fast path still works).
   defp transition_graph(raw) do
@@ -363,7 +380,10 @@ defmodule Arbiter.Trackers.Jira.Config do
     end
   end
 
-  defp valid_edge?(%{"transition" => t, "to" => to}) when is_binary(t) and is_binary(to), do: true
+  # An edge is valid as long as it declares where it lands: hops are resolved by
+  # DESTINATION status, so `"transition"` is an optional tie-break hint used only
+  # when several live transitions land on the same status (bd-bwwkvr).
+  defp valid_edge?(%{"to" => to}) when is_binary(to) and to != "", do: true
   defp valid_edge?(_), do: false
 
   defp field_ids(raw) do

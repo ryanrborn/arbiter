@@ -49,12 +49,19 @@ defmodule Arbiter.Trackers.Jira do
       configured `transition_graph` (e.g. Backlog → To Do → In Progress),
       executing each hop and re-listing the available transitions between hops.
 
+  The graph describes a **route** — which statuses to pass through — and every
+  hop is resolved against the live transitions by its *destination status*, not
+  by the transition's name. Jira workflows (and therefore transition names) can
+  differ per issue type on the same project, so a name-matched graph is only
+  ever correct for one type; a route is type-agnostic by construction.
+
   A lifecycle event with no `status_map` entry yields `:status_unmapped` (a
   benign "this tracker doesn't model that" skip); a *mapped* target that can't
   be reached yields `:no_transition_path` (BFS found no path in the configured
-  graph) or `:transition_unavailable` (BFS planned a path, but a hop's named
-  transition isn't in the live workflow when executed — e.g. renamed
-  upstream), both of which the sync layer surfaces loudly. See
+  graph) or `:transition_unavailable` (BFS planned a path, but when the hop was
+  executed no live transition landed on its destination status — the route
+  passes through a status this issue can't reach from here), both of which the
+  sync layer surfaces loudly. See
   `Arbiter.Trackers.Jira.Config` and `Arbiter.Trackers.Sync`.
 
   ## Tests
@@ -348,8 +355,8 @@ defmodule Arbiter.Trackers.Jira do
 
   defp first_hop_transition(cfg, transitions, current, target_status) do
     case plan_transition_path(cfg.transition_graph, current, target_status) do
-      {:ok, [first_name | _]} ->
-        case Enum.find(transitions, fn t -> t["name"] == first_name end) do
+      {:ok, [first_hop | _]} ->
+        case hop_transition(transitions, first_hop) do
           %{} = t -> {:ok, t}
           _ -> :none
         end
@@ -827,16 +834,23 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   @doc """
-  BFS over a transition graph for the shortest sequence of transition names
-  that moves an issue from `from` status to `to` status.
+  BFS over a transition graph for the shortest *route* — the sequence of hop
+  edges — that moves an issue from `from` status to `to` status.
 
-  `graph` is `%{from_status => [%{"transition" => name, "to" => to_status}]}`.
-  Returns `{:ok, [transition_name, ...]}` (empty list when already there) or
-  `{:error, %Error{kind: :no_transition_path}}` when no path exists. Pure — the
-  graph is the only input, so multi-hop planning is testable without HTTP.
+  `graph` is `%{from_status => [%{"to" => to_status, "transition" => name}]}`,
+  where `"transition"` is optional. Returns `{:ok, [edge, ...]}` (empty list
+  when already there) or `{:error, %Error{kind: :no_transition_path}}` when no
+  path exists. Pure — the graph is the only input, so multi-hop planning is
+  testable without HTTP.
+
+  The plan names *statuses*, not transitions: `execute_path/3` resolves each hop
+  against the live `/transitions` response by destination status, so a graph
+  stays correct on projects whose transition names differ per issue type
+  (bd-bwwkvr). An edge's `"transition"`, when present, is only a tie-break hint
+  for when several live transitions land on the same destination.
   """
   @spec plan_transition_path(map(), String.t(), String.t()) ::
-          {:ok, [String.t()]} | {:error, Error.t()}
+          {:ok, [Config.transition_edge()]} | {:error, Error.t()}
   def plan_transition_path(_graph, from, to) when from == to, do: {:ok, []}
 
   def plan_transition_path(graph, from, to) when is_map(graph) do
@@ -857,16 +871,16 @@ defmodule Arbiter.Trackers.Jira do
     edges = Map.get(graph, node, [])
 
     case Enum.find(edges, fn e -> e["to"] == to end) do
-      %{"transition" => name} ->
-        {:ok, Enum.reverse([name | path])}
+      %{} = edge ->
+        {:ok, Enum.reverse([edge | path])}
 
       nil ->
         {queue, visited} =
-          Enum.reduce(edges, {rest, visited}, fn %{"transition" => t, "to" => next}, {q, v} ->
+          Enum.reduce(edges, {rest, visited}, fn %{"to" => next} = edge, {q, v} ->
             if MapSet.member?(v, next) do
               {q, v}
             else
-              {q ++ [{next, [t | path]}], MapSet.put(v, next)}
+              {q ++ [{next, [edge | path]}], MapSet.put(v, next)}
             end
           end)
 
@@ -874,15 +888,22 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
-  # Execute a planned path one hop at a time. Each hop re-lists the live
-  # transitions (the available set changes after every move), matches the
-  # planned transition by NAME, and POSTs it. A failed hop halts loudly.
+  # Execute a planned route one hop at a time. Each hop re-lists the live
+  # transitions (the available set changes after every move), matches the hop by
+  # its DESTINATION status — exactly as the single-hop fast path does — and
+  # POSTs it. A failed hop halts loudly.
+  #
+  # Matching by destination rather than by the graph's transition name is what
+  # makes a graph portable across issue types: on projects where the workflow
+  # differs per type, the same Backlog -> To Do move is called "To do next" on a
+  # Story and "Ready to work (2)" on a Task, so a name-matched graph silently
+  # failed to transition one of them (bd-bwwkvr).
   defp execute_path(_cfg, _ref, []), do: :ok
 
-  defp execute_path(cfg, ref, names) do
-    Enum.reduce_while(names, :ok, fn name, _acc ->
+  defp execute_path(cfg, ref, hops) do
+    Enum.reduce_while(hops, :ok, fn hop, _acc ->
       with {:ok, transitions} <- list_raw_transitions(cfg, ref),
-           {:ok, id} <- find_transition_id(transitions, name),
+           {:ok, id} <- hop_transition_id(transitions, hop),
            :ok <- post_transition(cfg, ref, id) do
         {:cont, :ok}
       else
@@ -891,8 +912,8 @@ defmodule Arbiter.Trackers.Jira do
     end)
   end
 
-  defp find_transition_id(transitions, name) do
-    case Enum.find(transitions, fn t -> t["name"] == name end) do
+  defp hop_transition_id(transitions, hop) do
+    case hop_transition(transitions, hop) do
       %{"id" => id} when is_binary(id) ->
         {:ok, id}
 
@@ -902,12 +923,24 @@ defmodule Arbiter.Trackers.Jira do
            kind: :transition_unavailable,
            status: nil,
            message:
-             "Jira transition #{inspect(name)} not available in current state; " <>
-               "available: #{inspect(Enum.map(transitions, & &1["name"]))}",
+             "no Jira transition to #{inspect(hop["to"])} available in current state; " <>
+               "available: #{inspect(Enum.map(transitions, &{&1["name"], transition_target(&1)}))}",
            raw: transitions
          }}
     end
   end
+
+  # The live transition for one planned hop: any transition landing on the hop's
+  # destination status, preferring the edge's configured name when several do.
+  defp hop_transition(transitions, %{"to" => target} = hop) do
+    candidates = Enum.filter(transitions, fn t -> transition_target(t) == target end)
+    named = hop["transition"]
+
+    Enum.find(candidates, fn t -> is_binary(named) and t["name"] == named end) ||
+      List.first(candidates)
+  end
+
+  defp hop_transition(_transitions, _hop), do: nil
 
   defp post_transition(cfg, ref, transition_id) do
     payload = %{"transition" => %{"id" => transition_id}}
