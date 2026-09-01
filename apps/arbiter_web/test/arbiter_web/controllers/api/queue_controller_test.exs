@@ -89,4 +89,67 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert msg =~ "awaiting_review"
     end
   end
+
+  describe "POST /api/queue/:task_id/rerun_ci (bd-5mzzww / #1448)" do
+    test "re-runs CI through the live watchdog and reports the granularity used", %{
+      conn: conn,
+      ws: ws
+    } do
+      {task, _pid} = parked_worker(ws, "!qc-rerun")
+      assert :ok = Watchdog.restart(task.id)
+
+      conn = post(conn, ~p"/api/queue/#{task.id}/rerun_ci", %{"mode" => "all_jobs"})
+
+      assert %{"rerun" => true, "task_id" => id, "mode" => "all_jobs"} = json_response(conn, 200)
+      assert id == task.id
+      assert [{"!qc-rerun", opts} | _] = StubMerger.ci_reruns()
+      assert opts.mode == :all_jobs
+    end
+
+    test "404s when no watchdog is running for the task", %{conn: conn} do
+      conn = post(conn, ~p"/api/queue/no-such-task-xyz/rerun_ci", %{})
+      assert json_response(conn, 404)
+    end
+
+    test "400s on an unknown mode before touching the forge", %{conn: conn, ws: ws} do
+      {task, _pid} = parked_worker(ws, "!qc-rerun2")
+      assert :ok = Watchdog.restart(task.id)
+
+      conn = post(conn, ~p"/api/queue/#{task.id}/rerun_ci", %{"mode" => "sideways"})
+
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert msg =~ "mode"
+      assert StubMerger.ci_reruns() == []
+    end
+  end
+
+  describe "POST /api/queue/:task_id/mark_ci_external (bd-5mzzww / #1448)" do
+    test "404s when no watchdog is running for the task", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/queue/no-such-task-xyz/mark_ci_external", %{"note" => "infra is down"})
+
+      assert json_response(conn, 404)
+    end
+
+    test "400s without a note — an unevidenced verdict is not actionable", %{conn: conn, ws: ws} do
+      {task, _pid} = parked_worker(ws, "!qc-ext1")
+      assert :ok = Watchdog.restart(task.id)
+
+      conn = post(conn, ~p"/api/queue/#{task.id}/mark_ci_external", %{})
+
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert msg =~ "note"
+    end
+
+    test "400s when the task is not parked on a CI-failed block", %{conn: conn, ws: ws} do
+      {task, _pid} = parked_worker(ws, "!qc-ext2")
+      assert :ok = Watchdog.restart(task.id)
+
+      conn =
+        post(conn, ~p"/api/queue/#{task.id}/mark_ci_external", %{"note" => "infra is down today"})
+
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert msg =~ "ci_failed"
+    end
+  end
 end

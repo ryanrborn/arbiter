@@ -52,6 +52,41 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcherTest do
       assert prompt =~ "arb message coordinator"
       assert prompt =~ "arb done"
     end
+
+    test "offers the CI-retry verb, with the granularity warning (bd-5mzzww / #1448)" do
+      context = %{
+        task: %Issue{id: "bd-fix2"},
+        branch: "feature/bd-fix2",
+        target_branch: "main",
+        checks: [%{name: "playwright-smoke", summary: "review app 502", url: nil}]
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      # The incident: the only re-run a human reaches for reuses the stale
+      # upstream deploy, so it is guaranteed to fail identically.
+      assert prompt =~ "ci_rerun"
+      assert prompt =~ "all_jobs"
+      assert prompt =~ "workflow"
+      assert prompt =~ "failed_jobs"
+      assert prompt =~ ~r/reuse[sd]?/i
+    end
+
+    test "gives an 'infra, not my diff' verdict somewhere to go (bd-5mzzww / #1448)" do
+      context = %{
+        task: %Issue{id: "bd-fix3"},
+        branch: "feature/bd-fix3",
+        target_branch: "main",
+        checks: []
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      # A follow-up worker reached exactly this conclusion hours before the
+      # human did, and had nowhere to put it but free-text chat.
+      assert prompt =~ "ci_mark_external"
+      assert prompt =~ "evidence"
+    end
   end
 
   describe "registry_suffix/0" do

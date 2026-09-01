@@ -500,7 +500,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
     # rather than hidden: hiding it would make the button flicker out at
     # exactly the moment an operator is likely to reach for it, and clicking
     # through to a busy Watchdog surfaces a clear "try again" flash instead.
-    Watchdog.parked_on(task_id) in [:ci_failed, :busy]
+    # `:ci_failed_external` (bd-5mzzww) is a reclassification of the same park,
+    # not a different one: once the infrastructure is fixed, re-arming is the
+    # right move, so hiding the button here would strand the task.
+    Watchdog.parked_on(task_id) in [:ci_failed, :ci_failed_external, :busy]
   end
 
   defp retry_auto_resolve_available?(_task_id, _snapshot), do: false

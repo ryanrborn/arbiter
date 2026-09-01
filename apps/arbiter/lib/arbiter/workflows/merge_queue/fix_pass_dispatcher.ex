@@ -324,6 +324,12 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   cause, commit, push to the SAME branch, exit. It does NOT instruct the worker
   to re-implement the change set or open a new PR. It is told to escalate via the
   mailbox when the failure isn't something it can fix, rather than thrashing.
+
+  Two non-code outs are spelled out (bd-5mzzww): `ci_rerun` for a failure that a
+  rebuild would clear — with the granularity trap named explicitly, because
+  re-running only the failed jobs reuses the stale upstream artifact that caused
+  the failure — and `ci_mark_external` for an "infra, not my diff" verdict, which
+  previously had nowhere to go but free-text chat nobody read.
   """
   @spec prompt_for(map()) :: String.t()
   def prompt_for(%{task: %Issue{id: task_id}, branch: branch, target_branch: target} = context) do
@@ -352,8 +358,36 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
       * touch files unrelated to the failure,
       * disable or skip the check to make it "pass".
 
-    If the failure is NOT something you can fix — an infrastructure/flake
-    failure, or a failure you cannot reproduce or understand — STOP and escalate
+    If the check failed for a reason that is NOT in your diff — a stale build
+    artifact, a review app an EARLIER job in the same run deployed, a flaky
+    external service — you do not have to change code to clear it. Re-run CI
+    with the `ci_rerun` MCP tool, and pick the granularity deliberately:
+
+      * `failed_jobs` re-runs ONLY the failed jobs and REUSES every job that
+         already succeeded. If the failing check tests something an earlier job
+         in the same run produced (a deployed review app, a built image), this
+         re-tests the identical stale input and will fail identically. Never use
+         it twice in a row — a repeat of an identical re-run tells you nothing.
+      * `all_jobs` re-runs the whole run, REBUILDING the upstream jobs. This is
+         the right choice for a stale-artifact failure.
+      * `workflow` fires a fresh workflow_dispatch and is the only mode that can
+         carry inputs (e.g. `{"force_deploy": "true"}`).
+
+    The default mode, `auto`, picks between them for you; override it only when
+    you know something it doesn't.
+
+    If you conclude the failure is broken infrastructure repo-wide rather than
+    anything about this branch — you have evidence, such as the same check
+    failing on unrelated branches today, and nothing in this diff touching the
+    failing path — record that verdict with the `ci_mark_external` MCP tool
+    (`note:` your evidence, in a sentence or two). That reclassifies the park so
+    the coordinator escalation reads "CI is broken repo-wide, not on this
+    branch" instead of looking like ordinary broken code, and puts your note in
+    front of whoever decides to force-merge. Do this INSTEAD of vanishing with
+    the diagnosis in your head.
+
+    If the failure is NOT something you can fix and NOT something the above
+    covers — a failure you cannot reproduce or understand — STOP and escalate
     by running:
 
         arb message coordinator "CI fix-pass on #{task_id} needs human review: <one-line explanation>"
