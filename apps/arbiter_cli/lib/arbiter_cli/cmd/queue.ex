@@ -15,6 +15,13 @@ defmodule ArbiterCli.Cmd.Queue do
                                                    died, attached to the MR its
                                                    worker already has open
                                                    (bd-8jixav)
+      arb queue rerun-ci <task-id> [--mode M]  — re-run a parked task's CI,
+                                                   choosing the granularity
+                                                   (bd-5mzzww)
+      arb queue mark-ci-external <task-id> <note>
+                                               — record an "infra, not this
+                                                   diff" verdict on a
+                                                   :ci_failed park (bd-5mzzww)
 
   When a graph member's worker fails, the Conductor pauses all tasks downstream
   of the failure and posts an escalation to the coordinator inbox. `resume` clears
@@ -36,6 +43,29 @@ defmodule ArbiterCli.Cmd.Queue do
   full re-dispatch through the review gate. It refuses when a Watchdog is
   already running: two on one MR would race the merge and double-dispatch fix
   passes. `restart_watchdog` (underscored) is accepted as an alias.
+
+  `rerun-ci` is the operator's CI-retry verb, and it exists because the forge's
+  own affordance is a trap. "Re-run failed jobs" — the button a human reaches
+  for first — REUSES every job in the run that already succeeded. When the
+  failing check tests an artifact an earlier job in that run produced (a
+  per-branch review app, a built image), re-running only the failed job
+  re-tests the identical stale artifact and fails identically, every time. So
+  this verb makes the granularity explicit:
+
+      --mode auto         (default) escalate past failed_jobs automatically
+                          whenever completed upstream jobs would be reused, or
+                          the run is already on attempt 2+
+      --mode failed_jobs  re-run only the failed jobs (reuses upstream output)
+      --mode all_jobs     re-run the whole run, REBUILDING upstream jobs
+      --mode workflow     fresh workflow_dispatch; the only mode that can
+                          carry --input k=v pairs (e.g. force_deploy=true)
+
+  `mark-ci-external` is where an "infrastructure is broken repo-wide, this is
+  not my diff" verdict goes. It reclassifies a `:ci_failed` park as
+  `:ci_failed_external` and carries the note into the coordinator escalation,
+  so the page reads as broken CI rather than as broken code. The note is
+  mandatory: an unevidenced "it's not me" is not something an operator can act
+  on.
   """
 
   alias ArbiterCli.{Client, Output}
@@ -65,6 +95,19 @@ defmodule ArbiterCli.Cmd.Queue do
 
         [cmd | _] when cmd in ["restart-watchdog", "restart_watchdog"] ->
           Output.die("queue restart-watchdog requires: <task-id>")
+
+        [cmd, task_id | rest_args] when cmd in ["rerun-ci", "rerun_ci"] ->
+          rerun_ci(task_id, rest_args, mode)
+
+        [cmd | _] when cmd in ["rerun-ci", "rerun_ci"] ->
+          Output.die("queue rerun-ci requires: <task-id>")
+
+        [cmd, task_id | note_parts]
+        when cmd in ["mark-ci-external", "mark_ci_external"] and note_parts != [] ->
+          mark_ci_external(task_id, Enum.join(note_parts, " "), mode)
+
+        [cmd | _] when cmd in ["mark-ci-external", "mark_ci_external"] ->
+          Output.die("queue mark-ci-external requires: <task-id> <note>")
 
         _ ->
           IO.puts(:stderr, "arb: unknown queue subcommand")
@@ -171,6 +214,119 @@ defmodule ArbiterCli.Cmd.Queue do
 
       {:error, %Client.Error{kind: :http, status: 503}} ->
         Output.die("task #{task_id}'s worker did not answer in time — try again in a moment.")
+
+      {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
+        msg = get_in(body, ["error", "message"]) || inspect(body)
+        Output.die(msg)
+
+      {:error, %Client.Error{message: msg}} ->
+        Output.die(msg)
+    end
+  end
+
+  @rerun_modes ~w(auto failed_jobs all_jobs workflow)
+
+  defp rerun_ci(task_id, args, mode) do
+    {opts, bad} = parse_rerun_args(args, %{}, [])
+    bad != [] && Output.die("queue rerun-ci: unrecognised argument(s): #{Enum.join(bad, " ")}")
+
+    case Client.post("/api/queue/#{task_id}/rerun_ci", opts) do
+      {:ok, body} ->
+        if mode == :json do
+          IO.puts(Jason.encode!(body))
+        else
+          IO.puts(rerun_summary(task_id, body))
+        end
+
+      {:error, %Client.Error{kind: :http, status: 404}} ->
+        Output.die(
+          "no merge watchdog is currently running for task #{task_id}, so there is nothing " <>
+            "holding its PR to re-run CI for.\n" <>
+            "If the PR is still open, its watchdog died — start a replacement with:\n" <>
+            "  arb queue restart-watchdog #{task_id}"
+        )
+
+      {:error, %Client.Error{kind: :http, status: 503}} ->
+        Output.die("task #{task_id}'s watchdog is busy polling — try again in a moment.")
+
+      {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
+        msg = get_in(body, ["error", "message"]) || inspect(body)
+        Output.die(msg)
+
+      {:error, %Client.Error{message: msg}} ->
+        Output.die(msg)
+    end
+  end
+
+  defp rerun_summary(task_id, body) when is_map(body) do
+    used = body["mode"] || "auto"
+    run = body["run_id"]
+    workflow = body["workflow"]
+    rationale = body["rationale"]
+
+    header =
+      "Re-ran CI for #{task_id}: mode=#{used}" <>
+        if(workflow, do: " workflow=#{workflow}", else: "") <>
+        if(run, do: " run=#{run}", else: "")
+
+    # Print the rationale: an operator who never sees WHY auto escalated past
+    # failed_jobs will reach for the failed-jobs button again next time.
+    [header, rationale && "  why: #{rationale}", body["url"] && "  #{body["url"]}"]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp rerun_summary(task_id, _body), do: "Re-ran CI for #{task_id}."
+
+  defp parse_rerun_args([], opts, bad), do: {opts, Enum.reverse(bad)}
+
+  defp parse_rerun_args(["--mode", value | rest], opts, bad) do
+    if value in @rerun_modes do
+      parse_rerun_args(rest, Map.put(opts, "mode", value), bad)
+    else
+      Output.die(
+        "queue rerun-ci: unknown --mode #{inspect(value)} — expected one of: " <>
+          Enum.join(@rerun_modes, ", ")
+      )
+    end
+  end
+
+  defp parse_rerun_args(["--workflow", value | rest], opts, bad),
+    do: parse_rerun_args(rest, Map.put(opts, "workflow", value), bad)
+
+  defp parse_rerun_args(["--input", kv | rest], opts, bad) do
+    case String.split(kv, "=", parts: 2) do
+      [k, v] ->
+        inputs = Map.put(Map.get(opts, "inputs", %{}), k, v)
+        parse_rerun_args(rest, Map.put(opts, "inputs", inputs), bad)
+
+      _ ->
+        Output.die("queue rerun-ci: --input expects key=value, got: #{inspect(kv)}")
+    end
+  end
+
+  defp parse_rerun_args([arg | rest], opts, bad), do: parse_rerun_args(rest, opts, [arg | bad])
+
+  defp mark_ci_external(task_id, note, mode) do
+    case Client.post("/api/queue/#{task_id}/mark_ci_external", %{"note" => note}) do
+      {:ok, body} ->
+        if mode == :json do
+          IO.puts(Jason.encode!(body))
+        else
+          IO.puts(
+            "Marked: #{task_id} reclassified as ci_failed_external. The coordinator " <>
+              "escalation now reads as broken CI, not broken code, and carries your note."
+          )
+        end
+
+      {:error, %Client.Error{kind: :http, status: 404}} ->
+        Output.die(
+          "no merge watchdog is currently running for task #{task_id} — there is no park " <>
+            "to reclassify."
+        )
+
+      {:error, %Client.Error{kind: :http, status: 503}} ->
+        Output.die("task #{task_id}'s watchdog is busy polling — try again in a moment.")
 
       {:error, %Client.Error{kind: :http, body: body}} when is_map(body) ->
         msg = get_in(body, ["error", "message"]) || inspect(body)

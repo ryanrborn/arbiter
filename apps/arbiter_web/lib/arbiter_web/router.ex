@@ -163,6 +163,8 @@ defmodule ArbiterWeb.Router do
     post("/queue/:task_id/resume", QueueController, :resume)
     post("/queue/:task_id/retry_auto_resolve", QueueController, :retry_auto_resolve)
     post("/queue/:task_id/restart_watchdog", QueueController, :restart_watchdog)
+    post("/queue/:task_id/rerun_ci", QueueController, :rerun_ci)
+    post("/queue/:task_id/mark_ci_external", QueueController, :mark_ci_external)
 
     # Board scheduler (autopilot) operations
     post("/scheduler/pause", SchedulerController, :pause)
