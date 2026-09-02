@@ -378,6 +378,10 @@ defmodule Arbiter.Workflows.PRPatrol do
   # does persist, a still-failing PR re-escalates at most every
   # `re_escalate_after_ms`, so a condition that outlives the original message
   # (missed notification, new failure mode) doesn't stay silent indefinitely.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp record_dispatch_failure(task, pr_number, state, reason) do
     prior = Map.get(state.dispatch_failures, pr_number)
     count = if prior, do: prior.count + 1, else: 1

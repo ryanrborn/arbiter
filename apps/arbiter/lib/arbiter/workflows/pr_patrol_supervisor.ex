@@ -358,6 +358,10 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   #     source the worker dispatch path resolves worktrees from. Used by
   #     workspaces like leotech, whose repos are distinct leo-technologies-llc/*
   #     repos.
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp patrol_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
 

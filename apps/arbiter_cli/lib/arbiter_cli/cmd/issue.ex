@@ -25,6 +25,10 @@ defmodule ArbiterCli.Cmd.Issue do
   alias ArbiterCli.Output
   alias ArbiterCli.Workspace
 
+  # Pre-existing complexity 18 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     # A `--workspace <name>` flag anywhere in an `arb issue *` invocation
     # overrides the active workspace, exactly as `ARB_WORKSPACE` does. We

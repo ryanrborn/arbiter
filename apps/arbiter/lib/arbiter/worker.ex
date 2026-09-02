@@ -1173,6 +1173,10 @@ defmodule Arbiter.Worker do
   # implementer (meta.role == :implementer) a `:impl` row; everything else
   # writes `:work`. Missing fields are fine — we record what we have rather
   # than dropping the row.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp record_usage_event(%State{} = state, %{} = session, exit_status) do
     usage =
       session
@@ -1903,6 +1907,10 @@ defmodule Arbiter.Worker do
   # without having to know about the internal :claude_sessions map.
   # When there are multiple concurrent sessions this surfaces the most recent
   # one; for now there's only ever one.
+  # Pre-existing complexity 17 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp sync_session_meta(%State{claude_sessions: sessions, meta: meta} = state, port) do
     case Map.get(sessions, port) do
       %{} = session ->
@@ -2797,6 +2805,10 @@ defmodule Arbiter.Worker do
   # ad-hoc runs without a provisioned worktree (no `:worktree_path` in meta)
   # fall through to the legacy path. git failures fail open: a transient git
   # hiccup must not strand a real completion.
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp commit_gate(%State{meta: meta}) do
     worktree = meta && Map.get(meta, :worktree_path)
     target = (meta && Map.get(meta, :target_branch)) || "main"
@@ -3521,6 +3533,10 @@ defmodule Arbiter.Worker do
   # row — no matter which CLI the run was really driving. The sessions the
   # worker already owns know their own provider (threaded in at spawn), so fall
   # back to the most recent one before falling back to Claude.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp respawn_routing(%State{meta: meta} = state) do
     routing_config = (meta && Map.get(meta, :routing_config)) || %{}
     model = Map.get(routing_config, :model)
@@ -3693,6 +3709,10 @@ defmodule Arbiter.Worker do
     do:
       {:secret_in_commit, "Worker committed an Arbiter-injected agent-config (bearer-token) file"}
 
+  # Pre-existing complexity 16 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
     branch = (meta && Map.get(meta, :branch)) || "(unknown)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
@@ -4239,6 +4259,10 @@ defmodule Arbiter.Worker do
   #
   # The task's difficulty drives the default; the workspace cap can only tighten
   # it (min), never loosen it beyond the difficulty-appropriate ceiling.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_review_rounds(%State{meta: meta} = state) do
     case meta && Map.get(meta, :review_rounds) do
       n when is_integer(n) and n > 0 ->
@@ -4578,6 +4602,10 @@ defmodule Arbiter.Worker do
   # `ReviewGate.findings_from/2`) for :request_changes/:no_verdict-with-text,
   # or a plain synthesized string (e.g. "no parseable VERDICT line") when the
   # reviewer produced nothing usable.
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp review_gate_failure_summary(verdict, findings) when is_binary(findings) do
     {verdict_line, body} =
       case String.split(findings, "\n", parts: 2) do
@@ -4896,6 +4924,10 @@ defmodule Arbiter.Worker do
               :none ->
                 retry_opts = open_retry_opts(state)
 
+                # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+                # wired Credo up. Thresholds stay at the tool's own default so new
+                # code is held to it; see the note in .credo.exs.
+                # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                 case safe_open(adapter, branch, title, description, open_opts, retry_opts) do
                   {:ok, mr_ref} ->
                     finalize_opened_mr(state, adapter, workspace, opts, mr_ref)

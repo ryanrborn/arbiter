@@ -136,6 +136,16 @@
           #
           {Credo.Check.Refactor.Apply, []},
           {Credo.Check.Refactor.CondStatements, []},
+          # Left at Credo's default ceiling of 9 on purpose. bd-4x2yhq wired
+          # Credo up against a codebase that already had 79 functions above
+          # it (the worst at 18). Raising the ceiling to clear them would
+          # have taken a number that no longer means anything — a new
+          # 17-branch function would sail through. Instead each of the 79 is
+          # suppressed at its own `def` with
+          # `# credo:disable-for-next-line`, recording the complexity it was
+          # baselined at. New code is held to 9; the debt is greppable
+          # (`rg 'Pre-existing complexity'`) and each site can be paid down
+          # in isolation by deleting its comment.
           {Credo.Check.Refactor.CyclomaticComplexity, []},
           {Credo.Check.Refactor.FilterCount, []},
           {Credo.Check.Refactor.FilterFilter, []},
@@ -145,6 +155,14 @@
           {Credo.Check.Refactor.MatchInCondition, []},
           {Credo.Check.Refactor.NegatedConditionsInUnless, []},
           {Credo.Check.Refactor.NegatedConditionsWithElse, []},
+          # `max_nesting: 3`, not the default 2. This one is a house-style
+          # decision rather than a baseline: at 2, a `case` inside an `if`
+          # inside a `with` — ordinary, readable Elixir, and 141 occurrences
+          # here — is a finding. 3 is a real ceiling that still catches the
+          # genuinely tangled. The 17 functions that were deeper are
+          # suppressed per-site alongside the complexity ones; the two at
+          # depth 4 that were a single extracted clause head away
+          # (Workflows.Machine, ReviewIndexLive) were fixed instead.
           {Credo.Check.Refactor.Nesting, [max_nesting: 3]},
           {Credo.Check.Refactor.RedundantWithClauseResult, []},
           {Credo.Check.Refactor.RejectReject, []},

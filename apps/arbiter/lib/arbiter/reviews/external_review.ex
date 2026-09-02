@@ -865,6 +865,10 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp maybe_notify_coordinator(_prepared, _result, _record), do: :ok
 
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp render_report_body(prepared, result, record) do
     rec_id = record && record.id
     proposed = Map.get(result, :proposed_comments) || []
@@ -1571,6 +1575,10 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp findings_summary([]), do: nil
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp findings_summary(findings) when is_list(findings) do
     lines =
       findings

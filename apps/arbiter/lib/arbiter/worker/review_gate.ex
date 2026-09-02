@@ -758,6 +758,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # implementer.
   defp attempt_finish(%{reported?: true} = state, _status), do: {:done, state}
 
+  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp attempt_finish(state, status) do
     case parse_verdict(Enum.reverse(state.lines)) do
       :no_verdict ->

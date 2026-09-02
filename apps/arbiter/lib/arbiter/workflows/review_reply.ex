@@ -121,6 +121,10 @@ defmodule Arbiter.Workflows.ReviewReply do
 
   # ---- :post_reply ----------------------------------------------------------
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run_step(
         :post_reply,
         %{adapter: adapter, mr_ref: mr_ref, comment_id: comment_id, reply_body: body} = state
@@ -154,6 +158,10 @@ defmodule Arbiter.Workflows.ReviewReply do
 
   # ---- helpers --------------------------------------------------------------
 
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp build_thread_context(thread) do
     parts = []
 

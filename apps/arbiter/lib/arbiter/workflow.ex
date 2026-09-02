@@ -116,6 +116,10 @@ defmodule Arbiter.Workflow do
     end
   end
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defmacro __before_compile__(env) do
     module = env.module
     steps = Module.get_attribute(module, :__workflow_steps)

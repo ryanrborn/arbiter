@@ -62,6 +62,10 @@ defmodule ArbiterCli.Cmd.Server do
   @migrate_switches [json: :boolean, timeout: :integer, force: :boolean]
   @default_migrate_timeout_s 60
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     case argv do
       ["start" | rest] -> Cmd.Start.run(rest)
@@ -125,6 +129,10 @@ defmodule ArbiterCli.Cmd.Server do
   #
   # When the server is down there is no competing connection, so we run
   # migrations standalone (the original behaviour).
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp migrate(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)

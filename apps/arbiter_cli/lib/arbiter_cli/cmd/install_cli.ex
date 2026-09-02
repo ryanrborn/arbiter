@@ -64,6 +64,10 @@ defmodule ArbiterCli.Cmd.InstallCli do
     end
   end
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp build_escript(cli_dir) do
     Start.log_text("Building CLI escript (mix escript.build)…")
 
@@ -83,6 +87,10 @@ defmodule ArbiterCli.Cmd.InstallCli do
             case File.copy(escript_path, install_path) do
               {:ok, _} ->
                 # Make it executable
+                # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+                # wired Credo up. Thresholds stay at the tool's own default so new
+                # code is held to it; see the note in .credo.exs.
+                # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                 case File.chmod(install_path, 0o755) do
                   :ok ->
                     Start.log_text("Installed CLI escript to #{install_path}")

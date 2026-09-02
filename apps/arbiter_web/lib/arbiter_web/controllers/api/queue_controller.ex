@@ -122,6 +122,10 @@ defmodule ArbiterWeb.Api.QueueController do
       parked without an MR ref / adapter to watch.
     * 503 — the worker didn't answer in time.
   """
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def restart_watchdog(conn, %{"task_id" => task_id})
       when is_binary(task_id) and task_id != "" do
     case Watchdog.restart(task_id) do

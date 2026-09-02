@@ -147,6 +147,10 @@ defmodule Arbiter.Tasks.Claim do
 
         :none ->
           with :ok <- maybe_check_prior_claim(adapter, ref, force?) do
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             case create_task(workspace, type, ref, issue_map, adapter) do
               {:ok, :created, task} = result ->
                 maybe_signal_claim(adapter, ref, task, workspace, current_user_id)

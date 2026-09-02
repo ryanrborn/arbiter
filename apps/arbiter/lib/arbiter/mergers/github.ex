@@ -202,6 +202,10 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp create_pr(cfg, owner, repo, ref_form, branch, title, description, opts) do
     target = Map.get(opts, :target_branch) || cfg.default_target_branch
 
@@ -1075,6 +1079,10 @@ defmodule Arbiter.Mergers.Github do
        when status in [:merged, :closed],
        do: nil
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp block_reason(cfg, pr, _status, pipeline, _approved, changes_requested) do
     state = merge_state(pr)
     draft? = Map.get(pr, "draft") == true or state == "draft"

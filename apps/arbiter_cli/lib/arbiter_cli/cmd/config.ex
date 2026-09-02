@@ -66,6 +66,10 @@ defmodule ArbiterCli.Cmd.Config do
 
   @switches [workspace: :string, force: :boolean, json: :boolean]
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)

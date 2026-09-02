@@ -75,6 +75,10 @@ defmodule Arbiter.Mergers.Gitlab do
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def open(branch, title, description, opts)
       when is_binary(branch) and is_binary(title) and is_binary(description) and is_map(opts) do
     with {:ok, cfg} <- Config.resolve(),
@@ -310,6 +314,10 @@ defmodule Arbiter.Mergers.Gitlab do
               post_summary_note(cfg, iid, body, "Approved")
 
             {:error, %Error{} = err} ->
+              # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+              # wired Credo up. Thresholds stay at the tool's own default so new
+              # code is held to it; see the note in .credo.exs.
+              # credo:disable-for-next-line Credo.Check.Refactor.Nesting
               if self_approve_error?(err) do
                 Logger.warning(
                   "GitLab self-review: approve rejected (#{err.message}); " <>
@@ -673,6 +681,10 @@ defmodule Arbiter.Mergers.Gitlab do
   # would fire while the MR is merely being prepared, not genuinely blocked.
   defp block_reason(_cfg, _body, status, _pipeline) when status in [:merged, :closed], do: nil
 
+  # Pre-existing complexity 17 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp block_reason(cfg, body, _status, pipeline) do
     draft? = Map.get(body, "draft") == true or Map.get(body, "work_in_progress") == true
     detailed = Map.get(body, "detailed_merge_status")

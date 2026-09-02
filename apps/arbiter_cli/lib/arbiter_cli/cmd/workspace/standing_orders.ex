@@ -10,6 +10,10 @@ defmodule ArbiterCli.Cmd.Workspace.StandingOrders do
   alias ArbiterCli.Cmd.Workspace.Resolver
 
   @spec run([String.t()], keyword()) :: :ok | no_return()
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv, opts) do
     {parsed, rest, mode} = ArgParser.parse(argv, switches: Keyword.fetch!(opts, :switches))
     workspace_opt = parsed[:workspace]

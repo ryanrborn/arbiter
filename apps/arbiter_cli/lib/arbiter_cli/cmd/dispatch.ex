@@ -51,6 +51,10 @@ defmodule ArbiterCli.Cmd.Dispatch do
   # test-time dep here, so the escript can't call it at runtime). Keep in sync.
   @providers ~w(claude gemini codex)
 
+  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)

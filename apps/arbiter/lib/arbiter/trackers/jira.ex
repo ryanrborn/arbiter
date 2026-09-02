@@ -180,6 +180,10 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   @impl true
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def parse_ref(s) when is_binary(s) do
     cond do
       String.starts_with?(s, "jira:") ->
@@ -418,6 +422,10 @@ defmodule Arbiter.Trackers.Jira do
       case request(cfg, :get, "/issue/#{ref}/comment", params: [maxResults: 100]) do
         {:ok, %Req.Response{status: status_code, body: %{"comments" => comments}}}
         when status_code in 200..299 and is_list(comments) ->
+          # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+          # wired Credo up. Thresholds stay at the tool's own default so new
+          # code is held to it; see the note in .credo.exs.
+          # credo:disable-for-next-line Credo.Check.Refactor.Nesting
           case Enum.find(comments, fn c ->
                  String.contains?(comment_text(c), @ownership_marker)
                end) do

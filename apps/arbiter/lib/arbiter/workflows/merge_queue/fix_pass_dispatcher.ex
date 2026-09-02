@@ -131,6 +131,10 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     e -> {:error, {:task_load_failed, Exception.message(e)}}
   end
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_context(%Issue{} = task, args) do
     workspace = maybe_load_workspace(task.workspace_id)
 

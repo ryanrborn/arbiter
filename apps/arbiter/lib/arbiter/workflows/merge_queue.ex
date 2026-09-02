@@ -946,6 +946,10 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   # Merge-ready rungs PARK at :ready_to_merge; the actual merge is admitted
   # one-at-a-time by admit_one_merge/2 (Phase 3) so the queue serializes.
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp advance_ready_ladder(state, item, mr_state) do
     cond do
       item.status == :awaiting_approval and mr_state.approved and mr_state.ci_clean ->

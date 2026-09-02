@@ -729,6 +729,10 @@ defmodule Arbiter.Worker.Worktree do
   """
   @spec sync_from_origin(path(), String.t()) ::
           {:ok, :up_to_date | :synced} | {:error, error_reason()}
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def sync_from_origin(path, branch)
       when is_binary(path) and is_binary(branch) do
     with :ok <- ensure_origin_remote(path),
@@ -748,6 +752,10 @@ defmodule Arbiter.Worker.Worktree do
 
                 {:ok, _remote_sha} ->
                   # Local is behind remote — fast-forward.
+                  # Pre-existing nesting 5 — baselined when bd-4x2yhq first
+                  # wired Credo up. Thresholds stay at the tool's own default so new
+                  # code is held to it; see the note in .credo.exs.
+                  # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                   case run_git(["merge", "--ff-only", ref], cd: path) do
                     {:ok, _} -> {:ok, :synced}
                     {:error, _} = err -> err
@@ -808,6 +816,10 @@ defmodule Arbiter.Worker.Worktree do
           {:ok, :up_to_date | :synced | :rebased | :ahead}
           | {:error,
              {:diverged_conflict, %{files: [String.t()], output: String.t()}} | error_reason()}
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def rebase_onto_origin(path, branch)
       when is_binary(path) and is_binary(branch) do
     with :ok <- ensure_origin_remote(path),
@@ -824,6 +836,10 @@ defmodule Arbiter.Worker.Worktree do
               {:ok, :up_to_date}
 
             {{:ok, _local_sha}, {:ok, _remote_sha}} ->
+              # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+              # wired Credo up. Thresholds stay at the tool's own default so new
+              # code is held to it; see the note in .credo.exs.
+              # credo:disable-for-next-line Credo.Check.Refactor.Nesting
               case run_git(["merge", "--ff-only", ref], cd: path) do
                 {:ok, _} -> {:ok, :synced}
                 {:error, _} = err -> err
@@ -1058,6 +1074,10 @@ defmodule Arbiter.Worker.Worktree do
           source_dep = Path.join(source_lib, dep)
           dest_dep = Path.join(dest_lib, dep)
 
+          # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+          # wired Credo up. Thresholds stay at the tool's own default so new
+          # code is held to it; see the note in .credo.exs.
+          # credo:disable-for-next-line Credo.Check.Refactor.Nesting
           unless File.exists?(dest_dep) do
             System.cmd("cp", ["-a", "--reflink=auto", source_dep, dest_dep],
               stderr_to_stdout: true

@@ -308,6 +308,10 @@ defmodule Arbiter.Agents.Gemini.Stream do
 
   defp summarize_params(_params), do: ""
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp result_summary(event) do
     status = event["status"] || "done"
     stats = event["stats"] || %{}

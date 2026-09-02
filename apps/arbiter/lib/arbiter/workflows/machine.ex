@@ -318,6 +318,10 @@ defmodule Arbiter.Workflows.Machine do
     end
   end
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_advance(from, %Data{workflow_module: mod, current_step: step} = data) do
     definition = mod.step_definition(step)
     missing = Enum.reject(definition.needs, &(&1 in data.completed_steps))
@@ -339,19 +343,8 @@ defmodule Arbiter.Workflows.Machine do
 
           case persist(new_data, advance_status(next_step), nil) do
             :ok ->
-              reply =
-                case next_step do
-                  @done -> {:ok, :completed}
-                  s -> {:ok, s}
-                end
-
-              next_fsm_state =
-                case next_step do
-                  @done -> :completed
-                  _ -> :running
-                end
-
-              {:next_state, next_fsm_state, new_data, [{:reply, from, reply}]}
+              {:next_state, fsm_state_for(next_step), new_data,
+               [{:reply, from, {:ok, advance_reply(next_step)}}]}
 
             {:error, err} ->
               {:keep_state, data, [{:reply, from, {:error, err}}]}
@@ -391,6 +384,16 @@ defmodule Arbiter.Workflows.Machine do
         {:keep_state, data, [{:reply, from, {:error, reason}}]}
     end
   end
+
+  # The step the caller is told it advanced to, and the FSM state that step
+  # implies. Extracted from `do_advance/3` rather than inlined as two `case`s:
+  # at that point in the function body they sat four blocks deep, and the
+  # named clauses say what the mapping is without the reader tracing nesting.
+  defp advance_reply(@done), do: :completed
+  defp advance_reply(step), do: step
+
+  defp fsm_state_for(@done), do: :completed
+  defp fsm_state_for(_step), do: :running
 
   defp advance_status(@done), do: :completed
   defp advance_status(_), do: :running

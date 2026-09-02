@@ -137,6 +137,10 @@ defmodule ArbiterCli.Cmd.Update do
 
   # ---- deploy mode -------------------------------------------------------
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_deploy(argv) do
     {opts, _rest, mode} =
       ArgParser.parse_strict!(argv, "arb update",
@@ -231,6 +235,10 @@ defmodule ArbiterCli.Cmd.Update do
 
   # ---- issue-edit mode ---------------------------------------------------
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_edit_issue(argv) do
     {opts, rest, mode} = ArgParser.parse(argv, switches: @edit_switches)
 

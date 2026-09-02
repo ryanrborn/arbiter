@@ -1097,6 +1097,10 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # First hit wins. This lets workspaces override the global default
   # without changing application config.
+  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
@@ -1128,6 +1132,10 @@ defmodule Arbiter.Worker.Dispatch do
               {:error, {:git_failed, msg}} when is_binary(msg) ->
                 cond do
                   String.contains?(msg, "already exists") ->
+                    # Pre-existing nesting 5 — baselined when bd-4x2yhq first
+                    # wired Credo up. Thresholds stay at the tool's own default so new
+                    # code is held to it; see the note in .credo.exs.
+                    # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                     case Worktree.attach(repo_path, branch) do
                       {:ok, path} -> {:ok, path}
                       {:error, reason} -> {:error, {:worktree_failed, reason}}
@@ -1210,6 +1218,10 @@ defmodule Arbiter.Worker.Dispatch do
       |> Enum.find_value(fn path ->
         case RepoResolver.from_remote(path) do
           {:ok, {owner, name}} ->
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             if RepoConfig.normalize_slug("#{owner}/#{name}") == target, do: path
 
           _ ->

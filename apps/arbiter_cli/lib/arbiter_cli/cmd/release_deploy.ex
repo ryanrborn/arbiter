@@ -82,6 +82,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     ArgParser.unless_help(argv, @moduledoc, fn -> do_deploy(argv) end)
   end
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_deploy(argv) do
     {opts, _rest, mode} = ArgParser.parse_strict!(argv, "arb server deploy", strict: @switches)
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000

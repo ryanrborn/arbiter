@@ -221,6 +221,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   def resolve(_other, override, _repo), do: merge(default(), override)
 
+  # Pre-existing complexity 17 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_from_config(config, override, repo) do
     config = config || %{}
     workspace_policy = get_in(config, ["agent", "security"]) || %{}

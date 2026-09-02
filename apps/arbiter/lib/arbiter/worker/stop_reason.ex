@@ -281,6 +281,10 @@ defmodule Arbiter.Worker.StopReason do
   Returns a `%StopReason{}`.
   """
   @spec classify(integer() | nil, [String.t()]) :: t()
+  # Pre-existing complexity 18 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def classify(exit_status, output_lines) when is_list(output_lines) do
     haystack = signature_haystack(output_lines)
     signal = signal_for(exit_status)
@@ -505,6 +509,10 @@ defmodule Arbiter.Worker.StopReason do
   `"credentials expired (exit 1)"`.
   """
   @spec label(t()) :: String.t()
+  # Pre-existing complexity 18 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def label(%__MODULE__{category: category} = reason) do
     base =
       case category do

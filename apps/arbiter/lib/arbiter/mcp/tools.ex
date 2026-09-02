@@ -216,6 +216,10 @@ defmodule Arbiter.MCP.Tools do
             if fetch_optional_bool!(args, "include_prompt") == false do
               nil
             else
+              # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+              # wired Credo up. Thresholds stay at the tool's own default so new
+              # code is held to it; see the note in .credo.exs.
+              # credo:disable-for-next-line Credo.Check.Refactor.Nesting
               case Transcript.prompt(record.id) do
                 {:ok, prompt} -> prompt
                 {:error, _} -> nil
@@ -1814,6 +1818,10 @@ defmodule Arbiter.MCP.Tools do
   # as-is to preserve legitimate string values. workspace_config_set's schema
   # explicitly allows strings, so a client sending "5" as a config value should
   # not have it reinterpreted as the integer 5.
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def unwrap_stringified_json(v, allowed_types) when is_binary(v) do
     trimmed = String.trim(v)
 

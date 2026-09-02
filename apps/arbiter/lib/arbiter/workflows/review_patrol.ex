@@ -293,6 +293,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # bd-7qgxf9); the GitHub clients honour that class at their request seam
   # (this runs synchronously in the patrol process).
   @impl true
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def do_tick_body(state) do
     # Re-fetch the workspace on every tick so config changes take effect
     # immediately without a GenServer restart (mirrors PRPatrol).

@@ -207,6 +207,10 @@ defmodule Arbiter.MCP.Tools.Worker do
   # can fetch the ticket's acceptance criteria. When `tracker_context_type` is
   # omitted, the workspace's default tracker type is used as the fallback —
   # the most common case (reviewee and reviewer share the same tracker).
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp maybe_set_tracker_context(task, args) do
     case Tools.fetch_string(args, "tracker_context_ref") do
       ref when is_binary(ref) and ref != "" ->
@@ -696,6 +700,10 @@ defmodule Arbiter.MCP.Tools.Worker do
           |> Keyword.put(:skip_quota_gate, true)
           |> Keyword.put(:quota_bypass_actor, actor_string(tier))
           |> then(fn opts2 ->
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             if quota_bypass_reason,
               do: Keyword.put(opts2, :quota_bypass_reason, quota_bypass_reason),
               else: opts2

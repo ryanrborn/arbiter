@@ -320,6 +320,10 @@ defmodule Arbiter.Loop do
     end
   end
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp reinforce(existing, candidate, bar, actor) do
     incident_refs = Enum.uniq(existing.incident_refs ++ refs(candidate, :incident_refs))
     task_refs = Enum.uniq(existing.task_refs ++ refs(candidate, :task_refs))
