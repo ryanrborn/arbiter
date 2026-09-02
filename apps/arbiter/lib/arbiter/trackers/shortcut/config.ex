@@ -168,9 +168,17 @@ defmodule Arbiter.Trackers.Shortcut.Config do
 
   defp workflow_id(raw) do
     case Map.get(raw, "workflow_id") do
-      id when is_integer(id) -> id
-      id when is_binary(id) -> with {n, ""} <- Integer.parse(id), do: n, else: (_ -> nil)
-      _ -> nil
+      id when is_integer(id) ->
+        id
+
+      id when is_binary(id) ->
+        case Integer.parse(id) do
+          {n, ""} -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 

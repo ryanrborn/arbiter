@@ -626,10 +626,7 @@ defmodule Arbiter.Worker.Watchdog do
         ref when is_binary(ref) -> Worker.whereis(ref)
       end
 
-    if not is_pid(worker_pid) do
-      # Nothing to watch — the worker is already gone.
-      :ignore
-    else
+    if is_pid(worker_pid) do
       workspace = Keyword.get(opts, :workspace)
       Mergers.prepare_with_repo(workspace, Keyword.get(opts, :repo))
 
@@ -798,6 +795,9 @@ defmodule Arbiter.Worker.Watchdog do
       Process.monitor(worker_pid)
       schedule(self(), Keyword.get(opts, :initial_delay_ms, 0))
       {:ok, state}
+    else
+      # Nothing to watch — the worker is already gone.
+      :ignore
     end
   end
 

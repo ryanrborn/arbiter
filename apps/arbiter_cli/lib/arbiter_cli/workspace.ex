@@ -53,9 +53,10 @@ defmodule ArbiterCli.Workspace do
 
   @spec resolve() :: {:ok, map()} | {:error, String.t()}
   def resolve do
-    with {:ok, %{"data" => list}} <- Client.get("/api/workspaces") do
-      resolve_from_list(list, System.get_env("ARB_WORKSPACE"))
-    else
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} ->
+        resolve_from_list(list, System.get_env("ARB_WORKSPACE"))
+
       {:error, %Client.Error{} = err} ->
         {:error, "could not load workspaces: #{err.message}"}
     end

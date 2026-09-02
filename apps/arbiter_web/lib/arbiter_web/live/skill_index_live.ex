@@ -113,17 +113,18 @@ defmodule ArbiterWeb.SkillIndexLive do
     activation = params["activation_mode"] |> to_string()
     code_only = params["code_only"] == "true"
 
-    with {:ok, metadata} <- parse_metadata(metadata_text) do
-      attrs = %{
-        name: name,
-        body: body,
-        metadata: metadata,
-        activation_mode: activation,
-        code_only: code_only
-      }
+    case parse_metadata(metadata_text) do
+      {:ok, metadata} ->
+        attrs = %{
+          name: name,
+          body: body,
+          metadata: metadata,
+          activation_mode: activation,
+          code_only: code_only
+        }
 
-      persist(socket, socket.assigns.editing, attrs)
-    else
+        persist(socket, socket.assigns.editing, attrs)
+
       {:error, msg} ->
         {:noreply,
          assign(socket,

@@ -157,49 +157,50 @@ defmodule Arbiter.Worker.Dispatch do
     # is provisioned and recorded, so the Driver can tear it down and the
     # caller can see it.
     #
-    # Two nested `with`s rather than one chain, deliberately: a `with`-clause
-    # binding does NOT leak into that `with`'s own `else`. With a single chain
-    # the error branch would read the *outer* `opts` — the function parameter,
-    # which never carries `:review_checkout` (it is added inside
-    # `resolve_agent_cwd/3`) — so its teardown was a guaranteed no-op and the
-    # throwaway worktree leaked on every post-spawn failure. Nesting puts the
-    # rebound `opts` in scope for the inner `else`, which is the branch that
-    # actually needs it.
-    with {:ok, claude_port, opts} <-
-           maybe_start_claude(task, worker_pid, worktree_path, opts) do
-      with {:ok, machine_id, machine_pid} <-
-             attach_and_start_machine(task, worktree_path, opts),
-           {:ok, driver_pid} <-
-             maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
-           # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
-           # async close (in production, the MergeQueue direct-strategy close of an
-           # in-flight `{:worker_done}` from the just-stopped run) can land in the
-           # window between that guard and `start_worker/3`, flipping the task to
-           # `:closed` AFTER the guard passed but as/just before the new worker is
-           # attached — leaving a live worker orphaned on a `:closed` task (the
-           # close's own StopWorker found no worker to stop). Re-assert here, now
-           # that the worker is live, and realign a raced-closed task.
-           {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
-        {:ok,
-         %{
-           task: task,
-           worker_pid: worker_pid,
-           machine_id: machine_id,
-           machine_pid: machine_pid,
-           driver_pid: driver_pid,
-           worktree_path: worktree_path,
-           review_checkout: Keyword.get(opts, :review_checkout),
-           claude_port: claude_port
-         }}
-      else
-        {:error, reason} = err ->
-          # A checkout provisioned moments ago has no Driver to reclaim it once
-          # the spawn fails, so tear it down here rather than leak it.
-          Checkout.teardown(review_checkout_path(opts))
-          fail_spawned_worker(worker_pid, reason)
-          err
-      end
-    else
+    # An outer `case` around the inner `with` chain rather than one flat
+    # chain, deliberately: a `with`-clause binding does NOT leak into that
+    # `with`'s own `else`. With a single chain the error branch would read the
+    # *outer* `opts` — the function parameter, which never carries
+    # `:review_checkout` (it is added inside `resolve_agent_cwd/3`) — so its
+    # teardown was a guaranteed no-op and the throwaway worktree leaked on
+    # every post-spawn failure. Splitting the first step out puts the rebound
+    # `opts` in scope for the inner `else`, which is the branch that actually
+    # needs it.
+    case maybe_start_claude(task, worker_pid, worktree_path, opts) do
+      {:ok, claude_port, opts} ->
+        with {:ok, machine_id, machine_pid} <-
+               attach_and_start_machine(task, worktree_path, opts),
+             {:ok, driver_pid} <-
+               maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
+             # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
+             # async close (in production, the MergeQueue direct-strategy close of an
+             # in-flight `{:worker_done}` from the just-stopped run) can land in the
+             # window between that guard and `start_worker/3`, flipping the task to
+             # `:closed` AFTER the guard passed but as/just before the new worker is
+             # attached — leaving a live worker orphaned on a `:closed` task (the
+             # close's own StopWorker found no worker to stop). Re-assert here, now
+             # that the worker is live, and realign a raced-closed task.
+             {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
+          {:ok,
+           %{
+             task: task,
+             worker_pid: worker_pid,
+             machine_id: machine_id,
+             machine_pid: machine_pid,
+             driver_pid: driver_pid,
+             worktree_path: worktree_path,
+             review_checkout: Keyword.get(opts, :review_checkout),
+             claude_port: claude_port
+           }}
+        else
+          {:error, reason} = err ->
+            # A checkout provisioned moments ago has no Driver to reclaim it once
+            # the spawn fails, so tear it down here rather than leak it.
+            Checkout.teardown(review_checkout_path(opts))
+            fail_spawned_worker(worker_pid, reason)
+            err
+        end
+
       # `maybe_start_claude/4` is the frame that provisioned the checkout and
       # tears it down on its own failure path, so there is nothing left to
       # reclaim here — and nothing reachable to reclaim it with.

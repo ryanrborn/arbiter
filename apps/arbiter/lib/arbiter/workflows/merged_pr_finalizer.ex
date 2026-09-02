@@ -314,12 +314,14 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     if live_worker?(task) do
       skip_live_worker(task)
     else
-      with {:ok, %{status: :merged}} <- adapter.get(pr_ref) do
-        finalize(task)
-      else
+      case adapter.get(pr_ref) do
+        {:ok, %{status: :merged}} ->
+          finalize(task)
+
         # PR is open, approved-but-not-merged, closed without merge, or API
         # error (including 404 for a PR in a different repo). All are no-ops.
-        _ -> :noop
+        _ ->
+          :noop
       end
     end
   end
@@ -361,10 +363,12 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     if live_worker?(task) do
       skip_live_worker(task)
     else
-      with {:ok, %{status: :merged}} <- adapter.get(ref) do
-        finalize_follow_up(task, ref)
-      else
-        _ -> :noop
+      case adapter.get(ref) do
+        {:ok, %{status: :merged}} ->
+          finalize_follow_up(task, ref)
+
+        _ ->
+          :noop
       end
     end
   end

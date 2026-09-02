@@ -651,13 +651,15 @@ defmodule Arbiter.Workflows.MergeQueue do
   # generic push failure; any other reconcile error (missing origin, fetch
   # failure) fails open and lets the push itself surface the real error.
   defp push_worktree_branch(worktree_module, worktree_path, branch) do
-    with :ok <- reconcile_worktree_before_push(worktree_module, worktree_path, branch) do
-      case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do
-        {:ok, _} = ok -> ok
-        {:error, reason} -> {:error, {:push_failed, reason}}
-      end
-    else
-      {:error, {:diverged, _detail} = reason} -> {:error, {:push_failed, reason}}
+    case reconcile_worktree_before_push(worktree_module, worktree_path, branch) do
+      :ok ->
+        case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do
+          {:ok, _} = ok -> ok
+          {:error, reason} -> {:error, {:push_failed, reason}}
+        end
+
+      {:error, {:diverged, _detail} = reason} ->
+        {:error, {:push_failed, reason}}
     end
   end
 

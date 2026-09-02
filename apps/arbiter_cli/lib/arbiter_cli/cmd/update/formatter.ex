@@ -22,17 +22,28 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
     IO.puts("(Run `arb restart` if you want to bounce Phoenix anyway.)")
   end
 
-  def emit_deployed(
-        :json,
-        integration_branch,
-        before_sha,
-        after_sha,
-        commits,
-        actions,
-        was_running,
-        migrations_applied,
-        cli_built
-      ) do
+  @doc """
+  Renders a completed deploy.
+
+  The outcome travels as a single `deploy` map rather than eight positional
+  arguments: at arity 9 the call sites were an unlabelled column of shas,
+  counters and booleans that only a reader with the definition open could
+  decode (and `mix credo --strict` flagged, correctly, as past its arity
+  ceiling). Keys: `:branch`, `:before_sha`, `:after_sha`, `:commits`,
+  `:actions`, `:was_running`, `:migrations_applied`, `:cli_built`.
+  """
+  def emit_deployed(:json, deploy) do
+    %{
+      branch: integration_branch,
+      before_sha: before_sha,
+      after_sha: after_sha,
+      commits: commits,
+      actions: actions,
+      was_running: was_running,
+      migrations_applied: migrations_applied,
+      cli_built: cli_built
+    } = deploy
+
     Output.emit_json(%{
       branch: integration_branch,
       pulled: true,
@@ -51,17 +62,14 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
     })
   end
 
-  def emit_deployed(
-        :text,
-        integration_branch,
-        _before,
-        _after,
-        commits,
-        _actions,
-        _was_running,
-        migrations_applied,
-        cli_built
-      ) do
+  def emit_deployed(:text, deploy) do
+    %{
+      branch: integration_branch,
+      commits: commits,
+      migrations_applied: migrations_applied,
+      cli_built: cli_built
+    } = deploy
+
     IO.puts("")
     IO.puts("Pulled #{length(commits)} new commit(s) onto #{integration_branch}:")
     print_commits(commits)
@@ -83,17 +91,24 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
     Doctor.report()
   end
 
-  def emit_deploy_timeout(
-        :json,
-        integration_branch,
-        before_sha,
-        after_sha,
-        commits,
-        actions,
-        timeout_ms,
-        migrations_applied,
-        cli_built
-      ) do
+  @doc """
+  Renders a deploy whose Phoenix restart never came back up.
+
+  Same single-map argument as `emit_deployed/2`, with `:timeout_ms` in place
+  of `:was_running`.
+  """
+  def emit_deploy_timeout(:json, deploy) do
+    %{
+      branch: integration_branch,
+      before_sha: before_sha,
+      after_sha: after_sha,
+      commits: commits,
+      actions: actions,
+      timeout_ms: timeout_ms,
+      migrations_applied: migrations_applied,
+      cli_built: cli_built
+    } = deploy
+
     Output.emit_json(%{
       branch: integration_branch,
       pulled: true,
@@ -114,17 +129,15 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
     Output.halt(1)
   end
 
-  def emit_deploy_timeout(
-        :text,
-        integration_branch,
-        _before,
-        _after,
-        commits,
-        _actions,
-        timeout_ms,
-        migrations_applied,
-        cli_built
-      ) do
+  def emit_deploy_timeout(:text, deploy) do
+    %{
+      branch: integration_branch,
+      commits: commits,
+      timeout_ms: timeout_ms,
+      migrations_applied: migrations_applied,
+      cli_built: cli_built
+    } = deploy
+
     IO.puts("")
     IO.puts("Pulled #{length(commits)} new commit(s) onto #{integration_branch}:")
     print_commits(commits)

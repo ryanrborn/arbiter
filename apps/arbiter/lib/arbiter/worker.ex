@@ -2802,34 +2802,32 @@ defmodule Arbiter.Worker do
     target = (meta && Map.get(meta, :target_branch)) || "main"
     expected = meta && Map.get(meta, :branch)
 
-    cond do
-      is_binary(worktree) and File.dir?(worktree) and
-          worktree_on_branch?(worktree, expected) ->
-        case Arbiter.Worker.Worktree.completion_state(worktree, target) do
-          {:ok, :ready} ->
-            # bd-9q966y: belt-and-suspenders — even a "clean, committed" worktree
-            # must not carry injected agent-config files (.mcp.json / .gemini/ /
-            # .codex/) in its committed diff. These files contain per-spawn bearer
-            # tokens. Normally they are gitignored via .git/info/exclude (written
-            # by AgentConfig.write/3), but if that was bypassed this gate catches
-            # the slip. Fail open on git errors to avoid stranding valid completions.
-            case Arbiter.Worker.Worktree.has_injected_config_in_commits?(worktree, target) do
-              {:ok, true} -> {:gate, :secret_in_commit}
-              _ -> :ok
-            end
+    if is_binary(worktree) and File.dir?(worktree) and
+         worktree_on_branch?(worktree, expected) do
+      case Arbiter.Worker.Worktree.completion_state(worktree, target) do
+        {:ok, :ready} ->
+          # bd-9q966y: belt-and-suspenders — even a "clean, committed" worktree
+          # must not carry injected agent-config files (.mcp.json / .gemini/ /
+          # .codex/) in its committed diff. These files contain per-spawn bearer
+          # tokens. Normally they are gitignored via .git/info/exclude (written
+          # by AgentConfig.write/3), but if that was bypassed this gate catches
+          # the slip. Fail open on git errors to avoid stranding valid completions.
+          case Arbiter.Worker.Worktree.has_injected_config_in_commits?(worktree, target) do
+            {:ok, true} -> {:gate, :secret_in_commit}
+            _ -> :ok
+          end
 
-          {:ok, :uncommitted} ->
-            {:gate, :uncommitted}
+        {:ok, :uncommitted} ->
+          {:gate, :uncommitted}
 
-          {:ok, :no_commits} ->
-            {:gate, :no_commits}
+        {:ok, :no_commits} ->
+          {:gate, :no_commits}
 
-          {:error, _} ->
-            :ok
-        end
-
-      true ->
-        :ok
+        {:error, _} ->
+          :ok
+      end
+    else
+      :ok
     end
   end
 
@@ -3025,7 +3023,7 @@ defmodule Arbiter.Worker do
       # to every adapter module and emit an "undefined or private" warning for
       # Gemini, which `mix compile --warnings-as-errors` then fails on. The
       # dynamic dispatch is the point, not an oversight.
-      # credo:disable-next-line Credo.Check.Refactor.Apply
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(adapter, :splice_prompt, [argv, [nudge]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, :no_print_slot} -> {:ok, port_args}
@@ -3500,7 +3498,7 @@ defmodule Arbiter.Worker do
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
       # Dynamic on purpose — see the note on inject_nudge_argv/3 above.
-      # credo:disable-next-line Credo.Check.Refactor.Apply
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(adapter, :splice_prompt, [argv, ["--resume", session_id, prompt]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, _} = err -> err

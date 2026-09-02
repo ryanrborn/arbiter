@@ -54,14 +54,16 @@ defmodule ArbiterCli.Cmd.List do
         |> put_if(:assignee, opts[:assignee])
         |> put_if(:workspace_id, opts[:workspace_id])
 
-      with {:ok, tasks} <- fetch_tasks(params) do
-        if opts[:tracker] do
-          emit_with_tracker(tasks, mode)
-        else
-          Output.emit_issue_list(tasks, mode)
-        end
-      else
-        {:error, err} -> Output.die(err)
+      case fetch_tasks(params) do
+        {:ok, tasks} ->
+          if opts[:tracker] do
+            emit_with_tracker(tasks, mode)
+          else
+            Output.emit_issue_list(tasks, mode)
+          end
+
+        {:error, err} ->
+          Output.die(err)
       end
     end
   end

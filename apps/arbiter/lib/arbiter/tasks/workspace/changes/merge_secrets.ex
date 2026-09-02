@@ -46,10 +46,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.MergeSecrets do
   end
 
   defp apply_patch(changeset, incoming) do
-    with :ok <- validate_shape(incoming) do
-      merged = merge(existing_secrets(changeset), incoming)
-      AshCloak.encrypt_and_set(changeset, :secrets, merged)
-    else
+    case validate_shape(incoming) do
+      :ok ->
+        merged = merge(existing_secrets(changeset), incoming)
+        AshCloak.encrypt_and_set(changeset, :secrets, merged)
+
       {:error, message} ->
         Changeset.add_error(changeset, field: :secrets, message: message)
     end

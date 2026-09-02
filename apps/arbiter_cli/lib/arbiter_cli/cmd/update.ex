@@ -203,30 +203,28 @@ defmodule ArbiterCli.Cmd.Update do
       # Finally restart Phoenix to load the new code
       case Restart.perform(root, timeout_ms) do
         {:ok, actions, was_running} ->
-          Formatter.emit_deployed(
-            mode,
-            @integration_branch,
-            before_sha,
-            after_sha,
-            commits,
-            actions,
-            was_running,
-            migrations_applied,
-            cli_built
-          )
+          Formatter.emit_deployed(mode, %{
+            branch: @integration_branch,
+            before_sha: before_sha,
+            after_sha: after_sha,
+            commits: commits,
+            actions: actions,
+            was_running: was_running,
+            migrations_applied: migrations_applied,
+            cli_built: cli_built
+          })
 
         {:timeout, actions, _was_running} ->
-          Formatter.emit_deploy_timeout(
-            mode,
-            @integration_branch,
-            before_sha,
-            after_sha,
-            commits,
-            actions,
-            timeout_ms,
-            migrations_applied,
-            cli_built
-          )
+          Formatter.emit_deploy_timeout(mode, %{
+            branch: @integration_branch,
+            before_sha: before_sha,
+            after_sha: after_sha,
+            commits: commits,
+            actions: actions,
+            timeout_ms: timeout_ms,
+            migrations_applied: migrations_applied,
+            cli_built: cli_built
+          })
       end
     end
   end
