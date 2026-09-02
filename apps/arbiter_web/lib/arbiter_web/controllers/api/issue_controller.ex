@@ -18,6 +18,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -69,7 +70,7 @@ defmodule ArbiterWeb.Api.IssueController do
       :ok ->
         case Ash.create(Issue, attrs) do
           {:ok, issue} ->
-            case Arbiter.Tasks.Issue.Changes.CreateUpstream.last_error() do
+            case CreateUpstream.last_error() do
               nil ->
                 conn
                 |> put_status(:created)

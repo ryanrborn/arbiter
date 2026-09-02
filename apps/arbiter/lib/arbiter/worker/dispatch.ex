@@ -58,6 +58,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Reviews.Checkout
@@ -2119,7 +2120,7 @@ defmodule Arbiter.Worker.Dispatch do
     Task.Supervisor.start_child(Arbiter.Worker.MCPVerifySupervisor, fn ->
       require Logger
 
-      case Arbiter.MCP.AgentConfig.Codex.verify_connection(write_opts) do
+      case Codex.verify_connection(write_opts) do
         :ok ->
           :ok
 

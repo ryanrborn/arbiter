@@ -91,6 +91,8 @@ defmodule Arbiter.Worker.ClaudeSession do
   overrides this.
   """
 
+  alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Agents.Claude.Security
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.StepSummary
@@ -306,8 +308,8 @@ defmodule Arbiter.Worker.ClaudeSession do
         policy = Arbiter.Agents.SecurityPolicy.default()
 
         flags =
-          Arbiter.Agents.Claude.Security.permission_argv(policy) ++
-            Arbiter.Agents.Claude.Security.settings_argv(policy) ++
+          Security.permission_argv(policy) ++
+            Security.settings_argv(policy) ++
             ["--output-format", "stream-json", "--verbose"]
 
         Arbiter.Agents.Claude.build_argv(claude, prompt, flags)
@@ -1299,7 +1301,7 @@ defmodule Arbiter.Worker.ClaudeSession do
     base =
       case Keyword.fetch(opts, :env) do
         {:ok, list} when is_list(list) -> list
-        _ -> Arbiter.Agents.Claude.ConfigDir.env()
+        _ -> ConfigDir.env()
       end
 
     release_clean = Arbiter.Worker.ReleaseEnv.clean_pairs()

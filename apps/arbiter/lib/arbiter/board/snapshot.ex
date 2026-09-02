@@ -95,6 +95,7 @@ defmodule Arbiter.Board.Snapshot do
 
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Quota.Gate.Snapshot, as: QuotaSnapshot
   alias Arbiter.Worker.Watchdog
 
   require Ash.Query
@@ -835,7 +836,7 @@ defmodule Arbiter.Board.Snapshot do
   # first clears when the window resets, the second clears if you raise the
   # ceiling. Naming the ceiling in the second case saves the lookup.
   defp quota_phrase(snapshot, workspace) do
-    case Arbiter.Quota.Gate.Snapshot.normalize(snapshot) do
+    case QuotaSnapshot.normalize(snapshot) do
       nil ->
         "quota exhausted"
 

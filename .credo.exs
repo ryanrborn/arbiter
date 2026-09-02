@@ -83,8 +83,22 @@
           # You can customize the priority of any check
           # Priority values are: `low, normal, high, higher`
           #
+          # `if_nested_deeper_than: 3`, not the default 0.
+          #
+          # Nearly every module here is `Arbiter.<Context>.<Module>` — three
+          # parts. At the default, `Messages.Message.new(...)` and its 235
+          # siblings are all "nested modules that could be aliased", which is
+          # not a finding about this code, it is a finding about Elixir's
+          # naming convention. Three-part references are how a call announces
+          # which context it is crossing into, and aliasing them away costs
+          # more readability at the call site than it saves in line length.
+          #
+          # Four parts and up is a different claim: `Arbiter.Agents.Claude.
+          # Security.foo()` really is long enough at a call site to be worth
+          # a top-of-module alias, and those (13 at the time of writing) were
+          # fixed rather than tuned away.
           {Credo.Check.Design.AliasUsage,
-         [priority: :low, if_nested_deeper_than: 2, if_called_more_often_than: 0]},
+           [priority: :low, if_nested_deeper_than: 3, if_called_more_often_than: 0]},
           {Credo.Check.Design.TagFIXME, []},
           # You can also customize the exit_status of each check.
           # If you don't want TODO comments to cause `mix credo` to fail, just

@@ -60,6 +60,7 @@ defmodule Arbiter.Workflows.ReviewReply do
     steps: [:read_thread, :compose_reply, :post_reply]
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Mergers
 
   require Logger
@@ -221,7 +222,7 @@ defmodule Arbiter.Workflows.ReviewReply do
         # Append the review_agent model when seeded (Agents.prepare/2 puts the
         # config in the process dict; Claude.Config reads it back here).
         args =
-          case Arbiter.Agents.Claude.Config.active_model() do
+          case ClaudeConfig.active_model() do
             model when is_binary(model) and model != "" -> args ++ ["--model", model]
             _ -> args
           end

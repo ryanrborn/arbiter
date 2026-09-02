@@ -64,6 +64,10 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   returned (a clean approval).
   """
 
+  alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
+  alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Agents.Claude.Security
+
   require Logger
 
   @type severity :: :info | :warning | :error
@@ -221,7 +225,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # before running a re-review, so re-reviews can run on a cheaper model than
   # the first pass (bd-f3fg22); mirrors `ReviewReply.default_compose/2`.
   defp maybe_add_model_arg(args) do
-    case Arbiter.Agents.Claude.Config.active_model() do
+    case ClaudeConfig.active_model() do
       model when is_binary(model) and model != "" -> args ++ ["--model", model]
       _ -> args
     end
@@ -254,8 +258,8 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
           })
 
         args ++
-          Arbiter.Agents.Claude.Security.permission_argv(policy) ++
-          Arbiter.Agents.Claude.Security.settings_argv(policy)
+          Security.permission_argv(policy) ++
+          Security.settings_argv(policy)
     end
   end
 
@@ -325,7 +329,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         pair -> pair
       end)
 
-    config_dir = Arbiter.Agents.Claude.ConfigDir.env()
+    config_dir = ConfigDir.env()
     release_clean ++ config_dir
   end
 
