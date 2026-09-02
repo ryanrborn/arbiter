@@ -369,19 +369,29 @@ defmodule Arbiter.Tasks.DependencyTest do
     # and `Ash.Error.Unknown` from any direct read.
     #
     # Fix: commit b193ea9 switched the importer to
-    # `Ash.UUIDv7.bingenerate/0`. These tests pin both halves so a
-    # future regression — anyone bypassing Ash to bulk-insert deps —
-    # gets caught at test time, not at runtime.
-    test "v7-id row inserted via Repo.insert_all is readable via Ash.read",
+    # `Ash.UUIDv7.bingenerate/0`. That was right on Postgres, whose native
+    # uuid column takes the 16-byte form. On SQLite `id` is a plain `:text`
+    # column: the adapter stores whatever bytes it is handed and hands them
+    # straight back, and Ash's non-strict load keeps a value its type
+    # rejects instead of failing the read — so a 16-byte id "reads fine"
+    # while `Ash.get/2` can never find the row by either form, and a v4 id
+    # is never rejected at all. The v4-rejection test that lived here
+    # (skipped since the SQLite move) asserted a guarantee this stack no
+    # longer offers and is gone. What the store does guarantee is that a
+    # row carrying the hyphenated v7 *string* round-trips — which is what
+    # the importer writes now (`Arbiter.Tasks.DoltImport.RecordsTest`), and
+    # what anyone else bulk-inserting around Ash has to write too.
+    test "v7 string id inserted via Repo.insert_all round-trips through Ash.read and Ash.get",
          %{a: a, b: b} do
       now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+      id = Ash.UUIDv7.generate()
       a_id = a.id
       b_id = b.id
 
       {1, _} =
         Repo.insert_all("dependencies", [
           %{
-            id: Ash.UUIDv7.bingenerate(),
+            id: id,
             from_issue_id: a_id,
             to_issue_id: b_id,
             type: "blocks",
@@ -390,46 +400,10 @@ defmodule Arbiter.Tasks.DependencyTest do
           }
         ])
 
-      assert [%Dependency{from_issue_id: ^a_id, to_issue_id: ^b_id}] =
+      assert [%Dependency{id: ^id, from_issue_id: ^a_id, to_issue_id: ^b_id}] =
                filter_for_ab(a_id, b_id)
-    end
 
-    @tag :skip
-    # SQLite stores UUIDs as text without version enforcement; cast_stored
-    # does not reject a v4 UUID at read time. Postgres enforced this via its
-    # native UUID type + UUIDv7 check constraint. Ash-level validation on
-    # write still applies — this only affects rows injected via Repo.insert_all.
-    test "v4-id row inserted via Repo.insert_all is rejected by Ash on read",
-         %{a: a, b: b} do
-      now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
-
-      {1, _} =
-        Repo.insert_all("dependencies", [
-          %{
-            id: Ecto.UUID.bingenerate(),
-            from_issue_id: a.id,
-            to_issue_id: b.id,
-            type: "blocks",
-            created_at: now,
-            updated_at: now
-          }
-        ])
-
-      # Ash chokes at read-time. Either it raises or it returns
-      # {:error, _}; accept both shapes — the point is "this surfaces
-      # loudly", not "this exact error wraps the failure".
-      result =
-        try do
-          {:ok, Ash.read(Dependency)}
-        rescue
-          e -> {:rescued, e}
-        end
-
-      case result do
-        {:ok, {:error, _}} -> :ok
-        {:rescued, _} -> :ok
-        {:ok, {:ok, _}} -> flunk("expected Ash.read to fail on a v4 UUID, but it succeeded")
-      end
+      assert %Dependency{id: ^id} = Ash.get!(Dependency, id)
     end
   end
 

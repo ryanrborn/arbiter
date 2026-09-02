@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   @shortdoc "Imports issues + dependencies from one or more gas-town Dolt DBs"
   @moduledoc """
   Reads issues and dependencies from the existing gas-town Dolt DBs and inserts
-  them into the arbiter Postgres store via Ecto.
+  them into the arbiter store via Ecto.
 
   Idempotent: re-running skips rows that already exist (`ON CONFLICT DO NOTHING`).
 
@@ -25,7 +25,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   1. Reads the issue prefix from the first row (e.g. `"hq"` from `hq-3o8`).
   2. Finds or creates a `Workspace` with that prefix and a human-readable name.
   3. Bulk-inserts all `issues` rows (Ecto, not Ash — bypasses GenerateId since
-     we want to preserve the original IDs). Rows already present in Postgres
+     we want to preserve the original IDs). Rows already present
      (by `id`) are skipped via `ON CONFLICT DO NOTHING`.
   4. Bulk-inserts all `dependencies` rows. Skips conflicts on
      `(from_issue_id, to_issue_id, type)`.
@@ -191,33 +191,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
 
   defp bulk_insert_issues(workspace_id, rows) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    workspace_uuid_bin = Ecto.UUID.dump!(workspace_id)
-
-    records =
-      Enum.map(rows, fn row ->
-        {tracker_type, tracker_ref} = Mapper.parse_external_ref(row["external_ref"])
-
-        %{
-          id: row["id"],
-          workspace_id: workspace_uuid_bin,
-          title: Mapper.nonempty(row["title"]) || "(untitled)",
-          description: Mapper.compose_description(row),
-          acceptance: row["acceptance_criteria"] || "",
-          notes: row["notes"] || "",
-          qa_notes: "",
-          deployment_notes: "",
-          # Ecto.insert_all needs the raw DB type (varchar) — convert atoms to strings.
-          status: Atom.to_string(Mapper.map_status(row["status"])),
-          priority: Mapper.parse_priority(row["priority"]),
-          issue_type: Atom.to_string(Mapper.map_issue_type(row["issue_type"])),
-          assignee: Mapper.nonempty(row["assignee"]),
-          tracker_type: Atom.to_string(tracker_type),
-          tracker_ref: tracker_ref,
-          created_at: Mapper.parse_dt(row["created_at"]) || now,
-          updated_at: Mapper.parse_dt(row["updated_at"]) || now,
-          closed_at: Mapper.parse_dt(row["closed_at"])
-        }
-      end)
+    records = Enum.map(rows, &Mapper.issue_record(&1, workspace_id, now))
 
     {n, _} =
       Arbiter.Repo.insert_all(
@@ -260,10 +234,10 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   defp bulk_insert_dependencies(rows) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
-    # Filter out edges that reference tasks not in our Postgres store.
+    # Filter out edges that reference tasks not in our store.
     # Cross-repo deps in Dolt may point to tasks from repos we didn't import
     # (e.g. server has deps pointing to ac-*, ad-* tasks from other Dolt DBs).
-    # Postgres FK would block these; skip them rather than failing the whole batch.
+    # The FK would block these; skip them rather than failing the whole batch.
     known_ids =
       Arbiter.Repo.query!("SELECT id FROM issues", [])
       |> Map.get(:rows)
@@ -286,17 +260,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
                 nil
 
               type ->
-                %{
-                  # Dependency.id is Ash.Type.UUIDv7 — must be v7, not v4.
-                  id: Ash.UUIDv7.bingenerate(),
-                  from_issue_id: row["issue_id"],
-                  to_issue_id: row["depends_on_id"],
-                  type: Atom.to_string(type),
-                  created_by: Mapper.nonempty(row["created_by"]),
-                  notes: "",
-                  created_at: Mapper.parse_dt(row["created_at"]) || now,
-                  updated_at: Mapper.parse_dt(row["created_at"]) || now
-                }
+                Mapper.dependency_record(row, type, now)
             end
         end
       end)

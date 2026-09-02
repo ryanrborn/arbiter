@@ -114,4 +114,56 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
   end
 
   def derive_prefix(_), do: "ar"
+
+  # ---- Row -> record (the shapes `Repo.insert_all/3` receives) ----
+  #
+  # These bypass Ash, so nothing normalises ids for us. On SQLite every id
+  # column is plain `:text`: the adapter stores exactly the bytes it is handed
+  # and hands the same bytes back, and Ash's non-strict load keeps a value its
+  # type rejects rather than failing the read. Both ids below must therefore be
+  # the hyphenated *string* Ash itself writes — a 16-byte `Ecto.UUID.dump!/1`
+  # or `Ash.UUIDv7.bingenerate/0` value lands as opaque text that no
+  # `Ash.get/2` can find and no foreign key can match
+  # (`Arbiter.Tasks.DoltImport.RecordsTest`).
+
+  @doc false
+  def issue_record(row, workspace_id, now) do
+    {tracker_type, tracker_ref} = parse_external_ref(row["external_ref"])
+
+    %{
+      id: row["id"],
+      workspace_id: workspace_id,
+      title: nonempty(row["title"]) || "(untitled)",
+      description: compose_description(row),
+      acceptance: row["acceptance_criteria"] || "",
+      notes: row["notes"] || "",
+      qa_notes: "",
+      deployment_notes: "",
+      # Ecto.insert_all needs the raw DB type — convert atoms to strings.
+      status: Atom.to_string(map_status(row["status"])),
+      priority: parse_priority(row["priority"]),
+      issue_type: Atom.to_string(map_issue_type(row["issue_type"])),
+      assignee: nonempty(row["assignee"]),
+      tracker_type: Atom.to_string(tracker_type),
+      tracker_ref: tracker_ref,
+      created_at: parse_dt(row["created_at"]) || now,
+      updated_at: parse_dt(row["updated_at"]) || now,
+      closed_at: parse_dt(row["closed_at"])
+    }
+  end
+
+  @doc false
+  def dependency_record(row, type, now) do
+    %{
+      # Dependency.id is Ash.Type.UUIDv7 — v7, and in string form (see above).
+      id: Ash.UUIDv7.generate(),
+      from_issue_id: row["issue_id"],
+      to_issue_id: row["depends_on_id"],
+      type: Atom.to_string(type),
+      created_by: nonempty(row["created_by"]),
+      notes: "",
+      created_at: parse_dt(row["created_at"]) || now,
+      updated_at: parse_dt(row["created_at"]) || now
+    }
+  end
 end
