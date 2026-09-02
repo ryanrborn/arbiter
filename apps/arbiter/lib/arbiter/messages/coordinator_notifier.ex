@@ -68,9 +68,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   require Logger
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.Message
   alias Arbiter.Worker.StopReason
 
   @config_key "coordinator_notifications"

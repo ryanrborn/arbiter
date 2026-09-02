@@ -6,8 +6,8 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
   needing a live Dolt DB.
   """
 
-  alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Dependency
+  alias Arbiter.Tasks.Issue
 
   @valid_dep_types Dependency
                    |> then(fn _ ->

@@ -88,9 +88,9 @@ defmodule Arbiter.Workflows.PRPatrol do
     recheck_stop_message: "last watched item closed",
     gate: :has_open_authored_pr?
 
-  alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}

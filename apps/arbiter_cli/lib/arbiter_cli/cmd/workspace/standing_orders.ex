@@ -6,8 +6,8 @@ defmodule ArbiterCli.Cmd.Workspace.StandingOrders do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.Cmd.Workspace.Resolver
   alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.Cmd.Workspace.Resolver
 
   @spec run([String.t()], keyword()) :: :ok | no_return()
   def run(argv, opts) do

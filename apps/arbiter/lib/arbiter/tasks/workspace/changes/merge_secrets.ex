@@ -21,8 +21,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.MergeSecrets do
 
   use Ash.Resource.Change
 
-  alias Ash.Changeset
   alias Arbiter.Tasks.Workspace
+  alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do

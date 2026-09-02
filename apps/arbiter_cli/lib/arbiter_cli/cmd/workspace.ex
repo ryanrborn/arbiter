@@ -49,8 +49,8 @@ defmodule ArbiterCli.Cmd.Workspace do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.Cmd.Workspace.{Secrets, StandingOrders}
   alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.Cmd.Workspace.{Secrets, StandingOrders}
 
   # Mirrors Arbiter.Tasks.Workspace.valid_tracker_types/0 and
   # valid_merger_strategies/0 for friendly client-side errors on `create`. The

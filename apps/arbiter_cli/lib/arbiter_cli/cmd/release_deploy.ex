@@ -69,8 +69,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.Cmd.ReleaseDeploy.{Formatter, Github, ReleaseFiles}
   alias ArbiterCli.{Cmd.Doctor, Cmd.InstallService, Cmd.Restart, Cmd.Start}
+  alias ArbiterCli.Cmd.ReleaseDeploy.{Formatter, Github, ReleaseFiles}
 
   @default_timeout_s 60
 

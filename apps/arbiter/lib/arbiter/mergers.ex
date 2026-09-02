@@ -16,8 +16,8 @@ defmodule Arbiter.Mergers do
   `config["merge"]["strategy"]`, falling back to `:direct`).
   """
 
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.{Direct, Github, Gitlab}
+  alias Arbiter.Tasks.Workspace
 
   @type adapter :: module()
 

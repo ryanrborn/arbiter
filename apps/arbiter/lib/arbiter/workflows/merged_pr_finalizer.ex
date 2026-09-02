@@ -81,8 +81,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   use GenServer
 
   alias Arbiter.GitHub.Limiter
-  alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers.Sync
   alias Arbiter.Worker
   require Ash.Query

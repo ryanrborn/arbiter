@@ -20,14 +20,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.Message
+  alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
-  alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Workflows.MachineState
   require Ash.Query
   require Logger

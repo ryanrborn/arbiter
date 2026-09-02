@@ -61,8 +61,8 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   """
 
   alias Arbiter.Agents.CredentialsRef
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.Gitlab.Error
+  alias Arbiter.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
 

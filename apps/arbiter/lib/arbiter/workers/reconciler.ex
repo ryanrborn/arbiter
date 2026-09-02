@@ -33,9 +33,9 @@ defmodule Arbiter.Workers.Reconciler do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.Message
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Usage.Event
   alias Arbiter.Worker

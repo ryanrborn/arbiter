@@ -197,11 +197,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     gate: :has_open_engagement?
 
   alias Arbiter.Agents
+  alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewReply}
-  alias Arbiter.{Mergers, Tasks.Workspace}
   require Ash.Query
   require Logger
 

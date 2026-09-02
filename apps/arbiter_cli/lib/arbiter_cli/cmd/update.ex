@@ -76,8 +76,8 @@ defmodule ArbiterCli.Cmd.Update do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.Cmd.Update.{Formatter, Git}
   alias ArbiterCli.{Client, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.Cmd.Update.{Formatter, Git}
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
   # branch (`main`); a deploy is always a pull of merged work into it.

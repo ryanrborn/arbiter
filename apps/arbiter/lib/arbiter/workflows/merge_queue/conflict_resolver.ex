@@ -44,10 +44,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   git.
   """
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession

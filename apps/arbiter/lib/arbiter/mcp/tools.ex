@@ -53,13 +53,13 @@ defmodule Arbiter.MCP.Tools do
   """
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.MCP.Scope
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Graph
   alias Arbiter.Tasks.GraphMember
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.MCP.Scope
   alias Arbiter.Trackers
   alias Arbiter.Usage
   alias Arbiter.Workflows.Conductor

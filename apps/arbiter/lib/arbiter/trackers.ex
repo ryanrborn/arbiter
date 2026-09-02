@@ -18,9 +18,9 @@ defmodule Arbiter.Trackers do
 
   require Logger
 
-  alias Arbiter.Tasks.Issue
   alias Arbiter.Messages.Message
-  alias Arbiter.Trackers.{Gitlab, GitHub, Jira, Linear, None, Shortcut, Tracker}
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Trackers.{GitHub, Gitlab, Jira, Linear, None, Shortcut, Tracker}
 
   @type adapter :: module()
 

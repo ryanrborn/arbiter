@@ -18,8 +18,8 @@ defmodule ArbiterWeb.Api.QueueController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Workflows.Conductor
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workflows.Conductor
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 

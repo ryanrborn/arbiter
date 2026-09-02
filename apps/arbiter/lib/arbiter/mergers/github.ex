@@ -71,7 +71,7 @@ defmodule Arbiter.Mergers.Github do
   require Logger
 
   alias Arbiter.Http.Client
-  alias Arbiter.Mergers.{CIRerun, Merger, Github.Config, Github.Error, Github.RepoResolver}
+  alias Arbiter.Mergers.{CIRerun, Github.Config, Github.Error, Github.RepoResolver, Merger}
   alias Arbiter.Providers.Github, as: Provider
 
   @stub_name Arbiter.Mergers.Github.HTTP

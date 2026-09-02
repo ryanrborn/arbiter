@@ -61,8 +61,8 @@ defmodule ArbiterCli.Cmd.Config do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.Cmd.Config.{Formatter, Value}
   alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.Cmd.Config.{Formatter, Value}
 
   @switches [workspace: :string, force: :boolean, json: :boolean]
 

@@ -213,16 +213,16 @@ defmodule Arbiter.Workflows.MergeQueue do
   require Ash.Query
 
   alias Arbiter.GitHub.Limiter
-  alias Arbiter.Tasks.Issue
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
-  alias Arbiter.Worker.PRTemplate
+  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Trackers
   alias Arbiter.Worker.PrimarySync
+  alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
-  alias Arbiter.Trackers
 
   @default_poll_interval_ms 30_000
 

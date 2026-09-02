@@ -46,9 +46,9 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   alias Arbiter.Reviews.ExternalReview
   alias Arbiter.Worker
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptLog
-  alias Arbiter.Worker.Dispatch
   alias Arbiter.Workers.Run
   require Ash.Query
 

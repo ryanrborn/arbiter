@@ -7,8 +7,8 @@ defmodule Arbiter.Application do
 
   alias Arbiter.Workflows.ConductorReconciler
   alias Arbiter.Workflows.DispatchQueueSupervisor
-  alias Arbiter.Workflows.MergeQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
+  alias Arbiter.Workflows.MergeQueueSupervisor
   alias Arbiter.Workflows.PRPatrolSupervisor
   alias Arbiter.Workflows.ReviewPatrolSupervisor
 
