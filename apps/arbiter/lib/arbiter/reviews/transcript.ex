@@ -351,11 +351,10 @@ defmodule Arbiter.Reviews.Transcript do
 
   defp tool_result_text(content) when is_list(content) do
     content
-    |> Enum.map(fn
+    |> Enum.map_join("\n", fn
       %{"text" => text} when is_binary(text) -> text
       other -> inspect(other)
     end)
-    |> Enum.join("\n")
   end
 
   defp tool_result_text(nil), do: ""

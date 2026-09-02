@@ -38,7 +38,7 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
   filesystem) so it's easy to assert on in tests.
 
   Dispatches on whether `root` is a dev-mode source checkout
-  (`dev_checkout?/1` — mirrors `Cmd.Start.is_umbrella_root?/1`'s mix.exs +
+  (`dev_checkout?/1` — mirrors `Cmd.Start.umbrella_root?/1`'s mix.exs +
   apps/ heuristic):
 
     * **not a checkout (release install)** — `ExecStart` points at the OTP
@@ -60,7 +60,7 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
     end
   end
 
-  # Deliberately NOT `Start.is_umbrella_root?/1` — that helper also treats a
+  # Deliberately NOT `Start.umbrella_root?/1` — that helper also treats a
   # bare `compose.yml` (no mix.exs/apps/) as a root, which is right for
   # locating *some* Arbiter home but wrong here: a release-install box whose
   # ARB_HOME points at a data dir holding only the Postgres compose.yml would

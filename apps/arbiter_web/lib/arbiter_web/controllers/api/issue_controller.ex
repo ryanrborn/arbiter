@@ -238,12 +238,10 @@ defmodule ArbiterWeb.Api.IssueController do
        do: {:ok, raw}
 
   defp coerce_filter_value(field, raw) when field in [:status, :issue_type] and is_binary(raw) do
-    try do
-      {:ok, String.to_existing_atom(raw)}
-    rescue
-      ArgumentError ->
-        {:error, {:invalid_request, "invalid #{field}: #{inspect(raw)}"}}
-    end
+    {:ok, String.to_existing_atom(raw)}
+  rescue
+    ArgumentError ->
+      {:error, {:invalid_request, "invalid #{field}: #{inspect(raw)}"}}
   end
 
   defp coerce_filter_value(_, raw) when is_binary(raw), do: {:ok, raw}

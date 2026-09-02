@@ -105,8 +105,7 @@ defmodule Arbiter.Worker.ReviewScope do
     pattern =
       glob
       |> String.split(~r/\*+/)
-      |> Enum.map(&Regex.escape/1)
-      |> Enum.join(".*")
+      |> Enum.map_join(".*", &Regex.escape/1)
 
     Regex.compile!("^" <> pattern <> "$")
   end

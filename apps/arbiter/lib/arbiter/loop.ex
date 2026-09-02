@@ -143,8 +143,7 @@ defmodule Arbiter.Loop do
   @spec fingerprint(map()) :: String.t()
   def fingerprint(candidate) when is_map(candidate) do
     [:kind, :target, :category, :difficulty, :repo]
-    |> Enum.map(&(candidate |> fetch(&1) |> canonicalise()))
-    |> Enum.join("|")
+    |> Enum.map_join("|", &(candidate |> fetch(&1) |> canonicalise()))
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
   end

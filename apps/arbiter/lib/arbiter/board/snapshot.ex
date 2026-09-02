@@ -248,8 +248,7 @@ defmodule Arbiter.Board.Snapshot do
   # which are the only ones the question means anything for.
   defp load_watchdog_live(workers) do
     workers
-    |> Enum.filter(&(Map.get(&1, :status) == :awaiting_review))
-    |> Enum.filter(&Watchdog.alive?(&1.task_id))
+    |> Enum.filter(&(Map.get(&1, :status) == :awaiting_review and Watchdog.alive?(&1.task_id)))
     |> MapSet.new(& &1.task_id)
   rescue
     # A board that renders five columns beats one that raises: an unreadable

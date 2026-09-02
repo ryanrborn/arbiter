@@ -589,17 +589,15 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp workflow_steps_for(nil), do: []
 
   defp workflow_steps_for(%MachineState{workflow_module: name}) when is_binary(name) do
-    try do
-      mod = Module.safe_concat([name])
+    mod = Module.safe_concat([name])
 
-      if function_exported?(mod, :steps, 0) do
-        Enum.map(mod.steps(), &Atom.to_string/1)
-      else
-        []
-      end
-    rescue
-      _ -> []
+    if function_exported?(mod, :steps, 0) do
+      Enum.map(mod.steps(), &Atom.to_string/1)
+    else
+      []
     end
+  rescue
+    _ -> []
   end
 
   defp safe_state(pid) do

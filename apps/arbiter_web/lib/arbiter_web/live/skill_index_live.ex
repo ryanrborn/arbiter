@@ -290,7 +290,7 @@ defmodule ArbiterWeb.SkillIndexLive do
   defp metadata_gist(_), do: nil
 
   defp error_message(%Ash.Error.Invalid{errors: errors}) do
-    errors |> Enum.map(&Exception.message/1) |> Enum.join("; ")
+    errors |> Enum.map_join("; ", &Exception.message/1)
   end
 
   defp error_message(err) when is_exception(err), do: Exception.message(err)

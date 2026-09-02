@@ -101,7 +101,7 @@ defmodule Arbiter.Workers.RunStep do
       public? true
       default false
 
-      description "block[\"is_error\"] straight from the tool_result block, as a real boolean — not inferred from the rendered \"tool error\" display string."
+      description ~s(block["is_error"] straight from the tool_result block, as a real boolean — not inferred from the rendered "tool error" display string.)
     end
 
     attribute :duration_ms, :integer do
@@ -142,7 +142,7 @@ defmodule Arbiter.Workers.RunStep do
       default "live"
       constraints max_length: 16, trim?: true
 
-      description "How this row was captured: \"live\" (written by the ClaudeSession emit path as the run happened) or \"backfill\" (reconstructed by Arbiter.Workers.StepBackfill from the on-disk session JSONL). Backfilled rows carry line-timestamp timing rather than monotonic-clock timing, and were redacted against today's known secret values rather than the run's own — provenance worth being able to filter on."
+      description ~s[How this row was captured: "live" (written by the ClaudeSession emit path as the run happened) or "backfill" (reconstructed by Arbiter.Workers.StepBackfill from the on-disk session JSONL). Backfilled rows carry line-timestamp timing rather than monotonic-clock timing, and were redacted against today's known secret values rather than the run's own — provenance worth being able to filter on.]
     end
 
     create_timestamp :inserted_at

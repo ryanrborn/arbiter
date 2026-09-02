@@ -1086,11 +1086,10 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   defp tool_result_content_text(blocks) when is_list(blocks) do
     blocks
-    |> Enum.map(fn
+    |> Enum.map_join("\n", fn
       %{"type" => "text", "text" => t} when is_binary(t) -> t
       _ -> ""
     end)
-    |> Enum.join("\n")
   end
 
   defp tool_result_content_text(_), do: ""

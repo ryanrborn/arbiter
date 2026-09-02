@@ -76,7 +76,7 @@ defmodule Arbiter.Workflow do
         description: "Arbiter.Workflow: `steps:` must be a list of atoms, got: #{inspect(steps)}"
     end
 
-    # TODO Phase 5: process these options to compose workflows.
+    # Phase 5 (not yet implemented): process these options to compose workflows.
     # `extends:`    — a single workflow module to inherit from
     # `expansions:` — keyword list mapping insertion-point atom => workflow module
     #                 (e.g. [tdd_cycle: :implement] expands :implement into a

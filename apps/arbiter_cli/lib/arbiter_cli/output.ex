@@ -186,15 +186,13 @@ defmodule ArbiterCli.Output do
         {"Closed", issue["closed_at"]}
       ]
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
-      |> Enum.map(fn {k, v} -> "#{String.pad_trailing(k <> ":", 12)}#{v}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {k, v} -> "#{String.pad_trailing(k <> ":", 12)}#{v}" end)
 
     sections =
       issue
       |> detail_sections()
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
-      |> Enum.map(fn {k, v} -> "\n#{k}:\n  " <> indent(v) end)
-      |> Enum.join("")
+      |> Enum.map_join("", fn {k, v} -> "\n#{k}:\n  " <> indent(v) end)
 
     header <> sections
   end

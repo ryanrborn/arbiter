@@ -354,13 +354,11 @@ defmodule Arbiter.Skills do
           {:ok, Arbiter.Skills.Usage.t()} | {:error, term()}
   def increment_usage(skill_id, counter)
       when is_binary(skill_id) and counter in [:materialize_count, :invoke_count, :patch_count] do
-    try do
-      atomic_increment!(skill_id, counter)
-    rescue
-      e ->
-        Logger.warning("Arbiter.Skills.increment_usage failed for #{skill_id}: #{inspect(e)}")
-        {:error, e}
-    end
+    atomic_increment!(skill_id, counter)
+  rescue
+    e ->
+      Logger.warning("Arbiter.Skills.increment_usage failed for #{skill_id}: #{inspect(e)}")
+      {:error, e}
   end
 
   # Catch-all: an unpersisted/synthetic skill (nil id, e.g. a test fixture

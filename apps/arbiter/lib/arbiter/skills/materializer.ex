@@ -119,8 +119,7 @@ defmodule Arbiter.Skills.Materializer do
   defp always_on_block(resolved) do
     directives =
       resolved
-      |> Enum.map(fn %{skill: s} -> "  * `/#{s.name}`#{skill_desc(s)}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn %{skill: s} -> "  * `/#{s.name}`#{skill_desc(s)}" end)
 
     """
     Required skills — you MUST use each of these for this task. Invoke it as a
@@ -134,8 +133,7 @@ defmodule Arbiter.Skills.Materializer do
   defp situational_block(resolved) do
     listing =
       resolved
-      |> Enum.map(fn %{skill: s} -> "  * `/#{s.name}`#{skill_desc(s)}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn %{skill: s} -> "  * `/#{s.name}`#{skill_desc(s)}" end)
 
     """
     Available skills — invoke the relevant one via its slash command when it

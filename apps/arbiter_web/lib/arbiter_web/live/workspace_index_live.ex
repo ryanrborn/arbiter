@@ -84,8 +84,7 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
 
   defp error_message(%Ash.Error.Invalid{errors: errors}) do
     errors
-    |> Enum.map(&Exception.message/1)
-    |> Enum.join("; ")
+    |> Enum.map_join("; ", &Exception.message/1)
   end
 
   defp error_message(err), do: Exception.message(err)

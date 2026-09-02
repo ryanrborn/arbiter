@@ -398,7 +398,7 @@ defmodule Arbiter.Trackers do
         "Workspace \"#{name}\" is configured with tracker type #{inspect(type)}, " <>
           "but no adapter is registered for this type. " <>
           "Tracker integration will be a no-op until the adapter ships or the config is corrected.\n\n" <>
-          "To silence this warning, set `config[\"tracker\"][\"type\"]` to \"none\" " <>
+          ~s(To silence this warning, set `config["tracker"]["type"]` to "none" ) <>
           "(or a supported type: #{Enum.join(Map.keys(@adapters) -- [:none], ", ")})."
     })
   rescue

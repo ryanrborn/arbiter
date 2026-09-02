@@ -137,7 +137,6 @@ defmodule Arbiter.AuditToolingTest do
                read!("mix.exs") =~ "audit: [",
              "root mix.exs must define the `audit` alias"
     end
-
   end
 
   describe "CI" do

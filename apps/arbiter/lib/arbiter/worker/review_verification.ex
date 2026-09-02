@@ -202,7 +202,7 @@ defmodule Arbiter.Worker.ReviewVerification do
   def criteria_banner_text(unmet, total) do
     "⚠️ ACCEPTANCE CRITERIA NOT MET — the reviewer approved on code quality but its own " <>
       "CRITERIA breakdown marks #{unmet} of #{total} acceptance criteria `[NOT MET]`. " <>
-      "\"Tests pass\" is not \"criteria met\": this work does not satisfy the task as stated " <>
+      ~s("Tests pass" is not "criteria met": this work does not satisfy the task as stated ) <>
       "and must NOT be treated as a clean, mergeable APPROVE. Address the unmet criteria " <>
       "below before this can merge."
   end

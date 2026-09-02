@@ -48,9 +48,8 @@ defmodule Arbiter.Agents.Routing do
   """
   @spec choose(Issue.t(), Workspace.t() | nil, Policy.ledger_snapshot()) :: Policy.choice()
   def choose(%Issue{} = task, workspace, ledger_snapshot \\ %{}) do
-    workspace
-    |> policy_for_workspace()
-    |> apply(:choose, [task, workspace, ledger_snapshot])
+    policy = policy_for_workspace(workspace)
+    policy.choose(task, workspace, ledger_snapshot)
   end
 
   @doc """
@@ -95,11 +94,9 @@ defmodule Arbiter.Agents.Routing do
 
   @doc false
   def agent_type_atom(%{"type" => t}) when is_binary(t) do
-    try do
-      String.to_existing_atom(t)
-    rescue
-      ArgumentError -> :claude
-    end
+    String.to_existing_atom(t)
+  rescue
+    ArgumentError -> :claude
   end
 
   def agent_type_atom(%{"type" => list}) when is_list(list) do

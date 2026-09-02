@@ -1573,97 +1573,95 @@ defmodule Arbiter.Worker do
   # by the port itself so multiple concurrent sessions (future) wouldn't
   # collide.
   def handle_call({:__claude_session_open__, port_args, session_config}, _from, %State{} = state) do
-    try do
-      # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
-      # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
-      # prompt) into THIS spawn so it continues the prior Claude session, but
-      # stash the PRISTINE argv as :claude_spawn — the bd-t9uq25 auto-resume
-      # rebuilds each `--resume` from pristine args + the latest session id, so a
-      # polluted spawn would stack duplicate flags. One-shot: consumed below.
-      {spawn_args, pristine_args} = resume_spawn_args(state, port_args)
+    # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
+    # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
+    # prompt) into THIS spawn so it continues the prior Claude session, but
+    # stash the PRISTINE argv as :claude_spawn — the bd-t9uq25 auto-resume
+    # rebuilds each `--resume` from pristine args + the latest session id, so a
+    # polluted spawn would stack duplicate flags. One-shot: consumed below.
+    {spawn_args, pristine_args} = resume_spawn_args(state, port_args)
 
-      # bd-11abk2: an oversized original prompt is delivered via a temp file
-      # (Arbiter.Agents.Claude.build_argv/3); if the bd-1z7624 session-resume
-      # injection above swapped it out for the short continue prompt, that
-      # temp file is now orphaned — nothing will ever open it — so reclaim it
-      # immediately rather than leaking it until the worker exits.
-      provider = Map.get(session_config, :provider)
-      adapter = agent_adapter_for_provider(provider)
+    # bd-11abk2: an oversized original prompt is delivered via a temp file
+    # (Arbiter.Agents.Claude.build_argv/3); if the bd-1z7624 session-resume
+    # injection above swapped it out for the short continue prompt, that
+    # temp file is now orphaned — nothing will ever open it — so reclaim it
+    # immediately rather than leaking it until the worker exits.
+    provider = Map.get(session_config, :provider)
+    adapter = agent_adapter_for_provider(provider)
 
-      # bd-9rdwe4 (#1017 gap G5): persist the composed prompt BEFORE any
-      # tmpfile is reclaimed below — nothing recorded what an agent was told,
-      # and the oversized-prompt tmpfile is unlinked as soon as this worker no
-      # longer needs it. We already hold the raw prompt string in
-      # `session_config` (threaded in by `ClaudeSession.start/1` /
-      # `ClaudeSession.build_session_config/3`), so persistence never depends
-      # on reading it back off a temp file that might already be gone.
-      persist_composed_prompt(state, session_config)
+    # bd-9rdwe4 (#1017 gap G5): persist the composed prompt BEFORE any
+    # tmpfile is reclaimed below — nothing recorded what an agent was told,
+    # and the oversized-prompt tmpfile is unlinked as soon as this worker no
+    # longer needs it. We already hold the raw prompt string in
+    # `session_config` (threaded in by `ClaudeSession.start/1` /
+    # `ClaudeSession.build_session_config/3`), so persistence never depends
+    # on reading it back off a temp file that might already be gone.
+    persist_composed_prompt(state, session_config)
 
-      if spawn_args != pristine_args do
-        case get_prompt_tmpfile(adapter, pristine_args.argv) do
-          path when is_binary(path) -> File.rm(path)
-          nil -> :ok
-        end
+    if spawn_args != pristine_args do
+      case get_prompt_tmpfile(adapter, pristine_args.argv) do
+        path when is_binary(path) -> File.rm(path)
+        nil -> :ok
       end
-
-      port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
-      now = DateTime.utc_now()
-
-      session =
-        session_config
-        |> Map.put(:port, port)
-        |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
-        |> Map.put(:output_lines, [])
-        |> Map.put(:line_buf, "")
-        |> Map.put(:exit_status, nil)
-        |> Map.put(:exited_at, nil)
-        |> Map.put(:started_at, now)
-        |> Map.put(:activity, "starting")
-        |> Map.put(:activity_at, now)
-        |> Map.put(:output_log, open_output_log(state))
-        |> Map.put(:run_id, state.run_id)
-
-      sessions = Map.put(state.claude_sessions, port, session)
-
-      # Mark the worker claude-driven so views can show the live activity
-      # signal (mirrored below) instead of a frozen workflow step — the
-      # claude-driven Driver never ticks the Machine. See bd-c919xj.
-      #
-      # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
-      # the worker with a nudge prompt when arb-done arrives with uncommitted
-      # work, without round-tripping through the workspace-aware Dispatch builder
-      # that does not know how to swap the prompt mid-session.
-      # bd-au3xrq: stash the coordinates the on-disk session-JSONL fallback needs.
-      # `config_dir` is the effective CLAUDE_CONFIG_DIR this spawn ran under (from
-      # the injected env, else the inherited default); `cwd` is the worktree the
-      # CLI derives its project-slug from. `session_id` lands later (init event,
-      # via sync_session_meta) — together they root
-      # `<config_dir>/projects/<slug>/<session_id>.jsonl`.
-      config_dir = effective_config_dir(port_args)
-
-      meta =
-        (state.meta || %{})
-        |> Map.put(:claude_session, true)
-        |> Map.put(:claude_spawn, pristine_args)
-        |> Map.delete(:resume_session_id)
-        |> Map.put(:config_dir, config_dir)
-        |> Map.put(:cwd, Map.get(port_args, :cd))
-
-      new_state = %State{state | claude_sessions: sessions, meta: meta}
-      new_state = sync_session_meta(new_state, port)
-
-      # Persist config_dir onto the run row now, at dispatch, so a node that dies
-      # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
-      # a Gemini/Codex run has no Claude session file to reconcile against.
-      if config_dir && new_state.run_id &&
-           Map.get(session_config, :provider) in [nil, "claude"] do
-        backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
-      end
-
-      {:reply, {:ok, port}, new_state}
-    rescue
-      e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
     end
+
+    port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
+    now = DateTime.utc_now()
+
+    session =
+      session_config
+      |> Map.put(:port, port)
+      |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
+      |> Map.put(:output_lines, [])
+      |> Map.put(:line_buf, "")
+      |> Map.put(:exit_status, nil)
+      |> Map.put(:exited_at, nil)
+      |> Map.put(:started_at, now)
+      |> Map.put(:activity, "starting")
+      |> Map.put(:activity_at, now)
+      |> Map.put(:output_log, open_output_log(state))
+      |> Map.put(:run_id, state.run_id)
+
+    sessions = Map.put(state.claude_sessions, port, session)
+
+    # Mark the worker claude-driven so views can show the live activity
+    # signal (mirrored below) instead of a frozen workflow step — the
+    # claude-driven Driver never ticks the Machine. See bd-c919xj.
+    #
+    # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
+    # the worker with a nudge prompt when arb-done arrives with uncommitted
+    # work, without round-tripping through the workspace-aware Dispatch builder
+    # that does not know how to swap the prompt mid-session.
+    # bd-au3xrq: stash the coordinates the on-disk session-JSONL fallback needs.
+    # `config_dir` is the effective CLAUDE_CONFIG_DIR this spawn ran under (from
+    # the injected env, else the inherited default); `cwd` is the worktree the
+    # CLI derives its project-slug from. `session_id` lands later (init event,
+    # via sync_session_meta) — together they root
+    # `<config_dir>/projects/<slug>/<session_id>.jsonl`.
+    config_dir = effective_config_dir(port_args)
+
+    meta =
+      (state.meta || %{})
+      |> Map.put(:claude_session, true)
+      |> Map.put(:claude_spawn, pristine_args)
+      |> Map.delete(:resume_session_id)
+      |> Map.put(:config_dir, config_dir)
+      |> Map.put(:cwd, Map.get(port_args, :cd))
+
+    new_state = %State{state | claude_sessions: sessions, meta: meta}
+    new_state = sync_session_meta(new_state, port)
+
+    # Persist config_dir onto the run row now, at dispatch, so a node that dies
+    # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
+    # a Gemini/Codex run has no Claude session file to reconcile against.
+    if config_dir && new_state.run_id &&
+         Map.get(session_config, :provider) in [nil, "claude"] do
+      backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
+    end
+
+    {:reply, {:ok, port}, new_state}
+  rescue
+    e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
   end
 
   # bd-1z7624: build the spawn argv for the first session, injecting
@@ -3031,6 +3029,14 @@ defmodule Arbiter.Worker do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
+      # credo:disable-next-line Credo.Check.Refactor.Apply
+      # `splice_prompt/2` is not a callback on Arbiter.Agents.Agent (see its
+      # @optional_callbacks) — only Claude and Codex define it, Gemini does not.
+      # The `function_exported?/3` guard above is what makes the call safe; a
+      # static `adapter.splice_prompt(...)` makes the compiler resolve `adapter`
+      # to every adapter module and emit an "undefined or private" warning for
+      # Gemini, which `mix compile --warnings-as-errors` then fails on. The
+      # dynamic dispatch is the point, not an oversight.
       case apply(adapter, :splice_prompt, [argv, [nudge]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, :no_print_slot} -> {:ok, port_args}
@@ -3506,6 +3512,8 @@ defmodule Arbiter.Worker do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
+      # credo:disable-next-line Credo.Check.Refactor.Apply
+      # Dynamic on purpose — see the note on inject_nudge_argv/3 above.
       case apply(adapter, :splice_prompt, [argv, ["--resume", session_id, prompt]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, _} = err -> err
@@ -3776,8 +3784,7 @@ defmodule Arbiter.Worker do
     text
     |> String.trim_trailing()
     |> String.split("\n")
-    |> Enum.map(&("  " <> &1))
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", &("  " <> &1))
   end
 
   defp record_commit_gate_note(%State{task_id: task_id}, _reason, _why, summary) do

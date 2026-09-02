@@ -409,8 +409,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
   def render_checks(checks) when is_list(checks) do
     checks
-    |> Enum.map(&render_check/1)
-    |> Enum.join("\n\n")
+    |> Enum.map_join("\n\n", &render_check/1)
   end
 
   defp render_check(%{} = check) do
@@ -429,7 +428,6 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   defp indent(text) do
     text
     |> String.split("\n")
-    |> Enum.map(&("      " <> &1))
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", &("      " <> &1))
   end
 end

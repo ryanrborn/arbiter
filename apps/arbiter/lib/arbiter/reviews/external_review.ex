@@ -879,14 +879,13 @@ defmodule Arbiter.Reviews.ExternalReview do
         list ->
           list
           |> Enum.with_index()
-          |> Enum.map(fn {c, i} ->
+          |> Enum.map_join("\n", fn {c, i} ->
             file = c[:file] || c["file"] || "?"
             line = c[:line] || c["line"]
             loc = if line, do: "#{file}:#{line}", else: file
             body = c[:body] || c["body"] || ""
             "  [#{i}] #{loc}\n      #{body}"
           end)
-          |> Enum.join("\n")
       end
 
     """

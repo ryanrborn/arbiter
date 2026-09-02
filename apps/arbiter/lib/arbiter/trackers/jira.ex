@@ -315,8 +315,7 @@ defmodule Arbiter.Trackers.Jira do
       forced =
         [:qa_notes, :deployment_notes]
         |> Enum.map(&forced_note_descriptor(cfg, &1))
-        |> Enum.reject(&is_nil/1)
-        |> Enum.reject(&MapSet.member?(existing_ids, &1.id))
+        |> Enum.reject(&(is_nil(&1) or MapSet.member?(existing_ids, &1.id)))
 
       descriptors ++ forced
     else
@@ -543,7 +542,7 @@ defmodule Arbiter.Trackers.Jira do
   defp description_to_text(_), do: ""
 
   defp adf_block_text(%{"content" => content}) when is_list(content),
-    do: content |> Enum.map(&adf_inline_text/1) |> Enum.join("")
+    do: content |> Enum.map_join("", &adf_inline_text/1)
 
   defp adf_block_text(%{"text" => text}) when is_binary(text), do: text
   defp adf_block_text(_), do: ""
@@ -551,7 +550,7 @@ defmodule Arbiter.Trackers.Jira do
   defp adf_inline_text(%{"text" => text}) when is_binary(text), do: text
 
   defp adf_inline_text(%{"content" => content}) when is_list(content),
-    do: content |> Enum.map(&adf_inline_text/1) |> Enum.join("")
+    do: content |> Enum.map_join("", &adf_inline_text/1)
 
   defp adf_inline_text(_), do: ""
 
@@ -594,7 +593,7 @@ defmodule Arbiter.Trackers.Jira do
       escaped = String.replace(title, "\"", "\\\"")
 
       jql =
-        "project = \"#{cfg.project_key}\" AND summary ~ \"#{escaped}\" " <>
+        ~s(project = "#{cfg.project_key}" AND summary ~ "#{escaped}" ) <>
           "AND statusCategory != Done ORDER BY created DESC"
 
       body = %{

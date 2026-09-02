@@ -72,12 +72,12 @@ defmodule Arbiter.Quota.GoogleQuota do
       allow_nil? false
       public? true
       constraints max_length: 64, trim?: true
-      description "\"gemini_cli\" | \"antigravity\"."
+      description ~s("gemini_cli" | "antigravity".)
     end
 
     attribute :plan, :string do
       public? true
-      description "Plan / tier reported by loadCodeAssist (e.g. \"Free\", \"Pro\")."
+      description ~s[Plan / tier reported by loadCodeAssist (e.g. "Free", "Pro").]
     end
 
     attribute :message, :string do

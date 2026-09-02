@@ -278,7 +278,7 @@ defmodule Arbiter.Tasks.Workspace do
       public? true
       allow_nil? true
 
-      description "Stable label of the actor who last wrote this workspace (e.g. \"coordinator\", \"cli\")."
+      description ~s[Stable label of the actor who last wrote this workspace (e.g. "coordinator", "cli").]
     end
 
     create_timestamp :created_at

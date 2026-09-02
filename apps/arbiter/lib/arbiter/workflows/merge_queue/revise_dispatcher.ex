@@ -169,8 +169,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
 
   defp render_items(feedback) when is_list(feedback) do
     feedback
-    |> Enum.map(&render_item/1)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", &render_item/1)
   end
 
   defp render_item(%{kind: :review} = item) do

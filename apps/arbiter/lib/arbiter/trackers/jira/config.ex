@@ -470,7 +470,7 @@ defmodule Arbiter.Trackers.Jira.Config do
       nil
     else
       case get_in(raw, ["difficulty", "buckets"]) do
-        buckets when is_list(buckets) and length(buckets) > 0 ->
+        buckets when is_list(buckets) and buckets != [] ->
           parse_buckets(buckets) || @default_difficulty_buckets
 
         _ ->

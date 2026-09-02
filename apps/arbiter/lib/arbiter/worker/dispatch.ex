@@ -665,9 +665,8 @@ defmodule Arbiter.Worker.Dispatch do
               "live worker and avoid orphaning it on a closed task (bd-cgmidt)"
           )
 
-          with {:ok, reopened} <- reopen_task(task),
-               {:ok, in_progress} <- transition_to_in_progress(reopened, []) do
-            {:ok, in_progress}
+          with {:ok, reopened} <- reopen_task(task) do
+            transition_to_in_progress(reopened, [])
           end
       end
     end

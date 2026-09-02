@@ -901,8 +901,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # check runner can feed to its reviewer.
   defp changes_to_diff(%{"changes" => changes}) when is_list(changes) do
     changes
-    |> Enum.map(&render_change/1)
-    |> Enum.join("")
+    |> Enum.map_join("", &render_change/1)
   end
 
   defp changes_to_diff(_), do: ""

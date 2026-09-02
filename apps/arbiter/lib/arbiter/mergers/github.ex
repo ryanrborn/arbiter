@@ -474,8 +474,7 @@ defmodule Arbiter.Mergers.Github do
          |> handle_json() do
       {:ok, %{"workflow_runs" => runs}} when is_list(runs) ->
         runs
-        |> Enum.filter(&failed_run?/1)
-        |> Enum.filter(&matches_workflow?(&1, workflow))
+        |> Enum.filter(&(failed_run?(&1) and matches_workflow?(&1, workflow)))
         |> List.first()
         |> case do
           nil ->
@@ -826,8 +825,7 @@ defmodule Arbiter.Mergers.Github do
         body
         |> get_in(["data", "repository", "pullRequest", "reviewThreads", "nodes"])
         |> List.wrap()
-        |> Enum.reject(&is_nil/1)
-        |> Enum.reject(fn node -> Map.get(node, "isResolved") == true end)
+        |> Enum.reject(&(is_nil(&1) or Map.get(&1, "isResolved") == true))
         |> Enum.map(&normalize_review_thread/1)
 
       {:ok, threads}
@@ -1182,8 +1180,10 @@ defmodule Arbiter.Mergers.Github do
   # correctly reads as "not currently approved".
   defp latest_state_for(reviews, login) when is_list(reviews) and is_binary(login) do
     reviews
-    |> Enum.filter(&(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]))
-    |> Enum.filter(&(review_author(&1) == login))
+    |> Enum.filter(
+      &(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"] and
+          review_author(&1) == login)
+    )
     |> List.last()
     |> case do
       nil -> nil
@@ -1363,7 +1363,7 @@ defmodule Arbiter.Mergers.Github do
            status: nil,
            message:
              "GitHub merger config missing \"repo\" and no :repo_path in opts to derive it from. " <>
-               "Set workspace.config[\"merge\"][\"config\"][\"repo\"] for single-repo workspaces, " <>
+               ~s(Set workspace.config["merge"]["config"]["repo"] for single-repo workspaces, ) <>
                "or pass :repo_path so the adapter can derive owner/repo from the repo's git remote.",
            raw: nil
          }}
@@ -1562,7 +1562,7 @@ defmodule Arbiter.Mergers.Github do
 
     repo_blocks =
       repo_aliases
-      |> Enum.map(fn "r" <> j = ra ->
+      |> Enum.map_join("\n", fn "r" <> j = ra ->
         pr_blocks =
           entries
           |> Enum.filter(&(&1.ralias == ra))
@@ -1570,7 +1570,6 @@ defmodule Arbiter.Mergers.Github do
 
         "    #{ra}: repository(owner: $o#{j}, name: $n#{j}) {\n#{pr_blocks}\n    }"
       end)
-      |> Enum.join("\n")
 
     # `rateLimit { cost }` is itself free of points and makes GitHub return the
     # exact points this query billed, so a sweep's cost is observable in the logs
@@ -1740,8 +1739,7 @@ defmodule Arbiter.Mergers.Github do
     node
     |> get_in(["reviewThreads", "nodes"])
     |> List.wrap()
-    |> Enum.reject(&is_nil/1)
-    |> Enum.reject(fn n -> Map.get(n, "isResolved") == true end)
+    |> Enum.reject(&(is_nil(&1) or Map.get(&1, "isResolved") == true))
     |> Enum.map(&merge_latest_thread_comment/1)
     |> Enum.map(&normalize_review_thread/1)
   end

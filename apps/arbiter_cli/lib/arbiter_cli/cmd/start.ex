@@ -322,8 +322,8 @@ defmodule ArbiterCli.Cmd.Start do
   end
 
   @doc false
-  @spec is_umbrella_root?(String.t()) :: boolean()
-  def is_umbrella_root?(dir) do
+  @spec umbrella_root?(String.t()) :: boolean()
+  def umbrella_root?(dir) do
     (File.exists?(Path.join(dir, "mix.exs")) and File.dir?(Path.join(dir, "apps"))) or
       File.exists?(Path.join(dir, "compose.yml"))
   end
@@ -358,7 +358,7 @@ defmodule ArbiterCli.Cmd.Start do
     case File.read(path) do
       {:ok, home} when home not in ["", "\n"] ->
         expanded = home |> String.trim() |> Path.expand()
-        if is_umbrella_root?(expanded), do: expanded, else: nil
+        if umbrella_root?(expanded), do: expanded, else: nil
 
       _ ->
         nil
@@ -394,7 +394,7 @@ defmodule ArbiterCli.Cmd.Start do
     parent = Path.dirname(dir)
 
     cond do
-      is_umbrella_root?(dir) ->
+      umbrella_root?(dir) ->
         dir
 
       # Reached the filesystem root without finding an umbrella.
