@@ -24,9 +24,26 @@ defmodule Arbiter.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
-      consolidate_protocols: Mix.env() != :dev
+      consolidate_protocols: Mix.env() != :dev,
+      dialyzer: dialyzer()
     ]
   end
+
+  # Point at the umbrella-root PLT rather than this app's own build dir, so
+  # `mix dialyzer` from inside apps/arbiter reuses the single PLT the root builds
+  # instead of spending minutes constructing a near-identical third copy.
+  # See the root mix.exs `dialyzer/0` for the rationale in full.
+  defp dialyzer do
+    [
+      plt_core_path: "../../priv/plts",
+      plt_local_path: "../../priv/plts",
+      plt_add_apps: [:mix, :eex, :ex_unit],
+      ignore_warnings: "../../.dialyzer_ignore.exs",
+      list_unused_filters: true,
+      flags: [:error_handling, :unknown]
+    ]
+  end
+
 
   # Configuration for the OTP application.
   #
@@ -48,6 +65,12 @@ defmodule Arbiter.MixProject do
   defp deps do
     [
       {:sourceror, "~> 1.8", only: [:dev, :test]},
+      # Static analysis / security scanning. Also declared at the umbrella
+      # root, which owns the shared PLT config — see the root mix.exs and the
+      # `mix audit` alias there.
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
       {:meck, "~> 0.9", only: :test},
       {:ash_phoenix, "~> 2.0"},
       {:ash_paper_trail, "~> 0.5"},
