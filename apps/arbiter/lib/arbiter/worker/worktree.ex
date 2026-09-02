@@ -73,33 +73,31 @@ defmodule Arbiter.Worker.Worktree do
     path = worktree_path(branch_name)
 
     result =
-      cond do
-        File.dir?(path) ->
-          case current_branch(path) do
-            {:ok, ^branch_name} ->
-              {:ok, path}
-
-            {:ok, _other} ->
-              {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
-
-            {:error, _} = err ->
-              err
-          end
-
-        true ->
-          File.mkdir_p!(Path.dirname(path))
-
-          with :ok <- ensure_origin_remote(repo_path),
-               :ok <- fetch_origin_branch(repo_path, base_branch),
-               :ok <- ensure_origin_ref(repo_path, base_branch),
-               {:ok, _stdout} <-
-                 run_git(
-                   ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
-                   cd: repo_path
-                 ) do
-            :ok = seed_compiled_deps(repo_path, path)
+      if File.dir?(path) do
+        case current_branch(path) do
+          {:ok, ^branch_name} ->
             {:ok, path}
-          end
+
+          {:ok, _other} ->
+            {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
+
+          {:error, _} = err ->
+            err
+        end
+      else
+        File.mkdir_p!(Path.dirname(path))
+
+        with :ok <- ensure_origin_remote(repo_path),
+             :ok <- fetch_origin_branch(repo_path, base_branch),
+             :ok <- ensure_origin_ref(repo_path, base_branch),
+             {:ok, _stdout} <-
+               run_git(
+                 ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
+                 cd: repo_path
+               ) do
+          :ok = seed_compiled_deps(repo_path, path)
+          {:ok, path}
+        end
       end
 
     with {:ok, wt_path} <- result do
@@ -389,30 +387,28 @@ defmodule Arbiter.Worker.Worktree do
       when is_binary(repo_path) and is_binary(branch_name) do
     path = worktree_path(branch_name)
 
-    cond do
-      File.dir?(path) ->
-        case current_branch(path) do
-          {:ok, ^branch_name} ->
-            {:ok, path}
+    if File.dir?(path) do
+      case current_branch(path) do
+        {:ok, ^branch_name} ->
+          {:ok, path}
 
-          {:ok, _other} ->
-            {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
+        {:ok, _other} ->
+          {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
 
-          {:error, _} = err ->
-            err
-        end
+        {:error, _} = err ->
+          err
+      end
+    else
+      File.mkdir_p!(Path.dirname(path))
 
-      true ->
-        File.mkdir_p!(Path.dirname(path))
+      case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
+        {:ok, _stdout} ->
+          :ok = seed_compiled_deps(repo_path, path)
+          {:ok, path}
 
-        case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
-          {:ok, _stdout} ->
-            :ok = seed_compiled_deps(repo_path, path)
-            {:ok, path}
-
-          {:error, _} = err ->
-            err
-        end
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -1112,15 +1108,13 @@ defmodule Arbiter.Worker.Worktree do
   defp run_git(args, opts) do
     cd = Keyword.get(opts, :cd)
 
-    cond do
-      is_binary(cd) and not File.dir?(cd) ->
-        {:error, {:git_failed, "cwd does not exist: #{cd}"}}
-
-      true ->
-        case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
-          {output, 0} -> {:ok, output}
-          {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
-        end
+    if is_binary(cd) and not File.dir?(cd) do
+      {:error, {:git_failed, "cwd does not exist: #{cd}"}}
+    else
+      case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
+        {output, 0} -> {:ok, output}
+        {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
+      end
     end
   rescue
     e in ErlangError ->

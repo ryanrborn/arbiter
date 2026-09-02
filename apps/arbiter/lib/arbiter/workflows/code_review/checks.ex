@@ -83,19 +83,17 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   """
   @spec run(String.t(), map()) :: {:ok, [finding()]} | {:error, term()}
   def run(diff, state) when is_binary(diff) do
-    cond do
-      String.trim(diff) == "" ->
-        {:ok, []}
+    if String.trim(diff) == "" do
+      {:ok, []}
+    else
+      {filtered_diff, elided_paths} = filter_diff(diff, state)
 
-      true ->
-        {filtered_diff, elided_paths} = filter_diff(diff, state)
-
-        invoke_reviewer(build_prompt(filtered_diff, elided_paths, state), state)
-        |> case do
-          {:ok, raw} -> {:ok, parse_findings(raw)}
-          {:ok, raw, usage} -> {:ok, parse_findings(raw), usage}
-          {:error, _} = err -> err
-        end
+      invoke_reviewer(build_prompt(filtered_diff, elided_paths, state), state)
+      |> case do
+        {:ok, raw} -> {:ok, parse_findings(raw)}
+        {:ok, raw, usage} -> {:ok, parse_findings(raw), usage}
+        {:error, _} = err -> err
+      end
     end
   end
 

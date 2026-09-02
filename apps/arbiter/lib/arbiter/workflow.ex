@@ -228,22 +228,20 @@ defmodule Arbiter.Workflow do
       completed = Map.get(acc_state, :completed_steps, [])
       missing = Enum.reject(definition.needs, &(&1 in completed))
 
-      cond do
-        missing != [] ->
-          {:halt, {:error, {step, {:unmet_needs, missing}}}}
+      if missing != [] do
+        {:halt, {:error, {step, {:unmet_needs, missing}}}}
+      else
+        case workflow_module.run_step(step, acc_state) do
+          {:ok, new_state} when is_map(new_state) ->
+            new_completed = Map.get(new_state, :completed_steps, completed) ++ [step]
+            {:cont, {:ok, Map.put(new_state, :completed_steps, new_completed)}}
 
-        true ->
-          case workflow_module.run_step(step, acc_state) do
-            {:ok, new_state} when is_map(new_state) ->
-              new_completed = Map.get(new_state, :completed_steps, completed) ++ [step]
-              {:cont, {:ok, Map.put(new_state, :completed_steps, new_completed)}}
+          {:error, reason} ->
+            {:halt, {:error, {step, reason}}}
 
-            {:error, reason} ->
-              {:halt, {:error, {step, reason}}}
-
-            other ->
-              {:halt, {:error, {step, {:bad_return, other}}}}
-          end
+          other ->
+            {:halt, {:error, {step, {:bad_return, other}}}}
+        end
       end
     end)
   end

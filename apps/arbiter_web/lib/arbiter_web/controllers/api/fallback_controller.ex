@@ -27,22 +27,20 @@ defmodule ArbiterWeb.Api.FallbackController do
   use ArbiterWeb, :controller
 
   def call(conn, {:error, %Ash.Error.Invalid{} = err}) do
-    cond do
-      contains_not_found?(err) ->
-        conn
-        |> put_status(:not_found)
-        |> json(%{error: %{type: "not_found", message: "resource not found", details: %{}}})
-
-      true ->
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{
-          error: %{
-            type: "validation_error",
-            message: "validation failed",
-            details: ash_invalid_details(err)
-          }
-        })
+    if contains_not_found?(err) do
+      conn
+      |> put_status(:not_found)
+      |> json(%{error: %{type: "not_found", message: "resource not found", details: %{}}})
+    else
+      conn
+      |> put_status(:unprocessable_entity)
+      |> json(%{
+        error: %{
+          type: "validation_error",
+          message: "validation failed",
+          details: ash_invalid_details(err)
+        }
+      })
     end
   end
 

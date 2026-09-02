@@ -810,22 +810,20 @@ defmodule Arbiter.Reviews.ExternalReview do
   end
 
   defp report_only_mode?(opts, prepared) do
-    cond do
-      Map.get(opts, :report_only) == true ->
-        true
+    if Map.get(opts, :report_only) == true do
+      true
+    else
+      case ReviewAutomation.normalize(Map.get(opts, :automation)) do
+        :report_only ->
+          true
 
-      true ->
-        case ReviewAutomation.normalize(Map.get(opts, :automation)) do
-          :report_only ->
-            true
+        mode when mode in [:auto, :flag, :off] ->
+          false
 
-          mode when mode in [:auto, :flag, :off] ->
-            false
-
-          nil ->
-            config = workspace_config(prepared.workspace)
-            ReviewAutomation.resolve(config, nil, Map.get(prepared, :repo_name)) == :report_only
-        end
+        nil ->
+          config = workspace_config(prepared.workspace)
+          ReviewAutomation.resolve(config, nil, Map.get(prepared, :repo_name)) == :report_only
+      end
     end
   end
 
@@ -1604,9 +1602,10 @@ defmodule Arbiter.Reviews.ExternalReview do
     model = Map.get(usage, :model)
 
     task_id =
-      cond do
-        record && record.id -> "ext:#{record.id}"
-        true -> "ext:#{String.slice(prepared.mr_ref, 0, 250)}"
+      if record && record.id do
+        "ext:#{record.id}"
+      else
+        "ext:#{String.slice(prepared.mr_ref, 0, 250)}"
       end
 
     attrs = %{

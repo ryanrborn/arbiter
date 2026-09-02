@@ -322,49 +322,47 @@ defmodule Arbiter.Workflows.Machine do
     definition = mod.step_definition(step)
     missing = Enum.reject(definition.needs, &(&1 in data.completed_steps))
 
-    cond do
-      missing != [] ->
-        {:keep_state, data, [{:reply, from, {:error, {:unmet_needs, missing}}}]}
+    if missing != [] do
+      {:keep_state, data, [{:reply, from, {:error, {:unmet_needs, missing}}}]}
+    else
+      case safe_run_step(mod, step, data.state) do
+        {:ok, new_state} when is_map(new_state) ->
+          new_completed = data.completed_steps ++ [step]
+          next_step = next_step(mod.steps(), step)
 
-      true ->
-        case safe_run_step(mod, step, data.state) do
-          {:ok, new_state} when is_map(new_state) ->
-            new_completed = data.completed_steps ++ [step]
-            next_step = next_step(mod.steps(), step)
+          new_data = %Data{
+            data
+            | state: new_state,
+              completed_steps: new_completed,
+              current_step: next_step
+          }
 
-            new_data = %Data{
-              data
-              | state: new_state,
-                completed_steps: new_completed,
-                current_step: next_step
-            }
+          case persist(new_data, advance_status(next_step), nil) do
+            :ok ->
+              reply =
+                case next_step do
+                  @done -> {:ok, :completed}
+                  s -> {:ok, s}
+                end
 
-            case persist(new_data, advance_status(next_step), nil) do
-              :ok ->
-                reply =
-                  case next_step do
-                    @done -> {:ok, :completed}
-                    s -> {:ok, s}
-                  end
+              next_fsm_state =
+                case next_step do
+                  @done -> :completed
+                  _ -> :running
+                end
 
-                next_fsm_state =
-                  case next_step do
-                    @done -> :completed
-                    _ -> :running
-                  end
+              {:next_state, next_fsm_state, new_data, [{:reply, from, reply}]}
 
-                {:next_state, next_fsm_state, new_data, [{:reply, from, reply}]}
+            {:error, err} ->
+              {:keep_state, data, [{:reply, from, {:error, err}}]}
+          end
 
-              {:error, err} ->
-                {:keep_state, data, [{:reply, from, {:error, err}}]}
-            end
+        {:error, reason} ->
+          fail_with(from, data, reason)
 
-          {:error, reason} ->
-            fail_with(from, data, reason)
-
-          other ->
-            fail_with(from, data, {:bad_return, other})
-        end
+        other ->
+          fail_with(from, data, {:bad_return, other})
+      end
     end
   end
 

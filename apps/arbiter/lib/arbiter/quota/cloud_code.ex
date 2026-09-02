@@ -185,24 +185,22 @@ defmodule Arbiter.Quota.CloudCode do
   defp fetch_gemini(token, opts) do
     {project_id, plan} = resolve_gemini_project(token, opts)
 
-    cond do
-      is_nil(project_id) ->
-        snapshot("gemini-cli", plan, [], project_missing_message("Gemini CLI"))
+    if is_nil(project_id) do
+      snapshot("gemini-cli", plan, [], project_missing_message("Gemini CLI"))
+    else
+      case post(@gemini_quota_url, bearer_headers(token), %{project: project_id}, opts) do
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          snapshot("gemini-cli", plan, gemini_models(body), nil)
 
-      true ->
-        case post(@gemini_quota_url, bearer_headers(token), %{project: project_id}, opts) do
-          {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-            snapshot("gemini-cli", plan, gemini_models(body), nil)
+        {:ok, %Req.Response{status: 401}} ->
+          snapshot("gemini-cli", plan, [], "Gemini CLI quota auth expired; reconnect the CLI.")
 
-          {:ok, %Req.Response{status: 401}} ->
-            snapshot("gemini-cli", plan, [], "Gemini CLI quota auth expired; reconnect the CLI.")
+        {:ok, %Req.Response{status: status}} ->
+          snapshot("gemini-cli", plan, [], "Gemini CLI quota error (#{status}).")
 
-          {:ok, %Req.Response{status: status}} ->
-            snapshot("gemini-cli", plan, [], "Gemini CLI quota error (#{status}).")
-
-          {:error, err} ->
-            snapshot("gemini-cli", plan, [], "Gemini CLI quota error: #{transport_message(err)}")
-        end
+        {:error, err} ->
+          snapshot("gemini-cli", plan, [], "Gemini CLI quota error: #{transport_message(err)}")
+      end
     end
   end
 

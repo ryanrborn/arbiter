@@ -2385,22 +2385,13 @@ defmodule Arbiter.Worker do
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
   #     workers with no branch complete directly as before.
   defp on_claude_done(%State{meta: meta} = state) do
-    cond do
-      # bd-5lc99r: a `task` issue type is non-reviewable ops/research/spike work.
-      # It produces a findings summary in `notes`, NOT a code change — so there
-      # is no commit gate, no review gate, no PR, and no merge. The only gate is
-      # the notes gate: refuse to let `arb done` close the directive until the
-      # worker has written its findings to `notes`. Then complete directly,
-      # regardless of whether a worktree/branch exists (the worktree is optional
-      # for a task and is never integrated).
-      task_type?(meta) and not review_only?(meta) ->
-        case notes_gate(state) do
-          :ok -> complete_now(state, :claude_done)
-          {:gate, :blank} -> handle_notes_gate(state)
-        end
-
-      true ->
-        on_claude_done_reviewable(state, meta)
+    if task_type?(meta) and not review_only?(meta) do
+      case notes_gate(state) do
+        :ok -> complete_now(state, :claude_done)
+        {:gate, :blank} -> handle_notes_gate(state)
+      end
+    else
+      on_claude_done_reviewable(state, meta)
     end
   end
 
@@ -2877,18 +2868,16 @@ defmodule Arbiter.Worker do
     cap = (meta && Map.get(meta, :commit_nudge_cap)) || 1
     attempts = (meta && Map.get(meta, :commit_nudge_attempts)) || 0
 
-    cond do
-      attempts >= cap ->
-        park_commit_gate(state, reason, :cap_exhausted)
+    if attempts >= cap do
+      park_commit_gate(state, reason, :cap_exhausted)
+    else
+      case respawn_with_commit_nudge(state, reason) do
+        {:ok, new_state} ->
+          new_state
 
-      true ->
-        case respawn_with_commit_nudge(state, reason) do
-          {:ok, new_state} ->
-            new_state
-
-          {:error, why} ->
-            park_commit_gate(state, reason, {:respawn_failed, why})
-        end
+        {:error, why} ->
+          park_commit_gate(state, reason, {:respawn_failed, why})
+      end
     end
   end
 
@@ -3029,7 +3018,6 @@ defmodule Arbiter.Worker do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
-      # credo:disable-next-line Credo.Check.Refactor.Apply
       # `splice_prompt/2` is not a callback on Arbiter.Agents.Agent (see its
       # @optional_callbacks) — only Claude and Codex define it, Gemini does not.
       # The `function_exported?/3` guard above is what makes the call safe; a
@@ -3037,6 +3025,7 @@ defmodule Arbiter.Worker do
       # to every adapter module and emit an "undefined or private" warning for
       # Gemini, which `mix compile --warnings-as-errors` then fails on. The
       # dynamic dispatch is the point, not an oversight.
+      # credo:disable-next-line Credo.Check.Refactor.Apply
       case apply(adapter, :splice_prompt, [argv, [nudge]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, :no_print_slot} -> {:ok, port_args}
@@ -3152,15 +3141,13 @@ defmodule Arbiter.Worker do
     cap = notes_nudge_cap(meta)
     attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
 
-    cond do
-      attempts >= cap ->
-        park_notes_gate(state, :cap_exhausted)
-
-      true ->
-        case respawn_with_notes_nudge(state) do
-          {:ok, new_state} -> new_state
-          {:error, why} -> park_notes_gate(state, {:respawn_failed, why})
-        end
+    if attempts >= cap do
+      park_notes_gate(state, :cap_exhausted)
+    else
+      case respawn_with_notes_nudge(state) do
+        {:ok, new_state} -> new_state
+        {:error, why} -> park_notes_gate(state, {:respawn_failed, why})
+      end
     end
   end
 
@@ -3512,8 +3499,8 @@ defmodule Arbiter.Worker do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
-      # credo:disable-next-line Credo.Check.Refactor.Apply
       # Dynamic on purpose — see the note on inject_nudge_argv/3 above.
+      # credo:disable-next-line Credo.Check.Refactor.Apply
       case apply(adapter, :splice_prompt, [argv, ["--resume", session_id, prompt]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, _} = err -> err

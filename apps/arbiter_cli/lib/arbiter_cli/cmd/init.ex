@@ -229,14 +229,12 @@ defmodule ArbiterCli.Cmd.Init do
   defp scaffold_file(path, contents, force) do
     exists = File.exists?(path)
 
-    cond do
-      exists and not force ->
-        :skipped
-
-      true ->
-        File.mkdir_p!(Path.dirname(path))
-        File.write!(path, contents)
-        if exists, do: :overwritten, else: :created
+    if exists and not force do
+      :skipped
+    else
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, contents)
+      if exists, do: :overwritten, else: :created
     end
   end
 
