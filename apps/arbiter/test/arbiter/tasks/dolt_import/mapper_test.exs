@@ -175,4 +175,25 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
       assert Mapper.derive_prefix([]) == "ar"
     end
   end
+
+  describe "row -> record" do
+    @now DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    @v7 ~r/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+    test "dependency_record/3 assigns a hyphenated v7 string id" do
+      rec =
+        Mapper.dependency_record(
+          %{"issue_id" => "hq-1", "depends_on_id" => "hq-2"},
+          :blocks,
+          @now
+        )
+
+      assert rec.id =~ @v7
+    end
+
+    test "issue_record/3 keeps workspace_id as the hyphenated string" do
+      ws_id = Ash.UUIDv7.generate()
+      assert Mapper.issue_record(%{"id" => "hq-1"}, ws_id, @now).workspace_id == ws_id
+    end
+  end
 end
