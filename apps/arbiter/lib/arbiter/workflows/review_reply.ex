@@ -218,6 +218,11 @@ defmodule Arbiter.Workflows.ReviewReply do
     Application.get_env(:arbiter, :review_reply_composer) || (&default_compose/2)
   end
 
+  # `System.cmd/3` spawns the executable directly (`:spawn_executable`) — no
+  # shell, so there is no metacharacter injection to have. `path` is the
+  # Claude CLI location resolved from Arbiter's own agent config, not from a
+  # request or a task field.
+  # sobelow_skip ["CI.System"]
   defp default_compose(thread_context, _state) do
     case System.find_executable("claude") do
       nil ->

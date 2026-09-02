@@ -324,14 +324,27 @@ defmodule Arbiter.Loop.Corpus do
 
   # ---- helpers ------------------------------------------------------------
 
+  # As in Loop.Canary.Metrics: the interpolated text is a generated `?N`
+  # placeholder list, never a value. Values travel in `params`.
+  # sobelow_skip ["SQL.Query"]
   defp query(sql, params) do
     %{columns: cols, rows: rows} = Repo.query!(sql, params)
     Enum.map(rows, fn row -> cols |> Enum.zip(row) |> Map.new() end)
   end
 
+  # Column values out of Arbiter's own tables — statuses and worker types that
+  # Ash dumped from atoms it defined. `String.to_existing_atom/1` rather than
+  # `String.to_atom/1` (sobelow DOS.StringToAtom): a row carrying an
+  # unrecognised string is corrupt data, and minting a permanent atom for it
+  # is the worse of the two failure modes.
   defp to_atom(nil), do: nil
-  defp to_atom(s) when is_binary(s), do: String.to_atom(s)
   defp to_atom(a) when is_atom(a), do: a
+
+  defp to_atom(s) when is_binary(s) do
+    String.to_existing_atom(s)
+  rescue
+    ArgumentError -> nil
+  end
 
   defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 

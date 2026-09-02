@@ -416,6 +416,11 @@ defmodule ArbiterCli.Cmd.Start do
   # External command execution. Defaults to System.cmd/3; tests stub it to
   # record invocations and flip a fake "now reachable" signal without shelling
   # out. Returns `{output_binary, exit_status}`.
+  # `cmd` is a literal at every call site ("mix", "git", "systemctl"); the
+  # variable exists only so tests can swap the runner through the process
+  # dictionary. `System.cmd/3` spawns the executable directly, without a
+  # shell, so the argument list cannot be reinterpreted as syntax.
+  # sobelow_skip ["CI.System"]
   def run_cmd(cmd, args, opts) do
     case Process.get(:bd2_cmd_runner) do
       fun when is_function(fun, 3) -> fun.(cmd, args, opts)

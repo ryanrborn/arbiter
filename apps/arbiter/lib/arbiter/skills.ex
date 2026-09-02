@@ -375,6 +375,12 @@ defmodule Arbiter.Skills do
   # Atomic upsert-increment: a single SQL statement, so two concurrent
   # dispatches incrementing the same skill never race each other the way a
   # separate read + write would.
+  # `counter_col`/`ts_col` are interpolated because SQLite will not accept a
+  # bound parameter in a column position. They are not free text:
+  # `timestamp_for/1` has exactly three clauses, so any `counter` other than
+  # :materialize_count / :invoke_count / :patch_count raises FunctionClauseError
+  # before a statement is ever built. Every actual value is bound (?1..?7).
+  # sobelow_skip ["SQL.Query"]
   defp atomic_increment!(skill_id, counter) do
     id = Ash.UUIDv7.generate()
     now = DateTime.utc_now()

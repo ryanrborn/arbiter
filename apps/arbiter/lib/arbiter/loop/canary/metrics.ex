@@ -187,6 +187,10 @@ defmodule Arbiter.Loop.Canary.Metrics do
     end)
   end
 
+  # The only interpolation reaching this helper is the `?1, ?2, …` placeholder
+  # list `in_chunks/2` builds from `1..length(chunk)` — integers this module
+  # generated. Every value is a bound parameter in `params`.
+  # sobelow_skip ["SQL.Query"]
   defp query(sql, params) do
     %{columns: cols, rows: rows} = Repo.query!(sql, params)
     Enum.map(rows, fn row -> cols |> Enum.zip(row) |> Map.new() end)

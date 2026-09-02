@@ -1048,13 +1048,18 @@ defmodule Arbiter.Trackers.Jira do
   defp translate_fields(cfg, fields_map) do
     fields_map
     |> Enum.reduce(%{}, fn {key, value}, acc ->
-      atom_key = if is_atom(key), do: key, else: String.to_atom(to_string(key))
+      # `String.to_existing_atom/1` (sobelow DOS.StringToAtom). A string key
+      # with no existing atom cannot be in `cfg.field_ids` either — that map
+      # is keyed by atoms Arbiter's own code defined — so it would have
+      # fallen through to the `customfield_` branch regardless. `nil` here
+      # takes the same path, without minting a permanent atom first.
+      atom_key = if is_atom(key), do: key, else: existing_atom(to_string(key))
 
-      case Map.fetch(cfg.field_ids, atom_key) do
+      case atom_key && Map.fetch(cfg.field_ids, atom_key) do
         {:ok, jira_id} ->
           Map.put(acc, jira_id, encode_value(atom_key, value))
 
-        :error ->
+        _ ->
           # Allow callers to pass raw Jira field IDs (e.g. "customfield_10999")
           # through unchanged for one-off needs.
           if is_binary(key) and String.starts_with?(key, "customfield_") do
@@ -1064,6 +1069,12 @@ defmodule Arbiter.Trackers.Jira do
           end
       end
     end)
+  end
+
+  defp existing_atom(string) do
+    String.to_existing_atom(string)
+  rescue
+    ArgumentError -> nil
   end
 
   defp encode_value(atom_key, value) when atom_key in @markdown_fields and is_binary(value) do

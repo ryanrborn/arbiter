@@ -1,13 +1,50 @@
 defmodule ArbiterWeb.Router do
   use ArbiterWeb, :router
 
+  # Content-Security-Policy for the dashboard (sobelow Config.CSP).
+  #
+  # The board renders content Arbiter did not author — worker transcripts,
+  # PR and review bodies, tracker issue text. HEEx escapes it, but a CSP is
+  # the layer that still holds if something ever renders raw: it stops an
+  # injected tag from loading or phoning home to an origin that is not ours.
+  #
+  # Directive by directive, and why each is what it is:
+  #
+  #   * `script-src 'self'` with no `'unsafe-inline'`. The generator's inline
+  #     theme <script> was moved to assets/js/theme.js precisely so this could
+  #     stay strict — an inline allowance here would give back most of what
+  #     the policy is for.
+  #   * `style-src` keeps `'unsafe-inline'`: LiveView's JS commands
+  #     (`JS.show/1`, `JS.transition/1`) work by writing inline `style`
+  #     attributes, and daisyUI theme variables are set the same way. Without
+  #     it every transition in the UI silently stops.
+  #   * `fonts.googleapis.com` / `fonts.gstatic.com`: assets/css/app.css
+  #     `@import`s Geist from Google Fonts and the browser fetches the woff2
+  #     from gstatic. Drop both entries the day those get self-hosted.
+  #   * `connect-src` names `ws:`/`wss:` explicitly rather than relying on
+  #     `'self'` covering the LiveView socket — browsers disagree about that,
+  #     and getting it wrong takes the whole dashboard offline.
+  #   * `frame-ancestors 'none'` (clickjacking), `object-src 'none'`,
+  #     `base-uri 'self'` (stops an injected <base> re-pointing every
+  #     relative URL), `form-action 'self'`.
+  @csp "default-src 'self'; " <>
+         "script-src 'self'; " <>
+         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " <>
+         "font-src 'self' data: https://fonts.gstatic.com; " <>
+         "img-src 'self' data: blob:; " <>
+         "connect-src 'self' ws: wss:; " <>
+         "frame-ancestors 'none'; " <>
+         "base-uri 'self'; " <>
+         "object-src 'none'; " <>
+         "form-action 'self'"
+
   pipeline :browser do
     plug(:accepts, ["html"])
     plug(:fetch_session)
     plug(:fetch_live_flash)
     plug(:put_root_layout, html: {ArbiterWeb.Layouts, :root})
     plug(:protect_from_forgery)
-    plug(:put_secure_browser_headers)
+    plug(:put_secure_browser_headers, %{"content-security-policy" => @csp})
   end
 
   pipeline :api do

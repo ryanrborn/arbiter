@@ -354,10 +354,7 @@ defmodule Arbiter.Trackers.Jira.Config do
       end)
 
     # Allow workspaces to map extra lifecycle events beyond the defaults.
-    extras =
-      for {k, v} <- user, is_binary(k), is_binary(v), into: %{} do
-        {String.to_atom(k), v}
-      end
+    extras = user_extras(user)
 
     Map.merge(base, extras)
   end
@@ -395,10 +392,7 @@ defmodule Arbiter.Trackers.Jira.Config do
       end)
 
     # Allow workspace to define extra fields beyond the defaults.
-    extras =
-      for {k, v} <- user, is_binary(k), is_binary(v), into: %{} do
-        {String.to_atom(k), v}
-      end
+    extras = user_extras(user)
 
     Map.merge(base, extras)
   end
@@ -494,5 +488,31 @@ defmodule Arbiter.Trackers.Jira.Config do
       [] -> nil
       sorted -> sorted
     end
+  end
+
+  # Workspace config is operator-writable over the API, and atoms are never
+  # garbage collected — `String.to_atom/1` on its keys is an unbounded,
+  # permanent leak into a VM-wide table (sobelow DOS.StringToAtom).
+  #
+  # `String.to_existing_atom/1` costs nothing here: every consumer of the
+  # merged maps looks a key up with an atom that Arbiter's own code wrote
+  # (`Jira.translate_fields/2` derives its key from the caller's field map;
+  # status lookups use literal lifecycle atoms), so an extra whose atom does
+  # not already exist could never have matched anything. Unknown keys are
+  # dropped rather than minted.
+  defp user_extras(user) do
+    for {k, v} <- user, is_binary(k), is_binary(v), reduce: %{} do
+      acc ->
+        case existing_atom(k) do
+          nil -> acc
+          atom -> Map.put(acc, atom, v)
+        end
+    end
+  end
+
+  defp existing_atom(string) do
+    String.to_existing_atom(string)
+  rescue
+    ArgumentError -> nil
   end
 end

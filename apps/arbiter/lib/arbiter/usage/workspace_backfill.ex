@@ -39,6 +39,11 @@ defmodule Arbiter.Usage.WorkspaceBackfill do
   @spec run() :: [report()]
   def run, do: Enum.map(@tables, &backfill_table/1)
 
+  # `table` is interpolated as an identifier (SQLite takes no parameter in a
+  # table position) but is not input: it comes from `@tables`, a compile-time
+  # `~w(usage_events worker_runs)`. `run/0` is the only caller and it maps
+  # over that literal list.
+  # sobelow_skip ["SQL.Query"]
   defp backfill_table(table) do
     before_count = null_count(table)
 
@@ -63,6 +68,8 @@ defmodule Arbiter.Usage.WorkspaceBackfill do
     %{table: table, before: before_count, backfilled: updated, unresolved: after_count}
   end
 
+  # Same `@tables` compile-time constant as `backfill_table/1` above.
+  # sobelow_skip ["SQL.Query"]
   defp null_count(table) do
     %{rows: [[count]]} =
       Repo.query!("SELECT COUNT(*) FROM #{table} WHERE workspace_id IS NULL", [])

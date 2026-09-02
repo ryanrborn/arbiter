@@ -1,0 +1,32 @@
+# Sobelow configuration for the `arbiter_cli` escript.
+[
+  verbose: false,
+  private: false,
+  skip: true,
+  # Not a Phoenix app — no router to find, and saying so keeps the scan
+  # from warning about its absence on every run.
+  router: :none,
+  exit: :low,
+  format: "txt",
+  out: nil,
+  threshold: :low,
+
+  # Config.HTTPS — "HTTPS Not Enabled", 1 finding, high confidence.
+  #
+  # A false positive by category. This app is a `mix escript` CLI, not a
+  # Phoenix app: it has no Endpoint, serves no traffic, and terminates no
+  # TLS. Its config/ holds Logger settings and nothing else (see
+  # config/runtime.exs, which says so explicitly). The check is looking for
+  # `force_ssl` on an endpoint that does not exist. The endpoint that does
+  # exist lives in apps/arbiter_web, where this check is left enabled.
+  #
+  # Traversal.FileModule — 54 findings.
+  #
+  # Same call as apps/arbiter/.sobelow-conf: the CLI's whole purpose is
+  # touching the operator's filesystem (install the escript, provision
+  # worktrees, read config), it takes its paths from that operator's own
+  # argv and config, and it has no network-facing input at all.
+  ignore: ["Config.HTTPS", "Traversal.FileModule"],
+  ignore_files: [],
+  version: false
+]

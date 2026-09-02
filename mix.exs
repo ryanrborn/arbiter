@@ -133,7 +133,12 @@ defmodule Arbiter.Umbrella.MixProject do
         "format --check-formatted",
         "compile --warnings-as-errors",
         "credo --strict",
-        "sobelow --config",
+        # Sobelow refuses to scan an umbrella root ("each application should
+        # be scanned separately"), so it runs once per app against that app's
+        # own .sobelow-conf. `cmd` shells out rather than invoking the Mix
+        # task three times, because Mix runs a given task once per session and
+        # the 2nd and 3rd invocations would silently no-op.
+        "cmd mix sobelow --config",
         "dialyzer"
       ]
     ]
