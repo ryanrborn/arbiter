@@ -1005,7 +1005,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "abnormal exit before DONE/result still flushes buffered agy text (bd-2fzwlc round 2)" do
-      {pid, task_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("agy-sj-exit-flush")
 
       # agy emits its whole response with no interior newlines until the

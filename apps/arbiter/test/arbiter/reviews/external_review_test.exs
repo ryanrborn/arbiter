@@ -2563,7 +2563,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       # Subscribe to async events so we can wait for completion
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
 
-      assert {:ok, ack} =
+      assert {:ok, _ack} =
                ExternalReview.dispatch(
                  pr: "octo/widget#42",
                  workspace: ws.name,

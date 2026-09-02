@@ -25,6 +25,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def link_for(_), do: ""
     @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
     def post_inline_comment(_, _, _), do: {:ok, %{}}
@@ -49,6 +53,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
@@ -75,6 +83,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def link_for(_), do: ""
     @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
     def post_inline_comment(_, _, _), do: {:ok, %{}}
@@ -99,6 +111,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff("#42", _opts), do: {:ok, "diff --git a/x b/x\n+hi\n"}
     def get_diff(_, _), do: {:ok, ""}
@@ -125,6 +141,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff(_, _), do: {:error, :transport_down}
     @impl true
@@ -153,6 +173,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def link_for(_), do: ""
     @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
     def get_diff(_, _), do: raise("get_diff must not be called when a checkout is present")
     @impl true
     def post_inline_comment(_, _, _), do: {:ok, %{}}
@@ -177,6 +201,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
@@ -207,6 +235,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def link_for(_), do: ""
     @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
     def post_inline_comment(_, _, _), do: {:ok, %{path: "/tmp/reviews/x.md"}}
@@ -231,6 +263,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
@@ -261,10 +297,14 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def link_for(_), do: ""
     @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
     def get_diff(_, _), do: {:ok, ""}
 
     @impl true
-    def post_inline_comment(mr_ref, %{file: "boom.ex"} = _finding, _opts) do
+    def post_inline_comment(_mr_ref, %{file: "boom.ex"} = _finding, _opts) do
       {:error, :forbidden}
     end
 
@@ -297,6 +337,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
@@ -331,6 +375,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true
@@ -367,6 +415,10 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def request_review(_, _), do: :ok
     @impl true
     def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
     @impl true
     def get_diff(_, _), do: {:ok, ""}
     @impl true

@@ -3,7 +3,6 @@ defmodule Arbiter.Worker.DispatchTest do
 
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
-  alias Arbiter.Usage.Event
   alias Arbiter.Worker
   alias Arbiter.Worker.{BranchNamer, Dispatch, Worktree}
   alias Arbiter.Workers.Run

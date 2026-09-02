@@ -195,14 +195,22 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
              end)
     end
 
-    test "the parent LiveView no longer implements the section events", %{conn: conn} do
-      ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+    test "the parent LiveView no longer implements the section events" do
+      # Called in-process rather than pushed at a mounted view. `render_click`
+      # against the LiveView process crashes it, and `catch_exit` swallows that
+      # crash without asserting anything — a shell that quietly grew a clause
+      # for one of these events would have kept passing, and the intentional
+      # crash showed up in every test run as a FunctionClauseError with no
+      # failing test to explain it. `assert_raise` fails the moment any
+      # component-owned event finds a clause on the shell, and the direct call
+      # keeps the LiveView process (and the log) out of it.
+      socket = %Phoenix.LiveView.Socket{}
 
-      # Routed straight at the LiveView (no phx-target), a section event has no
-      # matching clause and takes the view down.
-      Process.flag(:trap_exit, true)
-      catch_exit(render_click(view, "rm_order", %{"index" => "0"}))
+      for event <- @component_events do
+        assert_raise FunctionClauseError, fn ->
+          ArbiterWeb.WorkspaceDetailLive.handle_event(event, %{"index" => "0"}, socket)
+        end
+      end
     end
   end
 
