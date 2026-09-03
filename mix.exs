@@ -40,6 +40,12 @@ defmodule Arbiter.Umbrella.MixProject do
   #
   # The canonical invocation is `mix dialyzer` from the umbrella root:
   # dialyxir walks every child app's ebin, so one run covers all three.
+  # Running it from inside a child app works and reuses the same PLT
+  # (dialyxir even refuses to build one there — "In an Umbrella child, not
+  # checking PLT..."), but it only analyses that app, so the other apps'
+  # entries in .dialyzer_ignore.exs match nothing and `list_unused_filters`
+  # reports them as unnecessary skips. That is an artifact of the narrower
+  # scope, not a stale baseline — `mix audit` and CI both run from the root.
   def dialyzer do
     [
       plt_core_path: "priv/plts",
