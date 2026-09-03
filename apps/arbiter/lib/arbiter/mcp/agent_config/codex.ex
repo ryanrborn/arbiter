@@ -36,10 +36,8 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
   def write_mcp_config(worktree, opts) when is_binary(worktree) do
     dir = Path.join(worktree, @dirname)
 
-    with :ok <- File.mkdir_p(dir),
-         toml = config_toml(opts),
-         :ok <- File.write(Path.join(dir, @filename), toml) do
-      :ok
+    with :ok <- File.mkdir_p(dir) do
+      File.write(Path.join(dir, @filename), config_toml(opts))
     end
   end
 

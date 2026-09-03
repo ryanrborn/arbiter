@@ -33,9 +33,9 @@ defmodule Arbiter.Workers.Reconciler do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.Message
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
@@ -231,8 +231,7 @@ defmodule Arbiter.Workers.Reconciler do
       Issue
       |> Ash.Query.filter(status == :in_progress and is_nil(pr_ref))
       |> Ash.read!()
-      |> Enum.reject(&live_worker_for_issue?/1)
-      |> Enum.reject(&review_only?/1)
+      |> Enum.reject(&(live_worker_for_issue?(&1) or review_only?(&1)))
 
     {resumed, escalated} =
       Enum.reduce(stuck, {0, 0}, fn issue, {res, esc} ->

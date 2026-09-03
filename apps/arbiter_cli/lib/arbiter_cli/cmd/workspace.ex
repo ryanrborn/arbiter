@@ -49,8 +49,8 @@ defmodule ArbiterCli.Cmd.Workspace do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.Cmd.Workspace.{Secrets, StandingOrders}
   alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.Cmd.Workspace.{Secrets, StandingOrders}
 
   # Mirrors Arbiter.Tasks.Workspace.valid_tracker_types/0 and
   # valid_merger_strategies/0 for friendly client-side errors on `create`. The
@@ -69,6 +69,10 @@ defmodule ArbiterCli.Cmd.Workspace do
     merger_strategy: :string
   ]
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     case argv do
       ["list" | rest] ->
@@ -140,6 +144,10 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   # ----- create ----------------------------------------------------------
 
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp create(argv) do
     {opts, rest, mode} = ArgParser.parse(argv, switches: @switches)
 

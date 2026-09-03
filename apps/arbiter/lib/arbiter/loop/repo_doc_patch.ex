@@ -164,8 +164,10 @@ defmodule Arbiter.Loop.RepoDocPatch do
 
   defp render_entries(entries) do
     entries
-    |> Enum.map(&"#{@entry_prefix}#{&1.id} -->#{if &1.text == "", do: "", else: " " <> &1.text}")
-    |> Enum.join("\n")
+    |> Enum.map_join(
+      "\n",
+      &"#{@entry_prefix}#{&1.id} -->#{if &1.text == "", do: "", else: " " <> &1.text}"
+    )
   end
 
   defp render(before, entries, rest) do

@@ -496,6 +496,10 @@ defmodule Arbiter.Trackers.Gitlab do
 
   # Merge labels from three sources into a single comma-joined string, GitLab's
   # expected `labels` param format. Only sets "labels" if there is at least one.
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp maybe_put_labels(payload, cfg, status, priority, issue_type) do
     status_label =
       case Map.get(cfg.status_map, status) do

@@ -1,4 +1,11 @@
 defmodule Arbiter.Release do
+  @moduledoc """
+  Release-time database tasks for the `arbiter` mix release.
+
+  Mix (and therefore `mix ecto.migrate`) is not available inside a release, so
+  deployments invoke these via `bin/arbiter eval Arbiter.Release.migrate`.
+  """
+
   @app :arbiter
 
   @doc """

@@ -71,7 +71,7 @@ defmodule Arbiter.Mergers.Github do
   require Logger
 
   alias Arbiter.Http.Client
-  alias Arbiter.Mergers.{CIRerun, Merger, Github.Config, Github.Error, Github.RepoResolver}
+  alias Arbiter.Mergers.{CIRerun, Github.Config, Github.Error, Github.RepoResolver, Merger}
   alias Arbiter.Providers.Github, as: Provider
 
   @stub_name Arbiter.Mergers.Github.HTTP
@@ -202,6 +202,10 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp create_pr(cfg, owner, repo, ref_form, branch, title, description, opts) do
     target = Map.get(opts, :target_branch) || cfg.default_target_branch
 
@@ -474,8 +478,7 @@ defmodule Arbiter.Mergers.Github do
          |> handle_json() do
       {:ok, %{"workflow_runs" => runs}} when is_list(runs) ->
         runs
-        |> Enum.filter(&failed_run?/1)
-        |> Enum.filter(&matches_workflow?(&1, workflow))
+        |> Enum.filter(&(failed_run?(&1) and matches_workflow?(&1, workflow)))
         |> List.first()
         |> case do
           nil ->
@@ -762,24 +765,22 @@ defmodule Arbiter.Mergers.Github do
 
   @impl true
   def link_for(mr_ref) when is_binary(mr_ref) do
-    cond do
-      String.starts_with?(mr_ref, "http://") or String.starts_with?(mr_ref, "https://") ->
-        mr_ref
+    if String.starts_with?(mr_ref, "http://") or String.starts_with?(mr_ref, "https://") do
+      mr_ref
+    else
+      case parse_mr_ref(mr_ref) do
+        {:embedded, owner, repo, number} ->
+          "https://github.com/#{owner}/#{repo}/pull/#{number}"
 
-      true ->
-        case parse_mr_ref(mr_ref) do
-          {:embedded, owner, repo, number} ->
-            "https://github.com/#{owner}/#{repo}/pull/#{number}"
+        {:bare, number} ->
+          case Config.active_repo_slug() do
+            slug when is_binary(slug) -> "https://github.com/#{slug}/pull/#{number}"
+            nil -> "https://github.com/owner/repo/pull/#{number}"
+          end
 
-          {:bare, number} ->
-            case Config.active_repo_slug() do
-              slug when is_binary(slug) -> "https://github.com/#{slug}/pull/#{number}"
-              nil -> "https://github.com/owner/repo/pull/#{number}"
-            end
-
-          :invalid ->
-            ""
-        end
+        :invalid ->
+          ""
+      end
     end
   end
 
@@ -826,8 +827,7 @@ defmodule Arbiter.Mergers.Github do
         body
         |> get_in(["data", "repository", "pullRequest", "reviewThreads", "nodes"])
         |> List.wrap()
-        |> Enum.reject(&is_nil/1)
-        |> Enum.reject(fn node -> Map.get(node, "isResolved") == true end)
+        |> Enum.reject(&(is_nil(&1) or Map.get(&1, "isResolved") == true))
         |> Enum.map(&normalize_review_thread/1)
 
       {:ok, threads}
@@ -1079,6 +1079,10 @@ defmodule Arbiter.Mergers.Github do
        when status in [:merged, :closed],
        do: nil
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp block_reason(cfg, pr, _status, pipeline, _approved, changes_requested) do
     state = merge_state(pr)
     draft? = Map.get(pr, "draft") == true or state == "draft"
@@ -1182,8 +1186,10 @@ defmodule Arbiter.Mergers.Github do
   # correctly reads as "not currently approved".
   defp latest_state_for(reviews, login) when is_list(reviews) and is_binary(login) do
     reviews
-    |> Enum.filter(&(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]))
-    |> Enum.filter(&(review_author(&1) == login))
+    |> Enum.filter(
+      &(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"] and
+          review_author(&1) == login)
+    )
     |> List.last()
     |> case do
       nil -> nil
@@ -1363,7 +1369,7 @@ defmodule Arbiter.Mergers.Github do
            status: nil,
            message:
              "GitHub merger config missing \"repo\" and no :repo_path in opts to derive it from. " <>
-               "Set workspace.config[\"merge\"][\"config\"][\"repo\"] for single-repo workspaces, " <>
+               ~s(Set workspace.config["merge"]["config"]["repo"] for single-repo workspaces, ) <>
                "or pass :repo_path so the adapter can derive owner/repo from the repo's git remote.",
            raw: nil
          }}
@@ -1562,7 +1568,7 @@ defmodule Arbiter.Mergers.Github do
 
     repo_blocks =
       repo_aliases
-      |> Enum.map(fn "r" <> j = ra ->
+      |> Enum.map_join("\n", fn "r" <> j = ra ->
         pr_blocks =
           entries
           |> Enum.filter(&(&1.ralias == ra))
@@ -1570,7 +1576,6 @@ defmodule Arbiter.Mergers.Github do
 
         "    #{ra}: repository(owner: $o#{j}, name: $n#{j}) {\n#{pr_blocks}\n    }"
       end)
-      |> Enum.join("\n")
 
     # `rateLimit { cost }` is itself free of points and makes GitHub return the
     # exact points this query billed, so a sweep's cost is observable in the logs
@@ -1740,8 +1745,7 @@ defmodule Arbiter.Mergers.Github do
     node
     |> get_in(["reviewThreads", "nodes"])
     |> List.wrap()
-    |> Enum.reject(&is_nil/1)
-    |> Enum.reject(fn n -> Map.get(n, "isResolved") == true end)
+    |> Enum.reject(&(is_nil(&1) or Map.get(&1, "isResolved") == true))
     |> Enum.map(&merge_latest_thread_comment/1)
     |> Enum.map(&normalize_review_thread/1)
   end

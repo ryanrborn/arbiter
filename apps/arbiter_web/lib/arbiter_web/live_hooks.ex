@@ -191,6 +191,10 @@ defmodule ArbiterWeb.LiveHooks do
         case msg do
           {:quota_updated, ^workspace_id, quota} ->
             # Skip updates for hidden providers to prevent re-introduction via PubSub
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             if quota.provider in @hidden_providers do
               {:halt, socket}
             else

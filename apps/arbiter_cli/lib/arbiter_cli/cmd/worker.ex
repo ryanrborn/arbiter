@@ -40,6 +40,10 @@ defmodule ArbiterCli.Cmd.Worker do
 
   @switches [json: :boolean, repo: :string, model: :string, force_quota: :boolean]
 
+  # Pre-existing complexity 18 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
@@ -186,6 +190,10 @@ defmodule ArbiterCli.Cmd.Worker do
 
   defp emit_show(snap, :json), do: IO.puts(Jason.encode!(snap))
 
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp emit_show(snap, :text) do
     if snap["source"] == "history" do
       IO.puts("(no live worker — showing most recent historical run)")

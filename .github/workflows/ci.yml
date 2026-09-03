@@ -69,6 +69,74 @@ jobs:
       - name: Check formatting
         run: mix format --check-formatted
 
+  # Static analysis + security scan: the umbrella-root `mix audit` alias
+  # (see mix.exs), which runs deps.unlock --check-unused, format
+  # --check-formatted, compile --warnings-as-errors, credo --strict, sobelow
+  # per app, and dialyzer.
+  #
+  # Same constraint as every other job here: the merger reads this check
+  # run's conclusion and blocks the merge on anything but success, so this
+  # job has to be able to stay green. It can — bd-4x2yhq triaged the entire
+  # first pass to zero findings (see .credo.exs, the three .sobelow-conf
+  # files, and .dialyzer_ignore.exs for what was fixed versus suppressed and
+  # why). It fails only on a NEW finding, which is the point.
+  #
+  # MIX_ENV is dev rather than test: dialyzer analyses the code that ships,
+  # and a test-env build pulls in `test/support` and swaps compile-time
+  # config. The dev cache is this job's alone, hence the distinct cache key.
+  audit:
+    name: mix audit (credo, sobelow, dialyzer)
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.19.4"
+
+      - name: Restore deps/build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-audit-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp28.5-elixir1.19.4-audit-
+
+      # The PLT is cached separately from _build. It is derived entirely from
+      # mix.lock plus the OTP/Elixir pair, it is worth hundreds of MB, and
+      # building it from cold costs minutes — so it gets a key that only those
+      # inputs move, and `restore-keys` lets a stale PLT be incrementally
+      # updated rather than rebuilt when a single dep changes.
+      #
+      # `mix.exs` pins plt_core_path/plt_local_path to this one directory for
+      # the umbrella root AND all three child apps (`../../priv/plts`), so
+      # there is exactly one PLT here, not three.
+      - name: Restore dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-plt-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp28.5-elixir1.19.4-plt-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: mix audit
+        run: mix audit
+
   # NOTE: there was deliberately NO `mix test` job here for a while.
   #
   # A `mix test` job was added alongside this workflow and removed immediately

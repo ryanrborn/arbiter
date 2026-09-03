@@ -59,3 +59,8 @@ MORNING-BRIEF.md
 # SQLite and database artifacts (legacy local development artifacts from pre-Postgres era).
 *.sqlite3
 *.db
+
+# Dialyzer PLTs — built once for the whole umbrella (see mix.exs `dialyzer/0`).
+# Multi-hundred-MB binaries derived entirely from mix.lock; CI caches them
+# instead of committing them.
+/priv/plts/

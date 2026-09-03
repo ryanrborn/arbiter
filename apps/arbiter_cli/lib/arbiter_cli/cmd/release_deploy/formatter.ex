@@ -51,6 +51,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     Doctor.report()
   end
 
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec emit_rollback(:json | :text, String.t(), String.t() | nil, non_neg_integer(), list()) ::
+          no_return()
   def emit_rollback(:json, tag, rolled_back, timeout_ms, pre_deploy_fails) do
     Output.emit_json(%{
       version: tag,
@@ -93,6 +97,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     Output.halt(1)
   end
 
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec emit_swap_failed(:json | :text, String.t(), String.t() | nil, String.t() | nil) ::
+          no_return()
   def emit_swap_failed(:json, tag, server_vsn, rolled_back) do
     Output.emit_json(%{
       version: tag,

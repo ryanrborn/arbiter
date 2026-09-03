@@ -88,9 +88,9 @@ defmodule Arbiter.Workflows.PRPatrol do
     recheck_stop_message: "last watched item closed",
     gate: :has_open_authored_pr?
 
-  alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
@@ -378,6 +378,10 @@ defmodule Arbiter.Workflows.PRPatrol do
   # does persist, a still-failing PR re-escalates at most every
   # `re_escalate_after_ms`, so a condition that outlives the original message
   # (missed notification, new failure mode) doesn't stay silent indefinitely.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp record_dispatch_failure(task, pr_number, state, reason) do
     prior = Map.get(state.dispatch_failures, pr_number)
     count = if prior, do: prior.count + 1, else: 1
@@ -711,8 +715,14 @@ defmodule Arbiter.Workflows.PRPatrol do
   # research/ops `:task` directives before this fix, so no behavior changes,
   # just the discriminator that now matters for every follow-up too.
   defp zombie_idle?(pid) do
+    # Matching `meta: nil` in the head rather than testing `is_nil(meta)` in the
+    # body: `Worker.state/1` types `meta` as `map()`, so the body form is an
+    # `:exact_compare` (`map() == nil`) that dialyxir 1.4.7 can neither format
+    # nor filter. The nil case is still handled — it is a persisted column and
+    # this reads a live GenServer's state, hence the rescue/catch below.
     case Worker.state(pid) do
-      %{status: :idle, meta: meta} -> is_nil(meta) or is_nil(Map.get(meta, :worktree_path))
+      %{status: :idle, meta: nil} -> true
+      %{status: :idle, meta: meta} -> is_nil(Map.get(meta, :worktree_path))
       _ -> false
     end
   rescue

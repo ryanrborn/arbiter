@@ -58,6 +58,10 @@ defmodule ArbiterWeb.MCP.Plug do
   def init(opts), do: opts
 
   @impl true
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def call(conn, _opts) do
     cond do
       not MCP.enabled?() ->

@@ -107,6 +107,10 @@ defmodule Arbiter.MCP.AgentConfig do
             |> Enum.join("\n")
 
           if new_entries != "" do
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             separator = if String.ends_with?(existing, "\n") or existing == "", do: "", else: "\n"
             File.write!(exclude_path, existing <> separator <> new_entries <> "\n")
           end

@@ -23,8 +23,12 @@ defmodule ArbiterCli.Output do
   """
   @spec extract_mode([String.t()]) :: {:text | :json, [String.t()]}
   def extract_mode(argv) do
-    {opts, rest, _invalid} =
-      OptionParser.parse(argv, switches: [json: :boolean], allow_nonexistent_atoms?: true)
+    # NOTE: this used to pass `allow_nonexistent_atoms?: true`. There is no such
+    # OptionParser option (the real one is `:allow_nonexistent_atoms`, without
+    # the `?`), so the call broke `OptionParser.parse/2`'s contract and dialyzer
+    # typed this whole function `none()`. `switches:` already declares every
+    # atom this parses, so the option was never needed either way.
+    {opts, rest, _invalid} = OptionParser.parse(argv, switches: [json: :boolean])
 
     mode = if opts[:json], do: :json, else: :text
     # Strip the parsed flag from rest by re-collecting non-flag args + leftover flags
@@ -186,15 +190,13 @@ defmodule ArbiterCli.Output do
         {"Closed", issue["closed_at"]}
       ]
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
-      |> Enum.map(fn {k, v} -> "#{String.pad_trailing(k <> ":", 12)}#{v}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {k, v} -> "#{String.pad_trailing(k <> ":", 12)}#{v}" end)
 
     sections =
       issue
       |> detail_sections()
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
-      |> Enum.map(fn {k, v} -> "\n#{k}:\n  " <> indent(v) end)
-      |> Enum.join("")
+      |> Enum.map_join("", fn {k, v} -> "\n#{k}:\n  " <> indent(v) end)
 
     header <> sections
   end
@@ -311,6 +313,9 @@ defmodule ArbiterCli.Output do
 
   # Tests set :bd2_halt_strategy to :raise so they can capture exits via
   # rescue/catch without killing the BEAM. Production path calls System.halt/1.
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec do_halt(non_neg_integer()) :: no_return()
   defp do_halt(code) do
     case Process.get(:bd2_halt_strategy, :system_halt) do
       :raise -> raise ArbiterCli.Output.Halt, code: code

@@ -278,7 +278,7 @@ defmodule Arbiter.Tasks.Workspace do
       public? true
       allow_nil? true
 
-      description "Stable label of the actor who last wrote this workspace (e.g. \"coordinator\", \"cli\")."
+      description ~s[Stable label of the actor who last wrote this workspace (e.g. "coordinator", "cli").]
     end
 
     create_timestamp :created_at
@@ -393,7 +393,12 @@ defmodule Arbiter.Tasks.Workspace do
   @spec merger_strategy(t()) :: atom()
   def merger_strategy(workspace) do
     case get_in(workspace.config || %{}, ["merge", "strategy"]) do
-      strategy when strategy in @valid_merger_strategies -> String.to_atom(strategy)
+      # `String.to_existing_atom/1`, not `String.to_atom/1` (sobelow
+      # DOS.StringToAtom). The value is validated against the list above, so
+      # the atom is guaranteed to already exist and the unbounded-atom-table
+      # concern does not apply — but spelling it this way means a future edit
+      # that loosens the guard cannot quietly reintroduce the leak.
+      strategy when strategy in @valid_merger_strategies -> String.to_existing_atom(strategy)
       _ -> :direct
     end
   end

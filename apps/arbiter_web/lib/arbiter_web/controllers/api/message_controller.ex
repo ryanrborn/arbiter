@@ -145,20 +145,16 @@ defmodule ArbiterWeb.Api.MessageController do
   defp parse_kind(""), do: {:ok, nil}
 
   defp parse_kind(raw) when is_binary(raw) do
-    try do
-      {:ok, String.to_existing_atom(raw)}
-    rescue
-      ArgumentError -> {:error, {:invalid_request, "invalid kind: #{inspect(raw)}"}}
-    end
+    {:ok, String.to_existing_atom(raw)}
+  rescue
+    ArgumentError -> {:error, {:invalid_request, "invalid kind: #{inspect(raw)}"}}
   end
 
   defp coerce_kind(%{"kind" => kind} = attrs) when is_binary(kind) do
-    try do
-      Map.put(attrs, "kind", String.to_existing_atom(kind))
-    rescue
-      # Leave the bad string in place; Ash returns a clean validation error.
-      ArgumentError -> attrs
-    end
+    Map.put(attrs, "kind", String.to_existing_atom(kind))
+  rescue
+    # Leave the bad string in place; Ash returns a clean validation error.
+    ArgumentError -> attrs
   end
 
   defp coerce_kind(attrs), do: attrs

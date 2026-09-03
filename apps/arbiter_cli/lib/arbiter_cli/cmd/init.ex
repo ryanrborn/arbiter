@@ -154,6 +154,10 @@ defmodule ArbiterCli.Cmd.Init do
 
   @switches [force: :boolean, json: :boolean, dev: :boolean, diff: :boolean]
 
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
@@ -229,14 +233,12 @@ defmodule ArbiterCli.Cmd.Init do
   defp scaffold_file(path, contents, force) do
     exists = File.exists?(path)
 
-    cond do
-      exists and not force ->
-        :skipped
-
-      true ->
-        File.mkdir_p!(Path.dirname(path))
-        File.write!(path, contents)
-        if exists, do: :overwritten, else: :created
+    if exists and not force do
+      :skipped
+    else
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, contents)
+      if exists, do: :overwritten, else: :created
     end
   end
 

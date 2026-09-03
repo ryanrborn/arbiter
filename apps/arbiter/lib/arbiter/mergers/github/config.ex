@@ -46,8 +46,8 @@ defmodule Arbiter.Mergers.Github.Config do
   """
 
   alias Arbiter.Agents.CredentialsRef
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.Github.Error
+  alias Arbiter.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
 

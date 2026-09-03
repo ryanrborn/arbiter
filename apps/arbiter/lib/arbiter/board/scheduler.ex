@@ -183,9 +183,8 @@ defmodule Arbiter.Board.Scheduler do
   defp board_hold(_paused, _quota, _slots), do: @no_slot_reason
 
   defp card_block(card, claimed) do
-    with nil <- dependency_block(card),
-         nil <- overlap_block(card, claimed) do
-      nil
+    with nil <- dependency_block(card) do
+      overlap_block(card, claimed)
     end
   end
 

@@ -249,6 +249,9 @@ defmodule ArbiterCli.Cmd.Start do
     Doctor.report()
   end
 
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec emit_timeout(:json | :text, list(), non_neg_integer()) :: no_return()
   defp emit_timeout(:json, actions, timeout_ms) do
     IO.puts(
       Jason.encode!(%{
@@ -322,8 +325,8 @@ defmodule ArbiterCli.Cmd.Start do
   end
 
   @doc false
-  @spec is_umbrella_root?(String.t()) :: boolean()
-  def is_umbrella_root?(dir) do
+  @spec umbrella_root?(String.t()) :: boolean()
+  def umbrella_root?(dir) do
     (File.exists?(Path.join(dir, "mix.exs")) and File.dir?(Path.join(dir, "apps"))) or
       File.exists?(Path.join(dir, "compose.yml"))
   end
@@ -358,7 +361,7 @@ defmodule ArbiterCli.Cmd.Start do
     case File.read(path) do
       {:ok, home} when home not in ["", "\n"] ->
         expanded = home |> String.trim() |> Path.expand()
-        if is_umbrella_root?(expanded), do: expanded, else: nil
+        if umbrella_root?(expanded), do: expanded, else: nil
 
       _ ->
         nil
@@ -394,7 +397,7 @@ defmodule ArbiterCli.Cmd.Start do
     parent = Path.dirname(dir)
 
     cond do
-      is_umbrella_root?(dir) ->
+      umbrella_root?(dir) ->
         dir
 
       # Reached the filesystem root without finding an umbrella.
@@ -416,6 +419,11 @@ defmodule ArbiterCli.Cmd.Start do
   # External command execution. Defaults to System.cmd/3; tests stub it to
   # record invocations and flip a fake "now reachable" signal without shelling
   # out. Returns `{output_binary, exit_status}`.
+  # `cmd` is a literal at every call site ("mix", "git", "systemctl"); the
+  # variable exists only so tests can swap the runner through the process
+  # dictionary. `System.cmd/3` spawns the executable directly, without a
+  # shell, so the argument list cannot be reinterpreted as syntax.
+  # sobelow_skip ["CI.System"]
   def run_cmd(cmd, args, opts) do
     case Process.get(:bd2_cmd_runner) do
       fun when is_function(fun, 3) -> fun.(cmd, args, opts)

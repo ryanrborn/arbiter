@@ -133,10 +133,7 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
       {:ok, worktree_path} ->
         result =
           write_and_open(
-            ws,
-            repo,
-            repo_path,
-            target_branch,
+            %{ws: ws, repo: repo, repo_path: repo_path, target_branch: target_branch},
             worktree_path,
             branch,
             row,
@@ -153,17 +150,13 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
     end
   end
 
-  defp write_and_open(
-         ws,
-         repo,
-         repo_path,
-         target_branch,
-         worktree_path,
-         branch,
-         row,
-         lesson,
-         attribution
-       ) do
+  # `target` bundles the four repo coordinates only the Mergers calls below
+  # need (`:ws`, `:repo`, `:repo_path`, `:target_branch`). Passing them
+  # positionally put this at arity 9 — past Credo's ceiling, and an
+  # unlabelled six-string call site that read as a guessing game.
+  defp write_and_open(target, worktree_path, branch, row, lesson, attribution) do
+    %{ws: ws, repo: repo, repo_path: repo_path, target_branch: target_branch} = target
+
     doc_path = doc_path(row.payload)
     file_path = Path.join(worktree_path, doc_path)
     current = read(file_path)

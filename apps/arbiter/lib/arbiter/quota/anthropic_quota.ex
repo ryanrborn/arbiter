@@ -105,7 +105,7 @@ defmodule Arbiter.Quota.AnthropicQuota do
 
     attribute :representative_claim, :string do
       public? true
-      description "Which window currently binds: \"five_hour\" | \"seven_day\"."
+      description ~s(Which window currently binds: "five_hour" | "seven_day".)
     end
 
     attribute :overage_status, :string, public?: true

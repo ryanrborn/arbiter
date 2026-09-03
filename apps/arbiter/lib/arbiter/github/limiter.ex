@@ -772,7 +772,7 @@ defmodule Arbiter.GitHub.Limiter do
   defp log_report(pools) do
     summary =
       pools
-      |> Enum.map(fn {pool_id, pool} ->
+      |> Enum.map_join(" | ", fn {pool_id, pool} ->
         c = pool.counts
 
         "#{inspect(pool_id)} remaining=#{inspect(pool.remaining)} " <>
@@ -780,7 +780,6 @@ defmodule Arbiter.GitHub.Limiter do
           "bg=#{c.background}#{subsystem_breakdown(c)} bg_paused=#{c.background_paused} " <>
           "secondary_trips=#{c.secondary_trips}"
       end)
-      |> Enum.join(" | ")
 
     Logger.info("GitHub limiter: #{summary}")
   end

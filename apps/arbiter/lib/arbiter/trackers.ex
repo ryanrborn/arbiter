@@ -18,9 +18,9 @@ defmodule Arbiter.Trackers do
 
   require Logger
 
-  alias Arbiter.Tasks.Issue
   alias Arbiter.Messages.Message
-  alias Arbiter.Trackers.{Gitlab, GitHub, Jira, Linear, None, Shortcut, Tracker}
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Trackers.{GitHub, Gitlab, Jira, Linear, None, Shortcut, Tracker}
 
   @type adapter :: module()
 
@@ -138,12 +138,10 @@ defmodule Arbiter.Trackers do
 
   @spec transition(Issue.t(), Tracker.status()) :: :ok | {:error, term()}
   def transition(%Issue{tracker_ref: ref} = issue, status) do
-    cond do
-      not is_binary(ref) or ref == "" ->
-        :ok
-
-      true ->
-        for_task(issue).transition(ref, status)
+    if not is_binary(ref) or ref == "" do
+      :ok
+    else
+      for_task(issue).transition(ref, status)
     end
   end
 
@@ -168,18 +166,16 @@ defmodule Arbiter.Trackers do
           :ok | {:error, :not_supported} | {:error, term()}
   def add_remote_link(%Issue{tracker_ref: ref} = issue, url, title)
       when is_binary(url) and is_binary(title) do
-    cond do
-      not is_binary(ref) or ref == "" ->
+    if not is_binary(ref) or ref == "" do
+      {:error, :not_supported}
+    else
+      adapter = for_task(issue)
+
+      if function_exported?(adapter, :add_remote_link, 3) do
+        adapter.add_remote_link(ref, url, title)
+      else
         {:error, :not_supported}
-
-      true ->
-        adapter = for_task(issue)
-
-        if function_exported?(adapter, :add_remote_link, 3) do
-          adapter.add_remote_link(ref, url, title)
-        else
-          {:error, :not_supported}
-        end
+      end
     end
   end
 
@@ -195,18 +191,16 @@ defmodule Arbiter.Trackers do
   @spec add_comment(Issue.t(), String.t()) ::
           :ok | {:error, :not_supported} | {:error, term()}
   def add_comment(%Issue{tracker_ref: ref} = issue, body) when is_binary(body) do
-    cond do
-      not is_binary(ref) or ref == "" ->
+    if not is_binary(ref) or ref == "" do
+      {:error, :not_supported}
+    else
+      adapter = for_task(issue)
+
+      if function_exported?(adapter, :add_comment, 2) do
+        adapter.add_comment(ref, body)
+      else
         {:error, :not_supported}
-
-      true ->
-        adapter = for_task(issue)
-
-        if function_exported?(adapter, :add_comment, 2) do
-          adapter.add_comment(ref, body)
-        else
-          {:error, :not_supported}
-        end
+      end
     end
   end
 
@@ -398,7 +392,7 @@ defmodule Arbiter.Trackers do
         "Workspace \"#{name}\" is configured with tracker type #{inspect(type)}, " <>
           "but no adapter is registered for this type. " <>
           "Tracker integration will be a no-op until the adapter ships or the config is corrected.\n\n" <>
-          "To silence this warning, set `config[\"tracker\"][\"type\"]` to \"none\" " <>
+          ~s(To silence this warning, set `config["tracker"]["type"]` to "none" ) <>
           "(or a supported type: #{Enum.join(Map.keys(@adapters) -- [:none], ", ")})."
     })
   rescue
