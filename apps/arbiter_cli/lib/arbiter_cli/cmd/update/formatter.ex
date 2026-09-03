@@ -97,6 +97,9 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
   Same single-map argument as `emit_deployed/2`, with `:timeout_ms` in place
   of `:was_running`.
   """
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec emit_deploy_timeout(:json | :text, map()) :: no_return()
   def emit_deploy_timeout(:json, deploy) do
     %{
       branch: integration_branch,

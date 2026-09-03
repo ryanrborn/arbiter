@@ -252,8 +252,14 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("upgrade", args), do: ArbiterCli.Cmd.SelfUpdate.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec help(term()) :: no_return()
   defp help(_), do: usage_and_exit(0)
 
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec usage_and_exit(non_neg_integer()) :: no_return()
   defp usage_and_exit(code) do
     IO.puts(@moduledoc)
     ArbiterCli.Output.halt(code)

@@ -249,6 +249,9 @@ defmodule ArbiterCli.Cmd.Start do
     Doctor.report()
   end
 
+  # Terminates the VM via `Output.halt/1` on every clause — spelled out so
+  # dialyzer does not report it as an accidental "no local return".
+  @spec emit_timeout(:json | :text, list(), non_neg_integer()) :: no_return()
   defp emit_timeout(:json, actions, timeout_ms) do
     IO.puts(
       Jason.encode!(%{

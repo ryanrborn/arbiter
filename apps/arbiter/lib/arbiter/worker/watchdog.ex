@@ -601,7 +601,15 @@ defmodule Arbiter.Worker.Watchdog do
   yet, don't hide it" rather than "not parked", since a `nil` here would make
   the button flicker out at exactly the moment an operator needs it.
   """
-  @spec parked_on(String.t()) :: block_reason() | :busy | nil
+  # `:ci_failed_external` is NOT a `block_reason()` — no adapter ever classifies
+  # an MR that way. It is a *park* reason the Watchdog promotes a `:ci_failed`
+  # block to once a worker marks the failure external (`effective_park_reason/2`),
+  # and `handle_call(:parked_on, ...)` replies with `state.park_reason`, so it
+  # reaches callers. Leaving it out of this spec made the dashboard's
+  # `retry_auto_resolve_available?/2` membership test provably false to dialyzer
+  # (worker_detail_live.ex:506) — the branch that keeps the "Retry auto-resolve"
+  # button visible on an external-CI park.
+  @spec parked_on(String.t()) :: block_reason() | :ci_failed_external | :busy | nil
   def parked_on(task_id) when is_binary(task_id) do
     case whereis(task_id) do
       nil -> nil
