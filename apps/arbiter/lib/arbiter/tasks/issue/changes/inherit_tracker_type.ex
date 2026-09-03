@@ -35,6 +35,10 @@ defmodule Arbiter.Tasks.Issue.Changes.InheritTrackerType do
               |> Map.get("tracker", %{})
               |> Map.get("type")
 
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             if inherited in @valid do
               Changeset.force_change_attribute(
                 cs,

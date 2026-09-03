@@ -65,14 +65,14 @@ defmodule ArbiterCli.Cmd.InstallCliTest do
     end
   end
 
-  describe "is_umbrella_root?/1" do
+  describe "umbrella_root?/1" do
     test "returns true for a dir with mix.exs and apps/" do
       dir = Path.join(System.tmp_dir!(), "arb-umbrella-#{:os.getpid()}")
       File.mkdir_p!(Path.join(dir, "apps"))
       File.write!(Path.join(dir, "mix.exs"), "")
       on_exit(fn -> File.rm_rf(dir) end)
 
-      assert Start.is_umbrella_root?(dir)
+      assert Start.umbrella_root?(dir)
     end
 
     test "returns true for a dir with compose.yml" do
@@ -81,7 +81,7 @@ defmodule ArbiterCli.Cmd.InstallCliTest do
       File.write!(Path.join(dir, "compose.yml"), "")
       on_exit(fn -> File.rm_rf(dir) end)
 
-      assert Start.is_umbrella_root?(dir)
+      assert Start.umbrella_root?(dir)
     end
 
     test "returns false for a plain directory (stale CI temp path)" do
@@ -89,7 +89,7 @@ defmodule ArbiterCli.Cmd.InstallCliTest do
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf(dir) end)
 
-      refute Start.is_umbrella_root?(dir)
+      refute Start.umbrella_root?(dir)
     end
 
     test "returns false for mix.exs without apps/ (non-umbrella project)" do
@@ -98,7 +98,7 @@ defmodule ArbiterCli.Cmd.InstallCliTest do
       File.write!(Path.join(dir, "mix.exs"), "")
       on_exit(fn -> File.rm_rf(dir) end)
 
-      refute Start.is_umbrella_root?(dir)
+      refute Start.umbrella_root?(dir)
     end
   end
 

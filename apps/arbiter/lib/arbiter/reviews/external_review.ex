@@ -810,22 +810,20 @@ defmodule Arbiter.Reviews.ExternalReview do
   end
 
   defp report_only_mode?(opts, prepared) do
-    cond do
-      Map.get(opts, :report_only) == true ->
-        true
+    if Map.get(opts, :report_only) == true do
+      true
+    else
+      case ReviewAutomation.normalize(Map.get(opts, :automation)) do
+        :report_only ->
+          true
 
-      true ->
-        case ReviewAutomation.normalize(Map.get(opts, :automation)) do
-          :report_only ->
-            true
+        mode when mode in [:auto, :flag, :off] ->
+          false
 
-          mode when mode in [:auto, :flag, :off] ->
-            false
-
-          nil ->
-            config = workspace_config(prepared.workspace)
-            ReviewAutomation.resolve(config, nil, Map.get(prepared, :repo_name)) == :report_only
-        end
+        nil ->
+          config = workspace_config(prepared.workspace)
+          ReviewAutomation.resolve(config, nil, Map.get(prepared, :repo_name)) == :report_only
+      end
     end
   end
 
@@ -867,6 +865,10 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp maybe_notify_coordinator(_prepared, _result, _record), do: :ok
 
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp render_report_body(prepared, result, record) do
     rec_id = record && record.id
     proposed = Map.get(result, :proposed_comments) || []
@@ -879,14 +881,13 @@ defmodule Arbiter.Reviews.ExternalReview do
         list ->
           list
           |> Enum.with_index()
-          |> Enum.map(fn {c, i} ->
+          |> Enum.map_join("\n", fn {c, i} ->
             file = c[:file] || c["file"] || "?"
             line = c[:line] || c["line"]
             loc = if line, do: "#{file}:#{line}", else: file
             body = c[:body] || c["body"] || ""
             "  [#{i}] #{loc}\n      #{body}"
           end)
-          |> Enum.join("\n")
       end
 
     """
@@ -1574,6 +1575,10 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp findings_summary([]), do: nil
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp findings_summary(findings) when is_list(findings) do
     lines =
       findings
@@ -1605,9 +1610,10 @@ defmodule Arbiter.Reviews.ExternalReview do
     model = Map.get(usage, :model)
 
     task_id =
-      cond do
-        record && record.id -> "ext:#{record.id}"
-        true -> "ext:#{String.slice(prepared.mr_ref, 0, 250)}"
+      if record && record.id do
+        "ext:#{record.id}"
+      else
+        "ext:#{String.slice(prepared.mr_ref, 0, 250)}"
       end
 
     attrs = %{

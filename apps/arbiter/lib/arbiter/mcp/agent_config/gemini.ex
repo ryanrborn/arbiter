@@ -48,10 +48,8 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   def write_mcp_config(worktree, opts) when is_binary(worktree) do
     dir = Path.join(worktree, @dirname)
 
-    with :ok <- File.mkdir_p(dir),
-         config = config_map(opts),
-         :ok <- File.write(Path.join(dir, @filename), Jason.encode!(config, pretty: true)) do
-      :ok
+    with :ok <- File.mkdir_p(dir) do
+      File.write(Path.join(dir, @filename), Jason.encode!(config_map(opts), pretty: true))
     end
   end
 

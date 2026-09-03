@@ -119,30 +119,28 @@ defmodule Arbiter.Skills.InvocationParser do
   # workspace_id is used for skill resolution: workspace-scoped skills shadow
   # global skills of the same name within that workspace.
   defp increment_skill_usage(skill_name, workspace_id) when is_binary(skill_name) do
-    try do
-      with {:ok, skill} <- Arbiter.Skills.resolve_skill(skill_name, workspace_id),
-           {:ok, _updated} <- Arbiter.Skills.increment_usage(skill.id, :invoke_count) do
-        :ok
-      else
-        {:error, :not_found} ->
-          # Skill name not in registry — might be a bundled skill or a typo.
-          # Don't log as error; this is expected for bundled skills.
-          :skipped
+    with {:ok, skill} <- Arbiter.Skills.resolve_skill(skill_name, workspace_id),
+         {:ok, _updated} <- Arbiter.Skills.increment_usage(skill.id, :invoke_count) do
+      :ok
+    else
+      {:error, :not_found} ->
+        # Skill name not in registry — might be a bundled skill or a typo.
+        # Don't log as error; this is expected for bundled skills.
+        :skipped
 
-        {:error, reason} ->
-          Logger.warning(
-            "Arbiter.Skills.InvocationParser: failed to increment #{inspect(skill_name)}: #{inspect(reason)}"
-          )
-
-          :error
-      end
-    rescue
-      e ->
+      {:error, reason} ->
         Logger.warning(
-          "Arbiter.Skills.InvocationParser: exception incrementing #{inspect(skill_name)}: #{inspect(e)}"
+          "Arbiter.Skills.InvocationParser: failed to increment #{inspect(skill_name)}: #{inspect(reason)}"
         )
 
         :error
     end
+  rescue
+    e ->
+      Logger.warning(
+        "Arbiter.Skills.InvocationParser: exception incrementing #{inspect(skill_name)}: #{inspect(e)}"
+      )
+
+      :error
   end
 end

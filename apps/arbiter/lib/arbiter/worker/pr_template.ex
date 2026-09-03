@@ -180,6 +180,10 @@ defmodule Arbiter.Worker.PRTemplate do
     end)
   end
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp placeholders_for(%Issue{} = task) do
     %{
       "task.id" => task.id || "",

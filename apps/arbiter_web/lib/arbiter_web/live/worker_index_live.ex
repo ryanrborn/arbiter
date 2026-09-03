@@ -14,10 +14,10 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
-  alias ArbiterWeb.Paging
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
+  alias ArbiterWeb.Paging
   require Ash.Query
 
   @workers_topic "workers"

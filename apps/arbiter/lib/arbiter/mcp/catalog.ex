@@ -197,7 +197,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Read the coordinator escalation mailbox for the workspace — the structured " <>
           "replacement for `arb message inbox` / `arb inbox`. Lists messages where " <>
-          "`to_ref == \"coordinator\"`. Two states: `state: \"unread\"` (default) lists unread " <>
+          ~s[`to_ref == "coordinator"`. Two states: `state: "unread"` (default) lists unread ] <>
           "messages and marks them read on return; optionally `clear: true` also soft-clears the " <>
           "outstanding tail (mirrors `arb inbox clear`). `state: \"outstanding\"` lists read-but-uncleared " <>
           "messages (the triage queue) as a pure read — no mutations. `state: \"outstanding\"` and " <>
@@ -677,10 +677,10 @@ defmodule Arbiter.MCP.Catalog do
             ],
             "description" =>
               "Override the workspace review_automation policy: \"auto\" = review AND post to the " <>
-                "PR; \"report_only\" (alias \"propose\") = review fully but post NOTHING — surface " <>
+                ~s[PR; "report_only" (alias "propose") = review fully but post NOTHING — surface ] <>
                 "findings + proposed comments to the coordinator to greenlight (infra default, " <>
-                "human-in-the-loop); \"flag\" (alias \"notify\") = do not review, just flag new " <>
-                "commits/replies; \"off\" (aliases \"never\"/\"disabled\") = hard opt-out — refuse " <>
+                ~s[human-in-the-loop); "flag" (alias "notify") = do not review, just flag new ] <>
+                ~s[commits/replies; "off" (aliases "never"/"disabled") = hard opt-out — refuse ] <>
                 "to dispatch a reviewer at all, no agent spawned, nothing posted (pass `force: true` " <>
                 "to override a single dispatch). When omitted, the mode is resolved from the " <>
                 "workspace policy using the PR author (the actual author for a `pr` review; " <>
@@ -712,7 +712,7 @@ defmodule Arbiter.MCP.Catalog do
               "Skip the self-approve guard (`pr` only: dispatch even when this identity has " <>
                 "already left a current approving review on the PR) AND/OR the review_automation " <>
                 "\"off\" guard (`pr` and `task_id`: dispatch even when the resolved mode is " <>
-                "\"off\"/\"never\"/\"disabled\"). Default false — normally such a dispatch is " <>
+                ~s["off"/"never"/"disabled"). Default false — normally such a dispatch is ] <>
                 "refused so we don't double-post an approval or ignore a hard opt-out."
           }
         },
@@ -881,7 +881,7 @@ defmodule Arbiter.MCP.Catalog do
           "attempt), or `task_id` (no `run_id`) for the task's most recent run (`arb worker " <>
           "log <task-id>`, unchanged behaviour). `task_id` may be a ReviewGate synthetic id " <>
           "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`). `exists` distinguishes " <>
-          "\"no file yet / never captured\" (false, empty `lines`) from \"captured but empty\" " <>
+          ~s["no file yet / never captured" (false, empty `lines`) from "captured but empty" ] <>
           "(true, empty `lines`). Not-found when no matching run exists.",
       input_schema: %{
         "type" => "object",
@@ -909,7 +909,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "The composed prompt one run was spawned with (bd-9rdwe4, #1017 gap G5), redacted " <>
           "through the same choke-point as transcript lines — the sibling of `worker_log` for " <>
-          "\"what was this agent told\" instead of \"what did it say\". Pass `run_id` to read " <>
+          ~s("what was this agent told" instead of "what did it say". Pass `run_id` to read ) <>
           "that exact run, or `task_id` (no `run_id`) for the task's most recent run. `task_id` " <>
           "may be a ReviewGate synthetic id (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, " <>
           "`#t<N>`). `exists` distinguishes \"no prompt ever persisted\" (false, `prompt` nil) " <>
@@ -1358,7 +1358,7 @@ defmodule Arbiter.MCP.Catalog do
         "Set an install-wide runtime setting; `null` always clears the override and falls back " <>
           "to the app-env/hardcoded default. `conductor_system_max_concurrent` (positive " <>
           "integer) takes effect on the next Conductor drain cycle across every running graph. " <>
-          "`credential_watchdog_adapters` (list of agent types — \"claude\", \"gemini\", " <>
+          ~s[`credential_watchdog_adapters` (list of agent types — "claude", "gemini", ] <>
           "\"codex\"; `[]` probes nothing), `credential_watchdog_interval_ms` and " <>
           "`credential_watchdog_recovery_interval_ms` (positive integers) take effect on the " <>
           "CredentialWatchdog's next poll cycle. No restart required. Returns `{key, value}`.",
@@ -2025,7 +2025,7 @@ defmodule Arbiter.MCP.Catalog do
           "inputs" => %{
             "type" => "object",
             "description" =>
-              "workflow_dispatch inputs, e.g. {\"force_deploy\": \"true\"}. Supplying any " <>
+              ~s(workflow_dispatch inputs, e.g. {"force_deploy": "true"}. Supplying any ) <>
                 "input forces `workflow` mode, since only a fresh dispatch can carry them. " <>
                 "Combining inputs with mode `failed_jobs`/`all_jobs` is rejected.",
             "additionalProperties" => %{"type" => "string"}

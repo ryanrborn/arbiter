@@ -758,6 +758,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # implementer.
   defp attempt_finish(%{reported?: true} = state, _status), do: {:done, state}
 
+  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp attempt_finish(state, status) do
     case parse_verdict(Enum.reverse(state.lines)) do
       :no_verdict ->
@@ -1844,10 +1848,9 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp render_thread(thread) do
     thread
-    |> Enum.map(fn %{round: round, role: role, subject: subject, body: body} ->
+    |> Enum.map_join("\n\n---\n\n", fn %{round: round, role: role, subject: subject, body: body} ->
       "### Round #{round} — #{role_label(role)}: #{subject}\n\n#{String.trim(body)}"
     end)
-    |> Enum.join("\n\n---\n\n")
   end
 
   defp role_label(:reviewer), do: "Reviewer → Implementer"

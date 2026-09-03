@@ -815,6 +815,10 @@ defmodule Arbiter.Tasks.Issue do
   > `Arbiter.Board.Snapshot`, and it is a behaviour change for three public
   > surfaces, not a filter tweak.
   """
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def ready(opts \\ []) do
     workspace_id = Keyword.get(opts, :workspace_id)
 
@@ -875,6 +879,10 @@ defmodule Arbiter.Tasks.Issue do
         blocked_by_blocks =
           blocks_gating
           |> Enum.filter(fn d ->
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             case Map.fetch(fetched_by_id, d.from_issue_id) do
               {:ok, blocker} -> blocker.status != :closed
               :error -> false

@@ -213,16 +213,16 @@ defmodule Arbiter.Workflows.MergeQueue do
   require Ash.Query
 
   alias Arbiter.GitHub.Limiter
-  alias Arbiter.Tasks.Issue
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
-  alias Arbiter.Worker.PRTemplate
+  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Trackers
   alias Arbiter.Worker.PrimarySync
+  alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
-  alias Arbiter.Trackers
 
   @default_poll_interval_ms 30_000
 
@@ -651,13 +651,15 @@ defmodule Arbiter.Workflows.MergeQueue do
   # generic push failure; any other reconcile error (missing origin, fetch
   # failure) fails open and lets the push itself surface the real error.
   defp push_worktree_branch(worktree_module, worktree_path, branch) do
-    with :ok <- reconcile_worktree_before_push(worktree_module, worktree_path, branch) do
-      case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do
-        {:ok, _} = ok -> ok
-        {:error, reason} -> {:error, {:push_failed, reason}}
-      end
-    else
-      {:error, {:diverged, _detail} = reason} -> {:error, {:push_failed, reason}}
+    case reconcile_worktree_before_push(worktree_module, worktree_path, branch) do
+      :ok ->
+        case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do
+          {:ok, _} = ok -> ok
+          {:error, reason} -> {:error, {:push_failed, reason}}
+        end
+
+      {:error, {:diverged, _detail} = reason} ->
+        {:error, {:push_failed, reason}}
     end
   end
 
@@ -944,6 +946,10 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   # Merge-ready rungs PARK at :ready_to_merge; the actual merge is admitted
   # one-at-a-time by admit_one_merge/2 (Phase 3) so the queue serializes.
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp advance_ready_ladder(state, item, mr_state) do
     cond do
       item.status == :awaiting_approval and mr_state.approved and mr_state.ci_clean ->

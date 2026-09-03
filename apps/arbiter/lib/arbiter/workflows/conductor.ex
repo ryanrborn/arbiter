@@ -198,9 +198,8 @@ defmodule Arbiter.Workflows.Conductor do
     with {:ok, graph} <- load_graph(graph_id),
          :ok <- ensure_draft(graph),
          :ok <- validate_acyclic(graph_id),
-         {:ok, _running} <- transition_running(graph),
-         {:ok, pid} <- start_under_supervisor(graph_id, opts) do
-      {:ok, pid}
+         {:ok, _running} <- transition_running(graph) do
+      start_under_supervisor(graph_id, opts)
     end
   end
 
@@ -577,12 +576,13 @@ defmodule Arbiter.Workflows.Conductor do
         [workspace_id: state.workspace_id]
         |> Issue.ready()
         |> Enum.filter(&MapSet.member?(member_set, &1.id))
-        # C5: don't dispatch tasks whose branch is paused by a failed upstream
-        |> Enum.reject(&MapSet.member?(state.paused_ids, &1.id))
+        # C5: don't dispatch tasks whose branch is paused by a failed upstream.
         # C6: never (re-)dispatch a task that already has a live worker — guards
         # the boot window where a worker survived (or partially survived) a crash
         # and a non-primary/duplicate boot.
-        |> Enum.reject(&worker_in_flight?(state, &1.id))
+        |> Enum.reject(
+          &(MapSet.member?(state.paused_ids, &1.id) or worker_in_flight?(state, &1.id))
+        )
         |> Enum.sort_by(&{&1.priority, &1.id})
 
       conflicts = conflict_adjacency(member_ids)

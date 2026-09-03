@@ -203,7 +203,7 @@ defmodule Arbiter.Skills.Skill do
       public? true
       allow_nil? true
 
-      description "Stable label of the actor who last wrote this skill (e.g. \"coordinator\", \"worker:bd-…\")."
+      description ~s[Stable label of the actor who last wrote this skill (e.g. "coordinator", "worker:bd-…").]
     end
 
     create_timestamp :created_at

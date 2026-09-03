@@ -58,6 +58,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Reviews.Checkout
@@ -157,49 +158,50 @@ defmodule Arbiter.Worker.Dispatch do
     # is provisioned and recorded, so the Driver can tear it down and the
     # caller can see it.
     #
-    # Two nested `with`s rather than one chain, deliberately: a `with`-clause
-    # binding does NOT leak into that `with`'s own `else`. With a single chain
-    # the error branch would read the *outer* `opts` — the function parameter,
-    # which never carries `:review_checkout` (it is added inside
-    # `resolve_agent_cwd/3`) — so its teardown was a guaranteed no-op and the
-    # throwaway worktree leaked on every post-spawn failure. Nesting puts the
-    # rebound `opts` in scope for the inner `else`, which is the branch that
-    # actually needs it.
-    with {:ok, claude_port, opts} <-
-           maybe_start_claude(task, worker_pid, worktree_path, opts) do
-      with {:ok, machine_id, machine_pid} <-
-             attach_and_start_machine(task, worktree_path, opts),
-           {:ok, driver_pid} <-
-             maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
-           # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
-           # async close (in production, the MergeQueue direct-strategy close of an
-           # in-flight `{:worker_done}` from the just-stopped run) can land in the
-           # window between that guard and `start_worker/3`, flipping the task to
-           # `:closed` AFTER the guard passed but as/just before the new worker is
-           # attached — leaving a live worker orphaned on a `:closed` task (the
-           # close's own StopWorker found no worker to stop). Re-assert here, now
-           # that the worker is live, and realign a raced-closed task.
-           {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
-        {:ok,
-         %{
-           task: task,
-           worker_pid: worker_pid,
-           machine_id: machine_id,
-           machine_pid: machine_pid,
-           driver_pid: driver_pid,
-           worktree_path: worktree_path,
-           review_checkout: Keyword.get(opts, :review_checkout),
-           claude_port: claude_port
-         }}
-      else
-        {:error, reason} = err ->
-          # A checkout provisioned moments ago has no Driver to reclaim it once
-          # the spawn fails, so tear it down here rather than leak it.
-          Checkout.teardown(review_checkout_path(opts))
-          fail_spawned_worker(worker_pid, reason)
-          err
-      end
-    else
+    # An outer `case` around the inner `with` chain rather than one flat
+    # chain, deliberately: a `with`-clause binding does NOT leak into that
+    # `with`'s own `else`. With a single chain the error branch would read the
+    # *outer* `opts` — the function parameter, which never carries
+    # `:review_checkout` (it is added inside `resolve_agent_cwd/3`) — so its
+    # teardown was a guaranteed no-op and the throwaway worktree leaked on
+    # every post-spawn failure. Splitting the first step out puts the rebound
+    # `opts` in scope for the inner `else`, which is the branch that actually
+    # needs it.
+    case maybe_start_claude(task, worker_pid, worktree_path, opts) do
+      {:ok, claude_port, opts} ->
+        with {:ok, machine_id, machine_pid} <-
+               attach_and_start_machine(task, worktree_path, opts),
+             {:ok, driver_pid} <-
+               maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
+             # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
+             # async close (in production, the MergeQueue direct-strategy close of an
+             # in-flight `{:worker_done}` from the just-stopped run) can land in the
+             # window between that guard and `start_worker/3`, flipping the task to
+             # `:closed` AFTER the guard passed but as/just before the new worker is
+             # attached — leaving a live worker orphaned on a `:closed` task (the
+             # close's own StopWorker found no worker to stop). Re-assert here, now
+             # that the worker is live, and realign a raced-closed task.
+             {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
+          {:ok,
+           %{
+             task: task,
+             worker_pid: worker_pid,
+             machine_id: machine_id,
+             machine_pid: machine_pid,
+             driver_pid: driver_pid,
+             worktree_path: worktree_path,
+             review_checkout: Keyword.get(opts, :review_checkout),
+             claude_port: claude_port
+           }}
+        else
+          {:error, reason} = err ->
+            # A checkout provisioned moments ago has no Driver to reclaim it once
+            # the spawn fails, so tear it down here rather than leak it.
+            Checkout.teardown(review_checkout_path(opts))
+            fail_spawned_worker(worker_pid, reason)
+            err
+        end
+
       # `maybe_start_claude/4` is the frame that provisioned the checkout and
       # tears it down on its own failure path, so there is nothing left to
       # reclaim here — and nothing reachable to reclaim it with.
@@ -665,9 +667,8 @@ defmodule Arbiter.Worker.Dispatch do
               "live worker and avoid orphaning it on a closed task (bd-cgmidt)"
           )
 
-          with {:ok, reopened} <- reopen_task(task),
-               {:ok, in_progress} <- transition_to_in_progress(reopened, []) do
-            {:ok, in_progress}
+          with {:ok, reopened} <- reopen_task(task) do
+            transition_to_in_progress(reopened, [])
           end
       end
     end
@@ -1096,6 +1097,10 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # First hit wins. This lets workspaces override the global default
   # without changing application config.
+  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
@@ -1127,6 +1132,10 @@ defmodule Arbiter.Worker.Dispatch do
               {:error, {:git_failed, msg}} when is_binary(msg) ->
                 cond do
                   String.contains?(msg, "already exists") ->
+                    # Pre-existing nesting 5 — baselined when bd-4x2yhq first
+                    # wired Credo up. Thresholds stay at the tool's own default so new
+                    # code is held to it; see the note in .credo.exs.
+                    # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                     case Worktree.attach(repo_path, branch) do
                       {:ok, path} -> {:ok, path}
                       {:error, reason} -> {:error, {:worktree_failed, reason}}
@@ -1209,6 +1218,10 @@ defmodule Arbiter.Worker.Dispatch do
       |> Enum.find_value(fn path ->
         case RepoResolver.from_remote(path) do
           {:ok, {owner, name}} ->
+            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+            # wired Credo up. Thresholds stay at the tool's own default so new
+            # code is held to it; see the note in .credo.exs.
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
             if RepoConfig.normalize_slug("#{owner}/#{name}") == target, do: path
 
           _ ->
@@ -2119,7 +2132,7 @@ defmodule Arbiter.Worker.Dispatch do
     Task.Supervisor.start_child(Arbiter.Worker.MCPVerifySupervisor, fn ->
       require Logger
 
-      case Arbiter.MCP.AgentConfig.Codex.verify_connection(write_opts) do
+      case Codex.verify_connection(write_opts) do
         :ok ->
           :ok
 

@@ -66,6 +66,8 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
       (tests that *do* exercise isolation point this at a tmp dir).
   """
 
+  alias Arbiter.Agents.Claude.Security
+
   require Logger
 
   # The operator config files we link through (auth only), by name.
@@ -264,7 +266,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   @spec default_settings_json() :: String.t()
   def default_settings_json do
     Arbiter.Agents.SecurityPolicy.default()
-    |> Arbiter.Agents.Claude.Security.settings()
+    |> Security.settings()
     |> Jason.encode!(pretty: true)
   end
 

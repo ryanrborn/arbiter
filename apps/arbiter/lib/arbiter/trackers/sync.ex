@@ -60,9 +60,9 @@ defmodule Arbiter.Trackers.Sync do
 
   require Logger
 
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Trackers
   alias Arbiter.Trackers.Jira
 

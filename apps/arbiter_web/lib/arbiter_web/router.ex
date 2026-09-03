@@ -1,13 +1,53 @@
 defmodule ArbiterWeb.Router do
   use ArbiterWeb, :router
 
+  # Content-Security-Policy for the dashboard (sobelow Config.CSP).
+  #
+  # The board renders content Arbiter did not author — worker transcripts,
+  # PR and review bodies, tracker issue text. HEEx escapes it, but a CSP is
+  # the layer that still holds if something ever renders raw: it stops an
+  # injected tag from loading or phoning home to an origin that is not ours.
+  #
+  # Directive by directive, and why each is what it is:
+  #
+  #   * `script-src 'self'` with no `'unsafe-inline'`. The generator's inline
+  #     theme <script> was moved to assets/js/theme.js precisely so this could
+  #     stay strict — an inline allowance here would give back most of what
+  #     the policy is for. The one exception is the dev-only `/dev` scope,
+  #     which needs the allowance for LiveDashboard and therefore has its own
+  #     pipeline and its own header; see `@dev_csp` at the bottom of this file.
+  #   * `style-src` keeps `'unsafe-inline'`: LiveView's JS commands
+  #     (`JS.show/1`, `JS.transition/1`) work by writing inline `style`
+  #     attributes, and daisyUI theme variables are set the same way. Without
+  #     it every transition in the UI silently stops.
+  #   * `fonts.googleapis.com` / `fonts.gstatic.com`: assets/css/app.css
+  #     `@import`s Geist from Google Fonts and the browser fetches the woff2
+  #     from gstatic. Drop both entries the day those get self-hosted.
+  #   * `connect-src` names `ws:`/`wss:` explicitly rather than relying on
+  #     `'self'` covering the LiveView socket — browsers disagree about that,
+  #     and getting it wrong takes the whole dashboard offline.
+  #   * `frame-ancestors 'none'` (clickjacking), `object-src 'none'`,
+  #     `base-uri 'self'` (stops an injected <base> re-pointing every
+  #     relative URL), `form-action 'self'`.
+  @csp_shared "default-src 'self'; " <>
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " <>
+                "font-src 'self' data: https://fonts.gstatic.com; " <>
+                "img-src 'self' data: blob:; " <>
+                "connect-src 'self' ws: wss:; " <>
+                "frame-ancestors 'none'; " <>
+                "base-uri 'self'; " <>
+                "object-src 'none'; " <>
+                "form-action 'self'"
+
+  @csp "script-src 'self'; " <> @csp_shared
+
   pipeline :browser do
     plug(:accepts, ["html"])
     plug(:fetch_session)
     plug(:fetch_live_flash)
     plug(:put_root_layout, html: {ArbiterWeb.Layouts, :root})
     plug(:protect_from_forgery)
-    plug(:put_secure_browser_headers)
+    plug(:put_secure_browser_headers, %{"content-security-policy" => @csp})
   end
 
   pipeline :api do
@@ -205,8 +245,35 @@ defmodule ArbiterWeb.Router do
     # as long as you are also using SSL (which you should anyway).
     import Phoenix.LiveDashboard.Router
 
+    # The `/dev` scope (LiveDashboard) gets the same policy with one directive
+    # relaxed. LiveDashboard's own layout emits an inline <script> defining
+    # `window.LiveDashboard`, and its bundled JS reads `.customHooks` off that
+    # object on connect — under `script-src 'self'` the browser blocks the
+    # inline script and the dashboard LiveView never connects. The layout does
+    # carry a `nonce` attribute, but it resolves against `:csp_nonce_assign_key`,
+    # which only exists if it is passed to `live_dashboard/2` along with a plug
+    # that assigns the nonces and folds them into this header per request.
+    #
+    # We take the allowance instead of the nonce plumbing: the scope is compiled
+    # in only when `:dev_routes` is set (config/dev.exs), it serves an operator
+    # tool on localhost, and the alternative is per-request header construction
+    # in the router for a route that never ships. Every other directive — most
+    # of all `frame-ancestors`, `object-src` and `base-uri` — still applies. If
+    # LiveDashboard is ever exposed in production, wire the nonces properly
+    # rather than reaching for this pipeline.
+    @dev_csp "script-src 'self' 'unsafe-inline'; " <> @csp_shared
+
+    pipeline :dev_browser do
+      plug(:accepts, ["html"])
+      plug(:fetch_session)
+      plug(:fetch_live_flash)
+      plug(:put_root_layout, html: {ArbiterWeb.Layouts, :root})
+      plug(:protect_from_forgery)
+      plug(:put_secure_browser_headers, %{"content-security-policy" => @dev_csp})
+    end
+
     scope "/dev" do
-      pipe_through(:browser)
+      pipe_through(:dev_browser)
 
       live_dashboard("/dashboard", metrics: ArbiterWeb.Telemetry)
     end

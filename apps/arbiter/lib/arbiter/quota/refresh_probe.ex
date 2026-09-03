@@ -248,8 +248,15 @@ defmodule Arbiter.Quota.RefreshProbe do
   end
 
   defp run_port(exec_path, rest_args, env, workspace_id, timeout_ms) do
+    # `Enum.empty?/1`, not `env == []`: the only caller builds `env` as
+    # `ConfigDir.env() ++ [{"ANTHROPIC_BASE_URL", base_url}]`, so dialyzer can
+    # prove the literal comparison constant and reports an `:exact_compare`
+    # (a warning class dialyxir 1.4.7 can neither format nor filter). The
+    # guard is kept because `run_port/5` is a general port helper and an empty
+    # env must not turn into `{:env, []}`, which Port.open/2 treats as
+    # "clear the environment".
     env_opt =
-      if env == [],
+      if Enum.empty?(env),
         do: [],
         else: [{:env, Enum.map(env, fn {k, v} -> {to_charlist(k), to_charlist(v)} end)}]
 

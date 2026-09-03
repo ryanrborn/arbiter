@@ -541,7 +541,7 @@ defmodule Arbiter.Loop.Analysis do
       {{repo, _sig}, group} ->
         [
           %{
-            task_id: group |> Enum.map(& &1.task_id) |> Enum.join("+"),
+            task_id: group |> Enum.map_join("+", & &1.task_id),
             difficulty:
               group |> Enum.map(& &1.difficulty) |> Enum.reject(&is_nil/1) |> min_or_nil(),
             repo: repo,

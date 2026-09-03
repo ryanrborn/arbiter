@@ -364,18 +364,19 @@ defmodule Arbiter.Worker.Driver do
   end
 
   defp close_task(task_id, close_upstream \\ false) do
-    with {:ok, task} <- Ash.get(Issue, task_id) do
-      attrs = %{close_upstream: close_upstream}
+    case Ash.get(Issue, task_id) do
+      {:ok, task} ->
+        attrs = %{close_upstream: close_upstream}
 
-      case Ash.update(task, attrs, action: :close) do
-        {:ok, _} ->
-          :ok
+        case Ash.update(task, attrs, action: :close) do
+          {:ok, _} ->
+            :ok
 
-        {:error, err} ->
-          Logger.warning("Worker.Driver: failed to close task #{task_id}: #{inspect(err)}")
-          :error
-      end
-    else
+          {:error, err} ->
+            Logger.warning("Worker.Driver: failed to close task #{task_id}: #{inspect(err)}")
+            :error
+        end
+
       err ->
         Logger.warning("Worker.Driver: failed to close task #{task_id}: #{inspect(err)}")
         :error

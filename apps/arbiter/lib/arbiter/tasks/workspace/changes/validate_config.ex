@@ -106,6 +106,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_merge(changeset, nil), do: changeset
 
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp validate_merge(changeset, merge) when is_map(merge) do
     valid_strategies = Arbiter.Tasks.Workspace.valid_merger_strategies()
 
@@ -167,6 +171,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_agent_block(changeset, _label, nil), do: changeset
 
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp validate_agent_block(changeset, label, block) when is_map(block) do
     valid_types = Arbiter.Agents.valid_agent_types()
 
@@ -456,6 +464,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_review_automation(changeset, nil), do: changeset
 
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp validate_review_automation(changeset, block) when is_map(block) do
     changeset
     |> then(fn cs ->
@@ -543,6 +555,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_quota(changeset, nil), do: changeset
 
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp validate_quota(changeset, quota) when is_map(quota) do
     changeset
     |> then(fn cs ->

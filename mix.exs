@@ -22,7 +22,43 @@ defmodule Arbiter.Umbrella.MixProject do
       deps: deps(),
       aliases: aliases(),
       listeners: [Phoenix.CodeReloader],
-      releases: releases()
+      releases: releases(),
+      dialyzer: dialyzer()
+    ]
+  end
+
+  # ONE PLT for the whole umbrella.
+  #
+  # dialyxir defaults `plt_core_path`/`plt_local_path` to the *current*
+  # project's build directory. In an umbrella that means `mix dialyzer` run
+  # from apps/arbiter, apps/arbiter_web and apps/arbiter_cli would each build
+  # and maintain a separate copy of the same multi-minute PLT — three PLTs
+  # covering an almost identical dependency tree, none of them reused. Pinning
+  # both paths to a single umbrella-root directory (each child app points at
+  # `../../priv/plts`) makes the first build pay the cost once and every
+  # subsequent run — from the root or from any child app — reuse it.
+  #
+  # The canonical invocation is `mix dialyzer` from the umbrella root:
+  # dialyxir walks every child app's ebin, so one run covers all three.
+  # Running it from inside a child app works and reuses the same PLT
+  # (dialyxir even refuses to build one there — "In an Umbrella child, not
+  # checking PLT..."), but it only analyses that app, so the other apps'
+  # entries in .dialyzer_ignore.exs match nothing and `list_unused_filters`
+  # reports them as unnecessary skips. That is an artifact of the narrower
+  # scope, not a stale baseline — `mix audit` and CI both run from the root.
+  def dialyzer do
+    [
+      plt_core_path: "priv/plts",
+      plt_local_path: "priv/plts",
+      # :mix and :eex are build/runtime-optional apps that lib/mix/tasks and
+      # arbiter_cli's escript templates reference; without them dialyzer
+      # reports unknown_function for every Mix.* and EEx.* call.
+      plt_add_apps: [:mix, :eex, :ex_unit],
+      ignore_warnings: ".dialyzer_ignore.exs",
+      # Fail the run if an ignore entry stops matching, so stale suppressions
+      # get deleted instead of silently masking a future warning.
+      list_unused_filters: true,
+      flags: [:error_handling, :unknown]
     ]
   end
 
@@ -57,7 +93,16 @@ defmodule Arbiter.Umbrella.MixProject do
   defp deps do
     [
       # Required to run "mix format" on ~H/.heex files from the umbrella root
-      {:phoenix_live_view, ">= 0.0.0"}
+      {:phoenix_live_view, ">= 0.0.0"},
+
+      # Static analysis / security scanning — see `mix audit` below and
+      # .github/workflows/ci.yml. Declared here (as well as in each child app)
+      # so `mix credo`, `mix dialyzer` and `mix sobelow` resolve when run from
+      # the umbrella root, which is the only place the umbrella-wide dialyzer
+      # PLT config lives.
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -74,7 +119,34 @@ defmodule Arbiter.Umbrella.MixProject do
     [
       # run `mix setup` in all child apps
       setup: ["cmd mix setup"],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      # Static analysis + security scan. Mirrors the `mix audit` alias the
+      # sibling codebases (tonic, vstim) run. Ordered cheapest-first so a
+      # formatting slip fails in seconds rather than after dialyzer's PLT work.
+      # `format --check-formatted` (not `format`) deliberately: audit reports,
+      # it never rewrites.
+      #
+      # `hex.audit` is deliberately NOT in this list. It currently exits 1 on
+      # five pre-existing advisories in the Ash tree (ash_phoenix
+      # EEF-CVE-2026-82724/82726/82725/82727, ash_cloak EEF-CVE-2026-81322,
+      # ash_sqlite EEF-CVE-2026-77846). Clearing those means upgrading Ash,
+      # which is its own piece of work — wiring it in here would make this
+      # alias, and therefore CI, red on arrival for reasons unrelated to
+      # static analysis. Run `mix hex.audit` by hand until that upgrade lands,
+      # then add it back to this list.
+      audit: [
+        "deps.unlock --check-unused",
+        "format --check-formatted",
+        "compile --warnings-as-errors",
+        "credo --strict",
+        # Sobelow refuses to scan an umbrella root ("each application should
+        # be scanned separately"), so it runs once per app against that app's
+        # own .sobelow-conf. `cmd` shells out rather than invoking the Mix
+        # task three times, because Mix runs a given task once per session and
+        # the 2nd and 3rd invocations would silently no-op.
+        "cmd mix sobelow --config",
+        "dialyzer"
+      ]
     ]
   end
 end

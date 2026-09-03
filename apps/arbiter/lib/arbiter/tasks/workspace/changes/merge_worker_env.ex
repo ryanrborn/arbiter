@@ -27,8 +27,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv do
 
   use Ash.Resource.Change
 
-  alias Ash.Changeset
   alias Arbiter.Tasks.Workspace
+  alias Ash.Changeset
 
   @name_re ~r/^[A-Za-z_][A-Za-z0-9_]*$/
 

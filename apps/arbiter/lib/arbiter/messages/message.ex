@@ -512,6 +512,10 @@ defmodule Arbiter.Messages.Message do
 
   def last_with_subject(_to_ref, [], _opts), do: nil
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def last_with_subject(to_ref, subjects, opts) when is_binary(to_ref) and is_list(subjects) do
     refs = ref_variants(to_ref)
 

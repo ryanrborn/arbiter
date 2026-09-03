@@ -46,9 +46,9 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   alias Arbiter.Reviews.ExternalReview
   alias Arbiter.Worker
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptLog
-  alias Arbiter.Worker.Dispatch
   alias Arbiter.Workers.Run
   require Ash.Query
 
@@ -66,6 +66,10 @@ defmodule ArbiterWeb.Api.WorkerController do
     end
   end
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp dispatch_task(conn, task_id, opts) do
     case Dispatch.dispatch(task_id, opts) do
       {:ok, result} ->
@@ -137,6 +141,10 @@ defmodule ArbiterWeb.Api.WorkerController do
   Always claude-driven (`start_claude: true`) — a review without an agent has
   nothing to do.
   """
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def review(conn, params) do
     case params do
       # External / non-arbiter PR review (bd-d4ealy): no task, no branch — point
@@ -227,6 +235,10 @@ defmodule ArbiterWeb.Api.WorkerController do
   never silently starts fresh. Always claude-driven; renders the same payload
   as `dispatch/2`.
   """
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def resume(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
     opts = resume_opts(params)

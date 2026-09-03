@@ -275,6 +275,10 @@ defmodule Arbiter.Trackers.GitHub do
   # Merge labels from three sources: the workspace status_map for the initial
   # task status, a "priority: N" label when priority is given, and a "type: T"
   # label when issue_type is given. Only sets "labels" if there is at least one.
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp maybe_put_labels(payload, cfg, status, priority, issue_type) do
     status_label =
       case Map.get(cfg.status_map, status) do

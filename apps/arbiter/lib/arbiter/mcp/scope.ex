@@ -78,8 +78,15 @@ defmodule Arbiter.MCP.Scope do
 
   `task` is anything exposing `:id` and `:workspace_id` (an `Arbiter.Tasks.Issue`).
   """
-  @spec mint_worker(%{id: String.t(), workspace_id: String.t()}, String.t() | nil, keyword()) ::
-          String.t()
+  # `optional(atom()) => any()` keeps the map type OPEN. The doc above says
+  # "anything exposing `:id` and `:workspace_id`", and the only caller
+  # (`Arbiter.Worker.Dispatch.maybe_write_mcp_config/3`) passes a full
+  # `%Arbiter.Tasks.Issue{}`; a closed two-key map type rejects it outright.
+  @spec mint_worker(
+          %{:id => String.t(), :workspace_id => String.t(), optional(atom()) => any()},
+          String.t() | nil,
+          keyword()
+        ) :: String.t()
   def mint_worker(%{id: task_id, workspace_id: ws_id}, repo \\ nil, opts \\ [])
       when is_binary(task_id) and is_binary(ws_id) do
     %{

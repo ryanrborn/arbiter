@@ -192,14 +192,21 @@ defmodule ArbiterWeb.ReviewIndexLive do
   # longer matches an active `?status=` filter — the operator is watching
   # this row transition, so leaving it visible is preferable to it vanishing
   # out from under them; it reappears filtered on the next navigation.
+  # Swap the reloaded row in by id. A clause head rather than an inline
+  # `if` inside the anonymous function: the `if` put this four blocks deep
+  # for no gain in clarity.
+  defp replace_record(records, id, record) do
+    Enum.map(records, fn
+      %{id: ^id} -> record
+      other -> other
+    end)
+  end
+
   defp patch_record(socket, id) do
     case Ash.get(Record, id) do
       {:ok, record} ->
         if Enum.any?(socket.assigns.records, &(&1.id == id)) do
-          records =
-            Enum.map(socket.assigns.records, fn r -> if r.id == id, do: record, else: r end)
-
-          assign(socket, :records, records)
+          assign(socket, :records, replace_record(socket.assigns.records, id, record))
         else
           load_records(socket)
         end

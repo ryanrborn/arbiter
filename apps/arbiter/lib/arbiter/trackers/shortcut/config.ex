@@ -156,7 +156,7 @@ defmodule Arbiter.Trackers.Shortcut.Config do
         {:error,
          config_missing(
            "Shortcut config missing \"credentials_ref\". Set " <>
-             "workspace.config[\"tracker\"][\"config\"][\"credentials_ref\"] or " <>
+             ~s(workspace.config["tracker"]["config"]["credentials_ref"] or ) <>
              ":arbiter, :shortcut_default_config in Application env."
          )}
     end
@@ -168,9 +168,17 @@ defmodule Arbiter.Trackers.Shortcut.Config do
 
   defp workflow_id(raw) do
     case Map.get(raw, "workflow_id") do
-      id when is_integer(id) -> id
-      id when is_binary(id) -> with {n, ""} <- Integer.parse(id), do: n, else: (_ -> nil)
-      _ -> nil
+      id when is_integer(id) ->
+        id
+
+      id when is_binary(id) ->
+        case Integer.parse(id) do
+          {n, ""} -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
@@ -188,7 +196,7 @@ defmodule Arbiter.Trackers.Shortcut.Config do
   # the feature is off (nil) — default.
   defp estimate_buckets(raw) do
     case get_in(raw, ["difficulty", "buckets"]) do
-      buckets when is_list(buckets) and length(buckets) > 0 ->
+      buckets when is_list(buckets) and buckets != [] ->
         parse_buckets(buckets) || @default_difficulty_buckets
 
       _ ->

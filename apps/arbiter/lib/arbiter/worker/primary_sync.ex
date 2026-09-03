@@ -50,12 +50,10 @@ defmodule Arbiter.Worker.PrimarySync do
       when is_binary(repo_path) and is_binary(base_branch) do
     with :ok <- Worktree.fetch_origin(repo_path, base_branch),
          {:ok, current} <- Worktree.current_branch(repo_path) do
-      cond do
-        current != base_branch ->
-          {:skipped, :not_on_default_branch}
-
-        true ->
-          with_clean_tree(repo_path, base_branch)
+      if current != base_branch do
+        {:skipped, :not_on_default_branch}
+      else
+        with_clean_tree(repo_path, base_branch)
       end
     end
   end
@@ -94,15 +92,13 @@ defmodule Arbiter.Worker.PrimarySync do
   defp run_git(args, opts) do
     cd = Keyword.get(opts, :cd)
 
-    cond do
-      is_binary(cd) and not File.dir?(cd) ->
-        {:error, {:git_failed, "cwd does not exist: #{cd}"}}
-
-      true ->
-        case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
-          {output, 0} -> {:ok, output}
-          {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
-        end
+    if is_binary(cd) and not File.dir?(cd) do
+      {:error, {:git_failed, "cwd does not exist: #{cd}"}}
+    else
+      case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
+        {output, 0} -> {:ok, output}
+        {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
+      end
     end
   rescue
     e in ErlangError -> {:error, {:git_failed, Exception.message(e)}}

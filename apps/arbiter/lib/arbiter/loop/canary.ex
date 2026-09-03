@@ -950,7 +950,7 @@ defmodule Arbiter.Loop.Canary do
   end
 
   defp ash_message(%Ash.Error.Invalid{errors: errors}),
-    do: errors |> Enum.map(&Exception.message/1) |> Enum.join("; ")
+    do: errors |> Enum.map_join("; ", &Exception.message/1)
 
   defp ash_message(err) when is_exception(err), do: Exception.message(err)
   defp ash_message(err), do: inspect(err)

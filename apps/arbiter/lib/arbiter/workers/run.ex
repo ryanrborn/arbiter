@@ -303,7 +303,7 @@ defmodule Arbiter.Workers.Run do
       default []
 
       description "Effective post-layering skill set (workspace -> repo -> task) active " <>
-                    "for this run: [{\"name\", \"activation_mode\", \"skill_version\"}, ...]. " <>
+                    ~s(for this run: [{"name", "activation_mode", "skill_version"}, ...]. ) <>
                     "\"skill_version\" is the skill's updated_at at dispatch time, so a later " <>
                     "edit to the skill body doesn't retroactively relabel this run's provenance."
     end
@@ -321,8 +321,8 @@ defmodule Arbiter.Workers.Run do
       constraints max_length: 64, trim?: true
 
       description "Which routing policy decided the model/tier for this run " <>
-                    "(\"static\" / \"by_priority\" / \"by_difficulty\" / \"by_budget\" / " <>
-                    "\"round_robin\" / \"review_agent\" — the last for a ReviewGate reviewer, " <>
+                    ~s[("static" / "by_priority" / "by_difficulty" / "by_budget" / ] <>
+                    ~s("round_robin" / "review_agent" — the last for a ReviewGate reviewer, ) <>
                     "which is configured directly rather than routed)."
     end
 
@@ -330,7 +330,7 @@ defmodule Arbiter.Workers.Run do
       public? true
       constraints max_length: 32, trim?: true
 
-      description "Resolved abstract tier (\"economy\" / \"standard\" / \"premium\"), not just " <>
+      description ~s[Resolved abstract tier ("economy" / "standard" / "premium"), not just ] <>
                     "the concrete model string already captured in :model."
     end
 
@@ -338,7 +338,7 @@ defmodule Arbiter.Workers.Run do
       public? true
       constraints max_length: 32, trim?: true
 
-      description "Resolved abstract reasoning effort (\"none\" / \"low\" / \"medium\" / \"high\")."
+      description ~s[Resolved abstract reasoning effort ("none" / "low" / "medium" / "high").]
     end
 
     attribute :difficulty_at_dispatch, :integer do
@@ -377,7 +377,7 @@ defmodule Arbiter.Workers.Run do
       constraints max_length: 64, trim?: true
 
       description "The terminal stream-json `result` event's `subtype` (e.g. \"success\", " <>
-                    "\"error_max_turns\", \"error_during_execution\") — the CLI's own " <>
+                    ~s["error_max_turns", "error_during_execution") — the CLI's own ] <>
                     "outcome/verdict, distinct from the subprocess exit_code."
     end
 
@@ -408,7 +408,7 @@ defmodule Arbiter.Workers.Run do
       constraints max_length: 64, trim?: true
 
       description "The run's typed terminal cause, stored as an atom name: an " <>
-                    "Arbiter.Worker.StopReason category (\"auth_expired\", \"context_thrash\", " <>
+                    ~s[Arbiter.Worker.StopReason category ("auth_expired", "context_thrash", ] <>
                     "\"exited_without_done\", ...) or, for a worker parked by the commit gate, " <>
                     "that gate's reason (\"uncommitted_at_completion\", ...). The structured " <>
                     "twin of failure_reason's prose; nil when the run ended in neither."

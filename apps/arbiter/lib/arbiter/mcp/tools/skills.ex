@@ -140,19 +140,17 @@ defmodule Arbiter.MCP.Tools.Skills do
   # (`Arbiter.Skills.resolve_skill/2`). `workspace_id` nil = global scope
   # (a workspace-agnostic coordinator sees every skill).
   defp fetch_skill_in_scope(ref, workspace_id) do
-    cond do
-      uuid_ref?(ref) ->
-        with {:ok, skill} <- fetch_skill(ref) do
-          if skill_visible?(skill, workspace_id),
-            do: {:ok, skill},
-            else: {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
-        end
-
-      true ->
-        case Arbiter.Skills.resolve_skill(ref, workspace_id) do
-          {:ok, skill} -> {:ok, skill}
-          {:error, :not_found} -> {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
-        end
+    if uuid_ref?(ref) do
+      with {:ok, skill} <- fetch_skill(ref) do
+        if skill_visible?(skill, workspace_id),
+          do: {:ok, skill},
+          else: {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
+      end
+    else
+      case Arbiter.Skills.resolve_skill(ref, workspace_id) do
+        {:ok, skill} -> {:ok, skill}
+        {:error, :not_found} -> {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
+      end
     end
   end
 

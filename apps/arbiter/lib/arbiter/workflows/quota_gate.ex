@@ -84,16 +84,10 @@ defmodule Arbiter.Workflows.QuotaGate do
       ws_id = to_string(workspace_id || "")
       workspace = safe_workspace(ws_id)
 
-      cond do
-        # :continue mode — never clamp here; the dispatch/2 quota seam owns the
-        # allow/overage decision so :continue graph work proceeds past the cap.
-        # Shared with the board's quota_hold/1 via Arbiter.Quota.continue_mode?/1
-        # (bd-5j6nmn) so both defer to the same seam-resolved mode.
-        Arbiter.Quota.continue_mode?(workspace) ->
-          :unlimited
-
-        true ->
-          throttle_headroom(ws_id, workspace)
+      if Arbiter.Quota.continue_mode?(workspace) do
+        :unlimited
+      else
+        throttle_headroom(ws_id, workspace)
       end
     end
 

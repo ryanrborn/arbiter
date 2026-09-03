@@ -83,17 +83,15 @@ defmodule ArbiterWeb.Api.RunController do
   defp parse_status(""), do: {:ok, nil}
 
   defp parse_status(raw) when is_binary(raw) do
-    try do
-      atom = String.to_existing_atom(raw)
+    atom = String.to_existing_atom(raw)
 
-      if atom in Run.statuses() do
-        {:ok, atom}
-      else
-        {:error, {:invalid_request, "invalid status: #{inspect(raw)}"}}
-      end
-    rescue
-      ArgumentError -> {:error, {:invalid_request, "invalid status: #{inspect(raw)}"}}
+    if atom in Run.statuses() do
+      {:ok, atom}
+    else
+      {:error, {:invalid_request, "invalid status: #{inspect(raw)}"}}
     end
+  rescue
+    ArgumentError -> {:error, {:invalid_request, "invalid status: #{inspect(raw)}"}}
   end
 
   defp parse_before(nil), do: {:ok, nil}

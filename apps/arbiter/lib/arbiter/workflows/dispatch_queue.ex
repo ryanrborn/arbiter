@@ -52,6 +52,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   require Logger
 
+  alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.DispatchQueueSupervisor
@@ -394,7 +395,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
     state
     |> provider_snapshots()
     |> Map.values()
-    |> Enum.map(&Arbiter.Quota.Gate.Snapshot.normalize/1)
+    |> Enum.map(&Snapshot.normalize/1)
     |> Enum.flat_map(fn
       %{reset_at: %DateTime{} = reset} -> [reset]
       _ -> []

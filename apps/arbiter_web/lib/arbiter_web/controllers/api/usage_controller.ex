@@ -141,20 +141,18 @@ defmodule ArbiterWeb.Api.UsageController do
   defp parse_by(""), do: {:error, {:invalid_request, "by is required: one of #{by_options()}"}}
 
   defp parse_by(raw) when is_binary(raw) do
-    try do
-      atom = String.to_existing_atom(raw)
+    atom = String.to_existing_atom(raw)
 
-      if atom in Usage.acceptable_groupings() do
-        {:ok, atom}
-      else
-        {:error,
-         {:invalid_request, "invalid by: #{inspect(raw)} (expected one of #{by_options()})"}}
-      end
-    rescue
-      ArgumentError ->
-        {:error,
-         {:invalid_request, "invalid by: #{inspect(raw)} (expected one of #{by_options()})"}}
+    if atom in Usage.acceptable_groupings() do
+      {:ok, atom}
+    else
+      {:error,
+       {:invalid_request, "invalid by: #{inspect(raw)} (expected one of #{by_options()})"}}
     end
+  rescue
+    ArgumentError ->
+      {:error,
+       {:invalid_request, "invalid by: #{inspect(raw)} (expected one of #{by_options()})"}}
   end
 
   defp by_options do
@@ -175,17 +173,15 @@ defmodule ArbiterWeb.Api.UsageController do
   defp parse_step(""), do: {:ok, nil}
 
   defp parse_step(raw) when is_binary(raw) do
-    try do
-      atom = String.to_existing_atom(raw)
+    atom = String.to_existing_atom(raw)
 
-      if atom in Event.steps() do
-        {:ok, atom}
-      else
-        {:error, {:invalid_request, "invalid step: #{inspect(raw)}"}}
-      end
-    rescue
-      ArgumentError -> {:error, {:invalid_request, "invalid step: #{inspect(raw)}"}}
+    if atom in Event.steps() do
+      {:ok, atom}
+    else
+      {:error, {:invalid_request, "invalid step: #{inspect(raw)}"}}
     end
+  rescue
+    ArgumentError -> {:error, {:invalid_request, "invalid step: #{inspect(raw)}"}}
   end
 
   defp parse_limit(nil), do: {:ok, @default_event_limit}

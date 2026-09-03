@@ -12,7 +12,7 @@ defmodule ArbiterCli.Cmd.InstallService do
       self-contained OTP release.
     * **Dev-mode source checkout** — when the root looks like an Arbiter
       source checkout (`mix.exs` + `apps/`, the same heuristic
-      `Cmd.Start.is_umbrella_root?/1` uses), `ExecStart` instead runs
+      `Cmd.Start.umbrella_root?/1` uses), `ExecStart` instead runs
       `<root>/.run-server.sh`, a small `exec`-chain launcher that `cd`s to
       the checkout, sources the checkout's own `.arbiter.env` (for
       `SECRET_KEY_BASE`, `DATABASE_PATH`, and similar dev-only settings that

@@ -81,8 +81,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   use GenServer
 
   alias Arbiter.GitHub.Limiter
-  alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers.Sync
   alias Arbiter.Worker
   require Ash.Query
@@ -311,24 +311,18 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   end
 
   defp maybe_finalize(%Issue{pr_ref: pr_ref} = task, adapter) do
-    cond do
-      # bd-38l3px: this sweep exists to finalize tasks whose worker/Watchdog is
-      # GONE (see moduledoc). A task with a LIVE worker is being actively worked
-      # — its own worker + Watchdog own the terminal transition. Closing it from
-      # here would silently kill an in-flight task whose `pr_ref` is stale (a
-      # merged PR from a PRIOR run that was reopened/re-dispatched). Leave it to
-      # its worker.
-      live_worker?(task) ->
-        skip_live_worker(task)
-
-      true ->
-        with {:ok, %{status: :merged}} <- adapter.get(pr_ref) do
+    if live_worker?(task) do
+      skip_live_worker(task)
+    else
+      case adapter.get(pr_ref) do
+        {:ok, %{status: :merged}} ->
           finalize(task)
-        else
-          # PR is open, approved-but-not-merged, closed without merge, or API
-          # error (including 404 for a PR in a different repo). All are no-ops.
-          _ -> :noop
-        end
+
+        # PR is open, approved-but-not-merged, closed without merge, or API
+        # error (including 404 for a PR in a different repo). All are no-ops.
+        _ ->
+          :noop
+      end
     end
   end
 
@@ -366,18 +360,16 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
        ) do
     ref = source_pr || tracker_ref
 
-    cond do
-      # bd-38l3px: same live-worker guard as maybe_finalize/2 — never close a
-      # task that a worker is actively driving.
-      live_worker?(task) ->
-        skip_live_worker(task)
-
-      true ->
-        with {:ok, %{status: :merged}} <- adapter.get(ref) do
+    if live_worker?(task) do
+      skip_live_worker(task)
+    else
+      case adapter.get(ref) do
+        {:ok, %{status: :merged}} ->
           finalize_follow_up(task, ref)
-        else
-          _ -> :noop
-        end
+
+        _ ->
+          :noop
+      end
     end
   end
 

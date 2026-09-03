@@ -1,0 +1,48 @@
+# Sobelow configuration for the `arbiter` app.
+#
+# Sobelow refuses to scan an umbrella root ("each application should be
+# scanned separately"), so the umbrella's `mix audit` alias shells out to
+# `mix sobelow --config` once per app — Mix runs each child app's task in its
+# own project, which picks up that app's own file. Each app carries one.
+[
+  verbose: false,
+  private: false,
+  # Honour `# sobelow_skip [...]` annotations. Every one of them in this app
+  # sits directly above the function it applies to, names the finding it
+  # silences, and says why — grep for `sobelow_skip` to audit the set.
+  skip: true,
+  # Not a Phoenix app — no router to find, and saying so keeps the scan
+  # from warning about its absence on every run.
+  router: :none,
+  # Fail the run on any finding, at any confidence. Combined with
+  # `threshold: :low` below that is the strictest setting available; it is
+  # affordable because the first-pass findings were triaged to zero rather
+  # than thresholded away.
+  exit: :low,
+  format: "txt",
+  out: nil,
+  threshold: :low,
+
+  # Traversal.FileModule — ignored app-wide, 64 findings.
+  #
+  # The check flags every `File.*` call whose path is a variable rather than
+  # a literal. Arbiter's job is to manage git worktrees, agent config dirs
+  # and log files on the operator's own machine, so that describes very
+  # nearly every file operation it performs; the check has no signal left
+  # here to give.
+  #
+  # This is a judgement about reachability, not a shrug. Directory traversal
+  # needs untrusted input to reach a path. The web surface (apps/arbiter_web)
+  # holds exactly one `File.*` call — `File.regular?/1` in
+  # `ArbiterWeb.Api.WorkerController`, on a transcript path derived from a
+  # persisted run id rather than from request input, and not a function this
+  # check flags — and takes no path parameter from any request; paths in this
+  # app are built from workspace config the operator wrote and from worktree
+  # roots Arbiter itself allocated. Re-examine this entry the day a controller
+  # or LiveView starts accepting a filename.
+  #
+  # Same reasoning and same entry as the sibling codebases (tonic, vstim).
+  ignore: ["Traversal.FileModule"],
+  ignore_files: [],
+  version: false
+]

@@ -207,7 +207,7 @@ defmodule Arbiter.Loop.PendingWrite do
       public? true
       default %{}
 
-      description "What apply needs, keyed by `kind` (e.g. %{\"task_id\" => …, \"difficulty\" => …})."
+      description ~s[What apply needs, keyed by `kind` (e.g. %{"task_id" => …, "difficulty" => …}).]
     end
 
     attribute :target_metric, :string do
@@ -355,7 +355,7 @@ defmodule Arbiter.Loop.PendingWrite do
     attribute :actor, :string do
       public? true
 
-      description "Stable label of the actor who last wrote this row (e.g. \"coordinator\", \"loop\"). Never read from untrusted MCP input."
+      description ~s[Stable label of the actor who last wrote this row (e.g. "coordinator", "loop"). Never read from untrusted MCP input.]
     end
 
     create_timestamp :created_at

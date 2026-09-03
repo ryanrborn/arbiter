@@ -76,8 +76,8 @@ defmodule ArbiterCli.Cmd.Update do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.Cmd.Update.{Formatter, Git}
   alias ArbiterCli.{Client, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.Cmd.Update.{Formatter, Git}
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
   # branch (`main`); a deploy is always a pull of merged work into it.
@@ -137,6 +137,10 @@ defmodule ArbiterCli.Cmd.Update do
 
   # ---- deploy mode -------------------------------------------------------
 
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_deploy(argv) do
     {opts, _rest, mode} =
       ArgParser.parse_strict!(argv, "arb update",
@@ -203,36 +207,38 @@ defmodule ArbiterCli.Cmd.Update do
       # Finally restart Phoenix to load the new code
       case Restart.perform(root, timeout_ms) do
         {:ok, actions, was_running} ->
-          Formatter.emit_deployed(
-            mode,
-            @integration_branch,
-            before_sha,
-            after_sha,
-            commits,
-            actions,
-            was_running,
-            migrations_applied,
-            cli_built
-          )
+          Formatter.emit_deployed(mode, %{
+            branch: @integration_branch,
+            before_sha: before_sha,
+            after_sha: after_sha,
+            commits: commits,
+            actions: actions,
+            was_running: was_running,
+            migrations_applied: migrations_applied,
+            cli_built: cli_built
+          })
 
         {:timeout, actions, _was_running} ->
-          Formatter.emit_deploy_timeout(
-            mode,
-            @integration_branch,
-            before_sha,
-            after_sha,
-            commits,
-            actions,
-            timeout_ms,
-            migrations_applied,
-            cli_built
-          )
+          Formatter.emit_deploy_timeout(mode, %{
+            branch: @integration_branch,
+            before_sha: before_sha,
+            after_sha: after_sha,
+            commits: commits,
+            actions: actions,
+            timeout_ms: timeout_ms,
+            migrations_applied: migrations_applied,
+            cli_built: cli_built
+          })
       end
     end
   end
 
   # ---- issue-edit mode ---------------------------------------------------
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_edit_issue(argv) do
     {opts, rest, mode} = ArgParser.parse(argv, switches: @edit_switches)
 

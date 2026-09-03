@@ -60,6 +60,7 @@ defmodule Arbiter.Workflows.ReviewReply do
     steps: [:read_thread, :compose_reply, :post_reply]
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Mergers
 
   require Logger
@@ -120,6 +121,10 @@ defmodule Arbiter.Workflows.ReviewReply do
 
   # ---- :post_reply ----------------------------------------------------------
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run_step(
         :post_reply,
         %{adapter: adapter, mr_ref: mr_ref, comment_id: comment_id, reply_body: body} = state
@@ -153,6 +158,10 @@ defmodule Arbiter.Workflows.ReviewReply do
 
   # ---- helpers --------------------------------------------------------------
 
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp build_thread_context(thread) do
     parts = []
 
@@ -209,6 +218,11 @@ defmodule Arbiter.Workflows.ReviewReply do
     Application.get_env(:arbiter, :review_reply_composer) || (&default_compose/2)
   end
 
+  # `System.cmd/3` spawns the executable directly (`:spawn_executable`) — no
+  # shell, so there is no metacharacter injection to have. `path` is the
+  # Claude CLI location resolved from Arbiter's own agent config, not from a
+  # request or a task field.
+  # sobelow_skip ["CI.System"]
   defp default_compose(thread_context, _state) do
     case System.find_executable("claude") do
       nil ->
@@ -221,7 +235,7 @@ defmodule Arbiter.Workflows.ReviewReply do
         # Append the review_agent model when seeded (Agents.prepare/2 puts the
         # config in the process dict; Claude.Config reads it back here).
         args =
-          case Arbiter.Agents.Claude.Config.active_model() do
+          case ClaudeConfig.active_model() do
             model when is_binary(model) and model != "" -> args ++ ["--model", model]
             _ -> args
           end

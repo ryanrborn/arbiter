@@ -127,7 +127,7 @@ defmodule Arbiter.Usage.Event do
       public? true
       constraints max_length: 64, trim?: true
 
-      description "Provider key (e.g. \"claude\", \"openai\"). Normalised so future non-Claude agents fit this same ledger."
+      description ~s[Provider key (e.g. "claude", "openai"). Normalised so future non-Claude agents fit this same ledger.]
     end
 
     attribute :tokens_in, :integer do

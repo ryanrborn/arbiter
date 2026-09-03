@@ -48,9 +48,8 @@ defmodule Arbiter.Agents.Routing do
   """
   @spec choose(Issue.t(), Workspace.t() | nil, Policy.ledger_snapshot()) :: Policy.choice()
   def choose(%Issue{} = task, workspace, ledger_snapshot \\ %{}) do
-    workspace
-    |> policy_for_workspace()
-    |> apply(:choose, [task, workspace, ledger_snapshot])
+    policy = policy_for_workspace(workspace)
+    policy.choose(task, workspace, ledger_snapshot)
   end
 
   @doc """
@@ -63,7 +62,12 @@ defmodule Arbiter.Agents.Routing do
 
   def policy_for_workspace(%Workspace{config: config}) do
     case get_in(config || %{}, ["routing", "policy"]) do
-      p when p in @valid_policies -> Map.fetch!(@policies, String.to_atom(p))
+      # `String.to_existing_atom/1`, not `String.to_atom/1` (sobelow
+      # DOS.StringToAtom). The value is validated against the list above, so
+      # the atom is guaranteed to already exist and the unbounded-atom-table
+      # concern does not apply — but spelling it this way means a future edit
+      # that loosens the guard cannot quietly reintroduce the leak.
+      p when p in @valid_policies -> Map.fetch!(@policies, String.to_existing_atom(p))
       _ -> Static
     end
   end
@@ -95,11 +99,9 @@ defmodule Arbiter.Agents.Routing do
 
   @doc false
   def agent_type_atom(%{"type" => t}) when is_binary(t) do
-    try do
-      String.to_existing_atom(t)
-    rescue
-      ArgumentError -> :claude
-    end
+    String.to_existing_atom(t)
+  rescue
+    ArgumentError -> :claude
   end
 
   def agent_type_atom(%{"type" => list}) when is_list(list) do

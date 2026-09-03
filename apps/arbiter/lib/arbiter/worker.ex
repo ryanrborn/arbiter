@@ -1173,6 +1173,10 @@ defmodule Arbiter.Worker do
   # implementer (meta.role == :implementer) a `:impl` row; everything else
   # writes `:work`. Missing fields are fine — we record what we have rather
   # than dropping the row.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp record_usage_event(%State{} = state, %{} = session, exit_status) do
     usage =
       session
@@ -1573,97 +1577,95 @@ defmodule Arbiter.Worker do
   # by the port itself so multiple concurrent sessions (future) wouldn't
   # collide.
   def handle_call({:__claude_session_open__, port_args, session_config}, _from, %State{} = state) do
-    try do
-      # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
-      # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
-      # prompt) into THIS spawn so it continues the prior Claude session, but
-      # stash the PRISTINE argv as :claude_spawn — the bd-t9uq25 auto-resume
-      # rebuilds each `--resume` from pristine args + the latest session id, so a
-      # polluted spawn would stack duplicate flags. One-shot: consumed below.
-      {spawn_args, pristine_args} = resume_spawn_args(state, port_args)
+    # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
+    # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
+    # prompt) into THIS spawn so it continues the prior Claude session, but
+    # stash the PRISTINE argv as :claude_spawn — the bd-t9uq25 auto-resume
+    # rebuilds each `--resume` from pristine args + the latest session id, so a
+    # polluted spawn would stack duplicate flags. One-shot: consumed below.
+    {spawn_args, pristine_args} = resume_spawn_args(state, port_args)
 
-      # bd-11abk2: an oversized original prompt is delivered via a temp file
-      # (Arbiter.Agents.Claude.build_argv/3); if the bd-1z7624 session-resume
-      # injection above swapped it out for the short continue prompt, that
-      # temp file is now orphaned — nothing will ever open it — so reclaim it
-      # immediately rather than leaking it until the worker exits.
-      provider = Map.get(session_config, :provider)
-      adapter = agent_adapter_for_provider(provider)
+    # bd-11abk2: an oversized original prompt is delivered via a temp file
+    # (Arbiter.Agents.Claude.build_argv/3); if the bd-1z7624 session-resume
+    # injection above swapped it out for the short continue prompt, that
+    # temp file is now orphaned — nothing will ever open it — so reclaim it
+    # immediately rather than leaking it until the worker exits.
+    provider = Map.get(session_config, :provider)
+    adapter = agent_adapter_for_provider(provider)
 
-      # bd-9rdwe4 (#1017 gap G5): persist the composed prompt BEFORE any
-      # tmpfile is reclaimed below — nothing recorded what an agent was told,
-      # and the oversized-prompt tmpfile is unlinked as soon as this worker no
-      # longer needs it. We already hold the raw prompt string in
-      # `session_config` (threaded in by `ClaudeSession.start/1` /
-      # `ClaudeSession.build_session_config/3`), so persistence never depends
-      # on reading it back off a temp file that might already be gone.
-      persist_composed_prompt(state, session_config)
+    # bd-9rdwe4 (#1017 gap G5): persist the composed prompt BEFORE any
+    # tmpfile is reclaimed below — nothing recorded what an agent was told,
+    # and the oversized-prompt tmpfile is unlinked as soon as this worker no
+    # longer needs it. We already hold the raw prompt string in
+    # `session_config` (threaded in by `ClaudeSession.start/1` /
+    # `ClaudeSession.build_session_config/3`), so persistence never depends
+    # on reading it back off a temp file that might already be gone.
+    persist_composed_prompt(state, session_config)
 
-      if spawn_args != pristine_args do
-        case get_prompt_tmpfile(adapter, pristine_args.argv) do
-          path when is_binary(path) -> File.rm(path)
-          nil -> :ok
-        end
+    if spawn_args != pristine_args do
+      case get_prompt_tmpfile(adapter, pristine_args.argv) do
+        path when is_binary(path) -> File.rm(path)
+        nil -> :ok
       end
-
-      port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
-      now = DateTime.utc_now()
-
-      session =
-        session_config
-        |> Map.put(:port, port)
-        |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
-        |> Map.put(:output_lines, [])
-        |> Map.put(:line_buf, "")
-        |> Map.put(:exit_status, nil)
-        |> Map.put(:exited_at, nil)
-        |> Map.put(:started_at, now)
-        |> Map.put(:activity, "starting")
-        |> Map.put(:activity_at, now)
-        |> Map.put(:output_log, open_output_log(state))
-        |> Map.put(:run_id, state.run_id)
-
-      sessions = Map.put(state.claude_sessions, port, session)
-
-      # Mark the worker claude-driven so views can show the live activity
-      # signal (mirrored below) instead of a frozen workflow step — the
-      # claude-driven Driver never ticks the Machine. See bd-c919xj.
-      #
-      # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
-      # the worker with a nudge prompt when arb-done arrives with uncommitted
-      # work, without round-tripping through the workspace-aware Dispatch builder
-      # that does not know how to swap the prompt mid-session.
-      # bd-au3xrq: stash the coordinates the on-disk session-JSONL fallback needs.
-      # `config_dir` is the effective CLAUDE_CONFIG_DIR this spawn ran under (from
-      # the injected env, else the inherited default); `cwd` is the worktree the
-      # CLI derives its project-slug from. `session_id` lands later (init event,
-      # via sync_session_meta) — together they root
-      # `<config_dir>/projects/<slug>/<session_id>.jsonl`.
-      config_dir = effective_config_dir(port_args)
-
-      meta =
-        (state.meta || %{})
-        |> Map.put(:claude_session, true)
-        |> Map.put(:claude_spawn, pristine_args)
-        |> Map.delete(:resume_session_id)
-        |> Map.put(:config_dir, config_dir)
-        |> Map.put(:cwd, Map.get(port_args, :cd))
-
-      new_state = %State{state | claude_sessions: sessions, meta: meta}
-      new_state = sync_session_meta(new_state, port)
-
-      # Persist config_dir onto the run row now, at dispatch, so a node that dies
-      # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
-      # a Gemini/Codex run has no Claude session file to reconcile against.
-      if config_dir && new_state.run_id &&
-           Map.get(session_config, :provider) in [nil, "claude"] do
-        backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
-      end
-
-      {:reply, {:ok, port}, new_state}
-    rescue
-      e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
     end
+
+    port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
+    now = DateTime.utc_now()
+
+    session =
+      session_config
+      |> Map.put(:port, port)
+      |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
+      |> Map.put(:output_lines, [])
+      |> Map.put(:line_buf, "")
+      |> Map.put(:exit_status, nil)
+      |> Map.put(:exited_at, nil)
+      |> Map.put(:started_at, now)
+      |> Map.put(:activity, "starting")
+      |> Map.put(:activity_at, now)
+      |> Map.put(:output_log, open_output_log(state))
+      |> Map.put(:run_id, state.run_id)
+
+    sessions = Map.put(state.claude_sessions, port, session)
+
+    # Mark the worker claude-driven so views can show the live activity
+    # signal (mirrored below) instead of a frozen workflow step — the
+    # claude-driven Driver never ticks the Machine. See bd-c919xj.
+    #
+    # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
+    # the worker with a nudge prompt when arb-done arrives with uncommitted
+    # work, without round-tripping through the workspace-aware Dispatch builder
+    # that does not know how to swap the prompt mid-session.
+    # bd-au3xrq: stash the coordinates the on-disk session-JSONL fallback needs.
+    # `config_dir` is the effective CLAUDE_CONFIG_DIR this spawn ran under (from
+    # the injected env, else the inherited default); `cwd` is the worktree the
+    # CLI derives its project-slug from. `session_id` lands later (init event,
+    # via sync_session_meta) — together they root
+    # `<config_dir>/projects/<slug>/<session_id>.jsonl`.
+    config_dir = effective_config_dir(port_args)
+
+    meta =
+      (state.meta || %{})
+      |> Map.put(:claude_session, true)
+      |> Map.put(:claude_spawn, pristine_args)
+      |> Map.delete(:resume_session_id)
+      |> Map.put(:config_dir, config_dir)
+      |> Map.put(:cwd, Map.get(port_args, :cd))
+
+    new_state = %State{state | claude_sessions: sessions, meta: meta}
+    new_state = sync_session_meta(new_state, port)
+
+    # Persist config_dir onto the run row now, at dispatch, so a node that dies
+    # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
+    # a Gemini/Codex run has no Claude session file to reconcile against.
+    if config_dir && new_state.run_id &&
+         Map.get(session_config, :provider) in [nil, "claude"] do
+      backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
+    end
+
+    {:reply, {:ok, port}, new_state}
+  rescue
+    e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
   end
 
   # bd-1z7624: build the spawn argv for the first session, injecting
@@ -1905,6 +1907,10 @@ defmodule Arbiter.Worker do
   # without having to know about the internal :claude_sessions map.
   # When there are multiple concurrent sessions this surfaces the most recent
   # one; for now there's only ever one.
+  # Pre-existing complexity 17 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp sync_session_meta(%State{claude_sessions: sessions, meta: meta} = state, port) do
     case Map.get(sessions, port) do
       %{} = session ->
@@ -2387,22 +2393,13 @@ defmodule Arbiter.Worker do
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
   #     workers with no branch complete directly as before.
   defp on_claude_done(%State{meta: meta} = state) do
-    cond do
-      # bd-5lc99r: a `task` issue type is non-reviewable ops/research/spike work.
-      # It produces a findings summary in `notes`, NOT a code change — so there
-      # is no commit gate, no review gate, no PR, and no merge. The only gate is
-      # the notes gate: refuse to let `arb done` close the directive until the
-      # worker has written its findings to `notes`. Then complete directly,
-      # regardless of whether a worktree/branch exists (the worktree is optional
-      # for a task and is never integrated).
-      task_type?(meta) and not review_only?(meta) ->
-        case notes_gate(state) do
-          :ok -> complete_now(state, :claude_done)
-          {:gate, :blank} -> handle_notes_gate(state)
-        end
-
-      true ->
-        on_claude_done_reviewable(state, meta)
+    if task_type?(meta) and not review_only?(meta) do
+      case notes_gate(state) do
+        :ok -> complete_now(state, :claude_done)
+        {:gate, :blank} -> handle_notes_gate(state)
+      end
+    else
+      on_claude_done_reviewable(state, meta)
     end
   end
 
@@ -2808,39 +2805,41 @@ defmodule Arbiter.Worker do
   # ad-hoc runs without a provisioned worktree (no `:worktree_path` in meta)
   # fall through to the legacy path. git failures fail open: a transient git
   # hiccup must not strand a real completion.
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp commit_gate(%State{meta: meta}) do
     worktree = meta && Map.get(meta, :worktree_path)
     target = (meta && Map.get(meta, :target_branch)) || "main"
     expected = meta && Map.get(meta, :branch)
 
-    cond do
-      is_binary(worktree) and File.dir?(worktree) and
-          worktree_on_branch?(worktree, expected) ->
-        case Arbiter.Worker.Worktree.completion_state(worktree, target) do
-          {:ok, :ready} ->
-            # bd-9q966y: belt-and-suspenders — even a "clean, committed" worktree
-            # must not carry injected agent-config files (.mcp.json / .gemini/ /
-            # .codex/) in its committed diff. These files contain per-spawn bearer
-            # tokens. Normally they are gitignored via .git/info/exclude (written
-            # by AgentConfig.write/3), but if that was bypassed this gate catches
-            # the slip. Fail open on git errors to avoid stranding valid completions.
-            case Arbiter.Worker.Worktree.has_injected_config_in_commits?(worktree, target) do
-              {:ok, true} -> {:gate, :secret_in_commit}
-              _ -> :ok
-            end
+    if is_binary(worktree) and File.dir?(worktree) and
+         worktree_on_branch?(worktree, expected) do
+      case Arbiter.Worker.Worktree.completion_state(worktree, target) do
+        {:ok, :ready} ->
+          # bd-9q966y: belt-and-suspenders — even a "clean, committed" worktree
+          # must not carry injected agent-config files (.mcp.json / .gemini/ /
+          # .codex/) in its committed diff. These files contain per-spawn bearer
+          # tokens. Normally they are gitignored via .git/info/exclude (written
+          # by AgentConfig.write/3), but if that was bypassed this gate catches
+          # the slip. Fail open on git errors to avoid stranding valid completions.
+          case Arbiter.Worker.Worktree.has_injected_config_in_commits?(worktree, target) do
+            {:ok, true} -> {:gate, :secret_in_commit}
+            _ -> :ok
+          end
 
-          {:ok, :uncommitted} ->
-            {:gate, :uncommitted}
+        {:ok, :uncommitted} ->
+          {:gate, :uncommitted}
 
-          {:ok, :no_commits} ->
-            {:gate, :no_commits}
+        {:ok, :no_commits} ->
+          {:gate, :no_commits}
 
-          {:error, _} ->
-            :ok
-        end
-
-      true ->
-        :ok
+        {:error, _} ->
+          :ok
+      end
+    else
+      :ok
     end
   end
 
@@ -2879,18 +2878,16 @@ defmodule Arbiter.Worker do
     cap = (meta && Map.get(meta, :commit_nudge_cap)) || 1
     attempts = (meta && Map.get(meta, :commit_nudge_attempts)) || 0
 
-    cond do
-      attempts >= cap ->
-        park_commit_gate(state, reason, :cap_exhausted)
+    if attempts >= cap do
+      park_commit_gate(state, reason, :cap_exhausted)
+    else
+      case respawn_with_commit_nudge(state, reason) do
+        {:ok, new_state} ->
+          new_state
 
-      true ->
-        case respawn_with_commit_nudge(state, reason) do
-          {:ok, new_state} ->
-            new_state
-
-          {:error, why} ->
-            park_commit_gate(state, reason, {:respawn_failed, why})
-        end
+        {:error, why} ->
+          park_commit_gate(state, reason, {:respawn_failed, why})
+      end
     end
   end
 
@@ -3031,6 +3028,14 @@ defmodule Arbiter.Worker do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
+      # `splice_prompt/2` is not a callback on Arbiter.Agents.Agent (see its
+      # @optional_callbacks) — only Claude and Codex define it, Gemini does not.
+      # The `function_exported?/3` guard above is what makes the call safe; a
+      # static `adapter.splice_prompt(...)` makes the compiler resolve `adapter`
+      # to every adapter module and emit an "undefined or private" warning for
+      # Gemini, which `mix compile --warnings-as-errors` then fails on. The
+      # dynamic dispatch is the point, not an oversight.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(adapter, :splice_prompt, [argv, [nudge]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, :no_print_slot} -> {:ok, port_args}
@@ -3146,15 +3151,13 @@ defmodule Arbiter.Worker do
     cap = notes_nudge_cap(meta)
     attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
 
-    cond do
-      attempts >= cap ->
-        park_notes_gate(state, :cap_exhausted)
-
-      true ->
-        case respawn_with_notes_nudge(state) do
-          {:ok, new_state} -> new_state
-          {:error, why} -> park_notes_gate(state, {:respawn_failed, why})
-        end
+    if attempts >= cap do
+      park_notes_gate(state, :cap_exhausted)
+    else
+      case respawn_with_notes_nudge(state) do
+        {:ok, new_state} -> new_state
+        {:error, why} -> park_notes_gate(state, {:respawn_failed, why})
+      end
     end
   end
 
@@ -3506,6 +3509,8 @@ defmodule Arbiter.Worker do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
+      # Dynamic on purpose — see the note on inject_nudge_argv/3 above.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(adapter, :splice_prompt, [argv, ["--resume", session_id, prompt]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
         {:error, _} = err -> err
@@ -3528,6 +3533,10 @@ defmodule Arbiter.Worker do
   # row — no matter which CLI the run was really driving. The sessions the
   # worker already owns know their own provider (threaded in at spawn), so fall
   # back to the most recent one before falling back to Claude.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp respawn_routing(%State{meta: meta} = state) do
     routing_config = (meta && Map.get(meta, :routing_config)) || %{}
     model = Map.get(routing_config, :model)
@@ -3700,6 +3709,10 @@ defmodule Arbiter.Worker do
     do:
       {:secret_in_commit, "Worker committed an Arbiter-injected agent-config (bearer-token) file"}
 
+  # Pre-existing complexity 16 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
     branch = (meta && Map.get(meta, :branch)) || "(unknown)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
@@ -3776,8 +3789,7 @@ defmodule Arbiter.Worker do
     text
     |> String.trim_trailing()
     |> String.split("\n")
-    |> Enum.map(&("  " <> &1))
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", &("  " <> &1))
   end
 
   defp record_commit_gate_note(%State{task_id: task_id}, _reason, _why, summary) do
@@ -4247,6 +4259,10 @@ defmodule Arbiter.Worker do
   #
   # The task's difficulty drives the default; the workspace cap can only tighten
   # it (min), never loosen it beyond the difficulty-appropriate ceiling.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_review_rounds(%State{meta: meta} = state) do
     case meta && Map.get(meta, :review_rounds) do
       n when is_integer(n) and n > 0 ->
@@ -4586,6 +4602,10 @@ defmodule Arbiter.Worker do
   # `ReviewGate.findings_from/2`) for :request_changes/:no_verdict-with-text,
   # or a plain synthesized string (e.g. "no parseable VERDICT line") when the
   # reviewer produced nothing usable.
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp review_gate_failure_summary(verdict, findings) when is_binary(findings) do
     {verdict_line, body} =
       case String.split(findings, "\n", parts: 2) do
@@ -4904,6 +4924,10 @@ defmodule Arbiter.Worker do
               :none ->
                 retry_opts = open_retry_opts(state)
 
+                # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+                # wired Credo up. Thresholds stay at the tool's own default so new
+                # code is held to it; see the note in .credo.exs.
+                # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                 case safe_open(adapter, branch, title, description, open_opts, retry_opts) do
                   {:ok, mr_ref} ->
                     finalize_opened_mr(state, adapter, workspace, opts, mr_ref)

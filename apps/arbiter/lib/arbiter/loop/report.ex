@@ -112,8 +112,7 @@ defmodule Arbiter.Loop.Report do
     others =
       grouped
       |> Map.drop([:operational, :agent_quality, :unknown])
-      |> Enum.map(fn {class, rows} -> class_block("#{class}", rows) end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {class, rows} -> class_block("#{class}", rows) end)
 
     """
     ## Failure segmentation (allowlist, not heuristic)
@@ -136,11 +135,10 @@ defmodule Arbiter.Loop.Report do
   defp class_block(title, rows) do
     body =
       rows
-      |> Enum.map(fn row ->
+      |> Enum.map_join("\n", fn row ->
         cites = row |> Map.get(:run_ids, []) |> Enum.take(5) |> Enum.join(", ")
         "| `#{row.subcategory}` | #{row.count} | #{cites} |"
       end)
-      |> Enum.join("\n")
 
     """
     ### #{title}
@@ -154,10 +152,9 @@ defmodule Arbiter.Loop.Report do
   defp misclassification(%{misclassification: m}) do
     cites =
       (Map.get(m, :citations) || [])
-      |> Enum.map(fn c ->
+      |> Enum.map_join("\n", fn c ->
         "- `#{c.run_id}` — labelled #{inspect(c.failure_reason)}, corrected to `#{c.corrected}`"
       end)
-      |> Enum.join("\n")
 
     rate_text = misclassification_rate_text(Map.get(m, :rate), g(m, :corroborated))
 
@@ -184,12 +181,11 @@ defmodule Arbiter.Loop.Report do
   defp finding_categories(%{finding_categories: cats}) do
     body =
       cats
-      |> Enum.map(fn c ->
+      |> Enum.map_join("\n", fn c ->
         tasks = c |> Map.get(:tasks, []) |> Enum.join(", ")
         cites = c |> Map.get(:run_ids, []) |> Enum.join(", ")
         "| #{c.category} | #{c.incidents} | #{tasks} | #{cites} | #{Map.get(c, :example, "")} |"
       end)
-      |> Enum.join("\n")
 
     """
     ## Reviewer-finding categories (agent-quality only)
@@ -205,10 +201,9 @@ defmodule Arbiter.Loop.Report do
   defp cells(%{cells: cells}) do
     body =
       cells
-      |> Enum.map(fn c ->
+      |> Enum.map_join("\n", fn c ->
         "| #{dlabel(c.difficulty)} | #{c.repo} | #{g(c, :tasks)} | #{pct(Map.get(c, :rework_rate, 0.0))} | $#{money(Map.get(c, :mean_cost_usd))} |"
       end)
-      |> Enum.join("\n")
 
     """
     ## Cost & rework by (difficulty, repo) cell
@@ -227,7 +222,7 @@ defmodule Arbiter.Loop.Report do
   defp difficulty_misestimates(%{difficulty_misestimates: mis}) do
     body =
       mis
-      |> Enum.map(fn m ->
+      |> Enum.map_join("\n", fn m ->
         {d, repo} = Map.get(m, :cell, {Map.get(m, :dispatched_difficulty), "?"})
         rec = Map.get(m, :recommendation, %{})
 
@@ -242,7 +237,6 @@ defmodule Arbiter.Loop.Report do
         - **Target metric:** #{Map.get(rec, :target_metric)} (baseline: #{Map.get(rec, :baseline)})
         """
       end)
-      |> Enum.join("\n")
 
     """
     ## Difficulty misestimates (segmented by (difficulty, repo) cell)
@@ -256,7 +250,7 @@ defmodule Arbiter.Loop.Report do
   defp suggestions(%{suggestions: suggestions}) do
     body =
       suggestions
-      |> Enum.map(fn s ->
+      |> Enum.map_join("\n", fn s ->
         ev = Map.get(s, :evidence, %{})
         incidents = Map.get(ev, :incidents, 0)
         tasks = Map.get(ev, :tasks, 0)
@@ -271,7 +265,6 @@ defmodule Arbiter.Loop.Report do
         - **Verdict:** #{verdict(Map.get(s, :verdict))} — #{Map.get(s, :rationale, "")}
         """
       end)
-      |> Enum.join("\n")
 
     """
     ## Suggestions
@@ -289,7 +282,7 @@ defmodule Arbiter.Loop.Report do
   defp notes(%{notes: []}), do: ""
 
   defp notes(%{notes: notes}) do
-    body = notes |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+    body = notes |> Enum.map_join("\n", &"- #{&1}")
 
     """
     ## Caveats

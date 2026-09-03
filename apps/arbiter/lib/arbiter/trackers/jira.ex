@@ -180,6 +180,10 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   @impl true
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def parse_ref(s) when is_binary(s) do
     cond do
       String.starts_with?(s, "jira:") ->
@@ -315,8 +319,7 @@ defmodule Arbiter.Trackers.Jira do
       forced =
         [:qa_notes, :deployment_notes]
         |> Enum.map(&forced_note_descriptor(cfg, &1))
-        |> Enum.reject(&is_nil/1)
-        |> Enum.reject(&MapSet.member?(existing_ids, &1.id))
+        |> Enum.reject(&(is_nil(&1) or MapSet.member?(existing_ids, &1.id)))
 
       descriptors ++ forced
     else
@@ -419,6 +422,10 @@ defmodule Arbiter.Trackers.Jira do
       case request(cfg, :get, "/issue/#{ref}/comment", params: [maxResults: 100]) do
         {:ok, %Req.Response{status: status_code, body: %{"comments" => comments}}}
         when status_code in 200..299 and is_list(comments) ->
+          # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+          # wired Credo up. Thresholds stay at the tool's own default so new
+          # code is held to it; see the note in .credo.exs.
+          # credo:disable-for-next-line Credo.Check.Refactor.Nesting
           case Enum.find(comments, fn c ->
                  String.contains?(comment_text(c), @ownership_marker)
                end) do
@@ -543,7 +550,7 @@ defmodule Arbiter.Trackers.Jira do
   defp description_to_text(_), do: ""
 
   defp adf_block_text(%{"content" => content}) when is_list(content),
-    do: content |> Enum.map(&adf_inline_text/1) |> Enum.join("")
+    do: content |> Enum.map_join("", &adf_inline_text/1)
 
   defp adf_block_text(%{"text" => text}) when is_binary(text), do: text
   defp adf_block_text(_), do: ""
@@ -551,7 +558,7 @@ defmodule Arbiter.Trackers.Jira do
   defp adf_inline_text(%{"text" => text}) when is_binary(text), do: text
 
   defp adf_inline_text(%{"content" => content}) when is_list(content),
-    do: content |> Enum.map(&adf_inline_text/1) |> Enum.join("")
+    do: content |> Enum.map_join("", &adf_inline_text/1)
 
   defp adf_inline_text(_), do: ""
 
@@ -594,7 +601,7 @@ defmodule Arbiter.Trackers.Jira do
       escaped = String.replace(title, "\"", "\\\"")
 
       jql =
-        "project = \"#{cfg.project_key}\" AND summary ~ \"#{escaped}\" " <>
+        ~s(project = "#{cfg.project_key}" AND summary ~ "#{escaped}" ) <>
           "AND statusCategory != Done ORDER BY created DESC"
 
       body = %{
@@ -1041,13 +1048,18 @@ defmodule Arbiter.Trackers.Jira do
   defp translate_fields(cfg, fields_map) do
     fields_map
     |> Enum.reduce(%{}, fn {key, value}, acc ->
-      atom_key = if is_atom(key), do: key, else: String.to_atom(to_string(key))
+      # `String.to_existing_atom/1` (sobelow DOS.StringToAtom). A string key
+      # with no existing atom cannot be in `cfg.field_ids` either — that map
+      # is keyed by atoms Arbiter's own code defined — so it would have
+      # fallen through to the `customfield_` branch regardless. `nil` here
+      # takes the same path, without minting a permanent atom first.
+      atom_key = if is_atom(key), do: key, else: existing_atom(to_string(key))
 
-      case Map.fetch(cfg.field_ids, atom_key) do
+      case atom_key && Map.fetch(cfg.field_ids, atom_key) do
         {:ok, jira_id} ->
           Map.put(acc, jira_id, encode_value(atom_key, value))
 
-        :error ->
+        _ ->
           # Allow callers to pass raw Jira field IDs (e.g. "customfield_10999")
           # through unchanged for one-off needs.
           if is_binary(key) and String.starts_with?(key, "customfield_") do
@@ -1057,6 +1069,12 @@ defmodule Arbiter.Trackers.Jira do
           end
       end
     end)
+  end
+
+  defp existing_atom(string) do
+    String.to_existing_atom(string)
+  rescue
+    ArgumentError -> nil
   end
 
   defp encode_value(atom_key, value) when atom_key in @markdown_fields and is_binary(value) do

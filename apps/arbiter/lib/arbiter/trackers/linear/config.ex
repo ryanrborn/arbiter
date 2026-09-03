@@ -182,7 +182,7 @@ defmodule Arbiter.Trackers.Linear.Config do
         {:error,
          config_missing(
            "Linear tracker config missing \"credentials_ref\". Set " <>
-             "workspace.config[\"tracker\"][\"config\"][\"credentials_ref\"] or " <>
+             ~s(workspace.config["tracker"]["config"]["credentials_ref"] or ) <>
              ":arbiter, :linear_tracker_default_config in Application env."
          )}
     end
@@ -213,7 +213,7 @@ defmodule Arbiter.Trackers.Linear.Config do
   # When `difficulty` is absent the feature is off (nil) — default.
   defp estimate_buckets(raw) do
     case get_in(raw, ["difficulty", "buckets"]) do
-      buckets when is_list(buckets) and length(buckets) > 0 ->
+      buckets when is_list(buckets) and buckets != [] ->
         parse_buckets(buckets) || @default_difficulty_buckets
 
       _ ->

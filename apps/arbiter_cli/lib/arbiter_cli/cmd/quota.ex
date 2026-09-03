@@ -137,6 +137,10 @@ defmodule ArbiterCli.Cmd.Quota do
   # that CLI isn't authenticated on this host — stay quiet rather than noisy.
   defp emit_google(nil, _label, _cost), do: :ok
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp emit_google(snap, label, cost) do
     IO.puts("")
     IO.puts("#{label} quota (plan: #{snap["plan"] || "—"}):")

@@ -1,0 +1,21 @@
+# Sobelow configuration for the `arbiter_web` app — the Phoenix surface, and
+# the one place a web-facing finding could actually be reachable.
+#
+# Nothing is ignored here, deliberately. The single first-pass finding
+# (Config.CSP, high confidence) was fixed rather than skipped: the browser
+# pipeline now sends a Content-Security-Policy, and the generator's inline
+# theme <script> moved to assets/js/theme.js so `script-src` could stay
+# `'self'`. See ArbiterWeb.Router for the directive-by-directive rationale.
+[
+  verbose: false,
+  private: false,
+  skip: true,
+  router: nil,
+  exit: :low,
+  format: "txt",
+  out: nil,
+  threshold: :low,
+  ignore: [],
+  ignore_files: [],
+  version: false
+]

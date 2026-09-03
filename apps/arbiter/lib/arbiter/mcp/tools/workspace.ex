@@ -222,6 +222,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
   defp validate_install_key(key) when key in @install_settings_keys, do: :ok
   defp validate_install_key(key), do: {:error, {:invalid, "unknown installation setting: #{key}"}}
 
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp require_install_value("credential_watchdog_adapters", args) do
     valid = Arbiter.Agents.valid_agent_types()
 

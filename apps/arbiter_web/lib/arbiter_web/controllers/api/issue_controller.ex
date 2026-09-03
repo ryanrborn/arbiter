@@ -18,6 +18,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -65,23 +66,24 @@ defmodule ArbiterWeb.Api.IssueController do
       |> Map.drop(["id", "force"])
       |> coerce_atoms(@atom_fields)
 
-    with :ok <- dedup_check(attrs, force?) do
-      case Ash.create(Issue, attrs) do
-        {:ok, issue} ->
-          case Arbiter.Tasks.Issue.Changes.CreateUpstream.last_error() do
-            nil ->
-              conn
-              |> put_status(:created)
-              |> render(:show, issue: issue)
+    case dedup_check(attrs, force?) do
+      :ok ->
+        case Ash.create(Issue, attrs) do
+          {:ok, issue} ->
+            case CreateUpstream.last_error() do
+              nil ->
+                conn
+                |> put_status(:created)
+                |> render(:show, issue: issue)
 
-            err ->
-              upstream_failure_response(conn, issue.id, err)
-          end
+              err ->
+                upstream_failure_response(conn, issue.id, err)
+            end
 
-        {:error, _} = err ->
-          err
-      end
-    else
+          {:error, _} = err ->
+            err
+        end
+
       {:local_dup, matches} ->
         ids = Enum.map_join(matches, ", ", & &1.id)
 
@@ -238,12 +240,10 @@ defmodule ArbiterWeb.Api.IssueController do
        do: {:ok, raw}
 
   defp coerce_filter_value(field, raw) when field in [:status, :issue_type] and is_binary(raw) do
-    try do
-      {:ok, String.to_existing_atom(raw)}
-    rescue
-      ArgumentError ->
-        {:error, {:invalid_request, "invalid #{field}: #{inspect(raw)}"}}
-    end
+    {:ok, String.to_existing_atom(raw)}
+  rescue
+    ArgumentError ->
+      {:error, {:invalid_request, "invalid #{field}: #{inspect(raw)}"}}
   end
 
   defp coerce_filter_value(_, raw) when is_binary(raw), do: {:ok, raw}

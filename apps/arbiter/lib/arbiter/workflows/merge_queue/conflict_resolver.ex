@@ -44,10 +44,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   git.
   """
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
@@ -159,6 +159,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   # Resolve everything the worker needs: a local checkout to cut the worktree
   # from, the task's branch name, and the target branch to rebase onto. Caller-
   # supplied args win over derived values so the MergeQueue and tests can override.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_context(%Issue{} = task, args) do
     workspace = maybe_load_workspace(task.workspace_id)
 

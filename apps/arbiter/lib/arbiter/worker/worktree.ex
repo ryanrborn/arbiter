@@ -73,33 +73,31 @@ defmodule Arbiter.Worker.Worktree do
     path = worktree_path(branch_name)
 
     result =
-      cond do
-        File.dir?(path) ->
-          case current_branch(path) do
-            {:ok, ^branch_name} ->
-              {:ok, path}
-
-            {:ok, _other} ->
-              {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
-
-            {:error, _} = err ->
-              err
-          end
-
-        true ->
-          File.mkdir_p!(Path.dirname(path))
-
-          with :ok <- ensure_origin_remote(repo_path),
-               :ok <- fetch_origin_branch(repo_path, base_branch),
-               :ok <- ensure_origin_ref(repo_path, base_branch),
-               {:ok, _stdout} <-
-                 run_git(
-                   ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
-                   cd: repo_path
-                 ) do
-            :ok = seed_compiled_deps(repo_path, path)
+      if File.dir?(path) do
+        case current_branch(path) do
+          {:ok, ^branch_name} ->
             {:ok, path}
-          end
+
+          {:ok, _other} ->
+            {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
+
+          {:error, _} = err ->
+            err
+        end
+      else
+        File.mkdir_p!(Path.dirname(path))
+
+        with :ok <- ensure_origin_remote(repo_path),
+             :ok <- fetch_origin_branch(repo_path, base_branch),
+             :ok <- ensure_origin_ref(repo_path, base_branch),
+             {:ok, _stdout} <-
+               run_git(
+                 ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
+                 cd: repo_path
+               ) do
+          :ok = seed_compiled_deps(repo_path, path)
+          {:ok, path}
+        end
       end
 
     with {:ok, wt_path} <- result do
@@ -389,30 +387,28 @@ defmodule Arbiter.Worker.Worktree do
       when is_binary(repo_path) and is_binary(branch_name) do
     path = worktree_path(branch_name)
 
-    cond do
-      File.dir?(path) ->
-        case current_branch(path) do
-          {:ok, ^branch_name} ->
-            {:ok, path}
+    if File.dir?(path) do
+      case current_branch(path) do
+        {:ok, ^branch_name} ->
+          {:ok, path}
 
-          {:ok, _other} ->
-            {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
+        {:ok, _other} ->
+          {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
 
-          {:error, _} = err ->
-            err
-        end
+        {:error, _} = err ->
+          err
+      end
+    else
+      File.mkdir_p!(Path.dirname(path))
 
-      true ->
-        File.mkdir_p!(Path.dirname(path))
+      case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
+        {:ok, _stdout} ->
+          :ok = seed_compiled_deps(repo_path, path)
+          {:ok, path}
 
-        case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
-          {:ok, _stdout} ->
-            :ok = seed_compiled_deps(repo_path, path)
-            {:ok, path}
-
-          {:error, _} = err ->
-            err
-        end
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -733,6 +729,10 @@ defmodule Arbiter.Worker.Worktree do
   """
   @spec sync_from_origin(path(), String.t()) ::
           {:ok, :up_to_date | :synced} | {:error, error_reason()}
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def sync_from_origin(path, branch)
       when is_binary(path) and is_binary(branch) do
     with :ok <- ensure_origin_remote(path),
@@ -752,6 +752,10 @@ defmodule Arbiter.Worker.Worktree do
 
                 {:ok, _remote_sha} ->
                   # Local is behind remote — fast-forward.
+                  # Pre-existing nesting 5 — baselined when bd-4x2yhq first
+                  # wired Credo up. Thresholds stay at the tool's own default so new
+                  # code is held to it; see the note in .credo.exs.
+                  # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                   case run_git(["merge", "--ff-only", ref], cd: path) do
                     {:ok, _} -> {:ok, :synced}
                     {:error, _} = err -> err
@@ -812,6 +816,10 @@ defmodule Arbiter.Worker.Worktree do
           {:ok, :up_to_date | :synced | :rebased | :ahead}
           | {:error,
              {:diverged_conflict, %{files: [String.t()], output: String.t()}} | error_reason()}
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def rebase_onto_origin(path, branch)
       when is_binary(path) and is_binary(branch) do
     with :ok <- ensure_origin_remote(path),
@@ -828,6 +836,10 @@ defmodule Arbiter.Worker.Worktree do
               {:ok, :up_to_date}
 
             {{:ok, _local_sha}, {:ok, _remote_sha}} ->
+              # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+              # wired Credo up. Thresholds stay at the tool's own default so new
+              # code is held to it; see the note in .credo.exs.
+              # credo:disable-for-next-line Credo.Check.Refactor.Nesting
               case run_git(["merge", "--ff-only", ref], cd: path) do
                 {:ok, _} -> {:ok, :synced}
                 {:error, _} = err -> err
@@ -1062,6 +1074,10 @@ defmodule Arbiter.Worker.Worktree do
           source_dep = Path.join(source_lib, dep)
           dest_dep = Path.join(dest_lib, dep)
 
+          # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+          # wired Credo up. Thresholds stay at the tool's own default so new
+          # code is held to it; see the note in .credo.exs.
+          # credo:disable-for-next-line Credo.Check.Refactor.Nesting
           unless File.exists?(dest_dep) do
             System.cmd("cp", ["-a", "--reflink=auto", source_dep, dest_dep],
               stderr_to_stdout: true
@@ -1112,15 +1128,13 @@ defmodule Arbiter.Worker.Worktree do
   defp run_git(args, opts) do
     cd = Keyword.get(opts, :cd)
 
-    cond do
-      is_binary(cd) and not File.dir?(cd) ->
-        {:error, {:git_failed, "cwd does not exist: #{cd}"}}
-
-      true ->
-        case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
-          {output, 0} -> {:ok, output}
-          {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
-        end
+    if is_binary(cd) and not File.dir?(cd) do
+      {:error, {:git_failed, "cwd does not exist: #{cd}"}}
+    else
+      case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do
+        {output, 0} -> {:ok, output}
+        {output, _nonzero} -> {:error, {:git_failed, String.trim(output)}}
+      end
     end
   rescue
     e in ErlangError ->

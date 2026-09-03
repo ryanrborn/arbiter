@@ -108,6 +108,10 @@ defmodule Arbiter.Mergers.Direct do
         with {:ok, _} <- run_git(["checkout", target], path) do
           case run_git(["merge", "--no-ff"] ++ message_args(title) ++ [branch], path) do
             {:ok, _} ->
+              # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+              # wired Credo up. Thresholds stay at the tool's own default so new
+              # code is held to it; see the note in .credo.exs.
+              # credo:disable-for-next-line Credo.Check.Refactor.Nesting
               with {:ok, _} <- run_git(["push", "origin", target], path) do
                 {:ok, encode_ref(branch, path, target)}
               end

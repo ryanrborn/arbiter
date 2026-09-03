@@ -763,6 +763,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   # Called wherever `@expanded_run` or `@runs` can change, so a run finishing
   # underneath an open row drops the follow and the row falls back to the
   # persisted tail `record_run_finished/1` just wrote.
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resync_live_run(socket) do
     current = socket.assigns[:live_run_topic]
 

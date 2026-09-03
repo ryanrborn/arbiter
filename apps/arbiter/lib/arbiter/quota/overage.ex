@@ -15,7 +15,6 @@ defmodule Arbiter.Quota.Overage do
 
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.Gate.Snapshot
-  alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage
 
   @five_hours_seconds 5 * 60 * 60
@@ -25,7 +24,15 @@ defmodule Arbiter.Quota.Overage do
   overage indicator and alert threshold compare against. Returns `0.0` on any
   read error so accounting never disrupts dispatch.
   """
-  @spec windowed_spend(Workspace.t() | nil, Snapshot.t() | AnthropicQuota.t() | nil) :: float()
+  # Deliberately wider than `Arbiter.Tasks.Workspace.t()`/`Snapshot.t()`: this reads exactly
+  # `workspace.id` and hands `quota` to `window_start/1`, which has a catch-all
+  # clause. `ArbiterWeb.UsageLive.assign_overage/1` passes a bare `%{id: ws_id}`
+  # and a quota row plucked out of untyped LiveView assigns, so the narrower
+  # spec made that call a `:call` warning while the code is correct.
+  @spec windowed_spend(
+          %{:id => String.t() | nil, optional(any()) => any()} | nil,
+          Snapshot.t() | AnthropicQuota.t() | map() | nil
+        ) :: float()
   def windowed_spend(workspace, quota) do
     ws_id = workspace && workspace.id
 

@@ -352,6 +352,10 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   # Derive the list of "owner/repo" strings to patrol for this workspace, exactly
   # as PRPatrolSupervisor does: single-repo (merge.config.repo set) or multi-repo
   # (one per repo, repo derived from each repo's origin remote).
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp patrol_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
 
