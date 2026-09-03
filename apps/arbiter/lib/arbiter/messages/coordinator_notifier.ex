@@ -99,7 +99,14 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
           optional(:workspace_id) => String.t() | nil,
           optional(:repo) => String.t() | nil,
           optional(:started_at) => DateTime.t() | nil,
-          optional(:meta) => map() | nil
+          optional(:meta) => map() | nil,
+          # A map type built only from `required/1` + `optional/1` literal keys
+          # is CLOSED: dialyzer rejects any map carrying a key not listed. Every
+          # real caller passes `Arbiter.Worker.snapshot/1`'s full map (`:status`,
+          # `:role`, `:current_step`, `:mr_ref`, `:registry_key`, ...), so
+          # without this the doc above ("extra keys are ignored") is a lie the
+          # type does not permit and every call site is a `:call` warning.
+          optional(atom()) => any()
         }
 
   @doc "Post the `:completed` lifecycle notification. Best-effort, returns `:ok`."
