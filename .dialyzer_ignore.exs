@@ -77,12 +77,15 @@
   # `Autopilot.pause/0` / `resume/0` are GenServer calls whose contract is a
   # one-line change away from gaining an error arm.
   #
-  #   * agents/preflight.ex, arbiter_cli/version.ex — not defensive clauses
-  #     at all: dialyzer resolves a build-time predicate to a constant
-  #     (`function_exported?/3` against a module it has already analysed;
-  #     `@git_dirty`, which is baked in by `git status --porcelain` when the
-  #     module compiles) and calls the other branch of the `if` dead. Which
-  #     branch is dead depends on the machine doing the build.
+  #   * agents/preflight.ex — not a defensive clause at all: dialyzer
+  #     resolves a build-time `function_exported?/3` check against a module
+  #     it has already analysed to a constant and calls the other branch of
+  #     the `if` dead. `arbiter_cli/version.ex` has the same shape (`if
+  #     @git_dirty`, baked in by `git status --porcelain` at compile time)
+  #     but isn't filtered here: CI always builds from a clean checkout, so
+  #     `@git_dirty` is `false` there and the warning never fires — a filter
+  #     for it would sit unused and fail `list_unused_filters`. It only
+  #     appears on a dev machine with a dirty tree.
   #   * quota/refresh_probe.ex — `if env == []`, where `env` is
   #     `ConfigDir.env() ++ [{"ANTHROPIC_BASE_URL", base_url}]` and so is
   #     never empty. Kept as a guard against the tail being made optional.
@@ -97,7 +100,6 @@
   {"lib/arbiter/worker/driver.ex", :pattern_match},
   {"lib/arbiter/worker/review_gate.ex", :pattern_match},
   {"lib/arbiter/workflows/conductor.ex", :pattern_match},
-  {"lib/arbiter_cli/version.ex", :pattern_match},
   {"lib/arbiter_web/controllers/api/loop_controller.ex", :pattern_match},
   {"lib/arbiter_web/controllers/api/scheduler_controller.ex", :pattern_match},
   {"lib/mix/tasks/arbiter.loop.analyze.ex", :pattern_match},
