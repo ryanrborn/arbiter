@@ -25,8 +25,17 @@ defmodule Arbiter.Tasks.Claim do
   require Ash.Query
 
   @typedoc "Outcome of a single claim attempt."
+  # The three tuple-shaped errors are NOT decoration: `ArbiterWeb.Api.
+  # ClaimController.create/2` matches each one to pick a distinct HTTP status
+  # (409 already_claimed, 403 not_assigned, 400 invalid_ref). While this type
+  # listed only `atom() | String.t() | map()` those three `else` branches were
+  # provably dead to dialyzer even though `claim/3` returns them at runtime —
+  # the type, not the code, was wrong.
   @type claim_result ::
           {:ok, :created | :existing, Issue.t()}
+          | {:error, {:not_assigned, term()}}
+          | {:error, {:already_claimed, term()}}
+          | {:error, {:invalid_ref, term()}}
           | {:error, atom() | String.t() | map()}
 
   @typedoc "A planned reconciliation action."

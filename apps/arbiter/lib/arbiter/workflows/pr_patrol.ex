@@ -715,8 +715,14 @@ defmodule Arbiter.Workflows.PRPatrol do
   # research/ops `:task` directives before this fix, so no behavior changes,
   # just the discriminator that now matters for every follow-up too.
   defp zombie_idle?(pid) do
+    # Matching `meta: nil` in the head rather than testing `is_nil(meta)` in the
+    # body: `Worker.state/1` types `meta` as `map()`, so the body form is an
+    # `:exact_compare` (`map() == nil`) that dialyxir 1.4.7 can neither format
+    # nor filter. The nil case is still handled — it is a persisted column and
+    # this reads a live GenServer's state, hence the rescue/catch below.
     case Worker.state(pid) do
-      %{status: :idle, meta: meta} -> is_nil(meta) or is_nil(Map.get(meta, :worktree_path))
+      %{status: :idle, meta: nil} -> true
+      %{status: :idle, meta: meta} -> is_nil(Map.get(meta, :worktree_path))
       _ -> false
     end
   rescue
