@@ -102,6 +102,43 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
       assert log =~ "teach this repo"
     end
 
+    test "when CLAUDE.md is a symlink to AGENTS.md, writes through symlink without replacing it",
+         %{
+           ws: ws,
+           repo: repo
+         } do
+      agents_path = Path.join(repo, "AGENTS.md")
+      claude_path = Path.join(repo, "CLAUDE.md")
+
+      File.write!(agents_path, "# Agent conventions\n")
+      File.ln_s!("AGENTS.md", claude_path)
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "core.symlinks", "true"])
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "AGENTS.md", "CLAUDE.md"])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          repo,
+          "commit",
+          "-q",
+          "-m",
+          "add AGENTS.md and CLAUDE.md symlink"
+        ])
+
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      {:ok, row} = Loop.record(candidate(ws, %{}))
+
+      assert {:ok, applied} = Loop.apply_pending(row.id)
+      assert applied.state == :applied
+
+      assert File.read_link!(claude_path) == "AGENTS.md"
+
+      agents_content = File.read!(agents_path)
+      assert agents_content =~ "this repo's tests need FLAG=1 set"
+      assert agents_content =~ "arbiter:begin"
+    end
+
     test "a repo not registered in the workspace's repo_paths fails cleanly", %{ws: ws} do
       {:ok, row} = Loop.record(candidate(ws, %{repo: "unknown-repo", target: "unknown-repo"}))
 

@@ -203,12 +203,25 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   end
 
   defp commit(worktree_path, doc_path, message) do
-    with {_, 0} <- System.cmd("git", ["add", doc_path], cd: worktree_path, stderr_to_stdout: true),
+    file_path = Path.join(worktree_path, doc_path)
+    add_path = resolve_git_add_path(file_path, doc_path)
+
+    with {_, 0} <- System.cmd("git", ["add", add_path], cd: worktree_path, stderr_to_stdout: true),
          {_, 0} <-
            System.cmd("git", ["commit", "-m", message], cd: worktree_path, stderr_to_stdout: true) do
       :ok
     else
       {output, _status} -> {:error, {:git_commit_failed, output}}
+    end
+  end
+
+  defp resolve_git_add_path(file_path, doc_path) do
+    case File.read_link(file_path) do
+      {:ok, target} ->
+        target
+
+      {:error, _} ->
+        doc_path
     end
   end
 
