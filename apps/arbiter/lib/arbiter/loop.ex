@@ -474,10 +474,21 @@ defmodule Arbiter.Loop do
 
   # What is left is fleet-wide prose — a skill patch or a new skill — which is
   # carried by every dispatch that materializes it, forever.
-  defp context_cost_tokens(gist, _scope, _kind, _payload) when is_binary(gist),
-    do: estimate_tokens(gist)
+  #
+  # When the row carries a rendered clause (bd-5w8h0r), that clause *is* the
+  # prose that lands in the prompt, and the gist is only the one-line summary
+  # an operator reads once in `arb loop pending`. Pricing the gist would
+  # under-read the recurring cost by roughly an order of magnitude — on a
+  # figure whose entire purpose is that "a fleet-wide prompt addition cannot be
+  # approved without its price visible".
+  defp context_cost_tokens(gist, _scope, _kind, payload) do
+    case payload && Map.get(payload, "clause") do
+      clause when is_binary(clause) and clause != "" -> estimate_tokens(clause)
+      _ when is_binary(gist) -> estimate_tokens(gist)
+      _ -> 0
+    end
+  end
 
-  defp context_cost_tokens(_gist, _scope, _kind, _payload), do: 0
 
   # Tokens, not bytes (Amendment D item 4). Skill clauses skew toward paths,
   # flags and code fragments, which tokenize far worse than prose, so a byte
