@@ -100,12 +100,15 @@ defmodule Arbiter.Loop.Apply do
     end
   end
 
+  # The skill is fetched *before* the attrs are built, because a clause-carrying
+  # payload (bd-5w8h0r) is resolved against the skill's current body — the
+  # splice happens here, at apply time, not when the proposal was authored.
   def side_effect(%PendingWrite{kind: :skill_patch, payload: payload}, attribution) do
     with {:ok, ref} <- Payload.string(payload, "skill", Payload.skill_gap_message()),
-         {:ok, attrs} <- Payload.skill_attrs(payload) do
-      case Arbiter.Skills.update_skill(ref, attrs, actor: attribution) do
+         {:ok, skill} <- fetch_skill(ref),
+         {:ok, attrs} <- Payload.skill_attrs(payload, skill.body) do
+      case Arbiter.Skills.update_skill(skill, attrs, actor: attribution) do
         {:ok, _} -> :ok
-        {:error, :not_found} -> {:error, {:unmapped, "no skill named #{inspect(ref)}"}}
         {:error, err} -> {:error, {:invalid, ash_message(err)}}
       end
     end
@@ -191,6 +194,13 @@ defmodule Arbiter.Loop.Apply do
     case Ash.get(Issue, task_id) do
       {:ok, issue} -> {:ok, issue}
       _ -> {:error, {:unmapped, "no task #{task_id}"}}
+    end
+  end
+
+  defp fetch_skill(ref) do
+    case Arbiter.Skills.get_skill(ref) do
+      {:ok, skill} -> {:ok, skill}
+      {:error, :not_found} -> {:error, {:unmapped, "no skill named #{inspect(ref)}"}}
     end
   end
 

@@ -340,6 +340,48 @@ defmodule Arbiter.Loop.PendingWriteTest do
       assert row.context_cost_tokens < byte_size(gist)
     end
 
+    test "a row carrying a rendered clause is priced from the clause, not the one-line gist",
+         %{ws: ws} do
+      clause =
+        Arbiter.Loop.SkillClause.render(%{
+          category: "missing test coverage",
+          imperative:
+            "Before requesting review, confirm every new branch has a test that fails " <>
+              "without the change — write it first and watch it fail.",
+          example: "no test for the error branch",
+          incidents: 4,
+          tasks: ["bd-1", "bd-2"]
+        })
+
+      {:ok, with_clause} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            gist: "patch skill `test-driven-development`: missing test coverage",
+            payload: %{
+              "skill" => "test-driven-development",
+              "clause_id" => "missing-test-coverage",
+              "clause" => clause
+            }
+          })
+        )
+
+      {:ok, gist_only} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            category: "gist-only category",
+            gist: "patch skill `test-driven-development`: missing test coverage"
+          })
+        )
+
+      # The gist is a table row an operator reads once; the clause is what
+      # actually lands in every future dispatch's prompt. Pricing the gist
+      # under-reads the recurring cost by an order of magnitude.
+      assert with_clause.context_cost_tokens > gist_only.context_cost_tokens
+      assert with_clause.context_cost_tokens > 40
+    end
+
     test "the estimate scales with the size of the clause being added", %{ws: ws} do
       {:ok, small} = Loop.record(candidate(%{workspace_id: ws.id, gist: "short lesson"}))
 
