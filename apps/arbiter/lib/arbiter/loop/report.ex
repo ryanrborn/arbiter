@@ -130,7 +130,21 @@ defmodule Arbiter.Loop.Report do
   defp calibration_line(%{status: :calibrated} = c) do
     "calibrated — #{round_i(Map.get(c, :capacity_weighted_tokens))} weighted tokens per window " <>
       "(from #{round_i(Map.get(c, :observed_weighted_tokens))} observed at " <>
-      "#{pct(Map.get(c, :utilization))} utilization, captured #{iso_or(Map.get(c, :captured_at), "unknown")})"
+      "#{pct(Map.get(c, :utilization))} utilization, captured #{iso_or(Map.get(c, :captured_at), "unknown")}). " <>
+      "Capacity is a **lower bound** — traffic on this plan from outside Arbiter " <>
+      "(an interactive session) raises utilization without writing a `usage_events` " <>
+      "row — so every share below is an **upper bound**, and a share over 100% is a " <>
+      "known over-estimate, not a measurement."
+  end
+
+  # A stale reading is a distinct absence from no reading at all, and the more
+  # dangerous one: it is the case that would otherwise calibrate plausibly off a
+  # window that has already rolled. Say how old it is.
+  defp calibration_line(%{reason: :stale_snapshot} = c) do
+    "**uncalibrated** (`stale_snapshot`) — the latest quota reading (captured " <>
+      "#{iso_or(Map.get(c, :captured_at), "unknown")}) describes a 5h window that has " <>
+      "already reset, so it cannot size the current one; every per-run 5h share this " <>
+      "window is `nil`, not zero"
   end
 
   defp calibration_line(%{reason: reason}),

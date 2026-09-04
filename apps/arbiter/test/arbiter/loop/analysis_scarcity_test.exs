@@ -5,10 +5,15 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
   """
   use ExUnit.Case, async: true
 
-  alias Arbiter.Loop.{Analysis, Report, Scarcity}
+  alias Arbiter.Loop.{Analysis, Proposals, Report, Scarcity}
 
   defp calibrated(capacity \\ 1_000_000.0) do
-    cal = Scarcity.calibrate(capacity * 0.5, %{utilization_5h: 0.5, captured_at: ~U[2026-09-04 09:00:00Z]})
+    cal =
+      Scarcity.calibrate(capacity * 0.5, %{
+        utilization_5h: 0.5,
+        captured_at: ~U[2026-09-04 09:00:00Z]
+      })
+
     %{
       unit: :window_share_5h,
       secondary_unit: :cost_usd,
@@ -147,6 +152,63 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
     end
   end
 
+  describe "the gist an operator approves on" do
+    # The one-line summary must be denominated in the same unit as the
+    # pre-registration it summarises — "$0.10" beside a 30%-of-window baseline
+    # is the summary contradicting the proposal.
+    test "under subscription billing the difficulty_override gist is in window share" do
+      report = Analysis.build_report(cheap_but_window_hungry_rows(), meta: meta(calibrated()))
+
+      assert [override] =
+               report
+               |> Proposals.candidates()
+               |> Enum.filter(&(&1.kind == :difficulty_override))
+
+      assert override.gist =~ "of one 5h window"
+      refute override.gist =~ "$"
+    end
+
+    test "under metered billing the gist stays dollar-denominated" do
+      rows = [
+        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share_5h: nil}),
+        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share_5h: nil}),
+        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share_5h: nil})
+      ]
+
+      report = Analysis.build_report(rows, meta: meta(metered()))
+
+      assert [override] =
+               report
+               |> Proposals.candidates()
+               |> Enum.filter(&(&1.kind == :difficulty_override))
+
+      assert override.gist =~ "$9.00"
+      refute override.gist =~ "5h window"
+    end
+
+    # An uncalibrated window leaves the share nil, which is exactly when the
+    # recommendation itself falls back to dollars — gist and baseline must fall
+    # back together.
+    test "a nil share falls back to dollars even when the fleet unit is the window" do
+      rows = [
+        row(%{task_id: "bd-subject", max_round: 2, cost_usd: 9.00, window_share_5h: nil}),
+        row(%{task_id: "bd-peer-1", max_round: 1, cost_usd: 1.00, window_share_5h: nil}),
+        row(%{task_id: "bd-peer-2", max_round: 1, cost_usd: 1.00, window_share_5h: nil})
+      ]
+
+      report = Analysis.build_report(rows, meta: meta(calibrated()))
+
+      assert [override] =
+               report
+               |> Proposals.candidates()
+               |> Enum.filter(&(&1.kind == :difficulty_override))
+
+      assert override.gist =~ "$9.00"
+      refute override.gist =~ "unavailable"
+      assert override.target_metric =~ "round-1 approval rate"
+    end
+  end
+
   describe "report scarcity disclosure" do
     test "the report carries the unit, how billing mode was determined, and the calibration" do
       report = Analysis.build_report([row(%{})], meta: meta(calibrated()))
@@ -168,6 +230,37 @@ defmodule Arbiter.Loop.AnalysisScarcityTest do
 
       assert md =~ "uncalibrated"
       assert md =~ "no_snapshot"
+    end
+
+    # The capacity estimate divides Arbiter's own draw by the whole account's
+    # utilization, so it is a lower bound and every share is an upper bound. The
+    # report must say so beside the number, not leave it to the design doc.
+    test "the calibrated line discloses that shares are upper bounds" do
+      report = Analysis.build_report([row(%{})], meta: meta(calibrated()))
+      md = Report.to_markdown(report)
+
+      assert md =~ "lower bound"
+      assert md =~ "upper bound"
+      assert md =~ "over 100%"
+    end
+
+    test "a stale snapshot is reported as its own absence, naming how old it is" do
+      stale_reading = %{utilization_5h: 0.5, captured_at: ~U[2026-09-01 09:00:00Z]}
+
+      scarcity = %{
+        unit: :window_share_5h,
+        secondary_unit: :cost_usd,
+        billing_mode: {:subscription, :inferred},
+        calibration: Scarcity.calibrate(1_000.0, nil, stale: stale_reading)
+      }
+
+      report = Analysis.build_report([row(%{window_share_5h: nil})], meta: meta(scarcity))
+      md = Report.to_markdown(report)
+
+      assert md =~ "stale_snapshot"
+      assert md =~ "already reset"
+      assert md =~ "2026-09-01"
+      refute md =~ "weighted tokens per window"
     end
 
     test "the analyser's own quota draw is stated in the report" do

@@ -54,11 +54,51 @@ defmodule Arbiter.Loop.Scarcity do
   ## Fail-soft, never fabricated
 
   Every function degrades to `nil` rather than to a plausible-looking zero. An
-  install with no captured snapshot, an idle calibration window, or a `0.0`
-  utilization reading yields `status: :uncalibrated` with a machine-readable
-  `reason`, and `window_share/2` returns `nil`. `Arbiter.Loop.Report` renders
-  that absence out loud — a blind window must not read as a cheap one, which is
-  the same discipline `Arbiter.Loop.Corpus` applies to `transcript_reads`.
+  install with no captured snapshot, a *stale* snapshot, an idle calibration
+  window, or a `0.0` utilization reading yields `status: :uncalibrated` with a
+  machine-readable `reason`, and `window_share/2` returns `nil`.
+  `Arbiter.Loop.Report` renders that absence out loud — a blind window must not
+  read as a cheap one, which is the same discipline `Arbiter.Loop.Corpus`
+  applies to `transcript_reads`.
+
+  Staleness is the sharpest of those cases, because it is the one that fails
+  *plausibly* rather than visibly. `anthropic_quotas` is a latest-only cache, so
+  `Arbiter.Quota.latest/2` happily returns a reading from a window that rolled
+  yesterday. Its `reset_5h_at` then places the window start a day in the past
+  while `utilization_5h` describes a window that has since reset several times
+  over, so a draw summed up to `now` would be divided by a utilization figure
+  measured over a different — and much shorter — interval, inflating capacity by
+  roughly the number of elapsed windows and deflating every share by the same
+  factor. `calibrate/3` therefore takes an explicit `:stale` snapshot and
+  refuses to calibrate from it (`reason: :stale_snapshot`), reusing
+  `Arbiter.Quota.Gate.stale?/1` — the predicate the dispatch gate already
+  throttles on — as the single definition of "too old to trust".
+
+  ## Coverage: capacity is a lower bound, shares are upper bounds
+
+  Calibration divides *Arbiter's observed weighted draw* by the *account's*
+  reported utilization. Those two have different coverage, and the asymmetry is
+  one-directional:
+
+    * `usage_events` only records what Arbiter itself dispatched. An interactive
+      Claude Code session on the same plan raises `utilization_5h` without
+      writing a row — on this installation that is the common case, not an edge
+      case.
+    * Both sides are read **fleet-wide**: `Arbiter.Loop.Corpus` deliberately does
+      not filter its per-run numerator by workspace (some `usage_events` rows
+      legitimately carry a `nil` `workspace_id`), so the calibration's observed
+      draw must not filter either, or numerator and denominator would describe
+      different populations and inflate every share by the ratio between them.
+
+  What remains after scoping both sides identically is non-Arbiter traffic, which
+  under-counts `observed`, hence under-estimates `capacity = observed /
+  utilization`, hence **over-estimates** every share. So `window_share_5h` is an
+  upper bound on a run's true draw, and a share above 100% of a window is a known
+  over-estimate rather than a measurement. This is reported out loud on the
+  report's calibration line. It does not undermine the *comparisons* the loop
+  makes — the bias is a single scale factor shared by every run in the window, so
+  the ranking within a `(difficulty, repo)` cell is unaffected — but it does mean
+  an absolute share should be read as "at most this much of a window".
 
   ## Billing mode
 
@@ -84,7 +124,7 @@ defmodule Arbiter.Loop.Scarcity do
   @type calibration :: %{
           window: :five_hour,
           status: :calibrated | :uncalibrated,
-          reason: nil | :no_snapshot | :no_utilization | :no_observed_tokens,
+          reason: nil | :no_snapshot | :stale_snapshot | :no_utilization | :no_observed_tokens,
           utilization: float() | nil,
           utilization_7d: float() | nil,
           observed_weighted_tokens: float(),
@@ -119,8 +159,16 @@ defmodule Arbiter.Loop.Scarcity do
   window and the utilization the provider reported for it.
 
   `snapshot` is any map carrying `:utilization_5h` (an `AnthropicQuota` row,
-  an `Arbiter.Quota.view/1` map, or `nil`). `opts` may carry `:since` — the
-  start of the calibration window — purely so the report can cite it.
+  an `Arbiter.Quota.view/1` map, or `nil`). `opts` may carry:
+
+    * `:since` — the start of the calibration window, purely so the report can
+      cite it.
+    * `:stale` — the snapshot the caller *rejected* as too old to calibrate from
+      (see `Arbiter.Quota.Gate.stale?/1`). Pass it here rather than as
+      `snapshot`: the reading is still worth citing (its `captured_at` says how
+      blind the window is, and its existence is still evidence of a windowed
+      plan for `billing_mode/2`), but its `utilization` describes a window that
+      has already rolled, so capacity must not be derived from it.
 
   Returns a `t:calibration/0`. `status: :uncalibrated` (with a `reason`) is a
   normal outcome, not an error: it means the window's capacity is unknown and
@@ -129,26 +177,36 @@ defmodule Arbiter.Loop.Scarcity do
   @spec calibrate(number(), map() | nil, keyword()) :: calibration()
   def calibrate(observed_weighted_tokens, snapshot, opts \\ []) do
     observed = observed_weighted_tokens / 1
-    util = snapshot && fetch(snapshot, :utilization_5h)
-
-    base = %{
-      window: :five_hour,
-      status: :uncalibrated,
-      reason: nil,
-      utilization: util,
-      utilization_7d: snapshot && fetch(snapshot, :utilization_7d),
-      observed_weighted_tokens: observed,
-      capacity_weighted_tokens: nil,
-      captured_at: snapshot && fetch(snapshot, :captured_at),
-      since: Keyword.get(opts, :since)
-    }
+    stale = Keyword.get(opts, :stale)
+    base = blank_calibration(observed, snapshot, stale, Keyword.get(opts, :since))
+    util = base.utilization
 
     cond do
+      not is_nil(stale) -> %{base | reason: :stale_snapshot}
       is_nil(snapshot) -> %{base | reason: :no_snapshot}
       not is_number(util) or util <= 0.0 -> %{base | reason: :no_utilization}
       observed <= 0.0 -> %{base | reason: :no_observed_tokens}
       true -> %{base | status: :calibrated, capacity_weighted_tokens: observed / util}
     end
+  end
+
+  # The uncalibrated frame every outcome starts from. A rejected `stale` reading
+  # still supplies `captured_at` — the report needs to say *how* blind the window
+  # is — but never `utilization`, which is the field that would imply a capacity.
+  defp blank_calibration(observed, snapshot, stale, since) do
+    cited = snapshot || stale
+
+    %{
+      window: :five_hour,
+      status: :uncalibrated,
+      reason: nil,
+      utilization: snapshot && fetch(snapshot, :utilization_5h),
+      utilization_7d: snapshot && fetch(snapshot, :utilization_7d),
+      observed_weighted_tokens: observed,
+      capacity_weighted_tokens: nil,
+      captured_at: cited && fetch(cited, :captured_at),
+      since: since
+    }
   end
 
   @doc """

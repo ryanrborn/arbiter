@@ -20,6 +20,12 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
   defp seed! do
     {:ok, ws} = Ash.create(Workspace, %{name: "scarcity-pass-ws", prefix: "scpw"})
 
+    subject = task!(ws, "window-hungry rework", rounds: 2, cost: 0.10, tokens_out: 200_000)
+    _peer1 = task!(ws, "cheap peer one", rounds: 1, cost: 9.00, tokens_out: 1_000)
+    _peer2 = task!(ws, "cheap peer two", rounds: 1, cost: 9.00, tokens_out: 1_000)
+
+    # Captured after the work it measures: the calibration sums the observed draw
+    # over `[window_start, captured_at]`, the interval this reading describes.
     {:ok, _q} =
       Ash.create(AnthropicQuota, %{
         workspace_id: ws.id,
@@ -27,10 +33,6 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
         utilization_5h: 0.5,
         captured_at: DateTime.utc_now()
       })
-
-    subject = task!(ws, "window-hungry rework", rounds: 2, cost: 0.10, tokens_out: 200_000)
-    _peer1 = task!(ws, "cheap peer one", rounds: 1, cost: 9.00, tokens_out: 1_000)
-    _peer2 = task!(ws, "cheap peer two", rounds: 1, cost: 9.00, tokens_out: 1_000)
 
     %{ws: ws, subject: subject}
   end
@@ -58,7 +60,7 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
         cost_usd: Keyword.fetch!(opts, :cost),
         tokens_in: 1_000,
         tokens_out: Keyword.fetch!(opts, :tokens_out),
-        occurred_at: DateTime.utc_now()
+        occurred_at: DateTime.add(DateTime.utc_now(), -300, :second)
       })
 
     {:ok, _} =
@@ -102,10 +104,18 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
     writes = Ash.read!(PendingWrite)
     override = Enum.find(writes, &(&1.kind == :difficulty_override))
 
-    assert override, "expected a :difficulty_override proposal, got #{inspect(Enum.map(writes, & &1.kind))}"
+    assert override,
+           "expected a :difficulty_override proposal, got #{inspect(Enum.map(writes, & &1.kind))}"
+
     assert override.target_metric =~ "5h-window share to converge"
     assert override.baseline =~ "of one 5h window"
     assert override.baseline =~ "round-1 approval"
+
+    # The one-line summary an operator actually approves on is in the same unit
+    # as the pre-registration it summarises — not "$0.10" beside a window-share
+    # baseline.
+    assert override.gist =~ "of one 5h window"
+    refute override.gist =~ "$"
 
     # Dollars are retained, not deleted: the report still carries mean cost.
     assert [cell] = report.cells

@@ -61,7 +61,7 @@ ticket's scope left open, and it is the only one the data supports.
 
 ### How capacity is estimated
 
-`Scarcity.calibrate/3` divides the workspace's weighted token draw over the
+`Scarcity.calibrate/3` divides the fleet's weighted token draw over the
 **current** 5h window by the `utilization_5h` the provider reported for that same
 window:
 
@@ -74,6 +74,64 @@ even though it is measured on the current one. The estimate's inputs
 (`observed_weighted_tokens`, `utilization`, `captured_at`) are all rendered in the
 report's "Unit of scarcity" table, so an operator can see how it was derived and
 how stale it is.
+
+Two things about that division are load-bearing enough to state separately.
+
+**The interval must match on both sides.** `observed_weighted_tokens` is summed
+over `[window_start, captured_at]` — not up to `now`. `window_start` comes from
+the snapshot's `reset_5h_at`; `captured_at` is when the utilization figure was
+read. Letting the numerator run past `captured_at` would divide a longer
+interval's draw by a shorter interval's utilization and over-state capacity.
+
+**A stale snapshot cannot calibrate at all.** `anthropic_quotas` is a latest-only
+cache, so `Quota.latest/2` returns whatever was captured last, however old. A
+reading from a window that has already reset places `window_start` in the past
+while its `utilization_5h` describes a window that has since rolled several
+times — capacity would come out inflated by roughly the number of elapsed
+windows, and every share deflated by the same factor, while the frame still
+claimed `:calibrated`. `Arbiter.Loop.Corpus` therefore runs the snapshot through
+`Arbiter.Quota.Gate.stale?/1` — the same predicate the dispatch gate refuses to
+throttle on (`reset_at` elapsed, or `captured_at` older than 5h) — and treats a
+stale reading as an absence, `reason: :stale_snapshot`. It is still used to infer
+the *billing mode*: a stale reading is weak evidence about the current window but
+perfectly good evidence that this plan has windows at all.
+
+### Coverage: capacity is a lower bound, shares are upper bounds
+
+The numerator of the calibration is *Arbiter's* observed draw; the denominator is
+the *account's* reported utilization. Those two populations are not identical, and
+the asymmetry runs one way.
+
+The part that is fixable is fixed: both the per-run numerator (`tokens_by_run/2`)
+and the calibration's observed draw are read **fleet-wide**, with no
+`workspace_id` filter. That matters because some `usage_events` rows legitimately
+carry a `nil` `workspace_id` (`Arbiter.Usage.WorkspaceBackfill`), and because
+runs from other workspaces still draw on the same account windows. Scoping one
+side but not the other would under-count `observed` and inflate every share by
+the reciprocal of the coverage ratio — enough to push shares past 100% of a
+window.
+
+The part that is *not* fixable from the ledger is traffic that never passes
+through Arbiter at all: an interactive Claude Code session on the same plan
+raises `utilization_5h` without writing a `usage_events` row, and on this
+installation that is the common case rather than an edge case. So:
+
+* `observed` under-counts the account's true draw,
+* hence `capacity = observed / utilization` is a **lower bound** on true capacity,
+* hence every `window_share_5h` is an **upper bound** on a run's true draw, and a
+  share above 100% of a window is a known over-estimate, not a measurement.
+
+The report's calibration line says exactly this, in those words, next to the
+capacity figure — the same "absence is never silent" discipline applied to bias
+instead of to missing data.
+
+Note what this does *not* undermine. The bias is a single scale factor shared by
+every run in the window, so it cancels in every comparison the loop actually
+makes — the ranking of tasks within a `(difficulty, repo)` cell, and a subject's
+share against its cohort median, are unaffected. It is only the *absolute* share
+that must be read as "at most this much of a window". This is a different
+argument from the weight-vector one below (which is about a scale error in the
+weights cancelling exactly); the two are independent and both are needed.
 
 ### The weighting, and why an approximate vector is sound
 
@@ -93,10 +151,12 @@ available for that.
 ### Absence is never zero
 
 Every path degrades to `nil`, never to a plausible-looking `0.0`. No captured
-snapshot, an idle calibration window, or a `0.0` utilization reading each yield
+snapshot, a snapshot too stale to describe the current window, an idle
+calibration window, or a `0.0` utilization reading each yield
 `status: :uncalibrated` with a machine-readable `reason`
-(`:no_snapshot` / `:no_utilization` / `:no_observed_tokens`), `window_share_5h` of
-`nil` on every row, and an explicit "**uncalibrated**" line in the report. This is
+(`:no_snapshot` / `:stale_snapshot` / `:no_utilization` / `:no_observed_tokens`),
+`window_share_5h` of `nil` on every row, and an explicit "**uncalibrated**" line
+in the report naming which absence it was. This is
 the same discipline `Arbiter.Loop.Corpus` already applies to `transcript_reads`:
 a blind window must not read as a clean one.
 

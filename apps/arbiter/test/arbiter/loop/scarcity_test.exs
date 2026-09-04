@@ -38,7 +38,11 @@ defmodule Arbiter.Loop.ScarcityTest do
 
   describe "calibrate/2" do
     test "derives 5h capacity from observed weighted tokens and observed utilization" do
-      cal = Scarcity.calibrate(1_200_000.0, %{utilization_5h: 0.4, captured_at: ~U[2026-09-04 10:00:00Z]})
+      cal =
+        Scarcity.calibrate(1_200_000.0, %{
+          utilization_5h: 0.4,
+          captured_at: ~U[2026-09-04 10:00:00Z]
+        })
 
       assert cal.status == :calibrated
       assert cal.window == :five_hour
@@ -72,6 +76,26 @@ defmodule Arbiter.Loop.ScarcityTest do
       cal = Scarcity.calibrate(0.0, %{utilization_5h: 0.4})
       assert cal.status == :uncalibrated
       assert cal.reason == :no_observed_tokens
+    end
+
+    # The dangerous case: a reading from a window that has already rolled would
+    # otherwise calibrate plausibly — and wrongly — off a utilization figure that
+    # describes a different interval than the observed draw.
+    test "a stale snapshot is refused, and says so rather than producing a capacity" do
+      cal =
+        Scarcity.calibrate(1_200_000.0, nil,
+          stale: %{utilization_5h: 0.4, captured_at: ~U[2026-09-01 10:00:00Z]}
+        )
+
+      assert cal.status == :uncalibrated
+      assert cal.reason == :stale_snapshot
+      assert cal.capacity_weighted_tokens == nil
+      assert Scarcity.window_share(300_000.0, cal) == nil
+
+      # The rejected reading is still cited, so the report can say how blind the
+      # window is rather than only that it is blind.
+      assert cal.captured_at == ~U[2026-09-01 10:00:00Z]
+      assert cal.utilization == nil
     end
   end
 
