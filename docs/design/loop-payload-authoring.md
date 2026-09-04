@@ -5,7 +5,10 @@ change**, and the only file it adds is this one.
 
 Everything under [What I measured](#what-i-measured) was measured against the
 running fleet on 2026-09-04, not recalled. Every recommendation cites the code
-it would touch, at the line it would touch.
+it would touch **by definition** — module, function or module attribute — not by
+line number, so the citations survive the next merge of `main` into whatever
+branch carries the follow-up work. Bare line numbers appear only for `@moduledoc`
+prose, which has no name to cite.
 
 Decided alongside `bd-5oh1lc` (#1464, *discovery*), as both tickets ask. That
 ticket's [§8](loop-inference-discovery-pass.md) said this one "can be answered
@@ -34,7 +37,8 @@ authoring admits no model at all.
 
 3. **`config_set` is the highest-value slice and it is a table lookup.** The
    cluster payload already carries `{from_difficulty, to_difficulty, repo}`
-   (`proposals.ex:262-266`). The patch is
+   (the `"cell"` entry written by `Proposals.misestimate_cluster_candidates/3`,
+   `proposals.ex`). The patch is
    `routing.rules.D<from> => effective_rule(workspace, to)` — resolved from
    `ByDifficulty.default_mapping/0` merged under the workspace's own
    `routing.rules`. No prose, no attribution problem, no model. All **6/6**
@@ -44,15 +48,15 @@ authoring admits no model at all.
 4. **That slice also unblocks machinery that is already shipped and currently
    unreachable.** #1187's autonomous-routing canary (`Loop.Canary`) consumes
    exactly one shape: a `:config_set` whose patch is one `D<n>` tier's
-   `model_tier` / `thinking` (`canary.ex:372-380`). **Nothing in production
-   code produces that shape.** `parse_routing_patch/1` rejects every
-   `:config_set` row that exists. The canary's only producers are in
+   `model_tier` / `thinking` (`Canary.parse_routing_patch/1`, `canary.ex`).
+   **Nothing in production code produces that shape.**
+   `parse_routing_patch/1` rejects every `:config_set` row that exists. The canary's only producers are in
    `test/`. This is not a "would be nice" — an entire Stage 3 feature is
    sitting behind a missing seven-line function.
 
 5. **The fingerprint argument in the ticket is real but points the other
-   way.** `payload` is **not** a fingerprint input (`loop.ex:146-150`;
-   the digest is `{kind, target, category, difficulty, repo}`). So
+   way.** `payload` is **not** a fingerprint input (`Loop.fingerprint/1`,
+   `loop.ex`; the digest is `{kind, target, category, difficulty, repo}`). So
    model-authored *prose* would not destabilise the digest at all. The
    dangerous field is `target` — which is precisely what the ticket's
    option (c) proposes to start populating. Attribution must be
@@ -101,7 +105,7 @@ Zero `repo_doc_patch` rows have ever existed, in any state.
 ### The failures are real, and they are clean
 
 Both applies below were run against live `:proposed` rows. Neither changed
-state — `Apply.run/2` orders `side_effect` before `persist` (`apply.ex:43-50`),
+state — `Apply.run/2` orders `side_effect` before `persist` (`apply.ex`),
 so a payload gap aborts before anything is written. Re-checked after: both
 still `:proposed`.
 
@@ -142,7 +146,7 @@ deterministic.
 
 ### The finding-category set is closed, and small
 
-`@finding_buckets` (`analysis.ex:222-228`) is four compile-time regexes:
+`@finding_buckets` (`analysis.ex`) is four compile-time regexes:
 
 | category | live row | an existing skill governs it? |
 |---|---|---|
@@ -155,7 +159,8 @@ deterministic.
 The fleet has exactly three skills, all global:
 `systematic-debugging`, `test-driven-development`,
 `verification-before-completion`. `Skill.managed_by` exists
-(`skill.ex:242`, #1465, closed) — the stated prerequisite is satisfied.
+(the `managed_by` attribute in `skill.ex`, #1465, closed) — the stated
+prerequisite is satisfied.
 
 **This is the measurement that decides the ticket.** "Category → skill
 attribution" reads like an open relation to be discovered. It is a five-row
@@ -165,7 +170,7 @@ not `:skill_patch`"*.
 
 ### The routing tiers all resolve to real changes
 
-`ByDifficulty.default_mapping/0` (`by_difficulty.ex:76-80`), with every
+`ByDifficulty.default_mapping/0` (`by_difficulty.ex`), with every
 workspace's own `routing.rules` merged on top:
 
 | workspace | policy | own rules |
@@ -190,7 +195,7 @@ override D4 today; against stock `default_mapping/0` both tiers are
 `premium/high`. The implementation must resolve against the workspace's
 effective rule and **decline to emit an identity patch**, or it recreates the
 permanently-stuck-row failure that `proposable_misestimate?/1` already guards
-against at the difficulty ceiling (`proposals.ex:290-293`).
+against at the difficulty ceiling (`proposals.ex`).
 
 ---
 
@@ -199,17 +204,17 @@ against at the difficulty ceiling (`proposals.ex:290-293`).
 The ticket's framing — "three of the five kinds are generated with no payload
 content" — is accurate for two of them and wrong for the third.
 
-`repo_doc_patch` **is not generated at all.** `finding_kind(:claude_md)`
-(`proposals.ex:175`) is reachable only when a suggestion's `destination` is
-`:claude_md`, and `Analysis.suggestion_targets/2` — the sole producer of
-`destination` (`analysis.ex:628-644`) — returns `:per_task_override` or
+`repo_doc_patch` **is not generated at all.** `Proposals.finding_kind/1`'s
+`:claude_md` clause (`proposals.ex`) is reachable only when a suggestion's
+`destination` is `:claude_md`, and `Analysis.suggestion_targets/2` — the sole
+producer of `destination` (`analysis.ex`) — returns `:per_task_override` or
 `:skill` and never `:claude_md`. The branch, and `finding_gist(:claude_md, _)`
 beside it, are unreachable from the analyser. Zero rows in the queue's entire
 history confirm it.
 
 The one live `:repo_doc_patch` path is the operator-invoked
 `arb loop propose repo-doc-patch --repo … --lesson …`
-(`Loop.propose_repo_doc_patch/1`, `loop.ex:224`), which supplies both repo and
+(`Loop.propose_repo_doc_patch/1`, `loop.ex`), which supplies both repo and
 prose by hand. It is not payload-less; it is not automatic; it is working as
 designed.
 
@@ -225,7 +230,7 @@ the branch; do not leave a documented route with no producer.
 
 ### What exists
 
-`misestimate_cluster_candidates/3` (`proposals.ex:235-270`) already groups
+`Proposals.misestimate_cluster_candidates/3` (`proposals.ex`) already groups
 misestimates by `{from_difficulty, to_difficulty, repo}` and writes:
 
 ```elixir
@@ -236,7 +241,7 @@ payload: %{
 }
 ```
 
-`Apply.side_effect/2` for `:config_set` (`apply.ex:130-145`) wants
+`Apply.side_effect/2`'s `:config_set` clause (`apply.ex`) wants
 `payload["patch"]` and hands it to the deep-merge `:patch_config` action.
 
 ### What is missing
@@ -287,7 +292,7 @@ Every input is a value already in hand. No prose. No model. No ambiguity.
 
 The ticket offers (c) as "carry a named target plus evidence with no prose — a
 human writes the diff". Applied literally, that row **still fails**:
-`Payload.skill_attrs/1` (`apply/payload.ex:75-88`) requires at least one of
+`Payload.skill_attrs/1` (`apply/payload.ex`) requires at least one of
 `body` / `metadata` / `activation_mode` and returns
 `{:unmapped, "this proposal carries no skill patch content to apply"}`
 otherwise. Naming the target only moves the failure from the first `with`
@@ -314,7 +319,8 @@ same closed set and the two must not drift:
 Two consequences worth stating explicitly:
 
 * **Routing unhomed categories to `:skill_create` is the right answer, not a
-  fallback.** That kind has full payload support already (`apply.ex:114-126`),
+  fallback.** That kind has full payload support already
+  (`Apply.side_effect/2`'s `:skill_create` clause, `apply.ex`),
   forces `managed_by: :loop`, and is the honest description of what the fleet
   needs: there is no security-practice skill and no context-budget skill, and
   a `skill_patch` against a skill that does not exist would fail with
@@ -328,8 +334,9 @@ Two consequences worth stating explicitly:
 
 The candidate already carries `category`, one verbatim `example` finding
 string, `incident_refs`, `task_refs`, and the pre-registered
-`target_metric` / `baseline` (`proposals.ex:134-166`). A rendered clause can
-therefore be fully derived except for one sentence:
+`target_metric` / `baseline` (`Proposals.finding_candidates/3`,
+`proposals.ex`). A rendered clause can therefore be fully derived except for
+one sentence:
 
 ```markdown
 ## Missing test coverage                      <- derived (category)
@@ -366,8 +373,9 @@ is not carrying its weight.
 
 ### The migration that must not be missed
 
-`target` **is** a fingerprint input (`loop.ex:146-150`). Populating it changes
-the digest of every finding-category row. The four live `skill_patch` rows
+`target` **is** a fingerprint input (`Loop.fingerprint/1`, `loop.ex`).
+Populating it changes the digest of every finding-category row. The four live
+`skill_patch` rows
 carry `target: nil` and 4–5 incidents of accumulated evidence each; a naive
 deploy inserts four *new* rows beside them and leaves the old ones live,
 holding the evidence, forever un-reinforced — the partial unique index is on
@@ -402,7 +410,8 @@ ticket's own statement of the risk and that inversion is the durable finding.
 ### Nondeterminism vs. fingerprint stability
 
 The ticket says an LLM pass "interacts badly with the fingerprint-reinforcement
-mechanic that assumes a stable digest". Measured against `loop.ex:136-150`:
+mechanic that assumes a stable digest". Measured against `Loop.fingerprint/1`
+and its `@doc` (`loop.ex`):
 
 * The digest is `{kind, target, category, difficulty, repo}`. `payload`,
   `gist`, `diff`, `baseline` and `incident_refs` are **deliberately excluded**
@@ -429,7 +438,7 @@ deterministic (attribution) is the part the ticket frames as the hard problem.
 
 For the record, the accounting an (a) implementation would have owed:
 
-* Recorded through `Corpus.record_pass_cost/1` (`corpus.ex:185`), which already
+* Recorded through `Corpus.record_pass_cost/1` (`corpus.ex`), which already
   inserts one `usage_events` row per pass under `task_id: "loop-analyze"`,
   `step: :other`, `provider: "arbiter"` — the loop's cost lands in the ledger
   it optimises. An authoring pass needs a distinct `model` label so its draw is
@@ -513,8 +522,9 @@ Required by the acceptance criteria, collected in one place.
   with a stub body and the evidence, and an operator fills it — the destination
   is real, which is what #1141 asks for.
 * Attribute a finding to a *repo*. `finding_categories/1` aggregates fleet-wide
-  with no repo cell (`analysis.ex:230-247`), which is why `:claude_md` has no
-  producer. Nothing here changes that; see `bd-ipq68i`.
+  with no repo cell (`Analysis.finding_categories/1`, `analysis.ex`), which is
+  why `:claude_md` has no producer. Nothing here changes that; see
+  `bd-ipq68i`.
 * Generalise across categories. Every clause is per-category by construction.
   A finding that spans two categories yields two clauses, not one synthesis.
 
