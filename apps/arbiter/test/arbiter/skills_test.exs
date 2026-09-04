@@ -17,6 +17,9 @@ defmodule Arbiter.SkillsTest do
       assert skill.activation_mode == :situational
       assert skill.code_only == false
       assert %DateTime{} = skill.created_at
+      # bd-blxwla: a skill created through the normal (operator-facing) path
+      # is authored by an operator, distinct from `actor` (who it's for).
+      assert skill.managed_by == :operator
     end
 
     test "accepts activation_mode and code_only (bd-d5hy7y)" do

@@ -114,7 +114,10 @@ defmodule Arbiter.Loop.Apply do
   def side_effect(%PendingWrite{kind: :skill_create, payload: payload}, attribution) do
     with {:ok, name} <- Payload.string(payload, "name"),
          {:ok, body} <- Payload.string(payload, "body") do
-      %{name: name, body: body}
+      # bd-blxwla: the loop authored this row, full stop — not something the
+      # payload gets a say in, so `managed_by: :loop` is forced here rather
+      # than read from `payload`.
+      %{name: name, body: body, managed_by: :loop}
       |> Payload.maybe_put(:metadata, Map.get(payload, "metadata"))
       |> Payload.maybe_put(:workspace_id, Map.get(payload, "workspace_id"))
       |> Arbiter.Skills.create_skill(actor: attribution)

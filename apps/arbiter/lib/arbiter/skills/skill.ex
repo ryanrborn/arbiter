@@ -47,6 +47,25 @@ defmodule Arbiter.Skills.Skill do
     * `:body` — the markdown skill body (the `SKILL.md` contents).
     * `:metadata` — optional free-form map (e.g. `description`, `tags`).
 
+  ## `managed_by` vs `actor` (bd-blxwla)
+
+  `managed_by` (`:operator | :loop | :unknown`) records **who authored** the
+  skill — a human/coordinator-driven write vs one `Arbiter.Loop.Apply` made on
+  the loop's behalf. `actor` is a different axis entirely: a free-form label
+  of *who made the most recent write* (for paper-trail attribution), not who
+  the skill is *for* or who originated it. A loop-authored skill can still be
+  edited by an operator afterwards — `actor` moves, `managed_by` does not (it
+  is fixed at creation, like `workspace_id`).
+
+  This distinction has to exist **before** the first loop-authored skill
+  lands (#1011 comment 5224098209 §5): once the loop has written a skill body
+  without this flag, there is no way to reconstruct after the fact which
+  registry rows are machine-authored — the split becomes unrecoverable
+  paper-trail archaeology. Every skill in the registry as of this attribute's
+  introduction predates loop payload-authoring, so all of them backfill to
+  `:operator`; `:unknown` exists for provenance that genuinely can't be
+  established and should have zero rows in practice.
+
   ## Name collisions with bundled skills
 
   Every `--print` worker always sees ~20 built-in "bundled" skills
@@ -117,7 +136,17 @@ defmodule Arbiter.Skills.Skill do
 
     create :create do
       primary? true
-      accept [:name, :body, :metadata, :activation_mode, :code_only, :workspace_id, :actor]
+
+      accept [
+        :name,
+        :body,
+        :metadata,
+        :activation_mode,
+        :code_only,
+        :workspace_id,
+        :actor,
+        :managed_by
+      ]
     end
 
     update :update do
@@ -204,6 +233,19 @@ defmodule Arbiter.Skills.Skill do
       allow_nil? true
 
       description ~s[Stable label of the actor who last wrote this skill (e.g. "coordinator", "worker:bd-…").]
+    end
+
+    # Who *authored* the skill, fixed at creation — distinct from `actor`
+    # (who made the most recent write). See the moduledoc section above.
+    # Only `Arbiter.Loop.Apply` sets `:loop`; every other creation path
+    # (dashboard, CLI, MCP `skill_create`) leaves the `:operator` default.
+    attribute :managed_by, :atom do
+      allow_nil? false
+      public? true
+      default :operator
+      constraints one_of: [:operator, :loop, :unknown]
+
+      description "Who authored the skill (:operator/:loop/:unknown) — distinct from :actor, which is who made the most recent write."
     end
 
     create_timestamp :created_at
