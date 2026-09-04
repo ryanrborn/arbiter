@@ -143,13 +143,17 @@ concrete: a detector allowlist cannot find what nobody anticipated, and 81.8%
 of the reviewer-finding signal is currently on the wrong side of that line.
 
 But "build a discovery pass" is decided here as three staged things, and only
-the middle one contains a model:
+the middle one contains a model. These are **discovery** stages — numbered
+independently of the epic's own Stage 0–3, which are a different sequence
+(#1011 / #1130 / #1187). `bd-4xc69o` documents how badly that overload has
+already bitten; the issues filed by this ticket are titled
+"Loop discovery Stage N" to keep the two apart.
 
 | stage | what it is | model? | writes? |
 |---|---|---|---|
-| **0 — residue instrument** | count the unbucketed units, report the count and a bounded sample, expose it in `meta` | no | no (the existing cost row only) |
-| **1 — discovery report tier** | one model call over the residue, emitting *candidate detector* proposals into a report section | yes | no |
-| **2 — detector admission** | a human merges an accepted candidate into `@finding_buckets` as code; the deterministic pass then does everything else | no (a human reviews a PR) | ordinary `PendingWrite` rows, from deterministic code |
+| **discovery 0 — residue instrument** | count the unbucketed units, report the count and a bounded sample, expose it in `meta` | no | no (the existing cost row only) |
+| **discovery 1 — report tier** | one model call over the residue, emitting *candidate detector* proposals into a report section | yes | no |
+| **discovery 2 — detector admission** | a human merges an accepted candidate into `@finding_buckets` as code; the deterministic pass then does everything else | no (a human reviews a PR) | ordinary `PendingWrite` rows, from deterministic code |
 
 Stage 0 is worth shipping on its own merits regardless of what happens to
 Stage 1. It closes an asymmetry that is a defect in its own right: the
@@ -374,19 +378,22 @@ determine, `bd-4xc69o`:
 
 ## Implementation issues
 
-Filed by this ticket; see the References section of the PR for ids.
+Filed by this ticket:
 
-1. **Stage 0 — finding-residue instrument** (no model, no new writes).
+1. **`bd-5ja2vb` (#1467) — discovery Stage 0: finding-residue instrument**
+   (no model, no new writes).
    Count units that `bucket_finding/1` rejects, carry the count in
    `Corpus.fetch/1`'s `meta` alongside `failed_runs` / `transcript_reads`, add
    a report section mirroring the existing "Unclassified (corpus-integrity
    signal)" section, and retain the residue units so a later merged detector
    can be backfilled over them. Symmetry with the failure-reason residue is
    the acceptance test.
-2. **Stage 1 — `--discover` report tier** (model, zero writes). Blocked on
-   Stage 0's trigger. Bounded residue slice, candidate *detectors* only,
+2. **`bd-4f6opo` (#1468) — discovery Stage 1: `--discover` report tier**
+   (model, zero writes). Depends on `bd-5ja2vb`; blocked on Stage 0's
+   trigger. Bounded residue slice, candidate *detectors* only,
    deterministic pre-check of every proposed regex against history before it
    is shown, own cost recorded through `record_pass_cost/1`, off by default.
-3. **Stage 2 — detector admission workflow** (no model). Blocked on four
-   operator-read windows of Stage 1. The mechanics of taking an accepted
+3. **`bd-8u2aqn` (#1469) — discovery Stage 2: detector admission workflow**
+   (no model). Depends on `bd-4f6opo`; blocked on four operator-read windows
+   of Stage 1. The mechanics of taking an accepted
    candidate to a merged `@finding_buckets` tuple and backfilling it.

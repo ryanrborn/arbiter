@@ -15,6 +15,11 @@
 # nil. Sampling is biased *towards* tasks the report already surfaced, so the
 # rate it reports is a lower bound on the full corpus.
 #
+# Side effect: it shells out to `arb loop analyze`, which inserts one
+# `usage_events` row for the analysis pass's own cost. That is the pass's normal
+# behaviour, not something this script adds — but it is a write, so the script
+# is not strictly read-only.
+#
 # Usage: scripts/measure_loop_finding_residue.sh [since] [base_url]
 #   e.g. scripts/measure_loop_finding_residue.sh 30d http://localhost:4848
 set -euo pipefail
