@@ -72,14 +72,24 @@ warrants at least the same gate.
 3. **Reviewer-finding categories**, clustered, with run citations — e.g.
    *"plausible code, green tests, inert at runtime."*
 
-4. **Difficulty misestimates**, segmented by `(difficulty, repo)` cell — tasks
+4. **Reviewer-finding residue (corpus-integrity signal).** The category table
+   above is a four-bucket allowlist (`Arbiter.Loop.FindingBuckets`), not a
+   classifier — a finding matching none of the buckets is not dropped, it is
+   counted, cited, and reported here with the same discipline as the
+   misclassification-rate section above: count, rate, distinct tasks, and a
+   bounded sample of `{task_id, run_id}` citations. As with misclassification,
+   if the residue rate is material, don't trust the category table above it —
+   it is a report of what the four buckets can name, not of everything
+   reviewers found.
+
+5. **Difficulty misestimates**, segmented by `(difficulty, repo)` cell — tasks
    where the dispatched difficulty under-provisioned the actual cost/rounds.
 
-5. **`(difficulty, repo)` cells** with rework rate and mean cost. Compare
+6. **`(difficulty, repo)` cells** with rework rate and mean cost. Compare
    *within* a cell: metrics move with difficulty mix and repo, so cross-cell
    comparison reads drift as improvement.
 
-6. **Suggestions.** Each names the metric it should move, that metric's current
+7. **Suggestions.** Each names the metric it should move, that metric's current
    baseline, and a destination.
 
 ## The discipline the report enforces — and you must too
@@ -340,16 +350,15 @@ fraction of reviewed tasks need a round 2.
 - `issues.difficulty` is the *current* value, so a re-filed task shows its final
   difficulty, not the value each attempt was dispatched at. Read
   "dispatched difficulty" in the report with that in mind.
-- **Reviewer findings that match no bucket are dropped, uncounted.**
-  `Analysis.bucket_finding/1` is a four-regex allowlist; a finding matching none
-  of them is rejected at `analysis.ex:246` and never reaches the report. Measured
-  2026-09-04 over a 30-day window: **81.8% of finding units (275 of 336) matched
-  no bucket**. So "reviewer-finding categories" is a report of the four things
-  the analyser can name, not of what reviewers actually found. The
-  failure-reason allowlist has an `:unclassified` residue section for exactly
-  this reason; this one does not, yet. Re-measure with
-  `scripts/measure_loop_finding_residue.sh`; the decision on what to do about it
-  is `docs/design/loop-inference-discovery-pass.md` (`bd-5oh1lc` / #1464).
+- **Reviewer findings that match no bucket are its own report section, not a
+  silent drop.** `Arbiter.Loop.FindingBuckets.bucket_finding/1` is a four-regex
+  allowlist; a finding matching none of them is counted, cited, and retained
+  as residue (see "Reviewer-finding residue" above) instead of being
+  discarded. **81.8% of finding units (275 of 336, over the 30-day window
+  measured 2026-09-04)** is the historical baseline this instrument was
+  calibrated against — read the residue section of the current report for the
+  live rate. The decision behind this is
+  `docs/design/loop-inference-discovery-pass.md` (`bd-5oh1lc` / #1464).
 
 ## Why it can't run the way the first attempt did
 

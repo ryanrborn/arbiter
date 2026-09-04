@@ -35,6 +35,23 @@ defmodule Arbiter.Loop.Corpus do
   whose output log was reaped still had to fall back; scoring it as zero
   reads would report a blind window as a fully-structured one.
 
+  ## Finding residue (bd-5ja2vb)
+
+  `Arbiter.Loop.FindingBuckets.bucket_finding/1` is a four-regex allowlist; a
+  reviewer finding matching none of them is the pass's other blind spot,
+  symmetric to an unclassified `failure_reason`. `meta.finding_residue`
+  reports it: `total_units` (every finding unit from a `role: review`,
+  non-`approve` round in the window), `count` (the ones no bucket matched),
+  `rate`, `distinct_tasks`, and `units` — the residue itself, retained (not
+  just counted) so a detector merged later can be backfilled over the actual
+  corpus instead of accumulating evidence from zero. Retention is bounded:
+  at most `residue_retention_limit/0` units, newest-first, each truncated to
+  `residue_text_limit/0` characters — the same "bounded, not raw" discipline
+  as the transcript tail above. This is computed over **every** matching
+  round in the window, independent of `failure_reason` classification —
+  unlike `Arbiter.Loop.Analysis`'s `finding_categories`, which only clusters
+  the agent-quality-classified subset for prompt-shaping purposes.
+
   A fallback run's `terminal_lines` is the union of two bounded reads
   (`OutputLog.tail_lines/2` + `OutputLog.scan_for/2`), not a raw transcript
   read — see bd-3ozmaj (#1159) and the "bounded scan" note in
@@ -82,8 +99,7 @@ defmodule Arbiter.Loop.Corpus do
 
   require Logger
 
-  alias Arbiter.Loop.FailureClassifier
-  alias Arbiter.Loop.Scarcity
+  alias Arbiter.Loop.{FailureClassifier, FindingBuckets, Scarcity}
   alias Arbiter.Quota
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Overage
@@ -94,7 +110,23 @@ defmodule Arbiter.Loop.Corpus do
   @tail_n 40
   @pass_task_id "loop-analyze"
 
+  # Finding-residue retention bound (bd-5ja2vb): at most this many residue
+  # units are retained in `meta.finding_residue.units`, newest-first — the
+  # count/rate/distinct_tasks are still computed over the FULL window, this
+  # only bounds the retained sample.
+  @residue_retention_limit 300
+  # Per-unit text truncation bound for retained residue units.
+  @residue_text_limit 400
+
   @type row :: map()
+  @type finding_residue_unit :: %{task_id: String.t(), run_id: String.t() | nil, text: String.t()}
+  @type finding_residue :: %{
+          total_units: non_neg_integer(),
+          count: non_neg_integer(),
+          rate: float() | nil,
+          distinct_tasks: non_neg_integer(),
+          units: [finding_residue_unit()]
+        }
   @type meta :: %{
           label: String.t(),
           since: DateTime.t(),
@@ -102,7 +134,8 @@ defmodule Arbiter.Loop.Corpus do
           workspace_id: term(),
           failed_runs: non_neg_integer(),
           transcript_reads: non_neg_integer(),
-          scarcity: scarcity()
+          scarcity: scarcity(),
+          finding_residue: finding_residue()
         }
 
   @type scarcity :: %{
@@ -183,11 +216,29 @@ defmodule Arbiter.Loop.Corpus do
       workspace_id: Keyword.get(opts, :workspace_id),
       failed_runs: failed,
       transcript_reads: reads,
-      scarcity: scarcity
+      scarcity: scarcity,
+      finding_residue: finding_residue(since, until)
     }
 
     {:ok, rows, meta}
   end
+
+  @doc "Retention bound for `meta.finding_residue.units` — see moduledoc."
+  @spec residue_retention_limit() :: pos_integer()
+  def residue_retention_limit, do: @residue_retention_limit
+
+  @doc """
+  The zero-finding shape of `finding_residue()` — the single source of truth
+  for callers (e.g. `Analysis`, `Report`) that need a default before any
+  window has been fetched.
+  """
+  @spec empty_finding_residue() :: finding_residue()
+  def empty_finding_residue,
+    do: %{total_units: 0, count: 0, rate: nil, distinct_tasks: 0, units: []}
+
+  @doc "Per-unit text truncation bound for retained residue units."
+  @spec residue_text_limit() :: pos_integer()
+  def residue_text_limit, do: @residue_text_limit
 
   @doc """
   True when a run's typed `stop_category` decides its classification on its
@@ -453,6 +504,70 @@ defmodule Arbiter.Loop.Corpus do
       items = rows |> Enum.flat_map(fn r -> split_findings(r["findings"]) end)
       {base, items}
     end)
+  end
+
+  # ---- finding residue (bd-5ja2vb) ----------------------------------------
+
+  # Count + retain the units `FindingBuckets.bucket_finding/1` rejects, over
+  # every `role: review`, non-`approve` round in the window — the same corpus
+  # `scripts/measure_loop_finding_residue.sh` sampled over HTTP, now the real
+  # thing over the full window in one query.
+  defp finding_residue(since, until) do
+    units =
+      review_request_changes_rounds(since, until)
+      |> Enum.flat_map(fn r ->
+        base = base_task_id(r["task_id"])
+
+        r["findings"]
+        |> split_findings()
+        |> Enum.reject(&disposition_preamble?/1)
+        |> Enum.map(&{base, r["run_id"], &1})
+      end)
+
+    total = length(units)
+
+    # `review_request_changes_rounds/2` orders newest-first, and both
+    # `Enum.flat_map/2` and `Enum.filter/2` below preserve that order — so
+    # `units` (the bounded retained sample) is newest-first without a
+    # separate sort.
+    residue =
+      units
+      |> Enum.filter(fn {_task, _run, text} -> is_nil(FindingBuckets.bucket_finding(text)) end)
+      |> Enum.map(fn {task_id, run_id, text} ->
+        %{task_id: task_id, run_id: run_id, text: truncate(text, @residue_text_limit)}
+      end)
+
+    %{
+      total_units: total,
+      count: length(residue),
+      rate: if(total == 0, do: nil, else: length(residue) / total),
+      distinct_tasks: residue |> Enum.map(& &1.task_id) |> Enum.uniq() |> length(),
+      units: Enum.take(residue, @residue_retention_limit)
+    }
+  end
+
+  defp review_request_changes_rounds(since, until) do
+    query(
+      """
+      SELECT task_id, run_id, findings
+      FROM review_gate_rounds
+      WHERE role = 'review' AND findings IS NOT NULL AND findings <> ''
+        AND verdict <> 'approve'
+        AND inserted_at >= ?1 AND inserted_at < ?2
+      ORDER BY inserted_at DESC
+      """,
+      [iso(since), iso(until)]
+    )
+    |> Enum.reject(&is_nil(&1["task_id"]))
+  end
+
+  # Mirrors `scripts/measure_loop_finding_residue.sh`'s guard: a
+  # `VERDICT: APPROVE` disposition preamble is not a finding unit even when it
+  # happens to match `finding_line?/1`.
+  defp disposition_preamble?(unit), do: Regex.match?(~r/^\W*verdict:\s*approve/i, unit)
+
+  defp truncate(text, limit) do
+    if String.length(text) > limit, do: String.slice(text, 0, limit) <> "…", else: text
   end
 
   # Strip the ReviewGate `#review…`/`#impl…` suffix to get the authoring task id.

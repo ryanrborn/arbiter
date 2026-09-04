@@ -754,4 +754,40 @@ defmodule Arbiter.Loop.AnalysisTest do
       assert Enum.any?(report.notes, &(&1 =~ "not statistically significant"))
     end
   end
+
+  # bd-5ja2vb: `Corpus.fetch/1` computes the residue over the raw
+  # `review_gate_rounds` (independent of agent-quality classification) and
+  # carries it in `meta.finding_residue`; `build_report/2` just threads it
+  # through onto `Report.finding_residue`, unchanged.
+  describe "finding residue is threaded through from meta (bd-5ja2vb)" do
+    test "meta.finding_residue passes through onto the report verbatim" do
+      residue = %{
+        total_units: 4,
+        count: 3,
+        rate: 0.75,
+        distinct_tasks: 2,
+        units: [%{task_id: "bd-a", run_id: "run-1", text: "stale memoisation key"}]
+      }
+
+      report =
+        Analysis.build_report([row(%{})],
+          label: "test",
+          meta: %{finding_residue: residue}
+        )
+
+      assert report.finding_residue == residue
+    end
+
+    test "with no meta.finding_residue supplied, defaults to a well-formed zero-shape" do
+      report = Analysis.build_report([row(%{})], label: "test")
+
+      assert report.finding_residue == %{
+               total_units: 0,
+               count: 0,
+               rate: nil,
+               distinct_tasks: 0,
+               units: []
+             }
+    end
+  end
 end

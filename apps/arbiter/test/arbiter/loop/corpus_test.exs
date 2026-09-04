@@ -278,4 +278,113 @@ defmodule Arbiter.Loop.CorpusTest do
     %{rows: [[n]]} = Repo.query!("SELECT COUNT(*) FROM usage_events", [])
     n
   end
+
+  # bd-5ja2vb: `Arbiter.Loop.Analysis.bucket_finding/1` (now
+  # `Arbiter.Loop.FindingBuckets.bucket_finding/1`) is a four-regex allowlist —
+  # a reviewer finding matching none of them was previously dropped, uncounted,
+  # by `Enum.reject(&is_nil/1)`. `Corpus.fetch/1` must count and retain that
+  # residue in `meta.finding_residue`, symmetric with `failed_runs` /
+  # `transcript_reads` above.
+  describe "fetch/1 — finding residue (bd-5ja2vb)" do
+    alias Arbiter.ReviewGate.Round
+
+    defp review_round!(task_id, attrs) do
+      {:ok, round} =
+        Ash.create(
+          Round,
+          Map.merge(
+            %{
+              task_id: task_id,
+              round: 1,
+              role: :review,
+              verdict: :request_changes,
+              converged: false
+            },
+            attrs
+          )
+        )
+
+      round
+    end
+
+    test "a finding matching no bucket is counted and retained, with its task_id/run_id" do
+      round =
+        review_round!("bd-residue-1", %{
+          run_id: "11111111-1111-1111-1111-111111111111",
+          findings:
+            "1. The memoisation key omits the tenant id, so two tenants share a cache slot."
+        })
+
+      assert {:ok, [], meta} = Corpus.fetch(window())
+
+      assert meta.finding_residue.total_units == 1
+      assert meta.finding_residue.count == 1
+      assert meta.finding_residue.rate == 1.0
+      assert meta.finding_residue.distinct_tasks == 1
+      assert [unit] = meta.finding_residue.units
+      assert unit.task_id == "bd-residue-1"
+      assert unit.run_id == round.run_id
+      assert unit.text =~ "memoisation key"
+    end
+
+    test "a finding matching a bucket is NOT residue, but still counts toward total_units" do
+      review_round!("bd-residue-2", %{
+        findings: "1. No test covers the new branch."
+      })
+
+      assert {:ok, [], meta} = Corpus.fetch(window())
+
+      assert meta.finding_residue.total_units == 1
+      assert meta.finding_residue.count == 0
+      assert meta.finding_residue.rate == 0.0
+      assert meta.finding_residue.units == []
+    end
+
+    test "an approve round's findings are excluded entirely" do
+      review_round!("bd-residue-3", %{
+        verdict: :approve,
+        converged: true,
+        findings: "1. Nitpick: the memoisation key naming could be clearer."
+      })
+
+      assert {:ok, [], meta} = Corpus.fetch(window())
+
+      assert meta.finding_residue.total_units == 0
+      assert meta.finding_residue.count == 0
+      assert meta.finding_residue.rate == nil
+    end
+
+    test "an empty window reports a well-formed zero-shape, not a crash" do
+      assert {:ok, [], meta} =
+               Corpus.fetch(since: ~U[2000-01-01 00:00:00Z], until: ~U[2000-01-08 00:00:00Z])
+
+      assert meta.finding_residue == %{
+               total_units: 0,
+               count: 0,
+               rate: nil,
+               distinct_tasks: 0,
+               units: []
+             }
+    end
+
+    test "two residue findings across two tasks count two distinct tasks" do
+      review_round!("bd-residue-4", %{findings: "1. stale memoisation key on refresh"})
+      review_round!("bd-residue-5", %{findings: "1. cache key omits the shard id"})
+
+      assert {:ok, [], meta} = Corpus.fetch(window())
+
+      assert meta.finding_residue.count == 2
+      assert meta.finding_residue.distinct_tasks == 2
+    end
+
+    test "a retained unit's text is truncated to residue_text_limit/0 characters" do
+      long_text = "1. " <> String.duplicate("x", Corpus.residue_text_limit() + 100)
+      review_round!("bd-residue-6", %{findings: long_text})
+
+      assert {:ok, [], meta} = Corpus.fetch(window())
+      assert [unit] = meta.finding_residue.units
+      # +1 for the trailing ellipsis marker.
+      assert String.length(unit.text) == Corpus.residue_text_limit() + 1
+    end
+  end
 end
