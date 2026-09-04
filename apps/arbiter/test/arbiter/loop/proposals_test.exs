@@ -154,7 +154,71 @@ defmodule Arbiter.Loop.ProposalsTest do
       assert Enum.sort(cluster.task_refs) == ["bd-2fzwlc", "bd-4ku4ze", "bd-61hnbb"]
       assert Enum.sort(cluster.incident_refs) == ["bd-2fzwlc", "bd-4ku4ze", "bd-61hnbb"]
       assert cluster.gist =~ "D2"
-      refute Map.has_key?(cluster.payload, "patch")
+      assert cluster.gist =~ "workspace-wide"
+
+      # No workspace_config passed, so the patch renders D2 the way the
+      # stock default_mapping routes D3 (the tier above).
+      assert cluster.payload["patch"] == %{
+               "routing" => %{
+                 "rules" => %{"D2" => %{"model_tier" => "premium", "thinking" => "high"}}
+               }
+             }
+    end
+
+    test "the patch routes the under-provisioned tier the way the workspace already routes the tier above it" do
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-override",
+              dispatched_difficulty: 2,
+              rounds: 3,
+              cost_usd: 10.0,
+              reason: :rework,
+              cell: {2, "arbiter"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      workspace_config = %{
+        "routing" => %{"rules" => %{"D3" => %{"model_tier" => "flagship", "thinking" => "xhigh"}}}
+      }
+
+      [cluster] =
+        Proposals.candidates(r, workspace_config: workspace_config)
+        |> Enum.filter(&(&1.kind == :config_set))
+
+      assert cluster.payload["patch"] == %{
+               "routing" => %{
+                 "rules" => %{"D2" => %{"model_tier" => "flagship", "thinking" => "xhigh"}}
+               }
+             }
+    end
+
+    test "an identity-rendering cell (from and to already route the same way) produces no cluster candidate" do
+      # Stock default_mapping routes D3 and D4 both premium/high, so a D3 -> D4
+      # cluster with no D4 override would render a no-op patch — a row that
+      # fails Ash validation on every `arb loop apply all`, forever.
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-identity",
+              dispatched_difficulty: 3,
+              rounds: 2,
+              cost_usd: 10.0,
+              reason: :rework,
+              cell: {3, "arbiter"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      candidates = Proposals.candidates(r)
+
+      assert Enum.any?(candidates, &(&1.kind == :difficulty_override))
+      refute Enum.any?(candidates, &(&1.kind == :config_set))
     end
 
     test "misestimates in different cells produce separate cluster candidates" do
@@ -537,6 +601,73 @@ defmodule Arbiter.Loop.ProposalsTest do
       assert length(clusters) == 2
       assert Enum.all?(clusters, &(&1.state == :hypothesis))
       refute Enum.any?(clusters, &Loop.applicable?/1)
+    end
+  end
+
+  describe "the emitted patch feeds Canary directly (bd-53cuj6)" do
+    test "Canary.eligible/1 (which calls parse_routing_patch/1) accepts a cleared-bar cluster's payload as-is" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "canary-feed-ws",
+          prefix: "cf",
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{}},
+            "routing" => %{"policy" => "by_difficulty"}
+          }
+        })
+
+      r = report(%{difficulty_misestimates: misestimate_2026_08_10_fixture()})
+
+      %{rows: rows, dropped: []} = Proposals.record_all(r, workspace_id: ws.id)
+
+      assert [cluster] = Enum.filter(rows, &(&1.kind == :config_set))
+      assert cluster.state == :proposed
+      assert Loop.applicable?(cluster)
+
+      assert {:ok, spec} = Arbiter.Loop.Canary.eligible(cluster)
+      assert spec.difficulty == 2
+      assert spec.rule == %{"model_tier" => "premium", "thinking" => "high"}
+      assert spec.workspace_id == ws.id
+    end
+
+    test "applies successfully against a workspace shaped like the real live cells" do
+      # The three live installations all carry only a D4 override
+      # (flagship/xhigh) — this workspace mirrors that shape so `Apply.run/2`
+      # exercises the exact patch the real D2 -> D3 / arbiter cell renders.
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "apply-feed-ws",
+          prefix: "af",
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{}},
+            "routing" => %{
+              "policy" => "by_difficulty",
+              "rules" => %{"D4" => %{"model_tier" => "flagship", "thinking" => "xhigh"}}
+            }
+          }
+        })
+
+      r = report(%{difficulty_misestimates: misestimate_2026_08_10_fixture()})
+
+      %{rows: rows, dropped: []} = Proposals.record_all(r, workspace_id: ws.id)
+      assert [cluster] = Enum.filter(rows, &(&1.kind == :config_set))
+      assert cluster.state == :proposed
+
+      assert {:ok, applied} = Arbiter.Loop.Apply.run(cluster, "test-operator")
+      assert applied.state == :applied
+
+      {:ok, updated_ws} = Ash.get(Workspace, ws.id)
+
+      assert get_in(updated_ws.config, ["routing", "rules", "D2"]) == %{
+               "model_tier" => "premium",
+               "thinking" => "high"
+             }
+
+      # The pre-existing D4 override is untouched by the deep-merge patch.
+      assert get_in(updated_ws.config, ["routing", "rules", "D4"]) == %{
+               "model_tier" => "flagship",
+               "thinking" => "xhigh"
+             }
     end
   end
 end

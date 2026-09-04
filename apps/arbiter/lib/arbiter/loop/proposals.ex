@@ -45,10 +45,11 @@ defmodule Arbiter.Loop.Proposals do
       same evidence bar as everything else in Stage 2 (≥3 incidents across ≥2
       distinct tasks), at which point it escalates as a fleet-wide proposal —
       "raise the default dispatch difficulty for this cell" — rather than
-      leaving that signal to be inferred from three isolated task rows. Like
-      the finding categories above, it carries no patch content yet (no
-      `"patch"` key in payload — Stage 3 work); applying it fails cleanly,
-      naming the gap.
+      leaving that signal to be inferred from three isolated task rows. The
+      payload carries a `"patch"` key rendering `routing.rules.D<from>` the
+      way this workspace already routes `D<to>` (bd-53cuj6), so applying it
+      succeeds; a cell where that patch would be a no-op (workspace already
+      routes both tiers the same way) is dropped rather than emitted to fail.
 
     * **`:quality_failure` misestimates do not become candidates.** The report's
       own recommendation for them is *"investigate the agent-quality failures
@@ -57,10 +58,12 @@ defmodule Arbiter.Loop.Proposals do
       the queue with writes the report itself declines to recommend.
   """
 
+  alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Loop
   alias Arbiter.Loop.Report
   alias Arbiter.Loop.Scarcity
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   # `gist` is a one-liner in a table; long finding categories get elided.
   @gist_limit 160
@@ -73,16 +76,19 @@ defmodule Arbiter.Loop.Proposals do
   The candidate proposals implied by `report`. Pure: no writes, no I/O.
 
   Options: `:workspace_id` (stamped on each candidate), `:origin` (defaults to
-  `"loop.analyze"`).
+  `"loop.analyze"`), `:workspace_config` (the workspace's `config` map, used
+  to render the `:config_set` cluster patch — resolved by the caller; this
+  function never fetches it itself).
   """
   @spec candidates(Report.t(), keyword()) :: [map()]
   def candidates(%Report{} = report, opts \\ []) do
     workspace_id = Keyword.get(opts, :workspace_id)
+    workspace_config = Keyword.get(opts, :workspace_config)
     origin = Keyword.get(opts, :origin, "loop.analyze")
 
     finding_candidates(report, workspace_id, origin) ++
       misestimate_candidates(report, workspace_id, origin) ++
-      misestimate_cluster_candidates(report, workspace_id, origin)
+      misestimate_cluster_candidates(report, workspace_id, workspace_config, origin)
   end
 
   @doc """
@@ -105,6 +111,11 @@ defmodule Arbiter.Loop.Proposals do
   def record_all(%Report{} = report, opts \\ []) do
     {record_opts, candidate_opts} = Keyword.split(opts, [:actor, :evidence_bar])
 
+    candidate_opts =
+      Keyword.put_new_lazy(candidate_opts, :workspace_config, fn ->
+        candidate_opts |> Keyword.get(:workspace_id) |> fetch_workspace_config()
+      end)
+
     {rows, dropped} =
       report
       |> candidates(candidate_opts)
@@ -125,6 +136,17 @@ defmodule Arbiter.Loop.Proposals do
       end)
 
     %{rows: Enum.reverse(rows), dropped: Enum.reverse(dropped)}
+  end
+
+  defp fetch_workspace_config(nil), do: nil
+
+  defp fetch_workspace_config(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, %Workspace{config: config}} -> config
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # ---- reviewer-finding categories ----------------------------------------
@@ -241,43 +263,72 @@ defmodule Arbiter.Loop.Proposals do
   # cell, and let `Arbiter.Loop.record/2`'s existing fingerprint accumulation
   # decide whether it has cleared the bar (this window, or across several).
 
-  defp misestimate_cluster_candidates(report, workspace_id, origin) do
+  defp misestimate_cluster_candidates(report, workspace_id, workspace_config, origin) do
     report.difficulty_misestimates
     |> Enum.filter(&proposable_misestimate?/1)
     |> Enum.group_by(&cluster_cell/1)
-    |> Enum.map(fn {{from, to, repo}, misestimates} ->
-      task_ids = misestimates |> Enum.map(& &1.task_id) |> Enum.uniq()
+    |> Enum.flat_map(fn {{from, to, repo}, misestimates} ->
+      from_rule = effective_rule(workspace_config, from)
+      to_rule = effective_rule(workspace_config, to)
 
-      %{
-        kind: :config_set,
-        scope: :fleet,
-        category: cluster_category(from, to, repo),
-        target: nil,
-        difficulty: from,
-        repo: repo,
-        gist:
-          elide(
-            "raise default dispatch difficulty for D#{from}/#{repo || "unknown repo"} to D#{to} " <>
-              "(#{length(task_ids)} task(s) this window)"
-          ),
-        target_metric: "rework rate for D#{from}/#{repo || "unknown repo"} dispatches",
-        baseline:
-          "#{length(task_ids)} misestimate(s) across #{length(task_ids)} distinct task(s)",
-        # One flagged task is one incident of this cell running hot; unioning
-        # on task_id keeps a re-run over the same window idempotent, same as
-        # the per-task candidate above.
-        incident_refs: task_ids,
-        task_refs: task_ids,
-        payload: %{
-          "cell" => %{"from_difficulty" => from, "to_difficulty" => to, "repo" => repo},
-          "task_ids" => task_ids,
-          "reason" => "rework_cluster"
-        },
-        diff: nil,
-        origin: origin,
-        workspace_id: workspace_id
-      }
+      # A no-op patch (this workspace already routes `from` the same way it
+      # routes `to`) would fail Ash validation on every `arb loop apply all`,
+      # forever — the same failure mode `proposable_misestimate?/1` already
+      # guards at the difficulty ceiling. Drop the candidate instead of
+      # emitting-and-failing.
+      if from_rule == to_rule do
+        []
+      else
+        task_ids = misestimates |> Enum.map(& &1.task_id) |> Enum.uniq()
+
+        [
+          %{
+            kind: :config_set,
+            scope: :fleet,
+            category: cluster_category(from, to, repo),
+            target: nil,
+            difficulty: from,
+            repo: repo,
+            # `routing.rules` is per-difficulty and workspace-wide — there is
+            # no per-repo routing key, so this patch moves every repo's D#{from}
+            # dispatches in the workspace, not just the ones on `repo`. The
+            # cell keeps `repo` as its fingerprint input (see `cluster_cell/1`)
+            # even though the patch itself is workspace-wide.
+            gist:
+              elide(
+                "raise default dispatch difficulty for D#{from} to D#{to}, workspace-wide " <>
+                  "(seen on #{repo || "unknown repo"}; #{length(task_ids)} task(s) this window)"
+              ),
+            target_metric: "rework rate for D#{from}/#{repo || "unknown repo"} dispatches",
+            baseline:
+              "#{length(task_ids)} misestimate(s) across #{length(task_ids)} distinct task(s)",
+            # One flagged task is one incident of this cell running hot; unioning
+            # on task_id keeps a re-run over the same window idempotent, same as
+            # the per-task candidate above.
+            incident_refs: task_ids,
+            task_refs: task_ids,
+            payload: %{
+              "cell" => %{"from_difficulty" => from, "to_difficulty" => to, "repo" => repo},
+              "task_ids" => task_ids,
+              "reason" => "rework_cluster",
+              "patch" => %{"routing" => %{"rules" => %{"D#{from}" => to_rule}}}
+            },
+            diff: nil,
+            origin: origin,
+            workspace_id: workspace_id
+          }
+        ]
+      end
     end)
+  end
+
+  # "Route the under-provisioned tier the way this workspace already routes
+  # the tier above it" — the default mapping for `difficulty`, overridden by
+  # any workspace-config rule for that same tier.
+  defp effective_rule(workspace_config, difficulty) do
+    default = Map.fetch!(ByDifficulty.default_mapping(), difficulty)
+    override = get_in(workspace_config || %{}, ["routing", "rules", "D#{difficulty}"]) || %{}
+    Map.merge(default, override)
   end
 
   defp cluster_cell(m),
