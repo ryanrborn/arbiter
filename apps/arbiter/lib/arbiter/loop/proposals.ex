@@ -61,8 +61,10 @@ defmodule Arbiter.Loop.Proposals do
 
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Loop
+  alias Arbiter.Loop.FindingBuckets
   alias Arbiter.Loop.Report
   alias Arbiter.Loop.Scarcity
+  alias Arbiter.Loop.SkillClause
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
@@ -164,45 +166,113 @@ defmodule Arbiter.Loop.Proposals do
 
   defp finding_candidates(report, workspace_id, origin) do
     by_title = Map.new(report.suggestions, &{&1.title, &1})
+    window_until = report |> Map.get(:window) |> then(&(&1 || %{})) |> Map.get(:until)
 
     Enum.map(report.finding_categories, fn cat ->
       suggestion = Map.get(by_title, cat.category, %{})
       destination = Map.get(suggestion, :destination) || :skill
+      attribution = FindingBuckets.attribution(cat.category)
 
-      %{
-        kind: finding_kind(destination),
-        scope: :fleet,
+      # The fingerprint inputs first, on their own: `Loop.fingerprint/1` reads
+      # only `{kind, target, category, difficulty, repo}`, so the digest is
+      # known before the payload is rendered — which is what lets the clause
+      # cite the finding's own stable identity.
+      identity = %{
+        kind: finding_kind(attribution),
+        target: attribution && attribution.skill,
         category: cat.category,
-        target: nil,
         difficulty: nil,
         # No repo: a finding category is a fleet-wide aggregate with no
         # attributed repo cell (see difficulty misestimates for the one place
-        # that attribution exists today). The apply path refuses the row and
-        # names the gap rather than guessing.
-        repo: nil,
-        gist: elide(finding_gist(destination, cat.category)),
+        # that attribution exists today).
+        repo: nil
+      }
+
+      Map.merge(identity, %{
+        scope: :fleet,
+        gist: elide(finding_gist(attribution, cat.category)),
         target_metric: Map.get(suggestion, :target_metric),
         baseline: Map.get(suggestion, :baseline),
         incident_refs: cat.run_ids,
         task_refs: cat.tasks,
-        # No `skill` key, no `repo`/`lesson`: the target skill or repo is not
-        # attributed yet (Stage 3). The apply path refuses the row and says so
-        # rather than guessing.
-        payload: %{
-          "category" => cat.category,
-          "example" => Map.get(cat, :example),
-          "destination" => to_string(destination)
-        },
+        payload: finding_payload(identity, cat, attribution, destination, window_until),
         diff: nil,
         origin: origin,
         workspace_id: workspace_id
-      }
+      })
     end)
   end
 
-  defp finding_kind(_destination), do: :skill_patch
+  # `:skill_patch` when a fleet skill governs the category, `:skill_create`
+  # when none does (bd-5w8h0r). A category with no attribution row keeps the
+  # pre-bd-5w8h0r shape — an unapplicable `:skill_patch` naming its gap — so
+  # this function stays total over hand-built input; the analyser itself cannot
+  # reach that branch, since `FindingBuckets`' table is total over its own
+  # categories at compile time.
+  defp finding_kind(%{kind: kind}), do: kind
+  defp finding_kind(nil), do: :skill_patch
 
-  defp finding_gist(_destination, category), do: "working-practice guardrail for: #{category}"
+  defp finding_gist(%{kind: :skill_patch, skill: skill}, category),
+    do: "patch skill `#{skill}`: #{category}"
+
+  defp finding_gist(%{kind: :skill_create, skill: skill}, category),
+    do: "create skill `#{skill}` (no fleet skill governs this yet): #{category}"
+
+  defp finding_gist(nil, category), do: "working-practice guardrail for: #{category}"
+
+  # An unattributed category carries evidence and nothing else: naming a target
+  # it does not have would be a guess, and `Apply` refuses the row with the gap
+  # spelled out rather than patching the wrong skill.
+  defp finding_payload(_identity, cat, nil, destination, _window_until) do
+    %{
+      "category" => cat.category,
+      "example" => Map.get(cat, :example),
+      "destination" => to_string(destination)
+    }
+  end
+
+  defp finding_payload(identity, cat, attribution, destination, window_until) do
+    clause =
+      SkillClause.render(%{
+        category: cat.category,
+        imperative: attribution.imperative,
+        example: Map.get(cat, :example),
+        # The counts the *clause* cites are this window's, straight off the
+        # candidate. The row's own `evidence_count` is the union across every
+        # window that has reinforced it, and the payload is re-rendered on each
+        # reinforcement, so the clause always describes the window that last
+        # touched it — which is what the provenance comment says it is.
+        incidents: length(cat.run_ids),
+        tasks: cat.tasks,
+        fingerprint: Loop.fingerprint(identity),
+        window_until: window_until
+      })
+
+    payload = %{
+      "category" => cat.category,
+      "example" => Map.get(cat, :example),
+      "destination" => to_string(destination),
+      "clause_id" => SkillClause.slug(cat.category),
+      "clause" => clause
+    }
+
+    case attribution.kind do
+      # No `"body"`: a patch carries only its clause, and `Apply` splices it
+      # into whatever the skill says at apply time. A whole body rendered here
+      # would be stale by the time an operator applied it, and applying it
+      # would silently revert any human edit made in between — the failure
+      # `RepoDocPatch` exists to avoid on a repo's `CLAUDE.md`.
+      :skill_patch ->
+        Map.put(payload, "skill", attribution.skill)
+
+      # A skill that does not exist has no body to splice into, so the stub is
+      # authored in full here. `Apply` forces `managed_by: :loop` on it.
+      :skill_create ->
+        payload
+        |> Map.put("name", attribution.skill)
+        |> Map.put("body", SkillClause.stub_body(attribution.skill, clause))
+    end
+  end
 
   # ---- difficulty misestimates --------------------------------------------
 

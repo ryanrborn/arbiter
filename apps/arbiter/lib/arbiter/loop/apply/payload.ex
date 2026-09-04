@@ -14,6 +14,8 @@ defmodule Arbiter.Loop.Apply.Payload do
   happens to exercise it.
   """
 
+  alias Arbiter.Loop.SkillClause
+
   @type result(t) :: {:ok, t} | {:error, {:unmapped, String.t()}}
 
   @doc "Fetch a non-empty string at `key`. `message` overrides the default gap text."
@@ -65,17 +67,33 @@ defmodule Arbiter.Loop.Apply.Payload do
   end
 
   @doc """
-  The `Arbiter.Skills.update_skill/3` attrs a `:skill_patch` payload carries.
+  The `Arbiter.Skills.update_skill/3` attrs a `:skill_patch` payload carries,
+  resolved against the skill's `current_body`.
 
-  Only the keys actually present are included, so applying a patch never
-  blanks a field the proposal said nothing about. A payload carrying none of
-  them is a gap.
+  Two shapes are accepted, in this order:
+
+    * **A clause** (bd-5w8h0r) — `"clause_id"` + `"clause"`, as
+      `Arbiter.Loop.Proposals` authors them. The clause is spliced into
+      `current_body` by `Arbiter.Loop.SkillClause.upsert/3`: it replaces its
+      own marked span if one is there and is appended otherwise. This is the
+      shape that matters for staleness — a proposal can sit in the queue for
+      weeks, and splicing at apply time means applying it does not revert
+      whatever a human wrote in the meantime, and does not append a second copy
+      of a clause an earlier window already landed.
+
+    * **Literal attrs** — `"body"` / `"metadata"` / `"activation_mode"`, any
+      subset, for hand-authored rows. Only the keys actually present are
+      included, so applying a patch never blanks a field the proposal said
+      nothing about. A literal `"body"` *does* replace the whole body; that is
+      what a hand-authored row asked for.
+
+  A payload carrying neither is a gap.
   """
-  @spec skill_attrs(map()) :: result(map())
-  def skill_attrs(payload) do
+  @spec skill_attrs(map(), String.t() | nil) :: result(map())
+  def skill_attrs(payload, current_body \\ nil) do
     attrs =
       %{}
-      |> maybe_put(:body, Map.get(payload, "body"))
+      |> maybe_put(:body, spliced_body(payload, current_body) || Map.get(payload, "body"))
       |> maybe_put(:metadata, Map.get(payload, "metadata"))
       |> maybe_put(:activation_mode, Map.get(payload, "activation_mode"))
 
@@ -83,6 +101,15 @@ defmodule Arbiter.Loop.Apply.Payload do
       {:error, {:unmapped, "this proposal carries no skill patch content to apply"}}
     else
       {:ok, attrs}
+    end
+  end
+
+  defp spliced_body(payload, current_body) do
+    with id when is_binary(id) and id != "" <- Map.get(payload, "clause_id"),
+         clause when is_binary(clause) and clause != "" <- Map.get(payload, "clause") do
+      SkillClause.upsert(current_body, id, clause)
+    else
+      _ -> nil
     end
   end
 

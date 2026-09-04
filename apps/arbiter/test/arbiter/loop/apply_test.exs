@@ -16,7 +16,7 @@ defmodule Arbiter.Loop.ApplyTest do
   alias Arbiter.Loop
   alias Arbiter.Loop.Apply
   alias Arbiter.Loop.Apply.{Payload, RepoDoc}
-  alias Arbiter.Loop.{Notify, PendingWrite}
+  alias Arbiter.Loop.{Notify, PendingWrite, SkillClause}
   alias Arbiter.Tasks.{Issue, Workspace}
 
   setup do
@@ -153,6 +153,122 @@ defmodule Arbiter.Loop.ApplyTest do
     end
   end
 
+  describe "Apply.side_effect/2 — the skill_patch clause splice (bd-5w8h0r)" do
+    setup %{ws: ws} do
+      {:ok, skill} =
+        Arbiter.Skills.create_skill(%{
+          name: "test-driven-development",
+          body: "# Test-driven development\n\nWrite the test first.\n"
+        })
+
+      %{ws: ws, skill: skill}
+    end
+
+    defp clause_row(ws, clause) do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            scope: :task,
+            category: "missing test coverage",
+            target: "test-driven-development",
+            payload: %{
+              "skill" => "test-driven-development",
+              "clause_id" => "missing-test-coverage",
+              "clause" => clause
+            }
+          })
+        )
+
+      row
+    end
+
+    defp rendered(incidents) do
+      SkillClause.render(%{
+        category: "missing test coverage",
+        imperative: "Confirm every new branch has a test that fails without the change.",
+        example: "no test for the error branch",
+        incidents: incidents,
+        tasks: ["bd-1", "bd-2"],
+        fingerprint: String.duplicate("f", 64),
+        window_until: ~U[2026-09-04 00:00:00Z]
+      })
+    end
+
+    test "splices the clause into the live body, leaving the rest of the skill untouched", %{
+      ws: ws
+    } do
+      row = clause_row(ws, rendered(4))
+
+      assert :ok == Apply.side_effect(row, Apply.attribution(row))
+
+      {:ok, skill} = Arbiter.Skills.get_skill("test-driven-development")
+      assert skill.body =~ "Write the test first."
+      assert skill.body =~ "## Missing test coverage"
+      assert skill.body =~ "4 incidents"
+    end
+
+    test "a later window replaces its own clause rather than appending a second copy", %{ws: ws} do
+      first = clause_row(ws, rendered(4))
+      assert :ok == Apply.side_effect(first, Apply.attribution(first))
+
+      # A fresh row for the same finding, one window later, with more evidence.
+      {:ok, second} =
+        Ash.update(first, %{payload: Map.put(first.payload, "clause", rendered(9)), actor: "loop"},
+          action: :reinforce,
+          actor: "loop"
+        )
+
+      assert :ok == Apply.side_effect(second, Apply.attribution(second))
+
+      {:ok, skill} = Arbiter.Skills.get_skill("test-driven-development")
+      marker = SkillClause.begin_marker("missing-test-coverage")
+      assert length(String.split(skill.body, marker)) - 1 == 1
+      assert skill.body =~ "9 incidents"
+      refute skill.body =~ "4 incidents"
+    end
+
+    test "a human edit made while the row sat in the queue survives the apply", %{ws: ws} do
+      row = clause_row(ws, rendered(4))
+
+      {:ok, _} =
+        Arbiter.Skills.update_skill(
+          "test-driven-development",
+          %{body: "# Test-driven development\n\nWrite the test first.\n\nAlso: run the suite.\n"},
+          actor: "ryan"
+        )
+
+      assert :ok == Apply.side_effect(row, Apply.attribution(row))
+
+      {:ok, skill} = Arbiter.Skills.get_skill("test-driven-development")
+      assert skill.body =~ "Also: run the suite.",
+             "the payload carries a clause, not a whole body — applying it must not revert a human edit"
+
+      assert skill.body =~ "## Missing test coverage"
+    end
+
+    test "a clause naming a skill that does not exist is :unmapped, not a silent create", %{
+      ws: ws
+    } do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            scope: :task,
+            target: "no-such-skill",
+            payload: %{
+              "skill" => "no-such-skill",
+              "clause_id" => "missing-test-coverage",
+              "clause" => rendered(4)
+            }
+          })
+        )
+
+      assert {:error, {:unmapped, msg}} = Apply.side_effect(row, Apply.attribution(row))
+      assert msg =~ "no-such-skill"
+    end
+  end
+
   describe "Apply.persist/2 — the persistence step, on its own" do
     test "stamps :applied and applied_at without running a side effect", %{ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "untouched", difficulty: 1, workspace_id: ws.id})
@@ -222,6 +338,27 @@ defmodule Arbiter.Loop.ApplyTest do
       assert {:ok, "fb"} = Payload.workspace_id(%{}, "fb")
       assert {:error, {:unmapped, msg}} = Payload.workspace_id(%{}, nil)
       assert msg =~ "workspace"
+    end
+
+    test "skill_attrs/2 splices a clause into the current body rather than replacing it" do
+      current = "# TDD\n\nWrite the test first.\n"
+
+      clause =
+        SkillClause.render(%{
+          category: "missing test coverage",
+          imperative: "Write the failing test first.",
+          incidents: 3,
+          tasks: ["bd-1"]
+        })
+
+      assert {:ok, %{body: body}} =
+               Payload.skill_attrs(
+                 %{"clause_id" => "missing-test-coverage", "clause" => clause},
+                 current
+               )
+
+      assert body =~ "Write the test first."
+      assert body =~ "## Missing test coverage"
     end
 
     test "skill_attrs/1 collects only the keys present, and refuses an empty patch" do
