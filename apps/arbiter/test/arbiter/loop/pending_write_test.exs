@@ -246,6 +246,34 @@ defmodule Arbiter.Loop.PendingWriteTest do
       assert row.state == :proposed
       assert row.evidence_count == 1
       assert Loop.applicable?(row)
+      refute Loop.authoring_gap(row)
+    end
+  end
+
+  describe "authoring_gap/1 — the payload-shape signal (bd-bldypb)" do
+    test "nil for a payload-complete row, regardless of state", %{ws: ws} do
+      {:ok, hyp} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :difficulty_override,
+            target: "bd-1",
+            payload: %{"task_id" => "bd-1", "difficulty" => 3}
+          })
+        )
+
+      assert hyp.state == :hypothesis
+      refute Loop.authoring_gap(hyp)
+    end
+
+    test "names the gap for a payload-less proposed row", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{workspace_id: ws.id, kind: :skill_patch, scope: :task, payload: %{}})
+        )
+
+      assert row.state == :proposed
+      assert Loop.authoring_gap(row) =~ "skill"
     end
   end
 

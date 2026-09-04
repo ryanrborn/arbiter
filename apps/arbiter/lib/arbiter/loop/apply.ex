@@ -15,6 +15,14 @@ defmodule Arbiter.Loop.Apply do
   no-auto-apply discipline is a property of `validate/1` specifically, which is
   worth asserting without also provisioning the write it guards.
 
+  A fifth function, `payload_ready?/1` (bd-bldypb), answers a narrower
+  question read-only: does this row's payload have what its kind's
+  `side_effect/2` clause needs, before ever fetching the skill/task/workspace
+  it targets or writing anything? It shares its per-kind extraction with
+  `side_effect/2` — the private `*_args/1` functions below — so the listing
+  (`arb loop pending`) and the apply path cannot drift on what "applicable"
+  means.
+
   Two rules the ordering encodes, and that the split makes checkable:
 
     * **The side effect runs before the row is marked.** A failed apply leaves
@@ -85,8 +93,8 @@ defmodule Arbiter.Loop.Apply do
   """
   @spec side_effect(PendingWrite.t(), String.t()) :: :ok | error()
   def side_effect(%PendingWrite{kind: :difficulty_override, payload: payload}, attribution) do
-    with {:ok, task_id} <- Payload.string(payload, "task_id"),
-         {:ok, difficulty} <- Payload.integer(payload, "difficulty"),
+    with {:ok, %{task_id: task_id, difficulty: difficulty}} <-
+           difficulty_override_args(payload),
          {:ok, issue} <- fetch_issue(task_id) do
       # `change_origin` is the Issue-side attribution hook: it lands in the
       # version row's `version_action_inputs`, since Issue has no `actor`
@@ -104,7 +112,7 @@ defmodule Arbiter.Loop.Apply do
   # payload (bd-5w8h0r) is resolved against the skill's current body — the
   # splice happens here, at apply time, not when the proposal was authored.
   def side_effect(%PendingWrite{kind: :skill_patch, payload: payload}, attribution) do
-    with {:ok, ref} <- Payload.string(payload, "skill", Payload.skill_gap_message()),
+    with {:ok, ref} <- skill_patch_args(payload),
          {:ok, skill} <- fetch_skill(ref),
          {:ok, attrs} <- Payload.skill_attrs(payload, skill.body) do
       case Arbiter.Skills.update_skill(skill, attrs, actor: attribution) do
@@ -115,8 +123,7 @@ defmodule Arbiter.Loop.Apply do
   end
 
   def side_effect(%PendingWrite{kind: :skill_create, payload: payload}, attribution) do
-    with {:ok, name} <- Payload.string(payload, "name"),
-         {:ok, body} <- Payload.string(payload, "body") do
+    with {:ok, %{name: name, body: body}} <- skill_create_args(payload) do
       # bd-blxwla: the loop authored this row, full stop — not something the
       # payload gets a say in, so `managed_by: :loop` is forced here rather
       # than read from `payload`.
@@ -131,13 +138,8 @@ defmodule Arbiter.Loop.Apply do
   # Invariant 4: config changes go through the deep-merge `:patch_config`
   # action, never a raw overwrite of `config`.
   def side_effect(%PendingWrite{kind: :config_set} = row, attribution) do
-    payload = row.payload
-
-    with {:ok, ws_id} <- Payload.workspace_id(payload, row.workspace_id),
-         {:ok, patch} <- Payload.map(payload, "patch"),
+    with {:ok, %{ws_id: ws_id, patch: patch, unset: unset}} <- config_set_args(row),
          {:ok, ws} <- fetch_workspace(ws_id) do
-      unset = Map.get(payload, "unset_paths") || []
-
       ws
       |> Ash.update(%{patch: patch, unset_paths: unset},
         action: :patch_config,
@@ -150,13 +152,88 @@ defmodule Arbiter.Loop.Apply do
   # Rung 2 of the destination ladder (Amendment D) — see `Loop.Apply.RepoDoc`
   # for the worktree/commit/PR mechanics this hands off to.
   def side_effect(%PendingWrite{kind: :repo_doc_patch} = row, attribution) do
-    payload = row.payload
-
-    with {:ok, repo} <- RepoDoc.repo(row),
-         {:ok, lesson} <- Payload.string(payload, "lesson"),
-         {:ok, ws_id} <- Payload.workspace_id(payload, row.workspace_id),
+    with {:ok, %{repo: repo, lesson: lesson, ws_id: ws_id}} <- repo_doc_args(row),
          {:ok, ws} <- fetch_workspace(ws_id) do
       RepoDoc.run(row, ws, repo, lesson, attribution)
+    end
+  end
+
+  # ---- payload-shape precondition (bd-bldypb) ------------------------------
+
+  @doc """
+  Whether `row`'s payload would satisfy its kind's apply preconditions — the
+  payload-shape half of "can this row be applied". Runs the exact same
+  per-kind argument extraction `side_effect/2` runs before it ever fetches
+  the skill/task/workspace the row targets or writes anything, and only
+  that: no DB lookup, no side effect, no state change on `row`.
+
+  This is *not* `Loop.inapplicable_reason/1` — that answers whether the
+  row's current *state* (`:proposed` vs. `:hypothesis`) allows applying it
+  at all. This answers whether the payload it carries has enough in it to
+  apply, regardless of state. Sharing the extraction functions with
+  `side_effect/2` is what keeps the two from ever disagreeing about what
+  "applicable" means.
+  """
+  @spec payload_ready?(PendingWrite.t()) :: :ok | error()
+  def payload_ready?(%PendingWrite{kind: :difficulty_override, payload: payload}) do
+    with {:ok, _} <- difficulty_override_args(payload), do: :ok
+  end
+
+  def payload_ready?(%PendingWrite{kind: :skill_patch, payload: payload}) do
+    with {:ok, _} <- skill_patch_args(payload), do: :ok
+  end
+
+  def payload_ready?(%PendingWrite{kind: :skill_create, payload: payload}) do
+    with {:ok, _} <- skill_create_args(payload), do: :ok
+  end
+
+  def payload_ready?(%PendingWrite{kind: :config_set} = row) do
+    with {:ok, _} <- config_set_args(row), do: :ok
+  end
+
+  def payload_ready?(%PendingWrite{kind: :repo_doc_patch} = row) do
+    with {:ok, _} <- repo_doc_args(row), do: :ok
+  end
+
+  def payload_ready?(%PendingWrite{kind: kind}),
+    do: {:error, {:unmapped, "no apply rule is defined for kind #{inspect(kind)}"}}
+
+  # Per-kind payload-shape extraction, shared verbatim by `side_effect/2` and
+  # `payload_ready?/1` — the one definition of what each kind's payload needs.
+
+  defp difficulty_override_args(payload) do
+    with {:ok, task_id} <- Payload.string(payload, "task_id"),
+         {:ok, difficulty} <- Payload.integer(payload, "difficulty") do
+      {:ok, %{task_id: task_id, difficulty: difficulty}}
+    end
+  end
+
+  defp skill_patch_args(payload) do
+    with {:ok, ref} <- Payload.string(payload, "skill", Payload.skill_gap_message()),
+         {:ok, _attrs} <- Payload.skill_attrs(payload) do
+      {:ok, ref}
+    end
+  end
+
+  defp skill_create_args(payload) do
+    with {:ok, name} <- Payload.string(payload, "name"),
+         {:ok, body} <- Payload.string(payload, "body") do
+      {:ok, %{name: name, body: body}}
+    end
+  end
+
+  defp config_set_args(%PendingWrite{payload: payload} = row) do
+    with {:ok, ws_id} <- Payload.workspace_id(payload, row.workspace_id),
+         {:ok, patch} <- Payload.map(payload, "patch") do
+      {:ok, %{ws_id: ws_id, patch: patch, unset: Map.get(payload, "unset_paths") || []}}
+    end
+  end
+
+  defp repo_doc_args(%PendingWrite{payload: payload} = row) do
+    with {:ok, repo} <- RepoDoc.repo(row),
+         {:ok, lesson} <- Payload.string(payload, "lesson"),
+         {:ok, ws_id} <- Payload.workspace_id(payload, row.workspace_id) do
+      {:ok, %{repo: repo, lesson: lesson, ws_id: ws_id}}
     end
   end
 

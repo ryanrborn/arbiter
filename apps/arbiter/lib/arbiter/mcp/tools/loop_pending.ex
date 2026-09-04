@@ -188,6 +188,7 @@ defmodule Arbiter.MCP.Tools.LoopPending do
       target: row.target,
       category: row.category,
       applicable: Arbiter.Loop.applicable?(row),
+      needs_authoring: !!Arbiter.Loop.authoring_gap(row),
       created_at: Tools.iso(row.created_at),
       updated_at: Tools.iso(row.updated_at)
     }
@@ -209,7 +210,8 @@ defmodule Arbiter.MCP.Tools.LoopPending do
       applied_at: Tools.iso(row.applied_at),
       escalated_at: Tools.iso(row.escalated_at),
       rejection_reason: row.rejection_reason,
-      inapplicable_reason: Arbiter.Loop.inapplicable_reason(row)
+      inapplicable_reason: Arbiter.Loop.inapplicable_reason(row),
+      authoring_gap: Arbiter.Loop.authoring_gap(row)
     })
   end
 end

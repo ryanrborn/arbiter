@@ -174,6 +174,7 @@ defmodule ArbiterWeb.Api.LoopController do
       target: row.target,
       category: row.category,
       applicable: Loop.applicable?(row),
+      needs_authoring: !!Loop.authoring_gap(row),
       created_at: row.created_at,
       updated_at: row.updated_at
     }
@@ -195,7 +196,8 @@ defmodule ArbiterWeb.Api.LoopController do
       applied_at: row.applied_at,
       escalated_at: row.escalated_at,
       rejection_reason: row.rejection_reason,
-      inapplicable_reason: Loop.inapplicable_reason(row)
+      inapplicable_reason: Loop.inapplicable_reason(row),
+      authoring_gap: Loop.authoring_gap(row)
     })
   end
 

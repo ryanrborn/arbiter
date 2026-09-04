@@ -253,13 +253,24 @@ defmodule ArbiterCli.Cmd.Loop do
   defp pending_line(row) do
     [
       String.pad_trailing(to_string(row["id"]), 38),
-      String.pad_trailing(to_string(row["state"]), 11),
+      String.pad_trailing(state_field(row), 27),
       String.pad_trailing(to_string(row["kind"]), 20),
       String.pad_trailing("#{row["evidence_count"]}i/#{row["distinct_tasks"]}t", 9),
       String.pad_trailing(context_cost(row["context_cost_tokens"]), 9),
       to_string(row["gist"])
     ]
     |> Enum.join(" ")
+  end
+
+  # bd-bldypb: a row whose payload can't satisfy its kind's apply
+  # preconditions is marked beside the state — the listing problem the
+  # payload-less rows caused, without suppressing the evidence they carry.
+  defp state_field(row) do
+    if row["needs_authoring"] do
+      "#{row["state"]} (needs authoring)"
+    else
+      to_string(row["state"])
+    end
   end
 
   # Amendment D: the recurring per-dispatch price of applying a proposal, shown
@@ -296,6 +307,7 @@ defmodule ArbiterCli.Cmd.Loop do
     if row["target_metric"], do: IO.puts("target metric: #{row["target_metric"]}")
     if row["baseline"], do: IO.puts("baseline: #{row["baseline"]}")
     if row["inapplicable_reason"], do: IO.puts("\nnot applicable: #{row["inapplicable_reason"]}")
+    if row["authoring_gap"], do: IO.puts("\nneeds authoring: #{row["authoring_gap"]}")
 
     case row["diff"] do
       diff when is_binary(diff) and diff != "" -> IO.puts("\n" <> diff)

@@ -698,6 +698,27 @@ defmodule Arbiter.Loop do
   def inapplicable_reason(%PendingWrite{state: state}),
     do: "state is #{state} — only a :proposed row can be applied"
 
+  @doc """
+  Whether `row`'s payload carries enough to satisfy its kind's apply
+  preconditions — `nil` when it does, a message naming the gap otherwise.
+
+  Orthogonal to `inapplicable_reason/1` above: that answers whether the
+  row's *state* allows applying it (the evidence bar's teeth); this answers
+  whether the payload it carries is enough to apply *as written*, regardless
+  of state — a `:hypothesis` can be payload-complete, and a `:proposed` row
+  can still be missing authoring (bd-bldypb). Delegates to
+  `Apply.payload_ready?/1`, the same check `Apply.side_effect/2` runs, so
+  this label and the apply path cannot disagree about what "applicable"
+  means. Runs no side effect.
+  """
+  @spec authoring_gap(PendingWrite.t()) :: String.t() | nil
+  def authoring_gap(%PendingWrite{} = row) do
+    case Apply.payload_ready?(row) do
+      :ok -> nil
+      {:error, {_code, message}} -> message
+    end
+  end
+
   # `Ash.Domain` defines its own `max/2` code interface, which shadows
   # `Kernel.max/2` inside this module — hence the explicit helper.
   defp shortfall(required, have) when required > have, do: required - have
