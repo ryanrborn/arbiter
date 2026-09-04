@@ -59,8 +59,11 @@ defmodule Arbiter.Loop.PendingWrite do
     repo Arbiter.Repo
 
     references do
-      # A workspace-scoped proposal is owned by its workspace. Fleet-wide rows
-      # with a nil workspace_id are unaffected.
+      # Every live row is owned by a workspace, `:fleet`-scoped included
+      # (bd-3dasqm) — `scope: :fleet` is the sole fleet marker; a nil
+      # `workspace_id` is not a second way to say "fleet-wide" (that was
+      # #1011 Stage 0 defect G3's shape on `usage_events`, fixed in #1016,
+      # and this resource must not reintroduce it on a different table).
       reference :workspace, on_delete: :delete
     end
 
@@ -368,7 +371,13 @@ defmodule Arbiter.Loop.PendingWrite do
       public? true
       attribute_writable? true
 
-      description "Owning workspace; nil means the proposal is not workspace-attributable."
+      description """
+      Owning workspace. Nullable per #1130, but `Arbiter.Loop.record/2` always
+      resolves a real workspace for a live row — a `:fleet`-scoped candidate
+      with none of its own is attributed to the installation's default
+      workspace rather than left nil (bd-3dasqm). A nil here should only be
+      seen on a row written before that fix and not yet backfilled.
+      """
     end
   end
 end

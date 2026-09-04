@@ -46,6 +46,7 @@ defmodule Arbiter.Loop do
 
   alias Arbiter.Loop.{Apply, Notify, PendingWrite}
   alias Arbiter.Messages.Message
+  alias Arbiter.Quota
   alias Arbiter.Tasks.Workspace
 
   require Ash.Query
@@ -279,46 +280,66 @@ defmodule Arbiter.Loop do
     task_refs = refs(candidate, :task_refs)
     scope = fetch(candidate, :scope) || :fleet
 
-    state =
-      if clears_bar?(scope, length(incident_refs), length(task_refs), bar),
-        do: :proposed,
-        else: :hypothesis
+    with {:ok, workspace_id} <- resolve_workspace_id(scope, fetch(candidate, :workspace_id)) do
+      state =
+        if clears_bar?(scope, length(incident_refs), length(task_refs), bar),
+          do: :proposed,
+          else: :hypothesis
 
-    attrs = %{
-      kind: fetch(candidate, :kind),
-      gist: fetch(candidate, :gist),
-      diff: fetch(candidate, :diff),
-      payload: fetch(candidate, :payload) || %{},
-      target_metric: fetch(candidate, :target_metric),
-      baseline: fetch(candidate, :baseline),
-      context_cost_tokens:
-        context_cost_tokens(
-          fetch(candidate, :gist),
-          scope,
-          fetch(candidate, :kind),
-          fetch(candidate, :payload)
-        ),
-      evidence_count: length(incident_refs),
-      distinct_tasks: length(task_refs),
-      incident_refs: incident_refs,
-      task_refs: task_refs,
-      scope: scope,
-      state: state,
-      fingerprint: fingerprint,
-      category: fetch(candidate, :category),
-      target: fetch(candidate, :target),
-      difficulty: fetch(candidate, :difficulty),
-      repo: fetch(candidate, :repo),
-      origin: fetch(candidate, :origin) || "loop.analyze",
-      actor: actor,
-      workspace_id: fetch(candidate, :workspace_id)
-    }
+      attrs = %{
+        kind: fetch(candidate, :kind),
+        gist: fetch(candidate, :gist),
+        diff: fetch(candidate, :diff),
+        payload: fetch(candidate, :payload) || %{},
+        target_metric: fetch(candidate, :target_metric),
+        baseline: fetch(candidate, :baseline),
+        context_cost_tokens:
+          context_cost_tokens(
+            fetch(candidate, :gist),
+            scope,
+            fetch(candidate, :kind),
+            fetch(candidate, :payload)
+          ),
+        evidence_count: length(incident_refs),
+        distinct_tasks: length(task_refs),
+        incident_refs: incident_refs,
+        task_refs: task_refs,
+        scope: scope,
+        state: state,
+        fingerprint: fingerprint,
+        category: fetch(candidate, :category),
+        target: fetch(candidate, :target),
+        difficulty: fetch(candidate, :difficulty),
+        repo: fetch(candidate, :repo),
+        origin: fetch(candidate, :origin) || "loop.analyze",
+        actor: actor,
+        workspace_id: workspace_id
+      }
 
-    with {:ok, row} <- Ash.create(PendingWrite, attrs, action: :propose, actor: actor) do
-      announce(row, :recorded)
-      maybe_escalate(row, actor)
+      with {:ok, row} <- Ash.create(PendingWrite, attrs, action: :propose, actor: actor) do
+        announce(row, :recorded)
+        maybe_escalate(row, actor)
+      end
     end
   end
+
+  # A `:fleet` candidate with no workspace of its own (the primary path: `arb
+  # loop analyze --propose` without `--workspace`) is attributed to the
+  # installation's default workspace — the same fallback `Notify.workspace_id/1`
+  # already used for escalation — rather than left as a null FK. That null was
+  # the exact shape of #1011 Stage 0 defect G3 (nil `workspace_id` on
+  # `usage_events`, fixed in #1016); `PendingWrite` must not reintroduce it.
+  #
+  # `default_workspace_id/0` deliberately errors when the install is ambiguous
+  # (several workspaces, none named "default") rather than guessing — a
+  # genuinely cross-workspace finding has no representation here, so record/2
+  # refuses it instead of writing an unscoped row. A `:task` candidate is left
+  # exactly as the caller provided it: it is attributed via its target task,
+  # not the install default.
+  defp resolve_workspace_id(:fleet, workspace_id) when workspace_id in [nil, ""],
+    do: Quota.default_workspace_id()
+
+  defp resolve_workspace_id(_scope, workspace_id), do: {:ok, workspace_id}
 
   # Pre-existing complexity 11 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new

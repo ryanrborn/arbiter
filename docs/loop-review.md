@@ -125,6 +125,19 @@ list, the full diff in the detail pane) and over MCP as `loop_pending_list` /
 `loop_pending_diff` / `loop_pending_apply` / `loop_pending_reject` — all
 **coordinator-tier only**, so a worker can never apply a fleet-wide change.
 
+Every live row — `fleet`-scoped included — carries a real `workspace_id`
+(bd-3dasqm); `scope: :fleet` alone is the fleet marker, never a null
+`workspace_id`. A `:fleet` candidate raised with no workspace of its own is
+attributed to the installation's default workspace (the sole workspace, or
+the one named `default` when there are several), the same fallback used for
+escalation routing. There is currently no representation of a finding that
+genuinely spans more than one workspace — an install where that attribution
+is ambiguous (several workspaces, none named `default`) has the row refused
+outright (`{:error, :ambiguous_workspace}`) rather than written with a null
+FK. A workspace-bound caller (dashboard, MCP, `arb loop pending`) only ever
+sees rows in its own workspace, so the same finding does not read as N
+findings across N workspaces.
+
 ### Cross-window accumulation: a below-bar finding is kept, not dropped
 
 Stage 1's evidence bar (≥ 3 incidents / ≥ 2 distinct tasks) is still the gate on

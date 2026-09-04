@@ -377,6 +377,16 @@ defmodule Arbiter.Loop.ProposalsTest do
     # (2, arbiter) cell — clears the same evidence bar the pass already
     # applies to reviewer-finding categories, so it must produce a fleet-wide
     # proposal alongside (not instead of) the three per-task overrides.
+
+    # The `:config_set` cluster candidate is `:fleet`-scoped and carries no
+    # `workspace_id` of its own (bd-3dasqm), so it resolves to the
+    # installation's default workspace on insert — an install needs at least
+    # one workspace to exist for that resolution to succeed.
+    setup do
+      {:ok, ws} = Ash.create(Workspace, %{name: "cluster-ws", prefix: "clus"})
+      %{ws: ws}
+    end
+
     defp misestimate_2026_08_10_fixture do
       [
         %{

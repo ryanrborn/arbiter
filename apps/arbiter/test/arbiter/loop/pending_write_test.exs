@@ -137,18 +137,23 @@ defmodule Arbiter.Loop.PendingWriteTest do
     end
   end
 
-  describe "record/2 — escalation for a fleet-wide row with no workspace" do
-    # `arb loop analyze --propose` without `--workspace` is the primary path and
-    # leaves every candidate's workspace_id nil, so this is the case that
-    # actually happens in the field — not the threaded-workspace one above.
-    test "falls back to the installation default workspace", %{ws: ws} do
-      {:ok, _hyp} = Loop.record(candidate())
+  describe "record/2 — a fleet-wide candidate with no workspace of its own" do
+    # `arb loop analyze --propose` without `--workspace` is the primary path
+    # and leaves every candidate's workspace_id nil. bd-3dasqm: that nil must
+    # never reach the row — `scope: :fleet` is the sole fleet marker, and a
+    # fleet row is attributed to the installation's default workspace (the
+    # same fallback `Notify.workspace_id/1` already used for escalation), not
+    # left workspace-less.
+    test "is attributed to the installation's sole workspace", %{ws: ws} do
+      {:ok, hyp} = Loop.record(candidate())
+      assert hyp.workspace_id == ws.id
 
       {:ok, promoted} =
         Loop.record(candidate(%{incident_refs: ["run-c"], task_refs: ["bd-2"]}))
 
+      assert promoted.id == hyp.id
       assert promoted.state == :proposed
-      assert is_nil(promoted.workspace_id)
+      assert promoted.workspace_id == ws.id
       assert promoted.escalated_at, "a posted escalation must stamp the row"
       assert [%Message{subject: subject}] = escalations(ws)
       assert subject =~ "loop proposal"
@@ -158,29 +163,23 @@ defmodule Arbiter.Loop.PendingWriteTest do
       assert length(escalations(ws)) == 1
     end
 
-    test "leaves escalated_at nil when no workspace can be resolved, so it retries", %{ws: ws} do
-      # A second, non-"default" workspace makes the installation default
-      # ambiguous, so there is nowhere to post.
-      {:ok, other} = Ash.create(Workspace, %{name: "loop-queue-other", prefix: "lo"})
+    test "is attributed to the workspace named \"default\" when the install has several" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "default", prefix: "df"})
+      {:ok, _other} = Ash.create(Workspace, %{name: "loop-queue-other", prefix: "lo"})
 
-      {:ok, _hyp} = Loop.record(candidate())
-      {:ok, promoted} = Loop.record(candidate(%{incident_refs: ["run-c"], task_refs: ["bd-2"]}))
+      {:ok, row} = Loop.record(candidate())
 
-      assert promoted.state == :proposed
-      assert escalations(ws) == []
-      assert escalations(other) == []
+      assert row.workspace_id == ws.id
+    end
 
-      refute promoted.escalated_at,
-             "an unposted escalation must not be stamped — the row would be silently swallowed"
+    test "is refused rather than written with a null workspace_id when the install is ambiguous" do
+      # Two workspaces, neither named "default": there is nowhere unambiguous
+      # to attribute a fleet-wide finding to, so record/2 must refuse it
+      # instead of reintroducing a null-FK row (the defect this task fixes).
+      {:ok, _other} = Ash.create(Workspace, %{name: "loop-queue-other", prefix: "lo"})
 
-      # Once the ambiguity is gone, the next window posts it rather than having
-      # marked it escalated forever.
-      {:ok, _} = Ash.update(other, %{name: "default"}, action: :update)
-
-      {:ok, retried} = Loop.record(candidate(%{incident_refs: ["run-d"], task_refs: ["bd-3"]}))
-
-      assert retried.escalated_at
-      assert length(escalations(other)) == 1
+      assert {:error, :ambiguous_workspace} = Loop.record(candidate())
+      assert Ash.read!(PendingWrite) == []
     end
   end
 
