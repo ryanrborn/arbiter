@@ -51,6 +51,27 @@ defmodule Arbiter.Loop.Corpus do
       list is narrow enough to carry no false-positive risk, and the corpus
       is small (tens of files, single-digit MB).
 
+  ## Quota-window enrichment (#1463, Amendment E)
+
+  Each row also carries `weighted_tokens` — its draw on the binding 5-hour
+  utilization window — and `window_share_5h`, that draw as a fraction of one
+  window's calibrated capacity. `meta.scarcity` carries the calibration, the
+  installation's billing mode, and which unit the pass is therefore optimising.
+  `Arbiter.Loop.Scarcity` owns the unit definition and the reasoning behind it;
+  this module only supplies the two bounded reads it needs (per-run token sums
+  over the corpus window, and the fleet's total weighted draw between the
+  *current* 5h window's start and the instant the snapshot was captured, which
+  is the interval the provider's `utilization_5h` reading describes). Both reads
+  are fleet-wide, so the calibration's numerator and the per-run numerator cover
+  the same population — see the "Coverage" section of `Arbiter.Loop.Scarcity`
+  for why that matters and what bias survives it.
+
+  A `window_share_5h` of `nil` means the window could not be calibrated —
+  never "this run drew nothing". `meta.scarcity.calibration.reason` says which
+  absence it was (`:no_snapshot`, `:stale_snapshot`, `:no_utilization`,
+  `:no_observed_tokens`), the same way `transcript_reads` refuses to report a
+  blind window as a fully-structured one.
+
   ## The one write
 
   `record_pass_cost/1` inserts a single `Arbiter.Usage.Event` row (step
@@ -62,7 +83,12 @@ defmodule Arbiter.Loop.Corpus do
   require Logger
 
   alias Arbiter.Loop.FailureClassifier
+  alias Arbiter.Loop.Scarcity
+  alias Arbiter.Quota
+  alias Arbiter.Quota.Gate
+  alias Arbiter.Quota.Overage
   alias Arbiter.Repo
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.OutputLog
 
   @tail_n 40
@@ -75,7 +101,15 @@ defmodule Arbiter.Loop.Corpus do
           until: DateTime.t(),
           workspace_id: term(),
           failed_runs: non_neg_integer(),
-          transcript_reads: non_neg_integer()
+          transcript_reads: non_neg_integer(),
+          scarcity: scarcity()
+        }
+
+  @type scarcity :: %{
+          unit: :window_share_5h | :cost_usd,
+          secondary_unit: :window_share_5h | :cost_usd,
+          billing_mode: Scarcity.billing_mode(),
+          calibration: Scarcity.calibration()
         }
 
   @doc """
@@ -93,6 +127,8 @@ defmodule Arbiter.Loop.Corpus do
 
     runs = base_runs(since, until, limit)
     cost_by_run = cost_by_run(since, until)
+    tokens_by_run = tokens_by_run(since, until)
+    scarcity = scarcity(Keyword.get(opts, :workspace_id))
     # Review activity is task-scoped: rounds and reviewer findings are recorded
     # under the reviewer's run and a `#review`-suffixed task_id, so they must be
     # keyed by the BASE task id — never the main run_id, which never appears in
@@ -110,6 +146,7 @@ defmodule Arbiter.Loop.Corpus do
         base = base_task_id(task_id)
         status = to_atom(r["status"])
         {read?, lines} = terminal_lines(status, r["stop_category"], run_id)
+        weighted = Map.get(tokens_by_run, run_id, 0.0)
 
         %{
           run_id: run_id,
@@ -125,6 +162,8 @@ defmodule Arbiter.Loop.Corpus do
           failure_reason: r["failure_reason"],
           stop_category: r["stop_category"],
           cost_usd: Map.get(cost_by_run, run_id, 0.0),
+          weighted_tokens: weighted,
+          window_share_5h: Scarcity.window_share(weighted, scarcity.calibration),
           max_round: Map.get(round_by_task, base, 1),
           rejected?: r["failure_reason"] == ":review_gate_rejected",
           converged?: status == :completed,
@@ -143,7 +182,8 @@ defmodule Arbiter.Loop.Corpus do
       until: until,
       workspace_id: Keyword.get(opts, :workspace_id),
       failed_runs: failed,
-      transcript_reads: reads
+      transcript_reads: reads,
+      scarcity: scarcity
     }
 
     {:ok, rows, meta}
@@ -191,12 +231,23 @@ defmodule Arbiter.Loop.Corpus do
       model: "loop-analysis-pass",
       provider: "arbiter",
       cost_usd: Map.get(info, :cost_usd, 0.0),
+      # #1463: the pass's own draw on the quota windows it now measures. Stage 1
+      # analysis is deterministic Elixir — it makes no model call — so the draw
+      # is a *measured* zero, written explicitly rather than left `nil`. If the
+      # payload-authoring work ever puts an LLM call inside `Loop`, these
+      # columns are where its draw lands, and the report's own-draw note stops
+      # being able to say "none".
+      tokens_in: Map.get(info, :tokens_in, 0),
+      tokens_out: Map.get(info, :tokens_out, 0),
+      cache_creation_tokens: Map.get(info, :cache_creation_tokens, 0),
+      cache_read_tokens: Map.get(info, :cache_read_tokens, 0),
       duration_ms: Map.get(info, :duration_ms),
       occurred_at: DateTime.utc_now(),
       worker_run_id: nil,
       raw: %{
         kind: "loop_analysis_pass",
-        rows_scanned: Map.get(info, :rows_scanned)
+        rows_scanned: Map.get(info, :rows_scanned),
+        quota_window_draw: "none"
       }
     }
 
@@ -239,6 +290,141 @@ defmodule Arbiter.Loop.Corpus do
       [iso(since), iso(until)]
     )
     |> Map.new(fn r -> {r["run_id"], flt(r["cost"])} end)
+  end
+
+  # Per-run weighted token draw over the corpus window — the numerator of
+  # `window_share_5h`. Grouped in SQL like `cost_by_run/2`; the weighting is
+  # applied in Elixir so `Arbiter.Loop.Scarcity` stays the single place the
+  # weight vector is defined.
+  defp tokens_by_run(since, until) do
+    query(
+      """
+      SELECT worker_run_id AS run_id,
+             SUM(COALESCE(tokens_in, 0)) AS tokens_in,
+             SUM(COALESCE(tokens_out, 0)) AS tokens_out,
+             SUM(COALESCE(cache_creation_tokens, 0)) AS cache_creation_tokens,
+             SUM(COALESCE(cache_read_tokens, 0)) AS cache_read_tokens
+      FROM usage_events
+      WHERE worker_run_id IS NOT NULL AND occurred_at >= ?1 AND occurred_at < ?2
+      GROUP BY worker_run_id
+      """,
+      [iso(since), iso(until)]
+    )
+    |> Map.new(fn r -> {r["run_id"], Scarcity.weighted_tokens(r)} end)
+  end
+
+  # The scarcity frame for this pass: which unit binds, how we know, and the
+  # 5h-window capacity every per-run share is divided by.
+  #
+  # Calibration deliberately reads the **current** 5h window, not the corpus
+  # window: `anthropic_quotas` is a latest-only cache, so the only utilization
+  # figure that exists is `now`'s, and it can only be divided into the draw of
+  # the window it was measured over. Capacity is a plan constant, so the
+  # estimate carries across the corpus window; the estimate's own inputs are
+  # reported (`observed_weighted_tokens`, `utilization`, `captured_at`) so an
+  # operator can see how it was derived.
+  #
+  # Fail-soft throughout: any read error degrades to an uncalibrated frame
+  # rather than crashing the pass, exactly as `record_pass_cost/1` swallows a
+  # ledger hiccup.
+  defp scarcity(workspace_id) do
+    ws_id = resolve_workspace_id(workspace_id)
+    latest = ws_id && Quota.latest(ws_id, "claude")
+
+    # `Quota.latest/2` reads a latest-only cache, so it returns whatever was
+    # captured last — possibly from a window that rolled days ago. Calibrating
+    # from that divides a draw summed up to `now` by a utilization measured over
+    # an already-reset window, which inflates capacity and deflates every share
+    # while still reporting `:calibrated`. `Gate.stale?/1` is the predicate the
+    # dispatch gate already refuses to throttle on; reuse it rather than invent
+    # a second notion of "too old".
+    stale = if latest && Gate.stale?(latest), do: latest
+    snapshot = if stale, do: nil, else: latest
+    config = ws_id && workspace_config(ws_id)
+
+    since = Overage.window_start(snapshot)
+    observed = if snapshot, do: weighted_tokens_between(since, captured_at(snapshot)), else: 0.0
+
+    calibration = Scarcity.calibrate(observed, snapshot, since: since, stale: stale)
+    # A stale reading is still direct evidence of a plan with windows, so it
+    # informs the billing mode even though it cannot calibrate capacity.
+    mode = Scarcity.billing_mode(config, latest)
+
+    %{
+      unit: Scarcity.primary_metric(mode),
+      secondary_unit: Scarcity.secondary_metric(mode),
+      billing_mode: mode,
+      calibration: calibration
+    }
+  rescue
+    error ->
+      Logger.warning("Loop.Corpus.scarcity/1 degraded to uncalibrated: #{inspect(error)}")
+
+      mode = {:metered, :default}
+
+      %{
+        unit: Scarcity.primary_metric(mode),
+        secondary_unit: Scarcity.secondary_metric(mode),
+        billing_mode: mode,
+        calibration: Scarcity.calibrate(0.0, nil)
+      }
+  end
+
+  defp resolve_workspace_id(id) when is_binary(id) and id != "", do: id
+
+  defp resolve_workspace_id(_) do
+    case Quota.default_workspace_id() do
+      {:ok, id} -> id
+      _ -> nil
+    end
+  end
+
+  # The instant the utilization reading was taken — the upper bound of the
+  # interval it describes. A snapshot that somehow carries no `captured_at` has
+  # already been through `Gate.stale?/1`, so `now` is the honest bound.
+  defp captured_at(%{captured_at: %DateTime{} = at}), do: at
+  defp captured_at(_snapshot), do: DateTime.utc_now()
+
+  defp workspace_config(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{config: config}} -> config
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # The total weighted draw over the interval the utilization reading describes
+  # — the numerator side of the calibration. One grouped row, never a scan of
+  # individual events.
+  #
+  # Deliberately **fleet-wide**, exactly like `tokens_by_run/2`: some
+  # `usage_events` rows legitimately carry a `nil` `workspace_id` (see
+  # `Arbiter.Usage.WorkspaceBackfill`), so filtering here while the per-run
+  # numerator does not would under-count `observed`, under-estimate
+  # `capacity = observed / utilization`, and inflate every share by the
+  # reciprocal. Both sides must describe the same population.
+  #
+  # Bounded above by `until` — the snapshot's `captured_at` — so the draw and the
+  # utilization figure it is divided by cover the same interval. Without the
+  # upper bound the numerator runs on to `now` while the denominator was fixed
+  # when the snapshot was taken.
+  defp weighted_tokens_between(%DateTime{} = since, %DateTime{} = until) do
+    query(
+      """
+      SELECT SUM(COALESCE(tokens_in, 0)) AS tokens_in,
+             SUM(COALESCE(tokens_out, 0)) AS tokens_out,
+             SUM(COALESCE(cache_creation_tokens, 0)) AS cache_creation_tokens,
+             SUM(COALESCE(cache_read_tokens, 0)) AS cache_read_tokens
+      FROM usage_events
+      WHERE occurred_at >= ?1 AND occurred_at <= ?2
+      """,
+      [iso(since), iso(until)]
+    )
+    |> case do
+      [row] -> Scarcity.weighted_tokens(row)
+      _ -> 0.0
+    end
   end
 
   defp max_round_by_task do

@@ -236,6 +236,12 @@ defmodule Arbiter.Loop.PendingWrite do
       (Amendment D). 0 for a per-task override — blast radius 1 is charged once,
       not forever. Non-zero for anything that lands in every future prompt, so a
       fleet-wide prompt addition cannot be approved without its price visible.
+
+      Tokens, deliberately — and this is the one place the loop was already
+      denominated in the unit that binds. Amendment E (#1463) moved the rest of
+      the analyser onto quota windows, whose draw is exactly a weighted token
+      count; see `docs/loop-scarcity-unit.md` and `Arbiter.Loop.Scarcity`. A
+      price expressed here in dollars would have had to be re-derived.
       """
     end
 

@@ -59,6 +59,7 @@ defmodule Arbiter.Loop.Proposals do
 
   alias Arbiter.Loop
   alias Arbiter.Loop.Report
+  alias Arbiter.Loop.Scarcity
   alias Arbiter.Tasks.Issue
 
   # `gist` is a one-liner in a table; long finding categories get elided.
@@ -181,6 +182,8 @@ defmodule Arbiter.Loop.Proposals do
   # ---- difficulty misestimates --------------------------------------------
 
   defp misestimate_candidates(report, workspace_id, origin) do
+    unit = report |> Map.get(:scarcity, %{}) |> Map.get(:unit, :cost_usd)
+
     report.difficulty_misestimates
     |> Enum.filter(&proposable_misestimate?/1)
     |> Enum.map(fn m ->
@@ -199,7 +202,7 @@ defmodule Arbiter.Loop.Proposals do
         gist:
           elide(
             "raise difficulty on #{m.task_id}: D#{from} → D#{to} " <>
-              "(#{m.rounds} review round(s), $#{fmt(m.cost_usd)})"
+              "(#{m.rounds} review round(s), #{draw_gist(m, unit)})"
           ),
         target_metric: Map.get(rec, :target_metric),
         baseline: Map.get(rec, :baseline),
@@ -221,6 +224,20 @@ defmodule Arbiter.Loop.Proposals do
       }
     end)
   end
+
+  # The one-line summary an operator approves on must be denominated in the same
+  # unit as the `target_metric`/`baseline` it summarises (#1463) — a gist reading
+  # "$0.10" next to a pre-registration in 5h-window share invites approving a
+  # dollar saving that the proposal never claimed to deliver.
+  #
+  # The `is_number` guard mirrors `Analysis.comparison_unit/3`: that is exactly
+  # the condition under which the recommendation itself falls back to dollars
+  # (an uncalibrated window leaves the share `nil`), so gist and baseline can
+  # never disagree about which unit they are in.
+  defp draw_gist(%{window_share_5h: share}, :window_share_5h) when is_number(share),
+    do: Scarcity.format_share(share)
+
+  defp draw_gist(m, _unit), do: "$#{fmt(Map.get(m, :cost_usd))}"
 
   # ---- difficulty-misestimate clustering (bd-70nblx) ----------------------
   #
