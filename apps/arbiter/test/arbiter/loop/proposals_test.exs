@@ -669,5 +669,54 @@ defmodule Arbiter.Loop.ProposalsTest do
                "thinking" => "xhigh"
              }
     end
+
+    test "record_all/2 with no :workspace_id resolves the default workspace's config, not stock defaults" do
+      # Production path: `arb loop analyze --propose` with no `--workspace`
+      # leaves `workspace_id: nil` all the way down to `candidates/2`, but the
+      # `:fleet`-scoped row still lands on `Quota.default_workspace_id()` on
+      # insert (bd-3dasqm). `fetch_workspace_config/1` must mirror that same
+      # resolution, or the patch renders against `ByDifficulty.default_mapping/0`
+      # instead of the workspace the row actually applies to — exactly the gap
+      # that dropped the live D3 -> D4 clusters (both D3 and D4 are
+      # `premium/high` in the stock table, so the identity guard fired and
+      # ate the candidate).
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "default",
+          prefix: "def",
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{}},
+            "routing" => %{
+              "policy" => "by_difficulty",
+              "rules" => %{"D4" => %{"model_tier" => "flagship", "thinking" => "xhigh"}}
+            }
+          }
+        })
+
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-vstim-1",
+              dispatched_difficulty: 3,
+              rounds: 3,
+              cost_usd: 9.0,
+              reason: :rework,
+              cell: {3, "vstim"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      %{rows: rows, dropped: []} = Proposals.record_all(r)
+
+      assert [cluster] = Enum.filter(rows, &(&1.kind == :config_set))
+      assert cluster.workspace_id == ws.id
+      assert cluster.payload["patch"] == %{
+               "routing" => %{
+                 "rules" => %{"D3" => %{"model_tier" => "flagship", "thinking" => "xhigh"}}
+               }
+             }
+    end
   end
 end

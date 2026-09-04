@@ -49,7 +49,8 @@ defmodule Arbiter.Loop.Proposals do
       payload carries a `"patch"` key rendering `routing.rules.D<from>` the
       way this workspace already routes `D<to>` (bd-53cuj6), so applying it
       succeeds; a cell where that patch would be a no-op (workspace already
-      routes both tiers the same way) is dropped rather than emitted to fail.
+      routes both tiers the same way) is dropped rather than emitted as a row
+      that would silently apply and change nothing.
 
     * **`:quality_failure` misestimates do not become candidates.** The report's
       own recommendation for them is *"investigate the agent-quality failures
@@ -138,7 +139,17 @@ defmodule Arbiter.Loop.Proposals do
     %{rows: Enum.reverse(rows), dropped: Enum.reverse(dropped)}
   end
 
-  defp fetch_workspace_config(nil), do: nil
+  # A `:fleet` candidate with no explicit `:workspace_id` still lands on a
+  # real workspace: `Loop.insert/3` attributes it to
+  # `Quota.default_workspace_id()`. Mirror that resolution here so the patch
+  # is rendered against the workspace the row actually applies to, not
+  # against stock defaults.
+  defp fetch_workspace_config(nil) do
+    case Arbiter.Quota.default_workspace_id() do
+      {:ok, id} -> fetch_workspace_config(id)
+      _ -> nil
+    end
+  end
 
   defp fetch_workspace_config(workspace_id) do
     case Ash.get(Workspace, workspace_id) do
@@ -272,11 +283,15 @@ defmodule Arbiter.Loop.Proposals do
       to_rule = effective_rule(workspace_config, to)
 
       # A no-op patch (this workspace already routes `from` the same way it
-      # routes `to`) would fail Ash validation on every `arb loop apply all`,
-      # forever — the same failure mode `proposable_misestimate?/1` already
-      # guards at the difficulty ceiling. Drop the candidate instead of
-      # emitting-and-failing.
-      if from_rule == to_rule do
+      # routes `to`) is not rejected by Apply — it deep-merges cleanly and the
+      # row is marked `:applied` having changed nothing, which is worse than a
+      # loud failure: a silent no-op that looks like progress. Drop the
+      # candidate instead of emitting one that can never do anything.
+      #
+      # `to_rule` is also `nil` when `to` is beyond `default_mapping/0`'s
+      # table (e.g. the difficulty ceiling rises past what the hardcoded
+      # mapping covers) — drop rather than crash a function documented pure.
+      if from_rule == nil or to_rule == nil or from_rule == to_rule do
         []
       else
         task_ids = misestimates |> Enum.map(& &1.task_id) |> Enum.uniq()
@@ -324,11 +339,25 @@ defmodule Arbiter.Loop.Proposals do
 
   # "Route the under-provisioned tier the way this workspace already routes
   # the tier above it" — the default mapping for `difficulty`, overridden by
-  # any workspace-config rule for that same tier.
+  # any workspace-config rule for that same tier. `nil` when `difficulty` has
+  # no entry in `default_mapping/0` (e.g. above the hardcoded table's range).
+  #
+  # Only `model_tier`/`thinking` are canary-legible (`Canary.validate_rule/1`
+  # rejects any other key); a workspace may pin extra keys such as `"model"`
+  # on its override (`ByDifficulty`'s moduledoc), so those are dropped rather
+  # than propagated into the emitted patch.
   defp effective_rule(workspace_config, difficulty) do
-    default = Map.fetch!(ByDifficulty.default_mapping(), difficulty)
-    override = get_in(workspace_config || %{}, ["routing", "rules", "D#{difficulty}"]) || %{}
-    Map.merge(default, override)
+    case Map.fetch(ByDifficulty.default_mapping(), difficulty) do
+      {:ok, default} ->
+        override = get_in(workspace_config || %{}, ["routing", "rules", "D#{difficulty}"]) || %{}
+
+        default
+        |> Map.merge(override)
+        |> Map.take(~w(model_tier thinking))
+
+      :error ->
+        nil
+    end
   end
 
   defp cluster_cell(m),
