@@ -191,7 +191,8 @@ defmodule Arbiter.Loop.PendingWriteTest do
     # total, not just cover `:fleet`, or a `:task` candidate with no
     # workspace becomes an invisible row instead of a visible-everywhere one.
     test "is attributed via its target task's own workspace", %{ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "misestimated", difficulty: 1, workspace_id: ws.id})
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "misestimated", difficulty: 1, workspace_id: ws.id})
 
       {:ok, row} =
         Loop.record(
