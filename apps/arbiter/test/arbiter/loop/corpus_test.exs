@@ -311,7 +311,8 @@ defmodule Arbiter.Loop.CorpusTest do
       round =
         review_round!("bd-residue-1", %{
           run_id: "11111111-1111-1111-1111-111111111111",
-          findings: "1. The memoisation key omits the tenant id, so two tenants share a cache slot."
+          findings:
+            "1. The memoisation key omits the tenant id, so two tenants share a cache slot."
         })
 
       assert {:ok, [], meta} = Corpus.fetch(window())
@@ -354,7 +355,8 @@ defmodule Arbiter.Loop.CorpusTest do
     end
 
     test "an empty window reports a well-formed zero-shape, not a crash" do
-      assert {:ok, [], meta} = Corpus.fetch(since: ~U[2000-01-01 00:00:00Z], until: ~U[2000-01-08 00:00:00Z])
+      assert {:ok, [], meta} =
+               Corpus.fetch(since: ~U[2000-01-01 00:00:00Z], until: ~U[2000-01-08 00:00:00Z])
 
       assert meta.finding_residue == %{
                total_units: 0,
