@@ -4,7 +4,7 @@ defmodule Arbiter.Loop.ProposalsTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Loop
-  alias Arbiter.Loop.{Analysis, PendingWrite, Proposals, Report}
+  alias Arbiter.Loop.{Analysis, FindingBuckets, PendingWrite, Proposals, Report, SkillClause}
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
@@ -57,9 +57,11 @@ defmodule Arbiter.Loop.ProposalsTest do
       assert inert.target_metric == "rework rate"
       assert inert.baseline == "42.0%"
 
-      # Stage 3 gap: no target skill is named, so nothing here claims to know
-      # which skill the patch belongs in.
-      refute Map.has_key?(inert.payload, "skill")
+      # bd-5w8h0r: the Stage 3 gap is closed — the category resolves to a
+      # target skill deterministically, and the row carries the clause to
+      # apply.
+      assert inert.target == "verification-before-completion"
+      assert inert.payload["skill"] == "verification-before-completion"
 
       thin = Enum.find(candidates, &(&1.category == "thin test"))
       assert thin, "a below-bar category is still a candidate — that is the point of Stage 2"
@@ -333,6 +335,110 @@ defmodule Arbiter.Loop.ProposalsTest do
 
       refute Enum.any?(candidates, &(&1.kind == :repo_doc_patch)),
              "auto-generated candidates must not include :repo_doc_patch"
+    end
+
+    test "a homed finding category names its skill and carries a rendered clause" do
+      r = report(%{finding_categories: [finding_category(%{category: "missing test coverage"})]})
+
+      assert [c] = Proposals.candidates(r)
+
+      assert c.kind == :skill_patch
+      assert c.target == "test-driven-development"
+      assert c.payload["skill"] == "test-driven-development"
+      assert c.payload["clause_id"] == "missing-test-coverage"
+
+      clause = c.payload["clause"]
+      assert clause =~ "## Missing test coverage"
+      assert clause =~ "the new code path is never executed"
+      assert clause =~ "confirm every new branch has a test that fails"
+      assert clause =~ SkillClause.begin_marker("missing-test-coverage")
+
+      # A `:skill_patch` never carries a whole body: the clause is spliced into
+      # whatever the skill says at apply time, so a human edit made while the
+      # row sat in the queue is not reverted by applying it.
+      refute Map.has_key?(c.payload, "body")
+    end
+
+    test "an unhomed category becomes a :skill_create with a stub body, not a patch to a skill that does not exist" do
+      r =
+        report(%{
+          finding_categories: [finding_category(%{category: "secret / credential exposure"})]
+        })
+
+      assert [c] = Proposals.candidates(r)
+
+      assert c.kind == :skill_create
+      assert c.target == "credential-hygiene"
+      assert c.payload["name"] == "credential-hygiene"
+      assert c.payload["body"] =~ "# credential-hygiene"
+      assert c.payload["body"] =~ "## Secret / credential exposure"
+      assert c.payload["clause_id"] == "secret-credential-exposure"
+    end
+
+    test "context exhaustion is homed too — the category the analyser emits outside the regexes" do
+      r =
+        report(%{
+          finding_categories: [
+            finding_category(%{category: FindingBuckets.context_exhaustion_category()})
+          ]
+        })
+
+      assert [c] = Proposals.candidates(r)
+      assert c.kind == :skill_create
+      assert c.target == "context-budget-discipline"
+    end
+
+    test "every category the analyser can emit resolves to a target" do
+      r =
+        report(%{
+          finding_categories:
+            Enum.map(FindingBuckets.categories(), &finding_category(%{category: &1}))
+        })
+
+      candidates = Proposals.candidates(r)
+      assert length(candidates) == 5
+
+      for c <- candidates do
+        assert is_binary(c.target), "#{c.category} still carries target: nil"
+        assert c.kind in [:skill_patch, :skill_create]
+      end
+    end
+
+    test "authoring is deterministic — two passes over one report render byte-identical payloads" do
+      r =
+        report(%{
+          finding_categories:
+            Enum.map(FindingBuckets.categories(), &finding_category(%{category: &1}))
+        })
+
+      assert Proposals.candidates(r) == Proposals.candidates(r)
+    end
+
+    test "a category with no attribution row is left unattributed rather than guessed at" do
+      # Not reachable from the analyser (the table is total over
+      # `FindingBuckets.categories/0`, enforced at compile time) — this is the
+      # hand-built/historical input path staying total.
+      r = report(%{finding_categories: [finding_category(%{category: "thin test"})]})
+
+      assert [c] = Proposals.candidates(r)
+      assert c.target == nil
+      refute Map.has_key?(c.payload, "skill")
+      refute Map.has_key?(c.payload, "clause")
+    end
+
+    test "the clause cites the window the evidence came from" do
+      r =
+        report(%{
+          window: %{
+            label: "last 7 days",
+            since: ~U[2026-08-28 00:00:00Z],
+            until: ~U[2026-09-04 00:00:00Z]
+          },
+          finding_categories: [finding_category(%{category: "missing test coverage"})]
+        })
+
+      assert [c] = Proposals.candidates(r)
+      assert c.payload["clause"] =~ "window ending 2026-09-04"
     end
 
     test "candidates/2 writes nothing" do

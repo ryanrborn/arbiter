@@ -474,17 +474,62 @@ defmodule Arbiter.Loop do
 
   # What is left is fleet-wide prose — a skill patch or a new skill — which is
   # carried by every dispatch that materializes it, forever.
-  defp context_cost_tokens(gist, _scope, _kind, _payload) when is_binary(gist),
-    do: estimate_tokens(gist)
+  defp context_cost_tokens(gist, _scope, _kind, payload), do: prose_tokens(payload, gist)
 
-  defp context_cost_tokens(_gist, _scope, _kind, _payload), do: 0
+  @doc """
+  The recurring per-dispatch price of the prose a fleet-wide row would land.
 
-  # Tokens, not bytes (Amendment D item 4). Skill clauses skew toward paths,
-  # flags and code fragments, which tokenize far worse than prose, so a byte
-  # count under-reads exactly the content most likely to be added. ~4 chars per
-  # token is the standard rule of thumb for English; the ceiling keeps a short
-  # clause from rounding down to zero and reading as free.
-  defp estimate_tokens(text) do
+  Body before clause before gist, because that is the order of how much of the
+  prompt the row actually adds (bd-5w8h0r):
+
+    * `"body"` — a `:skill_create` row authors the whole skill file, stub
+      preamble *and* clause. The preamble is carried by every dispatch that
+      materializes the skill, so pricing only the clause under-reads the row
+      by around a third.
+    * `"clause"` — a `:skill_patch` row carries no body; `Apply` splices the
+      clause into whatever the skill says at apply time, so the clause is the
+      whole of the addition.
+    * gist — a row with neither yet (a mid-analysis candidate). The one-line
+      summary an operator reads once in `arb loop pending` is a floor, not a
+      real price; it under-reads authored prose by roughly an order of
+      magnitude, on a figure whose entire purpose is that "a fleet-wide prompt
+      addition cannot be approved without its price visible".
+
+  Public so the bd-5w8h0r backfill prices a re-authored row exactly as
+  `record/2` would have, rather than re-implementing this precedence and
+  drifting from it.
+  """
+  @spec prose_tokens(map() | nil, String.t() | nil) :: non_neg_integer()
+  def prose_tokens(payload, gist) do
+    cond do
+      is_binary(body = payload && Map.get(payload, "body")) and body != "" ->
+        estimate_tokens(body)
+
+      is_binary(clause = payload && Map.get(payload, "clause")) and clause != "" ->
+        estimate_tokens(clause)
+
+      is_binary(gist) ->
+        estimate_tokens(gist)
+
+      true ->
+        0
+    end
+  end
+
+  @doc """
+  The recurring per-dispatch token price of `text`.
+
+  Tokens, not bytes (Amendment D item 4). Skill clauses skew toward paths,
+  flags and code fragments, which tokenize far worse than prose, so a byte
+  count under-reads exactly the content most likely to be added. ~4 chars per
+  token is the standard rule of thumb for English; the ceiling keeps a short
+  clause from rounding down to zero and reading as free.
+
+  Public as the primitive under `prose_tokens/2`, which is what a caller
+  pricing a whole row wants.
+  """
+  @spec estimate_tokens(String.t()) :: non_neg_integer()
+  def estimate_tokens(text) do
     text |> String.length() |> Kernel./(4) |> Float.ceil() |> trunc()
   end
 

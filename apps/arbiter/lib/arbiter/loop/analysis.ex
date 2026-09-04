@@ -294,7 +294,11 @@ defmodule Arbiter.Loop.Analysis do
       agent_quality_rows
       |> Enum.filter(&(&1.classification.subcategory == :context_exhaustion))
       |> Enum.map(fn row ->
-        {"context exhaustion — agent burned its own context window (no read discipline)", row,
+        # The literal lives in `FindingBuckets` beside the regex buckets and the
+        # attribution table keyed on it (bd-5w8h0r): a reworded copy here would
+        # silently unhome the category, and the proposal would go back to
+        # carrying no target.
+        {FindingBuckets.context_exhaustion_category(), row,
          "autocompact thrash / claude session error with no API error"}
       end)
 
