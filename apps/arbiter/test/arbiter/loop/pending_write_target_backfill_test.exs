@@ -174,6 +174,59 @@ defmodule Arbiter.Loop.PendingWriteTargetBackfillTest do
     assert merged.distinct_tasks == 2
   end
 
+  test "leaves none of the four live target-less rows live and orphaned" do
+    # The exact shape of the live queue on 2026-09-04: four :proposed
+    # `skill_patch` rows, `target: nil`, one per bucketed category.
+    live = [
+      {"secret / credential exposure", 3},
+      {"regression in existing behaviour", 8},
+      {"plausible code, green tests, inert at runtime", 4},
+      {"missing test coverage", 6}
+    ]
+
+    olds =
+      for {category, n} <- live do
+        legacy_row!(%{
+          category: category,
+          evidence_count: n,
+          distinct_tasks: n,
+          incident_refs: Enum.map(1..n, &"run-#{category}-#{&1}"),
+          task_refs: Enum.map(1..n, &"bd-#{category}-#{&1}")
+        })
+      end
+
+    report = PendingWriteTargetBackfill.run()
+
+    assert report.examined == 4
+    assert report.superseded == 4
+    assert report.inserted == 4
+    assert report.unresolved == 0
+
+    assert Enum.all?(olds, &(reload(&1).state == :superseded))
+
+    for {old, {category, n}} <- Enum.zip(olds, live) do
+      identity = Arbiter.Loop.Proposals.finding_identity(category)
+
+      [new] =
+        PendingWrite
+        |> Ash.Query.filter(fingerprint == ^Loop.fingerprint(identity))
+        |> Ash.read!()
+
+      assert new.state == :proposed
+      assert new.target == identity.target
+      assert new.kind == identity.kind
+      assert new.evidence_count == n
+      assert Enum.sort(new.incident_refs) == Enum.sort(old.incident_refs)
+      assert Enum.sort(new.task_refs) == Enum.sort(old.task_refs)
+      assert new.payload["clause"] =~ "arbiter:loop:begin"
+    end
+
+    # Nothing left behind at the old identity for a future pass to strand on.
+    assert PendingWrite
+           |> Ash.Query.filter(is_nil(target) and kind == :skill_patch and state == :proposed)
+           |> Ash.read!() == []
+  end
+
   test "is idempotent — a second run has nothing left to do" do
     legacy_row!(%{category: @homed})
 
