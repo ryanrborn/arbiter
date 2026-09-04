@@ -46,7 +46,8 @@ defmodule Arbiter.Loop do
 
   alias Arbiter.Loop.{Apply, Notify, PendingWrite}
   alias Arbiter.Messages.Message
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Quota
+  alias Arbiter.Tasks.{Issue, Workspace}
 
   require Ash.Query
   require Logger
@@ -279,46 +280,85 @@ defmodule Arbiter.Loop do
     task_refs = refs(candidate, :task_refs)
     scope = fetch(candidate, :scope) || :fleet
 
-    state =
-      if clears_bar?(scope, length(incident_refs), length(task_refs), bar),
-        do: :proposed,
-        else: :hypothesis
+    with {:ok, workspace_id} <-
+           resolve_workspace_id(scope, fetch(candidate, :workspace_id), fetch(candidate, :target)) do
+      state =
+        if clears_bar?(scope, length(incident_refs), length(task_refs), bar),
+          do: :proposed,
+          else: :hypothesis
 
-    attrs = %{
-      kind: fetch(candidate, :kind),
-      gist: fetch(candidate, :gist),
-      diff: fetch(candidate, :diff),
-      payload: fetch(candidate, :payload) || %{},
-      target_metric: fetch(candidate, :target_metric),
-      baseline: fetch(candidate, :baseline),
-      context_cost_tokens:
-        context_cost_tokens(
-          fetch(candidate, :gist),
-          scope,
-          fetch(candidate, :kind),
-          fetch(candidate, :payload)
-        ),
-      evidence_count: length(incident_refs),
-      distinct_tasks: length(task_refs),
-      incident_refs: incident_refs,
-      task_refs: task_refs,
-      scope: scope,
-      state: state,
-      fingerprint: fingerprint,
-      category: fetch(candidate, :category),
-      target: fetch(candidate, :target),
-      difficulty: fetch(candidate, :difficulty),
-      repo: fetch(candidate, :repo),
-      origin: fetch(candidate, :origin) || "loop.analyze",
-      actor: actor,
-      workspace_id: fetch(candidate, :workspace_id)
-    }
+      attrs = %{
+        kind: fetch(candidate, :kind),
+        gist: fetch(candidate, :gist),
+        diff: fetch(candidate, :diff),
+        payload: fetch(candidate, :payload) || %{},
+        target_metric: fetch(candidate, :target_metric),
+        baseline: fetch(candidate, :baseline),
+        context_cost_tokens:
+          context_cost_tokens(
+            fetch(candidate, :gist),
+            scope,
+            fetch(candidate, :kind),
+            fetch(candidate, :payload)
+          ),
+        evidence_count: length(incident_refs),
+        distinct_tasks: length(task_refs),
+        incident_refs: incident_refs,
+        task_refs: task_refs,
+        scope: scope,
+        state: state,
+        fingerprint: fingerprint,
+        category: fetch(candidate, :category),
+        target: fetch(candidate, :target),
+        difficulty: fetch(candidate, :difficulty),
+        repo: fetch(candidate, :repo),
+        origin: fetch(candidate, :origin) || "loop.analyze",
+        actor: actor,
+        workspace_id: workspace_id
+      }
 
-    with {:ok, row} <- Ash.create(PendingWrite, attrs, action: :propose, actor: actor) do
-      announce(row, :recorded)
-      maybe_escalate(row, actor)
+      with {:ok, row} <- Ash.create(PendingWrite, attrs, action: :propose, actor: actor) do
+        announce(row, :recorded)
+        maybe_escalate(row, actor)
+      end
     end
   end
+
+  # A `:fleet` candidate with no workspace of its own (the primary path: `arb
+  # loop analyze --propose` without `--workspace`) is attributed to the
+  # installation's default workspace — the same fallback `Notify.workspace_id/1`
+  # already used for escalation — rather than left as a null FK. That null was
+  # the exact shape of #1011 Stage 0 defect G3 (nil `workspace_id` on
+  # `usage_events`, fixed in #1016); `PendingWrite` must not reintroduce it.
+  #
+  # `default_workspace_id/0` deliberately errors when the install is ambiguous
+  # (several workspaces, none named "default") rather than guessing — a
+  # genuinely cross-workspace finding has no representation here, so record/2
+  # refuses it instead of writing an unscoped row.
+  defp resolve_workspace_id(:fleet, workspace_id, _target) when workspace_id in [nil, ""],
+    do: Quota.default_workspace_id()
+
+  # A `:task` candidate with no workspace of its own is attributed via its
+  # `target` task's own workspace — the same rule
+  # `PendingWriteWorkspaceBackfill` applies to historical rows — falling back
+  # to the install default when the task cannot be found or carries none
+  # itself. This must be total: leaving a `:task` row's `workspace_id: nil`
+  # reintroduces the exact null-FK defect this function exists to close (the
+  # `arb loop analyze --propose` path with no `--workspace` stamps every
+  # `:difficulty_override` candidate with `workspace_id: nil`), and a null row
+  # is no longer visible-everywhere once `pending_visible?` stopped matching
+  # nil — it is invisible instead.
+  defp resolve_workspace_id(:task, workspace_id, target) when workspace_id in [nil, ""] do
+    case target && Ash.get(Issue, target) do
+      {:ok, %Issue{workspace_id: ws_id}} when is_binary(ws_id) and ws_id != "" ->
+        {:ok, ws_id}
+
+      _ ->
+        Quota.default_workspace_id()
+    end
+  end
+
+  defp resolve_workspace_id(_scope, workspace_id, _target), do: {:ok, workspace_id}
 
   # Pre-existing complexity 11 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -341,12 +381,28 @@ defmodule Arbiter.Loop do
           other
       end
 
+    # A pre-existing row left with `workspace_id: nil` (written before this
+    # fix, or by a caller that bypassed `insert/3`) is repaired opportunistically
+    # on the next reinforcement rather than left null forever — `insert/3` is
+    # the only place a new row is created, but `reinforce/4` is the only place
+    # an old one is ever touched again.
+    workspace_id =
+      if is_nil(existing.workspace_id) do
+        case resolve_workspace_id(existing.scope, nil, existing.target) do
+          {:ok, ws_id} -> ws_id
+          {:error, _reason} -> nil
+        end
+      else
+        existing.workspace_id
+      end
+
     attrs = %{
       incident_refs: incident_refs,
       task_refs: task_refs,
       evidence_count: length(incident_refs),
       distinct_tasks: length(task_refs),
       state: state,
+      workspace_id: workspace_id,
       # The gist/baseline describe the *current* evidence and are still
       # pre-application here (only pre-application states are reinforced), so
       # refreshing them keeps the pre-registered baseline honest.

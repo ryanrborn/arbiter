@@ -193,6 +193,23 @@ defmodule ArbiterCli.Cmd.Loop do
       _ ->
         :ok
     end
+
+    case Map.get(envelope, "proposals_dropped") do
+      dropped when is_list(dropped) and dropped != [] ->
+        IO.puts("\n## Dropped candidates (#{length(dropped)})\n")
+
+        Enum.each(dropped, fn %{"gist" => gist, "reason" => reason} ->
+          IO.puts("- #{gist || "(no gist)"}: #{reason}")
+        end)
+
+        IO.puts(
+          "\nEach was refused by the write path (e.g. an ambiguous install with no default " <>
+            "workspace) and was not queued."
+        )
+
+      _ ->
+        :ok
+    end
   end
 
   # ---- the proposal queue -------------------------------------------------

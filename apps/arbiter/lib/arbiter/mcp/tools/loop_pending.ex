@@ -138,8 +138,11 @@ defmodule Arbiter.MCP.Tools.LoopPending do
   end
 
   # A proposal the caller's scope is allowed to see. A workspace-bound scope may
-  # only reach rows in its own workspace (or an unscoped, fleet-global row);
-  # never one belonging to a different workspace.
+  # only reach rows in its own workspace; never one belonging to a different
+  # workspace. `scope: :fleet` is the sole fleet marker — the row still
+  # carries a real `workspace_id` (bd-3dasqm) and is visible in that workspace
+  # only, not in every workspace, so it does not read as N findings when there
+  # are N workspaces.
   defp fetch_pending(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.require_string(args, "id"),
          {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
@@ -155,8 +158,9 @@ defmodule Arbiter.MCP.Tools.LoopPending do
     end
   end
 
+  # An unscoped (fleet-agnostic) caller sees everything; a workspace-bound
+  # caller sees only its own rows, whatever their scope.
   defp pending_visible?(_row, nil), do: true
-  defp pending_visible?(%{workspace_id: nil}, _ws_id), do: true
   defp pending_visible?(%{workspace_id: ws}, ws_id), do: ws == ws_id
 
   defp loop_error(:not_found), do: {:not_found, "no loop proposal matching that id"}

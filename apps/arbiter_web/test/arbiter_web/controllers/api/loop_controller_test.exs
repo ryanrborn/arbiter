@@ -162,6 +162,49 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert json_response(post(conn, ~p"/api/loop/propose", %{limit: "lots"}), 400)
       assert json_response(get(conn, ~p"/api/loop/analyze", %{limit: "-3"}), 400)
     end
+
+    # A fleet-scope candidate (every reviewer-finding category, per
+    # `Arbiter.Loop.Proposals`) with no `workspace_id` opt is attributed via
+    # `Quota.default_workspace_id/0`, which refuses on an ambiguous install
+    # (several workspaces, none named "default") rather than guessing
+    # (bd-3dasqm). `record_all/2` counts such a refusal in `:dropped` instead
+    # of losing it, and the controller surfaces that as `:proposals_dropped`
+    # — this is the first test to exercise that path through the HTTP
+    # surface end to end.
+    test "an ambiguous install without --workspace surfaces a refused fleet candidate in proposals_dropped",
+         %{conn: conn} do
+      # No workspace named "default" among these two: ambiguous.
+      _ws_a = workspace!()
+      _ws_b = workspace!()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "ctrl inert 2", difficulty: 1, workspace_id: workspace!().id})
+
+      run =
+        run!(%{
+          task_id: issue.id,
+          status: :failed,
+          model: "claude-haiku-4-5",
+          failure_reason: ":review_gate_rejected"
+        })
+
+      {:ok, _} =
+        Ash.create(Round, %{
+          task_id: issue.id,
+          run_id: run.id,
+          round: 2,
+          role: :review,
+          verdict: :request_changes,
+          converged: false,
+          findings: "Green tests but the new path is never executed at runtime — inert."
+        })
+
+      conn = post(conn, ~p"/api/loop/propose", %{since: "24h"})
+      body = json_response(conn, 200)
+
+      assert is_list(body["proposals_dropped"])
+      assert Enum.any?(body["proposals_dropped"], &(&1["reason"] =~ "ambiguous_workspace"))
+    end
   end
 
   describe "POST /api/loop/propose/repo_doc_patch" do
@@ -306,6 +349,13 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       repo: "arbiter",
       incident_refs: [issue.id],
       task_refs: [issue.id],
+      # Every call to `workspace!/0` mints a fresh workspace, so by the time a
+      # later test (or a `scope: :fleet` override below) runs, the install has
+      # several workspaces and none named "default" — `resolve_workspace_id/3`
+      # then refuses a :fleet candidate with no workspace as ambiguous
+      # (`Arbiter.Loop.resolve_workspace_id/3`). Stamping the issue's own real
+      # workspace here keeps every fixture deterministic regardless of scope.
+      workspace_id: issue.workspace_id,
       payload: %{"task_id" => issue.id, "difficulty" => 3},
       diff: "--- a/task\n+++ b/task\n@@ Issue.difficulty @@\n-difficulty: 2\n+difficulty: 3\n"
     }
