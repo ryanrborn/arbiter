@@ -140,7 +140,8 @@ defmodule Arbiter.Loop.PendingWrite do
         :context_cost_tokens,
         :diff,
         :payload,
-        :actor
+        :actor,
+        :workspace_id
       ]
     end
 

@@ -134,9 +134,21 @@ escalation routing. There is currently no representation of a finding that
 genuinely spans more than one workspace — an install where that attribution
 is ambiguous (several workspaces, none named `default`) has the row refused
 outright (`{:error, :ambiguous_workspace}`) rather than written with a null
-FK. A workspace-bound caller (dashboard, MCP, `arb loop pending`) only ever
-sees rows in its own workspace, so the same finding does not read as N
-findings across N workspaces.
+FK. A `:task` candidate raised with no workspace of its own (the same
+`arb loop analyze --propose` path) is attributed via its target task's own
+workspace, falling back to the installation default when the task cannot be
+resolved; it is refused on the same ambiguous-install terms as a `:fleet`
+candidate when neither resolves. A workspace-bound caller (dashboard, MCP,
+`arb loop pending`) only ever sees rows in its own workspace, so the same
+finding does not read as N findings across N workspaces.
+
+A refused candidate is **not silently lost**: `arb loop analyze --propose`
+still logs it, but it is also counted in the response's `proposals_dropped`
+list (gist + refusal reason), rendered under "Dropped candidates" in the
+text output. On an install with several workspaces and none named `default`,
+every fleet-scoped hypothesis from every analyze window is refused this
+way — `proposals_dropped` is how an operator notices that the finding stream
+is going missing, rather than only ever seeing it in a log line.
 
 ### Cross-window accumulation: a below-bar finding is kept, not dropped
 

@@ -183,6 +183,50 @@ defmodule Arbiter.Loop.PendingWriteTest do
     end
   end
 
+  describe "record/2 — a task-scoped candidate with no workspace of its own" do
+    # `arb loop analyze --propose` without `--workspace` stamps every
+    # `:difficulty_override` candidate with `workspace_id: nil`
+    # (`Proposals.misestimate_candidates/3`) — the same primary path that
+    # produced null `:fleet` rows. bd-3dasqm: `resolve_workspace_id/2` must be
+    # total, not just cover `:fleet`, or a `:task` candidate with no
+    # workspace becomes an invisible row instead of a visible-everywhere one.
+    test "is attributed via its target task's own workspace", %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "misestimated", difficulty: 1, workspace_id: ws.id})
+
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            kind: :difficulty_override,
+            scope: :task,
+            target: issue.id,
+            incident_refs: ["run-x"],
+            task_refs: [issue.id],
+            payload: %{"task_id" => issue.id, "difficulty" => 3}
+          })
+        )
+
+      assert row.workspace_id == ws.id
+    end
+
+    test "falls back to the installation default when the target task can't be resolved", %{
+      ws: ws
+    } do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            kind: :difficulty_override,
+            scope: :task,
+            target: "bd-does-not-exist",
+            incident_refs: ["run-x"],
+            task_refs: ["bd-does-not-exist"],
+            payload: %{"task_id" => "bd-does-not-exist", "difficulty" => 3}
+          })
+        )
+
+      assert row.workspace_id == ws.id
+    end
+  end
+
   describe "record/2 — task scope bypasses the bar" do
     test "a :task-scoped proposal lands :proposed at n=1", %{ws: ws} do
       {:ok, row} =

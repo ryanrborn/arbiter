@@ -422,7 +422,7 @@ defmodule Arbiter.Loop.ProposalsTest do
     test "a re-run over the fixture window produces one fleet-wide proposal, not three isolated rows only" do
       r = report(%{difficulty_misestimates: misestimate_2026_08_10_fixture()})
 
-      rows = Proposals.record_all(r)
+      %{rows: rows, dropped: []} = Proposals.record_all(r)
 
       overrides = Enum.filter(rows, &(&1.kind == :difficulty_override))
       assert length(overrides) == 3
@@ -502,7 +502,7 @@ defmodule Arbiter.Loop.ProposalsTest do
           ]
         })
 
-      rows = Proposals.record_all(r)
+      %{rows: rows, dropped: []} = Proposals.record_all(r)
 
       overrides = Enum.filter(rows, &(&1.kind == :difficulty_override))
       assert length(overrides) == 2
