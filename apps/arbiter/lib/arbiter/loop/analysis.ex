@@ -35,11 +35,6 @@ defmodule Arbiter.Loop.Analysis do
 
   alias Arbiter.Loop.{Corpus, FailureClassifier, FindingBuckets, Proposals, Report, Scarcity}
 
-  # Default shape of `Report.finding_residue` when the caller supplies no
-  # `meta.finding_residue` (e.g. a hand-built `build_report/2` call in a test).
-  # Mirrors `Arbiter.Loop.Corpus.fetch/1`'s own zero-window shape.
-  @empty_finding_residue %{total_units: 0, count: 0, rate: nil, distinct_tasks: 0, units: []}
-
   @small_sample_caveat "At ~15 dispatches/day most single-window deltas are not statistically significant — treat single-window movements as hypotheses, not results."
 
   # A fleet-wide change requires this much independent evidence. Anything less
@@ -203,7 +198,7 @@ defmodule Arbiter.Loop.Analysis do
   # subset `finding_categories/1` clusters) and carries it in `meta`, alongside
   # `failed_runs` / `transcript_reads`. This just threads it onto the report.
   defp finding_residue(opts) do
-    opts |> Keyword.get(:meta, %{}) |> Map.get(:finding_residue, @empty_finding_residue)
+    opts |> Keyword.get(:meta, %{}) |> Map.get(:finding_residue, Corpus.empty_finding_residue())
   end
 
   # ---- classification -----------------------------------------------------

@@ -44,7 +44,7 @@ defmodule Arbiter.Loop.Report do
             difficulty_misestimates: [],
             cells: [],
             suggestions: [],
-            finding_residue: %{total_units: 0, count: 0, rate: nil, distinct_tasks: 0, units: []},
+            finding_residue: Arbiter.Loop.Corpus.empty_finding_residue(),
             notes: []
 
   @type t :: %__MODULE__{}
@@ -286,7 +286,8 @@ defmodule Arbiter.Loop.Report do
       |> Map.get(:units, [])
       |> Enum.take(@finding_residue_citation_n)
       |> Enum.map_join("\n", fn u ->
-        "- `#{u.task_id}` / `#{u.run_id}` — #{u.text}"
+        run = if u.run_id, do: "`#{u.run_id}`", else: "(run_id unresolved)"
+        "- `#{u.task_id}` / #{run} — #{u.text}"
       end)
 
     """

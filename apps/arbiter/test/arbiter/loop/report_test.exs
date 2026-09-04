@@ -225,6 +225,32 @@ defmodule Arbiter.Loop.ReportTest do
       assert md =~ "residue" or md =~ "Residue"
       assert md =~ "n/a"
     end
+
+    test "a nil run_id (unresolved) renders a sentinel, not a blank citation" do
+      report = %Report{
+        window: %{label: "test"},
+        totals: %{runs: 1, main_runs: 1, failed: 1, completed: 0, tasks: 1, dispatches: 1},
+        segmentation: [],
+        misclassification: %{corroborated: 0, reclassified: 0, rate: nil, citations: []},
+        finding_categories: [],
+        difficulty_misestimates: [],
+        cells: [],
+        suggestions: [],
+        finding_residue: %{
+          total_units: 1,
+          count: 1,
+          rate: 1.0,
+          distinct_tasks: 1,
+          units: [%{task_id: "bd-res-3", run_id: nil, text: "some unbucketed finding"}]
+        },
+        notes: []
+      }
+
+      md = Report.to_markdown(report)
+      assert md =~ "bd-res-3"
+      assert md =~ "(run_id unresolved)"
+      refute md =~ "` / ` —"
+    end
   end
 
   describe "n=1 decline discipline (the bd-7rspia validation)" do

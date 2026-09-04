@@ -227,6 +227,15 @@ defmodule Arbiter.Loop.Corpus do
   @spec residue_retention_limit() :: pos_integer()
   def residue_retention_limit, do: @residue_retention_limit
 
+  @doc """
+  The zero-finding shape of `finding_residue()` — the single source of truth
+  for callers (e.g. `Analysis`, `Report`) that need a default before any
+  window has been fetched.
+  """
+  @spec empty_finding_residue() :: finding_residue()
+  def empty_finding_residue,
+    do: %{total_units: 0, count: 0, rate: nil, distinct_tasks: 0, units: []}
+
   @doc "Per-unit text truncation bound for retained residue units."
   @spec residue_text_limit() :: pos_integer()
   def residue_text_limit, do: @residue_text_limit
