@@ -712,6 +712,7 @@ defmodule Arbiter.Loop.ProposalsTest do
 
       assert [cluster] = Enum.filter(rows, &(&1.kind == :config_set))
       assert cluster.workspace_id == ws.id
+
       assert cluster.payload["patch"] == %{
                "routing" => %{
                  "rules" => %{"D3" => %{"model_tier" => "flagship", "thinking" => "xhigh"}}
