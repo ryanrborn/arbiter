@@ -63,7 +63,7 @@ defmodule Arbiter.Loop.PendingWriteTargetBackfill do
   started, the OTP application and Ash are not. The rendering helpers it calls
   (`Arbiter.Loop.Proposals.finding_identity/1`, `finding_payload/2`,
   `finding_gist/1`, `Arbiter.Loop.fingerprint/1`,
-  `Arbiter.Loop.estimate_tokens/1`) are pure module functions with no process
+  `Arbiter.Loop.prose_tokens/2`) are pure module functions with no process
   behind them, so they are safe from that context; anything reading through
   `Ash` would not be.
 
@@ -330,12 +330,11 @@ defmodule Arbiter.Loop.PendingWriteTargetBackfill do
   defp promoted_state(a, b) when "proposed" in [a, b], do: "proposed"
   defp promoted_state(a, _b), do: a
 
-  defp price(payload, gist) do
-    case Map.get(payload, "clause") do
-      clause when is_binary(clause) and clause != "" -> Loop.estimate_tokens(clause)
-      _ -> Loop.estimate_tokens(gist)
-    end
-  end
+  # Delegated, not re-implemented: the body-before-clause-before-gist
+  # precedence is the one thing that must not drift between here and
+  # `Loop.record/2`, or a backfilled `:skill_create` successor lands with a
+  # different price than the same row authored by a live pass.
+  defp price(payload, gist), do: Loop.prose_tokens(payload, gist)
 
   defp to_date(iso) when is_binary(iso) do
     case iso |> String.slice(0, 10) |> Date.from_iso8601() do

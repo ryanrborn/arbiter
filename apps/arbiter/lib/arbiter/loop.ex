@@ -474,21 +474,47 @@ defmodule Arbiter.Loop do
 
   # What is left is fleet-wide prose — a skill patch or a new skill — which is
   # carried by every dispatch that materializes it, forever.
-  #
-  # When the row carries a rendered clause (bd-5w8h0r), that clause *is* the
-  # prose that lands in the prompt, and the gist is only the one-line summary
-  # an operator reads once in `arb loop pending`. Pricing the gist would
-  # under-read the recurring cost by roughly an order of magnitude — on a
-  # figure whose entire purpose is that "a fleet-wide prompt addition cannot be
-  # approved without its price visible".
-  defp context_cost_tokens(gist, _scope, _kind, payload) do
-    case payload && Map.get(payload, "clause") do
-      clause when is_binary(clause) and clause != "" -> estimate_tokens(clause)
-      _ when is_binary(gist) -> estimate_tokens(gist)
-      _ -> 0
+  defp context_cost_tokens(gist, _scope, _kind, payload), do: prose_tokens(payload, gist)
+
+  @doc """
+  The recurring per-dispatch price of the prose a fleet-wide row would land.
+
+  Body before clause before gist, because that is the order of how much of the
+  prompt the row actually adds (bd-5w8h0r):
+
+    * `"body"` — a `:skill_create` row authors the whole skill file, stub
+      preamble *and* clause. The preamble is carried by every dispatch that
+      materializes the skill, so pricing only the clause under-reads the row
+      by around a third.
+    * `"clause"` — a `:skill_patch` row carries no body; `Apply` splices the
+      clause into whatever the skill says at apply time, so the clause is the
+      whole of the addition.
+    * gist — a row with neither yet (a mid-analysis candidate). The one-line
+      summary an operator reads once in `arb loop pending` is a floor, not a
+      real price; it under-reads authored prose by roughly an order of
+      magnitude, on a figure whose entire purpose is that "a fleet-wide prompt
+      addition cannot be approved without its price visible".
+
+  Public so the bd-5w8h0r backfill prices a re-authored row exactly as
+  `record/2` would have, rather than re-implementing this precedence and
+  drifting from it.
+  """
+  @spec prose_tokens(map() | nil, String.t() | nil) :: non_neg_integer()
+  def prose_tokens(payload, gist) do
+    cond do
+      is_binary(body = payload && Map.get(payload, "body")) and body != "" ->
+        estimate_tokens(body)
+
+      is_binary(clause = payload && Map.get(payload, "clause")) and clause != "" ->
+        estimate_tokens(clause)
+
+      is_binary(gist) ->
+        estimate_tokens(gist)
+
+      true ->
+        0
     end
   end
-
 
   @doc """
   The recurring per-dispatch token price of `text`.
@@ -499,8 +525,8 @@ defmodule Arbiter.Loop do
   token is the standard rule of thumb for English; the ceiling keeps a short
   clause from rounding down to zero and reading as free.
 
-  Public so the bd-5w8h0r backfill prices a re-authored row exactly as
-  `record/2` would have.
+  Public as the primitive under `prose_tokens/2`, which is what a caller
+  pricing a whole row wants.
   """
   @spec estimate_tokens(String.t()) :: non_neg_integer()
   def estimate_tokens(text) do

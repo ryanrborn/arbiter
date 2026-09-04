@@ -168,7 +168,8 @@ defmodule Arbiter.Loop.FindingBuckets do
   in `categories/0` is guaranteed a row at compile time. Callers treat it as
   "leave this candidate unattributed" rather than guessing a target.
   """
-  @spec attribution(String.t() | nil) :: %{kind: atom(), skill: String.t(), imperative: String.t()} | nil
+  @spec attribution(String.t() | nil) ::
+          %{kind: atom(), skill: String.t(), imperative: String.t()} | nil
   def attribution(category) when is_binary(category), do: Map.get(@attribution, category)
   def attribution(_), do: nil
 

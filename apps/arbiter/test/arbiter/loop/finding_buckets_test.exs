@@ -34,7 +34,12 @@ defmodule Arbiter.Loop.FindingBucketsTest do
       # The regexes and the table are two halves of one map; a finding that
       # buckets but does not attribute is the drift this pairing exists to
       # prevent.
-      for text <- ["no test for the error branch", "leaked a credential", "breaks existing behaviour", "green tests but never wired"] do
+      for text <- [
+            "no test for the error branch",
+            "leaked a credential",
+            "breaks existing behaviour",
+            "green tests but never wired"
+          ] do
         assert {category, ^text} = FindingBuckets.bucket_finding(text)
         assert FindingBuckets.attribution(category)
       end

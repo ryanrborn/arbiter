@@ -74,6 +74,20 @@ defmodule Arbiter.Loop.SkillAttributionPassTest do
       assert row.payload["body"] =~ SkillClause.begin_marker(row.payload["clause_id"])
       assert row.evidence_count == 3
       assert row.distinct_tasks == 2
+
+      # The whole body lands in every future dispatch, stub preamble included
+      # — pricing only the clause under-reads the standing cost of the row.
+      assert row.context_cost_tokens == Arbiter.Loop.estimate_tokens(row.payload["body"])
+
+      assert row.context_cost_tokens > Arbiter.Loop.estimate_tokens(row.payload["clause"]),
+             "the stub preamble is free at this price"
+    end
+
+    # A :skill_patch carries no body: `Apply` splices the clause into whatever
+    # the skill says at apply time, so the clause is the whole addition.
+    for row <- Enum.filter(rows, &(&1.kind == :skill_patch)) do
+      refute Map.has_key?(row.payload, "body")
+      assert row.context_cost_tokens == Arbiter.Loop.estimate_tokens(row.payload["clause"])
     end
   end
 

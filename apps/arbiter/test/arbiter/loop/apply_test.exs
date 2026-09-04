@@ -214,7 +214,9 @@ defmodule Arbiter.Loop.ApplyTest do
 
       # A fresh row for the same finding, one window later, with more evidence.
       {:ok, second} =
-        Ash.update(first, %{payload: Map.put(first.payload, "clause", rendered(9)), actor: "loop"},
+        Ash.update(
+          first,
+          %{payload: Map.put(first.payload, "clause", rendered(9)), actor: "loop"},
           action: :reinforce,
           actor: "loop"
         )
@@ -241,6 +243,7 @@ defmodule Arbiter.Loop.ApplyTest do
       assert :ok == Apply.side_effect(row, Apply.attribution(row))
 
       {:ok, skill} = Arbiter.Skills.get_skill("test-driven-development")
+
       assert skill.body =~ "Also: run the suite.",
              "the payload carries a clause, not a whole body — applying it must not revert a human edit"
 

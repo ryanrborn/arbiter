@@ -99,7 +99,7 @@ defmodule Arbiter.Loop.PendingWriteTargetBackfillTest do
     assert new.payload["clause"] =~ "<!-- arbiter:loop:begin missing-test-coverage -->"
     assert new.payload["clause"] =~ "no test for the error branch"
     assert new.gist == "patch skill `test-driven-development`: #{@homed}"
-    assert new.context_cost_tokens > 0
+    assert new.context_cost_tokens == Arbiter.Loop.estimate_tokens(new.payload["clause"])
   end
 
   test "an unhomed category is re-homed as a :skill_create row" do
@@ -117,6 +117,11 @@ defmodule Arbiter.Loop.PendingWriteTargetBackfillTest do
     assert new.target == "credential-hygiene"
     assert new.payload["name"] == "credential-hygiene"
     assert new.payload["body"] =~ "credential-hygiene"
+
+    # Priced from the body, exactly as a live pass would price the same row —
+    # the stub preamble is part of what every future dispatch carries.
+    assert new.context_cost_tokens == Arbiter.Loop.estimate_tokens(new.payload["body"])
+    assert new.context_cost_tokens > Arbiter.Loop.estimate_tokens(new.payload["clause"])
   end
 
   test "a category with no attribution row is left alone and counted unresolved" do

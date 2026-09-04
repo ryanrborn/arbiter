@@ -9,7 +9,8 @@ defmodule Arbiter.Loop.SkillClauseTest do
   defp clause(overrides \\ %{}) do
     %{
       category: "missing test coverage",
-      imperative: "Before requesting review, confirm every new branch has a test that fails without the change.",
+      imperative:
+        "Before requesting review, confirm every new branch has a test that fails without the change.",
       example: "no test for the error branch",
       incidents: 4,
       tasks: ["bd-3kgb0e", "bd-aaaaaa"],
@@ -43,7 +44,8 @@ defmodule Arbiter.Loop.SkillClauseTest do
     test "a category with an em-dash gloss uses only its head as the heading and slug" do
       text =
         clause(%{
-          category: "context exhaustion — agent burned its own context window (no read discipline)"
+          category:
+            "context exhaustion — agent burned its own context window (no read discipline)"
         })
 
       assert text =~ "## Context exhaustion"

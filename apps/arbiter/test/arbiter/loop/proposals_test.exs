@@ -429,7 +429,11 @@ defmodule Arbiter.Loop.ProposalsTest do
     test "the clause cites the window the evidence came from" do
       r =
         report(%{
-          window: %{label: "last 7 days", since: ~U[2026-08-28 00:00:00Z], until: ~U[2026-09-04 00:00:00Z]},
+          window: %{
+            label: "last 7 days",
+            since: ~U[2026-08-28 00:00:00Z],
+            until: ~U[2026-09-04 00:00:00Z]
+          },
           finding_categories: [finding_category(%{category: "missing test coverage"})]
         })
 
