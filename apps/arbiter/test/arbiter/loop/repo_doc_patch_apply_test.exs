@@ -102,10 +102,11 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
       assert log =~ "teach this repo"
     end
 
-    test "when CLAUDE.md is a symlink to AGENTS.md, writes through symlink without replacing it", %{
-      ws: ws,
-      repo: repo
-    } do
+    test "when CLAUDE.md is a symlink to AGENTS.md, writes through symlink without replacing it",
+         %{
+           ws: ws,
+           repo: repo
+         } do
       agents_path = Path.join(repo, "AGENTS.md")
       claude_path = Path.join(repo, "CLAUDE.md")
 
@@ -113,7 +114,17 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
       File.ln_s!("AGENTS.md", claude_path)
       {_, 0} = System.cmd("git", ["-C", repo, "config", "core.symlinks", "true"])
       {_, 0} = System.cmd("git", ["-C", repo, "add", "AGENTS.md", "CLAUDE.md"])
-      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add AGENTS.md and CLAUDE.md symlink"])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          repo,
+          "commit",
+          "-q",
+          "-m",
+          "add AGENTS.md and CLAUDE.md symlink"
+        ])
+
       {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
 
       {:ok, row} = Loop.record(candidate(ws, %{}))
