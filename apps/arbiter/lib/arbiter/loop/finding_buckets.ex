@@ -53,6 +53,15 @@ defmodule Arbiter.Loop.FindingBuckets do
   `Arbiter.Loop.PendingWriteTargetBackfill` performs. `:imperative` is *not* a
   fingerprint input and may be reworded freely.
 
+  A consequence of the same rule, worth stating before it surprises someone:
+  once the loop has actually created one of the two `:skill_create` skills, a
+  later window's row for that category is *still* `:skill_create` and will fail
+  on the unique-name constraint. Moving that row to `:skill_patch` is itself a
+  fingerprint change, so it takes the same supersede/backfill step. That is the
+  documented operational rule rather than silent behaviour: the alternative —
+  deciding the kind at apply time from whether the skill happens to exist —
+  would make the fingerprint depend on mutable state outside the table.
+
   ## Skills are global today
 
   All fleet skills carry `workspace_id: nil`, and this table is not

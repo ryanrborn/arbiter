@@ -490,12 +490,20 @@ defmodule Arbiter.Loop do
   end
 
 
-  # Tokens, not bytes (Amendment D item 4). Skill clauses skew toward paths,
-  # flags and code fragments, which tokenize far worse than prose, so a byte
-  # count under-reads exactly the content most likely to be added. ~4 chars per
-  # token is the standard rule of thumb for English; the ceiling keeps a short
-  # clause from rounding down to zero and reading as free.
-  defp estimate_tokens(text) do
+  @doc """
+  The recurring per-dispatch token price of `text`.
+
+  Tokens, not bytes (Amendment D item 4). Skill clauses skew toward paths,
+  flags and code fragments, which tokenize far worse than prose, so a byte
+  count under-reads exactly the content most likely to be added. ~4 chars per
+  token is the standard rule of thumb for English; the ceiling keeps a short
+  clause from rounding down to zero and reading as free.
+
+  Public so the bd-5w8h0r backfill prices a re-authored row exactly as
+  `record/2` would have.
+  """
+  @spec estimate_tokens(String.t()) :: non_neg_integer()
+  def estimate_tokens(text) do
     text |> String.length() |> Kernel./(4) |> Float.ceil() |> trunc()
   end
 

@@ -393,6 +393,46 @@ an independent argument against any scheme where a model picks targets, since
 a model that re-decides weekly produces a supersede storm and an evidence
 count that never accumulates.
 
+### As shipped (bd-5w8h0r, #1474)
+
+The table lives in `Arbiter.Loop.FindingBuckets`, beside the regexes that
+produce the categories it keys on, with a **compile-time totality guard in
+both directions**: a bucket with no attribution row, or an attribution row
+matching no bucket, raises `CompileError`. The imperative sentence is the
+third column of each row, so a new bucket cannot ship without one.
+
+Two things went differently from the sketch above, both deliberate:
+
+* **The clause is spliced at apply time, not at pass time.** A `:skill_patch`
+  payload carries `"clause"` + `"clause_id"` and no `"body"`;
+  `Arbiter.Loop.Apply.Payload.skill_attrs/2` resolves it against the skill's
+  *current* body via `Arbiter.Loop.SkillClause.upsert/3`. Rendering a whole
+  body at pass time and applying it weeks later would silently revert any
+  human edit made in between — the failure `RepoDocPatch` exists to prevent on
+  a repo `CLAUDE.md`. `:skill_create` payloads do carry a full `"body"`, since
+  there is no existing body to clobber.
+* **The provenance comment cites the fingerprint, not the row id.** The
+  pending-write id does not exist when the payload is authored — the row is
+  inserted *from* the payload. `loop:proposal:<id>` still lands on the skill's
+  paper-trail version via `Arbiter.Loop.Apply.attribution/1`, so both
+  identifiers are recoverable.
+
+The backfill is `Arbiter.Loop.PendingWriteTargetBackfill`, run from
+`priv/repo/migrations/*_backfill_loop_pending_write_targets.exs`. It is plain
+SQL for the same reason `PendingWriteWorkspaceBackfill` is: under
+`bin/arbiter eval Arbiter.Release.migrate` the repo is started and Ash is not.
+It leaves `:rejected` rows alone (a rejection is a record of a decision about
+a proposal the successor is not) and leaves a category with no attribution row
+live, counted `unresolved`, rather than guessing a target.
+
+One standing consequence the table's moduledoc now carries: once the loop has
+created one of the two `:skill_create` skills, a later window's row for that
+category is still `:skill_create` and will fail on the unique-name constraint.
+Moving it to `:skill_patch` is itself a fingerprint change and takes the same
+supersede/backfill step. Deciding the kind at apply time from whether the
+skill happens to exist would have made the fingerprint depend on mutable state
+outside the table — the exact property this section argues against.
+
 ---
 
 ## 4. `repo_doc_patch` — nothing to decide here
