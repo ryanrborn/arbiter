@@ -153,6 +153,151 @@ defmodule Arbiter.Loop.ApplyTest do
     end
   end
 
+  describe "Apply.payload_ready?/1 — the payload-shape precondition, read-only (bd-bldypb)" do
+    test "a difficulty_override with task_id + difficulty is ready", %{ws: ws} do
+      row = proposed_override(ws, %Issue{id: Ecto.UUID.generate()}, 2)
+
+      assert :ok == Apply.payload_ready?(row)
+    end
+
+    test "agrees with side_effect/2 that a payload-less skill_patch is not ready", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(candidate(%{workspace_id: ws.id, scope: :task, payload: %{}}))
+
+      assert {:error, {:unmapped, msg}} = Apply.payload_ready?(row)
+      assert msg =~ "skill"
+
+      # Both paths reach the same verdict off the same underlying check.
+      assert Apply.payload_ready?(row) == Apply.side_effect(row, Apply.attribution(row))
+    end
+
+    test "a skill_patch naming a skill and a clause is ready even before the skill is fetched",
+         %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            scope: :task,
+            payload: %{
+              "skill" => "does-not-exist-yet",
+              "clause_id" => "x",
+              "clause" => "some clause text"
+            }
+          })
+        )
+
+      # Ready by payload shape alone — whether "does-not-exist-yet" is a real
+      # skill is a target-existence question `side_effect/2` answers, not a
+      # payload-shape one.
+      assert :ok == Apply.payload_ready?(row)
+    end
+
+    test "a skill_create with name + body is ready", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :skill_create,
+            scope: :task,
+            payload: %{"name" => "not-yet-created", "body" => "# body"}
+          })
+        )
+
+      assert :ok == Apply.payload_ready?(row)
+    end
+
+    test "a skill_create missing body is not ready", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :skill_create,
+            scope: :task,
+            payload: %{"name" => "not-yet-created"}
+          })
+        )
+
+      assert {:error, {:unmapped, _}} = Apply.payload_ready?(row)
+    end
+
+    test "a config_set with a non-empty patch is ready even against an unknown workspace", %{
+      ws: ws
+    } do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :config_set,
+            scope: :fleet,
+            payload: %{"workspace_id" => Ecto.UUID.generate(), "patch" => %{"a" => 1}}
+          })
+        )
+
+      assert :ok == Apply.payload_ready?(row)
+    end
+
+    test "a config_set with no patch is not ready", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :config_set,
+            scope: :fleet,
+            payload: %{}
+          })
+        )
+
+      assert {:error, {:unmapped, msg}} = Apply.payload_ready?(row)
+      assert msg =~ "patch"
+    end
+
+    test "a repo_doc_patch with a repo + lesson is ready", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :repo_doc_patch,
+            scope: :fleet,
+            repo: "arbiter",
+            payload: %{"lesson" => "some lesson"}
+          })
+        )
+
+      assert :ok == Apply.payload_ready?(row)
+    end
+
+    test "a repo_doc_patch with no repo attribution is not ready", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :repo_doc_patch,
+            scope: :fleet,
+            repo: nil,
+            payload: %{"lesson" => "some lesson"}
+          })
+        )
+
+      assert {:error, {:unmapped, msg}} = Apply.payload_ready?(row)
+      assert msg =~ "repo"
+    end
+
+    test "runs no side effect: no skill, issue, or workspace is created or touched", %{ws: ws} do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :skill_create,
+            scope: :task,
+            payload: %{"name" => "should-not-be-created", "body" => "# body"}
+          })
+        )
+
+      assert :ok == Apply.payload_ready?(row)
+      assert {:error, :not_found} == Arbiter.Skills.get_skill("should-not-be-created")
+    end
+  end
+
   describe "Apply.side_effect/2 — the skill_patch clause splice (bd-5w8h0r)" do
     setup %{ws: ws} do
       {:ok, skill} =
