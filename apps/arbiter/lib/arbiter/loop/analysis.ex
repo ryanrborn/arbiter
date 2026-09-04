@@ -24,9 +24,16 @@ defmodule Arbiter.Loop.Analysis do
       `loop.evidence_bar.{min_incidents,min_distinct_tasks}` (bd-9j2g3x).
     * Comparisons are grouped into `(difficulty, repo)` cells so drift with the
       difficulty/repo mix does not read as improvement.
+    * The **objective function** is denominated in the unit that actually binds
+      (#1463, Amendment E). Under subscription billing that is
+      `window_share_5h` — a task's draw on the 5-hour utilization window, the
+      window `Arbiter.Quota.Gate` throttles on — with imputed dollars retained
+      as a secondary figure. Under metered API billing dollars still bind and
+      stay primary. `Arbiter.Loop.Scarcity` owns the decision and its reasoning;
+      `Arbiter.Loop.Corpus` supplies the calibration on `meta.scarcity`.
   """
 
-  alias Arbiter.Loop.{Corpus, FailureClassifier, Proposals, Report}
+  alias Arbiter.Loop.{Corpus, FailureClassifier, Proposals, Report, Scarcity}
 
   @small_sample_caveat "At ~15 dispatches/day most single-window deltas are not statistically significant — treat single-window movements as hypotheses, not results."
 
@@ -125,6 +132,7 @@ defmodule Arbiter.Loop.Analysis do
   """
   @spec build_report([map()], keyword()) :: Report.t()
   def build_report(rows, opts \\ []) do
+    scarcity = scarcity(opts)
     failed = Enum.filter(rows, &(&1.status == :failed))
     classified = Enum.map(failed, &classify_row/1)
     agent_quality = Enum.filter(classified, &(&1.classification.class == :agent_quality))
@@ -135,19 +143,53 @@ defmodule Arbiter.Loop.Analysis do
     # they consider only main-worker runs — not the synthetic `#review`/`#impl`
     # runs (which carry no issue difficulty and would pollute the cells).
     main_rows = Enum.filter(rows, &(&1.worker_type == :main))
-    misestimates = difficulty_misestimates(main_rows)
+    misestimates = difficulty_misestimates(main_rows, scarcity)
 
     %Report{
       window: window(opts),
       totals: totals(rows),
+      scarcity: scarcity,
       segmentation: segmentation(classified),
       misclassification: misclassification(classified),
       finding_categories: finding_categories,
       difficulty_misestimates: misestimates,
       cells: cells(main_rows),
       suggestions: suggestions(finding_categories, evidence_bar(opts)),
-      notes: [@small_sample_caveat]
+      notes: [@small_sample_caveat, own_draw_note()]
     }
+  end
+
+  # The scarcity frame `Arbiter.Loop.Corpus.fetch/1` computed for this window.
+  # `build_report/2` is called directly (tests, and any caller assembling rows
+  # by hand), so a missing frame degrades to metered/uncalibrated — the same
+  # unit the pass used before #1463 — rather than crashing or inventing a
+  # calibration.
+  defp scarcity(opts) do
+    case opts |> Keyword.get(:meta, %{}) |> Map.get(:scarcity) do
+      %{unit: unit, calibration: _} = frame when unit in [:window_share_5h, :cost_usd] ->
+        frame
+
+      _ ->
+        mode = {:metered, :default}
+
+        %{
+          unit: Scarcity.primary_metric(mode),
+          secondary_unit: Scarcity.secondary_metric(mode),
+          billing_mode: mode,
+          calibration: Scarcity.calibrate(0.0, nil)
+        }
+    end
+  end
+
+  # Amendment E's own footnote: an analyser that measures quota windows must
+  # account for the windows it consumes. Stage 1 is deterministic Elixir with
+  # no model call, so its draw is a measured zero (written explicitly onto the
+  # pass's `usage_events` row by `Corpus.record_pass_cost/1`). This note is the
+  # place that claim stops being true the moment an LLM call lands inside
+  # `Loop` — the payload-authoring work — so it is rendered every window
+  # rather than left to the design doc.
+  defp own_draw_note do
+    "Analyser's own draw on the quota windows it measures: none — the Stage 1 pass is deterministic Elixir and makes no model call, so its `usage_events` row carries an explicit zero-token draw. If an LLM call ever lands inside `Loop`, its draw lands on that row and this note must stop saying \"none\"."
   end
 
   # ---- classification -----------------------------------------------------
@@ -304,13 +346,13 @@ defmodule Arbiter.Loop.Analysis do
   # per the ticket's "compare within a cell" discipline. A task with no cohort
   # data this window (nothing else in its cell) can't be shown to be an
   # outlier, so it is flagged by default rather than silently dropped.
-  defp difficulty_misestimates(rows) do
+  defp difficulty_misestimates(rows, scarcity) do
     tasks = task_level(rows)
     cells = Enum.group_by(tasks, &{&1.difficulty, &1.repo})
 
     tasks
     |> Enum.filter(&(&1.has_difficulty? and (&1.reworked? or &1.quality_failure?)))
-    |> Enum.map(&build_misestimate(&1, cells))
+    |> Enum.map(&build_misestimate(&1, cells, scarcity))
     |> Enum.reject(&is_nil/1)
     |> Enum.sort_by(& &1.task_id)
   end
@@ -337,6 +379,7 @@ defmodule Arbiter.Loop.Analysis do
         difficulty: dispatched,
         repo: repo,
         cost: cost,
+        window_share: sum_shares(task_rows),
         rounds: rounds,
         attempts: length(task_rows),
         reworked?: rounds >= 2,
@@ -353,7 +396,7 @@ defmodule Arbiter.Loop.Analysis do
 
   defp quality_misestimate_signal?(_), do: false
 
-  defp build_misestimate(t, cells) do
+  defp build_misestimate(t, cells, scarcity) do
     cohort =
       cells
       |> Map.get({t.difficulty, t.repo}, [])
@@ -361,125 +404,210 @@ defmodule Arbiter.Loop.Analysis do
 
     reason = if t.reworked?, do: :rework, else: :quality_failure
 
-    case cohort_verdict(cohort, t, reason) do
+    case cohort_verdict(cohort, t, reason, scarcity) do
       :drop ->
         nil
 
-      {:flag, cohort_cost, cohort_rounds} ->
+      {:flag, cohort_stats} ->
         %{
           task_id: t.task_id,
           cell: {t.difficulty, t.repo},
           dispatched_difficulty: t.difficulty,
           rounds: t.rounds,
           cost_usd: t.cost,
+          window_share_5h: t.window_share,
           reason: reason,
-          note: misestimate_note(reason, t, cohort_cost, cohort_rounds),
-          recommendation: misestimate_recommendation(reason, t, cohort_cost, cohort_rounds)
+          note: misestimate_note(reason, t, cohort_stats),
+          recommendation: misestimate_recommendation(reason, t, cohort_stats)
         }
     end
+  end
+
+  # Which unit this particular comparison runs in. `:window_share_5h` only when
+  # the installation's binding unit *is* the window AND the subject and every
+  # peer carries a share — a cell where only some tasks have one would silently
+  # mix units. Otherwise `:cost_usd`, which is what the comparison used before
+  # #1463 and what still binds under metered billing.
+  defp comparison_unit(subject, cohort, %{unit: :window_share_5h}) do
+    if Enum.all?([subject | cohort], &is_number(&1.window_share)),
+      do: :window_share_5h,
+      else: :cost_usd
+  end
+
+  defp comparison_unit(_subject, _cohort, _scarcity), do: :cost_usd
+
+  defp draw(t, :window_share_5h), do: t.window_share
+  defp draw(t, :cost_usd), do: t.cost
+
+  # Render a draw in whichever unit the comparison ran in, so a note and its
+  # baseline can never disagree about what they are counting.
+  defp fmt_draw(nil, _unit), do: "n/a"
+  defp fmt_draw(value, :window_share_5h), do: Scarcity.format_share(value)
+  defp fmt_draw(value, :cost_usd), do: "$#{fmt(value)}"
+
+  # A task's total draw is the sum of its runs' shares. `nil` when no run
+  # carries one — the corpus could not calibrate the window, and summing
+  # nothing into `0.0` would claim a measurement that was never taken.
+  defp sum_shares(task_rows) do
+    shares = task_rows |> Enum.map(&Map.get(&1, :window_share_5h)) |> Enum.filter(&is_number/1)
+    if shares == [], do: nil, else: Enum.sum(shares)
+  end
+
+  defp sum_group_shares(group) do
+    shares = group |> Enum.map(& &1.window_share) |> Enum.filter(&is_number/1)
+    if shares == [], do: nil, else: Enum.sum(shares)
+  end
+
+  defp mean_share(tasks) do
+    shares = tasks |> Enum.map(& &1.window_share) |> Enum.filter(&is_number/1)
+    if shares == [], do: nil, else: Enum.sum(shares) / length(shares)
   end
 
   # No cohort data this window means there is nothing to compare against, so
   # we can't demonstrate the task is (or isn't) an outlier — flag it rather
   # than silently drop it on an absence of evidence.
-  defp cohort_verdict([], _t, _reason), do: {:flag, nil, nil}
+  defp cohort_verdict([], t, _reason, scarcity),
+    do: {:flag, %{draw: nil, rounds: nil, unit: comparison_unit(t, [], scarcity)}}
 
   # Cohort too small to have a meaningful median: treat as insufficient evidence
   # (same path as empty cohort). This avoids computing a "median" from a single
   # peer task and treating it as reliable ground truth.
-  defp cohort_verdict(cohort, _t, _reason) when length(cohort) < @min_cohort_size do
-    {:flag, nil, nil}
+  defp cohort_verdict(cohort, t, _reason, scarcity) when length(cohort) < @min_cohort_size do
+    {:flag, %{draw: nil, rounds: nil, unit: comparison_unit(t, cohort, scarcity)}}
   end
 
   # For rework cases (multiple review rounds), require the task to exceed its
-  # cell median on BOTH rounds and cost. This filters out tasks that needed
-  # rework but didn't cost more (true rework, not under-provisioning).
-  defp cohort_verdict(cohort, t, :rework) do
-    cohort_cost = cohort |> Enum.map(& &1.cost) |> median()
+  # cell median on BOTH rounds and draw. This filters out tasks that needed
+  # rework but didn't draw more (true rework, not under-provisioning).
+  #
+  # #1463: "draw" is the binding unit, not necessarily dollars. Under
+  # subscription billing a task that is *cheaper* in imputed dollars than its
+  # peers but eats more of the 5h window is exactly the case the old
+  # cost-denominated comparison could not see.
+  defp cohort_verdict(cohort, t, :rework, scarcity) do
+    unit = comparison_unit(t, cohort, scarcity)
+    cohort_draw = cohort |> Enum.map(&draw(&1, unit)) |> median()
     cohort_rounds = cohort |> Enum.map(& &1.rounds) |> median()
 
-    if t.cost > cohort_cost and t.rounds > cohort_rounds do
-      {:flag, cohort_cost, cohort_rounds}
+    if draw(t, unit) > cohort_draw and t.rounds > cohort_rounds do
+      {:flag, %{draw: cohort_draw, rounds: cohort_rounds, unit: unit}}
     else
       :drop
     end
   end
 
   # For quality_failure cases (agent failures), require the task to exceed its
-  # cell median on cost only. Rounds are not the signal for quality failures
-  # (they converge in round 1 by definition), so we only care if the cost is
+  # cell median on draw only. Rounds are not the signal for quality failures
+  # (they converge in round 1 by definition), so we only care if the draw is
   # anomalously high.
-  defp cohort_verdict(cohort, t, :quality_failure) do
-    cohort_cost = cohort |> Enum.map(& &1.cost) |> median()
+  defp cohort_verdict(cohort, t, :quality_failure, scarcity) do
+    unit = comparison_unit(t, cohort, scarcity)
+    cohort_draw = cohort |> Enum.map(&draw(&1, unit)) |> median()
     cohort_rounds = cohort |> Enum.map(& &1.rounds) |> median()
 
-    if t.cost > cohort_cost do
-      {:flag, cohort_cost, cohort_rounds}
+    if draw(t, unit) > cohort_draw do
+      {:flag, %{draw: cohort_draw, rounds: cohort_rounds, unit: unit}}
     else
       :drop
     end
   end
 
-  defp misestimate_note(:rework, t, nil, nil) do
+  defp misestimate_note(:rework, t, %{draw: nil, unit: unit}) do
     "Dispatched difficulty #{inspect(t.difficulty)} under-provisioned the actual work: " <>
-      "#{t.rounds} review round(s), $#{fmt(t.cost)} across #{t.attempts} attempt(s) " <>
+      "#{t.rounds} review round(s), #{fmt_draw(draw(t, unit), unit)} across #{t.attempts} attempt(s) " <>
       "(no cohort data this window to compare against). Segmented within cell " <>
       "(#{inspect(t.difficulty)}, #{t.repo})."
   end
 
-  defp misestimate_note(:rework, t, cohort_cost, cohort_rounds) do
+  defp misestimate_note(:rework, t, %{draw: cohort_draw, rounds: cohort_rounds, unit: unit}) do
     "Dispatched difficulty #{inspect(t.difficulty)} under-provisioned the actual work: " <>
-      "#{t.rounds} review round(s) (cell median #{cohort_rounds}), $#{fmt(t.cost)} across " <>
-      "#{t.attempts} attempt(s) (cell median $#{fmt(cohort_cost)}). Segmented within cell " <>
+      "#{t.rounds} review round(s) (cell median #{cohort_rounds}), #{fmt_draw(draw(t, unit), unit)} across " <>
+      "#{t.attempts} attempt(s) (cell median #{fmt_draw(cohort_draw, unit)}). Segmented within cell " <>
       "(#{inspect(t.difficulty)}, #{t.repo})."
   end
 
-  defp misestimate_note(:quality_failure, t, nil, nil) do
+  defp misestimate_note(:quality_failure, t, %{draw: nil, unit: unit}) do
     "Converged in round 1, but needed #{t.attempts} attempt(s) due to agent-quality " <>
-      "failures on the way there: $#{fmt(t.cost)} total (no cohort data this window to " <>
-      "compare against). This is a cost signal, not a rounds-based under-provisioning " <>
+      "failures on the way there: #{fmt_draw(draw(t, unit), unit)} total (no cohort data this window to " <>
+      "compare against). This is a #{unit_word(unit)} signal, not a rounds-based under-provisioning " <>
       "claim. Segmented within cell (#{inspect(t.difficulty)}, #{t.repo})."
   end
 
-  defp misestimate_note(:quality_failure, t, cohort_cost, _cohort_rounds) do
+  defp misestimate_note(:quality_failure, t, %{draw: cohort_draw, unit: unit}) do
     "Converged in round 1, but needed #{t.attempts} attempt(s) due to agent-quality " <>
-      "failures on the way there: $#{fmt(t.cost)} total vs. a $#{fmt(cohort_cost)} cell " <>
-      "median. This is a cost signal, not a rounds-based under-provisioning claim. " <>
+      "failures on the way there: #{fmt_draw(draw(t, unit), unit)} total vs. a #{fmt_draw(cohort_draw, unit)} cell " <>
+      "median. This is a #{unit_word(unit)} signal, not a rounds-based under-provisioning claim. " <>
       "Segmented within cell (#{inspect(t.difficulty)}, #{t.repo})."
   end
 
-  defp misestimate_recommendation(:rework, t, _cohort_cost, _cohort_rounds) do
-    next = if t.difficulty, do: t.difficulty + 1, else: nil
-
+  # The `:rework` misestimate is the one that becomes a real proposal — a
+  # `:difficulty_override` `PendingWrite` carrying this exact `target_metric` /
+  # `baseline` pair as its pre-registration (see `Arbiter.Loop.Proposals`).
+  # Under subscription billing it is therefore the proposal kind that is
+  # denominated in the binding unit: the metric to move is the task's draw on
+  # the 5h window, with round-1 approval retained in the baseline as the
+  # leading indicator it has always been.
+  defp misestimate_recommendation(:rework, t, %{unit: :window_share_5h} = cs) do
     %{
       destination: :per_task_override,
-      action:
-        "paper-trailed per-task override (blast-radius 1): set Issue.difficulty=#{inspect(next)} on #{t.task_id} and log a tracked hypothesis — do NOT change fleet routing on this single case",
+      action: rework_action(t),
+      target_metric: "5h-window share to converge for #{t.task_id}",
+      baseline:
+        "#{Scarcity.format_share(t.window_share)} across #{t.attempts} attempt(s)" <>
+          cohort_clause(cs) <>
+          "; round-1 approval 0% (first attempt needed #{t.rounds} rounds)"
+    }
+  end
+
+  defp misestimate_recommendation(:rework, t, _cohort_stats) do
+    %{
+      destination: :per_task_override,
+      action: rework_action(t),
       target_metric: "round-1 approval rate for #{t.task_id}",
       baseline: "0% (first attempt needed #{t.rounds} rounds)"
     }
   end
 
-  defp misestimate_recommendation(:quality_failure, t, nil, _cohort_rounds) do
+  defp misestimate_recommendation(:quality_failure, t, %{draw: nil, unit: unit}) do
     %{
       destination: :per_task_override,
-      action:
-        "paper-trailed per-task override (blast-radius 1): investigate the agent-quality failures on #{t.task_id}'s earlier attempts before recommending a difficulty change — the reviewer approved on round 1, so this is a cost anomaly, not a rounds signal",
-      target_metric: "cost to converge for #{t.task_id}",
-      baseline: "$#{fmt(t.cost)} across #{t.attempts} attempt(s) (no cohort baseline available)"
+      action: quality_failure_action(t, unit),
+      target_metric: "#{unit_metric(unit)} to converge for #{t.task_id}",
+      baseline:
+        "#{fmt_draw(draw(t, unit), unit)} across #{t.attempts} attempt(s) (no cohort baseline available)"
     }
   end
 
-  defp misestimate_recommendation(:quality_failure, t, cohort_cost, _cohort_rounds) do
+  defp misestimate_recommendation(:quality_failure, t, %{draw: cohort_draw, unit: unit}) do
     %{
       destination: :per_task_override,
-      action:
-        "paper-trailed per-task override (blast-radius 1): investigate the agent-quality failures on #{t.task_id}'s earlier attempts before recommending a difficulty change — the reviewer approved on round 1, so this is a cost anomaly, not a rounds signal",
-      target_metric: "cost to converge for #{t.task_id}",
+      action: quality_failure_action(t, unit),
+      target_metric: "#{unit_metric(unit)} to converge for #{t.task_id}",
       baseline:
-        "$#{fmt(t.cost)} across #{t.attempts} attempt(s), vs. $#{fmt(cohort_cost)} cell median"
+        "#{fmt_draw(draw(t, unit), unit)} across #{t.attempts} attempt(s), vs. #{fmt_draw(cohort_draw, unit)} cell median"
     }
   end
+
+  defp rework_action(t) do
+    next = if t.difficulty, do: t.difficulty + 1, else: nil
+
+    "paper-trailed per-task override (blast-radius 1): set Issue.difficulty=#{inspect(next)} on #{t.task_id} and log a tracked hypothesis — do NOT change fleet routing on this single case"
+  end
+
+  defp quality_failure_action(t, unit) do
+    "paper-trailed per-task override (blast-radius 1): investigate the agent-quality failures on #{t.task_id}'s earlier attempts before recommending a difficulty change — the reviewer approved on round 1, so this is a #{unit_word(unit)} anomaly, not a rounds signal"
+  end
+
+  defp cohort_clause(%{draw: nil}), do: " (no cohort baseline available)"
+
+  defp cohort_clause(%{draw: cohort_draw, unit: unit}),
+    do: ", vs. a #{fmt_draw(cohort_draw, unit)} cell median"
+
+  defp unit_word(:window_share_5h), do: "quota-window"
+  defp unit_word(:cost_usd), do: "cost"
+
+  defp unit_metric(:window_share_5h), do: "5h-window share"
+  defp unit_metric(:cost_usd), do: "cost"
 
   defp median([]), do: nil
 
@@ -512,6 +640,7 @@ defmodule Arbiter.Loop.Analysis do
         repo: first.repo,
         title: Map.get(first, :title),
         cost: task_rows |> Enum.map(&(&1.cost_usd || 0.0)) |> Enum.sum(),
+        window_share: sum_shares(task_rows),
         reworked?: Enum.any?(task_rows, &(&1.max_round >= 2))
       }
     end)
@@ -527,6 +656,9 @@ defmodule Arbiter.Loop.Analysis do
         repo: repo,
         tasks: n,
         rework_rate: reworked / n,
+        # `nil` — not `0.0` — when no task in the cell carries a share: an
+        # uncalibrated window must not read as a cell that draws nothing.
+        mean_window_share_5h: mean_share(tasks),
         mean_cost_usd: total_cost / n
       }
     end)
@@ -558,6 +690,7 @@ defmodule Arbiter.Loop.Analysis do
             repo: repo,
             title: hd(group).title,
             cost: group |> Enum.map(& &1.cost) |> Enum.sum(),
+            window_share: sum_group_shares(group),
             reworked?: true
           }
         ]

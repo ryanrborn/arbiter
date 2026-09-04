@@ -20,12 +20,19 @@ defmodule Arbiter.Loop.Report do
     * `suggestions` — each names a target metric, a baseline, a destination
       (skill / repo `CLAUDE.md` / per-task override) and its evidence tier, so
       a single incident visibly **declines** a fleet-wide change.
+    * `scarcity` — the **unit the pass optimises against** (#1463, epic #1011
+      Amendment E): which of `window_share_5h` / `cost_usd` binds at this
+      installation, how the billing mode was determined (configured vs
+      inferred), and the 5h-window calibration every per-run share was divided
+      by — including a machine-readable reason when that calibration failed, so
+      an uncalibrated window never renders as a cheap one.
     * `notes` — the small-sample caveats, rendered verbatim.
   """
 
   @enforce_keys [:window, :totals]
   defstruct window: %{},
             totals: %{},
+            scarcity: %{},
             segmentation: [],
             misclassification: %{corroborated: 0, reclassified: 0, rate: 0.0, citations: []},
             finding_categories: [],
@@ -42,6 +49,7 @@ defmodule Arbiter.Loop.Report do
     [
       header(r),
       corpus(r),
+      scarcity(r),
       segmentation(r),
       misclassification(r),
       finding_categories(r),
@@ -89,6 +97,46 @@ defmodule Arbiter.Loop.Report do
     | distinct tasks | #{g(t, :tasks)} |
     """
   end
+
+  # #1463: the unit the whole report is denominated in, stated before any
+  # number that uses it. Rendered even when uncalibrated — a window whose
+  # capacity could not be estimated must say so, because a silent fallback to
+  # dollars is exactly the drift Amendment E is about.
+  defp scarcity(%{scarcity: %{unit: unit} = s}) do
+    {mode, source} = Map.get(s, :billing_mode, {:metered, :default})
+    cal = Map.get(s, :calibration, %{})
+
+    """
+    ## Unit of scarcity
+
+    | field | value |
+    |---|---|
+    | primary unit | `#{unit}` |
+    | secondary unit | `#{Map.get(s, :secondary_unit)}` |
+    | billing mode | #{mode} (#{source}) |
+    | 5h calibration | #{calibration_line(cal)} |
+    | analyser's own draw | none — deterministic pass, no model call |
+
+    Under **subscription** billing the marginal dollar is not the scarce
+    resource; the 5-hour utilization window is — it is the window
+    `Arbiter.Quota.Gate` throttles dispatch on. Under **metered** API billing
+    dollars bind and lead instead. Whichever is secondary is still reported,
+    never dropped. See `docs/loop-scarcity-unit.md`.
+    """
+  end
+
+  defp scarcity(_), do: ""
+
+  defp calibration_line(%{status: :calibrated} = c) do
+    "calibrated — #{round_i(Map.get(c, :capacity_weighted_tokens))} weighted tokens per window " <>
+      "(from #{round_i(Map.get(c, :observed_weighted_tokens))} observed at " <>
+      "#{pct(Map.get(c, :utilization))} utilization, captured #{iso_or(Map.get(c, :captured_at), "unknown")})"
+  end
+
+  defp calibration_line(%{reason: reason}),
+    do: "**uncalibrated** (`#{reason}`) — every per-run 5h share this window is `nil`, not zero"
+
+  defp calibration_line(_), do: "**uncalibrated** (`no_snapshot`)"
 
   defp segmentation(%{segmentation: seg}) do
     grouped = Enum.group_by(seg, & &1.class)
@@ -202,17 +250,19 @@ defmodule Arbiter.Loop.Report do
     body =
       cells
       |> Enum.map_join("\n", fn c ->
-        "| #{dlabel(c.difficulty)} | #{c.repo} | #{g(c, :tasks)} | #{pct(Map.get(c, :rework_rate, 0.0))} | $#{money(Map.get(c, :mean_cost_usd))} |"
+        "| #{dlabel(c.difficulty)} | #{c.repo} | #{g(c, :tasks)} | #{pct(Map.get(c, :rework_rate, 0.0))} | #{share(Map.get(c, :mean_window_share_5h))} | $#{money(Map.get(c, :mean_cost_usd))} |"
       end)
 
     """
-    ## Cost & rework by (difficulty, repo) cell
+    ## Draw & rework by (difficulty, repo) cell
 
     Compare **within** a cell; metrics move with difficulty mix and repo, so
-    cross-cell comparison reads drift as improvement.
+    cross-cell comparison reads drift as improvement. The **mean 5h share** is
+    the binding unit under subscription billing (#1463); mean cost is retained
+    as the secondary figure and is the primary one under metered API billing.
 
-    | difficulty | repo | tasks | rework rate | mean cost |
-    |---|---|---|---|---|
+    | difficulty | repo | tasks | rework rate | mean 5h share | mean cost |
+    |---|---|---|---|---|---|
     #{body}
     """
   end
@@ -231,6 +281,7 @@ defmodule Arbiter.Loop.Report do
 
         - **Dispatched difficulty:** D#{Map.get(m, :dispatched_difficulty)}
         - **Rounds:** #{Map.get(m, :rounds)}
+        - **5h-window share:** #{share(Map.get(m, :window_share_5h))}
         - **Cost:** $#{money(Map.get(m, :cost_usd))}
         - **Note:** #{Map.get(m, :note, "")}
         - **Recommendation:** #{destination(Map.get(rec, :destination))} — #{Map.get(rec, :action, "")}
@@ -316,6 +367,15 @@ defmodule Arbiter.Loop.Report do
 
   defp pct(rate) when is_number(rate), do: "#{Float.round(rate * 100, 1)}%"
   defp pct(_), do: "n/a"
+
+  defp share(s) when is_number(s), do: "#{Float.round(s * 100, 1)}%"
+  defp share(_), do: "n/a"
+
+  defp round_i(n) when is_number(n), do: n |> round() |> Integer.to_string()
+  defp round_i(_), do: "?"
+
+  defp iso_or(%DateTime{} = dt, _fallback), do: iso(dt)
+  defp iso_or(_other, fallback), do: fallback
 
   defp money(nil), do: "0.00"
   defp money(n) when is_integer(n), do: :erlang.float_to_binary(n / 1, decimals: 2)
