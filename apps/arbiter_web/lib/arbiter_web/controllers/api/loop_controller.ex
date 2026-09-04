@@ -206,8 +206,22 @@ defmodule ArbiterWeb.Api.LoopController do
       totals: report.totals,
       misclassification_rate: report.misclassification[:rate],
       finding_categories: length(report.finding_categories),
+      finding_residue: finding_residue_summary(report.finding_residue),
       difficulty_misestimates: length(report.difficulty_misestimates),
       fleet_wide_suggestions: Enum.count(report.suggestions, &(&1.verdict == :fleet_wide))
+    }
+  end
+
+  # bd-5ja2vb: the count/rate/distinct-task shape, without the retained
+  # `units` sample (potentially hundreds of finding-text strings) — that
+  # belongs to the in-process `Report` a future backfill pass reads, not the
+  # compact summary a CLI/dashboard renders.
+  defp finding_residue_summary(fr) do
+    %{
+      total_units: Map.get(fr, :total_units, 0),
+      count: Map.get(fr, :count, 0),
+      rate: Map.get(fr, :rate),
+      distinct_tasks: Map.get(fr, :distinct_tasks, 0)
     }
   end
 

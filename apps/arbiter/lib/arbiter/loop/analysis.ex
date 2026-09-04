@@ -33,7 +33,7 @@ defmodule Arbiter.Loop.Analysis do
       `Arbiter.Loop.Corpus` supplies the calibration on `meta.scarcity`.
   """
 
-  alias Arbiter.Loop.{Corpus, FailureClassifier, Proposals, Report, Scarcity}
+  alias Arbiter.Loop.{Corpus, FailureClassifier, FindingBuckets, Proposals, Report, Scarcity}
 
   @small_sample_caveat "At ~15 dispatches/day most single-window deltas are not statistically significant — treat single-window movements as hypotheses, not results."
 
@@ -155,6 +155,7 @@ defmodule Arbiter.Loop.Analysis do
       difficulty_misestimates: misestimates,
       cells: cells(main_rows),
       suggestions: suggestions(finding_categories, evidence_bar(opts)),
+      finding_residue: finding_residue(opts),
       notes: [@small_sample_caveat, own_draw_note()]
     }
   end
@@ -190,6 +191,14 @@ defmodule Arbiter.Loop.Analysis do
   # rather than left to the design doc.
   defp own_draw_note do
     "Analyser's own draw on the quota windows it measures: none — the Stage 1 pass is deterministic Elixir and makes no model call, so its `usage_events` row carries an explicit zero-token draw. If an LLM call ever lands inside `Loop`, its draw lands on that row and this note must stop saying \"none\"."
+  end
+
+  # `Corpus.fetch/1` computes the residue (it owns the raw `review_gate_rounds`
+  # query, over ALL review rounds in the window — not just the agent-quality
+  # subset `finding_categories/1` clusters) and carries it in `meta`, alongside
+  # `failed_runs` / `transcript_reads`. This just threads it onto the report.
+  defp finding_residue(opts) do
+    opts |> Keyword.get(:meta, %{}) |> Map.get(:finding_residue, Corpus.empty_finding_residue())
   end
 
   # ---- classification -----------------------------------------------------
@@ -259,16 +268,6 @@ defmodule Arbiter.Loop.Analysis do
 
   # ---- finding categories (cluster reviewer findings + failure subcats) ----
 
-  # Keyword taxonomy over reviewer findings text. Order matters: first match
-  # wins per finding string.
-  @finding_buckets [
-    {~r/inert|never (?:executed|called|invoked|run|wired)|not (?:wired|reachable)|green tests? but|passes? but .*runtime/i,
-     "plausible code, green tests, inert at runtime"},
-    {~r/no test|missing test|untested|test coverage|without a test/i, "missing test coverage"},
-    {~r/secret|credential|token leaked/i, "secret / credential exposure"},
-    {~r/regression|breaks? existing|broke /i, "regression in existing behaviour"}
-  ]
-
   defp finding_categories(agent_quality_rows) do
     # Reviewer findings are task-level: `Corpus` keys the same `findings` list
     # to every run of a task (review rounds are recorded under the base task
@@ -284,7 +283,7 @@ defmodule Arbiter.Loop.Analysis do
       agent_quality_rows
       |> Enum.flat_map(fn row ->
         row.findings
-        |> Enum.map(&bucket_finding/1)
+        |> Enum.map(&FindingBuckets.bucket_finding/1)
         |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
         |> Enum.map(fn {cat, example} -> {cat, row, example} end)
@@ -313,12 +312,6 @@ defmodule Arbiter.Loop.Analysis do
       }
     end)
     |> Enum.sort_by(&(-&1.incidents))
-  end
-
-  defp bucket_finding(text) when is_binary(text) do
-    Enum.find_value(@finding_buckets, fn {re, cat} ->
-      if Regex.match?(re, text), do: {cat, text}
-    end)
   end
 
   # ---- difficulty misestimates -------------------------------------------

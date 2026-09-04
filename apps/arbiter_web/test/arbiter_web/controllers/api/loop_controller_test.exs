@@ -106,6 +106,37 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       refute Map.has_key?(body, "proposals")
       assert Ash.read!(PendingWrite) == []
     end
+
+    # bd-5ja2vb: the finding-residue count/rate/distinct_tasks must reach the
+    # compact JSON summary, not just the markdown, so a programmatic caller can
+    # watch the ceiling without parsing prose.
+    test "the JSON summary carries the finding-residue count/rate/distinct_tasks", %{conn: conn} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "ctrl residue", difficulty: 1, workspace_id: workspace!().id})
+
+      run = run!(%{task_id: issue.id, status: :failed, failure_reason: ":review_gate_rejected"})
+
+      {:ok, _} =
+        Ash.create(Round, %{
+          task_id: issue.id,
+          run_id: run.id,
+          round: 1,
+          role: :review,
+          verdict: :request_changes,
+          converged: false,
+          findings: "1. The memoisation key omits the tenant id."
+        })
+
+      conn = get(conn, ~p"/api/loop/analyze", %{since: "24h"})
+      body = json_response(conn, 200)
+
+      residue = body["summary"]["finding_residue"]
+      assert residue["total_units"] == 1
+      assert residue["count"] == 1
+      assert residue["rate"] == 1.0
+      assert residue["distinct_tasks"] == 1
+      assert body["markdown"] =~ "memoisation key"
+    end
   end
 
   describe "POST /api/loop/propose" do
