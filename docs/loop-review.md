@@ -340,6 +340,16 @@ fraction of reviewed tasks need a round 2.
 - `issues.difficulty` is the *current* value, so a re-filed task shows its final
   difficulty, not the value each attempt was dispatched at. Read
   "dispatched difficulty" in the report with that in mind.
+- **Reviewer findings that match no bucket are dropped, uncounted.**
+  `Analysis.bucket_finding/1` is a four-regex allowlist; a finding matching none
+  of them is rejected at `analysis.ex:246` and never reaches the report. Measured
+  2026-09-04 over a 30-day window: **81.8% of finding units (275 of 336) matched
+  no bucket**. So "reviewer-finding categories" is a report of the four things
+  the analyser can name, not of what reviewers actually found. The
+  failure-reason allowlist has an `:unclassified` residue section for exactly
+  this reason; this one does not, yet. Re-measure with
+  `scripts/measure_loop_finding_residue.sh`; the decision on what to do about it
+  is `docs/design/loop-inference-discovery-pass.md` (`bd-5oh1lc` / #1464).
 
 ## Why it can't run the way the first attempt did
 
