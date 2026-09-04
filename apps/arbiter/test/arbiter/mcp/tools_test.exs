@@ -4151,6 +4151,28 @@ defmodule Arbiter.MCP.ToolsTest do
       # Amendment D: a coordinator deciding over MCP sees the same recurring
       # price a human sees in the CLI. A per-task override is free forever.
       assert summary.context_cost_tokens == 0
+      # bd-bldypb: a difficulty override's payload is always complete, so it
+      # never needs authoring.
+      refute summary.needs_authoring
+    end
+
+    test "loop_pending_list marks a payload-less row as needing authoring (bd-bldypb)", ctx do
+      {:ok, gapped} =
+        Arbiter.Loop.record(%{
+          kind: :skill_patch,
+          scope: :task,
+          gist: "teach read discipline: context exhaustion",
+          category: "missing test coverage",
+          target: nil,
+          incident_refs: ["run-a"],
+          task_refs: ["bd-1"],
+          payload: %{},
+          workspace_id: ctx.ws.id
+        })
+
+      assert {:ok, data} = Tools.loop_pending_list(ctx.coordinator, %{})
+      summary = Enum.find(data.pending, &(&1.id == gapped.id))
+      assert summary.needs_authoring
     end
 
     test "loop_pending_list rejects an unknown state rather than silently returning nothing",
@@ -4167,6 +4189,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert data.diff =~ "+difficulty: 3"
       assert data.fingerprint == ctx.row.fingerprint
       assert data.applicable == true
+      refute data.authoring_gap
     end
 
     test "loop_pending_apply goes through the domain API and paper-trails the proposal id", ctx do

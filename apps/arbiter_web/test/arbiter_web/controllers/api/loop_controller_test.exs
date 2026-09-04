@@ -287,8 +287,33 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       # Amendment D: `arb loop pending` renders the recurring context price
       # straight off this summary shape, so it travels even when it is zero.
       assert summary["context_cost_tokens"] == row.context_cost_tokens
+      # bd-bldypb: a difficulty override's payload is always complete.
+      refute summary["needs_authoring"]
       # The summary shape stays compact — the diff is on the detail route.
       refute Map.has_key?(hd(body["pending"]), "diff")
+    end
+
+    test "GET /api/loop/pending marks a payload-less row as needing authoring (bd-bldypb)", %{
+      conn: conn
+    } do
+      {:ok, gapped} =
+        Loop.record(%{
+          kind: :skill_patch,
+          scope: :task,
+          gist: "teach read discipline: context exhaustion",
+          category: "missing test coverage",
+          target: nil,
+          incident_refs: ["run-a"],
+          task_refs: ["bd-1"],
+          payload: %{},
+          workspace_id: workspace!().id
+        })
+
+      conn = get(conn, ~p"/api/loop/pending")
+      body = json_response(conn, 200)
+
+      summary = Enum.find(body["pending"], &(&1["id"] == gapped.id))
+      assert summary["needs_authoring"]
     end
 
     test "GET /api/loop/pending rejects an unknown state rather than returning nothing", %{
@@ -308,6 +333,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       assert body["pending"]["diff"] =~ "+difficulty: 3"
       assert body["pending"]["fingerprint"] == row.fingerprint
       assert body["pending"]["applicable"] == true
+      refute body["pending"]["authoring_gap"]
     end
 
     test "GET /api/loop/pending/:id 404s on an unknown id", %{conn: conn} do

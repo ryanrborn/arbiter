@@ -153,6 +153,45 @@ defmodule ArbiterCli.Cmd.LoopTest do
       assert out =~ "free"
     end
 
+    # bd-bldypb: a row whose payload can't satisfy its kind's apply
+    # preconditions is marked beside the state, so an operator can tell
+    # which rows are actionable without pressing apply on each one.
+    test "loop pending marks a payload-less row as needing authoring" do
+      stub_get("/api/loop/pending", %{
+        "pending" => [
+          %{
+            "id" => "p-1",
+            "state" => "proposed",
+            "kind" => "skill_patch",
+            "evidence_count" => 4,
+            "distinct_tasks" => 3,
+            "needs_authoring" => true,
+            "gist" => "missing test coverage"
+          },
+          %{
+            "id" => "p-2",
+            "state" => "proposed",
+            "kind" => "difficulty_override",
+            "evidence_count" => 1,
+            "distinct_tasks" => 1,
+            "needs_authoring" => false,
+            "gist" => "raise difficulty on bd-x: D1 → D2"
+          }
+        ],
+        "evidence_bar" => %{"min_incidents" => 3, "min_distinct_tasks" => 2}
+      })
+
+      {out, _err, exit_code} = capture(fn -> Loop.run(["pending"]) end)
+
+      assert exit_code == 0
+      lines = String.split(out, "\n", trim: true)
+      gapped_line = Enum.find(lines, &String.contains?(&1, "p-1"))
+      override_line = Enum.find(lines, &String.contains?(&1, "p-2"))
+
+      assert gapped_line =~ "needs authoring"
+      refute override_line =~ "needs authoring"
+    end
+
     test "loop pending names the evidence bar when the queue is empty" do
       stub_get("/api/loop/pending", %{
         "pending" => [],
@@ -237,6 +276,32 @@ defmodule ArbiterCli.Cmd.LoopTest do
       assert exit_code == 0
       assert out =~ "not applicable"
       assert out =~ "needs 3 incidents"
+      assert out =~ "no diff"
+    end
+
+    test "loop diff surfaces why a proposed row needs authoring (bd-bldypb)" do
+      stub_get("/api/loop/pending/p-4", %{
+        "pending" => %{
+          "id" => "p-4",
+          "state" => "proposed",
+          "kind" => "skill_patch",
+          "scope" => "task",
+          "gist" => "missing test coverage",
+          "evidence_count" => 1,
+          "distinct_tasks" => 1,
+          "diff" => nil,
+          "needs_authoring" => true,
+          "authoring_gap" =>
+            "this proposal names no target skill: the loop does not yet map a finding " <>
+              "category to a skill"
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Loop.run(["diff", "p-4"]) end)
+
+      assert exit_code == 0
+      assert out =~ "needs authoring"
+      assert out =~ "names no target skill"
       assert out =~ "no diff"
     end
 
