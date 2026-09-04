@@ -172,6 +172,61 @@ defmodule Arbiter.Loop.ReportTest do
     end
   end
 
+  describe "finding residue is a corpus-integrity signal, symmetric with unclassified (bd-5ja2vb)" do
+    test "reports count, rate, distinct tasks, and cites units by task_id/run_id" do
+      report = %Report{
+        window: %{label: "test"},
+        totals: %{runs: 4, main_runs: 4, failed: 4, completed: 0, tasks: 4, dispatches: 4},
+        segmentation: [],
+        misclassification: %{corroborated: 0, reclassified: 0, rate: nil, citations: []},
+        finding_categories: [],
+        difficulty_misestimates: [],
+        cells: [],
+        suggestions: [],
+        finding_residue: %{
+          total_units: 4,
+          count: 3,
+          rate: 0.75,
+          distinct_tasks: 2,
+          units: [
+            %{task_id: "bd-res-1", run_id: "run-a", text: "stale memoisation key on refresh"},
+            %{task_id: "bd-res-2", run_id: "run-b", text: "cache key omits the shard id"}
+          ]
+        },
+        notes: []
+      }
+
+      md = Report.to_markdown(report)
+
+      assert md =~ "residue" or md =~ "Residue"
+      assert md =~ "corpus-integrity"
+      assert md =~ "75.0%"
+      assert md =~ "bd-res-1"
+      assert md =~ "run-a"
+      assert md =~ "stale memoisation key on refresh"
+      assert md =~ "bd-res-2"
+    end
+
+    test "a clean window with zero residue still renders the section (0 of 0)" do
+      report = %Report{
+        window: %{label: "test"},
+        totals: %{runs: 1, main_runs: 1, failed: 0, completed: 1, tasks: 1, dispatches: 1},
+        segmentation: [],
+        misclassification: %{corroborated: 0, reclassified: 0, rate: nil, citations: []},
+        finding_categories: [],
+        difficulty_misestimates: [],
+        cells: [],
+        suggestions: [],
+        finding_residue: %{total_units: 0, count: 0, rate: nil, distinct_tasks: 0, units: []},
+        notes: []
+      }
+
+      md = Report.to_markdown(report)
+      assert md =~ "residue" or md =~ "Residue"
+      assert md =~ "n/a"
+    end
+  end
+
   describe "n=1 decline discipline (the bd-7rspia validation)" do
     test "a single-incident finding renders as a per-task override, not a fleet change" do
       report = %Report{

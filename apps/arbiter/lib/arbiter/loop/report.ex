@@ -26,6 +26,11 @@ defmodule Arbiter.Loop.Report do
       inferred), and the 5h-window calibration every per-run share was divided
       by — including a machine-readable reason when that calibration failed, so
       an uncalibrated window never renders as a cheap one.
+    * `finding_residue` (bd-5ja2vb) — the reviewer-finding units
+      `Arbiter.Loop.FindingBuckets.bucket_finding/1` matched to no bucket, a
+      **first-class corpus-integrity finding** symmetric with
+      `misclassification` above: count, rate, distinct tasks and a retained,
+      bounded, newest-first sample with `{task_id, run_id}` citations.
     * `notes` — the small-sample caveats, rendered verbatim.
   """
 
@@ -39,6 +44,7 @@ defmodule Arbiter.Loop.Report do
             difficulty_misestimates: [],
             cells: [],
             suggestions: [],
+            finding_residue: %{total_units: 0, count: 0, rate: nil, distinct_tasks: 0, units: []},
             notes: []
 
   @type t :: %__MODULE__{}
@@ -53,6 +59,7 @@ defmodule Arbiter.Loop.Report do
       segmentation(r),
       misclassification(r),
       finding_categories(r),
+      finding_residue(r),
       cells(r),
       difficulty_misestimates(r),
       suggestions(r),
@@ -238,6 +245,9 @@ defmodule Arbiter.Loop.Report do
   defp misclassification_rate_text(nil, 0), do: "n/a (0 corroborated)"
   defp misclassification_rate_text(rate, _), do: pct(rate)
 
+  defp finding_residue_rate_text(nil, 0), do: "n/a (0 finding units)"
+  defp finding_residue_rate_text(rate, _), do: pct(rate)
+
   defp finding_categories(%{finding_categories: []}), do: ""
 
   defp finding_categories(%{finding_categories: cats}) do
@@ -255,6 +265,46 @@ defmodule Arbiter.Loop.Report do
     | category | incidents | tasks | run_ids | example |
     |---|---|---|---|---|
     #{body}
+    """
+  end
+
+  # bd-5ja2vb: symmetric with `misclassification/1` above — a reviewer finding
+  # matching no `FindingBuckets` bucket is a corpus-integrity finding, not a
+  # silently dropped unit. Shown unconditionally (like misclassification),
+  # not suppressed on zero, so a clean window says "0 of 0" rather than
+  # nothing.
+  @finding_residue_citation_n 10
+
+  defp finding_residue(%{finding_residue: fr}) do
+    total = Map.get(fr, :total_units, 0)
+    count = Map.get(fr, :count, 0)
+    tasks = Map.get(fr, :distinct_tasks, 0)
+    rate_text = finding_residue_rate_text(Map.get(fr, :rate), total)
+
+    cites =
+      fr
+      |> Map.get(:units, [])
+      |> Enum.take(@finding_residue_citation_n)
+      |> Enum.map_join("\n", fn u ->
+        "- `#{u.task_id}` / `#{u.run_id}` — #{u.text}"
+      end)
+
+    """
+    ## Reviewer-finding residue (corpus-integrity signal — bucket-allowlist drift detector)
+
+    `FindingBuckets.bucket_finding/1` is a four-regex allowlist, not ground
+    truth. Of **#{total}** reviewer finding units (`role: review`, non-approve
+    rounds) this window, **#{count}** matched none of the buckets — a residue
+    rate of **#{rate_text}**, across **#{tasks}** distinct task(s). This is a
+    **first-class corpus-integrity finding**, symmetric with the
+    misclassification rate above: an allowlist blind spot is worth more than
+    any single bucket, and is surfaced with citations rather than silently
+    dropped. Residue units are retained (bounded, newest-first, per-unit
+    truncated — see `Arbiter.Loop.Corpus.residue_retention_limit/0` and
+    `residue_text_limit/0`) so a later merged detector can be backfilled over
+    them.
+
+    #{cites}
     """
   end
 
