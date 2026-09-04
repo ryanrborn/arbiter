@@ -5,6 +5,18 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
 
   alias Arbiter.Loop
   alias Arbiter.Skills
+  alias Arbiter.Tasks.Workspace
+
+  # `resolve_workspace_id/3` attributes a `scope: :fleet` candidate with no
+  # `workspace_id` via `Quota.default_workspace_id/0`, which refuses once the
+  # install has zero (or several, none named "default") workspaces (bd-3dasqm).
+  # Stamp a real workspace on every fixture so these tests don't depend on
+  # install ambiguity, mirroring the loop_controller_test fix.
+  defp workspace! do
+    n = System.unique_integer([:positive])
+    {:ok, ws} = Ash.create(Workspace, %{name: "loop-idx-#{n}", prefix: "li#{n}"})
+    ws
+  end
 
   # A candidate that clears the default bar (3 incidents / 2 distinct tasks).
   defp proposed(attrs \\ %{}) do
@@ -18,12 +30,21 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       category: "category-#{n}",
       target: "target-#{n}",
       scope: :fleet,
+      workspace_id: workspace!().id,
       incident_refs: ["r1-#{n}", "r2-#{n}", "r3-#{n}"],
       task_refs: ["bd-a#{n}", "bd-b#{n}"]
     }
 
     {:ok, row} = Loop.record(Map.merge(base, attrs))
     row
+  end
+
+  # A `:proposed` row now escalates to the coordinator mailbox (bd-3dasqm) —
+  # a fixture's gist can therefore appear in the page's mailbox drawer as
+  # well as (or instead of) the `#loop-proposals` list. Scoped to the list
+  # itself, so these assertions test row visibility, not mailbox leakage.
+  defp proposals_html(view) do
+    view |> element("#loop-proposals, #loop-proposals-empty") |> render()
   end
 
   defp hypothesis(attrs \\ %{}) do
@@ -84,17 +105,16 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       hyp = hypothesis()
       {:ok, rejected} = Loop.reject_pending(proposed(), reason: "not worth it")
 
-      {:ok, view, html} = live(conn, ~p"/loop")
-      assert html =~ hyp.gist
-      refute html =~ rejected.gist
+      {:ok, view, _html} = live(conn, ~p"/loop")
+      assert proposals_html(view) =~ hyp.gist
+      refute proposals_html(view) =~ rejected.gist
 
-      html =
-        view
-        |> element("button[phx-click=filter][phx-value-tab=rejected]")
-        |> render_click()
+      view
+      |> element("button[phx-click=filter][phx-value-tab=rejected]")
+      |> render_click()
 
-      assert html =~ rejected.gist
-      refute html =~ hyp.gist
+      assert proposals_html(view) =~ rejected.gist
+      refute proposals_html(view) =~ hyp.gist
     end
 
     test "a filter value outside the tabs' options falls back to live", %{conn: conn} do
@@ -221,15 +241,15 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
 
       # The live filter excludes :applied rows from a fresh query — but this
       # one was *just* decided in this session, so it must not vanish.
-      assert html =~ row.gist
+      assert proposals_html(view) =~ row.gist
       assert html =~ ~s(data-decided="applied")
       assert html =~ "Dismiss"
       # The toast only hides the row — it never claims to undo the write.
       refute html =~ "Undo"
 
-      html = view |> element("[phx-click=dismiss_decision]") |> render_click()
+      view |> element("[phx-click=dismiss_decision]") |> render_click()
 
-      refute html =~ row.gist
+      refute proposals_html(view) =~ row.gist
     end
 
     test "dismiss clears every decided row in this session, not just the most recently toasted",
@@ -243,16 +263,18 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       view |> form("form[phx-submit=reject]") |> render_submit()
 
       view |> element("button[phx-value-id='#{row_b.id}']", "Review") |> render_click()
-      html = view |> form("form[phx-submit=reject]") |> render_submit()
+      view |> form("form[phx-submit=reject]") |> render_submit()
 
       # Both are dimmed and visible even though only the most recent toast shows.
-      assert html =~ row_a.gist
-      assert html =~ row_b.gist
+      proposals = proposals_html(view)
+      assert proposals =~ row_a.gist
+      assert proposals =~ row_b.gist
 
-      html = view |> element("[phx-click=dismiss_decision]") |> render_click()
+      view |> element("[phx-click=dismiss_decision]") |> render_click()
+      proposals = proposals_html(view)
 
-      refute html =~ row_a.gist
-      refute html =~ row_b.gist
+      refute proposals =~ row_a.gist
+      refute proposals =~ row_b.gist
     end
 
     test "switching filters clears decided rows so they don't leak into other filters",
@@ -269,13 +291,12 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
       view |> element("button[phx-click=apply]") |> render_click()
 
-      html =
-        view
-        |> element("button[phx-click=filter][phx-value-tab=rejected]")
-        |> render_click()
+      view
+      |> element("button[phx-click=filter][phx-value-tab=rejected]")
+      |> render_click()
 
       # The applied row must not leak into an unrelated filter's list or count.
-      refute html =~ row.gist
+      refute proposals_html(view) =~ row.gist
     end
 
     test "a decided row keeps its created_at-sorted position instead of jumping to the bottom",

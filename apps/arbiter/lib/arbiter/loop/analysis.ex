@@ -62,6 +62,12 @@ defmodule Arbiter.Loop.Analysis do
   reinforced onto the row with the same fingerprint from an earlier window — and
   the returned map gains a `:proposals` key. Proposals are inert: queueing one
   applies nothing, at any evidence level.
+
+  A candidate `Arbiter.Loop.record/2` refuses (e.g. a `:fleet` candidate on
+  an install with no unambiguous default workspace, bd-3dasqm) is not queued
+  and is not silently lost either: it is counted in `:proposals_dropped`
+  (`[%{gist:, reason:}]`) so an operator on such an install can see the
+  fleet-finding stream is going missing, rather than only a log line.
   """
   @spec analyze(keyword()) :: {:ok, map()} | {:error, term()}
   def analyze(opts \\ []) do
@@ -92,13 +98,18 @@ defmodule Arbiter.Loop.Analysis do
       # `:proposals` is only added when the caller opted in, so a non-proposing
       # caller sees exactly the map shape it saw before Stage 2.
       if Keyword.get(opts, :propose?, false) do
-        proposals =
+        %{rows: proposals, dropped: dropped} =
           Proposals.record_all(report,
             workspace_id: workspace_id,
             actor: Keyword.get(opts, :actor, "loop")
           )
 
-        {:ok, Map.put(envelope, :proposals, proposals)}
+        envelope =
+          envelope
+          |> Map.put(:proposals, proposals)
+          |> Map.put(:proposals_dropped, dropped)
+
+        {:ok, envelope}
       else
         {:ok, envelope}
       end

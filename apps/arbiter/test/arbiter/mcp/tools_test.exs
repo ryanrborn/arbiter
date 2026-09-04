@@ -4209,6 +4209,37 @@ defmodule Arbiter.MCP.ToolsTest do
       assert message =~ "no loop proposal matching"
     end
 
+    test "a fleet-scoped row is visible in its own workspace but not another (bd-3dasqm)",
+         ctx do
+      {:ok, fleet_row} =
+        Arbiter.Loop.record(%{
+          kind: :skill_patch,
+          scope: :fleet,
+          gist: "teach read discipline: context exhaustion",
+          category: "context exhaustion — agent burned its own context window",
+          incident_refs: ["run-a", "run-b", "run-c"],
+          task_refs: ["bd-1", "bd-2"],
+          payload: %{},
+          workspace_id: ctx.ws.id
+        })
+
+      refute is_nil(fleet_row.workspace_id)
+
+      own_scope = %Scope{tier: :coordinator, workspace_id: ctx.ws.id}
+      assert {:ok, _data} = Tools.loop_pending_diff(own_scope, %{"id" => fleet_row.id})
+
+      {:ok, other} = Ash.create(Workspace, %{name: "other-loop-ws-2", prefix: "olw2"})
+      intruder = %Scope{tier: :coordinator, workspace_id: other.id}
+
+      assert {:error, {:not_found, message}} =
+               Tools.loop_pending_diff(intruder, %{"id" => fleet_row.id})
+
+      assert message =~ "no loop proposal matching"
+
+      assert {:ok, data} = Tools.loop_pending_list(intruder, %{})
+      refute Enum.any?(data.pending, &(&1.id == fleet_row.id))
+    end
+
     test "an unknown id is a tool error, not a crash", ctx do
       assert {:error, {:not_found, message}} =
                Tools.loop_pending_apply(ctx.coordinator, %{"id" => Ecto.UUID.generate()})

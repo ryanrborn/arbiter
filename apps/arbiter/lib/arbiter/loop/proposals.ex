@@ -87,31 +87,43 @@ defmodule Arbiter.Loop.Proposals do
   @doc """
   Persist every candidate implied by `report` through `Arbiter.Loop.record/2`,
   so each one is either inserted or reinforced onto the row with the same
-  fingerprint. Returns the resulting rows (errors are logged and skipped so one
-  bad candidate cannot abort the pass).
+  fingerprint. Returns the resulting rows.
+
+  A candidate `record/2` refuses — e.g. a `:fleet` candidate on an ambiguous
+  install with no unambiguous workspace to attribute it to (bd-3dasqm) — is
+  logged and skipped rather than aborting the pass, but is *not* silently
+  lost: it is also counted in `:dropped`, so a caller (and, via
+  `Arbiter.Loop.Analysis.analyze/1`'s `:proposals_dropped`, an operator) can
+  see that the fleet-finding stream is going missing on such an install
+  instead of only noticing the log line.
   """
-  @spec record_all(Report.t(), keyword()) :: [Arbiter.Loop.PendingWrite.t()]
+  @spec record_all(Report.t(), keyword()) :: %{
+          rows: [Arbiter.Loop.PendingWrite.t()],
+          dropped: [%{gist: String.t() | nil, reason: term()}]
+        }
   def record_all(%Report{} = report, opts \\ []) do
     {record_opts, candidate_opts} = Keyword.split(opts, [:actor, :evidence_bar])
 
-    report
-    |> candidates(candidate_opts)
-    |> Enum.reduce([], fn candidate, acc ->
-      case Loop.record(candidate, record_opts) do
-        {:ok, row} ->
-          [row | acc]
+    {rows, dropped} =
+      report
+      |> candidates(candidate_opts)
+      |> Enum.reduce({[], []}, fn candidate, {rows, dropped} ->
+        case Loop.record(candidate, record_opts) do
+          {:ok, row} ->
+            {[row | rows], dropped}
 
-        {:error, reason} ->
-          require Logger
+          {:error, reason} ->
+            require Logger
 
-          Logger.warning(
-            "[loop.propose] skipped candidate #{inspect(candidate[:gist])}: #{inspect(reason)}"
-          )
+            Logger.warning(
+              "[loop.propose] skipped candidate #{inspect(candidate[:gist])}: #{inspect(reason)}"
+            )
 
-          acc
-      end
-    end)
-    |> Enum.reverse()
+            {rows, [%{gist: candidate[:gist], reason: reason} | dropped]}
+        end
+      end)
+
+    %{rows: Enum.reverse(rows), dropped: Enum.reverse(dropped)}
   end
 
   # ---- reviewer-finding categories ----------------------------------------

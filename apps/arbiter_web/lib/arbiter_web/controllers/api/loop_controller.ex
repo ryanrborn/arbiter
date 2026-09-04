@@ -90,10 +90,22 @@ defmodule ArbiterWeb.Api.LoopController do
     end
   end
 
-  # `:proposals` is only present when the caller opted in, so the analyze
-  # response body is byte-identical to what it was before Stage 2.
-  defp maybe_put_proposals(body, %{proposals: rows}),
-    do: Map.put(body, :proposals, Enum.map(rows, &render_pending/1))
+  # `:proposals` (and `:proposals_dropped`) are only present when the caller
+  # opted in, so the analyze response body is byte-identical to what it was
+  # before Stage 2. `:proposals_dropped` (bd-3dasqm) surfaces a candidate
+  # `record/2` refused — e.g. an ambiguous install with no unambiguous
+  # workspace to attribute a fleet finding to — instead of it only ever
+  # showing up in a log line.
+  defp maybe_put_proposals(body, %{proposals: rows} = envelope) do
+    dropped = Map.get(envelope, :proposals_dropped, [])
+
+    body
+    |> Map.put(:proposals, Enum.map(rows, &render_pending/1))
+    |> Map.put(
+      :proposals_dropped,
+      Enum.map(dropped, &%{gist: &1.gist, reason: inspect(&1.reason)})
+    )
+  end
 
   defp maybe_put_proposals(body, _envelope), do: body
 
