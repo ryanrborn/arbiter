@@ -440,10 +440,20 @@ defmodule Arbiter.Loop.Analysis do
   defp draw(t, :cost_usd), do: t.cost
 
   # Render a draw in whichever unit the comparison ran in, so a note and its
-  # baseline can never disagree about what they are counting.
+  # baseline can never disagree about what they are counting. The subject's own
+  # draw is spelled out in full ("49.4% of one 5h window"); a cohort median
+  # appearing beside it is compact ("0.3%"), which reads as English rather than
+  # repeating the unit inside a noun phrase.
   defp fmt_draw(nil, _unit), do: "n/a"
   defp fmt_draw(value, :window_share_5h), do: Scarcity.format_share(value)
   defp fmt_draw(value, :cost_usd), do: "$#{fmt(value)}"
+
+  defp fmt_median(nil, _unit), do: "n/a"
+
+  defp fmt_median(value, :window_share_5h),
+    do: "#{:erlang.float_to_binary(value * 100, decimals: 1)}%"
+
+  defp fmt_median(value, :cost_usd), do: "$#{fmt(value)}"
 
   # A task's total draw is the sum of its runs' shares. `nil` when no run
   # carries one — the corpus could not calibrate the window, and summing
@@ -522,7 +532,7 @@ defmodule Arbiter.Loop.Analysis do
   defp misestimate_note(:rework, t, %{draw: cohort_draw, rounds: cohort_rounds, unit: unit}) do
     "Dispatched difficulty #{inspect(t.difficulty)} under-provisioned the actual work: " <>
       "#{t.rounds} review round(s) (cell median #{cohort_rounds}), #{fmt_draw(draw(t, unit), unit)} across " <>
-      "#{t.attempts} attempt(s) (cell median #{fmt_draw(cohort_draw, unit)}). Segmented within cell " <>
+      "#{t.attempts} attempt(s) (cell median #{fmt_median(cohort_draw, unit)}). Segmented within cell " <>
       "(#{inspect(t.difficulty)}, #{t.repo})."
   end
 
@@ -535,7 +545,7 @@ defmodule Arbiter.Loop.Analysis do
 
   defp misestimate_note(:quality_failure, t, %{draw: cohort_draw, unit: unit}) do
     "Converged in round 1, but needed #{t.attempts} attempt(s) due to agent-quality " <>
-      "failures on the way there: #{fmt_draw(draw(t, unit), unit)} total vs. a #{fmt_draw(cohort_draw, unit)} cell " <>
+      "failures on the way there: #{fmt_draw(draw(t, unit), unit)} total vs. a #{fmt_median(cohort_draw, unit)} cell " <>
       "median. This is a #{unit_word(unit)} signal, not a rounds-based under-provisioning claim. " <>
       "Segmented within cell (#{inspect(t.difficulty)}, #{t.repo})."
   end
@@ -584,7 +594,7 @@ defmodule Arbiter.Loop.Analysis do
       action: quality_failure_action(t, unit),
       target_metric: "#{unit_metric(unit)} to converge for #{t.task_id}",
       baseline:
-        "#{fmt_draw(draw(t, unit), unit)} across #{t.attempts} attempt(s), vs. #{fmt_draw(cohort_draw, unit)} cell median"
+        "#{fmt_draw(draw(t, unit), unit)} across #{t.attempts} attempt(s), vs. #{fmt_median(cohort_draw, unit)} cell median"
     }
   end
 
@@ -601,7 +611,7 @@ defmodule Arbiter.Loop.Analysis do
   defp cohort_clause(%{draw: nil}), do: " (no cohort baseline available)"
 
   defp cohort_clause(%{draw: cohort_draw, unit: unit}),
-    do: ", vs. a #{fmt_draw(cohort_draw, unit)} cell median"
+    do: ", vs. a #{fmt_median(cohort_draw, unit)} cell median"
 
   defp unit_word(:window_share_5h), do: "quota-window"
   defp unit_word(:cost_usd), do: "cost"
