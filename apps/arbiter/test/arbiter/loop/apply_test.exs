@@ -132,6 +132,25 @@ defmodule Arbiter.Loop.ApplyTest do
       assert {:error, {:unmapped, msg}} = Apply.side_effect(row, Apply.attribution(row))
       assert msg =~ "no-such-skill"
     end
+
+    test "a :skill_create side effect authors the skill with managed_by: :loop (bd-blxwla)", %{
+      ws: ws
+    } do
+      {:ok, row} =
+        Loop.record(
+          candidate(%{
+            workspace_id: ws.id,
+            kind: :skill_create,
+            scope: :task,
+            payload: %{"name" => "loop-authored", "body" => "# body"}
+          })
+        )
+
+      assert :ok == Apply.side_effect(row, Apply.attribution(row))
+
+      {:ok, skill} = Arbiter.Skills.get_skill("loop-authored")
+      assert skill.managed_by == :loop
+    end
   end
 
   describe "Apply.persist/2 — the persistence step, on its own" do
