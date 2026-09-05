@@ -448,4 +448,15 @@ defmodule Arbiter.Loop.CanaryTest do
       refute get_in(Ash.get!(Workspace, ws.id).config, ["loop", "canary"])
     end
   end
+
+  # bd-77cbif: standing_orders is never injected into a worker prompt (only
+  # `arb prime`, the coordinator's briefing, reads it as text) — so it can't
+  # "bloat every future prompt" the way skill bodies do. The moduledoc used
+  # to make that claim for both; it must only make it for skills now.
+  test "moduledoc no longer claims standing_orders bloats every prompt" do
+    {:docs_v1, _, _, _, %{"en" => moduledoc}, _, _} = Code.fetch_docs(Canary)
+
+    refute moduledoc =~ ~r/standing_orders.{0,80}bloat/s,
+           "standing_orders is not injected into any prompt, so it cannot bloat one"
+  end
 end

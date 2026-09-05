@@ -167,13 +167,19 @@ defmodule ArbiterCli.ConfigSchema do
       canary        (map) — written and removed by Arbiter itself while a canary
                     runs; not meant to be hand-edited
 
-    standing_orders  (list)
+    standing_orders  (list) — coordinator-facing only, never reaches a worker
       list of short imperative strings (or {"title","detail"} objects), surfaced
-      high in every worker's `arb prime` briefing. Manage with
-      `arb workspace standing-order ls|add|rm`. Workspace-global — every repo
-      sees them. For an order that only applies to one repo, scope it under
-      `repo_paths.<repo>.standing_orders` instead (see below), or manage it
-      with `arb workspace standing-order ls|add|rm --repo <name>` (`--rig` is
+      high in `arb prime`'s briefing — which is read by the *coordinator*, not
+      by workers. No worker prompt ever includes these orders; they are never
+      injected into a dispatch. (A digest of the effective text is recorded on
+      each `worker_runs` row as `standing_orders_digest`, but that's provenance
+      for correlating outcomes against config changes, not delivery.) If you
+      need a repo's workers to see an instruction, put it in that repo's
+      `CLAUDE.md` instead. Manage with `arb workspace standing-order ls|add|rm`.
+      Workspace-global — `arb prime` shows them for any repo. For an order that
+      only applies to one repo, scope it under `repo_paths.<repo>.standing_orders`
+      instead (see below), or manage it with
+      `arb workspace standing-order ls|add|rm --repo <name>` (`--rig` is
       accepted as a deprecated alias for `--repo`).
 
     repo_paths  (map)
@@ -182,8 +188,9 @@ defmodule ArbiterCli.ConfigSchema do
         path             string — the worktree root (required in map form)
         target_branch    string — base branch for this repo, overriding "main"
         standing_orders  list — orders scoped to this repo only, surfaced in
-                          `arb prime` alongside the workspace-global ones.
-                          Manage with `arb workspace standing-order add --repo <name>`.
+                          `arb prime` (coordinator-facing only, see above)
+                          alongside the workspace-global ones. Manage with
+                          `arb workspace standing-order add --repo <name>`.
 
     pr_patrol  (map)
       author_logins        list of forge logins — when non-empty, PRPatrol only
