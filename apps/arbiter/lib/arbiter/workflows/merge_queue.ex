@@ -1065,6 +1065,21 @@ defmodule Arbiter.Workflows.MergeQueue do
     }
 
     case safe_resolve(state.conflict_resolver, args) do
+      # The resolver found zero divergence between the branch and the
+      # target's current tip — a phantom conflict (bd-1x4r25), most likely a
+      # stale/still-computing mergeability check on the forge side. Nothing
+      # was spawned, so leave the item exactly where it was (already its own
+      # "prior status" — it never entered :conflict_resolving) and don't
+      # escalate: a phantom conflict costs one git call and a log line, not
+      # an operator's attention. The next tick re-observes the merger's
+      # verdict fresh.
+      {:ok, :no_op} ->
+        Logger.info(
+          "MergeQueue: conflict resolver found zero divergence for task=#{item.task_id} — no-op"
+        )
+
+        {item, state}
+
       {:ok, _info} ->
         Logger.info("MergeQueue: spawned conflict resolver for task=#{item.task_id}")
 

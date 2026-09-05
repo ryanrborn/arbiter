@@ -389,6 +389,29 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       # Acceptance criterion: Coordinator / author is notified of the resolution.
       assert_received {:notify_called, ^task_id, _ws_id, _branch}
     end
+
+    test "resolver reports zero-divergence no-op — item keeps its prior status, no escalation",
+         %{workspace: ws, task: task} do
+      StubResolverWithCallback.register(task.id, self(), {:ok, :no_op})
+      conflicting_stub(906)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      %{items: [before]} = MergeQueue.state(name)
+
+      :ok = MergeQueue.tick(name)
+
+      assert_received {:resolver_called, args}
+      assert args.task_id == task.id
+
+      refute_received {:escalate_called, _, _, _, _}
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert item.status == before.status
+      assert item.prior_status == nil
+      assert item.resolver_spawned_at == nil
+    end
   end
 
   # ---- escalation ---------------------------------------------------------
@@ -668,6 +691,84 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
       assert {:error, {:worktree_failed, {:git_failed, _}}} = result
       # And no worker got partially spawned.
+      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
+    end
+  end
+
+  # ---- zero-divergence no-op pre-flight (bd-1x4r25) ----------------------
+
+  describe "ConflictResolver.resolve/1 zero-divergence no-op" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "rct-noop-#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      # An `origin` remote is required — the pre-flight check fetches
+      # `origin/<target_branch>` to get its CURRENT tip before comparing.
+      remote = Path.join(tmp, "repo-remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      worktree_root = Path.join(tmp, "wt")
+      File.mkdir_p!(worktree_root)
+
+      prior_wt =
+        case Application.fetch_env(:arbiter, :worktree_root) do
+          {:ok, v} -> {:set, v}
+          :error -> :unset
+        end
+
+      Application.put_env(:arbiter, :worktree_root, worktree_root)
+
+      on_exit(fn ->
+        case prior_wt do
+          {:set, v} -> Application.put_env(:arbiter, :worktree_root, v)
+          :unset -> Application.delete_env(:arbiter, :worktree_root)
+        end
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{tmp: tmp, repo: repo}
+    end
+
+    test "branch cut exactly from the target's tip (no divergence) returns {:ok, :no_op} and spawns no worker",
+         %{workspace: ws, task: task, repo: repo} do
+      # This is the incident shape: the task branch was cut from `main` and
+      # `main` has not moved since — merge-base(branch, origin/main) ==
+      # origin/main's tip. There is nothing to rebase.
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", branch, "main"])
+
+      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
+
+      result =
+        Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo_path: repo,
+          repo: "test/repo",
+          target_branch: "main",
+          start_claude: false
+        })
+
+      assert {:ok, :no_op} = result
+      # No worktree attach, no worker spawn happened for the no-op path.
       assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
     end
   end
