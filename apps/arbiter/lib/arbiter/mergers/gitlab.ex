@@ -156,9 +156,7 @@ defmodule Arbiter.Mergers.Gitlab do
              latest_review_id: nil,
              pipeline: pipeline,
              ci_clean: merge_status == "can_be_merged",
-             conflicting:
-               Map.get(body, "has_conflicts", false) == true or
-                 merge_status == "cannot_be_merged",
+             conflicting: settled_conflict?(body),
              block_reason: block_reason(cfg, body, status, pipeline),
              url: Map.get(body, "web_url") || link_for(ref_for(iid))
            }}
@@ -705,7 +703,7 @@ defmodule Arbiter.Mergers.Gitlab do
       draft? or detailed == "draft_status" ->
         :draft
 
-      conflicts? or detailed == "conflict" ->
+      settled_conflict?(body) ->
         log_conflict_verdict(body, detailed, merge_status, conflicts?)
         :conflict
 
@@ -741,8 +739,11 @@ defmodule Arbiter.Mergers.Gitlab do
       # Legacy fallback (no `detailed_merge_status` at all): `merge_status` is
       # deprecated and asynchronously recomputed, so a bare "cannot_be_merged"
       # without a corroborating `has_conflicts: true` (already checked above)
-      # is not trusted as a settled conflict.
-      is_nil(detailed) ->
+      # is not trusted as a settled conflict — it's treated the same as the
+      # other not-yet-settled statuses. Any other/unrecognized `merge_status`
+      # still falls through to `:blocked_other` below, same as before bd-1x4r25.
+      is_nil(detailed) and
+          merge_status in ["can_be_merged", "unchecked", "checking", "cannot_be_merged", nil, ""] ->
         nil
 
       true ->
@@ -750,14 +751,31 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
+  # Trusted, settled conflict signal only: an explicit `has_conflicts: true` or
+  # `detailed_merge_status == "conflict"`. `broken_status` and the legacy
+  # `merge_status == "cannot_be_merged"` are deliberately excluded — see the
+  # block comment above `block_reason/4` (bd-1x4r25). Shared by `block_reason/4`
+  # and the `conflicting` field on `get/1` so both paths agree on what counts
+  # as a real conflict worth dispatching a resolver for.
+  defp settled_conflict?(body) do
+    Map.get(body, "has_conflicts") == true or Map.get(body, "detailed_merge_status") == "conflict"
+  end
+
   # Surfaces the exact GitLab fields behind a :conflict verdict so a future
   # false positive is diagnosable from the log record rather than by
-  # reconstruction after the fact (bd-1x4r25).
+  # reconstruction after the fact (bd-1x4r25). This fires on every `get/1`
+  # poll for the lifetime of a genuinely conflicting MR (Watchdog/MergeQueue
+  # poll on a timer), so it stays at `warning` deliberately — a real conflict
+  # blocks a merge and is worth surfacing at that level on every poll — but
+  # carries `target_branch`/`sha` so the repeated line still earns its keep,
+  # showing whether the conflict is against the same target commit each time
+  # or has moved (which would mean it's worth re-checking, not stale).
   defp log_conflict_verdict(body, detailed, merge_status, conflicts?) do
     Logger.warning(
       "GitLab block_reason: :conflict — detailed_merge_status=#{inspect(detailed)} " <>
         "merge_status=#{inspect(merge_status)} has_conflicts=#{inspect(conflicts?)} " <>
-        "iid=#{inspect(Map.get(body, "iid"))}"
+        "iid=#{inspect(Map.get(body, "iid"))} target_branch=#{inspect(Map.get(body, "target_branch"))} " <>
+        "sha=#{inspect(Map.get(body, "sha"))}"
     )
   end
 
