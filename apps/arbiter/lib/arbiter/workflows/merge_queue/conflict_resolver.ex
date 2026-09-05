@@ -51,6 +51,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
 
   require Logger
@@ -74,6 +75,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   @type resolve_result ::
           {:ok, %{worker_pid: pid(), worktree_path: String.t(), branch: String.t()}}
+          | {:ok, :no_op}
           | {:error, term()}
 
   @doc """
@@ -83,6 +85,13 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   workspace when not supplied in `args`. Returns `{:ok, info}` once the
   worker is spawned (the rebase runs asynchronously); the MergeQueue picks
   up the resolution on its next poll when the PR turns mergeable again.
+
+  Before spawning, checks whether the branch has actually diverged from the
+  target's current tip (`git merge-base` vs the target's fetched-fresh
+  `origin/<target>`). When they're equal there is nothing to rebase — a
+  phantom conflict, most likely a stale/still-computing mergeability check
+  on the forge side — and this returns `{:ok, :no_op}` without spawning
+  anything.
 
   When the worker cannot be spawned (no local checkout, no branch,
   workspace missing) returns `{:error, reason}`. The MergeQueue's escalation
@@ -130,8 +139,24 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   @spec resolve(resolve_args()) :: resolve_result()
   def resolve(%{task_id: task_id} = args) when is_binary(task_id) do
     with {:ok, task} <- load_task(task_id),
-         {:ok, context} <- resolve_context(task, args),
-         {:ok, worktree_path} <- create_worktree(context),
+         {:ok, context} <- resolve_context(task, args) do
+      if zero_divergence?(context) do
+        Logger.info(
+          "ConflictResolver: task=#{task_id} branch=#{context.branch} has zero divergence " <>
+            "from target=#{context.target_branch} — nothing to rebase, skipping dispatch"
+        )
+
+        {:ok, :no_op}
+      else
+        dispatch(task, context, args)
+      end
+    end
+  end
+
+  def resolve(_), do: {:error, :missing_task_id}
+
+  defp dispatch(task, context, args) do
+    with {:ok, worktree_path} <- create_worktree(context),
          {:ok, worker_pid} <- start_worker(task, context, worktree_path),
          {:ok, _port} <- maybe_start_claude(worker_pid, worktree_path, context, args) do
       {:ok,
@@ -143,7 +168,50 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  def resolve(_), do: {:error, :missing_task_id}
+  # ---- belt-and-braces pre-flight divergence check (bd-1x4r25) -----------
+
+  # `settled_conflict?/1` in `Arbiter.Mergers.Gitlab` narrows when the merger
+  # reports a conflict, but the forge's own `has_conflicts`/mergeability
+  # computation is itself asynchronous and can be stale right after the
+  # target branch moves — the incident that prompted this fix had a resolver
+  # dispatched against a branch with a genuine no-op rebase. Before paying
+  # for a worktree attach + Claude session, check locally whether the task
+  # branch has actually diverged from the target's CURRENT tip. If not —
+  # nothing to rebase — skip the dispatch entirely rather than requiring an
+  # operator to adjudicate the eventual escalation.
+  #
+  # Fails open (treats as diverged, proceeds to full dispatch) on any git
+  # error — e.g. no `origin` remote in a test fixture, or a transient fetch
+  # failure — since a false "diverged" only costs the resolver its normal
+  # (already-tested) path, while a false "zero divergence" would silently
+  # skip a real conflict.
+  defp zero_divergence?(%{repo_path: repo_path, branch: branch, target_branch: target_branch}) do
+    target_ref = "origin/#{target_branch}"
+
+    with :ok <- Worktree.fetch_origin(repo_path, target_branch),
+         {:ok, target_sha} <- git(repo_path, ["rev-parse", target_ref]),
+         {:ok, merge_base_sha} <- merge_base_with_target(repo_path, branch, target_ref) do
+      merge_base_sha == target_sha
+    else
+      _ -> false
+    end
+  end
+
+  defp merge_base_with_target(repo_path, branch, target_ref) do
+    case git(repo_path, ["merge-base", branch, target_ref]) do
+      {:ok, sha} -> {:ok, sha}
+      {:error, _} -> git(repo_path, ["merge-base", "origin/" <> branch, target_ref])
+    end
+  end
+
+  defp git(repo_path, args) do
+    case System.cmd("git", args, cd: repo_path, stderr_to_stdout: true) do
+      {out, 0} -> {:ok, String.trim(out)}
+      {out, _nonzero} -> {:error, String.trim(out)}
+    end
+  rescue
+    e in ErlangError -> {:error, Exception.message(e)}
+  end
 
   # ---- context resolution --------------------------------------------------
 
@@ -167,7 +235,23 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     workspace = maybe_load_workspace(task.workspace_id)
 
     branch = Map.get(args, :branch) || derive_branch(task)
-    target_branch = Map.get(args, :target_branch) || workspace_base_branch(workspace) || "main"
+    # The target must be the branch the MR actually merges into, not merely the
+    # workspace's blanket base: the pre-flight in `zero_divergence?/1` compares
+    # against `origin/<target>`, and a branch that *contains* the wrong target's
+    # tip would read as "nothing to rebase" and silently suppress a real
+    # conflict (bd-1x4r25 review). So derive it through the same
+    # `Worker.TargetBranch` chain `Dispatch` cuts the worktree with and
+    # `MergeQueue` opens the MR against — per-task `target_branch` and per-repo
+    # config first, the workspace base only as a fallback. Caller-supplied
+    # `:target_branch` (the MergeQueue's `item.base`, the Watchdog's MR
+    # `base_ref`) still wins outright.
+    target_branch =
+      Map.get(args, :target_branch) ||
+        TargetBranch.resolve(task,
+          repo: Map.get(args, :repo),
+          workspace_base: workspace_base_branch(workspace)
+        )
+
     repo_path = Map.get(args, :repo_path) || resolve_repo_path(workspace, Map.get(args, :repo))
 
     cond do
