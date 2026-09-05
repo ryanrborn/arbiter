@@ -24,7 +24,8 @@ defmodule Arbiter.Mergers.Gitlab.Config do
         "credentials_ref" => "env:GITLAB_TOKEN",
         # optional:
         "default_target_branch" => "main",
-        "default_reviewers" => []
+        "default_reviewers" => [],
+        "merge_method" => "merge"
       }
 
   `project_id` is GitLab's numeric project ID (or a URL-encoded
@@ -67,13 +68,15 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   @pdict_key {__MODULE__, :active_workspace_config}
 
   @default_target_branch "main"
+  @default_merge_method :merge
 
   @type config :: %{
           host: String.t(),
           project_id: String.t(),
           token: String.t(),
           default_target_branch: String.t(),
-          default_reviewers: [term()]
+          default_reviewers: [term()],
+          merge_method: :merge | :squash | :ff
         }
 
   @doc """
@@ -168,7 +171,8 @@ defmodule Arbiter.Mergers.Gitlab.Config do
          token: token,
          default_target_branch:
            stringy(Map.get(raw, "default_target_branch")) || @default_target_branch,
-         default_reviewers: List.wrap(Map.get(raw, "default_reviewers"))
+         default_reviewers: List.wrap(Map.get(raw, "default_reviewers")),
+         merge_method: merge_method(raw)
        }}
     end
   end
@@ -235,4 +239,13 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
+
+  defp merge_method(raw) do
+    case Map.get(raw, "merge_method") do
+      "squash" -> :squash
+      "ff" -> :ff
+      "merge" -> :merge
+      _ -> @default_merge_method
+    end
+  end
 end

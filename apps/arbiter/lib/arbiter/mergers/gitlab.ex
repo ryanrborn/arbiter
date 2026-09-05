@@ -194,11 +194,23 @@ defmodule Arbiter.Mergers.Gitlab do
   @impl true
   def merge(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, iid} <- iid_from_ref(mr_ref) do
-      request(cfg, :put, "/merge_requests/#{iid}/merge", json: %{})
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 <-
+           request(cfg, :get, "/merge_requests/#{iid}", []),
+         head_sha = Map.get(mr_body, "sha") do
+      payload =
+        %{"sha" => head_sha}
+        |> maybe_put("merge_method", merge_method_param(cfg.merge_method))
+
+      request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
       |> handle_ok()
     end
   end
+
+  # GitLab's merge_method parameter accepts "merge", "squash", and "ff".
+  defp merge_method_param(:squash), do: "squash"
+  defp merge_method_param(:ff), do: "ff"
+  defp merge_method_param(:merge), do: "merge"
 
   @impl true
   def close(mr_ref) when is_binary(mr_ref) do

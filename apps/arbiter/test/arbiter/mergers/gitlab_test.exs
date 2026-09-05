@@ -712,27 +712,112 @@ defmodule Arbiter.Mergers.GitlabTest do
   end
 
   describe "merge/1" do
-    test "200: PUTs the merge endpoint and returns :ok" do
+    test "200: fetches MR, extracts head SHA, sends it in merge request body" do
       stub(fn conn ->
-        assert conn.method == "PUT"
-        assert conn.request_path == "#{base_path()}/#{@iid}/merge"
+        cond do
+          conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "iid" => @iid,
+              "state" => "opened",
+              "sha" => "abc123def456"
+            })
 
-        conn
-        |> Plug.Conn.put_status(200)
-        |> Req.Test.json(%{"iid" => @iid, "state" => "merged"})
+          conn.method == "PUT" and conn.request_path == "#{base_path()}/#{@iid}/merge" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["sha"] == "abc123def456"
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "merged"})
+        end
       end)
 
       assert :ok = Gitlab.merge(@ref)
     end
 
+    test "422 with SHA validation error when merge fails due to stale head" do
+      stub(fn conn ->
+        cond do
+          conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "iid" => @iid,
+              "state" => "opened",
+              "sha" => "abc123def456"
+            })
+
+          conn.method == "PUT" and conn.request_path == "#{base_path()}/#{@iid}/merge" ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "SHA must be provided when merging (validation_failed)"
+            })
+        end
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} = Gitlab.merge(@ref)
+    end
+
     test "405: not mergeable returns {:error, %Error{kind: :conflict}}" do
       stub(fn conn ->
-        conn
-        |> Plug.Conn.put_status(405)
-        |> Req.Test.json(%{"message" => "405 Method Not Allowed"})
+        cond do
+          conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "iid" => @iid,
+              "state" => "opened",
+              "sha" => "abc123def456"
+            })
+
+          conn.method == "PUT" ->
+            conn
+            |> Plug.Conn.put_status(405)
+            |> Req.Test.json(%{"message" => "405 Method Not Allowed"})
+        end
       end)
 
       assert {:error, %Error{kind: :conflict, status: 405}} = Gitlab.merge(@ref)
+    end
+
+    test "includes merge_method when configured" do
+      stub(fn conn ->
+        cond do
+          conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "iid" => @iid,
+              "state" => "opened",
+              "sha" => "abc123def456"
+            })
+
+          conn.method == "PUT" and conn.request_path == "#{base_path()}/#{@iid}/merge" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["sha"] == "abc123def456"
+            assert decoded["merge_method"] == "squash"
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "merged"})
+        end
+      end)
+
+      # Set merge_method in config
+      Config.put_active(%{
+        "host" => @host,
+        "project_id" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "default_target_branch" => "main",
+        "merge_method" => "squash"
+      })
+
+      assert :ok = Gitlab.merge(@ref)
     end
   end
 
