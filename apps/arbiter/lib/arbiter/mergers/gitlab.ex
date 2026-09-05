@@ -679,6 +679,16 @@ defmodule Arbiter.Mergers.Gitlab do
   # never the detailed-status string; and "preparing" / "checking" / "unchecked"
   # mean GitLab is still computing the merge status. Escalating any of these
   # would fire while the MR is merely being prepared, not genuinely blocked.
+  #
+  # `broken_status` and the legacy `merge_status == "cannot_be_merged"` are
+  # *not* trusted as a confirmed conflict on their own (bd-1x4r25): GitLab
+  # computes mergeability asynchronously, so either can read a stale value
+  # right after the target branch moves, with zero actual divergence. GitLab
+  # doesn't even document `broken_status` as target-conflict-specific (it's
+  # absent from the current REST API docs entirely). Only `has_conflicts ==
+  # true` or the explicit `detailed_merge_status == "conflict"` are trusted;
+  # everything else in that family is treated as "not settled yet", same as
+  # preparing/checking/unchecked, until a positive signal corroborates it.
   defp block_reason(_cfg, _body, status, _pipeline) when status in [:merged, :closed], do: nil
 
   # Pre-existing complexity 17 — baselined when bd-4x2yhq first
@@ -695,7 +705,8 @@ defmodule Arbiter.Mergers.Gitlab do
       draft? or detailed == "draft_status" ->
         :draft
 
-      conflicts? or detailed in ["conflict", "broken_status"] ->
+      conflicts? or detailed == "conflict" ->
+        log_conflict_verdict(body, detailed, merge_status, conflicts?)
         :conflict
 
       detailed == "need_rebase" ->
@@ -712,24 +723,42 @@ defmodule Arbiter.Mergers.Gitlab do
       detailed == "mergeable" ->
         nil
 
-      # In-progress / transient — CI not yet green, or merge status still being
-      # computed. Non-blocking until it settles (findings: ci_still_running is
-      # not a failure; preparing/checking/unchecked are not a block).
-      detailed in ["ci_must_pass", "ci_still_running", "preparing", "checking", "unchecked"] ->
+      # In-progress / transient / unconfirmed — CI not yet green, merge status
+      # still being computed, or an unconfirmed "broken" report. Non-blocking
+      # until it settles (findings: ci_still_running is not a failure;
+      # preparing/checking/unchecked are not a block; broken_status alone is
+      # not a confirmed conflict — see the block comment above).
+      detailed in [
+        "ci_must_pass",
+        "ci_still_running",
+        "preparing",
+        "checking",
+        "unchecked",
+        "broken_status"
+      ] ->
         nil
 
-      is_nil(detailed) and merge_status == "cannot_be_merged" ->
-        :conflict
-
-      is_nil(detailed) and merge_status in ["can_be_merged", "unchecked", "checking", nil, ""] ->
-        nil
-
+      # Legacy fallback (no `detailed_merge_status` at all): `merge_status` is
+      # deprecated and asynchronously recomputed, so a bare "cannot_be_merged"
+      # without a corroborating `has_conflicts: true` (already checked above)
+      # is not trusted as a settled conflict.
       is_nil(detailed) ->
         nil
 
       true ->
         :blocked_other
     end
+  end
+
+  # Surfaces the exact GitLab fields behind a :conflict verdict so a future
+  # false positive is diagnosable from the log record rather than by
+  # reconstruction after the fact (bd-1x4r25).
+  defp log_conflict_verdict(body, detailed, merge_status, conflicts?) do
+    Logger.warning(
+      "GitLab block_reason: :conflict — detailed_merge_status=#{inspect(detailed)} " <>
+        "merge_status=#{inspect(merge_status)} has_conflicts=#{inspect(conflicts?)} " <>
+        "iid=#{inspect(Map.get(body, "iid"))}"
+    )
   end
 
   # `not_approved` on an otherwise-green MR means the only thing left is a

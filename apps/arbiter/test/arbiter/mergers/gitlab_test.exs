@@ -572,8 +572,55 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert block_get(%{"draft" => true}).block_reason == :draft
     end
 
-    test "cannot_be_merged without detail falls back to :conflict" do
-      assert block_get(%{"merge_status" => "cannot_be_merged"}).block_reason == :conflict
+    test "cannot_be_merged without detail and without has_conflicts is non-blocking (bd-1x4r25)" do
+      # `merge_status` is GitLab's deprecated, asynchronously-recomputed field —
+      # it can read stale "cannot_be_merged" right after the target branch
+      # moves, with no real conflict. Without a corroborating `has_conflicts:
+      # true`, trust "not settled yet" over "conflict".
+      assert block_get(%{"merge_status" => "cannot_be_merged"}).block_reason == nil
+    end
+
+    test "cannot_be_merged corroborated by has_conflicts still classifies as :conflict" do
+      assert block_get(%{"merge_status" => "cannot_be_merged", "has_conflicts" => true}).block_reason ==
+               :conflict
+    end
+
+    test "broken_status alone is non-blocking, not a confirmed conflict (bd-1x4r25)" do
+      # GitLab does not document `broken_status` as meaning "conflicts with the
+      # target branch" — it is not even listed in the current API docs. Treat
+      # it the same as the other not-yet-settled statuses unless corroborated
+      # by `has_conflicts: true`.
+      assert block_get(%{"detailed_merge_status" => "broken_status"}).block_reason == nil
+    end
+
+    test "broken_status corroborated by has_conflicts still classifies as :conflict" do
+      assert block_get(%{"detailed_merge_status" => "broken_status", "has_conflicts" => true}).block_reason ==
+               :conflict
+    end
+
+    test "zero-divergence branch with CI still running is never a :conflict (bd-1x4r25 vs-a7w5g9)" do
+      # The exact shape observed in the incident: mergeable branch, merge-base
+      # already equal to the target tip, CI still running, no real conflict —
+      # yet GitLab's async merge-status recompute can transiently report a
+      # broken/cannot_be_merged status. Neither should dispatch a resolver.
+      result =
+        block_get(%{"detailed_merge_status" => "broken_status"}, [
+          %{"id" => 1, "status" => "running"}
+        ])
+
+      assert result.block_reason == nil
+    end
+
+    test "logs the raw GitLab merge-status fields alongside a :conflict verdict" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert block_get(%{"detailed_merge_status" => "conflict", "has_conflicts" => true}).block_reason ==
+                   :conflict
+        end)
+
+      assert log =~ "conflict"
+      assert log =~ "has_conflicts"
+      assert log =~ "detailed_merge_status"
     end
 
     test "an unresolved-discussions status classifies as :blocked_other" do
