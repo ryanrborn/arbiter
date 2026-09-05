@@ -9,6 +9,7 @@ defmodule Arbiter.Worker.RunProvenance do
   """
 
   alias Arbiter.Agents.Routing
+  alias Arbiter.StandingOrders
   alias Arbiter.Tasks.Workspace
 
   @doc """
@@ -58,25 +59,12 @@ defmodule Arbiter.Worker.RunProvenance do
 
   defp canonical_text(orders) when is_list(orders) do
     orders
-    |> Enum.map(&standing_order_text/1)
+    |> Enum.map(&StandingOrders.canonical_text/1)
     |> Enum.join("\n")
   end
 
   defp canonical_text(text) when is_binary(text), do: text
   defp canonical_text(other), do: inspect(other)
-
-  # Normalize a standing order element to canonical text (no display prefix).
-  # Consistent with the rendering in prime.ex, but without the "[ ] " prefix.
-  # Maps with {title, detail} are converted deterministically by sorting keys.
-  defp standing_order_text(%{"title" => title} = order) do
-    case order["detail"] do
-      detail when is_binary(detail) and detail != "" -> "#{title} — #{detail}"
-      _ -> title
-    end
-  end
-
-  defp standing_order_text(order) when is_binary(order), do: order
-  defp standing_order_text(order), do: inspect(order)
 
   defp sha256_hex(text) do
     :sha256
