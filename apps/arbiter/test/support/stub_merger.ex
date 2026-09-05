@@ -180,7 +180,7 @@ defmodule Arbiter.Test.StubMerger do
   end
 
   @impl true
-  def merge(ref, _expected_sha \\ nil) do
+  def merge(ref) do
     ensure_started()
 
     Agent.get_and_update(@name, fn s ->

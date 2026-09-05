@@ -130,7 +130,7 @@ defmodule Arbiter.Mergers.Direct do
   def get(_mr_ref), do: {:ok, %{status: :merged}}
 
   @impl true
-  def merge(_mr_ref, _expected_sha \\ nil), do: :ok
+  def merge(_mr_ref), do: :ok
 
   @impl true
   def close(_mr_ref), do: :ok

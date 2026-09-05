@@ -821,36 +821,35 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert :ok = Gitlab.merge(@ref)
     end
 
-    test "rejects merge when expected_sha differs from current head (stale approval)" do
+    test "GET 500: returns {:error, %Error{status: 500}} without attempting the merge PUT" do
       stub(fn conn ->
-        cond do
-          conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{
-              "iid" => @iid,
-              "state" => "opened",
-              "sha" => "newhead123456"
-            })
+        assert conn.method == "GET"
+        assert conn.request_path == "#{base_path()}/#{@iid}"
 
-          conn.method == "PUT" and conn.request_path == "#{base_path()}/#{@iid}/merge" ->
-            {:ok, body, conn} = Plug.Conn.read_body(conn)
-            decoded = Jason.decode!(body)
-            # Verify we're sending the expected SHA (different from current)
-            assert decoded["sha"] == "approvedsha"
-
-            # GitLab rejects because the SHA doesn't match current head
-            conn
-            |> Plug.Conn.put_status(422)
-            |> Req.Test.json(%{
-              "message" => "SHA must be provided when merging (validation_failed)"
-            })
-        end
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "Internal Server Error"})
       end)
 
-      # Call merge with an expected_sha that differs from the current head
-      assert {:error, %Error{kind: :validation_failed, status: 422}} =
-               Gitlab.merge(@ref, "approvedsha")
+      assert {:error, %Error{status: 500}} = Gitlab.merge(@ref)
+    end
+
+    test "GET transport failure: returns a transport_error, not a crash" do
+      stub(fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
+
+      assert {:error, %Error{}} = Gitlab.merge(@ref)
+    end
+
+    test "GET 200 with no sha in the body: returns a validation error naming the cause" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed}} = Gitlab.merge(@ref)
     end
   end
 

@@ -265,8 +265,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           base_updated_at: DateTime.t() | nil,
           last_handled_review_id: term() | nil,
           retry_not_before: DateTime.t() | nil,
-          phantom_conflicts: non_neg_integer(),
-          last_reviewed_sha: String.t() | nil
+          phantom_conflicts: non_neg_integer()
         }
 
   defmodule State do
@@ -584,7 +583,6 @@ defmodule Arbiter.Workflows.MergeQueue do
           base: base,
           repo: repo,
           priority: task_priority(task),
-          last_reviewed_sha: task.last_reviewed_sha,
           opened_at: DateTime.utc_now()
         )
 
@@ -1311,7 +1309,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp try_merge(state, item) do
     Mergers.prepare_with_repo(state.workspace, item.repo)
 
-    case state.adapter.merge(item.mr_ref, item.last_reviewed_sha) do
+    case state.adapter.merge(item.mr_ref) do
       :ok ->
         item = %{item | status: :merging}
         # Synchronously finalize. adapter.merge/1 returning :ok is the merge
@@ -1462,8 +1460,7 @@ defmodule Arbiter.Workflows.MergeQueue do
       # Not a retry budget — the item is not escalated or failed on it — just
       # a counter so a forge verdict that never converges is visible in the
       # log instead of polling silently forever.
-      phantom_conflicts: 0,
-      last_reviewed_sha: nil
+      phantom_conflicts: 0
     }
 
     Map.merge(base, Map.new(overrides))

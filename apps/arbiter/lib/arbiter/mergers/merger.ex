@@ -208,7 +208,7 @@ defmodule Arbiter.Mergers.Merger do
             ) ::
               {:ok, mr_ref} | {:error, term()}
   @callback get(mr_ref) :: {:ok, map()} | {:error, term()}
-  @callback merge(mr_ref, expected_sha :: String.t() | nil) :: :ok | {:error, term()}
+  @callback merge(mr_ref) :: :ok | {:error, term()}
   @callback close(mr_ref) :: :ok | {:error, term()}
   @callback add_comment(mr_ref, body :: String.t()) :: :ok | {:error, term()}
   @callback request_review(mr_ref, reviewers :: [term()]) :: :ok | {:error, term()}

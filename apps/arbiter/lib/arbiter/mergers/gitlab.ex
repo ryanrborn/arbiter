@@ -192,23 +192,27 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
-  def merge(mr_ref, expected_sha \\ nil) when is_binary(mr_ref) do
+  def merge(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do
         {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 ->
-          current_sha = Map.get(mr_body, "sha")
+          case Map.get(mr_body, "sha") do
+            sha when is_binary(sha) and sha != "" ->
+              payload =
+                %{"sha" => sha}
+                |> maybe_put("squash", squash_param(cfg.merge_method))
 
-          # Use the expected SHA if provided (from approval decision); otherwise use current head.
-          # If expected_sha was provided and differs from current, GitLab will reject the merge.
-          sha_to_send = expected_sha || current_sha
+              request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
+              |> handle_ok()
 
-          payload =
-            %{"sha" => sha_to_send}
-            |> maybe_put("squash", squash_param(cfg.merge_method))
-
-          request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
-          |> handle_ok()
+            _ ->
+              {:error,
+               %Error{
+                 kind: :validation_failed,
+                 message: "MR !#{iid} has no head SHA to merge"
+               }}
+          end
 
         {:ok, %Req.Response{status: status, body: body}} ->
           {:error, http_error(status, body)}
