@@ -7,9 +7,10 @@ defmodule Arbiter.Loop.Canary do
   it makes things worse.
 
   Everything else in the queue stays operator-applied. Skill bodies are prose
-  that gets resolved into every matching run's prompt (`worker_runs.resolved_skills`):
-  they bloat every future prompt and can contradict each other, so the epic
-  keeps them on the slower human path. `standing_orders` is operator-applied
+  that gets materialized into every matching run's worktree and pulled into
+  the agent's context (`worker_runs.resolved_skills` records which): they
+  bloat that context and can contradict each other, so the epic keeps them
+  on the slower human path. `standing_orders` is operator-applied
   for a different reason: it's coordinator-facing config (surfaced in `arb
   prime`, never injected into any worker prompt — see
   `ArbiterCli.ConfigSchema`), so there's no per-dispatch prompt effect to
