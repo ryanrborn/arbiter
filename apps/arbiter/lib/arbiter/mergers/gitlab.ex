@@ -156,9 +156,7 @@ defmodule Arbiter.Mergers.Gitlab do
              latest_review_id: nil,
              pipeline: pipeline,
              ci_clean: merge_status == "can_be_merged",
-             conflicting:
-               Map.get(body, "has_conflicts", false) == true or
-                 merge_status == "cannot_be_merged",
+             conflicting: settled_conflict?(body),
              block_reason: block_reason(cfg, body, status, pipeline),
              url: Map.get(body, "web_url") || link_for(ref_for(iid))
            }}
@@ -679,6 +677,16 @@ defmodule Arbiter.Mergers.Gitlab do
   # never the detailed-status string; and "preparing" / "checking" / "unchecked"
   # mean GitLab is still computing the merge status. Escalating any of these
   # would fire while the MR is merely being prepared, not genuinely blocked.
+  #
+  # `broken_status` and the legacy `merge_status == "cannot_be_merged"` are
+  # *not* trusted as a confirmed conflict on their own (bd-1x4r25): GitLab
+  # computes mergeability asynchronously, so either can read a stale value
+  # right after the target branch moves, with zero actual divergence. GitLab
+  # doesn't even document `broken_status` as target-conflict-specific (it's
+  # absent from the current REST API docs entirely). Only `has_conflicts ==
+  # true` or the explicit `detailed_merge_status == "conflict"` are trusted;
+  # everything else in that family is treated as "not settled yet", same as
+  # preparing/checking/unchecked, until a positive signal corroborates it.
   defp block_reason(_cfg, _body, status, _pipeline) when status in [:merged, :closed], do: nil
 
   # Pre-existing complexity 17 — baselined when bd-4x2yhq first
@@ -695,7 +703,8 @@ defmodule Arbiter.Mergers.Gitlab do
       draft? or detailed == "draft_status" ->
         :draft
 
-      conflicts? or detailed in ["conflict", "broken_status"] ->
+      settled_conflict?(body) ->
+        log_conflict_verdict(body, detailed, merge_status, conflicts?)
         :conflict
 
       detailed == "need_rebase" ->
@@ -712,24 +721,79 @@ defmodule Arbiter.Mergers.Gitlab do
       detailed == "mergeable" ->
         nil
 
-      # In-progress / transient — CI not yet green, or merge status still being
-      # computed. Non-blocking until it settles (findings: ci_still_running is
-      # not a failure; preparing/checking/unchecked are not a block).
-      detailed in ["ci_must_pass", "ci_still_running", "preparing", "checking", "unchecked"] ->
+      # In-progress / transient / unconfirmed — CI not yet green, merge status
+      # still being computed, or an unconfirmed "broken" report. Non-blocking
+      # until it settles (findings: ci_still_running is not a failure;
+      # preparing/checking/unchecked are not a block; broken_status alone is
+      # not a confirmed conflict — see the block comment above).
+      detailed in [
+        "ci_must_pass",
+        "ci_still_running",
+        "preparing",
+        "checking",
+        "unchecked",
+        "broken_status"
+      ] ->
         nil
 
-      is_nil(detailed) and merge_status == "cannot_be_merged" ->
-        :conflict
-
-      is_nil(detailed) and merge_status in ["can_be_merged", "unchecked", "checking", nil, ""] ->
-        nil
-
-      is_nil(detailed) ->
+      # Legacy fallback (no `detailed_merge_status` at all): `merge_status` is
+      # deprecated and asynchronously recomputed, so a bare "cannot_be_merged"
+      # without a corroborating `has_conflicts: true` (already checked above)
+      # is not trusted as a settled conflict — it's treated the same as the
+      # other not-yet-settled statuses. `cannot_be_merged_recheck` and
+      # `cannot_be_merged_rechecking` are the legacy enum's explicit "a
+      # mergeability recheck is queued / running" states — they appear on the
+      # same older GitLab versions that omit `detailed_merge_status`, and are
+      # *by definition* unsettled, so they belong here too.
+      #
+      # Unlike the pre-bd-1x4r25 code, an unrecognized `merge_status` with a nil
+      # `detailed` no longer returns `nil` — it falls through to `:blocked_other`
+      # below. That is a deliberate tightening: an unknown status is surfaced
+      # once to the coordinator rather than silently treated as mergeable.
+      is_nil(detailed) and
+          merge_status in [
+            "can_be_merged",
+            "unchecked",
+            "checking",
+            "cannot_be_merged",
+            "cannot_be_merged_recheck",
+            "cannot_be_merged_rechecking",
+            nil,
+            ""
+          ] ->
         nil
 
       true ->
         :blocked_other
     end
+  end
+
+  # Trusted, settled conflict signal only: an explicit `has_conflicts: true` or
+  # `detailed_merge_status == "conflict"`. `broken_status` and the legacy
+  # `merge_status == "cannot_be_merged"` are deliberately excluded — see the
+  # block comment above `block_reason/4` (bd-1x4r25). Shared by `block_reason/4`
+  # and the `conflicting` field on `get/1` so both paths agree on what counts
+  # as a real conflict worth dispatching a resolver for.
+  defp settled_conflict?(body) do
+    Map.get(body, "has_conflicts") == true or Map.get(body, "detailed_merge_status") == "conflict"
+  end
+
+  # Surfaces the exact GitLab fields behind a :conflict verdict so a future
+  # false positive is diagnosable from the log record rather than by
+  # reconstruction after the fact (bd-1x4r25). This fires on every `get/1`
+  # poll for the lifetime of a genuinely conflicting MR (Watchdog/MergeQueue
+  # poll on a timer), so it stays at `warning` deliberately — a real conflict
+  # blocks a merge and is worth surfacing at that level on every poll — but
+  # carries `target_branch`/`sha` so the repeated line still earns its keep,
+  # showing whether the conflict is against the same target commit each time
+  # or has moved (which would mean it's worth re-checking, not stale).
+  defp log_conflict_verdict(body, detailed, merge_status, conflicts?) do
+    Logger.warning(
+      "GitLab block_reason: :conflict — detailed_merge_status=#{inspect(detailed)} " <>
+        "merge_status=#{inspect(merge_status)} has_conflicts=#{inspect(conflicts?)} " <>
+        "iid=#{inspect(Map.get(body, "iid"))} target_branch=#{inspect(Map.get(body, "target_branch"))} " <>
+        "sha=#{inspect(Map.get(body, "sha"))}"
+    )
   end
 
   # `not_approved` on an otherwise-green MR means the only thing left is a

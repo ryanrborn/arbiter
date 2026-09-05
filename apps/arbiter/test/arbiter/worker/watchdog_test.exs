@@ -57,7 +57,8 @@ defmodule Arbiter.Worker.WatchdogTest do
         * `:running` — reports `:running`, so the resolver stays "in flight" and
           exactly one dispatch happens;
         * a pid — used verbatim.
-      * `:result` — `:ok` (default) or `{:error, reason}`.
+      * `:result` — `:ok` (default), `:no_op` (the resolver found zero
+        divergence and spawned nothing — bd-1x4r25), or `{:error, reason}`.
     """
     def arm(task_id, test_pid, opts \\ []) when is_list(opts) do
       :persistent_term.put({__MODULE__, task_id}, {test_pid, opts})
@@ -76,6 +77,9 @@ defmodule Arbiter.Worker.WatchdogTest do
               worker_pid = resolver_worker(Keyword.get(opts, :pid, :completed), pid)
               send(pid, {:resolver_spawned, worker_pid})
               {:ok, %{worker_pid: worker_pid, worktree_path: "/tmp/fake", branch: "feat/x"}}
+
+            :no_op ->
+              {:ok, :no_op}
 
             {:error, _} = err ->
               err
@@ -902,6 +906,116 @@ defmodule Arbiter.Worker.WatchdogTest do
       # Past the cap the Watchdog stays parked and must not keep spawning workers
       # or re-paging on every subsequent poll.
       refute_receive {:resolve_called, _}, 200
+      refute_receive {:escalate_called, _, _, _, _}, 200
+    end
+
+    # bd-1x4r25: the resolver's zero-divergence pre-flight returns `{:ok, :no_op}`
+    # instead of spawning a rebase worker. The Watchdog is the resolver's other
+    # production caller (MergeQueue is the first) and must recognise that shape —
+    # before this it fell through `safe_resolve/2`'s catch-all as
+    # `{:error, {:bad_return, {:ok, :no_op}}}` and paged the coordinator with an
+    # opaque reason, which is strictly worse than the phantom-conflict escalation
+    # it was meant to remove.
+    test "a zero-divergence no-op from the resolver neither escalates nor burns an attempt" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), result: :no_op)
+      StubMerger.queue_get("!c9", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(pid, task_id, "!c9",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 2,
+          interval_ms: 15
+        )
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      # A phantom conflict must cost a log line, not an operator's attention.
+      refute_receive {:escalate_called, _, _, _, _}, 300
+
+      state = :sys.get_state(wpid)
+      assert state.conflict_attempts == 0
+      refute state.conflict_escalated
+      refute state.conflict_resolving
+      assert state.conflict_resolver_pid == nil
+    end
+
+    # bd-1x4r25 review: the resolver's zero-divergence pre-flight compares the
+    # branch against `origin/<target_branch>`. If the Watchdog doesn't say which
+    # target, the resolver derives one from task/workspace config — and for an MR
+    # opened against an integration branch that guess can be `main`, which the
+    # branch already contains. That reads as "nothing to rebase" and, because the
+    # no-op path burns no attempt and never escalates, a real conflict would stall
+    # silently forever. The adapter already reports the MR's own target as
+    # `base_ref`; pass it through.
+    test "passes the MR's own base_ref to the resolver as :target_branch" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+
+      StubMerger.queue_get("!c11", [
+        %{
+          status: :open,
+          approved: true,
+          block_reason: :conflict,
+          base_ref: "integration/dolphin"
+        }
+      ])
+
+      start_watchdog(pid, task_id, "!c11",
+        workspace: test_workspace(),
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 1,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, args}, 1_000
+      assert args.target_branch == "integration/dolphin"
+    end
+
+    test "omits :target_branch when the adapter reports no base_ref" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      StubMerger.queue_get("!c12", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(pid, task_id, "!c12",
+        workspace: test_workspace(),
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 1,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, args}, 1_000
+      # An explicit nil would look like "the caller supplied a target" to the
+      # resolver, defeating its own derivation — the key must simply be absent.
+      refute Map.has_key?(args, :target_branch)
+    end
+
+    test "a persistent phantom conflict is logged at warning rather than silently forever" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), result: :no_op)
+      StubMerger.queue_get("!c10", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!c10",
+            workspace: test_workspace(),
+            auto_merge: false,
+            conflict_resolver: StubConflictResolver,
+            max_conflict_attempts: 2,
+            interval_ms: 15
+          )
+
+          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+          # Let the repeat-warning land before we read the captured log.
+          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+        end)
+
+      assert log =~ "zero divergence"
+      assert log =~ "[warning]"
       refute_receive {:escalate_called, _, _, _, _}, 200
     end
 

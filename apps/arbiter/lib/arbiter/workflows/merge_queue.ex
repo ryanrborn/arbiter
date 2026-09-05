@@ -264,7 +264,8 @@ defmodule Arbiter.Workflows.MergeQueue do
           prior_status: status() | nil,
           base_updated_at: DateTime.t() | nil,
           last_handled_review_id: term() | nil,
-          retry_not_before: DateTime.t() | nil
+          retry_not_before: DateTime.t() | nil,
+          phantom_conflicts: non_neg_integer()
         }
 
   defmodule State do
@@ -864,6 +865,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp advance_status(state, item, mr_state) do
     now = DateTime.utc_now()
     item = %{item | last_polled_at: now}
+    item = clear_phantom_conflicts_unless_conflicting(item, mr_state)
 
     cond do
       # Top-priority guard: a CONFLICTING MR never advances state. The
@@ -924,6 +926,13 @@ defmodule Arbiter.Workflows.MergeQueue do
         advance_ready_ladder(state, item, mr_state)
     end
   end
+
+  # The phantom-conflict counter measures *consecutive* ticks, so it clears
+  # the moment the forge stops claiming a conflict (bd-1x4r25).
+  defp clear_phantom_conflicts_unless_conflicting(item, %{conflicting: true}), do: item
+
+  defp clear_phantom_conflicts_unless_conflicting(item, _mr_state),
+    do: %{item | phantom_conflicts: 0}
 
   defp resume_after_conflict_resolution(state, item, mr_state) do
     restored = restore_after_resolution(state, item)
@@ -1047,6 +1056,32 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp handle_conflict(state, item), do: spawn_conflict_resolver(state, item)
 
+  # A single phantom conflict is routine — GitHub/GitLab recompute mergeability
+  # asynchronously and a target branch that just moved reads as conflicting for
+  # a beat. Repeats mean the forge's verdict is not converging. Since nothing
+  # bounds an item's lifetime in the queue, log those at `warning` so the
+  # condition reaches the record, on a doubling backoff (2nd, 4th, 8th, …) so
+  # the queue's poll loop can't turn it into a flood. Deliberately not an
+  # escalation: paging an operator for a conflict that does not exist is the
+  # cost this whole change set exists to remove.
+  defp log_phantom_conflict(item, 1) do
+    Logger.info(
+      "MergeQueue: conflict resolver found zero divergence for task=#{item.task_id} — no-op"
+    )
+  end
+
+  defp log_phantom_conflict(item, n) do
+    if n |> Integer.digits(2) |> Enum.sum() == 1 do
+      Logger.warning(
+        "MergeQueue: conflict resolver found zero divergence for task=#{item.task_id} " <>
+          "on #{n} consecutive ticks — the forge keeps reporting a conflict that does " <>
+          "not exist; nothing dispatched and nothing escalated"
+      )
+    end
+
+    :ok
+  end
+
   # Spawn the resolver and transition the item to :conflict_resolving. The
   # item's prior status is stashed so a successful push restores us to
   # exactly where the state machine was before the conflict was detected.
@@ -1065,6 +1100,19 @@ defmodule Arbiter.Workflows.MergeQueue do
     }
 
     case safe_resolve(state.conflict_resolver, args) do
+      # The resolver found zero divergence between the branch and the
+      # target's current tip — a phantom conflict (bd-1x4r25), most likely a
+      # stale/still-computing mergeability check on the forge side. Nothing
+      # was spawned, so leave the item exactly where it was (already its own
+      # "prior status" — it never entered :conflict_resolving) and don't
+      # escalate: a phantom conflict costs one git call and a log line, not
+      # an operator's attention. The next tick re-observes the merger's
+      # verdict fresh.
+      {:ok, :no_op} ->
+        phantom_conflicts = item.phantom_conflicts + 1
+        log_phantom_conflict(item, phantom_conflicts)
+        {%{item | phantom_conflicts: phantom_conflicts}, state}
+
       {:ok, _info} ->
         Logger.info("MergeQueue: spawned conflict resolver for task=#{item.task_id}")
 
@@ -1072,6 +1120,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           item
           | status: :conflict_resolving,
             prior_status: prior,
+            phantom_conflicts: 0,
             resolver_spawned_at: DateTime.utc_now()
         }
 
@@ -1404,7 +1453,13 @@ defmodule Arbiter.Workflows.MergeQueue do
       prior_status: nil,
       base_updated_at: nil,
       last_handled_review_id: nil,
-      retry_not_before: nil
+      retry_not_before: nil,
+      # Consecutive ticks on which the conflict resolver declined to spawn
+      # because the branch had zero divergence from the target (bd-1x4r25).
+      # Not a retry budget — the item is not escalated or failed on it — just
+      # a counter so a forge verdict that never converges is visible in the
+      # log instead of polling silently forever.
+      phantom_conflicts: 0
     }
 
     Map.merge(base, Map.new(overrides))
