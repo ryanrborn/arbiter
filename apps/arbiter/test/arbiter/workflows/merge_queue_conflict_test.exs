@@ -411,6 +411,35 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       assert item.status == before.status
       assert item.prior_status == nil
       assert item.resolver_spawned_at == nil
+      assert item.phantom_conflicts == 1
+    end
+
+    # bd-1x4r25 (round-3 advisory): the no-op path leaves the item where it was
+    # and never escalates, and MergeQueue has no per-item age ceiling — so a
+    # forge whose `has_conflicts` latches true and never recomputes would poll
+    # forever with nothing in the record but a single info line. Count the
+    # consecutive no-ops so the condition is visible; repeats log at warning.
+    test "consecutive zero-divergence no-ops are counted and surfaced at warning",
+         %{workspace: ws, task: task} do
+      StubResolverWithCallback.register(task.id, self(), {:ok, :no_op})
+      conflicting_stub(907)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      :ok = MergeQueue.tick(name)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = MergeQueue.tick(name)
+        end)
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert item.phantom_conflicts == 2
+      assert log =~ "zero divergence"
+      assert log =~ "[warning]"
+      # Still no operator page — visibility, not escalation.
+      refute_received {:escalate_called, _, _, _, _}
     end
   end
 

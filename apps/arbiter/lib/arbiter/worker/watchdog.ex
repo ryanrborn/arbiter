@@ -754,6 +754,10 @@ defmodule Arbiter.Worker.Watchdog do
         #                            monitor never fires on a normal finish.
         #   conflict_branch        — branch label (for the exhaustion escalation).
         #   conflict_escalated     — exhaustion already paged; stay parked, don't spam.
+        #   conflict_no_ops        — consecutive phantom conflicts (the resolver
+        #                            found zero divergence and spawned nothing).
+        #                            Not an attempt; tracked only so a
+        #                            non-converging forge verdict is visible.
         auto_resolve_conflict: auto_resolve_conflict,
         conflict_resolver: Keyword.get(opts, :conflict_resolver, @default_conflict_resolver),
         max_conflict_attempts: max_conflict_attempts,
@@ -762,6 +766,7 @@ defmodule Arbiter.Worker.Watchdog do
         conflict_resolver_pid: nil,
         conflict_branch: nil,
         conflict_escalated: false,
+        conflict_no_ops: 0,
         # Bounded self-healing of `{:awaiting_review_timeout, _}` (bd-8eheb6).
         #   max_auto_resumes        — auto-resume budget for this task; 0 = off.
         #   auto_resume_dispatcher  — module that re-attaches the worker and,
@@ -1789,6 +1794,19 @@ defmodule Arbiter.Worker.Watchdog do
     }
 
     case safe_resolve(state.conflict_resolver, args) do
+      # Phantom conflict (bd-1x4r25): the resolver compared the branch against
+      # the target's fresh tip, found zero divergence, and spawned nothing.
+      # There is no rebase to attempt, so this must not consume one of the
+      # bounded `max_conflict_attempts` passes and must not escalate — the
+      # forge's mergeability check is most likely still recomputing and the
+      # next poll re-observes it. We do count consecutive no-ops so the
+      # condition is visible in the record rather than repeating silently
+      # forever: `info` the first time, `warning` on every repeat.
+      {:ok, :no_op} ->
+        no_ops = state.conflict_no_ops + 1
+        log_phantom_conflict(state, no_ops)
+        %{state | conflict_no_ops: no_ops}
+
       {:ok, info} ->
         pid = Map.get(info, :worker_pid)
         attempt = state.conflict_attempts + 1
@@ -1830,13 +1848,20 @@ defmodule Arbiter.Worker.Watchdog do
            conflict_resolver_pid: nil,
            conflict_resolving: false,
            conflict_attempts: 0,
-           conflict_escalated: false
+           conflict_escalated: false,
+           conflict_no_ops: 0
          } = state
        ),
        do: state
 
-  defp reset_conflict_state(state),
-    do: %{teardown_resolver(state) | conflict_attempts: 0, conflict_escalated: false}
+  defp reset_conflict_state(state) do
+    %{
+      teardown_resolver(state)
+      | conflict_attempts: 0,
+        conflict_escalated: false,
+        conflict_no_ops: 0
+    }
+  end
 
   # Has the in-flight resolver worker finished its rebase pass? The resolver is
   # an `Arbiter.Worker` that lingers in a terminal status (:completed/:failed)
@@ -1910,9 +1935,43 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
+  # First phantom conflict is routine (a mergeability recheck in flight), so it
+  # logs at `info`. A repeat means the forge's verdict is not converging, which
+  # an operator reading the log should be able to see without being paged for
+  # it — so repeats log at `warning`, but on a doubling backoff (2nd, 4th, 8th,
+  # …) rather than once per poll, which would just trade a silent failure mode
+  # for a noisy one.
+  defp log_phantom_conflict(state, 1) do
+    Logger.info(
+      "Worker.Watchdog: conflict resolver found zero divergence for " <>
+        "task=#{state.task_id} mr=#{state.mr_ref} — phantom conflict, no rebase dispatched"
+    )
+  end
+
+  defp log_phantom_conflict(state, n) do
+    if power_of_two?(n) do
+      Logger.warning(
+        "Worker.Watchdog: conflict resolver found zero divergence for " <>
+          "task=#{state.task_id} mr=#{state.mr_ref} on #{n} consecutive polls — " <>
+          "the forge keeps reporting a conflict that does not exist; " <>
+          "no rebase dispatched and no attempt consumed"
+      )
+    end
+
+    :ok
+  end
+
+  defp power_of_two?(n) when is_integer(n) and n > 0,
+    do: n |> Integer.digits(2) |> Enum.sum() == 1
+
   defp safe_resolve(resolver, args) do
     case resolver.resolve(args) do
       {:ok, info} when is_map(info) -> {:ok, info}
+      # The resolver's zero-divergence pre-flight declined to spawn anything
+      # (bd-1x4r25). This is a success, not a dispatch failure — it must not
+      # fall through to `:bad_return` below, which would escalate a phantom
+      # conflict to the coordinator with an opaque reason.
+      {:ok, :no_op} -> {:ok, :no_op}
       {:error, reason} -> {:error, reason}
       other -> {:error, {:bad_return, other}}
     end
