@@ -2313,6 +2313,9 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp safe_merge(%{adapter: adapter, mr_ref: mr_ref}) do
+    # No stale-SHA guard: the adapter merges whatever head the forge reports
+    # at call time. Threading a reviewed-SHA check through here is tracked
+    # separately as bd-dxgris.
     case adapter.merge(mr_ref) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}

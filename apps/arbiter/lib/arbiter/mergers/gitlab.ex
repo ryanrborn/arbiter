@@ -195,10 +195,38 @@ defmodule Arbiter.Mergers.Gitlab do
   def merge(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
-      request(cfg, :put, "/merge_requests/#{iid}/merge", json: %{})
-      |> handle_ok()
+      case request(cfg, :get, "/merge_requests/#{iid}", []) do
+        {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 ->
+          case Map.get(mr_body, "sha") do
+            sha when is_binary(sha) and sha != "" ->
+              payload =
+                %{"sha" => sha}
+                |> maybe_put("squash", squash_param(cfg.merge_method))
+
+              request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
+              |> handle_ok()
+
+            _ ->
+              {:error,
+               %Error{
+                 kind: :validation_failed,
+                 message: "MR !#{iid} has no head SHA to merge"
+               }}
+          end
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
     end
   end
+
+  # GitLab's merge endpoint only accepts "squash" as a per-call parameter (boolean).
+  # The merge strategy (merge/rebase/ff) is a project-level setting, not per-MR.
+  defp squash_param(:squash), do: true
+  defp squash_param(_), do: nil
 
   @impl true
   def close(mr_ref) when is_binary(mr_ref) do

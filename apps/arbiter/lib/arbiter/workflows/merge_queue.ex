@@ -516,6 +516,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         base: resolve_base(state, task),
         repo: repo,
         priority: task_priority(task),
+        last_reviewed_sha: task.last_reviewed_sha,
         opened_at: DateTime.utc_now()
       )
 
