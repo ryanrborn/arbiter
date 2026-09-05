@@ -2313,7 +2313,7 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp safe_merge(%{adapter: adapter, mr_ref: mr_ref}) do
-    case adapter.merge(mr_ref) do
+    case adapter.merge(mr_ref, nil) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
       other -> {:error, {:bad_return, other}}

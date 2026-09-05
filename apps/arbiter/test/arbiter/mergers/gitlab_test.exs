@@ -784,7 +784,7 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:error, %Error{kind: :conflict, status: 405}} = Gitlab.merge(@ref)
     end
 
-    test "includes merge_method when configured" do
+    test "sends squash parameter when merge_method=squash is configured" do
       stub(fn conn ->
         cond do
           conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
@@ -800,7 +800,8 @@ defmodule Arbiter.Mergers.GitlabTest do
             {:ok, body, conn} = Plug.Conn.read_body(conn)
             decoded = Jason.decode!(body)
             assert decoded["sha"] == "abc123def456"
-            assert decoded["merge_method"] == "squash"
+            # GitLab's merge API only accepts "squash" (boolean), not "merge_method"
+            assert decoded["squash"] == true
 
             conn
             |> Plug.Conn.put_status(200)
@@ -818,6 +819,38 @@ defmodule Arbiter.Mergers.GitlabTest do
       })
 
       assert :ok = Gitlab.merge(@ref)
+    end
+
+    test "rejects merge when expected_sha differs from current head (stale approval)" do
+      stub(fn conn ->
+        cond do
+          conn.method == "GET" and conn.request_path == "#{base_path()}/#{@iid}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "iid" => @iid,
+              "state" => "opened",
+              "sha" => "newhead123456"
+            })
+
+          conn.method == "PUT" and conn.request_path == "#{base_path()}/#{@iid}/merge" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            # Verify we're sending the expected SHA (different from current)
+            assert decoded["sha"] == "approvedsha"
+
+            # GitLab rejects because the SHA doesn't match current head
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "SHA must be provided when merging (validation_failed)"
+            })
+        end
+      end)
+
+      # Call merge with an expected_sha that differs from the current head
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               Gitlab.merge(@ref, "approvedsha")
     end
   end
 

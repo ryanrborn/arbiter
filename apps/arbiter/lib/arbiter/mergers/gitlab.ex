@@ -192,25 +192,37 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
-  def merge(mr_ref) when is_binary(mr_ref) do
+  def merge(mr_ref, expected_sha \\ nil) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, iid} <- iid_from_ref(mr_ref),
-         {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 <-
-           request(cfg, :get, "/merge_requests/#{iid}", []),
-         head_sha = Map.get(mr_body, "sha") do
-      payload =
-        %{"sha" => head_sha}
-        |> maybe_put("merge_method", merge_method_param(cfg.merge_method))
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      case request(cfg, :get, "/merge_requests/#{iid}", []) do
+        {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 ->
+          current_sha = Map.get(mr_body, "sha")
 
-      request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
-      |> handle_ok()
+          # Use the expected SHA if provided (from approval decision); otherwise use current head.
+          # If expected_sha was provided and differs from current, GitLab will reject the merge.
+          sha_to_send = expected_sha || current_sha
+
+          payload =
+            %{"sha" => sha_to_send}
+            |> maybe_put("squash", squash_param(cfg.merge_method))
+
+          request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
+          |> handle_ok()
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
     end
   end
 
-  # GitLab's merge_method parameter accepts "merge", "squash", and "ff".
-  defp merge_method_param(:squash), do: "squash"
-  defp merge_method_param(:ff), do: "ff"
-  defp merge_method_param(:merge), do: "merge"
+  # GitLab's merge endpoint only accepts "squash" as a per-call parameter (boolean).
+  # The merge strategy (merge/rebase/ff) is a project-level setting, not per-MR.
+  defp squash_param(:squash), do: true
+  defp squash_param(_), do: nil
 
   @impl true
   def close(mr_ref) when is_binary(mr_ref) do

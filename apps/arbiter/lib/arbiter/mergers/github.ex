@@ -359,7 +359,7 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @impl true
-  def merge(mr_ref) when is_binary(mr_ref) do
+  def merge(mr_ref, _expected_sha \\ nil) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
       payload = %{"merge_method" => Atom.to_string(cfg.merge_method)}
