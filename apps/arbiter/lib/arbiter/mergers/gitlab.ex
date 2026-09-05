@@ -740,10 +740,27 @@ defmodule Arbiter.Mergers.Gitlab do
       # deprecated and asynchronously recomputed, so a bare "cannot_be_merged"
       # without a corroborating `has_conflicts: true` (already checked above)
       # is not trusted as a settled conflict — it's treated the same as the
-      # other not-yet-settled statuses. Any other/unrecognized `merge_status`
-      # still falls through to `:blocked_other` below, same as before bd-1x4r25.
+      # other not-yet-settled statuses. `cannot_be_merged_recheck` and
+      # `cannot_be_merged_rechecking` are the legacy enum's explicit "a
+      # mergeability recheck is queued / running" states — they appear on the
+      # same older GitLab versions that omit `detailed_merge_status`, and are
+      # *by definition* unsettled, so they belong here too.
+      #
+      # Unlike the pre-bd-1x4r25 code, an unrecognized `merge_status` with a nil
+      # `detailed` no longer returns `nil` — it falls through to `:blocked_other`
+      # below. That is a deliberate tightening: an unknown status is surfaced
+      # once to the coordinator rather than silently treated as mergeable.
       is_nil(detailed) and
-          merge_status in ["can_be_merged", "unchecked", "checking", "cannot_be_merged", nil, ""] ->
+          merge_status in [
+            "can_be_merged",
+            "unchecked",
+            "checking",
+            "cannot_be_merged",
+            "cannot_be_merged_recheck",
+            "cannot_be_merged_rechecking",
+            nil,
+            ""
+          ] ->
         nil
 
       true ->

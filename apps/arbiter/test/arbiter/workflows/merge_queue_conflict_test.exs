@@ -800,5 +800,49 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       # No worktree attach, no worker spawn happened for the no-op path.
       assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
     end
+
+    test "an un-supplied target is derived from the task, not blanket-defaulted to the workspace base",
+         %{workspace: ws, repo: repo} do
+      # bd-1x4r25 review: the pre-flight is only safe if it compares against the
+      # branch the MR actually merges into. A task targeting an integration
+      # branch, dispatched by a caller that passes no `:target_branch` (the
+      # Watchdog, when its adapter reports no `base_ref`), used to be compared
+      # against `origin/main` — which the branch already contains — and would
+      # no-op forever while a real conflict against the integration branch went
+      # unresolved and, because a no-op burns no attempt, unescalated.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "targets an integration branch",
+          description: "task under conflict test",
+          workspace_id: ws.id,
+          target_branch: "integration/dolphin"
+        })
+
+      # The integration branch has moved ahead of main; the task branch is cut
+      # from (and therefore contains all of) main.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "integration/dolphin"])
+      File.write!(Path.join(repo, "INT.md"), "int\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "INT.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "int"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "integration/dolphin"])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", branch, "main"])
+
+      result =
+        Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo_path: repo,
+          repo: "test/repo",
+          start_claude: false
+        })
+
+      assert {:ok, %{worker_pid: worker_pid}} = result
+      assert Arbiter.Worker.state(worker_pid).meta[:target_branch] == "integration/dolphin"
+
+      :ok = GenServer.stop(worker_pid, :normal, 1_000)
+    end
   end
 end

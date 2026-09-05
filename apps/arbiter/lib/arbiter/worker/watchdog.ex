@@ -758,6 +758,13 @@ defmodule Arbiter.Worker.Watchdog do
         #                            found zero divergence and spawned nothing).
         #                            Not an attempt; tracked only so a
         #                            non-converging forge verdict is visible.
+        #   mr_base_ref            — the branch the MR actually merges into, as
+        #                            reported by the adapter's own `get/1`
+        #                            (`base_ref`). Handed to the resolver as
+        #                            `target_branch` so its zero-divergence
+        #                            pre-flight compares against the real
+        #                            target, not a guessed workspace base
+        #                            (bd-1x4r25). nil until the first poll.
         auto_resolve_conflict: auto_resolve_conflict,
         conflict_resolver: Keyword.get(opts, :conflict_resolver, @default_conflict_resolver),
         max_conflict_attempts: max_conflict_attempts,
@@ -767,6 +774,7 @@ defmodule Arbiter.Worker.Watchdog do
         conflict_branch: nil,
         conflict_escalated: false,
         conflict_no_ops: 0,
+        mr_base_ref: nil,
         # Bounded self-healing of `{:awaiting_review_timeout, _}` (bd-8eheb6).
         #   max_auto_resumes        — auto-resume budget for this task; 0 = off.
         #   auto_resume_dispatcher  — module that re-attaches the worker and,
@@ -1752,9 +1760,26 @@ defmodule Arbiter.Worker.Watchdog do
   defp maybe_auto_resolve_conflict(%{auto_resolve_conflict: false} = state, _result), do: state
 
   defp maybe_auto_resolve_conflict(state, result) do
+    state = remember_base_ref(state, result)
+
     case effective_block_reason(state, result) do
       :conflict -> drive_conflict_resolution(state)
       _ -> reset_conflict_state(state)
+    end
+  end
+
+  # The adapter's `get/1` carries the MR's own target branch (`base_ref` — set
+  # by both the GitLab and GitHub adapters). Keep the last one seen so the
+  # conflict resolver's zero-divergence pre-flight is run against the branch
+  # this MR actually merges into. Without it the resolver falls back to
+  # deriving a target from task/workspace config; if that ever disagreed with
+  # the MR, a branch containing the *wrong* target's tip would read as "nothing
+  # to rebase" and a real conflict would be suppressed silently and
+  # indefinitely, since the no-op path consumes no attempt (bd-1x4r25 review).
+  defp remember_base_ref(state, result) do
+    case Map.get(result, :base_ref) do
+      ref when is_binary(ref) and ref != "" -> %{state | mr_base_ref: ref}
+      _ -> state
     end
   end
 
@@ -1787,11 +1812,13 @@ defmodule Arbiter.Worker.Watchdog do
   defp drive_conflict_resolution(state), do: spawn_conflict_resolver(state)
 
   defp spawn_conflict_resolver(state) do
-    args = %{
-      task_id: state.task_id,
-      workspace_id: workspace_id(state),
-      pr_ref: state.mr_ref
-    }
+    args =
+      %{
+        task_id: state.task_id,
+        workspace_id: workspace_id(state),
+        pr_ref: state.mr_ref
+      }
+      |> put_target_branch(state.mr_base_ref)
 
     case safe_resolve(state.conflict_resolver, args) do
       # Phantom conflict (bd-1x4r25): the resolver compared the branch against
@@ -1934,6 +1961,13 @@ defmodule Arbiter.Worker.Watchdog do
         )
     end
   end
+
+  # Only set `:target_branch` when the adapter actually told us one — an
+  # explicit nil would read as "caller supplied a target" downstream.
+  defp put_target_branch(args, ref) when is_binary(ref) and ref != "",
+    do: Map.put(args, :target_branch, ref)
+
+  defp put_target_branch(args, _ref), do: args
 
   # First phantom conflict is routine (a mergeability recheck in flight), so it
   # logs at `info`. A repeat means the forge's verdict is not converging, which

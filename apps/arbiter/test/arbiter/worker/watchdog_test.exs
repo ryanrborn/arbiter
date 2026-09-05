@@ -941,6 +941,58 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert state.conflict_resolver_pid == nil
     end
 
+    # bd-1x4r25 review: the resolver's zero-divergence pre-flight compares the
+    # branch against `origin/<target_branch>`. If the Watchdog doesn't say which
+    # target, the resolver derives one from task/workspace config — and for an MR
+    # opened against an integration branch that guess can be `main`, which the
+    # branch already contains. That reads as "nothing to rebase" and, because the
+    # no-op path burns no attempt and never escalates, a real conflict would stall
+    # silently forever. The adapter already reports the MR's own target as
+    # `base_ref`; pass it through.
+    test "passes the MR's own base_ref to the resolver as :target_branch" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+
+      StubMerger.queue_get("!c11", [
+        %{
+          status: :open,
+          approved: true,
+          block_reason: :conflict,
+          base_ref: "integration/dolphin"
+        }
+      ])
+
+      start_watchdog(pid, task_id, "!c11",
+        workspace: test_workspace(),
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 1,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, args}, 1_000
+      assert args.target_branch == "integration/dolphin"
+    end
+
+    test "omits :target_branch when the adapter reports no base_ref" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      StubMerger.queue_get("!c12", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(pid, task_id, "!c12",
+        workspace: test_workspace(),
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 1,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, args}, 1_000
+      # An explicit nil would look like "the caller supplied a target" to the
+      # resolver, defeating its own derivation — the key must simply be absent.
+      refute Map.has_key?(args, :target_branch)
+    end
+
     test "a persistent phantom conflict is logged at warning rather than silently forever" do
       {pid, task_id} = running_worker()
       StubConflictResolver.arm(task_id, self(), result: :no_op)

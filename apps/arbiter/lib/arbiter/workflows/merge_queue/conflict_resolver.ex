@@ -51,6 +51,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
 
   require Logger
@@ -234,7 +235,23 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     workspace = maybe_load_workspace(task.workspace_id)
 
     branch = Map.get(args, :branch) || derive_branch(task)
-    target_branch = Map.get(args, :target_branch) || workspace_base_branch(workspace) || "main"
+    # The target must be the branch the MR actually merges into, not merely the
+    # workspace's blanket base: the pre-flight in `zero_divergence?/1` compares
+    # against `origin/<target>`, and a branch that *contains* the wrong target's
+    # tip would read as "nothing to rebase" and silently suppress a real
+    # conflict (bd-1x4r25 review). So derive it through the same
+    # `Worker.TargetBranch` chain `Dispatch` cuts the worktree with and
+    # `MergeQueue` opens the MR against — per-task `target_branch` and per-repo
+    # config first, the workspace base only as a fallback. Caller-supplied
+    # `:target_branch` (the MergeQueue's `item.base`, the Watchdog's MR
+    # `base_ref`) still wins outright.
+    target_branch =
+      Map.get(args, :target_branch) ||
+        TargetBranch.resolve(task,
+          repo: Map.get(args, :repo),
+          workspace_base: workspace_base_branch(workspace)
+        )
+
     repo_path = Map.get(args, :repo_path) || resolve_repo_path(workspace, Map.get(args, :repo))
 
     cond do

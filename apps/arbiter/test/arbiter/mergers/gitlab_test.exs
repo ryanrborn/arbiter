@@ -583,6 +583,19 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert result.conflicting == false
     end
 
+    test "the legacy recheck-in-flight merge statuses are non-blocking (bd-1x4r25)" do
+      # `cannot_be_merged_recheck` / `cannot_be_merged_rechecking` are the
+      # legacy enum's "a mergeability recheck is queued / running" states, on
+      # exactly the older GitLab versions that omit `detailed_merge_status`.
+      # They are unsettled by definition — neither a conflict nor a merge rule
+      # a human can act on, so they must not page the coordinator.
+      for status <- ["cannot_be_merged_recheck", "cannot_be_merged_rechecking"] do
+        result = block_get(%{"merge_status" => status})
+        assert result.block_reason == nil, "expected #{status} to be non-blocking"
+        assert result.conflicting == false
+      end
+    end
+
     test "an unrecognized merge_status with no detail still classifies as :blocked_other" do
       # Only the specific legacy statuses known to mean "not settled yet" are
       # forgiven when `detailed_merge_status` is absent (bd-1x4r25 finding 3) —
