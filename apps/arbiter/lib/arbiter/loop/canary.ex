@@ -6,11 +6,16 @@ defmodule Arbiter.Loop.Canary do
   dispatches, measured against the untouched arm, and reverted automatically if
   it makes things worse.
 
-  Everything else in the queue stays operator-applied. Skill bodies and
-  `standing_orders` are prose: they bloat every future prompt and can
-  contradict each other, so the epic keeps them on the slower human path.
-  A routing rule is numeric, bounded, trivially reversible, and directly
-  measurable — which is why it goes first, and alone.
+  Everything else in the queue stays operator-applied. Skill bodies are prose
+  that gets materialized into every matching run's worktree and pulled into
+  the agent's context (`worker_runs.resolved_skills` records which): they
+  bloat that context and can contradict each other, so the epic keeps them
+  on the slower human path. `standing_orders` is operator-applied
+  for a different reason: it's coordinator-facing config (surfaced in `arb
+  prime`, never injected into any worker prompt — see
+  `ArbiterCli.ConfigSchema`), so there's no per-dispatch prompt effect to
+  canary in the first place. A routing rule is numeric, bounded, trivially
+  reversible, and directly measurable — which is why it goes first, and alone.
 
   ## The gate
 

@@ -35,9 +35,11 @@ defmodule ArbiterCli.Cmd.Workspace do
       arb workspace secret set tracker_token sct_rw_...
 
   Standing orders live in `config.standing_orders` — a list of short imperative
-  strings surfaced high in every worker's `arb prime` briefing. The `add`/`rm`
-  verbs edit individual entries via `PATCH /api/workspaces/:id/config` so the
-  rest of the config is never clobbered.
+  strings surfaced in `arb prime`, the **coordinator's** briefing. They are
+  never injected into any worker prompt — put worker-facing instructions in
+  the repo's `CLAUDE.md` instead. The `add`/`rm` verbs edit individual entries
+  via `PATCH /api/workspaces/:id/config` so the rest of the config is never
+  clobbered.
 
   All verbs accept `--workspace <name>` to target a workspace other than the
   default. Reads from `GET /api/workspaces`; writes via `PATCH /api/workspaces/:id`.

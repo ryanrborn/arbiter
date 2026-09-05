@@ -1,7 +1,8 @@
 defmodule ArbiterWeb.WorkspaceDetail.StandingOrdersComponent do
   @moduledoc """
-  `config.standing_orders` — the short imperative directives surfaced high in
-  every worker's `arb prime` briefing.
+  `config.standing_orders` — coordinator-facing directives surfaced in
+  `arb prime`. They are never injected into any worker prompt; put
+  worker-facing instructions in the repo's `CLAUDE.md` instead.
 
   Add/remove rewrite the whole list rather than patching into it, because
   `patch_config`'s deep merge has no way to delete a list element.
@@ -84,7 +85,7 @@ defmodule ArbiterWeb.WorkspaceDetail.StandingOrdersComponent do
       <.rows>
         <.setting_row
           name="Standing orders"
-          consequence="every worker reads these at the top of its arb prime briefing, on every dispatch in this workspace"
+          consequence="surfaced in arb prime, the coordinator's briefing — never injected into any worker prompt"
         >
           <:below>
             <ul :if={@orders != []} id="standing-orders" class={list_class()}>
@@ -106,7 +107,7 @@ defmodule ArbiterWeb.WorkspaceDetail.StandingOrdersComponent do
               icon="hero-clipboard-document-check"
               detail="standing_orders is empty"
             >
-              No standing orders — workers get the default briefing only.
+              No standing orders — arb prime shows the default briefing only.
             </Feedback.empty_state>
 
             <.form

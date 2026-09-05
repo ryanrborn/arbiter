@@ -313,7 +313,11 @@ defmodule Arbiter.Workers.Run do
       constraints max_length: 64, trim?: true
 
       description "SHA-256 hex digest of the workspace's effective standing_orders text at " <>
-                    "dispatch time. Nil when the workspace has no standing_orders configured."
+                    "dispatch time. Nil when the workspace has no standing_orders configured. " <>
+                    "Provenance only: standing_orders is never injected into this run's prompt " <>
+                    "(it's coordinator-facing config, surfaced in `arb prime`) — this digest " <>
+                    "exists so outcomes can be correlated against config changes, not to record " <>
+                    "something that shaped the run's behaviour."
     end
 
     attribute :routing_policy, :string do

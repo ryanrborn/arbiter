@@ -487,4 +487,36 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
       assert html =~ "save_tracker_config"
     end
   end
+
+  # bd-77cbif: this is the fourth doc site (alongside config_schema.ex,
+  # cmd/workspace.ex, and loop/canary.ex) that used to claim standing_orders
+  # reaches a worker prompt. Unlike the others it is rendered to the
+  # operator, on the page where orders are actually added, so a moduledoc
+  # check alone would miss the `consequence=` and empty-state strings that
+  # only appear in the rendered HTML.
+  describe "standing orders doc drift" do
+    test "moduledoc does not claim standing_orders reaches a worker briefing" do
+      {:docs_v1, _, :elixir, _, %{"en" => moduledoc}, _, _} =
+        Code.fetch_docs(ArbiterWeb.WorkspaceDetail.StandingOrdersComponent)
+
+      refute moduledoc =~ ~r/worker's `arb prime`/,
+             "arb prime is a coordinator command, not a per-worker briefing"
+
+      refute moduledoc =~ ~r/every worker/i,
+             "standing_orders is never injected into a worker prompt"
+    end
+
+    test "rendered page does not claim standing_orders reaches a worker prompt", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      refute html =~ ~r/worker reads these/i,
+             "the consequence text must not claim per-dispatch worker effect"
+
+      refute html =~ ~r/workers get the default briefing/i,
+             "the empty state must not imply orders change what workers receive"
+
+      assert html =~ "never injected into any worker prompt"
+    end
+  end
 end
