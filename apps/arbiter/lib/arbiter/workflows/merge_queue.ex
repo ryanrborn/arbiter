@@ -865,10 +865,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp advance_status(state, item, mr_state) do
     now = DateTime.utc_now()
     item = %{item | last_polled_at: now}
-
-    # The phantom-conflict counter measures *consecutive* ticks, so it clears
-    # the moment the forge stops claiming a conflict (bd-1x4r25).
-    item = if mr_state.conflicting, do: item, else: %{item | phantom_conflicts: 0}
+    item = clear_phantom_conflicts_unless_conflicting(item, mr_state)
 
     cond do
       # Top-priority guard: a CONFLICTING MR never advances state. The
@@ -929,6 +926,13 @@ defmodule Arbiter.Workflows.MergeQueue do
         advance_ready_ladder(state, item, mr_state)
     end
   end
+
+  # The phantom-conflict counter measures *consecutive* ticks, so it clears
+  # the moment the forge stops claiming a conflict (bd-1x4r25).
+  defp clear_phantom_conflicts_unless_conflicting(item, %{conflicting: true}), do: item
+
+  defp clear_phantom_conflicts_unless_conflicting(item, _mr_state),
+    do: %{item | phantom_conflicts: 0}
 
   defp resume_after_conflict_resolution(state, item, mr_state) do
     restored = restore_after_resolution(state, item)
