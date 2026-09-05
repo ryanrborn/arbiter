@@ -9,6 +9,7 @@ defmodule Arbiter.Worker.RunProvenance do
   """
 
   alias Arbiter.Agents.Routing
+  alias Arbiter.StandingOrders
   alias Arbiter.Tasks.Workspace
 
   @doc """
@@ -56,7 +57,9 @@ defmodule Arbiter.Worker.RunProvenance do
 
   def standing_orders_digest(_), do: nil
 
-  defp canonical_text(orders) when is_list(orders), do: Enum.join(orders, "\n")
+  defp canonical_text(orders) when is_list(orders),
+    do: Enum.map_join(orders, "\n", &StandingOrders.canonical_text/1)
+
   defp canonical_text(text) when is_binary(text), do: text
   defp canonical_text(other), do: inspect(other)
 
