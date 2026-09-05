@@ -85,6 +85,87 @@ defmodule Arbiter.Worker.RunProvenanceTest do
       refute RunProvenance.standing_orders_digest(ws1) ==
                RunProvenance.standing_orders_digest(ws2)
     end
+
+    test "handles maps with title and detail (documented format)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "prov-ws-#{uniq()}",
+          prefix: "pv",
+          config: %{
+            "standing_orders" => [
+              %{"title" => "run tests", "detail" => "before commit"}
+            ]
+          }
+        })
+
+      digest = RunProvenance.standing_orders_digest(ws)
+      assert is_binary(digest)
+      assert String.length(digest) == 64
+    end
+
+    test "handles maps with title only" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "prov-ws-#{uniq()}",
+          prefix: "pv",
+          config: %{
+            "standing_orders" => [
+              %{"title" => "run tests"}
+            ]
+          }
+        })
+
+      digest = RunProvenance.standing_orders_digest(ws)
+      assert is_binary(digest)
+      assert String.length(digest) == 64
+    end
+
+    test "handles mixed lists of strings and maps" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "prov-ws-#{uniq()}",
+          prefix: "pv",
+          config: %{
+            "standing_orders" => [
+              "always run tests",
+              %{"title" => "review code", "detail" => "before merge"},
+              %{"title" => "check lint"},
+              "never force-push"
+            ]
+          }
+        })
+
+      digest = RunProvenance.standing_orders_digest(ws)
+      assert is_binary(digest)
+      assert String.length(digest) == 64
+    end
+
+    test "hashes maps deterministically regardless of key order" do
+      {:ok, ws1} =
+        Ash.create(Workspace, %{
+          name: "prov-ws-#{uniq()}",
+          prefix: "pv",
+          config: %{
+            "standing_orders" => [
+              %{"title" => "run tests", "detail" => "before commit"}
+            ]
+          }
+        })
+
+      {:ok, ws2} =
+        Ash.create(Workspace, %{
+          name: "prov-ws-#{uniq()}",
+          prefix: "pv",
+          config: %{
+            "standing_orders" => [
+              %{"detail" => "before commit", "title" => "run tests"}
+            ]
+          }
+        })
+
+      assert RunProvenance.standing_orders_digest(ws1) ==
+               RunProvenance.standing_orders_digest(ws2)
+    end
   end
 
   describe "routing_policy_string/1" do
