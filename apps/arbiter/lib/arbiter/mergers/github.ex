@@ -26,7 +26,7 @@ defmodule Arbiter.Mergers.Github do
     * `"<owner>/<repo>#<number>"` — when the target repo was derived per-repo
       from the repo's git remote (multi-repo workspaces where `merge.config`
       omits `repo`). The owner/repo are baked into the ref so later
-      callbacks (`get/1`, `merge/1`, …) talk to the same repo without
+      callbacks (`get/1`, `merge/2`, …) talk to the same repo without
       re-resolving.
     * `"#<number>"` — when the target repo came from workspace config
       (`merge.config.repo`). The legacy single-repo shape; owner/repo are
@@ -359,15 +359,28 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @impl true
-  def merge(mr_ref) when is_binary(mr_ref) do
+  def merge(mr_ref, expected_sha) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
-      payload = %{"merge_method" => Atom.to_string(cfg.merge_method)}
+      # bd-dxgris / #1493: GitHub's merge endpoint takes the same `sha`
+      # precondition GitLab's does — "SHA that pull request head must match to
+      # allow merge" — so the race closes on both forges in the same change
+      # rather than being left asymmetric. A head that advanced past the
+      # reviewed commit comes back 409 ("Head branch was modified") instead of
+      # merging commits no reviewer ever saw.
+      payload =
+        %{"merge_method" => Atom.to_string(cfg.merge_method)}
+        |> maybe_put_sha(expected_sha)
 
       request(cfg, :put, "/repos/#{owner}/#{repo}/pulls/#{number}/merge", json: payload)
       |> expect_ok()
     end
   end
+
+  defp maybe_put_sha(payload, sha) when is_binary(sha) and sha != "",
+    do: Map.put(payload, "sha", sha)
+
+  defp maybe_put_sha(payload, _sha), do: payload
 
   @impl true
   def update_branch(mr_ref) when is_binary(mr_ref) do

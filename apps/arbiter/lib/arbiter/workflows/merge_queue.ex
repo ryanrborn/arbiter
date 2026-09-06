@@ -583,6 +583,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           base: base,
           repo: repo,
           priority: task_priority(task),
+          last_reviewed_sha: task.last_reviewed_sha,
           opened_at: DateTime.utc_now()
         )
 
@@ -866,6 +867,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp advance_status(state, item, mr_state) do
     now = DateTime.utc_now()
     item = %{item | last_polled_at: now}
+    item = track_reviewed_baseline(item, mr_state)
     item = clear_phantom_conflicts_unless_conflicting(item, mr_state)
 
     cond do
@@ -894,7 +896,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
       # MR was already merged externally (e.g. the Watchdog merged it for a
       # ReviewGate-approved task before the MergeQueue processed the worker_done
-      # event). Close the task directly without re-attempting adapter.merge/1
+      # event). Close the task directly without re-attempting adapter.merge/2
       # — that call would fail on an already-closed PR. bd-d1jp4r. Checked
       # before the changes-requested branch so a merged PR never triggers a
       # revise on a stale review.
@@ -1306,13 +1308,59 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp item_branch_label(%{task_id: task_id}), do: "task=" <> task_id
 
+  # bd-dxgris / #1493 — merge only the commit the review verdict was computed
+  # against. Same two layers as `Arbiter.Worker.Watchdog.safe_merge/1`: refuse
+  # locally when the head this queue last observed has moved past the reviewed
+  # baseline, and otherwise hand that baseline to the forge as an atomic
+  # precondition so the residual poll→merge window closes too.
+  defp merge_guarded(state, item) do
+    case Mergers.ReviewedSha.check(item_reviewed_sha(item), Map.get(item, :last_head_sha)) do
+      {:ok, expected_sha} ->
+        state.adapter.merge(item.mr_ref, expected_sha)
+
+      {:error, {:stale_reviewed_sha, reviewed, head}} = err ->
+        Logger.warning(
+          "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+            "branch advanced past the reviewed commit (reviewed=#{reviewed} head=#{head})"
+        )
+
+        err
+    end
+  end
+
+  # The task's recorded review baseline wins over the queue's own latch, exactly
+  # as in the Watchdog.
+  defp item_reviewed_sha(item) do
+    case Map.get(item, :last_reviewed_sha) do
+      sha when is_binary(sha) and sha != "" -> sha
+      _ -> Map.get(item, :reviewed_sha)
+    end
+  end
+
+  # Carry the reviewed baseline forward from one poll observation, mirroring
+  # `Arbiter.Worker.Watchdog.track_reviewed_baseline/2`.
+  defp track_reviewed_baseline(item, mr_state) do
+    head = Map.get(mr_state, :head_sha)
+
+    %{
+      item
+      | last_head_sha: head,
+        reviewed_sha:
+          Mergers.ReviewedSha.latch(
+            Map.get(item, :reviewed_sha),
+            Map.get(mr_state, :approved) == true,
+            head
+          )
+    }
+  end
+
   defp try_merge(state, item) do
     Mergers.prepare_with_repo(state.workspace, item.repo)
 
-    case state.adapter.merge(item.mr_ref) do
+    case merge_guarded(state, item) do
       :ok ->
         item = %{item | status: :merging}
-        # Synchronously finalize. adapter.merge/1 returning :ok is the merge
+        # Synchronously finalize. adapter.merge/2 returning :ok is the merge
         # confirmation, so it's safe to close now.
         item = %{item | status: :done}
         state = close_task_and_finalize(state, item)
@@ -1370,7 +1418,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   # bd-bqqnin: `close_task_and_finalize/2` is the single funnel every merge-
-  # success path routes through (a fresh adapter.merge/1, a poll that finds
+  # success path routes through (a fresh adapter.merge/2, a poll that finds
   # the MR already merged externally, and the direct/no-PR strategy alike),
   # so it's the right place to also fast-forward the repo's *primary* local
   # checkout — the shared directory a human/coordinator may `cd` into,
@@ -1449,6 +1497,14 @@ defmodule Arbiter.Workflows.MergeQueue do
       priority: 2,
       opened_at: nil,
       last_polled_at: nil,
+      # bd-dxgris / #1493 — the reviewed-SHA guard. `last_reviewed_sha` is the
+      # task's own recorded review baseline (captured at enqueue);
+      # `reviewed_sha` is the fallback the queue latches itself, the head
+      # observed on the first poll that reported the MR approved.
+      # `last_head_sha` is the head from the most recent poll.
+      last_reviewed_sha: nil,
+      reviewed_sha: nil,
+      last_head_sha: nil,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,

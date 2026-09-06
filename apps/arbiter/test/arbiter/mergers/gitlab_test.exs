@@ -711,7 +711,7 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
-  describe "merge/1" do
+  describe "merge/2" do
     test "200: fetches MR, extracts head SHA, sends it in merge request body" do
       stub(fn conn ->
         cond do
@@ -735,7 +735,41 @@ defmodule Arbiter.Mergers.GitlabTest do
         end
       end)
 
-      assert :ok = Gitlab.merge(@ref)
+      assert :ok = Gitlab.merge(@ref, nil)
+    end
+
+    test "an expected_sha is sent verbatim, with no head re-read (bd-dxgris)" do
+      # The reviewed SHA IS the precondition — re-reading the head would defeat
+      # the guard by replacing it with whatever landed since.
+      test_pid = self()
+
+      stub(fn conn ->
+        if conn.method == "GET", do: send(test_pid, :unexpected_head_read)
+
+        assert conn.method == "PUT"
+        assert conn.request_path == "#{base_path()}/#{@iid}/merge"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["sha"] == "reviewed-sha"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"iid" => @iid, "state" => "merged"})
+      end)
+
+      assert :ok = Gitlab.merge(@ref, "reviewed-sha")
+      refute_received :unexpected_head_read
+    end
+
+    test "409 when the branch advanced past the expected_sha" do
+      stub(fn conn ->
+        assert conn.method == "PUT"
+
+        conn
+        |> Plug.Conn.put_status(409)
+        |> Req.Test.json(%{"message" => "SHA does not match HEAD of source branch"})
+      end)
+
+      assert {:error, %Error{status: 409}} = Gitlab.merge(@ref, "reviewed-sha")
     end
 
     test "422 with SHA validation error when merge fails due to stale head" do
@@ -759,7 +793,7 @@ defmodule Arbiter.Mergers.GitlabTest do
         end
       end)
 
-      assert {:error, %Error{kind: :validation_failed, status: 422}} = Gitlab.merge(@ref)
+      assert {:error, %Error{kind: :validation_failed, status: 422}} = Gitlab.merge(@ref, nil)
     end
 
     test "405: not mergeable returns {:error, %Error{kind: :conflict}}" do
@@ -781,7 +815,7 @@ defmodule Arbiter.Mergers.GitlabTest do
         end
       end)
 
-      assert {:error, %Error{kind: :conflict, status: 405}} = Gitlab.merge(@ref)
+      assert {:error, %Error{kind: :conflict, status: 405}} = Gitlab.merge(@ref, nil)
     end
 
     test "sends squash parameter when merge_method=squash is configured" do
@@ -818,7 +852,7 @@ defmodule Arbiter.Mergers.GitlabTest do
         "merge_method" => "squash"
       })
 
-      assert :ok = Gitlab.merge(@ref)
+      assert :ok = Gitlab.merge(@ref, nil)
     end
 
     test "GET 500: returns {:error, %Error{status: 500}} without attempting the merge PUT" do
@@ -831,13 +865,13 @@ defmodule Arbiter.Mergers.GitlabTest do
         |> Req.Test.json(%{"message" => "Internal Server Error"})
       end)
 
-      assert {:error, %Error{status: 500}} = Gitlab.merge(@ref)
+      assert {:error, %Error{status: 500}} = Gitlab.merge(@ref, nil)
     end
 
     test "GET transport failure: returns a transport_error, not a crash" do
       stub(fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
 
-      assert {:error, %Error{}} = Gitlab.merge(@ref)
+      assert {:error, %Error{}} = Gitlab.merge(@ref, nil)
     end
 
     test "GET 200 with no sha in the body: returns a validation error naming the cause" do
@@ -849,7 +883,7 @@ defmodule Arbiter.Mergers.GitlabTest do
         |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
       end)
 
-      assert {:error, %Error{kind: :validation_failed}} = Gitlab.merge(@ref)
+      assert {:error, %Error{kind: :validation_failed}} = Gitlab.merge(@ref, nil)
     end
   end
 
@@ -1080,7 +1114,7 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:error, %Error{kind: :config_missing}} = Gitlab.get(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.update_branch(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.failing_check_logs(@ref)
-      assert {:error, %Error{kind: :config_missing}} = Gitlab.merge(@ref)
+      assert {:error, %Error{kind: :config_missing}} = Gitlab.merge(@ref, nil)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.close(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.add_comment(@ref, "x")
       assert {:error, %Error{kind: :config_missing}} = Gitlab.request_review(@ref, [1])
