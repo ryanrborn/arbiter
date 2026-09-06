@@ -30,6 +30,8 @@ defmodule Arbiter.Worker.WorkerEnv do
   the task-id self-recursion guard.
   """
 
+  require Logger
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
@@ -45,18 +47,46 @@ defmodule Arbiter.Worker.WorkerEnv do
   Returns `{[], []}` when `task_id` is not a non-empty string, the
   task/workspace can't be loaded, or no vars are configured — so the caller can
   splice the result in unconditionally.
+
+  If the workspace resolves but its store comes up empty despite having
+  configured keys (`worker_env_meta` non-empty), that's a degradation rather
+  than "nothing configured" — this logs a `Logger.warning` naming the task,
+  the workspace, and which half came up empty, so the next occurrence is
+  diagnosable from the log instead of a `/proc` inspection. A genuinely
+  unconfigured workspace (empty `worker_env_meta`) never warns.
   """
   @spec resolve(String.t() | nil) :: {[{String.t(), String.t()}], [String.t()]}
   def resolve(task_id) do
     case workspace_for(task_id) do
       %Workspace{} = ws ->
-        {ws |> Workspace.worker_env_map() |> Map.to_list(),
-         Workspace.worker_env_secret_values(ws)}
+        pairs = ws |> Workspace.worker_env_map() |> Map.to_list()
+        secret_values = Workspace.worker_env_secret_values(ws)
+        warn_if_degraded(task_id, ws, pairs)
+        {pairs, secret_values}
 
       nil ->
         {[], []}
     end
   end
+
+  # Only a workspace with configured keys (non-empty `worker_env_meta`) but an
+  # empty decrypted store is a degradation worth a warning — a workspace with
+  # nothing configured at all producing `[]` is the expected, silent case.
+  defp warn_if_degraded(task_id, %Workspace{} = ws, []) do
+    case Workspace.worker_env_keys(ws) do
+      [] ->
+        :ok
+
+      configured_keys ->
+        Logger.warning(
+          "WorkerEnv: workspace #{ws.id} (#{ws.name}) has #{length(configured_keys)} " <>
+            "configured worker env key(s) but worker_env_map/1 decrypted none for task " <>
+            "#{task_id} — encrypted_worker_env is likely unreadable or undecryptable"
+        )
+    end
+  end
+
+  defp warn_if_degraded(_task_id, _ws, _pairs), do: :ok
 
   @doc """
   Returns the workspace's user-defined env vars for `task_id` as decrypted

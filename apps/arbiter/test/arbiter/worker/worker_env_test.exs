@@ -1,6 +1,9 @@
 defmodule Arbiter.Worker.WorkerEnvTest do
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+  import Ecto.Query
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.WorkerEnv
@@ -66,6 +69,63 @@ defmodule Arbiter.Worker.WorkerEnvTest do
     test "returns [] for an unknown / nil task id" do
       assert WorkerEnv.secret_values("does-not-exist") == []
       assert WorkerEnv.secret_values(nil) == []
+    end
+  end
+
+  describe "resolve/1 observability" do
+    test "warns when the workspace resolves but its encrypted store is unreadable despite configured keys" do
+      ws =
+        workspace_with_env(%{
+          "API_TOKEN" => %{"value" => "tok_secret", "secret" => true}
+        })
+
+      task = task_in(ws)
+
+      # Simulate the storage-half degrading independently of the public
+      # worker_env_meta half (e.g. a corrupt/cleared ciphertext column) —
+      # exactly the "both halves written, only one readable" shape this
+      # ticket is about. Direct SQL bypasses Ash's write-only `worker_env`
+      # argument, which has no update path for the raw encrypted column.
+      Arbiter.Repo.update_all(
+        from(w in "workspaces", where: w.id == ^ws.id),
+        set: [encrypted_worker_env: nil]
+      )
+
+      log =
+        capture_log(fn ->
+          assert WorkerEnv.resolve(task.id) == {[], []}
+        end)
+
+      assert log =~ "WorkerEnv"
+      assert log =~ task.id
+      assert log =~ ws.id
+    end
+
+    test "does not warn for a genuinely unconfigured workspace" do
+      task = task_in(workspace_with_env(%{}))
+
+      log =
+        capture_log(fn ->
+          assert WorkerEnv.resolve(task.id) == {[], []}
+        end)
+
+      assert log == ""
+    end
+
+    test "does not warn when the store resolves normally" do
+      ws =
+        workspace_with_env(%{
+          "API_TOKEN" => %{"value" => "tok_secret", "secret" => true}
+        })
+
+      task = task_in(ws)
+
+      log =
+        capture_log(fn ->
+          assert WorkerEnv.resolve(task.id) == {[{"API_TOKEN", "tok_secret"}], ["tok_secret"]}
+        end)
+
+      assert log == ""
     end
   end
 end
