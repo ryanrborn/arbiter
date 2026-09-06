@@ -1,6 +1,9 @@
 defmodule Arbiter.Worker.WorkerEnvTest do
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+  import Ecto.Query
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.WorkerEnv
@@ -44,6 +47,22 @@ defmodule Arbiter.Worker.WorkerEnvTest do
       assert WorkerEnv.pairs(nil) == []
       assert WorkerEnv.pairs("") == []
     end
+
+    test "resolves the same pairs for a ReviewGate synthetic task id as for the base task" do
+      ws =
+        workspace_with_env(%{
+          "API_TOKEN" => %{"value" => "tok_secret", "secret" => true}
+        })
+
+      task = task_in(ws)
+
+      expected = WorkerEnv.resolve(task.id)
+      assert expected != {[], []}
+
+      assert WorkerEnv.resolve(task.id <> "#review") == expected
+      assert WorkerEnv.resolve(task.id <> "#review#impl1") == expected
+      assert WorkerEnv.resolve(task.id <> "#r2") == expected
+    end
   end
 
   describe "secret_values/1" do
@@ -66,6 +85,95 @@ defmodule Arbiter.Worker.WorkerEnvTest do
     test "returns [] for an unknown / nil task id" do
       assert WorkerEnv.secret_values("does-not-exist") == []
       assert WorkerEnv.secret_values(nil) == []
+    end
+  end
+
+  describe "resolve/1 observability" do
+    test "warns when the workspace resolves but its encrypted store is unreadable despite configured keys" do
+      ws =
+        workspace_with_env(%{
+          "API_TOKEN" => %{"value" => "tok_secret", "secret" => true}
+        })
+
+      task = task_in(ws)
+
+      # Simulate the storage-half degrading independently of the public
+      # worker_env_meta half (e.g. a corrupt/cleared ciphertext column) —
+      # exactly the "both halves written, only one readable" shape this
+      # ticket is about. Direct SQL bypasses Ash's write-only `worker_env`
+      # argument, which has no update path for the raw encrypted column.
+      Arbiter.Repo.update_all(
+        from(w in "workspaces", where: w.id == ^ws.id),
+        set: [encrypted_worker_env: nil]
+      )
+
+      log =
+        capture_log(fn ->
+          assert WorkerEnv.resolve(task.id) == {[], []}
+        end)
+
+      assert log =~ "WorkerEnv"
+      assert log =~ task.id
+      assert log =~ ws.id
+    end
+
+    test "does not warn for a genuinely unconfigured workspace" do
+      task = task_in(workspace_with_env(%{}))
+
+      log =
+        capture_log(fn ->
+          assert WorkerEnv.resolve(task.id) == {[], []}
+        end)
+
+      assert log == ""
+    end
+
+    test "warns when the decrypted store is missing some, but not all, configured keys" do
+      ws =
+        workspace_with_env(%{
+          "API_TOKEN" => %{"value" => "tok_secret", "secret" => true},
+          "LOG_LEVEL" => %{"value" => "debug", "secret" => false}
+        })
+
+      task = task_in(ws)
+
+      # Simulate a partially-degraded store: the decrypted map is missing
+      # LOG_LEVEL even though worker_env_meta still lists it as configured.
+      # Direct SQL bypasses Ash's write-only `worker_env` argument, which has
+      # no update path for the raw encrypted column.
+      partial =
+        Arbiter.Vault.encrypt!(:erlang.term_to_binary(%{"API_TOKEN" => "tok_secret"}))
+        |> Base.encode64()
+
+      Arbiter.Repo.update_all(
+        from(w in "workspaces", where: w.id == ^ws.id),
+        set: [encrypted_worker_env: partial]
+      )
+
+      log =
+        capture_log(fn ->
+          assert WorkerEnv.resolve(task.id) == {[{"API_TOKEN", "tok_secret"}], ["tok_secret"]}
+        end)
+
+      assert log =~ "WorkerEnv"
+      assert log =~ "LOG_LEVEL"
+      refute log =~ "API_TOKEN,"
+    end
+
+    test "does not warn when the store resolves normally" do
+      ws =
+        workspace_with_env(%{
+          "API_TOKEN" => %{"value" => "tok_secret", "secret" => true}
+        })
+
+      task = task_in(ws)
+
+      log =
+        capture_log(fn ->
+          assert WorkerEnv.resolve(task.id) == {[{"API_TOKEN", "tok_secret"}], ["tok_secret"]}
+        end)
+
+      assert log == ""
     end
   end
 end
