@@ -65,6 +65,30 @@ defmodule Arbiter.Worker.WorkerEnvE2ETest do
     refute Enum.any?(lines, &(&1 =~ @secret))
   end
 
+  test "env_pairs/3 (via ClaudeSession.start/1) includes the workspace's configured worker env vars" do
+    ws = new_workspace()
+    {:ok, task} = Ash.create(Issue, %{title: "e2e-env-pairs", workspace_id: ws.id})
+
+    {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter")
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: System.tmp_dir!(),
+        command: ["sh", "-c", "true"]
+      )
+
+    # `Arbiter.Worker.Worker` stashes the exact port_args (including the `:env`
+    # pairs list `env_pairs/3` built) as `meta.claude_spawn` for respawns
+    # (bd-ofql8k) — the same list handed to `Port.open`, so this is a direct
+    # assertion on env_pairs/3's output without spawning a shell to echo it.
+    env = Worker.state(pid).meta.claude_spawn.env
+
+    assert {"MY_PLAIN", "plain-visible"} in env
+    assert {"MY_SECRET", @secret} in env
+  end
+
   describe "gate-nudge respawn" do
     setup do
       tmp = Path.join(System.tmp_dir!(), "we-nudge-#{:erlang.unique_integer([:positive])}")
