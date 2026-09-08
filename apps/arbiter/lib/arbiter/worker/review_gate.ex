@@ -443,6 +443,29 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp durable_lines(_), do: {:error, :no_run_id}
 
+  # The run row id of the reviewer pass we are finishing — the key the durable
+  # transcript is filed under. The reviewer runs as its own worker under a
+  # synthetic task id (`<task>#review`, `#r2`, `#v2`), and its Run row is
+  # persisted when the pass is spawned. Best-effort: without it the transcript
+  # cross-check simply reports "unknown" rather than failing the pass.
+  defp reviewer_run_id(%{current_id: id}) when is_binary(id) and id != "" do
+    require Ash.Query
+
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Arbiter.Workers.Run{id: run_id} | _] -> run_id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp reviewer_run_id(_), do: nil
+
   # Findings = everything from the matched verdict line to the end, trimmed.
   # Falls back to the whole transcript if the index can't be located.
   defp findings_from(text, regex) do
@@ -845,7 +868,19 @@ defmodule Arbiter.Worker.ReviewGate do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp attempt_finish(state, status) do
-    case parse_verdict(Enum.reverse(state.lines)) do
+    # bd-6dxit2: `state.lines` is the reviewer's PubSub-captured transcript and
+    # is not itself capped, but it is a *live* buffer — a line broadcast before
+    # this pass subscribed, or dropped anywhere on the way, is simply absent, and
+    # `:no_verdict` cannot tell that apart from a reviewer that stayed silent.
+    # `parse_verdict/3` cross-checks the uncapped durable transcript before
+    # conceding and logs the disagreement when there is one, so the escalation
+    # blames the right party.
+    lines = Enum.reverse(state.lines)
+
+    {verdict, _source} =
+      parse_verdict(lines, reviewer_run_id(state), "reviewer task=#{state.current_id}")
+
+    case verdict do
       :no_verdict ->
         case classify_stop(status, state.lines) do
           %StopReason{category: category} = reason when category in @infra_failure_categories ->

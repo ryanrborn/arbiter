@@ -191,6 +191,14 @@ defmodule Arbiter.Worker do
   # Captured stdout is mirrored verbatim into the persisted Run.output_lines
   # column on terminal transitions. Cap at 500 lines so a runaway subprocess
   # doesn't bloat the row to many MB.
+  #
+  # bd-6dxit2: retained at 500. This is the *persisted tail*, kept small on
+  # purpose — `worker_runs` rows are read in bulk by the dashboard and every
+  # extra line is paid for on every listing. It is deliberately NOT the source
+  # of truth for verdict parsing: `Arbiter.Worker.OutputLog` holds the full,
+  # uncapped transcript per run, and `ReviewGate.parse_verdict/3` consults it
+  # before reporting `:no_verdict`, so a verdict followed by more than 500 lines
+  # of findings still parses.
   @max_output_lines 500
 
   # Statuses in which a subprocess exit means "the worker stopped without
@@ -2546,10 +2554,25 @@ defmodule Arbiter.Worker do
   # back to querying the merger adapter for the PR's submitted review state. This
   # treats the adapter submission as the source of truth and avoids landing
   # INCONCLUSIVE when the review genuinely went out.
+  #
+  # bd-6dxit2: `meta[:output_lines]` is ClaudeSession's most-recent-1000-lines
+  # buffer, not the whole transcript. A reviewer that prints its VERDICT and then
+  # keeps producing findings evicts its own sentinel, and the review — a real
+  # verdict with a real findings list — is discarded as INCONCLUSIVE. So parse
+  # via `parse_verdict/3`, which re-reads the uncapped durable transcript before
+  # conceding and logs which of the two sources saw what. The adapter fallback
+  # below is unchanged and still runs when neither source has a verdict.
   defp route_reviewer_completion(%State{} = state) do
     output_lines = Map.get(state.meta || %{}, :output_lines, [])
 
-    case Arbiter.Worker.ReviewGate.parse_verdict(output_lines) do
+    {verdict, _source} =
+      Arbiter.Worker.ReviewGate.parse_verdict(
+        output_lines,
+        state.run_id,
+        "review_only task=#{state.task_id}"
+      )
+
+    case verdict do
       {:approve, findings} ->
         route_approve_verdict(state, findings)
 

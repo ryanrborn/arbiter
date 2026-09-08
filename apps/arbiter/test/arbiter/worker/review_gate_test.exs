@@ -25,6 +25,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -49,6 +51,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
   @session_limit Path.expand("../../fixtures/review_session_limit.sh", __DIR__)
+  @long_findings Path.expand("../../fixtures/review_long_findings.sh", __DIR__)
   @no_verdict_auth_prose Path.expand(
                            "../../fixtures/review_no_verdict_auth_prose.sh",
                            __DIR__
@@ -756,6 +759,53 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
+    # bd-6dxit2: the acceptance case for "a review that emits a valid VERDICT:
+    # line is never reported as :no_verdict". The fixture prints its verdict and
+    # then 1200 more lines of findings — past ClaudeSession's 1000-line
+    # `meta[:output_lines]` cap and well past the 500-line persisted-row cap, so
+    # a naive tail scan of either buffer misses the sentinel entirely. The gate
+    # must still land REQUEST_CHANGES, with the reviewer's findings verbatim.
+    test "a verdict followed by more lines of findings than either line cap still parses",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-long-findings"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@long_findings],
+        review_timeout_ms: 20_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 25_000)
+      assert merge_commit_count(repo) == 0
+
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected,
+             "a verdict buried under 1200 lines of findings must not land INCONCLUSIVE"
+
+      escalation =
+        "admiral"
+        |> Message.inbox(workspace_id: ws.id)
+        |> Enum.find(&(&1.directive_ref == task.id))
+
+      assert escalation, "expected an escalation for the task"
+      refute escalation.body =~ "no parseable VERDICT"
+      assert escalation.body =~ "finding 1:"
+    end
+
     test "sync_from_origin fast-forwards the worktree to the latest pushed commit before review (bd-31bh37 regression)",
          %{repo: repo, ws: ws, tmp: tmp} do
       # Simulate the scenario: the per-task worktree has SOME commits (so the
@@ -1307,6 +1357,47 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a re-prompt to have been attempted before escalating"
+    end
+
+    # bd-6dxit2: an :no_verdict outcome must say which of the two possible
+    # causes it is. "The reviewer emitted no verdict" and "the parser was
+    # handed a truncated tail" are indistinguishable in the escalation text,
+    # and the fleet carried the ambiguity for weeks. The log now names the
+    # number of lines scanned and what the uncapped durable transcript holds.
+    test "logs a diagnostic on :no_verdict naming lines scanned and the durable transcript",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-no-verdict-diag"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reprompt, "NONE"],
+        review_timeout_ms: 5_000
+      }
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} =
+            Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+          on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+          :ok = Worker.advance(pid, :claude)
+          send(pid, {:__claude_session_done__, "arb done"})
+
+          wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+        end)
+
+      assert log =~ "no VERDICT for reviewer task=#{ReviewGate.reviewer_task_id(task.id)}"
+      assert log =~ ~r/scanned \d+ in-memory line\(s\)/
+
+      assert log =~ "durable transcript",
+             "the diagnostic must say what the uncapped transcript held"
     end
 
     # bd-b2glhm: a reviewer subprocess that dies from an infrastructure failure
