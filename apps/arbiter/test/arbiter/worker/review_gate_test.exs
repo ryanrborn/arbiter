@@ -48,6 +48,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
+  @session_limit Path.expand("../../fixtures/review_session_limit.sh", __DIR__)
   @no_verdict_auth_prose Path.expand(
                            "../../fixtures/review_no_verdict_auth_prose.sh",
                            __DIR__
@@ -1405,6 +1406,56 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "did not expect a re-prompt run row for a quota-exhaustion crash"
+    end
+
+    # bd-6dxit2: the same condition in the CLI's CURRENT wording — "You've hit
+    # your session limit · resets <time>", three lines, exit 1, in under a
+    # second. This is the exact shape of run 06bdc6ee (bd-dxgris#review#r2) that
+    # made the gate escalate "Reviewer produced no parseable VERDICT line, even
+    # after a verdict re-prompt" on a review that never ran. The escalation must
+    # name the usage limit, and no re-prompt may be spent on it.
+    test "a reviewer refused with the CLI's current session-limit wording escalates as quota, no re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-session-limit"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@session_limit],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation for the task"
+
+      assert escalation.body =~ "usage limit",
+             "expected the escalation to name the 5h usage limit, got: #{escalation.body}"
+
+      refute escalation.body =~ "no parseable VERDICT",
+             "a reviewer the CLI refused must not be reported as having produced no verdict"
+
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "did not expect a re-prompt run row for a session-limit refusal"
     end
 
     # bd-b2glhm round 2: a reviewer that exits 0 (finished cleanly) but merely
