@@ -136,6 +136,71 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
     end
   end
 
+  describe "ensure/0 + env/0 with CLAUDE_CODE_OAUTH_TOKEN set (bd-6umoh9)" do
+    setup do
+      prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      on_exit(fn ->
+        case prev_token do
+          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+          v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+      end)
+
+      :ok
+    end
+
+    test "does not seed .credentials.json when a worker OAuth token is configured", %{
+      target: target
+    } do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
+
+      assert {:ok, ^target} = ConfigDir.ensure()
+
+      # No operator credential should exist for the worker to refresh.
+      refute File.exists?(Path.join(target, ".credentials.json"))
+      # Everything else still seeds/generates normally.
+      assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
+      assert File.exists?(Path.join(target, "settings.json"))
+    end
+
+    test "removes a stale seeded .credentials.json once a worker OAuth token appears", %{
+      target: target
+    } do
+      # Simulate a pre-existing install that seeded before the token was adopted.
+      assert {:ok, ^target} = ConfigDir.ensure()
+      assert File.exists?(Path.join(target, ".credentials.json"))
+
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
+      assert {:ok, ^target} = ConfigDir.ensure()
+
+      refute File.exists?(Path.join(target, ".credentials.json"))
+    end
+
+    test "env/0 includes CLAUDE_CODE_OAUTH_TOKEN alongside CLAUDE_CONFIG_DIR", %{
+      target: target
+    } do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
+
+      assert ConfigDir.env() == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"}
+             ]
+    end
+
+    test "seeding still happens when the OS env var is unset (no regression)", %{
+      source: source,
+      target: target
+    } do
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      assert {:ok, ^target} = ConfigDir.ensure()
+
+      assert File.read!(Path.join(target, ".credentials.json")) ==
+               File.read!(Path.join(source, ".credentials.json"))
+    end
+  end
+
   describe "ensure/0 when disabled" do
     test "returns :disabled and env/0 is empty", %{target: target} do
       Application.put_env(:arbiter, :worker_isolate_config, false)
