@@ -171,11 +171,26 @@ defmodule Arbiter.Worker.StopReason do
   # it, as the CLI actually emits it standalone) UNLESS the `|<epoch>` reset
   # suffix is present, which is specific enough on its own — real prose
   # discussing the message doesn't happen to append a matching unix timestamp.
+  #
+  # bd-6dxit2: the CLI's current wording for the same condition is
+  # `You've hit your session limit · resets 4:50am (America/New_York)` — it
+  # never says "usage limit reached" any more. Runs refused this way exit 1
+  # within a second having emitted three lines, so before this alternative was
+  # added they classified as `:crashed`: a generic non-zero exit whose
+  # remediation is "re-dispatch". That misroute is what made ReviewGate re-prompt
+  # a reviewer that could not run and then report "no parseable VERDICT line"
+  # (the reviewer's fault) instead of "the account is out of 5h allowance".
+  # Any apostrophe form the CLI may emit is accepted (`.{0,3}` spans a plain
+  # `'` or a 3-byte UTF-8 `\u2019`; the regex carries no /u flag), and the line-leading
+  # anchor from bd-3wgdie applies here too so quoting this wording in source or
+  # tool output cannot buy a 5h park.
   @quota_signature ~r/
       ^[ \t]*(claude[ _]ai[ _])?usage[ _]limit[ _]reached
     | ^[ \t]*5[ -]hour[ _]limit[ _]reached
     | ^[ \t]*5h[ _]limit[ _]reached
     | usage[ _]limit[ _]reached\|\d+
+    | ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](session|usage)[ ]limit
+    | ^[ \t]*(session|usage)[ _]limit[ _]reached
   /mix
 
   @quota_reset_signature ~r/usage[ _]limit[ _]reached\|(\d+)/i
