@@ -67,6 +67,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   """
 
   alias Arbiter.Agents.Claude.Security
+  alias Arbiter.Agents.CredentialsRef
 
   require Logger
 
@@ -82,13 +83,40 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
   @doc """
   The env pairs to inject into a worker spawn: `[{"CLAUDE_CONFIG_DIR", dir}]`
-  when isolation is enabled and the dir is ready, `[]` otherwise (inherit the
-  host config unchanged).
+  when isolation is enabled and the dir is ready (`[]` otherwise — inherit the
+  host config unchanged), plus `{"CLAUDE_CODE_OAUTH_TOKEN", token}` whenever
+  the install-wide worker OAuth token (bd-2zigo1) is configured. All four
+  `ConfigDir` consumers (`claude.ex`, `quota/refresh_probe.ex`,
+  `worker/claude_session.ex`, `workflows/code_review/checks.ex`) call this
+  single function, so the token reaches every worker spawn path rather than
+  only the ones that separately remember to compose it in (bd-6umoh9).
   """
   @spec env() :: [{String.t(), String.t()}]
   def env do
-    case ensure() do
-      {:ok, dir} -> [{"CLAUDE_CONFIG_DIR", dir}]
+    config_pairs =
+      case ensure() do
+        {:ok, dir} -> [{"CLAUDE_CONFIG_DIR", dir}]
+        _ -> []
+      end
+
+    config_pairs ++ oauth_token_pairs()
+  end
+
+  @doc """
+  Whether a worker OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, bd-2zigo1) is
+  configured for this install. When true, workers authenticate with their
+  own credential grant and must not also be seeded a copy of the operator's
+  `.credentials.json` (bd-6umoh9) — sharing that file means whichever side
+  refreshes first rotates the other out.
+  """
+  @spec oauth_token_configured?() :: boolean()
+  def oauth_token_configured? do
+    match?({:ok, _}, CredentialsRef.resolve("env:CLAUDE_CODE_OAUTH_TOKEN"))
+  end
+
+  defp oauth_token_pairs do
+    case CredentialsRef.resolve("env:CLAUDE_CODE_OAUTH_TOKEN") do
+      {:ok, token} -> [{"CLAUDE_CODE_OAUTH_TOKEN", token}]
       _ -> []
     end
   end
@@ -274,11 +302,26 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   # worker stays authenticated and permissioned. Each link is independent and
   # non-fatal — a missing/uncopyable source just means that capability falls back
   # to whatever the inherited environment provides (e.g. ANTHROPIC_API_KEY).
+  #
+  # .credentials.json is deliberately excluded once a worker OAuth token
+  # (bd-6umoh9) is configured: seeding a copy of the operator's refresh token
+  # gives the worker something to rotate out from under the operator, which
+  # is exactly the defect this gate exists to close. A stale copy from before
+  # the token was adopted is actively removed rather than left in place.
   defp seed_links(dir) do
-    case source_dir() do
-      nil -> :ok
-      source -> Enum.each(@seed_links, &link_one(source, dir, &1))
+    if oauth_token_configured?() do
+      remove_stale_credentials(dir)
+    else
+      case source_dir() do
+        nil -> :ok
+        source -> Enum.each(@seed_links, &link_one(source, dir, &1))
+      end
     end
+  end
+
+  defp remove_stale_credentials(dir) do
+    _ = File.rm(Path.join(dir, ".credentials.json"))
+    :ok
   end
 
   defp link_one(source, dir, name) do
