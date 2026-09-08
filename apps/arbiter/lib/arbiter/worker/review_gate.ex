@@ -361,6 +361,88 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  @typedoc """
+  Which line source produced the verdict — `:memory` for the caller's own
+  (bounded) buffer, `:transcript` for the durable per-run log, `:none` when
+  neither had one.
+  """
+  @type verdict_source :: :memory | :transcript | :none
+
+  @doc """
+  Parse a reviewer's verdict, falling back to the run's **durable transcript**
+  before conceding `:no_verdict` — and logging which source saw what either way.
+
+  Every in-memory line buffer that feeds `parse_verdict/1` is bounded:
+  `Arbiter.Worker.ClaudeSession` keeps the most recent 1000 emitted lines in
+  `meta[:output_lines]`, of which `Arbiter.Worker` persists only the last 500 to
+  `worker_runs.output_lines`. Those caps exist to keep a runaway subprocess from
+  ballooning worker memory and the run row, and they stay — but they mean a
+  reviewer that prints `VERDICT:` and then keeps talking can lose its own
+  sentinel to eviction. Discarding a completed review over that is expensive
+  (bd-6dxit2 traced a $2.71 Opus review thrown away this way), so on a miss we
+  re-parse `Arbiter.Worker.OutputLog`, which is uncapped and keyed by `run_id`.
+
+  The log line is the point as much as the recovery: `:no_verdict` on its own
+  cannot distinguish "the reviewer genuinely emitted no verdict" from "the
+  parser was handed the wrong text", and for weeks the fleet could not tell
+  which it had. Now the two cases read differently in the log, and a disagreement
+  between the sources names itself.
+
+  `context` is a short caller-supplied label (e.g. `"task=bd-xxxx"`) echoed into
+  the log. Returns `{verdict, source}`.
+  """
+  @spec parse_verdict([String.t()], String.t() | nil, String.t()) ::
+          {verdict(), verdict_source()}
+  def parse_verdict(lines, run_id, context) when is_list(lines) and is_binary(context) do
+    case parse_verdict(lines) do
+      :no_verdict -> verdict_from_transcript(length(lines), run_id, context)
+      verdict -> {verdict, :memory}
+    end
+  end
+
+  defp verdict_from_transcript(scanned, run_id, context) do
+    case durable_lines(run_id) do
+      {:ok, durable} ->
+        case parse_verdict(durable) do
+          :no_verdict ->
+            Logger.warning(
+              "ReviewGate: no VERDICT for #{context}: scanned #{scanned} in-memory line(s) and " <>
+                "#{length(durable)} durable transcript line(s); neither contains a parseable " <>
+                "VERDICT line — the reviewer emitted no verdict"
+            )
+
+            {:no_verdict, :none}
+
+          verdict ->
+            Logger.warning(
+              "ReviewGate: VERDICT recovered from the durable transcript for #{context}: the " <>
+                "in-memory buffer (#{scanned} line(s)) had none, the transcript " <>
+                "(#{length(durable)} line(s)) does — the parser was reading a truncated tail, " <>
+                "not a reviewer that stayed silent"
+            )
+
+            {verdict, :transcript}
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: no VERDICT for #{context}: scanned #{scanned} in-memory line(s); the " <>
+            "durable transcript could not be read (#{inspect(reason)}), so whether the reviewer " <>
+            "emitted one is unknown"
+        )
+
+        {:no_verdict, :none}
+    end
+  end
+
+  defp durable_lines(run_id) when is_binary(run_id) and run_id != "" do
+    Arbiter.Worker.OutputLog.read_lines(run_id)
+  rescue
+    e -> {:error, e}
+  end
+
+  defp durable_lines(_), do: {:error, :no_run_id}
+
   # Findings = everything from the matched verdict line to the end, trimmed.
   # Falls back to the whole transcript if the index can't be located.
   defp findings_from(text, regex) do
