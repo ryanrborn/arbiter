@@ -225,7 +225,7 @@ defmodule Arbiter.Quota.RefreshProbe do
     with {:ok, sh} <- find_executable("sh"),
          {:ok, claude} <- find_executable("claude") do
       base_url = Arbiter.Quota.worker_base_url(workspace_id)
-      env = probe_env(base_url)
+      env = probe_env(workspace_id, base_url)
       rest_args = ["-c", ~s(exec "$@" < /dev/null), "sh", claude, "--print", "ok"]
       run_port(sh, rest_args, env, workspace_id, timeout_ms)
     else
@@ -236,8 +236,11 @@ defmodule Arbiter.Quota.RefreshProbe do
     end
   end
 
-  defp probe_env(base_url) do
-    ConfigDir.env() ++ [{"ANTHROPIC_BASE_URL", base_url}]
+  # bd-bw3466: the probe is already per-workspace, so it authenticates exactly
+  # as that workspace's workers do — including a `CLAUDE_CODE_OAUTH_TOKEN`
+  # configured in its `worker_env` rather than in the server's environment.
+  defp probe_env(workspace_id, base_url) do
+    ConfigDir.env(workspace_id) ++ [{"ANTHROPIC_BASE_URL", base_url}]
   end
 
   defp find_executable(name) do
@@ -249,7 +252,7 @@ defmodule Arbiter.Quota.RefreshProbe do
 
   defp run_port(exec_path, rest_args, env, workspace_id, timeout_ms) do
     # `Enum.empty?/1`, not `env == []`: the only caller builds `env` as
-    # `ConfigDir.env() ++ [{"ANTHROPIC_BASE_URL", base_url}]`, so dialyzer can
+    # `ConfigDir.env(workspace_id) ++ [{"ANTHROPIC_BASE_URL", base_url}]`, so dialyzer can
     # prove the literal comparison constant and reports an `:exact_compare`
     # (a warning class dialyxir 1.4.7 can neither format nor filter). The
     # guard is kept because `run_port/5` is a general port helper and an empty

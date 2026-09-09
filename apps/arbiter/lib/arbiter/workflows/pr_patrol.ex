@@ -58,6 +58,14 @@ defmodule Arbiter.Workflows.PRPatrol do
   escalates (bd-ci2jl2). A follow-up therefore carries `tracker_type: :none`
   (no lifecycle write-back) and links its source PR via `source_pr` instead.
 
+  A follow-up whose dispatch fails is closed (see `record_dispatch_failure/4`),
+  which frees this dedup check for a retry — a NEW `Issue` (a new task id) is
+  filed each retry, not the same one reopened. Left unbounded, a `repo` that
+  fails deterministically would file a fresh task forever, one per backoff
+  window. `@max_dispatch_attempts` bounds this: once a PR's consecutive
+  failure count hits it, PRPatrol gives up on that PR permanently — no more
+  follow-ups are filed for it until the patrol restarts (bd-7rxwzc).
+
   ## Lifecycle
 
   Not in `Application.children`. Started manually per-workspace:
@@ -108,18 +116,40 @@ defmodule Arbiter.Workflows.PRPatrol do
   # notification, new failure mode) doesn't stay silent forever (bd-dtpjlf).
   @re_escalate_after_ms 60 * 60_000
 
+  # `@max_backoff_ms` only paces a permanently-broken input down to about once
+  # an hour — it never actually stops. A `repo` that can never resolve (e.g.
+  # a forge project id threaded in where a repo_paths key was expected)
+  # therefore re-files a brand new follow-up task forever, one per backoff
+  # window, piling up closed task ids indefinitely (bd-7rxwzc — the vstim
+  # incident: 4 closed tasks for one PR in under 4 hours, still going). Once a
+  # PR's consecutive dispatch-failure count reaches this bound, PRPatrol gives
+  # up on it permanently: no further follow-up is filed, and one final
+  # escalation tells the coordinator retries have stopped — a human (or a
+  # workspace config fix + patrol restart) is required to unstick it.
+  @max_dispatch_attempts 5
+
+  @doc "Consecutive dispatch-failure bound before a PR is given up on. Exposed for tests."
+  def max_dispatch_attempts, do: @max_dispatch_attempts
+
   defstruct PatrolServer.common_fields() ++
               [
                 last_dispatched: %{},
-                # PR number => %{count: n, retry_at: DateTime, escalated_at: DateTime | nil}
-                # — tracks consecutive follow-up dispatch failures per PR so a
-                # persistent failure escalates and then exponential-backs-off,
-                # instead of re-filing + re-escalating every tick (bd-49ajyt).
-                # `escalated_at` is set ONLY when the coordinator message
-                # actually persisted (bd-dtpjlf) — a failed escalation write
-                # leaves it as it was, so the very next failure retries the
-                # escalation instead of being silently suppressed as "already
-                # escalated". Cleared as soon as a dispatch succeeds.
+                # PR number => %{count: n, retry_at: DateTime | nil, escalated_at:
+                # DateTime | nil, given_up: boolean} — tracks consecutive follow-up
+                # dispatch failures per PR so a persistent failure escalates and
+                # then exponential-backs-off, instead of re-filing +
+                # re-escalating every tick (bd-49ajyt). `escalated_at` is set
+                # ONLY when the coordinator message actually persisted
+                # (bd-dtpjlf) — a failed escalation write leaves it as it was,
+                # so the very next failure retries the escalation instead of
+                # being silently suppressed as "already escalated". `given_up`
+                # is set once `count` reaches `@max_dispatch_attempts`
+                # (bd-7rxwzc): from then on `retry_at` is `nil` and
+                # `backing_off?/2` blocks the PR permanently instead of just
+                # until the next backoff window, so a deterministically-failing
+                # `repo` stops re-filing forever instead of merely slowing to
+                # an hourly cadence forever. Cleared entirely as soon as a
+                # dispatch succeeds.
                 dispatch_failures: %{},
                 # How often (ms) a still-failing PR may re-escalate even after
                 # a prior escalation persisted (bd-dtpjlf) — test-only
@@ -386,15 +416,20 @@ defmodule Arbiter.Workflows.PRPatrol do
     prior = Map.get(state.dispatch_failures, pr_number)
     count = if prior, do: prior.count + 1, else: 1
     prior_escalated_at = prior && Map.get(prior, :escalated_at)
+    exhausted? = count >= @max_dispatch_attempts
 
+    # The exhausting attempt escalates unconditionally, even inside the
+    # re-escalation throttle window — it carries different, more important
+    # information ("retries have stopped entirely") than the routine
+    # still-failing re-escalation, and a PR only crosses this line once.
     due_for_escalation? =
-      is_nil(prior_escalated_at) or
+      exhausted? or is_nil(prior_escalated_at) or
         DateTime.diff(DateTime.utc_now(), prior_escalated_at, :millisecond) >=
           state.re_escalate_after_ms
 
     {escalated_at, escalated_this_time?} =
       if due_for_escalation? do
-        case escalate_dispatch_failure(task, state, reason) do
+        case escalate_dispatch_failure(task, state, reason, exhausted?) do
           :ok -> {DateTime.utc_now(), true}
           :error -> {prior_escalated_at, false}
         end
@@ -407,6 +442,7 @@ defmodule Arbiter.Workflows.PRPatrol do
         inspect(reason) <>
         " — closing" <>
         cond do
+          exhausted? and escalated_this_time? -> " and giving up (attempt bound reached)"
           escalated_this_time? -> " and escalating"
           due_for_escalation? -> " (escalation failed to persist — will retry next failure)"
           true -> " (backing off, already escalated)"
@@ -419,8 +455,21 @@ defmodule Arbiter.Workflows.PRPatrol do
       action: :close
     )
 
+    # A PR that's given up on never gets a `retry_at` again — `backing_off?/2`
+    # checks `given_up` first and blocks it unconditionally, regardless of how
+    # much wall-clock time passes (bd-7rxwzc). Giving up requires the
+    # exhausting escalation to have actually PERSISTED: if the coordinator
+    # write fails on the bounding attempt, `due_for_escalation?` stays true
+    # (it's forced by `exhausted?`), so the PR keeps retrying — at backoff
+    # intervals, past `count` — until the give-up escalation lands. Without
+    # this, a failed write on the last attempt would silence the PR forever
+    # with no escalation ever reaching the coordinator.
+    give_up? = exhausted? and escalated_this_time?
+
     retry_at =
-      DateTime.add(DateTime.utc_now(), backoff_ms(count, state.interval_ms), :millisecond)
+      unless give_up? do
+        DateTime.add(DateTime.utc_now(), backoff_ms(count, state.interval_ms), :millisecond)
+      end
 
     %{
       state
@@ -428,7 +477,8 @@ defmodule Arbiter.Workflows.PRPatrol do
           Map.put(state.dispatch_failures, pr_number, %{
             count: count,
             retry_at: retry_at,
-            escalated_at: escalated_at
+            escalated_at: escalated_at,
+            given_up: give_up?
           })
     }
   end
@@ -439,9 +489,14 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   # True while a PR is inside its post-failure backoff window: the follow-up
   # dispatch failed and the next retry is still in the future. Once the window
-  # elapses the PR is eligible for one more retry attempt.
+  # elapses the PR is eligible for one more retry attempt. A PR that has
+  # `given_up: true` (bd-7rxwzc: hit `@max_dispatch_attempts`) is blocked
+  # unconditionally — there's no window to wait out.
   defp backing_off?(pr_number, state) do
     case Map.get(state.dispatch_failures, pr_number) do
+      %{given_up: true} ->
+        true
+
       %{retry_at: %DateTime{} = retry_at} ->
         DateTime.compare(DateTime.utc_now(), retry_at) == :lt
 
@@ -465,7 +520,19 @@ defmodule Arbiter.Workflows.PRPatrol do
   # `{:error, _}` return from the write AND a raised exception/exit are loud
   # (`Logger.error`, not `Logger.debug`) — the whole prior incident was this
   # failure mode being invisible.
-  defp escalate_dispatch_failure(task, state, reason) do
+  defp escalate_dispatch_failure(task, state, reason, exhausted?) do
+    body_tail =
+      if exhausted? do
+        "The follow-up task has been closed. PRPatrol has now failed to dispatch a " <>
+          "follow-up for this PR #{@max_dispatch_attempts} times in a row and is giving " <>
+          "up: it will NOT retry again on its own. The failure is deterministic (the same " <>
+          "`repo` will resolve the same way every tick), so fix the underlying config " <>
+          "(commonly a `repo` that doesn't match a repo_paths key) and dispatch manually, " <>
+          "or restart this patrol once fixed."
+      else
+        "The follow-up task has been closed so the next patrol tick can retry filing it."
+      end
+
     attrs = %{
       kind: :escalation,
       to_ref: Message.coordinator_ref(),
@@ -475,8 +542,7 @@ defmodule Arbiter.Workflows.PRPatrol do
       subject: "PRPatrol follow-up dispatch failed for PR ##{task.source_pr}",
       body:
         "PRPatrol auto-filed a follow-up for #{state.repo} PR ##{task.source_pr}, but " <>
-          "Dispatch.dispatch/2 failed: #{inspect(reason)}. The follow-up task has been " <>
-          "closed so the next patrol tick can retry filing it."
+          "Dispatch.dispatch/2 failed: #{inspect(reason)}. " <> body_tail
     }
 
     send_fun = state.escalate_send_fun || (&Message.send_mail/1)
@@ -487,7 +553,7 @@ defmodule Arbiter.Workflows.PRPatrol do
 
       {:error, error} ->
         Logger.error(
-          "PRPatrol.escalate_dispatch_failure/3: coordinator escalation for PR " <>
+          "PRPatrol.escalate_dispatch_failure/4: coordinator escalation for PR " <>
             "##{task.source_pr} failed to persist: #{inspect(error)}"
         )
 
@@ -496,7 +562,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   rescue
     e ->
       Logger.error(
-        "PRPatrol.escalate_dispatch_failure/3 raised for PR ##{task.source_pr}: " <>
+        "PRPatrol.escalate_dispatch_failure/4 raised for PR ##{task.source_pr}: " <>
           Exception.message(e)
       )
 
@@ -504,7 +570,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   catch
     :exit, reason ->
       Logger.error(
-        "PRPatrol.escalate_dispatch_failure/3 exited for PR ##{task.source_pr}: #{inspect(reason)}"
+        "PRPatrol.escalate_dispatch_failure/4 exited for PR ##{task.source_pr}: #{inspect(reason)}"
       )
 
       :error

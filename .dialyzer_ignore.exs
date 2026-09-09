@@ -138,6 +138,7 @@
   {"lib/arbiter/board/file_scope.ex", :contract_with_opaque},
   {"lib/arbiter/board/snapshot.ex", :call_without_opaque},
   {"lib/arbiter/workflows/review_patrol.ex", :call_without_opaque},
+  {"lib/arbiter/worker.ex", :call_without_opaque},
 
   # ── 5. `pattern_match` fallout from the `:exact_compare` fixes ────────────
   #

@@ -36,7 +36,16 @@ defmodule Arbiter.Workers.Run do
     domain: Arbiter.Workers,
     data_layer: AshSqlite.DataLayer
 
-  @statuses ~w(running completed failed)a
+  # bd-8tjcms / #1511: `:review_not_started` is a *terminal, non-failure* outcome
+  # — the run reached `arb done` and exited cleanly, but the downstream review
+  # stage never started inside the Watchdog's poll ceiling
+  # (`{:awaiting_review_timeout, N}`). It was previously written as `:failed`,
+  # which reads as "the implementation run failed" and is wrong: the branch is
+  # pushed and the PR is open. Written by `Arbiter.Worker.record_run_finished/1`;
+  # the worker's in-memory FSM status stays `:failed` because that is the
+  # terminal state `Dispatch.resume/2` and the Watchdog's bounded auto-resume
+  # both require.
+  @statuses ~w(running completed failed review_not_started)a
 
   # The kind of worker that produced this run. A task can be worked by more
   # than one worker over its life: the `:main` worker that authors the change,
