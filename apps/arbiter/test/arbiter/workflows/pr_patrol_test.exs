@@ -1650,9 +1650,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       final_task_count = length(tasks_for_189.())
       final_escalation_count = length(escalations.())
 
-      assert final_task_count > 0 and final_task_count < 8,
-             "expected the attempt bound to stop re-filing well before every tick " <>
-               "creates a new task, got #{final_task_count} tasks across 8 ticks"
+      assert final_task_count == PRPatrol.max_dispatch_attempts(),
+             "expected exactly @max_dispatch_attempts tasks (one per attempt, then the " <>
+               "bound stops re-filing) across 8 ticks, got #{final_task_count}"
 
       # A second final "giving up" escalation, distinct from the first
       # "closing and escalating" one, tells the coordinator retries have
@@ -1670,6 +1670,133 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       :ok = PRPatrol.tick(name)
 
       assert length(tasks_for_189.()) == final_task_count
+      assert length(escalations.()) == final_escalation_count
+    end
+
+    # If the give-up escalation itself fails to persist on the bounding
+    # attempt, the PR must NOT be marked `given_up` — otherwise `backing_off?/2`
+    # blocks it unconditionally and the coordinator is never told anything
+    # (the exact invisible-failure mode bd-dtpjlf's persistence gating exists
+    # to prevent, but for the final escalation specifically). Simulate that
+    # write failure via `escalate_send_fun` on the bounding attempt only, and
+    # assert retries continue (with escalation re-attempted) until it lands.
+    test "a give-up escalation that fails to persist does not permanently block retries",
+         %{ws: _ws} do
+      {:ok, unconfigured_ws} =
+        Ash.create(Workspace, %{
+          name: "pp-exhaust-fail-#{System.unique_integer([:positive])}",
+          prefix: "ppxf#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "exhaust-fail-repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/exhaust-fail-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 189, "title" => "never resolves", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/exhaust-fail-repo/pulls/189/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/exhaust-fail-repo/pulls/189/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      max_attempts = PRPatrol.max_dispatch_attempts()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      # Only two escalation *sends* actually happen across the whole attempt
+      # bound: the initial "closing and escalating" one (call 0), then
+      # everything else is suppressed by the re-escalation window until the
+      # exhausting attempt forces one final "giving up" send (call 1). Fail
+      # that second (give-up) send only; every other escalation write
+      # succeeds normally.
+      escalate_send_fun = fn attrs ->
+        n = Agent.get_and_update(counter, fn n -> {n, n + 1} end)
+
+        if n == 1 do
+          {:error, :simulated_write_failure}
+        else
+          Arbiter.Messages.Message.send_mail(attrs)
+        end
+      end
+
+      name = String.to_atom("PRPatrol_exhaust_fail_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           repo: "owner/exhaust-fail-repo",
+           workspace_id: unconfigured_ws.id,
+           interval_ms: 60_000,
+           name: name,
+           escalate_send_fun: escalate_send_fun}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+
+      tasks_for_189 = fn ->
+        Issue
+        |> Ash.Query.filter(source_pr == "189")
+        |> Ash.read!()
+      end
+
+      escalations = fn ->
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          to_ref == "coordinator" and workspace_id == ^unconfigured_ws.id and
+            kind == :escalation
+        )
+        |> Ash.read!()
+      end
+
+      # Drive exactly through the attempt bound: the escalation on the
+      # bounding attempt is simulated to fail its write.
+      Enum.each(1..max_attempts, fn _ ->
+        force_retry_now(pid, 189)
+        :ok = PRPatrol.tick(name)
+      end)
+
+      # The give-up escalation failed to persist, so the PR must not be
+      # permanently blocked — one more retry attempt (beyond the nominal
+      # bound) must still occur.
+      force_retry_now(pid, 189)
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_189.()) == max_attempts + 1,
+             "expected a retry beyond the bound because the give-up escalation " <>
+               "failed to persist on the bounding attempt"
+
+      final_escalation_count = length(escalations.())
+
+      assert final_escalation_count >= 1,
+             "expected at least the initial escalation to have persisted"
+
+      assert Enum.any?(escalations.(), &(&1.body =~ "giving up")),
+             "expected the retried give-up escalation to eventually persist"
+
+      # Now that the give-up escalation has landed, the PR must be
+      # permanently blocked — no further tasks or escalations.
+      force_retry_now(pid, 189)
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_189.()) == max_attempts + 1
       assert length(escalations.()) == final_escalation_count
     end
   end

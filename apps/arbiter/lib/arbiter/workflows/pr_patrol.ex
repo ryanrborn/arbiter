@@ -128,6 +128,9 @@ defmodule Arbiter.Workflows.PRPatrol do
   # workspace config fix + patrol restart) is required to unstick it.
   @max_dispatch_attempts 5
 
+  @doc "Consecutive dispatch-failure bound before a PR is given up on. Exposed for tests."
+  def max_dispatch_attempts, do: @max_dispatch_attempts
+
   defstruct PatrolServer.common_fields() ++
               [
                 last_dispatched: %{},
@@ -454,9 +457,17 @@ defmodule Arbiter.Workflows.PRPatrol do
 
     # A PR that's given up on never gets a `retry_at` again — `backing_off?/2`
     # checks `given_up` first and blocks it unconditionally, regardless of how
-    # much wall-clock time passes (bd-7rxwzc).
+    # much wall-clock time passes (bd-7rxwzc). Giving up requires the
+    # exhausting escalation to have actually PERSISTED: if the coordinator
+    # write fails on the bounding attempt, `due_for_escalation?` stays true
+    # (it's forced by `exhausted?`), so the PR keeps retrying — at backoff
+    # intervals, past `count` — until the give-up escalation lands. Without
+    # this, a failed write on the last attempt would silence the PR forever
+    # with no escalation ever reaching the coordinator.
+    give_up? = exhausted? and escalated_this_time?
+
     retry_at =
-      unless exhausted? do
+      unless give_up? do
         DateTime.add(DateTime.utc_now(), backoff_ms(count, state.interval_ms), :millisecond)
       end
 
@@ -467,7 +478,7 @@ defmodule Arbiter.Workflows.PRPatrol do
             count: count,
             retry_at: retry_at,
             escalated_at: escalated_at,
-            given_up: exhausted?
+            given_up: give_up?
           })
     }
   end
