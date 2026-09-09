@@ -1312,8 +1312,11 @@ defmodule Arbiter.Worker do
   # state `Dispatch.resume/2` checks before re-attaching, and the Watchdog's
   # bounded auto-resume (bd-8eheb6) fails the worker precisely so it can resume
   # it. `failure_reason` is still written, so the reason is not lost.
-  defp run_status(%State{status: :failed, meta: %{failure_reason: {:awaiting_review_timeout, _}}}),
-    do: :review_not_started
+  defp run_status(%State{
+         status: :failed,
+         meta: %{failure_reason: {:awaiting_review_timeout, _}}
+       }),
+       do: :review_not_started
 
   defp run_status(%State{status: status}), do: status
 
