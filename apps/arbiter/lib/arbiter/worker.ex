@@ -269,7 +269,170 @@ defmodule Arbiter.Worker do
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
-    DynamicSupervisor.start_child(Arbiter.Worker.Supervisor, {__MODULE__, opts})
+    case ensure_single_active_task_worker(opts) do
+      :ok ->
+        log_worker_start(opts)
+        DynamicSupervisor.start_child(Arbiter.Worker.Supervisor, {__MODULE__, opts})
+
+      {:error, _reason} = refused ->
+        refused
+    end
+  end
+
+  @doc """
+  True when `status` means the worker is (or is about to be) driving an agent
+  session: `:idle` (registered, subprocess not spawned yet), `:resuming`,
+  `:running`, `:awaiting`.
+
+  Everything else is either *parked* (`:awaiting_review`, `:awaiting_review_gate`
+  — no agent, waiting on a reviewer/merge) or *terminal* (`:completed`,
+  `:failed`). The distinction is what `start/1` enforces the single-active-worker
+  rule on: a parked or terminal worker may share a task with a new pass, an
+  active one may not (bd-8tjcms).
+  """
+  @spec active_status?(atom()) :: boolean()
+  def active_status?(status), do: status in [:idle, :resuming, :running, :awaiting]
+
+  # bd-8tjcms / #1511. A task must never have two workers driving agents at the
+  # same time. Two agents sharing one worktree and branch interleave commits and
+  # double the premium-tier spend, and the failure is silent — vs-ehjarz ran a
+  # merge-queue fix pass and a Watchdog auto-resume concurrently for ~2 minutes.
+  #
+  # This has to live HERE rather than in `Dispatch`, because the two families of
+  # caller were mutually invisible:
+  #
+  #   * `Dispatch.dispatch/2` and `.resume/2` guard via `Worker.whereis/1`, which
+  #     only resolves the *exact* task_id key — it cannot see a subordinate
+  #     holding `<task_id>:fixpass` / `<task_id>:conflict`.
+  #   * `MergeQueue.FixPassDispatcher` and `.ConflictResolver` call
+  #     `start_or_reap_terminal/1` and only ever collide with their OWN key, so
+  #     they cannot see the primary.
+  #
+  # `start/1` is the one choke point every one of them goes through.
+  #
+  # Deliberately NOT blocked:
+  #   * a parked primary (`:awaiting_review*`) — subordinate passes are designed
+  #     to run alongside it (bd-8lq2g7) and the merge queue depends on it;
+  #   * a terminal primary — `Dispatch.start_worker/3` evicts it (bd-d70whv) and
+  #     `start_or_reap_terminal/1` reaps it (bd-8lq2g7);
+  #   * `ReviewGate`'s `#`-separated synthetic sessions — see
+  #     `Registry.live_exclusive_for/1`.
+  #
+  # `allow_concurrent_task_worker: true` opts out explicitly, for a caller that
+  # has already established exclusivity some other way (and for tests).
+  defp ensure_single_active_task_worker(opts) do
+    task_id = Keyword.get(opts, :task_id)
+
+    cond do
+      Keyword.get(opts, :allow_concurrent_task_worker, false) ->
+        :ok
+
+      not (is_binary(task_id) and task_id != "") ->
+        :ok
+
+      true ->
+        requested_key = resolve_registry_key(opts, task_id)
+
+        if PRegistry.exclusive_key?(requested_key, task_id) do
+          case active_sibling(task_id, requested_key) do
+            nil -> :ok
+            info -> refuse_concurrent_start(info)
+          end
+        else
+          :ok
+        end
+    end
+  end
+
+  # The first worker for `task_id` — under any key in the exclusive family
+  # except the one we are asking for — that is still driving an agent.
+  #
+  # An alive worker that does not answer `:snapshot` within the probe timeout is
+  # counted as active (`:unknown`): it is busy or wedged, not gone, and starting
+  # a second agent against it is exactly the outcome this guard exists to
+  # prevent. `arb worker stop <task-id>` is the documented way out, and the
+  # refusal message says so.
+  defp active_sibling(task_id, requested_key) do
+    task_id
+    |> PRegistry.live_exclusive_for()
+    |> Enum.reject(fn {key, pid} -> key == requested_key or pid == self() end)
+    |> Enum.find_value(fn {key, pid} ->
+      status = probe_status(pid)
+
+      if active_status?(status) or is_nil(status) do
+        %{
+          task_id: task_id,
+          registry_key: key,
+          requested_key: requested_key,
+          pid: pid,
+          status: status || :unknown
+        }
+      end
+    end)
+  end
+
+  defp probe_status(pid) do
+    case safe_snapshot(pid) do
+      %{status: status} -> status
+      _ -> nil
+    end
+  end
+
+  defp refuse_concurrent_start(info) do
+    Logger.warning(
+      "Worker.start: REFUSED a second active worker for task=#{info.task_id} " <>
+        "requested_key=#{info.requested_key} — #{info.registry_key} is already " <>
+        "#{info.status} (#{inspect(info.pid)}). Stop it first (`arb worker stop " <>
+        "#{info.task_id}`) if this dispatch should supersede it. origin=#{start_origin()}"
+    )
+
+    {:error, {:task_worker_live, info}}
+  end
+
+  # bd-8tjcms acceptance 2: the vs-ehjarz post-mortem could not say *who*
+  # started each of the two runs, because nothing recorded the caller. Every
+  # worker start now leaves a breadcrumb naming the task, the registry key, the
+  # role from `:meta`, and the first stack frame outside this module.
+  defp log_worker_start(opts) do
+    task_id = Keyword.get(opts, :task_id)
+    key = if is_binary(task_id), do: resolve_registry_key(opts, task_id), else: nil
+    role = opts |> Keyword.get(:meta, %{}) |> role_of()
+
+    Logger.info(
+      "Worker.start: task=#{inspect(task_id)} registry_key=#{inspect(key)} " <>
+        "role=#{inspect(role)} origin=#{start_origin()}"
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp role_of(%{} = meta), do: Map.get(meta, :role) || Map.get(meta, "role") || :main
+  defp role_of(_), do: :main
+
+  # The first stack frame outside this module — i.e. whatever asked for the
+  # worker (Dispatch, FixPassDispatcher, ConflictResolver, ReviewGate, an MCP
+  # tool, a LiveView). Rendered as `Module.fun/arity`; `"unknown"` if the stack
+  # is unavailable.
+  defp start_origin do
+    case Process.info(self(), :current_stacktrace) do
+      {:current_stacktrace, frames} ->
+        # Skip `Process.info/2` and this module's own frames; the first frame
+        # after them is the caller.
+        frames
+        |> Enum.drop_while(fn {mod, _fun, _arity, _loc} -> mod != __MODULE__ end)
+        |> Enum.drop_while(fn {mod, _fun, _arity, _loc} -> mod == __MODULE__ end)
+        |> List.first()
+        |> case do
+          {mod, fun, arity, _loc} when is_integer(arity) -> "#{inspect(mod)}.#{fun}/#{arity}"
+          {mod, fun, args, _loc} when is_list(args) -> "#{inspect(mod)}.#{fun}/#{length(args)}"
+          _ -> "unknown"
+        end
+
+      _ ->
+        "unknown"
+    end
   end
 
   @doc """
