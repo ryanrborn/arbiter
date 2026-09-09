@@ -1843,9 +1843,12 @@ defmodule Arbiter.Worker.Dispatch do
           |> SecurityPolicy.resolve(security_override(opts), Keyword.get(opts, :repo))
           |> review_security_policy(opts)
 
+        # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
+        # the worker OAuth token from this workspace's `worker_env` before
+        # falling back to the server env (bd-bw3466).
         agent_opts =
           agent_opts_from_choice(choice) ++
-            [security: policy] ++ anthropic_proxy_opts(adapter, workspace)
+            [security: policy, workspace: workspace] ++ anthropic_proxy_opts(adapter, workspace)
 
         tracker_context = fetch_tracker_context(task, workspace)
 

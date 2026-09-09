@@ -45,6 +45,23 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
   defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
   defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 
+  # A bare Workspace struct carrying an encrypted worker_env — the exact column
+  # `Workspace.worker_env_map/1` reads. No DB round-trip needed, and the value
+  # is never serialised anywhere.
+  defp workspace_with_worker_env(env) do
+    enc =
+      env
+      |> :erlang.term_to_binary()
+      |> Arbiter.Vault.encrypt!()
+      |> Base.encode64()
+
+    %Arbiter.Tasks.Workspace{
+      id: "ws-#{System.unique_integer([:positive])}",
+      name: "cfgdir",
+      encrypted_worker_env: enc
+    }
+  end
+
   describe "ensure/0 when enabled" do
     test "creates the dir and writes a clean, persona-free CLAUDE.md", %{target: target} do
       assert {:ok, ^target} = ConfigDir.ensure()
@@ -198,6 +215,140 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
 
       assert File.read!(Path.join(target, ".credentials.json")) ==
                File.read!(Path.join(source, ".credentials.json"))
+    end
+  end
+
+  # bd-bw3466: this install configures the worker token the supported
+  # per-workspace way (`worker_env`, encrypted at rest), not as a server env
+  # var — so the bd-6umoh9 gate above never fired and the operator's
+  # credentials were seeded (and rotated) exactly as before.
+  describe "workspace-scoped worker OAuth token (bd-bw3466)" do
+    setup do
+      prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      on_exit(fn ->
+        case prev_token do
+          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+          v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+      end)
+
+      :ok
+    end
+
+    test "oauth_token_configured?/1 sees a token defined only in worker_env" do
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
+
+      # The zero-arity form (server process env) is blind to it — the defect.
+      refute ConfigDir.oauth_token_configured?()
+      assert ConfigDir.oauth_token_configured?(ws)
+    end
+
+    test "ensure/1 does not seed .credentials.json when the workspace defines the token",
+         %{target: target} do
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
+
+      assert {:ok, ^target} = ConfigDir.ensure(ws)
+
+      refute File.exists?(Path.join(target, ".credentials.json"))
+      # Everything else still seeds/generates normally.
+      assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
+      assert File.exists?(Path.join(target, "settings.json"))
+    end
+
+    test "ensure/1 removes a stale copy seeded before the workspace token existed",
+         %{target: target} do
+      assert {:ok, ^target} = ConfigDir.ensure()
+      assert File.exists?(Path.join(target, ".credentials.json"))
+
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
+      assert {:ok, ^target} = ConfigDir.ensure(ws)
+
+      refute File.exists?(Path.join(target, ".credentials.json"))
+    end
+
+    test "env/1 injects the workspace's token alongside CLAUDE_CONFIG_DIR",
+         %{target: target} do
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
+
+      assert ConfigDir.env(ws) == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}
+             ]
+    end
+
+    test "the workspace token wins over a server env var of the same name",
+         %{target: target} do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
+
+      assert ConfigDir.env(ws) == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}
+             ]
+    end
+
+    test "falls back to the server env var when the workspace defines no token",
+         %{target: target} do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+      ws = workspace_with_worker_env(%{"SOME_OTHER" => "x"})
+
+      assert ConfigDir.env(ws) == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}
+             ]
+
+      assert {:ok, ^target} = ConfigDir.ensure(ws)
+      refute File.exists?(Path.join(target, ".credentials.json"))
+    end
+
+    # The other direction: a gate that never seeds would pass the tests above
+    # while silently breaking every install that has no worker token at all.
+    test "still seeds when neither the workspace nor the server env defines a token",
+         %{source: source, target: target} do
+      ws = workspace_with_worker_env(%{"SOME_OTHER" => "x"})
+
+      assert {:ok, ^target} = ConfigDir.ensure(ws)
+
+      assert File.read!(Path.join(target, ".credentials.json")) ==
+               File.read!(Path.join(source, ".credentials.json"))
+    end
+
+    test "an empty-string worker_env value is not treated as configured",
+         %{source: source, target: target} do
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => ""})
+
+      refute ConfigDir.oauth_token_configured?(ws)
+      assert {:ok, ^target} = ConfigDir.ensure(ws)
+
+      assert File.read!(Path.join(target, ".credentials.json")) ==
+               File.read!(Path.join(source, ".credentials.json"))
+    end
+
+    test "a nil workspace behaves exactly like the zero-arity form",
+         %{source: source, target: target} do
+      assert ConfigDir.env(nil) == ConfigDir.env()
+      assert {:ok, ^target} = ConfigDir.ensure(nil)
+
+      assert File.read!(Path.join(target, ".credentials.json")) ==
+               File.read!(Path.join(source, ".credentials.json"))
+    end
+
+    test "an undecryptable worker_env store degrades to the server env var",
+         %{target: target} do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+
+      ws = %Arbiter.Tasks.Workspace{
+        id: "ws-corrupt",
+        name: "cfgdir",
+        encrypted_worker_env: "not-base64-ciphertext!!"
+      }
+
+      assert ConfigDir.env(ws) == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}
+             ]
     end
   end
 
