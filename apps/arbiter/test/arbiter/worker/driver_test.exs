@@ -621,8 +621,17 @@ defmodule Arbiter.Worker.DriverTest do
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
 
+      # bd-8tjcms: `Worker.start/1` now refuses a second *active* worker for one
+      # task. In production this fixture's shape is reached with the primary
+      # parked at `:awaiting_review` (which the guard allows); here the primary
+      # is `:idle`, so opt out explicitly to keep building the same state.
       {:ok, fixpass_pid} =
-        Worker.start(task_id: task.id, registry_key: task.id <> ":fixpass", repo: "r")
+        Worker.start(
+          task_id: task.id,
+          registry_key: task.id <> ":fixpass",
+          repo: "r",
+          allow_concurrent_task_worker: true
+        )
 
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
@@ -666,11 +675,16 @@ defmodule Arbiter.Worker.DriverTest do
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
 
+      # bd-8tjcms: a real `<task_id>:watchdog` entry is an
+      # `Arbiter.Worker.Watchdog`, not an `Arbiter.Worker`, so the
+      # single-active-worker guard never sees it. This stand-in *is* a Worker,
+      # so it has to opt out to stay a faithful stand-in.
       {:ok, watchdog_pid} =
         Worker.start(
           task_id: task.id,
           registry_key: task.id <> Arbiter.Worker.Watchdog.registry_suffix(),
-          repo: "r"
+          repo: "r",
+          allow_concurrent_task_worker: true
         )
 
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})

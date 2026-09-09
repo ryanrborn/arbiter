@@ -473,6 +473,9 @@ defmodule ArbiterWeb.CoreComponents.Domain do
     case run_row_state(status) do
       "running" -> "border-l-[color:var(--arb-live)]"
       "awaiting review" <> _ -> "border-l-[color:var(--arb-attention)]"
+      # bd-8tjcms: the work landed, the review stage never started — an
+      # operator needs to see it, but it is not a failure.
+      "review not started" -> "border-l-[color:var(--arb-attention)]"
       "failed" -> "border-l-[color:var(--arb-fail)]"
       _ -> "border-l-[color:transparent]"
     end
