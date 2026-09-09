@@ -1715,7 +1715,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp present?(_), do: false
 
   defp difficulty_label(nil), do: "—"
-  defp difficulty_label(d) when is_integer(d) and d in 0..4, do: "D#{d}"
+  defp difficulty_label(d) when is_integer(d) and d in 0..5, do: "D#{d}"
   defp difficulty_label(_), do: "—"
 
   # Compact changeset summary for the timeline. Mirrors AuditLogLive.

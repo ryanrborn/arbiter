@@ -118,6 +118,29 @@ defmodule ArbiterCli.Cmd.InitTest do
       refute guide =~ "Ryan"
     end
 
+    test "scaffolded rubrics carry the D0..D5 scale with the opt-in D5 flagship rung" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      # The ceiling is D5 everywhere the rubric is stated, not D4.
+      assert guide =~ "Difficulty scale (D0\u2013D5)"
+      assert guide =~ "**DIFFICULTY (D0\u2013D5)**"
+      assert agents =~ "`--difficulty 0..5` (D0..D5)"
+      refute guide =~ "D0\u2013D4"
+      refute agents =~ "D0..D4"
+
+      # D5 reads as a deliberate escalation, not merely "harder than D4".
+      for doc <- [guide, agents] do
+        assert doc =~ "D5 Flagship"
+        assert doc =~ "deliberate escalation"
+        assert doc =~ ~s(not a reason)
+      end
+    end
+
     test "ARBITER_OPERATOR.md uses the plain code terms and domain prefix" do
       stub_install()
       dir = tmp_dir()

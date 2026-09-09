@@ -51,7 +51,7 @@ defmodule Arbiter.Trackers.Shortcut.Config do
           token: String.t(),
           workflow_id: integer() | nil,
           status_map: %{atom() => String.t()},
-          estimate_buckets: [{non_neg_integer(), 0..4}] | nil
+          estimate_buckets: [{non_neg_integer(), 0..5}] | nil
         }
 
   @doc """
@@ -208,7 +208,7 @@ defmodule Arbiter.Trackers.Shortcut.Config do
     parsed =
       Enum.flat_map(buckets, fn
         [max, diff]
-        when (is_integer(max) or is_float(max)) and is_integer(diff) and diff >= 0 and diff <= 4 ->
+        when (is_integer(max) or is_float(max)) and is_integer(diff) and diff >= 0 and diff <= 5 ->
           [{round(max), diff}]
 
         _ ->

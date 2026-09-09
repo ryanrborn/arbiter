@@ -344,7 +344,10 @@ defmodule Arbiter.Trackers.GitHub do
   end
 
   # Parse "difficulty: N" label — no outbound create uses this label today,
-  # but the inbound path honours it if someone adds it manually.
+  # but the inbound path honours it if someone adds it manually. #1519: the
+  # scale runs to D5, and a hand-added `difficulty: 5` label IS the deliberate
+  # operator escalation that level exists for, so it is honoured rather than
+  # silently dropped.
   @impl true
   def extract_difficulty(issue_map) do
     issue_map
@@ -352,7 +355,7 @@ defmodule Arbiter.Trackers.GitHub do
     |> Enum.find_value(fn
       "difficulty: " <> rest ->
         case Integer.parse(rest) do
-          {n, ""} when n >= 0 and n <= 4 -> {:ok, n}
+          {n, ""} when n >= 0 and n <= 5 -> {:ok, n}
           _ -> nil
         end
 

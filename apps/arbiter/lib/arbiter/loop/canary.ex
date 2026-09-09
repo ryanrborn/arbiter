@@ -155,6 +155,11 @@ defmodule Arbiter.Loop.Canary do
   # `model`, an adapter override) is out of scope for autonomous application.
   @rule_keys ~w(model_tier thinking)
 
+  # Top of the D<n> routing scale (#1519). Mirrors
+  # `Arbiter.Agents.Routing.ByDifficulty`'s default-mapping ceiling — a canary
+  # may target any tier that policy can route.
+  @max_difficulty 5
+
   @doc "The floor on canary-arm dispatches before any verdict is possible."
   @spec min_dispatches() :: pos_integer()
   def min_dispatches, do: @min_dispatches
@@ -207,7 +212,7 @@ defmodule Arbiter.Loop.Canary do
     with block when is_map(block) <- get_in(config, @canary_path),
          "running" <- Map.get(block, "status"),
          id when is_binary(id) and id != "" <- Map.get(block, "proposal_id"),
-         d when is_integer(d) and d in 0..4 <- Map.get(block, "difficulty"),
+         d when is_integer(d) and d in 0..@max_difficulty <- Map.get(block, "difficulty"),
          {:ok, rule} <- validate_rule(Map.get(block, "rule")),
          {:ok, started_at} <- parse_started_at(Map.get(block, "started_at")) do
       %__MODULE__{
@@ -300,7 +305,7 @@ defmodule Arbiter.Loop.Canary do
   """
   @spec eligible(PendingWrite.t()) ::
           {:ok,
-           %{proposal_id: String.t(), workspace_id: String.t(), difficulty: 0..4, rule: map()}}
+           %{proposal_id: String.t(), workspace_id: String.t(), difficulty: 0..5, rule: map()}}
           | {:error, String.t()}
   def eligible(%PendingWrite{} = row) do
     with :ok <- check_state(row),
@@ -429,12 +434,12 @@ defmodule Arbiter.Loop.Canary do
 
   defp tier_difficulty("D" <> n) do
     case Integer.parse(n) do
-      {d, ""} when d in 0..4 -> {:ok, d}
-      _ -> {:error, "#{inspect("D" <> n)} is not a D0..D4 routing tier"}
+      {d, ""} when d in 0..@max_difficulty -> {:ok, d}
+      _ -> {:error, "#{inspect("D" <> n)} is not a D0..D5 routing tier"}
     end
   end
 
-  defp tier_difficulty(key), do: {:error, "#{inspect(key)} is not a D0..D4 routing tier"}
+  defp tier_difficulty(key), do: {:error, "#{inspect(key)} is not a D0..D5 routing tier"}
 
   defp validate_rule(rule) when is_map(rule) and map_size(rule) > 0 do
     extra = Map.keys(rule) -- @rule_keys

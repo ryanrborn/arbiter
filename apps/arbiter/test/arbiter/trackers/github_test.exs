@@ -1211,6 +1211,18 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:ok, 4} = GitHub.extract_difficulty(issue)
     end
 
+    test "parses 'difficulty: 5' label as D5 — the opt-in flagship tier" do
+      # #1519: a human hand-adding `difficulty: 5` is exactly the deliberate
+      # escalation D5 exists for; the old `n <= 4` cap silently dropped it.
+      issue = %{"labels" => [%{"name" => "difficulty: 5"}]}
+      assert {:ok, 5} = GitHub.extract_difficulty(issue)
+    end
+
+    test "returns nil for out-of-range difficulty values" do
+      assert nil == GitHub.extract_difficulty(%{"labels" => [%{"name" => "difficulty: 6"}]})
+      assert nil == GitHub.extract_difficulty(%{"labels" => [%{"name" => "difficulty: -1"}]})
+    end
+
     test "returns nil when no difficulty label is present" do
       issue = %{"labels" => [%{"name" => "priority: 1"}]}
       assert nil == GitHub.extract_difficulty(issue)

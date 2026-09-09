@@ -108,15 +108,26 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       assert count_occurrences(html, "difficulty-bar-empty") == 3
     end
 
-    test "D4 fills four of five bars and tints them red" do
+    test "D4 fills four of five bars without the red tint" do
+      # #1519: the red "this is the expensive one" tint follows the flagship
+      # level, which is now D5. D4 is premium/max — dear, but not opt-in.
       html = render_component(&difficulty_meter/1, difficulty: 4)
 
       assert count_occurrences(html, "difficulty-bar-filled") == 4
       assert count_occurrences(html, "difficulty-bar-empty") == 1
-      assert html =~ "bg-error"
+      refute html =~ "bg-error"
     end
 
-    test "only D4 tints red; lower difficulties use the neutral fill" do
+    test "D5 fills all five bars and tints them red" do
+      html = render_component(&difficulty_meter/1, difficulty: 5)
+
+      assert count_occurrences(html, "difficulty-bar-filled") == 5
+      assert count_occurrences(html, "difficulty-bar-empty") == 0
+      assert html =~ "bg-error"
+      assert html =~ "Difficulty D5"
+    end
+
+    test "only D5 tints red; lower difficulties use the neutral fill" do
       html = render_component(&difficulty_meter/1, difficulty: 3)
 
       refute html =~ "bg-error"
@@ -131,7 +142,7 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
     end
 
     test "out-of-range or wrong-type difficulty degrades gracefully instead of crashing" do
-      html = render_component(&difficulty_meter/1, difficulty: 5)
+      html = render_component(&difficulty_meter/1, difficulty: 6)
       assert count_occurrences(html, "difficulty-bar-filled") == 0
       assert count_occurrences(html, "difficulty-bar-empty") == 5
       assert html =~ "Difficulty: not set"

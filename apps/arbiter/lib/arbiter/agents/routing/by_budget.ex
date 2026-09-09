@@ -6,10 +6,15 @@ defmodule Arbiter.Agents.Routing.ByBudget do
   has crossed `workspace.config["routing"]["budget_usd_per_day"]`,
   degrade the chosen tier one step:
 
-    * Abstract tiers (from `:by_difficulty`): `premium → standard → economy`
-      on the `"model_tier"` key.
+    * Abstract tiers (from `:by_difficulty`):
+      `flagship → premium → standard → economy` on the `"model_tier"` key.
     * Legacy concrete-model configs (from `:by_priority`):
-      `opus → sonnet → haiku` on the `"model"` key.
+      `fable → opus → sonnet → haiku` on the `"model"` key.
+
+  `flagship`/`fable` are not source tiers — they exist only where a workspace
+  defines `agent.config.tier_models.flagship` and points `routing.rules.D5` at
+  it (#1519) — but both ladders name them anyway, because the ceiling has to be
+  able to degrade the most expensive rung it can actually be handed.
 
   The two degradations are independent: a chosen config with both
   `"model"` and `"model_tier"` set has both degraded. A config with
@@ -34,13 +39,20 @@ defmodule Arbiter.Agents.Routing.ByBudget do
   alias Arbiter.Agents.Routing.ByPriority
   alias Arbiter.Tasks.Workspace
 
+  # Both ladders must name every rung they can be handed: `maybe_degrade/3`
+  # passes an unmapped value through *unchanged*, so a tier missing from the
+  # table is a tier the budget ceiling silently cannot touch. #1519 added the
+  # flagship rungs for exactly that reason — D5 is the most expensive dispatch
+  # in the system and was the only one the ceiling could not degrade.
   @model_degrade %{
+    "fable" => "opus",
     "opus" => "sonnet",
     "sonnet" => "haiku",
     "haiku" => "haiku"
   }
 
   @tier_degrade %{
+    "flagship" => "premium",
     "premium" => "standard",
     "standard" => "economy",
     "economy" => "economy"

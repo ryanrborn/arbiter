@@ -419,10 +419,14 @@ defmodule Arbiter.Tasks.Issue do
 
     attribute :difficulty, :integer do
       public? true
-      constraints min: 0, max: 4
+      # #1519: the ceiling is 5, not 4. The column is a plain integer with no
+      # DB-level CHECK (see the initial_sqlite migration and the issues
+      # resource snapshot), so widening the range is an Ash-validation change
+      # only — no migration.
+      constraints min: 0, max: 5
 
       description """
-      How hard the task is (0..4 / D0..D4). Orthogonal to :priority.
+      How hard the task is (0..5 / D0..D5). Orthogonal to :priority.
       Drives provider-agnostic model/thinking routing via
       `Arbiter.Agents.Routing.ByDifficulty`. Nullable; routing treats
       `nil` as D2 (the default tier).
@@ -432,6 +436,11 @@ defmodule Arbiter.Tasks.Issue do
       D2 Moderate — multi-file or some design choice (default).
       D3 Hard     — cross-cutting, non-obvious design, correctness-critical.
       D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
+      D5 Flagship — a deliberate escalation, never an ordinary rating: work
+                    judged worth a full quota window on the flagship model.
+                    Only an operator sets it, and only when D4's premium
+                    model at max effort has already failed or is plainly
+                    inadequate. "Harder than D4" is not a reason.
       """
     end
 

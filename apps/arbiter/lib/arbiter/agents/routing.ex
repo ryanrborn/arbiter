@@ -10,7 +10,7 @@ defmodule Arbiter.Agents.Routing do
     * `:by_priority` — map `task.priority` to a rule under
       `routing.rules["P0".."P4"]`, falling back to the workspace default.
     * `:by_difficulty` — map `task.difficulty` to abstract
-      `{model_tier, thinking}` under `routing.rules["D0".."D4"]`, falling
+      `{model_tier, thinking}` under `routing.rules["D0".."D5"]`, falling
       back to a default mapping. Provider-agnostic: each adapter resolves
       the tier + thinking abstractions to its own knobs.
     * `:by_budget` — `:by_priority` (or `:by_difficulty`, see the

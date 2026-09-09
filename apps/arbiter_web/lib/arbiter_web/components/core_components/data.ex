@@ -83,15 +83,18 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp priority_tag_class(_), do: "badge-ghost"
 
   @doc """
-  Renders a difficulty (D0-D4) as a 5-bar meter. For D{n}, exactly n bars
-  are filled — D0 fills zero bars (with a thin dashed border), D4 fills four
-  bars. Only D4 tints its filled bars red; every other difficulty uses the
+  Renders a difficulty (D0-D5) as a 5-bar meter. For D{n}, exactly n bars
+  are filled — D0 fills zero bars (with a thin dashed border), D5 fills all
+  five. Only D5 tints its filled bars red; every other difficulty uses the
   neutral fill color. `nil` renders all five bars empty with no border.
+
+  The red tint marks the flagship tier — the level that must be opted into —
+  so it follows D5 rather than staying on D4 (#1519).
 
   ## Examples
 
       <.difficulty_meter difficulty={0} />
-      <.difficulty_meter difficulty={4} />
+      <.difficulty_meter difficulty={5} />
       <.difficulty_meter difficulty={nil} />
   """
   attr :difficulty, :integer, default: nil
@@ -99,7 +102,7 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
   def difficulty_meter(assigns) do
     filled_count =
-      if is_integer(assigns.difficulty) and assigns.difficulty in 0..4,
+      if is_integer(assigns.difficulty) and assigns.difficulty in 0..5,
         do: assigns.difficulty,
         else: 0
 
@@ -130,11 +133,11 @@ defmodule ArbiterWeb.CoreComponents.Data do
     """
   end
 
-  defp difficulty_fill_class(4), do: "bg-error"
+  defp difficulty_fill_class(5), do: "bg-error"
   defp difficulty_fill_class(_), do: "bg-primary"
 
   defp difficulty_meter_label(nil), do: "Difficulty: not set"
-  defp difficulty_meter_label(d) when d in 0..4, do: "Difficulty D#{d}"
+  defp difficulty_meter_label(d) when d in 0..5, do: "Difficulty D#{d}"
   defp difficulty_meter_label(_), do: "Difficulty: not set"
 
   @doc """

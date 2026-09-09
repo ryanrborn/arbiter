@@ -260,7 +260,7 @@ defmodule Arbiter.Trackers.Gitlab do
     issue_map
     |> label_names()
     |> Enum.find_value(fn
-      "priority: " <> rest -> parse_bucket(rest)
+      "priority: " <> rest -> parse_priority_label(rest)
       _ -> nil
     end)
   end
@@ -272,14 +272,25 @@ defmodule Arbiter.Trackers.Gitlab do
     issue_map
     |> label_names()
     |> Enum.find_value(fn
-      "difficulty: " <> rest -> parse_bucket(rest)
+      "difficulty: " <> rest -> parse_difficulty_label(rest)
       _ -> nil
     end)
   end
 
-  defp parse_bucket(rest) do
+  defp parse_priority_label(rest) do
     case Integer.parse(rest) do
       {n, ""} when n >= 0 and n <= 4 -> {:ok, n}
+      _ -> nil
+    end
+  end
+
+  # #1519: the difficulty scale runs to D5 while priority stays P0..P4, so the
+  # two labels no longer share a ceiling. A hand-added `difficulty: 5` label is
+  # exactly the deliberate operator escalation the flagship rung exists for —
+  # same reasoning as `GitHub.extract_difficulty/1`.
+  defp parse_difficulty_label(rest) do
+    case Integer.parse(rest) do
+      {n, ""} when n >= 0 and n <= 5 -> {:ok, n}
       _ -> nil
     end
   end

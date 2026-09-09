@@ -232,7 +232,7 @@ defmodule ArbiterCli.Output do
   defp blank_to(v, _fallback), do: v
 
   defp difficulty_label(nil), do: nil
-  defp difficulty_label(n) when is_integer(n) and n in 0..4, do: "D#{n}"
+  defp difficulty_label(n) when is_integer(n) and n in 0..5, do: "D#{n}"
   defp difficulty_label(other), do: to_string(other)
 
   # Child-progress rollup line for a parent task. Only shown when the task has

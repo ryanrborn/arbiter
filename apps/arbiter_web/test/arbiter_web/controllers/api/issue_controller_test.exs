@@ -31,7 +31,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert ws_id == ws.id
     end
 
-    test "accepts and persists `difficulty` (0..4)", %{conn: conn, ws: ws} do
+    test "accepts and persists `difficulty` (0..5)", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/issues", %{
           title: "d3-feature",
@@ -43,6 +43,20 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
       conn = get(conn, ~p"/api/issues/#{id}")
       assert %{"difficulty" => 3} = json_response(conn, 200)
+    end
+
+    test "accepts `difficulty: 5` at the new ceiling (#1519)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "d5-flagship",
+          workspace_id: ws.id,
+          difficulty: 5
+        })
+
+      assert %{"id" => id, "difficulty" => 5} = json_response(conn, 201)
+
+      conn = get(conn, ~p"/api/issues/#{id}")
+      assert %{"difficulty" => 5} = json_response(conn, 200)
     end
 
     test "accepts, persists, and renders `repo` (bd-2jum8j)", %{conn: conn, ws: ws} do

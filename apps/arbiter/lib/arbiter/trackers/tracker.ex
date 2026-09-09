@@ -201,7 +201,7 @@ defmodule Arbiter.Trackers.Tracker do
   @callback extract_priority(map()) :: {:ok, 0..4} | nil
 
   @doc """
-  Extracts the Arbiter difficulty (0..4, where 0 = D0 / trivial) from a raw
+  Extracts the Arbiter difficulty (0..5, where 0 = D0 / trivial) from a raw
   issue map returned by `fetch/1`, derived from the tracker's
   estimate/story-points field via configurable buckets.
 
@@ -219,7 +219,7 @@ defmodule Arbiter.Trackers.Tracker do
 
   Optional — adapters without an estimate signal simply don't implement it.
   """
-  @callback extract_difficulty(map()) :: {:ok, 0..4} | nil
+  @callback extract_difficulty(map()) :: {:ok, 0..5} | nil
 
   @doc """
   Attach a remote link (e.g. the implementing PR/MR) to the tracked item.

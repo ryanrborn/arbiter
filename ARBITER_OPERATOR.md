@@ -50,7 +50,7 @@ arb create "Fix widget crash on startup" --description "..."
 arb update <task-id> --difficulty <n>
 ```
 
-Difficulty scale (D0–D4):
+Difficulty scale (D0–D5):
 
 ```
 D0 Trivial  — single-file, fully specified, no judgment (typo, config, doc edit)
@@ -58,12 +58,22 @@ D1 Simple   — localized, clear approach, light reasoning; follows existing pat
 D2 Moderate — multi-file or some design choice (default if omitted)
 D3 Hard     — cross-cutting, non-obvious design, correctness-critical
 D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
+D5 Flagship — a deliberate escalation, never an ordinary rating: work judged
+              worth a full quota window on the flagship model. Reach for it
+              only when D4 (premium model, max effort) has already failed or
+              is plainly inadequate. "Harder than D4" is not a reason.
 ```
+
+D5 is opt-in by design — it has to be typed. One measured D4 flagship run
+consumed an entire 5h quota window in ~12 minutes for $19.62 and answered one
+of six questions before being cut off, which is why the tier now sits behind a
+level nothing rates automatically: trackers, story-point buckets and the
+autonomous loop all stop at D4.
 
 ## 4. File Issues Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
-- **DIFFICULTY (D0–D4)** — drives the model + thinking budget routed to the
+- **DIFFICULTY (D0–D5)** — drives the model + thinking budget routed to the
   worker.
 - **PRIORITY (P0–P4)** — drives scheduling urgency.
 - They are **orthogonal** — a P0 can be D0 (trivial config bump); a P3 can be

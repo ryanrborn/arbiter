@@ -26,7 +26,7 @@ defmodule ArbiterWeb.TaskForm do
   @doc "Select options for `difficulty` (nullable; blank means unset → routed as D2)."
   def difficulty_options do
     [{"— unset —", ""}] ++
-      Enum.map(0..4, fn d -> {"D#{d} — #{difficulty_hint(d)}", to_string(d)} end)
+      Enum.map(0..5, fn d -> {"D#{d} — #{difficulty_hint(d)}", to_string(d)} end)
   end
 
   defp difficulty_hint(0), do: "trivial"
@@ -34,6 +34,9 @@ defmodule ArbiterWeb.TaskForm do
   defp difficulty_hint(2), do: "moderate"
   defp difficulty_hint(3), do: "hard"
   defp difficulty_hint(4), do: "extreme"
+  # #1519: the hint has to say what D5 costs, not just that it is bigger —
+  # the operator picks the level from this select.
+  defp difficulty_hint(5), do: "flagship — worth a full quota window"
 
   @doc "Select options for `issue_type`, drawn from the resource itself."
   def issue_type_options do

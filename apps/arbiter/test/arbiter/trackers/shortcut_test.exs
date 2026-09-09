@@ -958,6 +958,27 @@ defmodule Arbiter.Trackers.ShortcutTest do
       assert {:ok, 4} = Shortcut.extract_difficulty(%{"estimate" => 13})
     end
 
+    test "an explicitly configured D5 bucket is honoured, not dropped (#1519)" do
+      # Defaults top out at D4; an explicit bucket table is a deliberate
+      # operator escalation, so D5 must survive parsing.
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "difficulty" => %{"buckets" => [[13, 4], [21, 5]]}
+      })
+
+      assert {:ok, 4} = Shortcut.extract_difficulty(%{"estimate" => 13})
+      assert {:ok, 5} = Shortcut.extract_difficulty(%{"estimate" => 21})
+    end
+
+    test "a D5-only bucket table is not silently replaced by the defaults (#1519)" do
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "difficulty" => %{"buckets" => [[13, 5]]}
+      })
+
+      assert {:ok, 5} = Shortcut.extract_difficulty(%{"estimate" => 1})
+    end
+
     test "returns nil when estimate field is absent" do
       Config.put_active(%{
         "credentials_ref" => "env:#{@env_var}",

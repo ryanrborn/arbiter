@@ -335,6 +335,19 @@ defmodule Arbiter.Agents.GeminiTest do
       end
     end
 
+    test "clamps above-ladder levels to Gemini's own ceiling instead of dropping them" do
+      # #1519: D4/D5 route "max" (and workspaces route "xhigh"). Gemini has no
+      # level above "high", and the old whitelist silently emitted NO env var
+      # for anything it did not recognise — a Gemini workspace would have LOST
+      # its reasoning budget at the top of the scale.
+      for level <- ["xhigh", "max"] do
+        env = Gemini.spawn_env(thinking: level)
+
+        assert {"GEMINI_THINKING_LEVEL", "high"} in env,
+               "expected #{level} to clamp to high, got #{inspect(env)}"
+      end
+    end
+
     test "omits GEMINI_THINKING_LEVEL when :thinking is none / nil" do
       refute Enum.any?(
                Gemini.spawn_env(thinking: "none"),

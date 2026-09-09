@@ -109,6 +109,37 @@ defmodule Arbiter.Loop.CanaryTest do
       assert spec.workspace_id == ws.id
     end
 
+    test "accepts a D5 tier — the flagship level is a real routing tier", %{ws: ws} do
+      # #1519: `tier_difficulty/1` capped at D4, so a canary could never be
+      # expressed against the new top tier.
+      row =
+        proposed!(ws, %{
+          target: "routing.rules.D5",
+          difficulty: 5,
+          payload: %{
+            "workspace_id" => ws.id,
+            "patch" => %{"routing" => %{"rules" => %{"D5" => @canaried_rule}}}
+          }
+        })
+
+      assert {:ok, spec} = Canary.eligible(row)
+      assert spec.difficulty == 5
+    end
+
+    test "refuses a D6 tier — 5 is the top of the scale", %{ws: ws} do
+      row =
+        proposed!(ws, %{
+          target: "routing.rules.D6",
+          payload: %{
+            "workspace_id" => ws.id,
+            "patch" => %{"routing" => %{"rules" => %{"D6" => @canaried_rule}}}
+          }
+        })
+
+      assert {:error, reason} = Canary.eligible(row)
+      assert reason =~ "routing tier"
+    end
+
     test "refuses a proposal below the evidence bar", %{ws: ws} do
       row = proposed!(ws, %{incident_refs: ["run-a"], task_refs: ["bd-1"]})
       assert row.state == :hypothesis
@@ -322,7 +353,7 @@ defmodule Arbiter.Loop.CanaryTest do
 
   describe "byte-for-byte default behaviour" do
     test "a workspace with no loop config routes exactly as before", %{ws: ws} do
-      for d <- 0..4 do
+      for d <- 0..5 do
         task = %Issue{id: "bd-#{d}", difficulty: d}
 
         assert Routing.choose(task, ws, %{}) == %{

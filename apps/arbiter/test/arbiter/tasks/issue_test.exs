@@ -99,13 +99,13 @@ defmodule Arbiter.Tasks.IssueTest do
       assert p0.priority == 0
     end
 
-    test "difficulty defaults to nil and accepts 0..4", %{ws: ws} do
+    test "difficulty defaults to nil and accepts 0..5", %{ws: ws} do
       {:ok, default} =
         Ash.create(Issue, %{title: "no-difficulty", workspace_id: ws.id})
 
       assert default.difficulty == nil
 
-      for d <- 0..4 do
+      for d <- 0..5 do
         {:ok, set} =
           Ash.create(Issue, %{
             title: "d#{d}",
@@ -118,8 +118,10 @@ defmodule Arbiter.Tasks.IssueTest do
     end
 
     test "difficulty rejects out-of-range integers", %{ws: ws} do
+      # #1519: D5 is the flagship tier, so the ceiling is 5 — 6 is the first
+      # rejected value. D5 must be reachable or the opt-in tier is unusable.
       assert {:error, %Ash.Error.Invalid{}} =
-               Ash.create(Issue, %{title: "d5", difficulty: 5, workspace_id: ws.id})
+               Ash.create(Issue, %{title: "d6", difficulty: 6, workspace_id: ws.id})
 
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.create(Issue, %{title: "dneg", difficulty: -1, workspace_id: ws.id})

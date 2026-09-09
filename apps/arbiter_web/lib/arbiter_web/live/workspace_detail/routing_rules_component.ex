@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.WorkspaceDetail.RoutingRulesComponent do
   @moduledoc """
   `routing.rules` — a per-tier agent-config override keyed by priority
-  (`P0`..`P4`) or difficulty (`D0`..`D4`), depending on `routing.policy`.
+  (`P0`..`P4`) or difficulty (`D0`..`D5`), depending on `routing.policy`.
 
   Saving a key that already exists replaces that rule wholesale: the key is
   unset first, then the new entry merged in, so a field dropped from the form
@@ -55,7 +55,7 @@ defmodule ArbiterWeb.WorkspaceDetail.RoutingRulesComponent do
     end
   end
 
-  # `routing.rules` sorted by tier key ("D0".."D4" / "P0".."P4" sort
+  # `routing.rules` sorted by tier key ("D0".."D5" / "P0".."P4" sort
   # naturally as strings; anything else falls in alongside).
   defp routing_rules(ws) do
     case cfg(ws, ["routing", "rules"]) do
@@ -76,7 +76,7 @@ defmodule ArbiterWeb.WorkspaceDetail.RoutingRulesComponent do
       <.rows>
         <.setting_row
           name="Routing rules"
-          consequence="routing.rules — keyed by priority (P0-P4) or difficulty (D0-D4) per the routing policy; saving a key replaces that rule wholesale"
+          consequence="routing.rules — keyed by priority (P0-P4) or difficulty (D0-D5) per the routing policy; saving a key replaces that rule wholesale"
         >
           <:below>
             <ul :if={@routing_rules != []} id="routing-rules" class={list_class()}>
@@ -106,7 +106,7 @@ defmodule ArbiterWeb.WorkspaceDetail.RoutingRulesComponent do
                 name="rule[key]"
                 value=""
                 size="sm"
-                placeholder="D4 / P0"
+                placeholder="D5 / P0"
                 class="w-[90px]"
                 required
               />

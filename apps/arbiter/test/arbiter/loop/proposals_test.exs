@@ -199,9 +199,20 @@ defmodule Arbiter.Loop.ProposalsTest do
     end
 
     test "an identity-rendering cell (from and to already route the same way) produces no cluster candidate" do
-      # Stock default_mapping routes D3 and D4 both premium/high, so a D3 -> D4
-      # cluster with no D4 override would render a no-op patch — a row that
-      # fails Ash validation on every `arb loop apply all`, forever.
+      # A D3 -> D4 cluster whose D4 already routes exactly as D3 does would
+      # render a no-op patch — a row that fails Ash validation on every
+      # `arb loop apply all`, forever.
+      #
+      # #1519: stock D3/D4 no longer collide (D4 moved to premium/max), so the
+      # collision is staged from workspace config instead. That exercises the
+      # same property against the general case rather than against a
+      # coincidence in the default table.
+      workspace_config = %{
+        "routing" => %{
+          "rules" => %{"D4" => %{"model_tier" => "premium", "thinking" => "high"}}
+        }
+      }
+
       r =
         report(%{
           difficulty_misestimates: [
@@ -217,7 +228,7 @@ defmodule Arbiter.Loop.ProposalsTest do
           ]
         })
 
-      candidates = Proposals.candidates(r)
+      candidates = Proposals.candidates(r, workspace_config: workspace_config)
 
       assert Enum.any?(candidates, &(&1.kind == :difficulty_override))
       refute Enum.any?(candidates, &(&1.kind == :config_set))
@@ -264,10 +275,12 @@ defmodule Arbiter.Loop.ProposalsTest do
       assert Enum.sort(cells) == [{1, "arbiter"}, {1, "other-repo"}, {2, "arbiter"}]
     end
 
-    test "a misestimate on a task already at the difficulty ceiling is not a candidate" do
-      # `Issue.difficulty` is constrained to 0..4, so a D4 → D5 override could
-      # never apply — and being :task-scoped it would bypass the bar and land
-      # directly as :proposed, sticking in the queue forever.
+    test "a misestimate on a task already at the loop's ceiling is not a candidate" do
+      # #1519: the scale now runs to D5, but D5 is the *operator-only* flagship
+      # escalation — the loop's own bump ceiling stays at D4 so an automated
+      # proposal can never reach for a full quota window. The loop analysis is
+      # the very thing that rates roughly one tier low, so it is the last thing
+      # that should be allowed to nominate a flagship run.
       r =
         report(%{
           difficulty_misestimates: [
@@ -284,6 +297,25 @@ defmodule Arbiter.Loop.ProposalsTest do
         })
 
       assert Proposals.candidates(r) == []
+    end
+
+    test "a D3 misestimate is still a candidate — the cap is D4, not D3" do
+      r =
+        report(%{
+          difficulty_misestimates: [
+            %{
+              task_id: "bd-below-ceiling",
+              dispatched_difficulty: 3,
+              rounds: 3,
+              cost_usd: 31.0,
+              reason: :rework,
+              cell: {3, "arbiter"},
+              recommendation: %{}
+            }
+          ]
+        })
+
+      assert [_ | _] = Proposals.candidates(r)
     end
 
     test "a quality_failure misestimate is deliberately not a candidate" do

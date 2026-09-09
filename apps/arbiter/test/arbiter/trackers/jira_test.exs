@@ -1574,6 +1574,50 @@ defmodule Arbiter.Trackers.JiraTest do
       assert {:ok, 4} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 13}})
     end
 
+    test "an explicitly configured D5 bucket is honoured, not dropped (#1519)" do
+      # The default buckets top out at D4 on purpose, but a hand-written bucket
+      # table IS a deliberate operator escalation, so D5 must survive parsing.
+      # Regression: a `diff <= 4` guard silently dropped the clause and fell
+      # back to the stock D0..D3 table.
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "difficulty" => %{"field_id" => "customfield_10016", "buckets" => [[13, 4], [21, 5]]}
+      })
+
+      assert {:ok, 4} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 13}})
+      assert {:ok, 5} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 21}})
+    end
+
+    test "a D5-only bucket table is not silently replaced by the defaults (#1519)" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "difficulty" => %{"field_id" => "customfield_10016", "buckets" => [[13, 5]]}
+      })
+
+      # Under the old guard this parsed to [] → nil → @default_difficulty_buckets,
+      # which would have answered D0 for 1 point.
+      assert {:ok, 5} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 1}})
+    end
+
+    test "difficulties above the D5 ceiling are still rejected" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "difficulty" => %{"field_id" => "customfield_10016", "buckets" => [[13, 6]]}
+      })
+
+      # Out-of-range rows drop out; with none left the defaults apply.
+      assert {:ok, 0} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 1}})
+    end
+
     test "returns nil when configured field is absent from the issue" do
       Config.put_active(%{
         "host" => @host,

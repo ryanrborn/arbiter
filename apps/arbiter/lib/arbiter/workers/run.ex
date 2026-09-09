@@ -351,12 +351,15 @@ defmodule Arbiter.Workers.Run do
       public? true
       constraints max_length: 32, trim?: true
 
-      description ~s[Resolved abstract reasoning effort ("none" / "low" / "medium" / "high").]
+      description ~s[Resolved abstract reasoning effort ("none" / "low" / "medium" / "high" / "xhigh" / "max").]
     end
 
     attribute :difficulty_at_dispatch, :integer do
       public? true
-      constraints min: 0, max: 4
+      # #1519: must track `Issue.difficulty`'s ceiling — a D5 dispatch that
+      # could not record its own provenance would be invisible to exactly the
+      # cost analysis that motivated the tier.
+      constraints min: 0, max: 5
 
       description "The task's Issue.difficulty AT THE TIME this run was dispatched. A task's " <>
                     "difficulty can be edited later (bd-7rspia was corrected D1 -> D2 after the " <>
