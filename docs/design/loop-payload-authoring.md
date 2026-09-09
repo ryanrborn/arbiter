@@ -192,7 +192,10 @@ Resolving each live cluster's `D<from> → D<to>` step:
 
 6/6 real. Note D3→D4 is only non-identity *because* every workspace happens to
 override D4 today; against stock `default_mapping/0` both tiers are
-`premium/high`. The implementation must resolve against the workspace's
+`premium/high` (as of 2026-09-09; #1519 moved stock D4 to `premium/max` and
+added D5 as the flagship rung, so the two no longer collide by default — the
+table above is preserved as the point-in-time analysis it was). The
+implementation must resolve against the workspace's
 effective rule and **decline to emit an identity patch**, or it recreates the
 permanently-stuck-row failure that `proposable_misestimate?/1` already guards
 against at the difficulty ceiling (`proposals.ex`).
