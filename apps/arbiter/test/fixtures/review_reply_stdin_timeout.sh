@@ -13,4 +13,9 @@ if [ "$elapsed_ms" -ge 200 ]; then
   echo "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer." >&2
 fi
 
+# A diagnostic the defensive regex does NOT match, so this only stays out of
+# the body if stderr is genuinely kept separate from stdout (not because the
+# strip regex happens to catch it).
+echo "Notice: some other CLI diagnostic." >&2
+
 echo "This is the composed reply body."

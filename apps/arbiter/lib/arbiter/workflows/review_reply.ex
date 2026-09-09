@@ -73,7 +73,7 @@ defmodule Arbiter.Workflows.ReviewReply do
   # waiting for input, and only stdout is captured (stderr is left to inherit
   # the parent's, never merged in), so a diagnostic can't ride into the body
   # via either route.
-  @cli_diagnostic_line ~r/\A[ \t]*Warning: no stdin data received[^\n]*\n?/
+  @cli_diagnostic_line ~r/\A\s*Warning: no stdin data received[^\n]*\n?/
 
   step(:read_thread,
     description: "Validate thread input and assemble context string",
@@ -116,7 +116,7 @@ defmodule Arbiter.Workflows.ReviewReply do
 
     case composer.(ctx, state) do
       {:ok, body} when is_binary(body) and body != "" ->
-        body = body |> strip_cli_diagnostic() |> String.trim()
+        body = body |> String.trim_leading() |> strip_cli_diagnostic() |> String.trim()
 
         if body == "" do
           {:error, {:compose_failed, :empty_reply}}
@@ -259,32 +259,37 @@ defmodule Arbiter.Workflows.ReviewReply do
 
       path ->
         prompt = build_prompt(thread_context)
-        flags = ["--output-format", "text"]
+        flags = compose_flags()
 
-        # Append the review_agent model when seeded (Agents.prepare/2 puts the
-        # config in the process dict; Claude.Config reads it back here).
-        flags =
-          case ClaudeConfig.active_model() do
-            model when is_binary(model) and model != "" -> flags ++ ["--model", model]
-            _ -> flags
-          end
-
-        with {:ok, [cmd | args] = argv} <- ClaudeAdapter.build_argv(path, prompt, flags) do
-          try do
-            case System.cmd(cmd, args) do
-              {output, 0} -> {:ok, output}
-              {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
-            end
-          after
-            case ClaudeAdapter.prompt_tmpfile(argv) do
-              nil -> :ok
-              tmp -> File.rm(tmp)
-            end
-          end
+        with {:ok, argv} <- ClaudeAdapter.build_argv(path, prompt, flags) do
+          run_claude(argv)
         end
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  defp compose_flags do
+    flags = ["--output-format", "text"]
+
+    # Append the review_agent model when seeded (Agents.prepare/2 puts the
+    # config in the process dict; Claude.Config reads it back here).
+    case ClaudeConfig.active_model() do
+      model when is_binary(model) and model != "" -> flags ++ ["--model", model]
+      _ -> flags
+    end
+  end
+
+  defp run_claude([cmd | args] = argv) do
+    case System.cmd(cmd, args) do
+      {output, 0} -> {:ok, output}
+      {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
+    end
+  after
+    case ClaudeAdapter.prompt_tmpfile(argv) do
+      nil -> :ok
+      tmp -> File.rm(tmp)
+    end
   end
 
   defp prepare_review_agent(%{workspace: ws}) when not is_nil(ws),

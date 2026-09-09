@@ -367,9 +367,10 @@ defmodule Arbiter.Workflows.ReviewReplyTest do
     # received" warning spliced onto the front of the reply. This stubs
     # `claude` on PATH with a script that reproduces that exact CLI behavior
     # (see test/fixtures/review_reply_stdin_timeout.sh) and asserts the
-    # composed body never carries it, proving the fix is structural — a
-    # regex-only fix would still pass the compose_reply tests above but this
-    # one exercises the actual spawn.
+    # composed body never carries it. The fixture also emits a second stderr
+    # line the defensive regex does not match, so this only passes if stderr
+    # is genuinely kept separate from stdout — a regex-only fix would fail
+    # this assertion even though it passes the compose_reply tests above.
     setup do
       tmp =
         Path.join(
@@ -402,6 +403,7 @@ defmodule Arbiter.Workflows.ReviewReplyTest do
 
       assert {:ok, %{reply_body: body}} = ReviewReply.run_step(:compose_reply, state)
       refute body =~ "Warning: no stdin data received"
+      refute body =~ "Notice: some other CLI diagnostic."
       assert body == "This is the composed reply body."
     end
   end
