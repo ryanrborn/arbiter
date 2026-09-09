@@ -251,7 +251,6 @@ defmodule Arbiter.Workflows.ReviewReply do
   # the Claude CLI location resolved from Arbiter's own agent config, not
   # from a request or a task field, so there's no shell-injection surface in
   # `sh -c` here.
-  # sobelow_skip ["CI.System"]
   defp default_compose(thread_context, _state) do
     case System.find_executable("claude") do
       nil ->
@@ -280,6 +279,10 @@ defmodule Arbiter.Workflows.ReviewReply do
     end
   end
 
+  # `argv` comes from `ClaudeAdapter.build_argv/3` above, built from `path`
+  # (resolved from Arbiter's own agent config, never a request field), so
+  # there's no shell-injection surface here.
+  # sobelow_skip ["CI.System"]
   defp run_claude([cmd | args] = argv) do
     case System.cmd(cmd, args) do
       {output, 0} -> {:ok, output}
