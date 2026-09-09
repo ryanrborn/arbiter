@@ -1629,6 +1629,45 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert item.status == :conflict_resolving
       assert Ash.get!(Issue, task.id).status == :open
     end
+
+    @tag workspace_config: @ws_github
+    test "rebase-forward advances the head but does not strand the PR behind a stale reviewed-SHA guard",
+         %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            207 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "behind", "head" => %{"sha" => "sha-a"}}
+            }
+          }
+        end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#207", 2)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # Cycle 1: approved and behind base → the reviewed baseline latches at
+      # "sha-a", then the rebase is issued in the same tick.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 207}
+
+      # The rebase landed — the head moved to "sha-b" even though `approved`
+      # stays true (GitHub doesn't dismiss reviews on a rebase-forward).
+      Agent.update(agent, fn s ->
+        put_in(s, [207, :pr], %{"mergeStateStatus" => "clean", "head" => %{"sha" => "sha-b"}})
+      end)
+
+      # Cycle 2: caught up → merges on the new head instead of refusing
+      # forever on the baseline the queue's own rebase invalidated.
+      :ok = MergeQueue.tick(name)
+      assert_received {:merged, 207}
+
+      assert %{items: []} = MergeQueue.state(name)
+      assert Ash.get!(Issue, task.id).status == :closed
+    end
   end
 
   describe "serialized merge admission (#354, Phase 3)" do

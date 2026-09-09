@@ -212,7 +212,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # ("SHA must be provided when merging", bd-6i2k7u/#1491) — but note that this
   # merges whatever head the forge reports right now. Callers reach this only
   # on paths with no MR head to race against; see `Arbiter.Mergers.ReviewedSha`.
-  def merge(mr_ref, nil) when is_binary(mr_ref) do
+  def merge(mr_ref, _expected_sha) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do

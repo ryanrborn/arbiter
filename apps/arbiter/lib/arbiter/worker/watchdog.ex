@@ -718,6 +718,14 @@ defmodule Arbiter.Worker.Watchdog do
         # that already hold the task; otherwise loaded lazily at merge time.
         recorded_reviewed_sha: Keyword.get(opts, :last_reviewed_sha),
         reviewed_sha: nil,
+        # The recorded baseline in effect at the moment of the most recent
+        # `clear_reviewed_latch/1`, if any. `recorded_reviewed_sha/1` treats a
+        # freshly-loaded `last_reviewed_sha` as stale while it still matches
+        # this value — a fleet-initiated advance must not be papered over by
+        # the very engagement row it just invalidated — but honours it again
+        # once ReviewPatrol has advanced the task past it, which is what a
+        # genuine re-review looks like.
+        cleared_recorded_sha: nil,
         last_head_sha: nil,
         interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
         max_polls: Keyword.get(opts, :max_polls, default_max_polls),
@@ -2407,13 +2415,18 @@ defmodule Arbiter.Worker.Watchdog do
   # task, which is most of them).
   defp reviewed_sha(state), do: recorded_reviewed_sha(state) || state.reviewed_sha
 
-  defp recorded_reviewed_sha(%{recorded_reviewed_sha: sha}) when is_binary(sha) and sha != "",
-    do: sha
+  defp recorded_reviewed_sha(%{recorded_reviewed_sha: sha} = state)
+       when is_binary(sha) and sha != "" do
+    if sha == Map.get(state, :cleared_recorded_sha), do: nil, else: sha
+  end
 
-  defp recorded_reviewed_sha(%{task_id: task_id}) do
+  defp recorded_reviewed_sha(%{task_id: task_id} = state) do
     case Ash.get(Arbiter.Tasks.Issue, task_id) do
-      {:ok, %{last_reviewed_sha: sha}} when is_binary(sha) and sha != "" -> sha
-      _ -> nil
+      {:ok, %{last_reviewed_sha: sha}} when is_binary(sha) and sha != "" ->
+        if sha == Map.get(state, :cleared_recorded_sha), do: nil, else: sha
+
+      _ ->
+        nil
     end
   rescue
     _ -> nil
@@ -2445,7 +2458,14 @@ defmodule Arbiter.Worker.Watchdog do
   # of letting it converge. The guard is deliberately scoped to advances the
   # fleet did NOT initiate — a human or another process pushing to the branch
   # between the review verdict and the merge, which is the incident shape.
-  defp clear_reviewed_latch(state), do: %{state | reviewed_sha: nil}
+  defp clear_reviewed_latch(state) do
+    %{
+      state
+      | reviewed_sha: nil,
+        recorded_reviewed_sha: nil,
+        cleared_recorded_sha: reviewed_sha(state)
+    }
+  end
 
   defp safe(fun) do
     fun.()

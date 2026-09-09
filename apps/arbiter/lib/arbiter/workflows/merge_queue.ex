@@ -1009,6 +1009,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   # conflict is surfaced by the next get/1's `conflicting` field (→ resolver),
   # not inferred from this return value.
   defp update_base(state, item) do
+    item = clear_reviewed_latch(item)
+
     case safe_update_branch(state.adapter, item.mr_ref) do
       :ok ->
         Logger.info(
@@ -1119,13 +1121,15 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:ok, _info} ->
         Logger.info("MergeQueue: spawned conflict resolver for task=#{item.task_id}")
 
-        item = %{
+        item =
           item
-          | status: :conflict_resolving,
+          |> clear_reviewed_latch()
+          |> Map.merge(%{
+            status: :conflict_resolving,
             prior_status: prior,
             phantom_conflicts: 0,
             resolver_spawned_at: DateTime.utc_now()
-        }
+          })
 
         {item, state}
 
@@ -1149,12 +1153,18 @@ defmodule Arbiter.Workflows.MergeQueue do
   # Restore item state after a successful auto-rebase.
   defp restore_after_resolution(state, %{prior_status: nil} = item) do
     safe_notify_resolution(state, item)
-    %{item | status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil}
+
+    item
+    |> clear_reviewed_latch()
+    |> Map.merge(%{status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil})
   end
 
   defp restore_after_resolution(state, %{prior_status: prior} = item) do
     safe_notify_resolution(state, item)
-    %{item | status: prior, prior_status: nil, resolver_spawned_at: nil}
+
+    item
+    |> clear_reviewed_latch()
+    |> Map.merge(%{status: prior, prior_status: nil, resolver_spawned_at: nil})
   end
 
   # ---- changes-requested → auto-revise (bd-95lsjb) ------------------------
@@ -1337,6 +1347,14 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
+  # Drop the latch when the QUEUE is the one advancing the branch — an
+  # update-branch rebase or a conflict-resolver push. Mirrors
+  # `Arbiter.Worker.Watchdog.clear_reviewed_latch/1`: those pushes are this
+  # queue's own doing, already governed by their own bounded machinery, and
+  # not dropping the baseline here strands every PR the queue rebases
+  # forward on a guard that can never be satisfied again.
+  defp clear_reviewed_latch(item), do: %{item | reviewed_sha: nil, last_reviewed_sha: nil}
+
   # Carry the reviewed baseline forward from one poll observation, mirroring
   # `Arbiter.Worker.Watchdog.track_reviewed_baseline/2`.
   defp track_reviewed_baseline(item, mr_state) do
@@ -1379,6 +1397,13 @@ defmodule Arbiter.Workflows.MergeQueue do
             "mr_ref=#{item.mr_ref}: #{inspect(reason)} — will retry next tick"
         )
 
+        {%{item | last_error: reason}, state}
+
+      {:error, {:stale_reviewed_sha, _reviewed, _head} = reason} ->
+        # Leave status untouched, same rationale as the limiter clause above:
+        # a re-review (or the fleet's own clear_reviewed_latch/1 on its next
+        # rebase/resolve pass) can legitimately clear this, and :failed has
+        # no way back in.
         {%{item | last_error: reason}, state}
 
       {:error, reason} ->
