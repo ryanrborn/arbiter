@@ -26,12 +26,17 @@ defmodule ArbiterWeb.WorkspaceDetail.AgentModelConfigComponent do
   # The model tiers (`agent.config.tier_models`) and thinking levels
   # (`agent.config.thinking_argv`) every adapter defines. They are only the
   # *baseline* row set: operators routinely add keys of their own (real
-  # workspaces carry `tier_models.flagship` and `thinking_argv.xhigh`, neither
-  # of which appears anywhere in this codebase), so the rendered rows are the
-  # baseline unioned with whatever the workspace actually stores. Hiding an
-  # unknown key would leave config only `arb config set` can reach.
+  # workspaces carry `tier_models.flagship`, which appears nowhere in source),
+  # so the rendered rows are the baseline unioned with whatever the workspace
+  # actually stores. Hiding an unknown key would leave config only
+  # `arb config set` can reach.
+  #
+  # #1519: `xhigh` and `max` joined the baseline when routing started emitting
+  # them (D4/D5 → `max`). They are adapter levels now, not operator inventions,
+  # so an operator wiring up the flagship tier gets a row to override without
+  # having to know the key name.
   @base_model_tiers ~w[economy standard premium]
-  @base_thinking_levels ~w[low medium high]
+  @base_thinking_levels ~w[low medium high xhigh max]
 
   # `thinking_argv["none"]` is inert: every adapter's `thinking_argv/1` returns
   # `[]` for "none" before it ever consults the overrides. No row, and the key

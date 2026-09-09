@@ -4542,7 +4542,7 @@ defmodule Arbiter.Worker do
     _ -> nil
   end
 
-  # Load the task's difficulty integer (0..4) from the DB. Returns nil on any
+  # Load the task's difficulty integer (0..5) from the DB. Returns nil on any
   # error so the ReviewGate falls back to its D2 default rather than crashing.
   defp task_difficulty(task_id) when is_binary(task_id) do
     case Ash.get(Arbiter.Tasks.Issue, task_id) do

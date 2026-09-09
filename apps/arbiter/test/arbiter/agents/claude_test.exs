@@ -125,11 +125,15 @@ defmodule Arbiter.Agents.ClaudeTest do
       refute "opus" in argv
     end
 
-    test ":thinking emits --effort for low/medium/high", %{stub: _stub} do
-      for level <- ["low", "medium", "high"] do
+    test ":thinking emits --effort for every level on the ladder", %{stub: _stub} do
+      # #1519: the ladder is low < medium < high < xhigh < max. `xhigh`/`max`
+      # used to be absent from the built-in map, so an unrecognised level
+      # silently emitted NO effort flag at all — a D4 routed to "max" would
+      # have got less reasoning than a D3 routed to "high".
+      for level <- ["low", "medium", "high", "xhigh", "max"] do
         {:ok, argv} = Claude.default_argv("the prompt", thinking: level)
-        assert "--effort" in argv
-        assert level in argv
+        assert "--effort" in argv, "no --effort for thinking level #{level}"
+        assert level in argv, "--effort value missing for thinking level #{level}"
       end
     end
 

@@ -3402,9 +3402,12 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert ReviewGate.rounds_for_difficulty(nil) == 3
     end
 
-    test "D3 and D4 tasks get a 4-round cap" do
+    test "D3, D4 and D5 tasks get a 4-round cap" do
       assert ReviewGate.rounds_for_difficulty(3) == 4
       assert ReviewGate.rounds_for_difficulty(4) == 4
+      # #1519: without an explicit D5 entry the new top tier would silently
+      # fall through to @default_rounds (3) — FEWER rounds than D3.
+      assert ReviewGate.rounds_for_difficulty(5) == 4
     end
   end
 

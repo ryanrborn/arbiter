@@ -304,7 +304,13 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "integer",
             "description" => "0 (P0, highest) .. 4 (P4, lowest). Default 2."
           },
-          "difficulty" => %{"type" => "integer", "description" => "0 (D0) .. 4 (D4)."},
+          "difficulty" => %{
+            "type" => "integer",
+            "description" =>
+              "0 (D0, trivial) .. 5 (D5). D4 is extreme — novel architecture, deep " <>
+                "ambiguity. D5 is the flagship tier: a deliberate operator escalation for " <>
+                "work worth a full quota window, not simply \"harder than D4\"."
+          },
           "issue_type" => %{
             "type" => "string",
             "description" => "task | bug | feature | epic | chore | decision."
