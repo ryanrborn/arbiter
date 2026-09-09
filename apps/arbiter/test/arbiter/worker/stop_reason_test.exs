@@ -223,6 +223,36 @@ defmodule Arbiter.Worker.StopReasonTest do
 
       refute reason.category == :quota_exhausted
     end
+
+    # bd-cfhj7z scope note: detection must not assume repetition. Run 7e9e5ea5
+    # showed the phrase four times, but a corroborating run showed it exactly
+    # once in a 1067-line log. One occurrence, buried behind a long tail of
+    # ordinary worker chatter, is enough.
+    test "a single occurrence behind a long tail still classifies as quota" do
+      chatter = for i <- 1..1_100, do: "  #{i} | ordinary worker output line"
+
+      lines =
+        chatter ++
+          [
+            "You've hit your session limit \u00b7 resets 3:30am (America/New_York)",
+            "\u2699 claude session error \u00b7 0.4s \u00b7 $19.6159"
+          ]
+
+      assert StopReason.classify(1, lines).category == :quota_exhausted
+    end
+
+    # bd-cfhj7z scope note: the wording is not Fable-specific — Sonnet emits the
+    # identical form. Nothing in the signature is model-aware; this pins that.
+    test "the same wording from a Sonnet session classifies identically" do
+      reason =
+        StopReason.classify(1, [
+          "\u2699 claude session started (model claude-sonnet-5)",
+          "You\u2019ve hit your session limit \u00b7 resets 11:15pm (America/New_York)",
+          "\u2699 claude session error \u00b7 1.2s \u00b7 $0.0"
+        ])
+
+      assert reason.category == :quota_exhausted
+    end
   end
 
   # bd-cfhj7z: the CLI reports the reset as a human-readable wall clock in an
