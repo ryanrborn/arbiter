@@ -1565,6 +1565,115 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — deterministic dispatch failure gives up after a bounded number of attempts (bd-7rxwzc)" do
+    # bd-49ajyt's backoff only slows a permanently-broken input down to about
+    # once an hour — it never stops. A `repo` that can never resolve (e.g. the
+    # vstim incident: a GitLab project id threaded in where a repo_paths key
+    # was expected) therefore re-files a brand new follow-up task forever,
+    # one per backoff window, piling up closed task ids indefinitely. Once the
+    # per-PR failure count hits the bound, PRPatrol must stop creating new
+    # follow-ups for that PR and send exactly one final "giving up" escalation
+    # instead of continuing to retry hourly forever.
+    test "stops re-filing and escalates once more after the attempt bound is hit",
+         %{ws: _ws} do
+      {:ok, unconfigured_ws} =
+        Ash.create(Workspace, %{
+          name: "pp-exhaust-#{System.unique_integer([:positive])}",
+          prefix: "ppx#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "exhaust-repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/exhaust-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 189, "title" => "never resolves", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/exhaust-repo/pulls/189/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/exhaust-repo/pulls/189/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      name = String.to_atom("PRPatrol_exhaust_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           repo: "owner/exhaust-repo",
+           workspace_id: unconfigured_ws.id,
+           interval_ms: 60_000,
+           name: name}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+
+      tasks_for_189 = fn ->
+        Issue
+        |> Ash.Query.filter(source_pr == "189")
+        |> Ash.read!()
+      end
+
+      escalations = fn ->
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          to_ref == "coordinator" and workspace_id == ^unconfigured_ws.id and
+            kind == :escalation
+        )
+        |> Ash.read!()
+      end
+
+      # Drive the dispatch failure well past the attempt bound, rewinding the
+      # backoff window between ticks so each one is a genuine retry attempt.
+      Enum.each(1..8, fn _ ->
+        force_retry_now(pid, 189)
+        :ok = PRPatrol.tick(name)
+      end)
+
+      final_task_count = length(tasks_for_189.())
+      final_escalation_count = length(escalations.())
+
+      assert final_task_count > 0 and final_task_count < 8,
+             "expected the attempt bound to stop re-filing well before every tick " <>
+               "creates a new task, got #{final_task_count} tasks across 8 ticks"
+
+      # A second final "giving up" escalation, distinct from the first
+      # "closing and escalating" one, tells the coordinator retries have
+      # stopped — not just paced hourly forever.
+      assert final_escalation_count == 2,
+             "expected exactly one initial escalation plus one final give-up " <>
+               "escalation, got #{final_escalation_count}"
+
+      assert Enum.any?(escalations.(), &(&1.body =~ "giving up"))
+
+      # Further ticks — even with the backoff window rewound — must NOT create
+      # another task or send another escalation: the PR is permanently done
+      # retrying, not merely backing off.
+      force_retry_now(pid, 189)
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_189.()) == final_task_count
+      assert length(escalations.()) == final_escalation_count
+    end
+  end
+
   describe "tick/1 — zombie follow-up does not permanently block dedup (bd-bi5pn0)" do
     # Simulates a pre-existing zombie from the old bare-Worker.start bug (or
     # any future dispatch crash between registration and worktree
