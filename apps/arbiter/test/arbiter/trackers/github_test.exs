@@ -1232,4 +1232,51 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert nil == GitHub.extract_difficulty(%{})
     end
   end
+
+  # ---- extract_issue_type/1 --------------------------------------------------
+
+  describe "extract_issue_type/1" do
+    test "maps the bare 'bug' label to :bug" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "bug"}]})
+    end
+
+    test "maps 'enhancement' to :feature" do
+      assert {:ok, :feature} =
+               GitHub.extract_issue_type(%{"labels" => [%{"name" => "enhancement"}]})
+    end
+
+    test "maps 'chore' to :chore" do
+      assert {:ok, :chore} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "chore"}]})
+    end
+
+    test "maps 'epic' to :epic" do
+      assert {:ok, :epic} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "epic"}]})
+    end
+
+    test "maps an explicit 'task' label to :task" do
+      assert {:ok, :task} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "task"}]})
+    end
+
+    test "parses the round-trip 'type: bug' label written by GitHub.create/1" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: bug"}]})
+    end
+
+    test "is case-insensitive" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "Bug"}]})
+    end
+
+    test "returns nil for an unmapped label" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "wontfix"}]})
+    end
+
+    test "returns nil when no labels are present" do
+      assert nil == GitHub.extract_issue_type(%{})
+      assert nil == GitHub.extract_issue_type(%{"labels" => []})
+    end
+
+    test "picks the first mappable label when several are present" do
+      issue = %{"labels" => [%{"name" => "wontfix"}, %{"name" => "bug"}, %{"name" => "chore"}]}
+      assert {:ok, :bug} = GitHub.extract_issue_type(issue)
+    end
+  end
 end

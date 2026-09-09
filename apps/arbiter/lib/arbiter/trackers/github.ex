@@ -364,6 +364,47 @@ defmodule Arbiter.Trackers.GitHub do
     end)
   end
 
+  # Maps a GitHub label to an Arbiter issue_type. Only *unambiguous* single-
+  # word conventional labels are mapped; anything else (custom labels,
+  # multi-word labels with no recognized synonym) returns nil so the schema
+  # default (`:feature`) holds. Deliberately never maps an ambiguous signal to
+  # `:task` (the non-reviewable, no-PR-expected type) — under-mapping to
+  # `:feature` costs a reviewer a no-op pass, over-mapping to `:task` silently
+  # drops the PR a bug/feature/chore ticket was supposed to produce.
+  @issue_type_labels %{
+    "bug" => :bug,
+    "defect" => :bug,
+    "feature" => :feature,
+    "enhancement" => :feature,
+    "chore" => :chore,
+    "maintenance" => :chore,
+    "epic" => :epic,
+    "task" => :task,
+    "decision" => :decision
+  }
+
+  # Parse "type: X" (written by GitHub.create/1 for round-trip stability) or a
+  # bare conventional label name (GitHub's own default labels, e.g. "bug",
+  # "enhancement").
+  @impl true
+  def extract_issue_type(issue_map) do
+    issue_map
+    |> label_names()
+    |> Enum.find_value(fn name ->
+      case map_issue_type_label(name) do
+        nil -> nil
+        type -> {:ok, type}
+      end
+    end)
+  end
+
+  defp map_issue_type_label("type: " <> rest), do: match_issue_type_synonym(rest)
+  defp map_issue_type_label(name), do: match_issue_type_synonym(name)
+
+  defp match_issue_type_synonym(name) do
+    Map.get(@issue_type_labels, name |> String.trim() |> String.downcase())
+  end
+
   defp label_names(%{"labels" => labels}) when is_list(labels) do
     Enum.flat_map(labels, fn
       %{"name" => name} when is_binary(name) -> [name]

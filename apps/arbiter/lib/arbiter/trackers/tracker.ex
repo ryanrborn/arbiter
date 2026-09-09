@@ -222,6 +222,24 @@ defmodule Arbiter.Trackers.Tracker do
   @callback extract_difficulty(map()) :: {:ok, 0..5} | nil
 
   @doc """
+  Derives the Arbiter `issue_type` (`:task | :bug | :feature | :epic | :chore |
+  :decision`) from a raw issue map returned by `fetch/1`, typically via the
+  tracker's own labels/type field.
+
+  Returns `{:ok, issue_type}` when a usable, unambiguous signal is present;
+  returns `nil` when unavailable, unmapped, or ambiguous — callers then fall
+  through to the schema default (`:feature`, a PR-expecting type). Never map
+  to `:task` (the non-reviewable, no-PR-expected type) from an ambiguous
+  signal: under-mapping to `:feature` costs a reviewer a no-op pass, but
+  over-mapping to `:task` silently drops the PR a `bug`/`feature`/`chore`
+  ticket was supposed to produce.
+
+  Optional — adapters without a type signal simply don't implement it, and
+  `Claim.create_task/5` skips the field so the schema default holds.
+  """
+  @callback extract_issue_type(map()) :: {:ok, atom()} | nil
+
+  @doc """
   Attach a remote link (e.g. the implementing PR/MR) to the tracked item.
 
   `title` is the human label shown on the ticket; `url` is the link target.
@@ -315,5 +333,6 @@ defmodule Arbiter.Trackers.Tracker do
                       gating_fields: 2,
                       search_by_title: 1,
                       extract_priority: 1,
-                      extract_difficulty: 1
+                      extract_difficulty: 1,
+                      extract_issue_type: 1
 end

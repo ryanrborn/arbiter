@@ -65,10 +65,23 @@ defmodule Arbiter.Tasks.Claim do
   GitHub), posts an ownership comment and assigns the issue to the viewer after
   creating the task. These side-effects are non-fatal.
 
+  Derives `priority`, `difficulty` and `issue_type` from the issue via the
+  adapter's optional `extract_priority/1` / `extract_difficulty/1` /
+  `extract_issue_type/1` callbacks (currently: GitHub label parsing).
+  `:difficulty` and `:repo` opts below, when given, override whatever the
+  adapter derived — an explicit caller value always wins.
+
   Options:
 
     * `:force` — when `true`, skip both the assignment check and the prior
       claim check.
+    * `:difficulty` — explicit 0..5 difficulty, overriding any value derived
+      from the issue's labels. `nil`/omitted leaves the derived value (or
+      the schema's nil, which routing treats as D2) in place.
+    * `:repo` — persists the task's `repo` (a `repo_paths` key), overriding
+      any adapter-derived value. Unlike `difficulty`/`priority` there is no
+      adapter-side derivation for `repo` today, so this is effectively the
+      only way to set it at claim time.
 
   Returns:
 
@@ -87,9 +100,10 @@ defmodule Arbiter.Tasks.Claim do
     type = Trackers.workspace_type(workspace)
     adapter = Trackers.for_type(type)
     force? = Keyword.get(opts, :force, false)
+    overrides = Keyword.take(opts, [:difficulty, :repo])
 
     Trackers.with_workspace(type, workspace, fn ->
-      do_claim(adapter, type, workspace, ref, force?)
+      do_claim(adapter, type, workspace, ref, force?, overrides)
     end)
   end
 
@@ -145,7 +159,7 @@ defmodule Arbiter.Tasks.Claim do
 
   # ---- internals: claim ----------------------------------------------------
 
-  defp do_claim(adapter, type, workspace, ref, force?) do
+  defp do_claim(adapter, type, workspace, ref, force?, overrides) do
     with {:ok, current_user_id} <- get_current_user(adapter, workspace),
          {:ok, ref} <- normalize_ref(adapter, ref),
          {:ok, issue_map} <- adapter.fetch(ref),
@@ -160,7 +174,7 @@ defmodule Arbiter.Tasks.Claim do
             # wired Credo up. Thresholds stay at the tool's own default so new
             # code is held to it; see the note in .credo.exs.
             # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-            case create_task(workspace, type, ref, issue_map, adapter) do
+            case create_task(workspace, type, ref, issue_map, adapter, overrides) do
               {:ok, :created, task} = result ->
                 maybe_signal_claim(adapter, ref, task, workspace, current_user_id)
                 result
@@ -173,7 +187,7 @@ defmodule Arbiter.Tasks.Claim do
     end
   end
 
-  defp create_task(workspace, type, ref, issue_map, adapter) do
+  defp create_task(workspace, type, ref, issue_map, adapter, overrides) do
     attrs =
       %{
         title: adapter.extract_title(issue_map),
@@ -184,10 +198,22 @@ defmodule Arbiter.Tasks.Claim do
       }
       |> maybe_put_extracted(:priority, adapter, :extract_priority, issue_map)
       |> maybe_put_extracted(:difficulty, adapter, :extract_difficulty, issue_map)
+      |> maybe_put_extracted(:issue_type, adapter, :extract_issue_type, issue_map)
+      |> maybe_put_override(:difficulty, overrides)
+      |> maybe_put_override(:repo, overrides)
 
     case Ash.create(Issue, attrs) do
       {:ok, task} -> {:ok, :created, task}
       {:error, err} -> {:error, err}
+    end
+  end
+
+  # An explicit caller-supplied value (e.g. `arb claim --difficulty 3`) always
+  # wins over whatever the adapter derived from the issue itself.
+  defp maybe_put_override(attrs, key, overrides) do
+    case Keyword.fetch(overrides, key) do
+      {:ok, value} when not is_nil(value) -> Map.put(attrs, key, value)
+      _ -> attrs
     end
   end
 
