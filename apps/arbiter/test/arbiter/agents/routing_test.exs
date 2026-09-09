@@ -440,6 +440,50 @@ defmodule Arbiter.Agents.RoutingTest do
                config: %{"model_tier" => "economy", "thinking" => "none"}
              }
     end
+
+    # #1519: D5 is the level a workspace points at the flagship model, so it is
+    # the single most expensive dispatch the budget ceiling exists to stop. An
+    # unmapped tier passes through `maybe_degrade/3` unchanged, which would make
+    # `flagship` the one tier the ceiling could not touch.
+    test "over budget: a workspace D5 flagship rule degrades flagship → premium", %{ws: ws} do
+      ws = put_in(ws.config["routing"]["rules"], %{
+        "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
+      })
+
+      task = %Issue{difficulty: 5}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 0.10}) == %{
+               type: :claude,
+               config: %{"model_tier" => "flagship", "thinking" => "xhigh"}
+             }
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "xhigh"}
+             }
+    end
+
+    # The concrete-model ladder is the legacy `by_priority` path, but a
+    # workspace may pin `"model" => "fable"` directly. Without a rung above
+    # opus, that config is likewise undegradable.
+    test "over budget: a pinned concrete flagship model degrades fable → opus", %{ws: ws} do
+      ws = put_in(ws.config["routing"]["rules"], %{
+        "D5" => %{"model" => "fable", "thinking" => "xhigh"}
+      })
+
+      task = %Issue{difficulty: 5}
+
+      # Both ladders apply independently: the D5 default still supplies
+      # `model_tier`, so it degrades alongside the pinned concrete model.
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{
+                 "model_tier" => "standard",
+                 "model" => "opus",
+                 "thinking" => "xhigh"
+               }
+             }
+    end
   end
 
   describe "RoundRobin policy" do
