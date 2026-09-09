@@ -179,7 +179,9 @@ defmodule Arbiter.Worker.ReviewGateTranscriptFallbackTest do
     # understood eviction would still lose these. The fallback must be
     # truncation-agnostic — it is, and these lock that in.
     defp production_shape(trailing) do
-      head = for i <- 1..570, do: "- [MEDIUM] finding #{i}: file_#{i}.ex:#{i} needs a bounds check"
+      head =
+        for i <- 1..570, do: "- [MEDIUM] finding #{i}: file_#{i}.ex:#{i} needs a bounds check"
+
       tail = for i <- 1..trailing, do: "summary line #{i}"
       head ++ ["VERDICT: REQUEST_CHANGES"] ++ tail ++ ["arb done"]
     end
