@@ -20,9 +20,11 @@ defmodule ArbiterCli.Cmd.Claim do
                    D3 hard · D4 extreme · D5 flagship (a deliberate
                    escalation for work worth a full quota window — not
                    simply "harder than D4"). Drives model tier and thinking
-                   budget routed to workers. (default: D2 on the server)
-    --repo <repo>  Hint for a later `arb dispatch`. Recorded as a tip in the
-                   command's text output — not persisted on the task.
+                   budget routed to workers. **Default when unspecified**:
+                   the task is created with no difficulty set; routing
+                   treats an unset difficulty as D2 at dispatch time.
+    --repo <repo>  Repo the claimed task belongs to. Persisted on the task
+                   and also printed as a tip for a later `arb dispatch`.
     --json         Emit JSON instead of human-readable text.
   """
 
@@ -64,6 +66,7 @@ defmodule ArbiterCli.Cmd.Claim do
         %{"ref" => ref}
         |> maybe_put("force", opts[:force])
         |> maybe_put("difficulty", opts[:difficulty])
+        |> maybe_put("repo", opts[:repo])
 
       case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
         {:ok, payload} -> emit(payload, opts[:repo], mode)

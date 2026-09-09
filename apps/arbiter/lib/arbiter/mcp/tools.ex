@@ -554,18 +554,43 @@ defmodule Arbiter.MCP.Tools do
   Fetches the issue by `ref` via the workspace's tracker, verifies it is
   assigned to the workspace user (the claim signal; skip with `force: true`),
   and creates a linked task. Idempotent — returns the existing task if one
-  already references the issue. Backs onto `Arbiter.Tasks.Claim.claim/3`.
+  already references the issue. `difficulty` and `repo`, when given, override
+  whatever `Arbiter.Tasks.Claim.claim/3` would otherwise derive from the issue
+  (difficulty from labels) or leave unset (repo) — the same optional
+  parameters `arb claim` accepts over the CLI/HTTP surface, so a caller never
+  has to fall back to the CLI to set them. Backs onto
+  `Arbiter.Tasks.Claim.claim/3`.
   """
   @spec tracker_claim(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def tracker_claim(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args),
          {:ok, ref} <- require_string(args, "ref"),
          {:ok, force} <- fetch_bool(args, "force", false),
-         {:ok, workspace} <- fetch_workspace(ws_id) do
-      case Claim.claim(workspace, ref, force: force) do
+         {:ok, workspace} <- fetch_workspace(ws_id),
+         {:ok, overrides} <- collect_attrs(args, tracker_claim_override_spec()) do
+      opts =
+        [force: force]
+        |> put_string_key_opt(:difficulty, overrides)
+        |> put_string_key_opt(:repo, overrides)
+
+      case Claim.claim(workspace, ref, opts) do
         {:ok, status, task} -> {:ok, Map.put(serialize_task(task), :claim_status, to_str(status))}
         {:error, reason} -> {:error, {:invalid, claim_error_message(reason)}}
       end
+    end
+  end
+
+  defp tracker_claim_override_spec do
+    [
+      {"difficulty", :integer},
+      {"repo", :string}
+    ]
+  end
+
+  defp put_string_key_opt(opts, key, attrs) do
+    case Map.fetch(attrs, Atom.to_string(key)) do
+      {:ok, value} -> Keyword.put(opts, key, value)
+      :error -> opts
     end
   end
 

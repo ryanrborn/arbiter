@@ -84,6 +84,39 @@ defmodule ArbiterCli.Cmd.ClaimTest do
     assert out =~ "arb dispatch bd-abc arbiter"
   end
 
+  test "--repo forwards as repo in the POST body" do
+    parent = self()
+
+    stub_routes([
+      @workspace_lookup,
+      {{"post", "/api/workspaces/ws-1/claim"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{
+           "status" => "created",
+           "task" => %{
+             "id" => "bd-abc",
+             "title" => "T",
+             "status" => "open",
+             "tracker_type" => "github",
+             "tracker_ref" => "43",
+             "repo" => "arbiter"
+           }
+         })
+       end}
+    ])
+
+    {_out, _err, code} = capture(fn -> Claim.run(["43", "--repo", "arbiter"]) end)
+    assert code == 0
+
+    assert_received {:posted, body}
+    assert body["repo"] == "arbiter"
+  end
+
   test "--json emits JSON" do
     stub_routes([
       @workspace_lookup,

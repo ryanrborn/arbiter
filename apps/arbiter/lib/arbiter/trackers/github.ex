@@ -364,6 +364,73 @@ defmodule Arbiter.Trackers.GitHub do
     end)
   end
 
+  # Maps a GitHub label to an Arbiter issue_type. Only *unambiguous* single-
+  # word conventional labels are mapped; anything else (custom labels,
+  # multi-word labels with no recognized synonym) returns nil so the schema
+  # default (`:feature`) holds. `:task` (the non-reviewable, no-PR-expected
+  # type) is ONLY derived from the explicit "type: task" round-trip label
+  # written by `GitHub.create/1` — a bare "task" label is deliberately left
+  # unmapped (falls through to `:feature`), because in the wild "task" usually
+  # means "a work item", not "no code expected". Explicit "type: X" labels are
+  # checked before bare labels, so an issue carrying both an explicit
+  # round-trip label and a conflicting bare label (e.g. ["bug", "type: task"])
+  # honours the explicit label. Among bare labels, under-mapping to `:feature`
+  # costs a reviewer a no-op pass; over-mapping to `:task` silently drops the
+  # PR a bug/feature/chore ticket was supposed to produce, so bare labels
+  # never resolve to `:task`.
+  @issue_type_labels %{
+    "bug" => :bug,
+    "defect" => :bug,
+    "feature" => :feature,
+    "enhancement" => :feature,
+    "chore" => :chore,
+    "maintenance" => :chore,
+    "epic" => :epic,
+    "task" => :task,
+    "decision" => :decision
+  }
+
+  # Parse "type: X" (written by GitHub.create/1 for round-trip stability) or a
+  # bare conventional label name (GitHub's own default labels, e.g. "bug",
+  # "enhancement"). Explicit "type: X" labels take priority over bare labels.
+  @impl true
+  def extract_issue_type(issue_map) do
+    names = label_names(issue_map)
+
+    case Enum.find_value(names, &match_explicit_issue_type_label/1) do
+      nil ->
+        case Enum.find_value(names, &match_bare_issue_type_label/1) do
+          nil -> nil
+          type -> {:ok, type}
+        end
+
+      type ->
+        {:ok, type}
+    end
+  end
+
+  defp match_explicit_issue_type_label(name) do
+    case name |> String.trim() |> String.downcase() do
+      "type: " <> rest -> match_issue_type_synonym(rest)
+      _ -> nil
+    end
+  end
+
+  defp match_bare_issue_type_label(name) do
+    case name |> String.trim() |> String.downcase() do
+      "type: " <> _rest ->
+        nil
+
+      normalized ->
+        case match_issue_type_synonym(normalized) do
+          :task -> nil
+          type -> type
+        end
+    end
+  end
+
+  defp match_issue_type_synonym(name), do: Map.get(@issue_type_labels, name)
+
   defp label_names(%{"labels" => labels}) when is_list(labels) do
     Enum.flat_map(labels, fn
       %{"name" => name} when is_binary(name) -> [name]
