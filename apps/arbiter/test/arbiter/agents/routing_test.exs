@@ -446,9 +446,10 @@ defmodule Arbiter.Agents.RoutingTest do
     # unmapped tier passes through `maybe_degrade/3` unchanged, which would make
     # `flagship` the one tier the ceiling could not touch.
     test "over budget: a workspace D5 flagship rule degrades flagship → premium", %{ws: ws} do
-      ws = put_in(ws.config["routing"]["rules"], %{
-        "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
-      })
+      ws =
+        put_in(ws.config["routing"]["rules"], %{
+          "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
+        })
 
       task = %Issue{difficulty: 5}
 
@@ -467,9 +468,10 @@ defmodule Arbiter.Agents.RoutingTest do
     # workspace may pin `"model" => "fable"` directly. Without a rung above
     # opus, that config is likewise undegradable.
     test "over budget: a pinned concrete flagship model degrades fable → opus", %{ws: ws} do
-      ws = put_in(ws.config["routing"]["rules"], %{
-        "D5" => %{"model" => "fable", "thinking" => "xhigh"}
-      })
+      ws =
+        put_in(ws.config["routing"]["rules"], %{
+          "D5" => %{"model" => "fable", "thinking" => "xhigh"}
+        })
 
       task = %Issue{difficulty: 5}
 
