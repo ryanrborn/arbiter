@@ -150,6 +150,14 @@ defmodule Arbiter.Worker.Watchdog do
   resume again. Only *transient* refusals defer — `:no_outpost` and friends
   still page on the first failure, unchanged.
 
+  A refusal that names the task's *own* primary key rather than a subordinate
+  one is a third outcome: something already re-dispatched this task (a coordinator's
+  manual `worker_resume`/`worker_review`, the reconciler, a racing dispatch), so
+  the recovery being retried for has already happened. That stops the Watchdog
+  quietly — deferring would page a false `{:resume_blocked, _}` against a
+  healthy task and, if the blocker cleared inside the bound, fire a redundant
+  resume onto work that was already finished.
+
   ### Webhook upgrade (design only — not implemented here)
 
   Polling is the shipped mechanism. A future push path would add
@@ -841,13 +849,11 @@ defmodule Arbiter.Worker.Watchdog do
         # bd-di4t6d: bounded retries of an auto-resume that could not START.
         #   max_resume_deferrals — how many times we will re-try before paging.
         #   resume_deferrals     — how many we have used this episode.
-        #   review_timeout_cap   — the cap that produced the timeout, kept so a
-        #                          deferred retry never re-fails the worker (the
-        #                          `{:awaiting_review_timeout, N}` label is
-        #                          written exactly once — bd-8tjcms).
+        # A deferred retry re-enters `attempt_auto_resume/1` directly rather than
+        # `handle_review_timeout/2`, so the `{:awaiting_review_timeout, N}` label
+        # is still written exactly once, on the first pass (bd-8tjcms).
         max_resume_deferrals: max_resume_deferrals,
         resume_deferrals: 0,
-        review_timeout_cap: nil,
         # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
         # a notification fires once when the count first hits the threshold, then
         # is suppressed until the counter resets and re-hits the threshold.
@@ -2194,7 +2200,7 @@ defmodule Arbiter.Worker.Watchdog do
   # budget is spent, an escalation that names the spent budget explicitly.
   defp handle_review_timeout(state, cap) do
     safe(fn -> Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}) end)
-    attempt_auto_resume(%{state | review_timeout_cap: cap})
+    attempt_auto_resume(state)
   end
 
   # bd-di4t6d: one auto-resume decision, reachable twice — once from the poll
@@ -2257,6 +2263,16 @@ defmodule Arbiter.Worker.Watchdog do
   # that names the blocker and the retry count, then stops.
   defp handle_resume_error(state, attempt, reason) do
     cond do
+      main_worker_live?(state, reason) ->
+        Logger.info(
+          "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+            "transition=auto_resume outcome=already_recovered " <>
+            "blocked_by=#{inspect(resume_blocker(reason))}; the task's own primary slot is " <>
+            "live again, so the recovery this Watchdog was retrying for has already happened"
+        )
+
+        {:stop, state}
+
       not transient_resume_block?(reason) ->
         Logger.warning(
           "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} auto-resume " <>
@@ -2304,13 +2320,39 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  # Can a later retry of this resume plausibly succeed? Only the "something else
-  # is holding this task's worker slot right now" refusals — every one of which
-  # clears when that worker finishes. Anything else (a missing worktree, a closed
-  # task, a DB error) is a standing condition and is paged immediately.
+  # bd-di4t6d. A refusal that names the task's OWN primary key, rather than a
+  # `:fixpass` / `:conflict` sibling, is not a blocker to wait out — it is the
+  # answer. Something already re-dispatched this task: the coordinator running
+  # the ticket's own manual remedy (`worker_resume` / `worker_review`), the
+  # reconciler, or a racing dispatch. Deferring on it would be actively harmful
+  # twice over: the deferral bound would eventually page a false
+  # `{:resume_blocked, _}` against a task that is healthy, and if that worker
+  # finished inside the bound the next retry would succeed and mint a second
+  # agent session on work that is already done. So stop, quietly.
+  #
+  # `{:worker_active, status}` is `Dispatch.resume/2`'s `ensure_not_active/1`
+  # guard (it only ever resolves the exact task key). The `:task_worker_live`
+  # clause is the same fact arriving through `Worker.start/1`'s family check,
+  # which reports the primary's own key when the primary is what is live.
+  defp main_worker_live?(state, {:worker_start_failed, inner}),
+    do: main_worker_live?(state, inner)
+
+  defp main_worker_live?(_state, {:worker_active, _status}), do: true
+
+  defp main_worker_live?(%{task_id: task_id}, {:task_worker_live, %{registry_key: task_id}}),
+    do: true
+
+  defp main_worker_live?(_state, _reason), do: false
+
+  # Can a later retry of this resume plausibly succeed? Only the "a SUBORDINATE
+  # pass of this task is holding the family right now" refusal, which clears on
+  # its own when that pass finishes. (`main_worker_live?/2` above has already
+  # taken the refusals that name the primary itself, so what reaches here is a
+  # `<task_id>:fixpass` / `:conflict` sibling.) Anything else — a missing
+  # worktree, a closed task, a DB error — is a standing condition and is paged
+  # immediately.
   defp transient_resume_block?({:worker_start_failed, inner}), do: transient_resume_block?(inner)
   defp transient_resume_block?({:task_worker_live, _info}), do: true
-  defp transient_resume_block?({:worker_active, _status}), do: true
   defp transient_resume_block?(_), do: false
 
   # What is holding the slot, for the log line and the escalation body — the

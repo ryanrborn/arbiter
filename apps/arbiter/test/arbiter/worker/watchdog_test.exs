@@ -1449,6 +1449,60 @@ defmodule Arbiter.Worker.WatchdogTest do
                StubAutoResumeDispatcher.escalations()
     end
 
+    # The ticket's own manual remedy is a coordinator running `worker_resume` /
+    # `worker_review` by hand. If that lands while the Watchdog is still
+    # deferring, `Dispatch.resume/2`'s `ensure_not_active/1` guard refuses on the
+    # *exact* task key. That is a completely different fact from a subordinate
+    # pass holding a sibling key: recovery has already happened. Deferring on it
+    # would keep the Watchdog retrying against a healthy task, page
+    # `{:resume_blocked, _}` when the bound ran out, and — worse — fire a
+    # redundant resume the moment the human's worker finished, minting a second
+    # agent session on a task that was already done.
+    test "a refusal naming the task's own main worker means recovery already happened — stop, do not defer or page" do
+      {pid, task_id} = running_worker()
+
+      StubAutoResumeDispatcher.arm_resume_error({:worker_active, :running})
+
+      wpid = start_blocked_watchdog(pid, task_id, "!blk5", max_resume_deferrals: 5)
+      wref = Process.monitor(wpid)
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+
+      # Exactly one attempt, no deferred retries, and no coordinator page.
+      assert StubAutoResumeDispatcher.resume_count() == 1
+      assert StubAutoResumeDispatcher.escalations() == []
+
+      # bd-8tjcms's labelling is still written exactly once.
+      assert Worker.state(pid).meta.failure_reason == {:awaiting_review_timeout, 2}
+    end
+
+    # Same fact, arriving through the other guard: `Worker.start/1`'s
+    # single-active-worker check reports the *requested* key as the blocker when
+    # the primary itself is live, rather than a `:fixpass` / `:conflict` sibling.
+    test "a task_worker_live refusal whose registry key IS the task key also stops rather than deferring" do
+      {pid, task_id} = running_worker()
+
+      StubAutoResumeDispatcher.arm_resume_error(
+        {:worker_start_failed,
+         {:task_worker_live,
+          %{
+            pid: self(),
+            status: :running,
+            task_id: task_id,
+            registry_key: task_id,
+            requested_key: task_id
+          }}}
+      )
+
+      wpid = start_blocked_watchdog(pid, task_id, "!blk6", max_resume_deferrals: 5)
+      wref = Process.monitor(wpid)
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+
+      assert StubAutoResumeDispatcher.resume_count() == 1
+      assert StubAutoResumeDispatcher.escalations() == []
+    end
+
     test "the deferral bound is workspace-configurable" do
       {pid, task_id} = running_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id))
