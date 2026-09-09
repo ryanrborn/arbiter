@@ -2557,11 +2557,14 @@ defmodule Arbiter.Worker do
   #
   # bd-6dxit2: `meta[:output_lines]` is ClaudeSession's most-recent-1000-lines
   # buffer, not the whole transcript. A reviewer that prints its VERDICT and then
-  # keeps producing findings evicts its own sentinel, and the review — a real
-  # verdict with a real findings list — is discarded as INCONCLUSIVE. So parse
-  # via `parse_verdict/3`, which re-reads the uncapped durable transcript before
-  # conceding and logs which of the two sources saw what. The adapter fallback
-  # below is unchanged and still runs when neither source has a verdict.
+  # produces more than 1000 further lines of findings evicts its own sentinel and
+  # the review — a real verdict with a real findings list — is discarded as
+  # INCONCLUSIVE. (That eviction is a real hazard on this path but was NOT the
+  # cause of the reported false negatives; see `ReviewGate.parse_verdict/3` for
+  # what the measurements actually showed.) So parse via `parse_verdict/3`, which
+  # re-reads the uncapped durable transcript before conceding and logs which
+  # source saw what. The adapter fallback below is unchanged and still runs when
+  # neither source has a verdict.
   defp route_reviewer_completion(%State{} = state) do
     output_lines = Map.get(state.meta || %{}, :output_lines, [])
 

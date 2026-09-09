@@ -372,15 +372,32 @@ defmodule Arbiter.Worker.ReviewGate do
   Parse a reviewer's verdict, falling back to the run's **durable transcript**
   before conceding `:no_verdict` — and logging which source saw what either way.
 
-  Every in-memory line buffer that feeds `parse_verdict/1` is bounded:
-  `Arbiter.Worker.ClaudeSession` keeps the most recent 1000 emitted lines in
-  `meta[:output_lines]`, of which `Arbiter.Worker` persists only the last 500 to
-  `worker_runs.output_lines`. Those caps exist to keep a runaway subprocess from
-  ballooning worker memory and the run row, and they stay — but they mean a
-  reviewer that prints `VERDICT:` and then keeps talking can lose its own
-  sentinel to eviction. Discarding a completed review over that is expensive
-  (bd-6dxit2 traced a $2.71 Opus review thrown away this way), so on a miss we
-  re-parse `Arbiter.Worker.OutputLog`, which is uncapped and keyed by `run_id`.
+  Three different line buffers feed verdict parsing, and each can be missing the
+  sentinel for a different reason:
+
+    * `meta[:output_lines]` — `Arbiter.Worker.ClaudeSession` keeps only the most
+      recent 1000 emitted lines, and `Arbiter.Worker` persists only the last 500
+      of those. A cap drops the OLDEST lines, so a reviewer that prints
+      `VERDICT:` and then produces more than 1000 lines of findings evicts its
+      own sentinel.
+    * `ReviewGate.state.lines` — the gate's own live PubSub capture. It is not
+      capped, but it is assembled from broadcasts: a line emitted before this
+      pass subscribed, or still in flight when the pass is finished, is simply
+      absent. This buffer loses its NEWEST lines — the opposite end from a cap.
+    * `Arbiter.Worker.OutputLog` — the durable per-run transcript. Uncapped,
+      keyed by `run_id`, written straight through on every emitted line.
+
+  The first two are lossy in opposite directions, so the recovery must not care
+  which end went missing: on any miss, re-parse the durable transcript.
+
+  bd-6dxit2 measured which of these actually bit. Of the 72 recorded
+  `:review_gate_inconclusive` failures, 18 have a durable transcript for the
+  decisive pass and 5 of those transcripts contain a parseable `VERDICT:` line —
+  real false negatives, a completed review discarded. In all 5 the sentinel sat
+  10–43 lines from the end and was present even in the 500-line persisted tail,
+  so **cap eviction was not the cause in any observed case**; the gate's live
+  capture was. The caps remain a genuine hazard for a verdict followed by >1000
+  lines, and are covered too — but they were not this bug.
 
   The log line is the point as much as the recovery: `:no_verdict` on its own
   cannot distinguish "the reviewer genuinely emitted no verdict" from "the
