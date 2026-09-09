@@ -112,8 +112,18 @@ defmodule Arbiter.Quota.Gate do
     * `reset_at` is set and lies in the past — the window has rolled (Anthropic
       5h, Codex session, Google representative model), so `utilization` /
       `status` no longer reflect the current window.
-    * `captured_at` is more than 5 hours ago — the snapshot is too old to
-      throttle on even if `reset_at` is absent.
+    * `captured_at` is older than the configured staleness threshold
+      (default 300 seconds / 5 minutes) — the snapshot is too old to trust for
+      dispatch decisions even if the window hasn't rolled yet. After `/limit-reset`
+      or other API state changes, the snapshot won't reflect the new state until
+      a request is made, and if the gate holds all requests, the stale snapshot
+      never updates (bd-y0yup0).
+
+  Stale snapshots fail open: `over_cap?/2` and `in_overage?/2` treat a stale
+  snapshot as `nil` and return `false`. If the workspace is still genuinely
+  exhausted, at most one dispatch attempt per staleness window (default 5 min)
+  will be let through before the gate re-captures the real `rejected` status
+  and starts holding again (the clock resets on the captured_at timestamp).
   """
   @spec stale?(quota_source()) :: boolean()
   def stale?(quota), do: quota |> Snapshot.normalize() |> snapshot_stale?()
@@ -127,11 +137,32 @@ defmodule Arbiter.Quota.Gate do
       match?(%DateTime{}, snapshot.reset_at) and
         DateTime.compare(snapshot.reset_at, now) == :lt
 
+    threshold_seconds = staleness_threshold_seconds()
+
     too_old =
       match?(%DateTime{}, snapshot.captured_at) and
-        DateTime.diff(now, snapshot.captured_at, :second) >= 18_000
+        DateTime.diff(now, snapshot.captured_at, :second) >= threshold_seconds
 
     reset_elapsed or too_old
+  end
+
+  @doc """
+  The staleness threshold in seconds. A snapshot older than this is treated as
+  stale and fails open (no longer trusted for gate decisions).
+
+  Reads the `:arbiter, :quota` `:staleness_threshold_seconds` app-env,
+  defaulting to 300 seconds (5 minutes). This ensures that quota snapshots are
+  refreshed frequently enough to catch state changes like a `/limit-reset`
+  clearing the rate-limit cap. Without this threshold, a rejected snapshot held
+  indefinitely without being updated (since the gate prevents requests) would
+  deadlock recovery (bd-y0yup0).
+  """
+  @spec staleness_threshold_seconds() :: integer()
+  def staleness_threshold_seconds do
+    case Application.get_env(:arbiter, :quota, [])[:staleness_threshold_seconds] do
+      n when is_integer(n) and n > 0 -> n
+      _ -> 300
+    end
   end
 
   @doc """
