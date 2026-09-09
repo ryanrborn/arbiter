@@ -143,6 +143,60 @@ defmodule Arbiter.Worker.StopDetectionTest do
       refute state.meta.stop_reason.category == :credit_exhausted
     end
 
+    # bd-cfhj7z: the same condition in the wording the CLI actually emits, with
+    # a human-readable wall-clock reset instead of the `|<epoch>` suffix. Driven
+    # through the real subprocess -> ClaudeSession -> Worker path rather than
+    # calling classify/2 directly, because the wall-clock reset is only usable
+    # when the message's zone is the host's, and that is a property of the live
+    # process environment.
+    test "the CLI's wall-clock session-limit wording is classified and dated",
+         %{ws: ws} do
+      {pid, _task} = start_worker(ws)
+      :ok = Worker.advance(pid, :claude)
+      cwd = tmp_dir!("sd-quota-wallclock")
+      host_zone = Arbiter.Worker.StopReason.host_time_zone_name()
+      zone = host_zone || "America/New_York"
+      # Named relative to now, not as a fixed "3:30am": the horizon bound added
+      # for review finding 1 declines a reset further out than the 5h window
+      # this wording can describe, so a hardcoded hour would pass or fail
+      # depending on what time of day the suite runs.
+      at = NaiveDateTime.add(NaiveDateTime.local_now(), 90 * 60, :second)
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: [
+            "sh",
+            "-c",
+            "printf '%s\\n' " <>
+              "\"You've hit your session limit \u00b7 resets #{wall_clock_12h(at)} (#{zone})\" " <>
+              "\"\u2699 claude session error \u00b7 674.5s \u00b7 $19.6159\"; exit 1"
+          ]
+        )
+
+      state = wait_for_failed(pid)
+      reason = state.meta.stop_reason
+      assert reason.category == :quota_exhausted
+
+      if host_zone do
+        assert %DateTime{} = reason.retry_after
+        assert reason.retry_after.minute == at.minute
+        assert reason.remediation =~ "resets at"
+        # The wait Worker would actually schedule, rather than the blanket 5h.
+        # (`meta.stop_reason` is the to_map/1 form, so go via the DateTime.)
+        backoff = Worker.quota_resume_backoff_ms(reason.retry_after)
+        # Review finding 1's horizon bound holds on the production path too:
+        # a parsed wall-clock wait can never exceed the 5h window this wording
+        # describes (+ the 60s reset buffer), so it is always shorter than the
+        # blanket default it replaces -- and nowhere near the 8-day ceiling.
+        assert backoff > 0 and backoff <= :timer.hours(6) + 60_000
+        refute Worker.quota_wait_exceeds_max?(reason.retry_after)
+      else
+        assert reason.retry_after == nil
+      end
+    end
+
     test "a killed subprocess is classified as :killed", %{ws: ws} do
       {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
@@ -273,5 +327,18 @@ defmodule Arbiter.Worker.StopDetectionTest do
       # ever recorded.
       refute Map.has_key?(state.meta, :stop_reason)
     end
+  end
+
+  # Renders a NaiveDateTime the way the CLI writes a reset ("3:30am").
+  defp wall_clock_12h(%NaiveDateTime{} = at) do
+    {hour12, meridiem} =
+      case at.hour do
+        0 -> {12, "am"}
+        12 -> {12, "pm"}
+        h when h < 12 -> {h, "am"}
+        h -> {h - 12, "pm"}
+      end
+
+    "#{hour12}:#{String.pad_leading(to_string(at.minute), 2, "0")}#{meridiem}"
   end
 end
