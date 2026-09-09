@@ -143,6 +143,51 @@ defmodule Arbiter.Worker.StopDetectionTest do
       refute state.meta.stop_reason.category == :credit_exhausted
     end
 
+    # bd-cfhj7z: the same condition in the wording the CLI actually emits, with
+    # a human-readable wall-clock reset instead of the `|<epoch>` suffix. Driven
+    # through the real subprocess -> ClaudeSession -> Worker path rather than
+    # calling classify/2 directly, because the wall-clock reset is only usable
+    # when the message's zone is the host's, and that is a property of the live
+    # process environment.
+    test "the CLI's wall-clock session-limit wording is classified and dated",
+         %{ws: ws} do
+      {pid, _task} = start_worker(ws)
+      :ok = Worker.advance(pid, :claude)
+      cwd = tmp_dir!("sd-quota-wallclock")
+      host_zone = Arbiter.Worker.StopReason.host_time_zone_name()
+      zone = host_zone || "America/New_York"
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: [
+            "sh",
+            "-c",
+            "printf '%s\\n' " <>
+              "\"You've hit your session limit \u00b7 resets 3:30am (#{zone})\" " <>
+              "\"\u2699 claude session error \u00b7 674.5s \u00b7 $19.6159\"; exit 1"
+          ]
+        )
+
+      state = wait_for_failed(pid)
+      reason = state.meta.stop_reason
+      assert reason.category == :quota_exhausted
+
+      if host_zone do
+        assert %DateTime{} = reason.retry_after
+        assert reason.retry_after.minute == 30
+        assert reason.remediation =~ "resets at"
+        # The wait Worker would actually schedule, rather than the blanket 5h.
+        # (`meta.stop_reason` is the to_map/1 form, so go via the DateTime.)
+        backoff = Worker.quota_resume_backoff_ms(reason.retry_after)
+        assert backoff > 0 and backoff <= :timer.hours(25)
+        refute Worker.quota_wait_exceeds_max?(reason.retry_after)
+      else
+        assert reason.retry_after == nil
+      end
+    end
+
     test "a killed subprocess is classified as :killed", %{ws: ws} do
       {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
