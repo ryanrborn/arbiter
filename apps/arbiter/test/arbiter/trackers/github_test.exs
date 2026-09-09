@@ -1253,8 +1253,12 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:ok, :epic} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "epic"}]})
     end
 
-    test "maps an explicit 'task' label to :task" do
-      assert {:ok, :task} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "task"}]})
+    test "a bare 'task' label does NOT map to :task (falls through to the :feature default)" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "task"}]})
+    end
+
+    test "the explicit round-trip 'type: task' label DOES map to :task" do
+      assert {:ok, :task} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: task"}]})
     end
 
     test "parses the round-trip 'type: bug' label written by GitHub.create/1" do
@@ -1263,6 +1267,10 @@ defmodule Arbiter.Trackers.GitHubTest do
 
     test "is case-insensitive" do
       assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "Bug"}]})
+    end
+
+    test "is case-insensitive for the 'type: X' prefix" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "Type: Bug"}]})
     end
 
     test "returns nil for an unmapped label" do
@@ -1276,6 +1284,16 @@ defmodule Arbiter.Trackers.GitHubTest do
 
     test "picks the first mappable label when several are present" do
       issue = %{"labels" => [%{"name" => "wontfix"}, %{"name" => "bug"}, %{"name" => "chore"}]}
+      assert {:ok, :bug} = GitHub.extract_issue_type(issue)
+    end
+
+    test "an explicit 'type: X' label wins over a conflicting bare label regardless of order" do
+      issue = %{"labels" => [%{"name" => "bug"}, %{"name" => "type: task"}]}
+      assert {:ok, :task} = GitHub.extract_issue_type(issue)
+    end
+
+    test "a bare 'task' label does not block a later mappable bare label" do
+      issue = %{"labels" => [%{"name" => "task"}, %{"name" => "bug"}]}
       assert {:ok, :bug} = GitHub.extract_issue_type(issue)
     end
   end

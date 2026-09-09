@@ -196,7 +196,7 @@ defmodule Arbiter.Trackers.Tracker do
   directions.
 
   Optional — adapters without a priority signal simply don't implement it,
-  and `Claim.create_task/4` skips the field so the schema default holds.
+  and `Claim.create_task/6` skips the field so the schema default holds.
   """
   @callback extract_priority(map()) :: {:ok, 0..4} | nil
 
@@ -228,14 +228,15 @@ defmodule Arbiter.Trackers.Tracker do
 
   Returns `{:ok, issue_type}` when a usable, unambiguous signal is present;
   returns `nil` when unavailable, unmapped, or ambiguous — callers then fall
-  through to the schema default (`:feature`, a PR-expecting type). Never map
-  to `:task` (the non-reviewable, no-PR-expected type) from an ambiguous
-  signal: under-mapping to `:feature` costs a reviewer a no-op pass, but
-  over-mapping to `:task` silently drops the PR a `bug`/`feature`/`chore`
-  ticket was supposed to produce.
+  through to the schema default (`:feature`, a PR-expecting type). Implementers
+  should only map to `:task` (the non-reviewable, no-PR-expected type) from an
+  *explicit* signal (e.g. GitHub's `type: task` round-trip label) — never from
+  an ambiguous/bare one: under-mapping to `:feature` costs a reviewer a no-op
+  pass, but over-mapping to `:task` silently drops the PR a
+  `bug`/`feature`/`chore` ticket was supposed to produce.
 
   Optional — adapters without a type signal simply don't implement it, and
-  `Claim.create_task/5` skips the field so the schema default holds.
+  `Claim.create_task/6` skips the field so the schema default holds.
   """
   @callback extract_issue_type(map()) :: {:ok, atom()} | nil
 
