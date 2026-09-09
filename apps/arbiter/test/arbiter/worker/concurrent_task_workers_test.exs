@@ -97,6 +97,37 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
     end
   end
 
+  describe "Dispatch refuses rather than co-existing" do
+    # Acceptance 1: the vs-ehjarz shape — a merge-queue subordinate pass holds
+    # the task while the Watchdog's auto-resume dispatches a fresh primary.
+    test "dispatch/2 is refused while a subordinate pass is running", %{ws: ws, task: task} do
+      fixpass = start_worker!(ws, task, registry_key: task.id <> ":fixpass")
+      :ok = Worker.advance(fixpass, :claude)
+
+      assert {:error, {:worker_start_failed, {:task_worker_live, info}}} =
+               Arbiter.Worker.Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+
+      assert info.registry_key == task.id <> ":fixpass"
+      assert Worker.whereis(task.id) == nil
+    end
+
+    # The blind spot itself, pinned: every guard in `Dispatch` resolves the
+    # EXACT task_id key via `Worker.whereis/1`, so a live subordinate is
+    # invisible to it and `resumable_status/1` still says "go". That is why the
+    # rule is enforced in `Worker.start/1` — the one call every dispatcher makes
+    # — and not by adding another check to `Dispatch`.
+    test "Dispatch's own guards cannot see a live subordinate", %{ws: ws, task: task} do
+      fixpass = start_worker!(ws, task, registry_key: task.id <> ":fixpass")
+      :ok = Worker.advance(fixpass, :claude)
+
+      assert Worker.whereis(task.id) == nil
+      assert {true, nil} = Arbiter.Worker.Dispatch.resumable_status(task.id)
+
+      # ...and `Worker.start/1` is what actually stops the second agent.
+      assert {:error, {:task_worker_live, _}} = start_worker(ws, task, [])
+    end
+  end
+
   describe "coexistence that must keep working" do
     test "a subordinate pass starts alongside a terminal primary", %{ws: ws, task: task} do
       primary = start_worker!(ws, task, [])

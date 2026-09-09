@@ -1114,7 +1114,7 @@ defmodule Arbiter.Worker do
     model = Map.get(meta, :model)
 
     attrs = %{
-      status: state.status,
+      status: run_status(state),
       completed_at: DateTime.utc_now(),
       exit_code: Map.get(meta, :exit_status),
       output_lines: capture_output_lines(state),
@@ -1274,6 +1274,23 @@ defmodule Arbiter.Worker do
 
       :ok
   end
+
+  # bd-8tjcms / #1511. The durable run status is the FSM status, with one
+  # deliberate divergence: a worker failed with `{:awaiting_review_timeout, N}`
+  # reached `arb done`, exited 0, pushed its branch and (usually) opened a PR —
+  # what timed out is the *review* stage, downstream of the run. Recording that
+  # as `:failed` is the same class of mislabelling as bd-cfhj7z (quota
+  # exhaustion reported as `crashed (exit 1)`), and it is what made vs-ehjarz's
+  # successful run 39c6b497 read as a failure.
+  #
+  # Only the row diverges. `%State{}.status` stays `:failed`: it is the terminal
+  # state `Dispatch.resume/2` checks before re-attaching, and the Watchdog's
+  # bounded auto-resume (bd-8eheb6) fails the worker precisely so it can resume
+  # it. `failure_reason` is still written, so the reason is not lost.
+  defp run_status(%State{status: :failed, meta: %{failure_reason: {:awaiting_review_timeout, _}}}),
+    do: :review_not_started
+
+  defp run_status(%State{status: status}), do: status
 
   defp stringify_failure(nil), do: nil
   defp stringify_failure(s) when is_binary(s), do: s
