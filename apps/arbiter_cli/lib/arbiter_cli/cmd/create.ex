@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.Create do
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
-  ## --difficulty N (0..4 / D0..D4)
+  ## --difficulty N (0..5 / D0..D5)
 
   Sets how hard the task is. Orthogonal to `--priority`: priority answers
   "how urgent?"; difficulty answers "how hard?" and drives the model +
@@ -29,6 +29,12 @@ defmodule ArbiterCli.Cmd.Create do
       D4 Extreme  — novel architecture, deep ambiguity,
                     correctness-critical; may warrant exploration
                     or multiple passes.
+      D5 Flagship — a deliberate escalation, never an ordinary rating.
+                    Work judged worth a full quota window on the
+                    flagship model. Reach for it only when D4's
+                    premium model at max effort has already failed
+                    or is plainly inadequate — "harder than D4" is
+                    not a reason. Set by the operator, by hand.
 
   The coordinator / filing session sets `--difficulty` at create time with a
   one-line justification in the task's description. Routing maps the value
@@ -239,10 +245,10 @@ defmodule ArbiterCli.Cmd.Create do
   defp maybe_put_flag(map, key, true), do: Map.put(map, key, true)
 
   defp validate_difficulty!(nil), do: :ok
-  defp validate_difficulty!(n) when is_integer(n) and n in 0..4, do: :ok
+  defp validate_difficulty!(n) when is_integer(n) and n in 0..5, do: :ok
 
   defp validate_difficulty!(other) do
-    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..4 / D0..D4)")
+    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..5 / D0..D5)")
   end
 
   defp attach_deps(new_id, raw) do

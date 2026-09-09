@@ -1226,13 +1226,31 @@ defmodule Arbiter.Trackers.Jira do
 
   defp issue_key?(s), do: Regex.match?(~r/^[A-Z][A-Z0-9_]*-\d+$/, s)
 
-  # Map story-points to a difficulty integer (0..4) using sorted bucket
-  # thresholds. Each {max_pts, difficulty} pair means: if pts <= max_pts,
-  # return that difficulty. Falls back to D4 when pts exceeds all thresholds.
+  # Map story-points to a difficulty integer using sorted bucket thresholds.
+  # Each {max_pts, difficulty} pair means: if pts <= max_pts, return that
+  # difficulty. Falls back to D4 when pts exceeds all thresholds.
+  #
+  # The 0..4 range here is the *mapper's* ceiling, not the scale's — #1519
+  # widened the scale to D5, but deliberately did not raise this bucket table:
+  # D5 routes to the flagship model and must be a deliberate operator
+  # escalation, which an estimate-field threshold is not. See
+  # `Jira.Config` for the same decision on the default buckets.
   defp points_to_difficulty(buckets, pts) do
     case Enum.find(buckets, fn {max, _} -> pts <= max end) do
       {_, d} -> d
-      nil -> 4
+      nil -> over_ceiling_difficulty(buckets)
     end
+  end
+
+  # Points above the top bucket land at D4 ("extreme") — the stock behaviour,
+  # and the reason the default table stops at D3: D5 is never reached by an
+  # implicit fallthrough. #1519: if an operator explicitly configured a bucket
+  # above D4, honour it here too, otherwise a high point count would map
+  # *lower* than a smaller one.
+  defp over_ceiling_difficulty(buckets) do
+    buckets
+    |> Enum.map(fn {_, d} -> d end)
+    |> Enum.max(fn -> 4 end)
+    |> max(4)
   end
 end

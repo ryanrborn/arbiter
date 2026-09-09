@@ -255,7 +255,9 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       refute Map.has_key?(reloaded.config["routing"] || %{}, "budget_usd_per_day")
     end
 
-    test "adds, edits, and removes routing.rules entries (D0..D4 keyed rules)", %{conn: conn} do
+    test "adds, edits, and removes routing.rules entries (D0..D5 keyed rules)", %{conn: conn} do
+      # D5 is the tier a workspace points at the flagship model (#1519); this
+      # is the exact rule the coordinator authors after that change lands.
       ws = new_workspace(%{config: %{"routing" => %{"policy" => "by_difficulty"}}})
 
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
@@ -263,7 +265,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       view
       |> form("form[phx-submit=save_routing_rule]", %{
         "rule" => %{
-          "key" => "D4",
+          "key" => "D5",
           "model_tier" => "flagship",
           "thinking" => "xhigh",
           "model" => ""
@@ -273,7 +275,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
 
-      assert reloaded.config["routing"]["rules"]["D4"] == %{
+      assert reloaded.config["routing"]["rules"]["D5"] == %{
                "model_tier" => "flagship",
                "thinking" => "xhigh"
              }
@@ -284,19 +286,19 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       # Editing replaces the rule wholesale rather than merging stale fields.
       view
       |> form("form[phx-submit=save_routing_rule]", %{
-        "rule" => %{"key" => "D4", "model_tier" => "premium", "thinking" => "", "model" => ""}
+        "rule" => %{"key" => "D5", "model_tier" => "premium", "thinking" => "", "model" => ""}
       })
       |> render_submit()
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
-      assert reloaded.config["routing"]["rules"]["D4"] == %{"model_tier" => "premium"}
+      assert reloaded.config["routing"]["rules"]["D5"] == %{"model_tier" => "premium"}
 
       view
-      |> element("button[phx-click=rm_routing_rule][phx-value-key='D4']")
+      |> element("button[phx-click=rm_routing_rule][phx-value-key='D5']")
       |> render_click()
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
-      refute Map.has_key?(reloaded.config["routing"]["rules"] || %{}, "D4")
+      refute Map.has_key?(reloaded.config["routing"]["rules"] || %{}, "D5")
     end
 
     test "adds and removes routing.adapters entries", %{conn: conn} do

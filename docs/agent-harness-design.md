@@ -240,7 +240,7 @@ Initial policies:
 |---|---|---|
 | `:static` | Always returns `workspace.config["agent"]`. | Workspace only |
 | `:by_priority` | Maps `task.priority` (P0..P4) → `rules[<priority>]`. | Workspace + task |
-| `:by_difficulty` | Maps `task.difficulty` (D0..D4) → abstract `{model_tier, thinking}` via `rules[<difficulty>]` with a built-in default mapping. Provider-agnostic — adapters resolve tier/thinking to their own knobs. | Workspace + task |
+| `:by_difficulty` | Maps `task.difficulty` (D0..D5) → abstract `{model_tier, thinking}` via `rules[<difficulty>]` with a built-in default mapping. Provider-agnostic — adapters resolve tier/thinking to their own knobs. D5 defaults to `premium/max` in source; the flagship tier it exists for is supplied by workspace `routing.rules.D5`. | Workspace + task |
 | `:by_budget` | Wraps `:by_priority` (default) or `:by_difficulty` (set `routing.base_policy = "by_difficulty"`) until daily/weekly USD threshold; then degrade one tier on `"model_tier"` and/or `"model"`. | Workspace + task + ledger |
 | `:round_robin` | Cycle adapter list per dispatch. Useful for A/B. | Workspace + dispatch counter |
 

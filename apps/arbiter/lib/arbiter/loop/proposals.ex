@@ -90,7 +90,12 @@ defmodule Arbiter.Loop.Proposals do
 
   # Fallback for the `Issue.difficulty` ceiling if the constraint ever stops
   # declaring a max; `max_difficulty/0` prefers the resource's own value.
-  @difficulty_ceiling 4
+  @difficulty_ceiling 5
+
+  # The highest difficulty the LOOP may propose bumping a task to (#1519).
+  # Deliberately one below the scale's ceiling: D5 routes to the flagship
+  # model and is an operator-only escalation, never an automated suggestion.
+  @loop_bump_ceiling 4
 
   @doc """
   The candidate proposals implied by `report`. Pure: no writes, no I/O.
@@ -501,18 +506,26 @@ defmodule Arbiter.Loop.Proposals do
   # into a difficulty change. A misestimate with no dispatched difficulty has
   # nothing to increment.
   #
-  # A task already at the difficulty ceiling is skipped: `Issue.difficulty` is
-  # constrained to 0..4, so a D4 → D5 override could never apply. Being
-  # `:task`-scoped it would bypass the evidence bar and land directly as
-  # `:proposed`, then fail its Ash validation on every `arb loop apply all`
-  # forever — a permanently stuck queue entry.
+  # A task already at the loop's bump ceiling is skipped for two reasons:
+  #
+  #   * mechanically — a bump past `Issue.difficulty`'s constraint could never
+  #     apply, and being `:task`-scoped it would bypass the evidence bar and
+  #     land directly as `:proposed`, then fail its Ash validation on every
+  #     `arb loop apply all` forever: a permanently stuck queue entry; and
+  #   * by policy (#1519) — D5 routes to the flagship model, an escalation an
+  #     operator must type deliberately. The loop's own analysis is the very
+  #     thing measured to rate roughly a tier low, so it is the last thing that
+  #     should nominate a full-quota-window run. It may bump up to D4 and no
+  #     further.
   defp proposable_misestimate?(%{reason: :rework, dispatched_difficulty: d}) when is_integer(d),
-    do: d < max_difficulty()
+    do: d < proposal_ceiling()
 
   defp proposable_misestimate?(_), do: false
 
-  # Read from the resource so the ceiling cannot drift away from the constraint
-  # the apply path is actually validated against.
+  # The lower of the resource's own constraint (so the ceiling cannot drift
+  # away from what the apply path validates against) and the loop's policy cap.
+  defp proposal_ceiling, do: min(max_difficulty(), @loop_bump_ceiling)
+
   defp max_difficulty do
     case Ash.Resource.Info.attribute(Issue, :difficulty) do
       %{constraints: constraints} when is_list(constraints) ->

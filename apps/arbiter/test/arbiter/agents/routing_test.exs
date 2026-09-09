@@ -167,12 +167,45 @@ defmodule Arbiter.Agents.RoutingTest do
              }
     end
 
-    test "D4 → premium / high (default mapping)", %{ws: ws} do
+    test "D4 → premium / max (default mapping)", %{ws: ws} do
+      # #1519: D4 is the top *non-opt-in* tier. It gets the strongest effort
+      # source knows about so it is no longer identical to D3.
       task = %Issue{difficulty: 4}
 
       assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
-               config: %{"model_tier" => "premium", "thinking" => "high"}
+               config: %{"model_tier" => "premium", "thinking" => "max"}
+             }
+    end
+
+    test "D5 → premium / max in source (flagship only via workspace rule)", %{ws: ws} do
+      # #1519: flagship exists only in workspace config. An install that has
+      # not defined a flagship tier must still get the strongest thing source
+      # knows about rather than an unresolvable tier name.
+      task = %Issue{difficulty: 5}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "max"}
+             }
+    end
+
+    test "a D5 workspace rule routes the flagship tier" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{}},
+          "routing" => %{
+            "policy" => "by_difficulty",
+            "rules" => %{
+              "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
+            }
+          }
+        }
+      }
+
+      assert Routing.choose(%Issue{difficulty: 5}, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "flagship", "thinking" => "xhigh"}
              }
     end
 
@@ -259,8 +292,9 @@ defmodule Arbiter.Agents.RoutingTest do
       assert ByDifficulty.effective_difficulty(nil) == 2
       assert ByDifficulty.effective_difficulty(0) == 0
       assert ByDifficulty.effective_difficulty(4) == 4
+      assert ByDifficulty.effective_difficulty(5) == 5
       assert ByDifficulty.effective_difficulty(-1) == 0
-      assert ByDifficulty.effective_difficulty(99) == 4
+      assert ByDifficulty.effective_difficulty(99) == 5
     end
 
     # bd-3xultf: the reviewer tier is derived from the author's nominal tier
@@ -272,6 +306,9 @@ defmodule Arbiter.Agents.RoutingTest do
       assert ByDifficulty.tier_for_difficulty(2) == "standard"
       assert ByDifficulty.tier_for_difficulty(3) == "premium"
       assert ByDifficulty.tier_for_difficulty(4) == "premium"
+      # #1519: D5's *source* tier is premium — "flagship" is not a source
+      # concept, so the ReviewGate's reviewer bump has a real tier to work from.
+      assert ByDifficulty.tier_for_difficulty(5) == "premium"
       assert ByDifficulty.tier_for_difficulty(nil) == "standard"
     end
 
@@ -401,6 +438,52 @@ defmodule Arbiter.Agents.RoutingTest do
       assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
                type: :claude,
                config: %{"model_tier" => "economy", "thinking" => "none"}
+             }
+    end
+
+    # #1519: D5 is the level a workspace points at the flagship model, so it is
+    # the single most expensive dispatch the budget ceiling exists to stop. An
+    # unmapped tier passes through `maybe_degrade/3` unchanged, which would make
+    # `flagship` the one tier the ceiling could not touch.
+    test "over budget: a workspace D5 flagship rule degrades flagship → premium", %{ws: ws} do
+      ws =
+        put_in(ws.config["routing"]["rules"], %{
+          "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
+        })
+
+      task = %Issue{difficulty: 5}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 0.10}) == %{
+               type: :claude,
+               config: %{"model_tier" => "flagship", "thinking" => "xhigh"}
+             }
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "xhigh"}
+             }
+    end
+
+    # The concrete-model ladder is the legacy `by_priority` path, but a
+    # workspace may pin `"model" => "fable"` directly. Without a rung above
+    # opus, that config is likewise undegradable.
+    test "over budget: a pinned concrete flagship model degrades fable → opus", %{ws: ws} do
+      ws =
+        put_in(ws.config["routing"]["rules"], %{
+          "D5" => %{"model" => "fable", "thinking" => "xhigh"}
+        })
+
+      task = %Issue{difficulty: 5}
+
+      # Both ladders apply independently: the D5 default still supplies
+      # `model_tier`, so it degrades alongside the pinned concrete model.
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{
+                 "model_tier" => "standard",
+                 "model" => "opus",
+                 "thinking" => "xhigh"
+               }
              }
     end
   end

@@ -116,8 +116,11 @@ defmodule ArbiterCli.ConfigSchema do
       policy    one of: #{Enum.join(@routing_policies, ", ")}   (default: static)
       rules     map, policy-specific:
                   by_priority   — "P0".."P4" -> partial agent-config map
-                  by_difficulty — "D0".."D4" -> partial agent-config map
-                                  (default mapping: D0=economy/none .. D4=premium/high)
+                  by_difficulty — "D0".."D5" -> partial agent-config map
+                                  (default mapping: D0=economy/none, D1=economy/low,
+                                   D2=standard/medium, D3=premium/high,
+                                   D4=premium/max, D5=premium/max. D5 is the tier
+                                   to point at a flagship model via tier_models.)
       base_policy         (by_budget only) "by_priority" | "by_difficulty" (default: by_priority)
       budget_usd_per_day  (by_budget only) number — degrades one model tier once
                           today's spend crosses this ceiling

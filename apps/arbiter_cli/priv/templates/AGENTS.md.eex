@@ -167,7 +167,7 @@ workspace. The active workspace is **<%= @domain_name %>** (prefix `<%= @domain_
 Every issue you file should carry **two** orthogonal axes:
 
 - `--priority 0..4` (P0..P4) — *how urgent* (drives scheduling order).
-- `--difficulty 0..4` (D0..D4) — *how hard* (drives the model + thinking
+- `--difficulty 0..5` (D0..D5) — *how hard* (drives the model + thinking
   budget routed to the worker).
 
 A P0 can be a one-line config bump (D0); a P3 can be a hard refactor
@@ -184,6 +184,11 @@ D1 Simple   — localized, clear approach, light reasoning.
 D2 Moderate — multi-file or some design choice (default if omitted).
 D3 Hard     — cross-cutting, non-obvious design, correctness-critical.
 D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
+D5 Flagship — a deliberate escalation, never an ordinary rating: work
+              judged worth a full quota window on the flagship model.
+              Reach for it only when D4 (premium model, max effort) has
+              already failed or is plainly inadequate — "harder than D4"
+              is not a reason. Set by the operator, by hand.
 ```
 
 When filing, also drop a one-line **difficulty justification** in the
