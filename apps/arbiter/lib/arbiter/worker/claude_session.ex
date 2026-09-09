@@ -100,6 +100,15 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   require Logger
 
+  # The in-memory `meta[:output_lines]` buffer keeps only the most recent
+  # @line_cap lines; `prepend_capped/3` evicts from the far end. Retained at
+  # 1000 (bd-6dxit2): every live worker holds this list for its whole run, so an
+  # uncapped buffer lets one chatty agent grow the Worker process without bound.
+  # The cap is safe for verdict parsing only because `OutputLog` writes the
+  # SAME lines to an uncapped durable per-run transcript, and
+  # `ReviewGate.parse_verdict/3` re-reads that transcript before concluding a
+  # reviewer emitted no verdict. Lower this and the fallback still holds; remove
+  # the durable transcript and it does not.
   @line_cap 1000
   # bd-7a0pi8: anchor the marker to end-of-line. `\barb done` still rejects the
   # "arb doneness" substring; the trailing `[^\p{L}\p{N}]*$` requires the marker

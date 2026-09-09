@@ -130,6 +130,52 @@ defmodule Arbiter.Worker.StopReasonTest do
 
       assert reason.category == :quota_exhausted
     end
+
+    # bd-6dxit2: the Claude CLI changed the wording it emits when the 5h plan
+    # allowance is spent — it now says "You've hit your session limit · resets
+    # <time>" and exits 1 within a second, never running the agent. The old
+    # signature only knew "usage limit reached" / "5-hour limit reached", so
+    # these refusals classified as :crashed. That mattered: :crashed is not an
+    # infra-failure category, so ReviewGate re-prompted a reviewer that could
+    # not possibly run and then reported "no parseable VERDICT line" — a review
+    # that never happened, blamed on the reviewer (see review_gate_test.exs).
+    test "current CLI wording: \"You've hit your session limit\"" do
+      reason =
+        StopReason.classify(1, [
+          "⚙ claude session started (model claude-opus-5)",
+          "You've hit your session limit · resets 4:50am (America/New_York)",
+          "⚙ claude session error · 0.7s · $0.0"
+        ])
+
+      assert reason.category == :quota_exhausted
+    end
+
+    test "current CLI wording with a typographic apostrophe" do
+      reason = StopReason.classify(1, ["You\u2019ve hit your session limit · resets 4:50am"])
+      assert reason.category == :quota_exhausted
+    end
+
+    test "\"hit your usage limit\" phrasing also classifies as quota" do
+      reason = StopReason.classify(1, ["You've hit your usage limit · resets 9pm"])
+      assert reason.category == :quota_exhausted
+    end
+
+    test "bare \"session limit reached\" leading its line classifies as quota" do
+      reason = StopReason.classify(1, ["  Session limit reached"])
+      assert reason.category == :quota_exhausted
+    end
+
+    # bd-3wgdie's false-match guard must survive the new wording: source and
+    # tool output the reviewer merely *read* must not park a run for 5 hours.
+    test "does not false-match the session-limit wording quoted mid-line" do
+      reason =
+        StopReason.classify(1, [
+          "stop_reason.ex:180:    | you\u2019ve hit your session limit",
+          "    62\t  # matches \"You've hit your session limit\" from the CLI"
+        ])
+
+      refute reason.category == :quota_exhausted
+    end
   end
 
   describe "classify/2 — gateway / proxy errors (bd-298jz0)" do
