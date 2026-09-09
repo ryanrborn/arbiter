@@ -1467,7 +1467,19 @@ defmodule Arbiter.Worker.Dispatch do
     else
       # Route the probe through the same quota-capturing proxy a real spawn
       # uses (bd-5boun6) so `claude --print ping` updates quota state too.
-      probe_opts = preflight_opts(opts) ++ anthropic_proxy_opts(adapter, workspace)
+      #
+      # bd-bw3466: thread the workspace through as well. `Preflight.check/2`
+      # defaults the probe env to the adapter's `spawn_env/1`, which resolves
+      # CLAUDE_CODE_OAUTH_TOKEN from the workspace's encrypted `worker_env` —
+      # `preflight_opts/1`'s Keyword.take used to drop `:workspace`, so the
+      # probe ran unauthenticated whenever the install-wide fallback couldn't
+      # answer (several workspaces with different tokens), failing every
+      # dispatch with {:auth_check_failed, ...} before a worker ever spawned.
+      # The workspace is loaded right here at :1456 — there is no reason to
+      # lean on the install-wide fallback for this call site.
+      probe_opts =
+        preflight_opts(opts) ++
+          [workspace: workspace] ++ anthropic_proxy_opts(adapter, workspace)
 
       case Preflight.check(adapter, probe_opts) do
         :ok ->

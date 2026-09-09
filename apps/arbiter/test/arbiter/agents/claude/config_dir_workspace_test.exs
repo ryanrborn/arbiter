@@ -4,13 +4,21 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
 
   `config_dir_test.exs` covers the resolution rules with bare structs; this
   file covers the two things that need a real row — resolving a workspace by
-  **id**, and the install-wide `any_workspace_oauth_token?/0` fallback the
-  workspace-less call sites (`quota/refresh_probe.ex`,
-  `workflows/code_review/checks.ex`) rely on so they can't re-seed the
-  operator's `.credentials.json` behind a token-bearing workspace's back.
+  **id**, and the install-wide fallback (source 3 of `ConfigDir.oauth_token/1`)
+  that the workspace-less call sites (`Arbiter.Agents.CredentialWatchdog`,
+  `quota/refresh_probe.ex`, `workflows/code_review/checks.ex`) rely on.
+
+  The load-bearing property here is the **lockstep invariant**: seeding is
+  suppressed exactly when a token is injected. Breaking it leaves the
+  fleet-wide watchdog probe with an emptied config dir and no token, which
+  401s, marks the adapter expired and stops every dispatch.
   """
   # async: false — toggles Application/System env that other tests read.
   use Arbiter.DataCase, async: false
+
+  # The ambiguous-token case logs a warning by design; capture it so the run
+  # stays readable (logs still surface on failure).
+  @moduletag :capture_log
 
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Tasks.Workspace
@@ -116,12 +124,73 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
       refute File.exists?(Path.join(target, ".credentials.json"))
     end
 
-    test "a workspace-less spawn still gets no token injected", %{target: target} do
+    test "a workspace-less spawn carries the unambiguous install-wide token", %{target: target} do
+      _ = token_workspace()
       _ = token_workspace()
 
-      # Seeding is suppressed install-wide, but we never *guess* which
-      # workspace's token a workspace-less spawn should carry.
+      # Both workspaces define the *same* token, so there is exactly one value
+      # a workspace-less spawn could carry — carry it. Suppressing the seed
+      # without injecting anything would leave the CredentialWatchdog probe
+      # with no credentials at all.
+      assert ConfigDir.env() == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "ws-oauth-token"}
+             ]
+    end
+
+    test "workspaces that disagree leave a workspace-less spawn at pre-fix behaviour", %{
+      source: source,
+      target: target
+    } do
+      _ = token_workspace()
+
+      _ =
+        workspace_with_env(%{
+          "CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "other", "secret" => true}
+        })
+
+      # Two distinct values: we refuse to guess, so no token is injected — and
+      # the gate must stand down with it rather than emptying the config dir.
       assert ConfigDir.env() == [{"CLAUDE_CONFIG_DIR", target}]
+      assert {:ok, ^target} = ConfigDir.ensure()
+
+      assert File.read!(Path.join(target, ".credentials.json")) ==
+               File.read!(Path.join(source, ".credentials.json"))
+    end
+
+    test "the workspace-bearing spawn is unaffected by an ambiguous install", %{target: target} do
+      ws = token_workspace()
+
+      _ =
+        workspace_with_env(%{
+          "CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "other", "secret" => true}
+        })
+
+      assert ConfigDir.env(ws) == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"CLAUDE_CODE_OAUTH_TOKEN", "ws-oauth-token"}
+             ]
+    end
+
+    # The invariant the first cut of bd-bw3466 broke: a spawn whose
+    # `.credentials.json` we suppress must always be handed a token, or it has
+    # no credentials at all. The CredentialWatchdog probes with no workspace,
+    # 401s, and marks the adapter expired — stopping every dispatch.
+    test "ensure/0 suppressing the seed implies env/0 carries a token", %{target: target} do
+      for build <- [
+            fn -> :none end,
+            &token_workspace/0,
+            fn -> {token_workspace(), token_workspace()} end
+          ] do
+        _ = build.()
+
+        assert {:ok, ^target} = ConfigDir.ensure()
+        suppressed? = not File.exists?(Path.join(target, ".credentials.json"))
+        injected? = List.keymember?(ConfigDir.env(), "CLAUDE_CODE_OAUTH_TOKEN", 0)
+
+        assert suppressed? == injected?,
+               "seed suppressed?=#{suppressed?} but token injected?=#{injected?}"
+      end
     end
 
     test "seeding still happens when no workspace and no server env defines a token", %{

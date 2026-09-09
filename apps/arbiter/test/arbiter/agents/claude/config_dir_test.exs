@@ -3,6 +3,11 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
   # CLAUDE_CONFIG_DIR source) that other tests read.
   use ExUnit.Case, async: false
 
+  # bd-bw3466: no Ecto sandbox here, so ConfigDir's install-wide worker_env
+  # scan can't read Workspace and logs a warning on every call. Expected in this
+  # file; capture it so the run stays readable (logs still surface on failure).
+  @moduletag :capture_log
+
   alias Arbiter.Agents.Claude.ConfigDir
 
   setup do

@@ -57,18 +57,34 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
   The token can be configured two ways, and `oauth_token/1` checks both — the
   spawn's workspace `worker_env` (encrypted at rest) **first**, the arbiter
-  server's own process environment as the fallback. bd-6umoh9 only checked the
-  latter, so on an install that configures the token per-workspace (the
-  supported way) the gate never fired and seeding continued unchanged.
+  server's own process environment as the fallback (then, for a spawn with no
+  workspace at all, the install-wide answer described below). bd-6umoh9 only
+  checked the server environment, so on an install that configures the token
+  per-workspace (the supported way) the gate never fired and seeding continued
+  unchanged.
 
   Note the directory this gate protects is **install-wide** — one shared
-  `~/.cache/arbiter/worker-claude` for every workspace. So the seeding decision
-  is asked install-wide too (`any_workspace_oauth_token?/0`): if *any*
-  workspace holds a token, no spawn re-seeds the operator's credentials, or a
-  workspace-less spawn (the quota probe, a code-review check) would copy them
-  straight back in a second after a token-bearing spawn cleaned them out.
-  Token *injection* stays strictly scoped: we never guess which workspace's
-  token a workspace-less spawn should carry.
+  `~/.cache/arbiter/worker-claude` for every workspace. A workspace-less spawn
+  (the fleet-wide `CredentialWatchdog` probe, the quota probe, a code-review
+  check) runs against that same directory, so it must not copy the operator's
+  credentials straight back in a second after a token-bearing spawn cleaned
+  them out. The third and last source in `oauth_token/1` therefore looks
+  install-wide: when *every* workspace that defines `CLAUDE_CODE_OAUTH_TOKEN`
+  defines the **same** one, that is the only answer a workspace-less spawn
+  could carry, so we carry it. If workspaces disagree we carry nothing rather
+  than guess, and the seeding gate stands down with it.
+
+  The load-bearing invariant is **gate fires ⟺ token injected**, per spawn:
+  `seed_links/2` and `oauth_token_pairs/1` both read `oauth_token/1`, so a
+  spawn is never left with neither a seeded `.credentials.json` nor a token.
+  An earlier cut of bd-bw3466 broke this — the gate was asked install-wide
+  while injection stayed workspace-scoped, which would have left the
+  `CredentialWatchdog` probe (`Preflight.check(adapter, [])`, no workspace
+  available to a fleet-wide watchdog) running against an emptied config dir
+  with no token: a guaranteed 401, classified `:auth_expired`, marking the
+  adapter expired and short-circuiting *every* dispatch with a false expiry
+  escalation. Any future change here must keep the two in lockstep;
+  `config_dir_workspace_test.exs` asserts the invariant directly.
 
   ## Safety / degradation
 
@@ -124,9 +140,12 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   remember to compose it in (bd-6umoh9).
 
   Pass the spawn's workspace (struct or id) so a token configured the
-  per-workspace way — `worker_env`, encrypted at rest — is found; the
-  zero-arity form consults only the server process environment and is for
-  callers with genuinely no workspace in hand (bd-bw3466).
+  per-workspace way — `worker_env`, encrypted at rest — is found. The
+  zero-arity form is for callers with genuinely no workspace in hand; it falls
+  back to the server process environment and then to the unambiguous
+  install-wide workspace token, so such a spawn is authenticated rather than
+  left with neither credentials nor a token (bd-bw3466). See `oauth_token/1`
+  for the precedence.
   """
   @spec env(workspace_source()) :: [{String.t(), String.t()}]
   def env(workspace \\ nil) do
@@ -152,8 +171,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   @doc """
   The worker OAuth token for this spawn, or `nil`.
 
-  Precedence — **the workspace's `worker_env` wins, the server process
-  environment is the fallback**:
+  Precedence — **most specific first**:
 
     1. `CLAUDE_CODE_OAUTH_TOKEN` in `workspace`'s encrypted `worker_env`
        (read via `Arbiter.Tasks.Workspace.worker_env_map/1`; the value is
@@ -161,17 +179,31 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
     2. `CLAUDE_CODE_OAUTH_TOKEN` in the arbiter server's own environment
        (`.arbiter.env` / the service unit) — the bd-6umoh9 behaviour, kept so
        an install configured that way is not regressed.
+    3. The install-wide workspace token, *only when it is unambiguous*: the
+       single distinct `CLAUDE_CODE_OAUTH_TOKEN` value across every workspace
+       that defines one. `nil` when zero or more than one distinct value
+       exists.
 
   The workspace is the more specific configuration: an operator who sets a
   token on a workspace is stating what *that* workspace's workers authenticate
   as, and the server-wide var is the install default underneath it.
 
+  Step 3 exists because the config dir this token guards is **install-wide**
+  (see the moduledoc): a spawn with no workspace in hand — the fleet-wide
+  `CredentialWatchdog` probe, the quota probe, a code-review check — shares
+  the directory whose `.credentials.json` a token-bearing spawn deletes. It is
+  not a guess: when every workspace that defines the token defines the same
+  one, there is exactly one value such a spawn could carry. When workspaces
+  disagree we return `nil` and log, which leaves *both* injection and seeding
+  suppression off for that spawn — the pre-bd-bw3466 behaviour — rather than
+  silently picking one workspace's grant or running unauthenticated.
+
   Best-effort — a workspace that can't be loaded or whose store can't be
-  decrypted falls through to the server env rather than raising into a spawn.
+  decrypted falls through to the next source rather than raising into a spawn.
   """
   @spec oauth_token(workspace_source()) :: String.t() | nil
   def oauth_token(workspace \\ nil) do
-    workspace_oauth_token(workspace) || server_oauth_token()
+    workspace_oauth_token(workspace) || server_oauth_token() || install_oauth_token()
   end
 
   defp server_oauth_token do
@@ -425,18 +457,17 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   # is exactly the defect this gate exists to close. A stale copy from before
   # the token was adopted is actively removed rather than left in place.
   #
-  # bd-bw3466: the gate is asked as an *install-wide* question, because the
-  # config dir it guards is install-wide — a single shared
-  # `~/.cache/arbiter/worker-claude`. Suppressing the seed only for the spawns
-  # that name a token-bearing workspace would let the next workspace-less
-  # spawn (the quota probe, a code-review check) copy the operator's
-  # credentials straight back in, and the rotation would continue. So the
-  # answer is "yes" when *this* spawn's workspace defines a token, when the
-  # server environment defines one, or when *any* workspace does. Token
-  # *injection* stays strictly scoped (we never guess which workspace's token
-  # a workspace-less spawn should carry); only the seeding decision is global.
+  # bd-bw3466: the gate asks `oauth_token_configured?/1` — the *same* predicate
+  # `oauth_token_pairs/1` uses to decide whether to inject the token. That
+  # lockstep is the invariant: a spawn whose credentials we suppress is always
+  # a spawn we hand a token to. Reaching install-wide for the answer happens
+  # inside `oauth_token/1` (its third source), not here, so the two cannot
+  # drift apart the way they did in the first cut of this ticket — where an
+  # install-wide gate plus workspace-scoped injection left the workspace-less
+  # `CredentialWatchdog` probe with no credentials at all and 401ing the whole
+  # fleet into a false expiry.
   defp seed_links(dir, workspace) do
-    if oauth_token_configured?(workspace) or any_workspace_oauth_token?() do
+    if oauth_token_configured?(workspace) do
       remove_stale_credentials(dir)
     else
       case source_dir() do
@@ -450,22 +481,78 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   Whether **any** workspace on this install defines `CLAUDE_CODE_OAUTH_TOKEN`
   in its `worker_env` (bd-bw3466).
 
-  The seeding gate consults this so a workspace-less spawn cannot re-seed the
-  operator's `.credentials.json` into the shared config dir that a
-  token-bearing workspace's spawn just cleaned out. Best-effort: any failure
-  to read (no DB, no sandbox, unreadable store) answers `false`, which is the
-  pre-bd-bw3466 behaviour.
+  Reporting/diagnostics only — the seeding gate itself goes through
+  `oauth_token/1`, so that suppression and injection stay in lockstep. See
+  `workspace_oauth_tokens/0` for the degradation behaviour.
   """
   @spec any_workspace_oauth_token?() :: boolean()
-  def any_workspace_oauth_token? do
+  def any_workspace_oauth_token?, do: workspace_oauth_tokens() != []
+
+  @doc """
+  The distinct `CLAUDE_CODE_OAUTH_TOKEN` values configured across every
+  workspace's `worker_env` (bd-bw3466). Values are never logged.
+
+  Best-effort: any failure to read (no DB, no sandbox, unreadable store)
+  answers `[]`, i.e. "no install-wide token" — which resolves to *seeding the
+  operator's credentials*, the pre-bd-bw3466 behaviour. That is the unsafe
+  direction (a transient read failure lets rotation resume), so every failure
+  branch logs at `warning` rather than degrading silently: a recurrence shows
+  up in the log instead of only as mysterious re-authentication prompts.
+  """
+  @spec workspace_oauth_tokens() :: [String.t()]
+  def workspace_oauth_tokens do
     case Ash.read(Workspace) do
-      {:ok, workspaces} -> Enum.any?(workspaces, &(workspace_oauth_token(&1) != nil))
-      _ -> false
+      {:ok, workspaces} ->
+        workspaces
+        |> Enum.map(&workspace_oauth_token/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      other ->
+        warn_token_scan_failed(inspect(other))
+        []
     end
   rescue
-    _ -> false
+    e ->
+      warn_token_scan_failed(inspect(e))
+      []
   catch
-    :exit, _ -> false
+    :exit, reason ->
+      warn_token_scan_failed("exit #{inspect(reason)}")
+      []
+  end
+
+  defp warn_token_scan_failed(detail) do
+    Logger.warning(
+      "Arbiter.Agents.Claude.ConfigDir: could not scan workspaces for #{@oauth_token_var} " <>
+        "(#{detail}); treating the install as having no worker token, so a spawn with no " <>
+        "workspace or server token will re-seed the operator's .credentials.json and OAuth " <>
+        "rotation may resume (bd-bw3466)"
+    )
+  end
+
+  # Source 3 of `oauth_token/1`: the install-wide answer for a spawn with no
+  # workspace in hand. Only unambiguous when every workspace that defines the
+  # token defines the same one.
+  defp install_oauth_token do
+    case workspace_oauth_tokens() do
+      [only] ->
+        only
+
+      [] ->
+        nil
+
+      many ->
+        Logger.warning(
+          "Arbiter.Agents.Claude.ConfigDir: #{length(many)} distinct #{@oauth_token_var} values " <>
+            "are configured across workspaces; a spawn with no workspace in hand carries none " <>
+            "of them (and is seeded the operator's credentials as before bd-bw3466). Configure " <>
+            "one token per install, or set #{@oauth_token_var} in the server environment as " <>
+            "the workspace-less default."
+        )
+
+        nil
+    end
   end
 
   defp remove_stale_credentials(dir) do
