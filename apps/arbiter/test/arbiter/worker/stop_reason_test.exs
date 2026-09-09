@@ -176,6 +176,159 @@ defmodule Arbiter.Worker.StopReasonTest do
 
       refute reason.category == :quota_exhausted
     end
+
+    # bd-cfhj7z: run 7e9e5ea5 (task vs-1vd2hp, Fable, 2026-09-08). The worker
+    # burned its whole 5h window in ~12 minutes and was cut off mid-report; the
+    # phrase led four separate lines of the durable log, yet Arbiter recorded
+    # "agent subprocess crashed (exit code 1)". This is the verbatim five-line
+    # tail from that run, including the `claude session error` lines that follow
+    # the phrase — those trailing lines are the reason the tail is quoted in
+    # full: the last line of the log is NOT the quota phrase, so the detector
+    # has to find it inside the window rather than at the very end.
+    test "verbatim five-line tail from run 7e9e5ea5 classifies as quota" do
+      reason =
+        StopReason.classify(1, [
+          "You've hit your session limit \u00b7 resets 3:30am (America/New_York)",
+          "\u2699 claude session started (model claude-fable-5-1)",
+          "You've hit your session limit \u00b7 resets 3:30am (America/New_York)",
+          "\u2699 claude session error \u00b7 674.5s \u00b7 $19.6159",
+          "\u2699 claude session error \u00b7 0.4s \u00b7 $19.6159"
+        ])
+
+      assert reason.category == :quota_exhausted
+      assert reason.summary =~ "usage limit"
+      # The :crashed remediation this used to get ("check the captured stderr,
+      # then re-dispatch") is exactly the wrong advice for an exhausted window.
+      refute reason.remediation =~ "stderr"
+    end
+
+    # bd-cfhj7z / bd-3wgdie: the negative fixture is this ticket's own prose --
+    # a realistic sample of text a worker could read while working the ticket.
+    # Note the deliberate limit: the ticket ALSO quotes the raw log verbatim in
+    # a fenced block, where the phrase does lead its line. Those lines are
+    # byte-identical to real CLI output, so no line-anchored matcher can tell
+    # them apart; the anchor buys us the prose case, which is the common one.
+    test "does not false-match this ticket's own prose (bd-cfhj7z description)" do
+      reason =
+        StopReason.classify(1, [
+          "1. `@quota_signature` gains a line-leading alternative matching the",
+          "   observed wording (`you've hit your session limit`, tolerant of the",
+          "   typographic vs ASCII apostrophe \u2014 the CLI emits `\u2019`, and a naive",
+          "   `'` will silently fail to match). Anchored the same way the existing",
+          "   alternatives are; no unanchored variant is added.",
+          "bd-3wgdie already established that an unanchored quota phrase",
+          "false-matches a worker's own tool output \u2014 and `:quota_exhausted`",
+          "remediation is \"wait\", so a false positive costs a multi-hour park."
+        ])
+
+      refute reason.category == :quota_exhausted
+    end
+  end
+
+  # bd-cfhj7z: the CLI reports the reset as a human-readable wall clock in an
+  # IANA zone (`resets 3:30am (America/New_York)`), not the `|<epoch>` suffix
+  # `@quota_reset_signature` knows. Without this the category was right but the
+  # wait was always the blanket 5h default, even when the window reset in 10
+  # minutes.
+  describe "retry_after — wall-clock reset form (bd-cfhj7z)" do
+    test "resolves a reset later today to today" do
+      # 01:00 local, reset at 03:30 local, host at UTC-4.
+      local_now = ~N[2026-09-08 01:00:00]
+      offset = -4 * 3600
+
+      assert StopReason.wallclock_reset_utc(local_now, offset, 3, 30) ==
+               ~U[2026-09-08 07:30:00Z]
+    end
+
+    test "resolves a reset already past today to tomorrow" do
+      # 23:50 local, reset at 03:30 local => tomorrow, host at UTC-4.
+      local_now = ~N[2026-09-08 23:50:00]
+      offset = -4 * 3600
+
+      assert StopReason.wallclock_reset_utc(local_now, offset, 3, 30) ==
+               ~U[2026-09-09 07:30:00Z]
+    end
+
+    test "handles a positive UTC offset" do
+      local_now = ~N[2026-09-08 01:00:00]
+
+      assert StopReason.wallclock_reset_utc(local_now, 2 * 3600, 3, 30) ==
+               ~U[2026-09-08 01:30:00Z]
+    end
+
+    test "a reset exactly now resolves to now, not a day out" do
+      local_now = ~N[2026-09-08 03:30:00]
+
+      assert StopReason.wallclock_reset_utc(local_now, 0, 3, 30) ==
+               ~U[2026-09-08 03:30:00Z]
+    end
+
+    test "classify/2 parses the reset when the message zone is the host zone" do
+      zone = StopReason.host_time_zone_name()
+
+      reason =
+        StopReason.classify(1, [
+          "You've hit your session limit \u00b7 resets 3:30am (#{zone || "America/New_York"})"
+        ])
+
+      assert reason.category == :quota_exhausted
+
+      if zone do
+        assert %DateTime{} = reason.retry_after
+        # All modern IANA offsets are whole minutes, so the minute survives the
+        # local->UTC conversion.
+        assert reason.retry_after.minute == 30
+        diff = DateTime.diff(reason.retry_after, DateTime.utc_now())
+        assert diff >= 0 and diff <= 86_400
+        assert reason.remediation =~ "resets at"
+      else
+        assert reason.retry_after == nil
+      end
+    end
+
+    test "declines when the message names a zone that is not the host zone" do
+      reason =
+        StopReason.classify(1, [
+          "You've hit your session limit \u00b7 resets 3:30am (Antarctica/Troll)"
+        ])
+
+      # The category fix must not be coupled to the time parsing.
+      assert reason.category == :quota_exhausted
+      assert reason.retry_after == nil
+    end
+
+    test "a 12-hour boundary reset parses as midnight/noon" do
+      assert StopReason.wallclock_reset_utc(~N[2026-09-08 01:00:00], 0, 0, 0) ==
+               ~U[2026-09-09 00:00:00Z]
+    end
+
+    test "the epoch form still wins when both are present" do
+      reason =
+        StopReason.classify(1, [
+          "Claude AI usage limit reached|1789000000",
+          "You've hit your session limit \u00b7 resets 3:30am (America/New_York)"
+        ])
+
+      assert reason.category == :quota_exhausted
+      assert reason.retry_after == DateTime.from_unix!(1_789_000_000)
+    end
+
+    test "12am and 12pm are parsed as 00:00 and 12:00" do
+      phrase = "You've hit your session limit \u00b7 "
+
+      assert StopReason.parse_wallclock(phrase <> "resets 12am (America/New_York)") ==
+               {0, 0, "America/New_York"}
+
+      assert StopReason.parse_wallclock(phrase <> "resets 12pm") == {12, 0, nil}
+      assert StopReason.parse_wallclock(phrase <> "resets 9pm") == {21, 0, nil}
+      assert StopReason.parse_wallclock(phrase <> "resets 3:30AM") == {3, 30, nil}
+    end
+
+    test "the reset clause is only read off the CLI's own phrase line" do
+      # Prose merely mentioning a reset time must not become a retry_after.
+      refute StopReason.parse_wallclock("the window resets 3:30am (America/New_York)")
+      refute StopReason.parse_wallclock("  quoted: you've hit your session limit")
+    end
   end
 
   describe "classify/2 — gateway / proxy errors (bd-298jz0)" do

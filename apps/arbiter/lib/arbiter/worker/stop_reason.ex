@@ -184,6 +184,12 @@ defmodule Arbiter.Worker.StopReason do
   # `'` or a 3-byte UTF-8 `\u2019`; the regex carries no /u flag), and the line-leading
   # anchor from bd-3wgdie applies here too so quoting this wording in source or
   # tool output cannot buy a 5h park.
+  # bd-cfhj7z: the four `usage limit reached` alternatives are RETAINED, kept
+  # defensively rather than confirmed still-live — a scan of every run in the
+  # live DB whose tail contains "limit reached" (14 runs, 2026-07-07..2026-09-09)
+  # turned up no CLI emission of that wording at line start, only Arbiter's own
+  # log line and workers grepping this repo's fixtures. Absence of a recent hit
+  # is not proof an older pinned CLI build never emits it, so they stay.
   @quota_signature ~r/
       ^[ \t]*(claude[ _]ai[ _])?usage[ _]limit[ _]reached
     | ^[ \t]*5[ -]hour[ _]limit[ _]reached
@@ -194,6 +200,25 @@ defmodule Arbiter.Worker.StopReason do
   /mix
 
   @quota_reset_signature ~r/usage[ _]limit[ _]reached\|(\d+)/i
+
+  # bd-cfhj7z: the CLI build seen in run 7e9e5ea5 reports the reset as a
+  # human-readable *local wall clock* with an IANA zone name
+  # (`resets 3:30am (America/New_York)`) rather than the `|<epoch>` suffix
+  # `@quota_reset_signature` knows. `retry_after_from/1` therefore returned nil
+  # and `Arbiter.Worker.quota_resume_backoff_ms/1` fell back to its blanket 5h
+  # default — parking a worker and its worktree for five hours even when the
+  # window was ten minutes from resetting.
+  #
+  # The reset clause is only read off the CLI's own phrase line (the same
+  # bd-3wgdie line-leading anchor `@quota_signature` uses). Reading it from
+  # anywhere in the tail would let prose that merely mentions a reset time
+  # *shorten* a park, which is the more dangerous direction of the two.
+  @quota_reset_wallclock_signature ~r/
+      ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](?:session|usage)[ ]limit
+      [^\n]*?
+      \bresets[ \t]+(?<hour>\d{1,2})(?::(?<minute>\d{2}))?[ \t]*(?<meridiem>am|pm)
+      (?:[ \t]*\((?<zone>[A-Za-z][A-Za-z0-9_+\/-]*)\))?
+  /mix
 
   @credit_signature ~r/
       insufficient[^\n]{0,20}(credit|balance|funds|quota)
@@ -639,7 +664,13 @@ defmodule Arbiter.Worker.StopReason do
   # when the message doesn't carry one (older CLI versions, or a paraphrase
   # like "5-hour limit reached, try again later") — the caller falls back to a
   # generic "wait for the window to reset" remediation.
+  # The `|<epoch>` form is unambiguous, so it wins when both are present; the
+  # wall-clock form (bd-cfhj7z) is the fallback.
   defp retry_after_from(haystack) do
+    epoch_reset_from(haystack) || wallclock_reset_from(haystack)
+  end
+
+  defp epoch_reset_from(haystack) do
     with [_, secs] <- Regex.run(@quota_reset_signature, haystack),
          {secs, _} <- Integer.parse(secs),
          {:ok, dt} <- DateTime.from_unix(secs) do
@@ -648,6 +679,125 @@ defmodule Arbiter.Worker.StopReason do
       _ -> nil
     end
   end
+
+  # bd-cfhj7z: no tz database is bundled (the umbrella has neither :tzdata nor
+  # :tz, and Elixir's default `Calendar.UTCOnlyTimeZoneDatabase` cannot resolve
+  # "America/New_York"). We do not need one: the CLI renders that wall clock in
+  # *its own host's* local zone, and its host is this host — so the offset we
+  # need is the one the BEAM already gets from the OS's zoneinfo via
+  # `NaiveDateTime.local_now/0`.
+  #
+  # That equivalence is asserted, not assumed: when the message names a zone we
+  # only use the local offset if that name matches the host's configured zone
+  # (TZ, then the /etc/localtime symlink, then /etc/timezone). A mismatch — or
+  # a host whose zone we cannot name — yields nil, which is the pre-existing
+  # "no reset time reported" path, not a wrong one.
+  #
+  # Known bound: if a DST transition falls between now and the reset, the
+  # current offset is off by up to an hour. That is a ≤1h error twice a year
+  # against a 5h blanket default, and `quota_resume_backoff_ms/1` clamps the
+  # result to a 60s floor, so the failure mode is one early retry, not a hang.
+  defp wallclock_reset_from(haystack) do
+    with {hour, minute, zone} <- parse_wallclock(haystack),
+         true <- host_zone_matches?(zone) do
+      wallclock_reset_utc(NaiveDateTime.local_now(), local_utc_offset_seconds(), hour, minute)
+    else
+      _ -> nil
+    end
+  end
+
+  @doc false
+  @spec parse_wallclock(String.t()) :: {0..23, 0..59, String.t() | nil} | nil
+  def parse_wallclock(haystack) when is_binary(haystack) do
+    with %{"hour" => raw_hour, "meridiem" => meridiem} = caps <-
+           Regex.named_captures(@quota_reset_wallclock_signature, haystack),
+         {hour12, ""} when hour12 in 0..12 <- Integer.parse(raw_hour),
+         minute when minute in 0..59 <- parse_minute(caps["minute"]) do
+      {to_24h(hour12, String.downcase(meridiem)), minute, presence(caps["zone"])}
+    else
+      _ -> nil
+    end
+  end
+
+  defp parse_minute(minute) when minute in [nil, ""], do: 0
+  defp parse_minute(minute), do: String.to_integer(minute)
+
+  defp to_24h(12, "am"), do: 0
+  defp to_24h(12, "pm"), do: 12
+  defp to_24h(hour, "pm"), do: hour + 12
+  defp to_24h(hour, _am), do: hour
+
+  # `3:30am` names a wall-clock time, not a date. It is always the *next*
+  # occurrence: the CLI only prints a reset that has not happened yet, so a
+  # time already past locally belongs to tomorrow. An exact tie is treated as
+  # "now" (the window is resetting) rather than a full day out.
+  @doc false
+  @spec wallclock_reset_utc(NaiveDateTime.t(), integer(), 0..23, 0..59) :: DateTime.t()
+  def wallclock_reset_utc(%NaiveDateTime{} = local_now, offset_seconds, hour, minute)
+      when is_integer(offset_seconds) do
+    candidate = NaiveDateTime.new!(NaiveDateTime.to_date(local_now), Time.new!(hour, minute, 0))
+
+    candidate =
+      if NaiveDateTime.compare(candidate, local_now) == :lt do
+        NaiveDateTime.add(candidate, 86_400, :second)
+      else
+        candidate
+      end
+
+    candidate
+    |> NaiveDateTime.add(-offset_seconds, :second)
+    |> DateTime.from_naive!("Etc/UTC")
+  end
+
+  # Whole-minute rounding: the two clock reads are microseconds apart, and every
+  # modern IANA offset is a whole number of minutes.
+  defp local_utc_offset_seconds do
+    diff = NaiveDateTime.diff(NaiveDateTime.local_now(), NaiveDateTime.utc_now(), :second)
+    round(diff / 60) * 60
+  end
+
+  @doc false
+  @spec host_time_zone_name() :: String.t() | nil
+  def host_time_zone_name do
+    case presence(System.get_env("TZ")) do
+      nil -> host_zone_from_files()
+      tz -> tz |> String.trim_leading(":") |> zone_from_path()
+    end
+  end
+
+  defp host_zone_from_files do
+    case File.read_link("/etc/localtime") do
+      {:ok, target} ->
+        zone_from_path(target)
+
+      _ ->
+        case File.read("/etc/timezone") do
+          {:ok, contents} -> contents |> String.trim() |> presence()
+          _ -> nil
+        end
+    end
+  end
+
+  defp zone_from_path(path) do
+    case String.split(path, "zoneinfo/", parts: 2) do
+      [_, zone] -> presence(zone)
+      _ -> presence(path)
+    end
+  end
+
+  # A message that names no zone is taken at face value: the CLI wrote it in
+  # host-local time and we only need the offset, not the name.
+  defp host_zone_matches?(nil), do: true
+
+  defp host_zone_matches?(zone) do
+    case host_time_zone_name() do
+      nil -> false
+      host -> String.downcase(host) == String.downcase(zone)
+    end
+  end
+
+  defp presence(value) when value in [nil, ""], do: nil
+  defp presence(value), do: value
 
   defp quota_remediation(%DateTime{} = retry_after) do
     "Provider-side plan usage limit, not a billing failure — no action needed. " <>
