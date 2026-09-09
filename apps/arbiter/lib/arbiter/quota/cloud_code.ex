@@ -492,9 +492,13 @@ defmodule Arbiter.Quota.CloudCode do
 
   @doc """
   Map a stored `GoogleQuota` row to the uniform two-window quota view shape the
-  topbar / `/usage` page render. Google has no time windows, so the
+  topbar / `/usage` page render. Gemini has no time windows, so the
   representative used-fraction fills the primary ("5h") slot and the secondary
-  ("7d") slot is left empty.
+  ("7d") slot is left empty. Antigravity does have explicit `5h`/`weekly`
+  windows per group, but `representative/1` collapses them to a single worst
+  bucket, so this "5h" slot may actually carry a weekly reset time; the UI
+  doesn't mislabel this today because the 5h-specific helpers are gated to
+  the `"claude"` provider and `secondary_label` stays `nil` here.
   """
   @spec view(GoogleQuota.t()) :: map()
   def view(%GoogleQuota{} = row) do
@@ -698,25 +702,53 @@ defmodule Arbiter.Quota.CloudCode do
       end)
 
     outcome =
-      case Task.yield(task, timeout + 1_000) do
-        {:ok, {_out, 0}} ->
-          read_agy_usage_output(tmp)
+      try do
+        case Task.yield(task, timeout + 3_000) do
+          {:ok, {_out, 0}} ->
+            read_agy_usage_output(tmp)
 
-        {:ok, {_out, status}} ->
-          {:error, {:exit, status}}
+          # `timeout -k 1` kills with SIGTERM at the deadline and SIGKILL a
+          # second later; either way the shell reports 124/137 for a
+          # subprocess that overran, not an auth failure. Without this clause
+          # a merely-slow `agy` gets reported as "not authenticated".
+          {:ok, {_out, status}} when status in [124, 137] ->
+            {:error, :timeout}
 
-        nil ->
-          Task.shutdown(task, :brutal_kill)
-          {:error, :timeout}
+          {:ok, {_out, status}} ->
+            {:error, {:exit, status}}
+
+          {:exit, _reason} ->
+            {:error, :malformed}
+
+          nil ->
+            Task.shutdown(task, :brutal_kill)
+            {:error, :timeout}
+        end
+      after
+        File.rm_rf(agy_usage_tmp_dir(tmp))
       end
 
-    File.rm(tmp)
     outcome
   end
 
+  # A private, unpredictably-named directory (not just a file) so the shell's
+  # `>"$1"` redirect can't be steered onto an attacker-planted symlink in the
+  # world-writable /tmp, and so `agy`'s raw JSON (whatever it may contain)
+  # isn't world-readable for the subprocess's lifetime the way a bare 0644
+  # temp file would be.
   defp agy_usage_tmp_path do
-    Path.join(System.tmp_dir!(), "arbiter-agy-usage-#{System.unique_integer([:positive])}.json")
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "arbiter-agy-#{Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)}"
+      )
+
+    File.mkdir!(dir)
+    File.chmod!(dir, 0o700)
+    Path.join(dir, "usage.json")
   end
+
+  defp agy_usage_tmp_dir(tmp), do: Path.dirname(tmp)
 
   # No token material ever passes through here — only the decoded JSON body,
   # which callers parse down to `remaining_fraction` / `window` / `reset_time`.

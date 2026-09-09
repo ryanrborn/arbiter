@@ -177,13 +177,14 @@ config :arbiter, :cloud_code_quota, enabled: false
 # `credentials:`/`auth_path:` and enable the Req.Test stub explicitly.
 config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
 
-# `Arbiter.Quota.CloudCode.antigravity/1` falls back to the operator's real
-# `~/.config/Antigravity/...` state DB when no `:antigravity_state_path` is
-# given. Point the default at a path that never exists so the suite's quota
-# surface stays a pure no-op instead of reading real host state on whatever
-# machine happens to have Antigravity installed. Tests exercising the live
-# path pass `antigravity_state_path:` explicitly.
-config :arbiter, :antigravity_state_path, "/nonexistent/antigravity/state.vscdb"
+# `Arbiter.Quota.CloudCode.antigravity/1` shells out to the `agy` CLI by
+# name/path via `:agy_cmd` (default `"agy"`, resolved with
+# `System.find_executable/1`). Point the default at a name that can never
+# resolve so the suite's quota surface stays a pure no-op instead of shelling
+# out to a real ~199 MB `agy` binary on whatever machine happens to have it
+# installed. Tests exercising the live path pass `agy_cmd:` (or
+# `agy_usage_probe:`) explicitly.
+config :arbiter, :agy_cmd, "arbiter-test-nonexistent-agy"
 
 # Disable the fleet credential Watchdog in test — its probe is a real agent-CLI
 # round-trip per adapter (`codex exec` in particular bills against the ChatGPT
