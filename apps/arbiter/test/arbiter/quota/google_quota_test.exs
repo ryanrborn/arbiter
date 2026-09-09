@@ -28,6 +28,12 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
     Keyword.merge([creds_path: creds_path, plug: {Req.Test, @stub}], extra)
   end
 
+  # Antigravity (bd-d7hmqn) no longer fetches over HTTP — it shells out to
+  # the `agy` CLI — so its tests stub `agy_usage_probe` instead of `plug`.
+  defp antigravity_opts(probe_result), do: [agy_usage_probe: fn -> probe_result end]
+
+  defp agy_usage_body(groups), do: %{"command" => %{"data" => %{"groups" => groups}}}
+
   describe "refresh/3 (gemini)" do
     test "fetches live, upserts a GoogleQuota row, and returns the snapshot" do
       ws = workspace!()
@@ -101,20 +107,18 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
   describe "refresh/3 (antigravity)" do
     test "persists under the antigravity provider code" do
       ws = workspace!()
-      creds = creds_file("agtoken")
 
-      Req.Test.stub(@stub, fn conn ->
-        Req.Test.json(conn, %{
-          "models" => %{
-            "gemini-3-flash" => %{
-              "displayName" => "Gemini 3 Flash",
-              "quotaInfo" => %{"remainingFraction" => 0.25, "resetTime" => "1782250684"}
-            }
+      body =
+        agy_usage_body([
+          %{
+            "name" => "Gemini Models",
+            "buckets" => [
+              %{"window" => "weekly", "remaining_fraction" => 0.25, "reset_time" => "1782250684"}
+            ]
           }
-        })
-      end)
+        ])
 
-      assert CloudCode.refresh(ws.id, :antigravity, opts(creds, project_id: "p"))
+      assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:ok, body}))
 
       row = CloudCode.latest(ws.id, "antigravity")
       assert %GoogleQuota{provider: "antigravity", used_percent: 75.0} = row
@@ -122,34 +126,28 @@ defmodule Arbiter.Quota.GoogleQuotaTest do
 
     test "a subsequent degraded fetch (no model data) preserves the last good used_percent/reset_at/snapshot" do
       ws = workspace!()
-      creds = creds_file("agtoken")
 
-      Req.Test.stub(@stub, fn conn ->
-        Req.Test.json(conn, %{
-          "models" => %{
-            "gemini-3-flash" => %{
-              "displayName" => "Gemini 3 Flash",
-              "quotaInfo" => %{"remainingFraction" => 0.25, "resetTime" => "1782250684"}
-            }
+      body =
+        agy_usage_body([
+          %{
+            "name" => "Gemini Models",
+            "buckets" => [
+              %{"window" => "weekly", "remaining_fraction" => 0.25, "reset_time" => "1782250684"}
+            ]
           }
-        })
-      end)
+        ])
 
-      assert CloudCode.refresh(ws.id, :antigravity, opts(creds, project_id: "p"))
+      assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:ok, body}))
       good_row = CloudCode.latest(ws.id, "antigravity")
       assert good_row.used_percent == 75.0
       refute is_nil(good_row.reset_at)
 
-      Req.Test.stub(@stub, fn conn ->
-        conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"error" => "forbidden"})
-      end)
-
-      assert CloudCode.refresh(ws.id, :antigravity, opts(creds, project_id: "p"))
+      assert CloudCode.refresh(ws.id, :antigravity, antigravity_opts({:error, {:exit, 1}}))
       degraded_row = CloudCode.latest(ws.id, "antigravity")
 
       assert degraded_row.used_percent == good_row.used_percent
       assert degraded_row.reset_at == good_row.reset_at
-      assert degraded_row.message =~ "forbidden" or degraded_row.message =~ "Antigravity"
+      assert degraded_row.message =~ "not authenticated"
 
       # The stored `snapshot` column (what `arb quota`/the MCP tool read back
       # verbatim via `serialize_latest/2`) must carry the *new* degraded

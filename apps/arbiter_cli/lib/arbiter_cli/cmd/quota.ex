@@ -13,8 +13,12 @@ defmodule ArbiterCli.Cmd.Quota do
   * Codex: OpenAI session + weekly windows, refreshed by the quota probe using
     the `codex` CLI's stored token. Shows a short message until a snapshot has
     been captured (i.e. the CLI isn't authenticated on this host).
-  * Gemini CLI / Antigravity: per-model Cloud Code Assist quota (remaining %,
-    reset time), shown once that CLI is authenticated and probed on this host.
+  * Gemini CLI: per-model Cloud Code Assist quota (remaining %, reset time),
+    shown once that CLI is authenticated and probed on this host.
+  * Antigravity: per-window remaining % + reset time for each model group
+    (`Gemini Models`, `Claude and GPT models` × `5h`, `weekly`), sourced
+    directly from `agy --output-format json --print "/usage"` (bd-d7hmqn) —
+    shown once the `agy` CLI is authenticated on this host.
 
   Each provider also shows its recent spend (last 30 days, actual dollars from
   the usage ledger) when any is recorded.

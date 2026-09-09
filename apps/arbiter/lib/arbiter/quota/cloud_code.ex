@@ -14,46 +14,25 @@ defmodule Arbiter.Quota.CloudCode do
   The Gemini CLI stores its OAuth token at `~/.gemini/oauth_creds.json`
   (`access_token`).
 
-  Antigravity does **not** share that token — despite both being Google Cloud
-  Code Assist clients, they are registered as two separate OAuth clients, each
-  with its own independent refresh token (confirmed against 9router's
-  `open-sse/providers/shared.js`, which lists distinct `ANTIGRAVITY_OAUTH_CLIENT`
-  / `GOOGLE_OAUTH_CLIENT` client ids). Re-authenticating one has no effect on
-  the other, and a stale Gemini CLI token does not mean Antigravity is stale
-  (bd-5bchzv fixes the bd-4n1r8m spike's wrong assumption that they shared a
-  token).
+  ### Antigravity: no stored token at all (bd-d7hmqn)
 
-  ### Antigravity token precedence (bd-4ku4ze)
+  Antigravity used to follow the same read-a-stored-token-and-call-the-API
+  shape as Gemini CLI above (bd-4ku4ze): read the IDE's `state.vscdb`
+  sqlite DB, fall back to the Gemini CLI creds file, and if neither yielded a
+  token, shell out to `agy models` as a pure liveness check so a stale local
+  copy could at least be distinguished from a logged-out account. In practice
+  that stack of fallbacks degraded to a message telling the *operator* to go
+  refresh the token by hand — not useful when nothing was actually wrong with
+  the account, just with Arbiter's own copy of its token.
 
-  1. **IDE `state.vscdb`** — the Antigravity IDE app (a VS Code fork) persists
-     its live access token in its own `globalStorage` sqlite DB at
-     `~/.config/Antigravity/User/globalStorage/state.vscdb`, under the
-     `antigravityAuthStatus` key's `apiKey` field, and rewrites that row every
-     time the app refreshes its token in the background. We read that DB
-     read-only via `Exqlite.Sqlite3`. This token goes stale as soon as the IDE
-     stops running, since nothing else refreshes it.
-  2. **Gemini CLI creds file fallback** — if the state DB is unavailable (e.g.
-     Antigravity was never installed on this host), we fall back to the shared
-     Gemini CLI creds file as a last-ditch attempt rather than reporting "not
-     configured" outright — even though it's a different OAuth client, it's
-     Google Cloud Code Assist auth and better than nothing.
-  3. **`agy` CLI liveness probe** — the `agy` CLI (Antigravity's own binary,
-     `~/.local/bin/agy`) keeps its token in the OS keyring via a `keyringAuth`
-     → `adcAuth` → WIF → file chain, invisible to both paths above. We do
-     **not** read the keyring directly (its Secret Service attribute schema is
-     undocumented and brittle to depend on); instead, when neither of the
-     above yields a usable token, we shell out to `agy models` as a pure
-     liveness check. A `0` exit proves a credential *does* exist somewhere in
-     `agy`'s chain, even though we can't read it ourselves — so we report a
-     live-but-unreadable status distinct from "not configured", and (bullet 3
-     of bd-4ku4ze) distinct from "credential found but rejected" (a 401 on an
-     actual token we hold). The same probe disambiguates a 401 on a stale
-     `state.vscdb`/fallback token: if `agy` is still live, only our stored
-     copy is stale, not the underlying account.
-
-  None of these paths is ever written, and we do **not** refresh any token —
-  the real app/CLI keeps its own fresh through normal use, so a stale token
-  degrades to a `message` rather than triggering an OAuth dance here.
+  `agy` (Antigravity's own CLI, `~/.local/bin/agy`) can report the real
+  quota directly — `agy --output-format json --print "/usage"` — using
+  whatever credential it holds in its own keyring/ADC/WIF chain, without us
+  ever reading or holding a token ourselves. So Antigravity now shells out to
+  that command instead of making an HTTP call with a stored token: see
+  `antigravity/1` below. This removes the token-reading paths above entirely
+  (no `state.vscdb`, no Gemini CLI fallback, no liveness-only probe) — there
+  is nothing left in Arbiter's control to go stale.
 
   ### Gemini CLI keyring review (bd-4ku4ze)
 
@@ -77,19 +56,49 @@ defmodule Arbiter.Quota.CloudCode do
   separate failure mode — a valid token but no cached Cloud Code project —
   already distinct from an auth failure, so no probe is needed on that path.
 
-  ## Flow
+  ## Flow — Gemini CLI
 
   1. Read `access_token` from the creds file. Missing/blank → `nil` (no-op).
-  2. Resolve the Cloud Code project id. Neither CLI caches it locally, so we
+  2. Resolve the Cloud Code project id. The CLI doesn't cache it locally, so we
      POST `loadCodeAssist` (which also returns `currentTier.name`, the plan).
      A caller may inject a known id via `opts[:project_id]` to skip this hop.
-  3. POST the quota endpoint (`retrieveUserQuota` for Gemini,
-     `fetchAvailableModels` for Antigravity) with `{project: id}` and normalize
-     each model's `remainingFraction` into a `{used, total: 1000, ...}` shape.
+  3. POST `retrieveUserQuota` with `{project: id}` and normalize each model's
+     `remainingFraction` into a `{used, total: 1000, ...}` shape.
 
-  Both `gemini/1` and `antigravity/1` return either `nil` (not configured) or a
-  serialized snapshot map — never raise — so the `arb quota` / `quota_get` /
-  `GET /api/quota` surface can render or omit them without special-casing errors.
+  `gemini/1` returns either `nil` (not configured) or a serialized snapshot
+  map — never raises.
+
+  ## Flow — Antigravity (bd-d7hmqn)
+
+  Shell out to `agy --output-format json --print "/usage"` (the `agy` CLI's
+  own binary, resolved via `System.find_executable/1`) and parse
+  `.command.data.groups[].buckets[]` — each bucket a `{window, remaining_fraction,
+  reset_time}` triple, grouped by model family (`"Gemini Models"`, `"Claude and
+  GPT models"` at last check; the CLI's JSON may add more). Each `{group,
+  window}` pair is normalized into a `model_quota()` entry via the same
+  `normalize_model/4` Gemini CLI uses, so the existing `arb quota` / REST / MCP
+  rendering (which walks `snapshot.models`) needs no special-casing for the
+  multi-group, multi-window shape — it just sees more "model" rows, one per
+  group/window combination. `remaining_fraction` is already a *remaining*
+  fraction (unlike the Anthropic/Codex snapshots, which store *utilization*),
+  so no inversion is applied — setting `remaining_percentage: fraction * 100`
+  directly.
+
+  `antigravity/1` **always returns a snapshot, never `nil`** — the whole point
+  of this CLI-only design is that `agy` alone can tell us whether the account
+  is live, so every outcome (not installed, not authenticated, timed out,
+  unparseable JSON, or a real reading) surfaces as a snapshot with either
+  `models` or a plain-English `message`, never a silent omission. Never
+  raises. See `run_agy_usage/1` for the subprocess mechanics and the
+  process-hygiene notes carried over from the old liveness probe (backgrounded
+  language-server, output-capture deadlock, hard subprocess timeout). No
+  token material is ever logged — only the parsed `remaining_fraction` /
+  `window` / `reset_time` fields are kept, and JSON decode failures log
+  nothing about the raw body.
+
+  Both `gemini/1` and `antigravity/1` return a map the `arb quota` /
+  `quota_get` / `GET /api/quota` surface can render without special-casing
+  errors.
 
   ## Persistence (bd-ajh7bd)
 
@@ -106,15 +115,11 @@ defmodule Arbiter.Quota.CloudCode do
 
   alias Arbiter.Quota.GoogleQuota
 
-  # ---- endpoints (verified against 9router registry/gemini-cli.js + antigravity.js)
+  # ---- endpoints (verified against 9router registry/gemini-cli.js)
   @gemini_quota_url "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
   @gemini_load_url "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-  @antigravity_quota_url "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
-  @antigravity_load_url "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 
   @default_creds_path "~/.gemini/oauth_creds.json"
-  @default_antigravity_state_path "~/.config/Antigravity/User/globalStorage/state.vscdb"
-  @antigravity_auth_status_key "antigravityAuthStatus"
 
   # Normalized base — the provider only hands us a fraction, not raw units, so
   # we mirror 9router's arbitrary 1000-unit base for used/total. Percentage is
@@ -126,25 +131,20 @@ defmodule Arbiter.Quota.CloudCode do
   # default for the server host and is not load-bearing for quota reads.
   @client_metadata %{"ideType" => 9, "pluginType" => 2, "platform" => 3}
 
-  # Antigravity exposes dozens of models; 9router filters the quota view down to
-  # this allowlist of the ones worth surfacing. We replicate it so the display
-  # stays legible rather than dumping every internal variant.
-  @antigravity_important_models MapSet.new(~w(
-    gemini-3-flash-agent
-    gemini-3.5-flash-low
-    gemini-3.5-flash-extra-low
-    gemini-pro-agent
-    gemini-3.1-pro-low
-    claude-sonnet-4-6
-    claude-opus-4-6-thinking
-    gpt-oss-120b-medium
-    gemini-3-flash
-    gemini-3.1-flash-image
-    gemini-3-pro-image
-  ))
+  # `agy --output-format json --print "/usage"` — reports real per-window
+  # remaining quota directly from whatever credential `agy` itself holds
+  # (bd-d7hmqn), replacing the old stored-token HTTP call entirely.
+  @agy_usage_args ["--output-format", "json", "--print", "/usage"]
+  @default_agy_usage_timeout_ms 8_000
 
-  @antigravity_user_agent "antigravity/1.104.0"
-  @antigravity_client_version "1.107.0"
+  # Same rationale as the old liveness-probe cache this replaces: the `agy`
+  # binary is large (~199 MB) and backgrounds its own language server, so
+  # `CloudProbe`'s periodic fan-out across every workspace must not re-exec it
+  # on every cycle. A short TTL keeps the data reasonably fresh while still
+  # collapsing the near-simultaneous per-workspace calls within one probe
+  # cycle into a single subprocess.
+  @agy_usage_cache_key {__MODULE__, :agy_usage_cache}
+  @agy_usage_cache_ttl_ms 60_000
 
   @type model_quota :: %{
           model_id: String.t(),
@@ -230,127 +230,98 @@ defmodule Arbiter.Quota.CloudCode do
 
   defp gemini_models(_), do: []
 
-  # ---- Antigravity -------------------------------------------------------
+  # ---- Antigravity (bd-d7hmqn) -------------------------------------------
 
   @doc """
-  Antigravity per-model quota snapshot, or `nil` when not configured.
+  Antigravity quota snapshot, sourced directly from
+  `agy --output-format json --print "/usage"` — **never `nil`**, see the
+  moduledoc's "Flow — Antigravity" section for why every outcome (not
+  installed, not authenticated, timed out, malformed JSON, or a real reading)
+  is a snapshot with either `models` or a `message`, never a silent omission.
 
-  Reads Antigravity's own live access token from its `globalStorage` sqlite
-  state DB (see the moduledoc) — falling back to the Gemini CLI creds file
-  only if that DB is unavailable. If neither file yields a token, probes the
-  `agy` CLI's own auth chain (keyring/ADC/WIF) as a liveness check rather than
-  reporting "not configured" outright — see the moduledoc's "Antigravity
-  token precedence" section. Options:
+  Options:
 
-    * `:antigravity_state_path` — override the state DB path (tests / non-default homes)
     * `:agy_cmd` — override the `agy` executable name/path (default `"agy"`, resolved via `System.find_executable/1`)
-    * `:agy_probe` — override the liveness probe with a 0-arity fun returning `:live` / `:not_live` / `:not_installed` (tests)
-    * `:agy_probe_timeout` — max time to wait on the `agy` subprocess, ms (default 5000)
-    * `:creds_path`, `:project_id`, `:plug`, `:receive_timeout` — see `gemini/1`
+    * `:agy_usage_probe` — override the subprocess call with a 0-arity fun returning `{:ok, decoded_json} | {:error, reason}` (tests)
+    * `:agy_probe_timeout` — max time to wait on the `agy` subprocess, ms (default 8000)
+    * `:agy_usage_cache_ttl_ms` — override the memoization TTL (tests; default 60000)
   """
-  @spec antigravity(keyword()) :: snapshot() | nil
+  @spec antigravity(keyword()) :: snapshot()
   def antigravity(opts \\ []) do
-    case load_antigravity_token(opts) do
-      {:ok, token} -> fetch_antigravity(token, opts)
-      :error -> antigravity_without_token(opts)
-    end
-  end
-
-  # Neither the IDE's state.vscdb nor the Gemini CLI fallback yielded a token.
-  # That doesn't necessarily mean Antigravity has no live credential — the
-  # `agy` CLI keeps its own token in the OS keyring, invisible to us (see
-  # moduledoc). Probe it: if `agy models` succeeds, a credential *does* exist,
-  # just not one we can read to make the quota HTTP call ourselves, so we
-  # report a live-but-unreadable status instead of silently omitting
-  # Antigravity (the prior "not configured" `nil`, indistinguishable from
-  # Antigravity never having been used at all).
-  defp antigravity_without_token(opts) do
-    case agy_cli_probe(opts) do
-      :live -> snapshot("antigravity", "Unknown", [], agy_live_no_token_message())
-      _ -> nil
-    end
-  end
-
-  defp fetch_antigravity(token, opts) do
-    {project_id, plan} = resolve_antigravity_project(token, opts)
-    body = if project_id, do: %{project: project_id}, else: %{}
-
-    case post(@antigravity_quota_url, antigravity_headers(token), body, opts) do
-      {:ok, %Req.Response{status: status, body: resp}} when status in 200..299 ->
-        snapshot("antigravity", plan, antigravity_models(resp), nil)
-
-      {:ok, %Req.Response{status: 403}} ->
-        snapshot("antigravity", plan, [], "Antigravity quota API access forbidden.")
-
-      {:ok, %Req.Response{status: 401}} ->
-        snapshot("antigravity", plan, [], antigravity_expired_message(opts))
-
-      {:ok, %Req.Response{status: status}} ->
-        snapshot("antigravity", plan, [], "Antigravity quota error (#{status}).")
-
-      {:error, err} ->
-        snapshot("antigravity", plan, [], "Antigravity quota error: #{transport_message(err)}")
-    end
-  end
-
-  # A 401 on our stored token is "credential found but rejected" — but if the
-  # `agy` CLI is still live, the account itself isn't logged out, only
-  # Arbiter's file/DB copy is stale. Say so, rather than the generic message
-  # that sent this investigation (bd-4ku4ze) down the wrong path.
-  defp antigravity_expired_message(opts) do
-    case agy_cli_probe(opts) do
-      :live ->
-        "Antigravity quota token on file is stale (rejected), but the agy CLI session is " <>
-          "still authenticated — open the Antigravity IDE (or re-run `agy`) to refresh " <>
-          "the stored token."
-
-      _ ->
-        "Antigravity quota auth expired; reconnect."
-    end
-  end
-
-  defp agy_live_no_token_message do
-    "Antigravity CLI (agy) is authenticated, but Arbiter has no readable token: the IDE's " <>
-      "state.vscdb is missing or stale and there is no Gemini CLI fallback token. Open the " <>
-      "Antigravity IDE once to refresh state.vscdb, or reconnect."
-  end
-
-  defp resolve_antigravity_project(token, opts) do
-    case normalize_project_id(opts[:project_id]) do
-      pid when is_binary(pid) ->
-        {pid, "Unknown"}
-
-      nil ->
-        body = %{metadata: @client_metadata, mode: 1}
-
-        case post(@antigravity_load_url, antigravity_subscription_headers(token), body, opts) do
-          {:ok, %Req.Response{status: status, body: resp}} when status in 200..299 ->
-            {normalize_project_id(resp["cloudaicompanionProject"]), plan_name(resp, "Unknown")}
-
-          _ ->
-            {nil, "Unknown"}
+    case run_agy_usage(opts) do
+      {:ok, body} ->
+        case usage_models_from_agy(body) do
+          [] -> snapshot("antigravity", "Unknown", [], agy_malformed_message())
+          models -> snapshot("antigravity", "Unknown", models, nil)
         end
+
+      {:error, :not_installed} ->
+        snapshot("antigravity", "Unknown", [], agy_not_installed_message())
+
+      {:error, :timeout} ->
+        snapshot("antigravity", "Unknown", [], "Antigravity CLI (agy) did not respond in time.")
+
+      {:error, {:exit, status}} ->
+        snapshot(
+          "antigravity",
+          "Unknown",
+          [],
+          "Antigravity CLI (agy) is not authenticated (exit #{status}); run `agy` to sign in."
+        )
+
+      {:error, :malformed} ->
+        snapshot("antigravity", "Unknown", [], agy_malformed_message())
     end
+  rescue
+    e ->
+      Logger.debug("Arbiter.Quota.CloudCode.antigravity raised: #{Exception.message(e)}")
+      snapshot("antigravity", "Unknown", [], "Antigravity quota unavailable")
   end
 
-  defp antigravity_models(%{"models" => models}) when is_map(models) do
-    for {model_key, info} <- models,
-        is_map(info),
-        is_map(info["quotaInfo"]),
-        info["isInternal"] != true,
-        MapSet.member?(@antigravity_important_models, model_key) do
-      quota = info["quotaInfo"]
+  defp agy_not_installed_message do
+    "Antigravity CLI (agy) is not installed on this host (or not on PATH); install it and " <>
+      "run it once to authenticate before checking quota."
+  end
 
+  defp agy_malformed_message do
+    "Antigravity CLI (agy) returned unexpected data; its JSON output may have changed shape."
+  end
+
+  # `.command.data.groups[].buckets[]` — each bucket a `{window,
+  # remaining_fraction, reset_time}` triple, grouped by model family (e.g.
+  # "Gemini Models", "Claude and GPT models"). Flattened into one
+  # `model_quota()` per {group, window} pair so the existing per-model
+  # rendering needs no special-casing.
+  defp usage_models_from_agy(%{"command" => %{"data" => %{"groups" => groups}}})
+       when is_list(groups) do
+    for group <- groups,
+        is_map(group),
+        is_binary(group["name"]),
+        is_list(group["buckets"]),
+        bucket <- group["buckets"],
+        is_map(bucket),
+        is_binary(bucket["window"]),
+        not is_nil(bucket["remaining_fraction"]) do
       normalize_model(
-        model_key,
-        quota["remainingFraction"],
-        quota["resetTime"],
-        info["displayName"]
+        agy_bucket_id(group["name"], bucket["window"]),
+        bucket["remaining_fraction"],
+        bucket["reset_time"],
+        "#{group["name"]} (#{bucket["window"]})"
       )
     end
   end
 
-  defp antigravity_models(_), do: []
+  defp usage_models_from_agy(_), do: []
+
+  defp agy_bucket_id(group_name, window) do
+    slug =
+      group_name
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/, "_")
+      |> String.trim("_")
+
+    slug <> "_" <> window
+  end
 
   # ---- persistence (bd-ajh7bd) -------------------------------------------
 
@@ -362,18 +333,19 @@ defmodule Arbiter.Quota.CloudCode do
   Fetch one Google provider's live quota and upsert it into `GoogleQuota`.
 
   `which` is `:gemini` or `:antigravity`. Returns the serialized snapshot map on
-  a successful fetch (persisting a row + broadcasting `{:quota_updated, ws, view}`),
-  or `nil` when the provider isn't configured on this host (no creds) — in which
-  case **no row is written**, so a transient logout doesn't wipe the last good
-  reading.
+  a successful fetch (persisting a row + broadcasting `{:quota_updated, ws, view}`).
 
-  A fetch that *does* return (a real API error, or the "agy is live but we hold
-  no readable token" liveness-only snapshot) still writes a row — but if that
-  snapshot has no model data, the write preserves the previous row's
-  `used_percent` / `reset_at` / `snapshot` figures rather than nulling them out,
-  so a transient error or a liveness-only probe result updates the status
-  `message` without wiping the last good quota reading. `opts` are forwarded to
-  `gemini/1` / `antigravity/1`.
+  For `:gemini`, `nil` means the CLI isn't configured on this host (no creds) —
+  in which case **no row is written**, so a transient logout doesn't wipe the
+  last good reading.
+
+  For `:antigravity` (bd-d7hmqn), the fetch never returns `nil` — `agy` itself
+  determines whether it's installed/authenticated, so every call writes a row.
+  When that snapshot has no model data (agy missing / not authenticated /
+  timed out / malformed output), the write preserves the previous row's
+  `used_percent` / `reset_at` / `snapshot` figures rather than nulling them
+  out, so a transient error updates the status `message` without wiping the
+  last good quota reading. `opts` are forwarded to `gemini/1` / `antigravity/1`.
   """
   @spec refresh(String.t(), :gemini | :antigravity, keyword()) :: snapshot() | nil
   def refresh(workspace_id, which, opts \\ [])
@@ -520,9 +492,13 @@ defmodule Arbiter.Quota.CloudCode do
 
   @doc """
   Map a stored `GoogleQuota` row to the uniform two-window quota view shape the
-  topbar / `/usage` page render. Google has no time windows, so the
+  topbar / `/usage` page render. Gemini has no time windows, so the
   representative used-fraction fills the primary ("5h") slot and the secondary
-  ("7d") slot is left empty.
+  ("7d") slot is left empty. Antigravity does have explicit `5h`/`weekly`
+  windows per group, but `representative/1` collapses them to a single worst
+  bucket, so this "5h" slot may actually carry a weekly reset time; the UI
+  doesn't mislabel this today because the 5h-specific helpers are gated to
+  the `"claude"` provider and `secondary_label` stays `nil` here.
   """
   @spec view(GoogleQuota.t()) :: map()
   def view(%GoogleQuota{} = row) do
@@ -649,89 +625,74 @@ defmodule Arbiter.Quota.CloudCode do
     end
   end
 
-  # Antigravity's own token, read from its globalStorage sqlite state DB (see
-  # moduledoc). Falls back to the Gemini CLI creds file as a last resort only
-  # if the state DB isn't readable — Antigravity and Gemini CLI are separate
-  # OAuth clients, so that fallback is a degraded-but-better-than-nothing path,
-  # not the primary source.
-  defp load_antigravity_token(opts) do
-    case load_antigravity_state_token(opts) do
-      {:ok, token} -> {:ok, token}
-      :error -> load_access_token(opts)
-    end
-  end
-
-  # Liveness probe for the `agy` CLI's own auth chain (keyring → ADC → WIF →
-  # file — see moduledoc). We never attempt to read the keyring's attribute
-  # schema directly (brittle, duplicates auth logic the CLI already owns);
-  # instead we shell out and let `agy` tell us whether *it* considers itself
-  # authenticated. `:live` / `:not_live` / `:not_installed` — never raises.
-  defp agy_cli_probe(opts) do
-    case opts[:agy_probe] do
+  # Run `agy --output-format json --print "/usage"` off-process — see
+  # moduledoc's "Flow — Antigravity". `{:ok, decoded_json}` on a clean `0`
+  # exit with parseable JSON, else `{:error, :not_installed | :timeout |
+  # {:exit, status} | :malformed}`. Never raises. Injectable via
+  # `opts[:agy_usage_probe]` (a 0-arity fun) so tests never shell out.
+  defp run_agy_usage(opts) do
+    case opts[:agy_usage_probe] do
       fun when is_function(fun, 0) -> fun.()
-      _ -> agy_cli_probe_default(opts)
+      _ -> agy_usage_default(opts)
     end
   end
 
-  # A stale `state.vscdb` / degraded token is permanent by construction until
-  # the IDE reopens, so without caching `CloudProbe`'s 5-minute heartbeat
-  # (`Arbiter.Quota.CloudProbe.@default_interval_ms`) would spawn the ~199 MB
-  # `agy` binary — and the network call + backgrounded language-server it
-  # spawns (see `run_agy_probe/2`'s moduledoc) — forever, on every cycle, for
-  # every workspace. Memoize the outcome in `:persistent_term` for a few
-  # probe cycles so the real subprocess only runs occasionally.
-  @agy_probe_cache_key {__MODULE__, :agy_probe_cache}
-  @agy_probe_cache_ttl_ms 900_000
-
-  defp agy_cli_probe_default(opts) do
+  # Same memoization rationale as the liveness probe this replaces: `agy` is a
+  # large binary that backgrounds its own language server, and `CloudProbe`
+  # fans this call out across every workspace on each probe cycle. Cache the
+  # outcome briefly so those near-simultaneous per-workspace calls collapse
+  # into one subprocess, without holding stale quota figures too long.
+  defp agy_usage_default(opts) do
     cmd = opts[:agy_cmd] || Application.get_env(:arbiter, :agy_cmd) || "agy"
-    ttl = Keyword.get(opts, :agy_probe_cache_ttl_ms, @agy_probe_cache_ttl_ms)
+    ttl = Keyword.get(opts, :agy_usage_cache_ttl_ms, @agy_usage_cache_ttl_ms)
     now = System.monotonic_time(:millisecond)
 
-    case :persistent_term.get(@agy_probe_cache_key, nil) do
+    case :persistent_term.get(@agy_usage_cache_key, nil) do
       {^cmd, result, cached_at} when now - cached_at < ttl ->
         result
 
       _ ->
         result =
           case System.find_executable(cmd) do
-            nil -> :not_installed
-            path -> run_agy_probe(path, opts)
+            nil -> {:error, :not_installed}
+            path -> shell_out_agy_usage(path, opts)
           end
 
-        :persistent_term.put(@agy_probe_cache_key, {cmd, result, now})
+        :persistent_term.put(@agy_usage_cache_key, {cmd, result, now})
         result
     end
   rescue
-    _ -> :not_installed
+    _ -> {:error, :not_installed}
   end
 
-  # Run `agy models` off-process with a hard timeout — a hung/prompting CLI
-  # must never block `arb quota`. `Task.shutdown/2` on timeout closes our end
-  # of the port, but that only makes Erlang stop *waiting* on the OS process —
-  # it does not signal it, so a hung `agy` would otherwise be abandoned and
-  # keep running. To get an actual OS-side kill, we wrap the invocation in the
-  # `timeout` coreutil, which sends the signal itself once its own deadline
-  # elapses, independent of whether Erlang is still watching.
+  # Run the subprocess with a hard timeout — a hung/prompting CLI must never
+  # block `arb quota`. `Task.shutdown/2` on timeout only stops Erlang
+  # *waiting* on the OS process, so we wrap the invocation in the `timeout`
+  # coreutil to get an actual OS-side kill independent of whether Erlang is
+  # still watching (mirrors the old liveness probe's `run_agy_probe/2`).
   #
-  # `agy` backgrounds its own language-server process, which inherits
-  # whatever file descriptor its stdout points at. When we capture output via
-  # a plain `System.cmd/3` pipe, Erlang's port driver blocks waiting for that
-  # pipe's write end to close — but the backgrounded grandchild keeps it open
+  # `agy` backgrounds its own language-server process, which inherits whatever
+  # file descriptor its stdout points at. Capturing output via a plain
+  # `System.cmd/3` pipe would make Erlang's port driver block waiting for that
+  # pipe's write end to close — the backgrounded grandchild keeps it open
   # indefinitely, so the port never sees EOF even though `agy` itself exits
-  # immediately. Routing stdout/stderr through `/dev/null` (a real sink, not
-  # a pipe) instead of capturing it sidesteps this entirely.
-  defp run_agy_probe(path, opts) do
-    timeout = Keyword.get(opts, :agy_probe_timeout, 5_000)
+  # immediately. Redirecting stdout to a real file at the shell level (not a
+  # pipe `System.cmd` itself reads) sidesteps this entirely, so we can capture
+  # the JSON body without hitting the deadlock the liveness probe worked
+  # around by discarding output altogether.
+  defp shell_out_agy_usage(path, opts) do
+    timeout = Keyword.get(opts, :agy_probe_timeout, @default_agy_usage_timeout_ms)
     timeout_s = max(1, ceil(timeout / 1000))
+    tmp = agy_usage_tmp_path()
 
     task =
       Task.async(fn ->
         try do
           System.cmd("/bin/sh", [
             "-c",
-            ~s(exec timeout -k 1 #{timeout_s} "$0" models >/dev/null 2>&1 </dev/null),
-            path
+            ~s(exec timeout -k 1 #{timeout_s} "$0" #{Enum.join(@agy_usage_args, " ")} >"$1" 2>/dev/null </dev/null),
+            path,
+            tmp
           ])
         rescue
           _ -> {"", 1}
@@ -740,56 +701,64 @@ defmodule Arbiter.Quota.CloudCode do
         end
       end)
 
-    case Task.yield(task, timeout + 1_000) do
-      {:ok, {_out, 0}} ->
-        :live
-
-      {:ok, _other} ->
-        :not_live
-
-      nil ->
-        Task.shutdown(task, :brutal_kill)
-        :not_live
-    end
-  end
-
-  defp load_antigravity_state_token(opts) do
-    path =
-      opts[:antigravity_state_path] ||
-        Application.get_env(:arbiter, :antigravity_state_path) ||
-        @default_antigravity_state_path
-
-    expanded = Path.expand(path)
-
-    with true <- File.exists?(expanded),
-         {:ok, raw} <- read_item_table_value(expanded, @antigravity_auth_status_key),
-         {:ok, %{"apiKey" => token}} <- Jason.decode(raw),
-         true <- is_binary(token) and token != "" do
-      {:ok, token}
-    else
-      _ -> :error
-    end
-  end
-
-  # Read a single value out of a VS Code-style `ItemTable (key, value)` sqlite
-  # DB, read-only, without pulling in a full Ecto repo for one lookup.
-  defp read_item_table_value(db_path, key) do
-    with {:ok, db} <- Exqlite.Sqlite3.open(db_path, mode: :readonly) do
+    outcome =
       try do
-        with {:ok, stmt} <-
-               Exqlite.Sqlite3.prepare(db, "SELECT value FROM ItemTable WHERE key = ?"),
-             :ok <- Exqlite.Sqlite3.bind(stmt, [key]),
-             {:row, [value]} <- Exqlite.Sqlite3.step(db, stmt) do
-          {:ok, to_string(value)}
-        else
-          _ -> :error
+        case Task.yield(task, timeout + 3_000) do
+          {:ok, {_out, 0}} ->
+            read_agy_usage_output(tmp)
+
+          # `timeout -k 1` kills with SIGTERM at the deadline and SIGKILL a
+          # second later; either way the shell reports 124/137 for a
+          # subprocess that overran, not an auth failure. Without this clause
+          # a merely-slow `agy` gets reported as "not authenticated".
+          {:ok, {_out, status}} when status in [124, 137] ->
+            {:error, :timeout}
+
+          {:ok, {_out, status}} ->
+            {:error, {:exit, status}}
+
+          {:exit, _reason} ->
+            {:error, :malformed}
+
+          nil ->
+            Task.shutdown(task, :brutal_kill)
+            {:error, :timeout}
         end
       after
-        Exqlite.Sqlite3.close(db)
+        File.rm_rf(agy_usage_tmp_dir(tmp))
       end
+
+    outcome
+  end
+
+  # A private, unpredictably-named directory (not just a file) so the shell's
+  # `>"$1"` redirect can't be steered onto an attacker-planted symlink in the
+  # world-writable /tmp, and so `agy`'s raw JSON (whatever it may contain)
+  # isn't world-readable for the subprocess's lifetime the way a bare 0644
+  # temp file would be.
+  defp agy_usage_tmp_path do
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "arbiter-agy-#{Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)}"
+      )
+
+    File.mkdir!(dir)
+    File.chmod!(dir, 0o700)
+    Path.join(dir, "usage.json")
+  end
+
+  defp agy_usage_tmp_dir(tmp), do: Path.dirname(tmp)
+
+  # No token material ever passes through here — only the decoded JSON body,
+  # which callers parse down to `remaining_fraction` / `window` / `reset_time`.
+  defp read_agy_usage_output(tmp) do
+    with {:ok, raw} <- File.read(tmp),
+         {:ok, decoded} <- Jason.decode(raw) do
+      {:ok, decoded}
+    else
+      _ -> {:error, :malformed}
     end
-  rescue
-    _ -> :error
   end
 
   # ---- HTTP --------------------------------------------------------------
@@ -798,26 +767,6 @@ defmodule Arbiter.Quota.CloudCode do
     [
       {"authorization", "Bearer " <> token},
       {"content-type", "application/json"}
-    ]
-  end
-
-  defp antigravity_headers(token) do
-    [
-      {"authorization", "Bearer " <> token},
-      {"content-type", "application/json"},
-      {"user-agent", @antigravity_user_agent},
-      {"x-client-name", "antigravity"},
-      {"x-client-version", @antigravity_client_version},
-      {"x-request-source", "local"}
-    ]
-  end
-
-  defp antigravity_subscription_headers(token) do
-    [
-      {"authorization", "Bearer " <> token},
-      {"content-type", "application/json"},
-      {"user-agent", @antigravity_user_agent},
-      {"x-request-source", "local"}
     ]
   end
 
