@@ -1111,6 +1111,112 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert is_nil(task.difficulty)
     end
 
+    test "GitHub: 'bug' label populates task.issue_type, not the :feature schema default",
+         %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload(%{"labels" => [%{"name" => "bug"}]}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.issue_type == :bug
+    end
+
+    test "GitHub: no issue-type-mappable label leaves task.issue_type on the :feature default",
+         %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.issue_type == :feature
+    end
+
+    test "an explicit :difficulty opt overrides the issue's difficulty label", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload(%{"labels" => [%{"name" => "difficulty: 0"}]}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43", difficulty: 4)
+      assert task.difficulty == 4
+    end
+
+    # Regression test for bd-ckpgsi: claiming used to silently drop
+    # difficulty, issue_type and repo, requiring a follow-up task_update after
+    # every claim. All three must survive a single claim call.
+    test "difficulty, issue_type and repo all survive a claim that specifies them",
+         %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload(%{"labels" => [%{"name" => "bug"}]}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} =
+               Claim.claim(ws, "43", difficulty: 3, repo: "emricare/tonic")
+
+      assert task.difficulty == 3
+      assert task.issue_type == :bug
+      assert task.repo == "emricare/tonic"
+    end
+
     test "Jira: Highest priority maps to P0 — priority 0 is highest", %{jira_ws: ws} do
       payload =
         jira_issue_payload(%{

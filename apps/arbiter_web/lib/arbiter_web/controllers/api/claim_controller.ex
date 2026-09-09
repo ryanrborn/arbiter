@@ -11,7 +11,10 @@ defmodule ArbiterWeb.Api.ClaimController do
   Routes:
 
     * `POST /api/workspaces/:workspace_id/claim` — claim one issue by ref.
-      Body: `{"ref": "42", "force": false}`. Returns the task JSON.
+      Body: `{"ref": "42", "force": false, "difficulty": 3, "repo": "org/repo"}`.
+      `difficulty` and `repo` are optional and, when given, override whatever
+      `Arbiter.Tasks.Claim.claim/3` would otherwise derive from the issue
+      (difficulty from labels) or leave unset (repo). Returns the task JSON.
     * `GET  /api/workspaces/:workspace_id/sync/plan` — dry-run reconcile.
       Returns the list of planned actions without acting.
     * `POST /api/workspaces/:workspace_id/sync` — apply reconcile.
@@ -31,7 +34,9 @@ defmodule ArbiterWeb.Api.ClaimController do
 
     with :ok <- require_string(ref, "ref"),
          {:ok, workspace} <- get_workspace(workspace_id),
-         {:ok, status, task} <- Claim.claim(workspace, ref, force: force?) do
+         {:ok, claim_opts} <- claim_opts(params),
+         {:ok, status, task} <-
+           Claim.claim(workspace, ref, Keyword.put(claim_opts, :force, force?)) do
       conn
       |> put_status(status_code_for(status))
       |> json(%{
@@ -158,6 +163,49 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   defp require_string(_v, name),
     do: {:error, {:invalid_request, "#{name} is required"}}
+
+  defp claim_opts(params) do
+    with {:ok, difficulty} <- fetch_optional_integer(params, "difficulty", 0..5),
+         {:ok, repo} <- fetch_optional_string(params, "repo") do
+      {:ok, [difficulty: difficulty, repo: repo]}
+    end
+  end
+
+  defp fetch_optional_integer(params, key, range) do
+    case Map.get(params, key) do
+      nil ->
+        {:ok, nil}
+
+      v when is_integer(v) ->
+        integer_in_range(v, key, range)
+
+      v when is_binary(v) ->
+        case Integer.parse(v) do
+          {n, ""} -> integer_in_range(n, key, range)
+          _ -> {:error, {:invalid_request, "#{key} must be an integer"}}
+        end
+
+      _ ->
+        {:error, {:invalid_request, "#{key} must be an integer"}}
+    end
+  end
+
+  defp integer_in_range(n, key, first..last//_ = range) do
+    if n in range do
+      {:ok, n}
+    else
+      {:error, {:invalid_request, "#{key} #{n} out of range #{first}..#{last}"}}
+    end
+  end
+
+  defp fetch_optional_string(params, key) do
+    case Map.get(params, key) do
+      nil -> {:ok, nil}
+      "" -> {:ok, nil}
+      v when is_binary(v) -> {:ok, v}
+      _ -> {:error, {:invalid_request, "#{key} must be a string"}}
+    end
+  end
 
   defp truthy?(true), do: true
   defp truthy?("true"), do: true

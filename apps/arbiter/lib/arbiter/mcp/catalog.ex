@@ -1187,7 +1187,10 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Claim an external tracker issue into a task (`arb claim <issue#>`). Verifies the issue is " <>
           "assigned to the workspace user (skip with `force: true`) and creates a linked task. " <>
-          "Idempotent — returns the existing task if one already references the issue.",
+          "Idempotent — returns the existing task if one already references the issue. " <>
+          "`difficulty` and `issue_type` are otherwise derived from the issue's tracker labels " <>
+          "where the adapter supports it (currently GitHub); `difficulty` and `repo` below " <>
+          "override whatever would otherwise be derived or left unset.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1198,6 +1201,19 @@ defmodule Arbiter.MCP.Catalog do
           "force" => %{
             "type" => "boolean",
             "description" => "Skip the assignment-as-claim check (default false)."
+          },
+          "difficulty" => %{
+            "type" => "integer",
+            "description" =>
+              "0 (D0, trivial) .. 5 (D5). Overrides any value derived from the issue's " <>
+                "labels. Omit to keep the derived value (or nil, which routing treats as D2)."
+          },
+          "repo" => %{
+            "type" => "string",
+            "description" =>
+              "The repo this task belongs to, as a configured `repo_paths` key " <>
+                "(e.g. \"emricare/tonic\"). Optional — only needed in a multi-repo workspace, " <>
+                "where dispatch otherwise can't tell which checkout the claimed issue is for."
           }
         },
         "required" => ["ref"],

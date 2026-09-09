@@ -188,6 +188,45 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       assert json_response(conn, 201)
     end
 
+    test "difficulty and repo in the body are persisted on the created task",
+         %{conn: conn, gh: ws} do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload(%{"labels" => [%{"name" => "bug"}]}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      conn =
+        post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{
+          "ref" => "43",
+          "difficulty" => 3,
+          "repo" => "emricare/tonic"
+        })
+
+      body = json_response(conn, 201)
+      assert body["task"]["difficulty"] == 3
+      assert body["task"]["issue_type"] == "bug"
+      assert body["task"]["repo"] == "emricare/tonic"
+    end
+
+    test "400 when difficulty is out of range", %{conn: conn, gh: ws} do
+      conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{"ref" => "43", "difficulty" => 9})
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
     test "400 when ref is missing", %{conn: conn, gh: ws} do
       conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
