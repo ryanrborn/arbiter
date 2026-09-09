@@ -215,6 +215,44 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       assert keys_for_workspace(ws.id) == [ws.id]
       assert PRPatrol.state(pid).repo == "12345"
     end
+
+    # bd-7rxwzc: vstim's shape — a `merge.config.project_id` (needed by the
+    # GitLab merger adapter to query the forge) AND a `repo_paths` entry
+    # (needed by `Dispatch.dispatch/2` to resolve a worktree). Before the fix,
+    # `patrol_repos/1` used the bare numeric `project_id` as `repo`, which is
+    # threaded straight into `Dispatch.dispatch/2`'s `repo:` opt — but
+    # `repo_paths` is keyed by repo name, never by a forge project id, so that
+    # dispatch fails with `{:repo_not_found, "68258632"}` deterministically,
+    # forever. `repo` must resolve against `repo_paths` instead, exactly like
+    # the multi-repo case below.
+    test "prefers a repo_paths-derived slug over the numeric project_id" do
+      repo_path = git_repo_with_origin("git@gitlab.com:emricare/vstim.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "gl-vstim-#{System.unique_integer([:positive])}",
+          prefix: "gv#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "project_id" => 68_258_632,
+                "credentials_ref" => "env:GITLAB_TOKEN"
+              }
+            },
+            "repo_paths" => %{"vstim" => repo_path}
+          }
+        })
+
+      open_pr_task!(ws, "!189")
+
+      assert {:ok, pid} = start(ws)
+      assert is_pid(pid) and Process.alive?(pid)
+
+      assert keys_for_workspace(ws.id) == [ws.id]
+      assert PRPatrol.state(pid).repo == "emricare/vstim"
+    end
   end
 
   describe "start_patrol/2 — gitlab multi-repo workspace (emricare/vstim shape)" do
