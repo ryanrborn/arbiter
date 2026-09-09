@@ -425,6 +425,16 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert conn.resp_body =~ "arbiter-mcp session=#{session_id}"
     end
 
+    test "the SSE stream includes the mandatory endpoint event", ctx do
+      conn = sse(ctx.conn, ctx.coordinator_token)
+
+      assert conn.status == 200
+      # The endpoint event must be present in the response body
+      assert conn.resp_body =~ "event: endpoint"
+      # The endpoint URI should be the request path
+      assert conn.resp_body =~ "data: /mcp"
+    end
+
     test "a worker token is rejected on GET (401) — workspace isolation holds", ctx do
       conn = sse(ctx.conn, ctx.worker_token)
       assert json_response(conn, 401)["error"]["type"] == "unauthorized"

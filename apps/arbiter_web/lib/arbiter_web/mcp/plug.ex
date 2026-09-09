@@ -148,7 +148,17 @@ defmodule ArbiterWeb.MCP.Plug do
       |> put_resp_content_type("text/event-stream")
       |> send_chunked(200)
 
-    case chunk(conn, ": arbiter-mcp session=#{session_id}\n\n") do
+    uri = conn.request_path <> if(conn.query_string != "", do: "?" <> conn.query_string, else: "")
+
+    payload = """
+    : arbiter-mcp session=#{session_id}
+
+    event: endpoint
+    data: #{uri}
+
+    """
+
+    case chunk(conn, payload) do
       {:ok, conn} -> sse_loop(conn, sse_deadline())
       {:error, _closed} -> conn
     end
