@@ -348,6 +348,58 @@ defmodule Arbiter.Worker.DispatchTest do
       assert result.task.status == :in_progress
     end
 
+    # bd-bw3466: `preflight_opts/1` used to Keyword.take a fixed list that
+    # excluded `:workspace`, so the probe ran with no workspace in hand and
+    # `Claude.spawn_env/1` injected no CLAUDE_CODE_OAUTH_TOKEN — on an install
+    # that configures the token per-workspace (`worker_env`, the supported
+    # way) every dispatch failed its own preflight before a worker spawned.
+    #
+    # A second workspace with a *different* token is deliberate: it makes the
+    # install-wide fallback in ConfigDir.oauth_token/1 ambiguous, so the only
+    # way the probe can see a token is the workspace being threaded through
+    # `preflight_opts/1`. Without the second workspace this test passes even
+    # against the bug.
+    #
+    # The probe below exits 0 only if the workspace's token reached its env, so
+    # a regression turns this into {:error, {:auth_check_failed, _}}. Getting
+    # to :missing_worktree proves the preflight passed.
+    @tag :capture_log
+    test "the preflight probe inherits the workspace's worker_env OAuth token" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "preflight-worker-env-ws",
+          prefix: "pf",
+          worker_env: %{
+            "CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "ws-preflight-token", "secret" => true}
+          }
+        })
+
+      {:ok, _other} =
+        Ash.create(Workspace, %{
+          name: "preflight-other-ws",
+          prefix: "po",
+          worker_env: %{
+            "CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "other-token", "secret" => true}
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "preflight token", workspace_id: ws.id})
+
+      assert {:error, :missing_worktree} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 provision_worktree: false,
+                 claude_command: ["sh", "-c", "exit 0"],
+                 probe_command: [
+                   "sh",
+                   "-c",
+                   ~s{test "$CLAUDE_CODE_OAUTH_TOKEN" = "ws-preflight-token"}
+                 ]
+               )
+    end
+
     test "preflight: false bypasses the probe even with start_claude", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
 
