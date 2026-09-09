@@ -147,6 +147,36 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     end
 
+    # bd-2y0gd5's trap, re-armed by this guard: `Arbiter.Worker.Registry` also
+    # holds NON-worker entries under `:`-separated keys for the same task — the
+    # `Arbiter.Worker.Watchdog` at `<task_id>:watchdog` most of all. Probing one
+    # with `:snapshot` kills it. The scan must only ever touch `Arbiter.Worker`
+    # children of `Arbiter.Worker.Supervisor`.
+    test "a non-worker registry entry neither blocks a start nor is probed", %{
+      ws: ws,
+      task: task
+    } do
+      test_pid = self()
+
+      squatter =
+        spawn(fn ->
+          {:ok, _} = Registry.register(Arbiter.Worker.Registry, task.id <> ":watchdog", nil)
+          send(test_pid, :registered)
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive :registered, 1_000
+
+      assert {:ok, pid} = start_worker(ws, task, [])
+      assert is_pid(pid)
+      assert Process.alive?(squatter), "the non-worker registry entry was probed to death"
+
+      send(squatter, :stop)
+    end
+
     test "an explicit opt-out still starts a second worker", %{ws: ws, task: task} do
       primary = start_worker!(ws, task, [])
       :ok = Worker.advance(primary, :claude)

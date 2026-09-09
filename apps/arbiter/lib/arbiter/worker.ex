@@ -353,9 +353,13 @@ defmodule Arbiter.Worker do
   # prevent. `arb worker stop <task-id>` is the documented way out, and the
   # refusal message says so.
   defp active_sibling(task_id, requested_key) do
+    workers = worker_pids()
+
     task_id
     |> PRegistry.live_exclusive_for()
-    |> Enum.reject(fn {key, pid} -> key == requested_key or pid == self() end)
+    |> Enum.reject(fn {key, pid} ->
+      key == requested_key or pid == self() or not MapSet.member?(workers, pid)
+    end)
     |> Enum.find_value(fn {key, pid} ->
       status = probe_status(pid)
 
@@ -369,6 +373,27 @@ defmodule Arbiter.Worker do
         }
       end
     end)
+  end
+
+  # Only actual `Arbiter.Worker` processes may be probed with `:snapshot`.
+  # `Arbiter.Worker.Registry` also holds non-worker entries under this task's
+  # `:`-separated keys — `<task_id>:watchdog` (an `Arbiter.Worker.Watchdog`,
+  # supervised elsewhere) among them — and calling `:snapshot` on one of those
+  # crashes it, which is the bd-2y0gd5 trap `list_children/0` documents. Same
+  # discriminator as `list_children/0`: a `:worker` child of
+  # `Arbiter.Worker.Supervisor` whose module is this one.
+  defp worker_pids do
+    Arbiter.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_id, pid, :worker, [__MODULE__]} when is_pid(pid) -> [pid]
+      _ -> []
+    end)
+    |> MapSet.new()
+  rescue
+    _ -> MapSet.new()
+  catch
+    :exit, _ -> MapSet.new()
   end
 
   defp probe_status(pid) do
