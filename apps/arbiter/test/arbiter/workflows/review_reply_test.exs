@@ -312,6 +312,100 @@ defmodule Arbiter.Workflows.ReviewReplyTest do
     test "returns bad_state when :thread_context is missing" do
       assert {:error, {:bad_state, _}} = ReviewReply.run_step(:compose_reply, %{})
     end
+
+    test "strips a leading CLI stdin-diagnostic line from an otherwise-correct composer reply" do
+      # Defensive strip (bd-79s7i1 ask 3): even if a composer hands back a body
+      # that begins with the CLI's stdin-timeout warning — the exact shape the
+      # bug produced — the workflow must not post it. Assert on the composed
+      # body, not on how the composer was invoked.
+      leaked =
+        "Warning: no stdin data received in 3s, proceeding without it. If piping " <>
+          "from a slow command, redirect stdin explicitly: < /dev/null to skip, " <>
+          "or wait longer.\nThe actual reply content goes here."
+
+      state = %{
+        thread_context: "ctx",
+        reply_composer: fn _ctx, _state -> {:ok, leaked} end
+      }
+
+      assert {:ok, %{reply_body: body}} = ReviewReply.run_step(:compose_reply, state)
+      assert body == "The actual reply content goes here."
+      refute body =~ "Warning: no stdin data received"
+    end
+
+    test "leaves a reply body untouched when it carries no diagnostic prefix" do
+      state = %{
+        thread_context: "ctx",
+        reply_composer: fn _ctx, _state -> {:ok, "Nothing suspicious here."} end
+      }
+
+      assert {:ok, %{reply_body: "Nothing suspicious here."}} =
+               ReviewReply.run_step(:compose_reply, state)
+    end
+
+    test "returns compose_failed when the diagnostic strip leaves nothing behind" do
+      state = %{
+        thread_context: "ctx",
+        reply_composer: fn _ctx, _state ->
+          {:ok, "Warning: no stdin data received in 3s, proceeding without it.\n"}
+        end
+      }
+
+      assert {:error, {:compose_failed, :empty_reply}} =
+               ReviewReply.run_step(:compose_reply, state)
+    end
+  end
+
+  # ==========================================================================
+  # :compose_reply — default composer's CLI invocation (bd-79s7i1)
+  # ==========================================================================
+
+  describe "default composer (real `claude` CLI invocation)" do
+    # Regression coverage for bd-79s7i1: the default composer used to shell
+    # out with no stdin redirection and `stderr_to_stdout: true`, so a CLI
+    # that timed out waiting on an unfed stdin pipe had its "no stdin data
+    # received" warning spliced onto the front of the reply. This stubs
+    # `claude` on PATH with a script that reproduces that exact CLI behavior
+    # (see test/fixtures/review_reply_stdin_timeout.sh) and asserts the
+    # composed body never carries it. The fixture also emits a second stderr
+    # line the defensive regex does not match, so this only passes if stderr
+    # is genuinely kept separate from stdout — a regex-only fix would fail
+    # this assertion even though it passes the compose_reply tests above.
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-review-reply-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      stub = Path.join(tmp, "claude")
+
+      fixture =
+        Path.expand("../../fixtures/review_reply_stdin_timeout.sh", __DIR__)
+
+      File.cp!(fixture, stub)
+      File.chmod!(stub, 0o755)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{tmp}:#{old_path}")
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      :ok
+    end
+
+    test "composed body never begins with the CLI's stdin-timeout warning" do
+      state = %{thread_context: "File: lib/foo.ex\n\nThread:\nauthor: Why?"}
+
+      assert {:ok, %{reply_body: body}} = ReviewReply.run_step(:compose_reply, state)
+      refute body =~ "Warning: no stdin data received"
+      refute body =~ "Notice: some other CLI diagnostic."
+      assert body == "This is the composed reply body."
+    end
   end
 
   # ==========================================================================

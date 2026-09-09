@@ -60,10 +60,20 @@ defmodule Arbiter.Workflows.ReviewReply do
     steps: [:read_thread, :compose_reply, :post_reply]
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.Claude, as: ClaudeAdapter
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Mergers
 
   require Logger
+
+  # A future CLI change could reintroduce a different stdin/startup diagnostic
+  # on this same path (bd-79s7i1) — this strip is a backstop, not the fix.
+  # The structural fix is in `default_compose/2`: stdin is explicitly closed
+  # (`< /dev/null`) via `ClaudeAdapter.build_argv/3` so the CLI never times out
+  # waiting for input, and only stdout is captured (stderr is left to inherit
+  # the parent's, never merged in), so a diagnostic can't ride into the body
+  # via either route.
+  @cli_diagnostic_line ~r/\A\s*Warning: no stdin data received[^\n]*\n?/
 
   step(:read_thread,
     description: "Validate thread input and assemble context string",
@@ -106,7 +116,13 @@ defmodule Arbiter.Workflows.ReviewReply do
 
     case composer.(ctx, state) do
       {:ok, body} when is_binary(body) and body != "" ->
-        {:ok, Map.put(state, :reply_body, String.trim(body))}
+        body = body |> String.trim_leading() |> strip_cli_diagnostic() |> String.trim()
+
+        if body == "" do
+          {:error, {:compose_failed, :empty_reply}}
+        else
+          {:ok, Map.put(state, :reply_body, body)}
+        end
 
       {:ok, _} ->
         {:error, {:compose_failed, :empty_reply}}
@@ -218,11 +234,23 @@ defmodule Arbiter.Workflows.ReviewReply do
     Application.get_env(:arbiter, :review_reply_composer) || (&default_compose/2)
   end
 
-  # `System.cmd/3` spawns the executable directly (`:spawn_executable`) — no
-  # shell, so there is no metacharacter injection to have. `path` is the
-  # Claude CLI location resolved from Arbiter's own agent config, not from a
-  # request or a task field.
-  # sobelow_skip ["CI.System"]
+  defp strip_cli_diagnostic(body), do: Regex.replace(@cli_diagnostic_line, body, "")
+
+  # `ClaudeAdapter.build_argv/3` wraps the spawn in `sh -c 'exec "$@" <
+  # /dev/null'` (or the stdin-tmpfile variant for an oversized prompt) — the
+  # same E2BIG-safe, stdin-closed invocation every other Claude spawn in
+  # Arbiter uses. Before this fix this composer called `System.cmd/3`
+  # directly with no stdin redirection at all and `stderr_to_stdout: true`,
+  # so a stdin pipe that was never written left the CLI waiting, it emitted
+  # its "no stdin data received in 3s" warning, and `stderr_to_stdout`
+  # spliced that warning onto the front of the captured output — which this
+  # composer then posted verbatim as the reply body (bd-79s7i1). Closing
+  # stdin explicitly means the CLI never waits and never warns; capturing
+  # only stdout (no `stderr_to_stdout`) means a diagnostic printed to stderr
+  # can't reach the body even if the CLI's behavior changes again. `path` is
+  # the Claude CLI location resolved from Arbiter's own agent config, not
+  # from a request or a task field, so there's no shell-injection surface in
+  # `sh -c` here.
   defp default_compose(thread_context, _state) do
     case System.find_executable("claude") do
       nil ->
@@ -230,23 +258,41 @@ defmodule Arbiter.Workflows.ReviewReply do
 
       path ->
         prompt = build_prompt(thread_context)
-        args = ["--print", prompt, "--output-format", "text"]
+        flags = compose_flags()
 
-        # Append the review_agent model when seeded (Agents.prepare/2 puts the
-        # config in the process dict; Claude.Config reads it back here).
-        args =
-          case ClaudeConfig.active_model() do
-            model when is_binary(model) and model != "" -> args ++ ["--model", model]
-            _ -> args
-          end
-
-        case System.cmd(path, args, stderr_to_stdout: true) do
-          {output, 0} -> {:ok, output}
-          {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
+        with {:ok, argv} <- ClaudeAdapter.build_argv(path, prompt, flags) do
+          run_claude(argv)
         end
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  defp compose_flags do
+    flags = ["--output-format", "text"]
+
+    # Append the review_agent model when seeded (Agents.prepare/2 puts the
+    # config in the process dict; Claude.Config reads it back here).
+    case ClaudeConfig.active_model() do
+      model when is_binary(model) and model != "" -> flags ++ ["--model", model]
+      _ -> flags
+    end
+  end
+
+  # `argv` comes from `ClaudeAdapter.build_argv/3` above, built from `path`
+  # (resolved from Arbiter's own agent config, never a request field), so
+  # there's no shell-injection surface here.
+  # sobelow_skip ["CI.System"]
+  defp run_claude([cmd | args] = argv) do
+    case System.cmd(cmd, args) do
+      {output, 0} -> {:ok, output}
+      {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
+    end
+  after
+    case ClaudeAdapter.prompt_tmpfile(argv) do
+      nil -> :ok
+      tmp -> File.rm(tmp)
+    end
   end
 
   defp prepare_review_agent(%{workspace: ws}) when not is_nil(ws),
