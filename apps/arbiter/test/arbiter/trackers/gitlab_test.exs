@@ -601,6 +601,14 @@ defmodule Arbiter.Trackers.GitlabTest do
       assert Gitlab.extract_difficulty(%{"labels" => ["difficulty: 2"]}) == {:ok, 2}
       assert Gitlab.extract_difficulty(%{"labels" => []}) == nil
     end
+
+    test "difficulty accepts D5 while priority still stops at P4 (#1519)" do
+      # The two labels shared one parser before #1519; the difficulty scale now
+      # runs one rung higher than the priority scale.
+      assert Gitlab.extract_difficulty(%{"labels" => ["difficulty: 5"]}) == {:ok, 5}
+      assert Gitlab.extract_difficulty(%{"labels" => ["difficulty: 6"]}) == nil
+      assert Gitlab.extract_priority(%{"labels" => ["priority: 5"]}) == nil
+    end
   end
 
   describe "check_prior_claim/1" do

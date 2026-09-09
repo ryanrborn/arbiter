@@ -1033,7 +1033,19 @@ defmodule Arbiter.Trackers.Linear do
   defp points_to_difficulty(buckets, pts) do
     case Enum.find(buckets, fn {max, _} -> pts <= max end) do
       {_, d} -> d
-      nil -> 4
+      nil -> over_ceiling_difficulty(buckets)
     end
+  end
+
+  # Points above the top bucket land at D4 ("extreme") — the stock behaviour,
+  # and the reason the default table stops at D3: D5 is never reached by an
+  # implicit fallthrough. #1519: if an operator explicitly configured a bucket
+  # above D4, honour it here too, otherwise a high point count would map
+  # *lower* than a smaller one.
+  defp over_ceiling_difficulty(buckets) do
+    buckets
+    |> Enum.map(fn {_, d} -> d end)
+    |> Enum.max(fn -> 4 end)
+    |> max(4)
   end
 end
