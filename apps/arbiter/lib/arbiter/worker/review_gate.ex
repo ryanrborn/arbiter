@@ -361,6 +361,128 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  @typedoc """
+  Which line source produced the verdict — `:memory` for the caller's own
+  (bounded) buffer, `:transcript` for the durable per-run log, `:none` when
+  neither had one.
+  """
+  @type verdict_source :: :memory | :transcript | :none
+
+  @doc """
+  Parse a reviewer's verdict, falling back to the run's **durable transcript**
+  before conceding `:no_verdict` — and logging which source saw what either way.
+
+  Three different line buffers feed verdict parsing, and each can be missing the
+  sentinel for a different reason:
+
+    * `meta[:output_lines]` — `Arbiter.Worker.ClaudeSession` keeps only the most
+      recent 1000 emitted lines, and `Arbiter.Worker` persists only the last 500
+      of those. A cap drops the OLDEST lines, so a reviewer that prints
+      `VERDICT:` and then produces more than 1000 lines of findings evicts its
+      own sentinel.
+    * `ReviewGate.state.lines` — the gate's own live PubSub capture. It is not
+      capped, but it is assembled from broadcasts: a line emitted before this
+      pass subscribed, or still in flight when the pass is finished, is simply
+      absent. This buffer loses its NEWEST lines — the opposite end from a cap.
+    * `Arbiter.Worker.OutputLog` — the durable per-run transcript. Uncapped,
+      keyed by `run_id`, written straight through on every emitted line.
+
+  The first two are lossy in opposite directions, so the recovery must not care
+  which end went missing: on any miss, re-parse the durable transcript.
+
+  bd-6dxit2 measured which of these actually bit. Of the 72 recorded
+  `:review_gate_inconclusive` failures, 18 have a durable transcript for the
+  decisive pass and 5 of those transcripts contain a parseable `VERDICT:` line —
+  real false negatives, a completed review discarded. In all 5 the sentinel sat
+  10–43 lines from the end and was present even in the 500-line persisted tail,
+  so **cap eviction was not the cause in any observed case**; the gate's live
+  capture was. The caps remain a genuine hazard for a verdict followed by >1000
+  lines, and are covered too — but they were not this bug.
+
+  The log line is the point as much as the recovery: `:no_verdict` on its own
+  cannot distinguish "the reviewer genuinely emitted no verdict" from "the
+  parser was handed the wrong text", and for weeks the fleet could not tell
+  which it had. Now the two cases read differently in the log, and a disagreement
+  between the sources names itself.
+
+  `context` is a short caller-supplied label (e.g. `"task=bd-xxxx"`) echoed into
+  the log. Returns `{verdict, source}`.
+  """
+  @spec parse_verdict([String.t()], String.t() | nil, String.t()) ::
+          {verdict(), verdict_source()}
+  def parse_verdict(lines, run_id, context) when is_list(lines) and is_binary(context) do
+    case parse_verdict(lines) do
+      :no_verdict -> verdict_from_transcript(length(lines), run_id, context)
+      verdict -> {verdict, :memory}
+    end
+  end
+
+  defp verdict_from_transcript(scanned, run_id, context) do
+    case durable_lines(run_id) do
+      {:ok, durable} ->
+        case parse_verdict(durable) do
+          :no_verdict ->
+            Logger.warning(
+              "ReviewGate: no VERDICT for #{context}: scanned #{scanned} in-memory line(s) and " <>
+                "#{length(durable)} durable transcript line(s); neither contains a parseable " <>
+                "VERDICT line — the reviewer emitted no verdict"
+            )
+
+            {:no_verdict, :none}
+
+          verdict ->
+            Logger.warning(
+              "ReviewGate: VERDICT recovered from the durable transcript for #{context}: the " <>
+                "in-memory buffer (#{scanned} line(s)) had none, the transcript " <>
+                "(#{length(durable)} line(s)) does — the parser was reading a truncated tail, " <>
+                "not a reviewer that stayed silent"
+            )
+
+            {verdict, :transcript}
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: no VERDICT for #{context}: scanned #{scanned} in-memory line(s); the " <>
+            "durable transcript could not be read (#{inspect(reason)}), so whether the reviewer " <>
+            "emitted one is unknown"
+        )
+
+        {:no_verdict, :none}
+    end
+  end
+
+  defp durable_lines(run_id) when is_binary(run_id) and run_id != "" do
+    Arbiter.Worker.OutputLog.read_lines(run_id)
+  rescue
+    e -> {:error, e}
+  end
+
+  defp durable_lines(_), do: {:error, :no_run_id}
+
+  # The run row id of the reviewer pass we are finishing — the key the durable
+  # transcript is filed under. The reviewer runs as its own worker under a
+  # synthetic task id (`<task>#review`, `#r2`, `#v2`), and its Run row is
+  # persisted when the pass is spawned. Best-effort: without it the transcript
+  # cross-check simply reports "unknown" rather than failing the pass.
+  defp reviewer_run_id(%{current_id: id}) when is_binary(id) and id != "" do
+    require Ash.Query
+
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Arbiter.Workers.Run{id: run_id} | _] -> run_id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp reviewer_run_id(_), do: nil
+
   # Findings = everything from the matched verdict line to the end, trimmed.
   # Falls back to the whole transcript if the index can't be located.
   defp findings_from(text, regex) do
@@ -763,7 +885,19 @@ defmodule Arbiter.Worker.ReviewGate do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp attempt_finish(state, status) do
-    case parse_verdict(Enum.reverse(state.lines)) do
+    # bd-6dxit2: `state.lines` is the reviewer's PubSub-captured transcript and
+    # is not itself capped, but it is a *live* buffer — a line broadcast before
+    # this pass subscribed, or dropped anywhere on the way, is simply absent, and
+    # `:no_verdict` cannot tell that apart from a reviewer that stayed silent.
+    # `parse_verdict/3` cross-checks the uncapped durable transcript before
+    # conceding and logs the disagreement when there is one, so the escalation
+    # blames the right party.
+    lines = Enum.reverse(state.lines)
+
+    {verdict, _source} =
+      parse_verdict(lines, reviewer_run_id(state), "reviewer task=#{state.current_id}")
+
+    case verdict do
       :no_verdict ->
         case classify_stop(status, state.lines) do
           %StopReason{category: category} = reason when category in @infra_failure_categories ->
