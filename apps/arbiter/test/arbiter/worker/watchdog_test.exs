@@ -1355,6 +1355,118 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  # bd-di4t6d / #1531. The observed stall (vs-a5miga, vs-ehjarz, vs-ciouz8):
+  # the Watchdog hit its poll ceiling *while the fix pass it had itself
+  # dispatched was still running*, so `Dispatch.resume` refused with
+  # `{:worker_start_failed, {:task_worker_live, %{registry_key:
+  # "<task>:fixpass"}}}`. That single attempt was escalated as "auto-resume
+  # FAILED after 0 attempts" and the Watchdog stopped. Minutes later the fix
+  # pass finished and *nothing* re-examined the task: the primary was :failed,
+  # no Watchdog was polling, and the task sat :in_progress with an open PR
+  # until a human ran `worker_review` by hand.
+  describe "auto-resume blocked by a live subordinate pass (bd-di4t6d)" do
+    defp start_blocked_watchdog(pid, task_id, mr_ref, opts) do
+      base = [
+        interval_ms: 10,
+        initial_delay_ms: 0,
+        max_polls: 2,
+        auto_merge: true,
+        workspace: test_workspace(),
+        auto_resume_dispatcher: StubAutoResumeDispatcher
+      ]
+
+      start_watchdog(pid, task_id, mr_ref, Keyword.merge(base, opts))
+    end
+
+    # The exact error shape the live vs-a5miga escalation carried.
+    defp fixpass_live(task_id) do
+      {:worker_start_failed,
+       {:task_worker_live,
+        %{
+          pid: self(),
+          status: :running,
+          task_id: task_id,
+          registry_key: task_id <> ":fixpass",
+          requested_key: task_id
+        }}}
+    end
+
+    test "retries the resume until the blocking pass clears, instead of giving up on the first refusal" do
+      {pid, task_id} = running_worker()
+
+      # Blocked twice (the fix pass is still running), then it finishes.
+      StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id), 2)
+
+      wpid = start_blocked_watchdog(pid, task_id, "!blk1", max_resume_deferrals: 5)
+      wref = Process.monitor(wpid)
+
+      wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 3 end, 5_000)
+
+      # bd-8tjcms's labelling is untouched: the timeout is registered, once.
+      assert Worker.state(pid).meta.failure_reason == {:awaiting_review_timeout, 2}
+
+      # Three tries, all of them auto-resume attempt 1: a resume that never
+      # started must not burn the bd-8eheb6 budget.
+      assert Enum.map(StubAutoResumeDispatcher.resumes(), & &1.attempt) == [1, 1, 1]
+
+      # ...and no coordinator page, because it self-healed.
+      assert StubAutoResumeDispatcher.escalations() == []
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+    end
+
+    test "the deferral bound escalates once and stops, rather than retrying forever" do
+      {pid, task_id} = running_worker()
+
+      StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id))
+
+      wpid = start_blocked_watchdog(pid, task_id, "!blk2", max_resume_deferrals: 2)
+      wref = Process.monitor(wpid)
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+
+      # One initial attempt + exactly two deferred retries. Never a fourth.
+      assert StubAutoResumeDispatcher.resume_count() == 3
+
+      assert [{^task_id, _ws_id, "!blk2", 0, {:resume_blocked, _reason, 2}}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+
+    test "a non-transient resume error is NOT deferred — it escalates on the first failure" do
+      StubAutoResumeDispatcher.arm_resume_error(:no_outpost)
+      {pid, task_id} = running_worker()
+
+      wpid = start_blocked_watchdog(pid, task_id, "!blk3", max_resume_deferrals: 5)
+      wref = Process.monitor(wpid)
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+
+      # Retrying a cleaned-up worktree can never succeed, so it must not be
+      # deferred: one attempt, one page.
+      assert StubAutoResumeDispatcher.resume_count() == 1
+
+      assert [{^task_id, _ws_id, "!blk3", 0, {:resume_failed, :no_outpost}}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+
+    test "the deferral bound is workspace-configurable" do
+      {pid, task_id} = running_worker()
+      StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id))
+
+      ws = test_workspace(%{"merge" => %{"max_awaiting_review_resume_deferrals" => 1}})
+
+      wpid = start_blocked_watchdog(pid, task_id, "!blk4", workspace: ws)
+      wref = Process.monitor(wpid)
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+
+      assert StubAutoResumeDispatcher.resume_count() == 2
+
+      assert [{^task_id, _ws_id, "!blk4", 0, {:resume_blocked, _reason, 1}}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+  end
+
   describe "pipeline watching (watch_pipeline: true)" do
     test "does not escalate when watch_pipeline is false (default)" do
       {pid, task_id} = running_worker()

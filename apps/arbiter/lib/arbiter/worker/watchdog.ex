@@ -115,6 +115,41 @@ defmodule Arbiter.Worker.Watchdog do
   first-time genuine failure. Non-timeout failures (`:mr_closed`, a real crash)
   are untouched — they escalate immediately, exactly as before.
 
+  ### When the resume is refused by the task's own subordinate pass (bd-di4t6d)
+
+  The bd-8eheb6 path above had a single-shot failure mode that stalled tasks
+  indefinitely. `Worker.start/1` allows only one live worker per task, and a
+  subordinate pass (`<task>:fixpass`, `<task>:conflict`) registers under its own
+  key but shares the task id — so while a fix pass dispatched by *this same
+  Watchdog* is still running, `AutoResumeDispatcher.resume/1` comes back
+  `{:error, {:worker_start_failed, {:task_worker_live, %{registry_key:
+  "<task>:fixpass", ...}}}}`.
+
+  That is exactly the situation the poll ceiling produces: the Watchdog
+  dispatches a fix pass to clear a `:ci_failed` block, keeps polling, hits
+  `max_polls` minutes later while the fix pass is still working, and fires its
+  one and only auto-resume into a slot that cannot accept it. The old code
+  treated that like `:no_outpost` — escalate and `{:stop, :normal, _}` — leaving
+  a task in `awaiting_review` with a completed run, no live reviewer, and no
+  process left that would ever look at it again. The three observed stalls
+  (vs-ehjarz/!183, vs-ciouz8/!189, vs-a5miga/!198) are all this.
+
+  A resume that never *started* is not a resume, so it must not burn the
+  `:max_auto_resumes` budget. Instead the Watchdog defers: it stays alive and
+  retries the resume every `interval_ms` for up to `:max_resume_deferrals`
+  (default 30 ≈ 30 min at the default interval; workspace key
+  `merge.max_awaiting_review_resume_deferrals`; `0` restores the pre-bd-di4t6d
+  single-shot behaviour). When the blocking pass finishes, the deferred resume
+  takes — a fresh main worker re-enters `route_completion` and therefore
+  `enter_review_gate`, so the reviewer is re-dispatched, including for the
+  `fix_pass` that caused the block.
+
+  The deferral bound escalates once and stops, mirroring the auto-resume budget:
+  `{:resume_blocked, reason, deferrals}` names the blocking registry key and
+  tells the coordinator to look at the wedged subordinate pass rather than
+  resume again. Only *transient* refusals defer — `:no_outpost` and friends
+  still page on the first failure, unchanged.
+
   ### Webhook upgrade (design only — not implemented here)
 
   Polling is the shipped mechanism. A future push path would add
@@ -222,6 +257,18 @@ defmodule Arbiter.Worker.Watchdog do
   # `:auto_resume_dispatcher` opt (tests stub it).
   @default_auto_resume_dispatcher Arbiter.Workflows.MergeQueue.AutoResumeDispatcher
 
+  # Deferred retries of an auto-resume that could not *start* (bd-di4t6d).
+  # Distinct from `@default_max_auto_resumes`, which bounds resumes that DID
+  # run: a refusal like `{:task_worker_live, %{registry_key: "<task>:fixpass"}}`
+  # means a subordinate pass the Watchdog itself dispatched is still holding the
+  # task's registry family, so the resume never happened and must not burn that
+  # budget. 30 retries at the default 60s interval is ~30 minutes — comfortably
+  # longer than the ~18-minute fix pass that produced the vs-a5miga stall, and
+  # still bounded. 0 restores the pre-bd-di4t6d "escalate on the first refusal"
+  # behaviour. Override via opt `:max_resume_deferrals` or workspace
+  # config["merge"]["max_awaiting_review_resume_deferrals"].
+  @default_max_resume_deferrals 30
+
   # The resolver that dispatches a rebase-resolve worker against the task's
   # existing worktree. Injectable via the `:conflict_resolver` opt (tests pass a
   # stub). The default is the same module the MergeQueue uses, so the Watchdog-
@@ -246,6 +293,7 @@ defmodule Arbiter.Worker.Watchdog do
           | {:max_conflict_attempts, pos_integer()}
           | {:conflict_resolver, module()}
           | {:max_auto_resumes, non_neg_integer()}
+          | {:max_resume_deferrals, non_neg_integer()}
           | {:auto_resume_dispatcher, module()}
           | {:merge_fail_notify_threshold, pos_integer()}
           | {:park_heartbeat_polls, non_neg_integer()}
@@ -674,6 +722,7 @@ defmodule Arbiter.Worker.Watchdog do
 
       max_conflict_attempts = resolve_max_conflict_attempts(opts, workspace)
       max_auto_resumes = resolve_max_auto_resumes(opts, workspace)
+      max_resume_deferrals = resolve_max_resume_deferrals(opts, workspace)
 
       state = %{
         task_id: task_id,
@@ -789,6 +838,16 @@ defmodule Arbiter.Worker.Watchdog do
         max_auto_resumes: max_auto_resumes,
         auto_resume_dispatcher:
           Keyword.get(opts, :auto_resume_dispatcher, @default_auto_resume_dispatcher),
+        # bd-di4t6d: bounded retries of an auto-resume that could not START.
+        #   max_resume_deferrals — how many times we will re-try before paging.
+        #   resume_deferrals     — how many we have used this episode.
+        #   review_timeout_cap   — the cap that produced the timeout, kept so a
+        #                          deferred retry never re-fails the worker (the
+        #                          `{:awaiting_review_timeout, N}` label is
+        #                          written exactly once — bd-8tjcms).
+        max_resume_deferrals: max_resume_deferrals,
+        resume_deferrals: 0,
+        review_timeout_cap: nil,
         # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
         # a notification fires once when the count first hits the threshold, then
         # is suppressed until the counter resets and re-hits the threshold.
@@ -921,6 +980,22 @@ defmodule Arbiter.Worker.Watchdog do
         )
 
         reschedule(state)
+    end
+  end
+
+  # bd-di4t6d. The retry tick for a deferred auto-resume. The worker was already
+  # failed with `{:awaiting_review_timeout, N}` on the first pass, so this does
+  # NOT re-fail it (and does not re-poll the MR — the merge lane is finished with
+  # this worker; what we are waiting on is the registry slot).
+  @impl true
+  def handle_info(:retry_review_resume, state) do
+    case attempt_auto_resume(state) do
+      {:defer, state} ->
+        schedule_resume_retry(state)
+        {:noreply, state}
+
+      {:stop, state} ->
+        {:stop, :normal, state}
     end
   end
 
@@ -2079,8 +2154,14 @@ defmodule Arbiter.Worker.Watchdog do
         "whether it was auto-resumed or escalated)"
     )
 
-    handle_review_timeout(state, cap)
-    {:stop, :normal, %{state | poll_count: count + 1}}
+    case handle_review_timeout(state, cap) do
+      {:defer, state} ->
+        schedule_resume_retry(state)
+        {:noreply, %{state | poll_count: count + 1}}
+
+      {:stop, state} ->
+        {:stop, :normal, %{state | poll_count: count + 1}}
+    end
   end
 
   defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: false} = state)
@@ -2112,15 +2193,23 @@ defmodule Arbiter.Worker.Watchdog do
   # What changes is what happens next — a bounded auto-resume, or, once that
   # budget is spent, an escalation that names the spent budget explicitly.
   defp handle_review_timeout(state, cap) do
+    safe(fn -> Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}) end)
+    attempt_auto_resume(%{state | review_timeout_cap: cap})
+  end
+
+  # bd-di4t6d: one auto-resume decision, reachable twice — once from the poll
+  # ceiling and once from every deferred retry. Returns `{:stop, state}` when the
+  # episode is finished (resumed, or paged) and `{:defer, state}` when the resume
+  # could not start for a reason that a later retry can clear.
+  defp attempt_auto_resume(state) do
     snap = snapshot(state)
     attempts = awaiting_review_resume_attempts(snap)
-
-    safe(fn -> Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}) end)
 
     if attempts < state.max_auto_resumes do
       auto_resume(state, attempts + 1)
     else
       escalate_auto_resume_give_up(state, snap, attempts, :budget_exhausted)
+      {:stop, state}
     end
   end
 
@@ -2141,12 +2230,34 @@ defmodule Arbiter.Worker.Watchdog do
       {:ok, _} ->
         Logger.warning(
           "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} timed out at " <>
-            ":awaiting_review; auto-resumed (attempt #{attempt}/#{state.max_auto_resumes})"
+            ":awaiting_review; auto-resumed (attempt #{attempt}/#{state.max_auto_resumes}" <>
+            deferral_suffix(state) <> ")"
         )
 
-        :ok
+        {:stop, state}
 
       {:error, reason} ->
+        handle_resume_error(state, attempt, reason)
+    end
+  end
+
+  # bd-di4t6d. Two very different failures used to share one exit:
+  #
+  #   * the resume RAN and could not stick (`:no_outpost` — the worktree was
+  #     cleaned up). Retrying can never help, so page immediately, as before.
+  #   * the resume never STARTED because the task's registry family is still
+  #     held by a live worker — in practice the `<task_id>:fixpass` subordinate
+  #     the Watchdog itself dispatched moments earlier. That pass finishes on its
+  #     own within minutes, at which point the resume would succeed; the old code
+  #     paged and stopped the Watchdog, so nothing was left to try again and the
+  #     task sat :in_progress with an open PR indefinitely.
+  #
+  # The second case is deferred and retried on the poll interval, bounded by
+  # `max_resume_deferrals`. Hitting that bound pages ONCE with a give-up reason
+  # that names the blocker and the retry count, then stops.
+  defp handle_resume_error(state, attempt, reason) do
+    cond do
+      not transient_resume_block?(reason) ->
         Logger.warning(
           "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} auto-resume " <>
             "attempt #{attempt} failed (#{inspect(reason)}); escalating instead"
@@ -2158,8 +2269,66 @@ defmodule Arbiter.Worker.Watchdog do
           attempt - 1,
           {:resume_failed, reason}
         )
+
+        {:stop, state}
+
+      state.resume_deferrals < state.max_resume_deferrals ->
+        deferrals = state.resume_deferrals + 1
+
+        Logger.warning(
+          "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+            "transition=auto_resume outcome=deferred blocked_by=#{inspect(resume_blocker(reason))} " <>
+            "deferral=#{deferrals}/#{state.max_resume_deferrals} — the resume never started, " <>
+            "so it does not burn the auto-resume budget; retrying in #{state.interval_ms}ms"
+        )
+
+        {:defer, %{state | resume_deferrals: deferrals}}
+
+      true ->
+        Logger.warning(
+          "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+            "transition=auto_resume outcome=deferral_bound_hit " <>
+            "blocked_by=#{inspect(resume_blocker(reason))} " <>
+            "deferrals=#{state.resume_deferrals}/#{state.max_resume_deferrals}; " <>
+            "escalating to the coordinator"
+        )
+
+        escalate_auto_resume_give_up(
+          state,
+          snapshot(state),
+          attempt - 1,
+          {:resume_blocked, reason, state.resume_deferrals}
+        )
+
+        {:stop, state}
     end
   end
+
+  # Can a later retry of this resume plausibly succeed? Only the "something else
+  # is holding this task's worker slot right now" refusals — every one of which
+  # clears when that worker finishes. Anything else (a missing worktree, a closed
+  # task, a DB error) is a standing condition and is paged immediately.
+  defp transient_resume_block?({:worker_start_failed, inner}), do: transient_resume_block?(inner)
+  defp transient_resume_block?({:task_worker_live, _info}), do: true
+  defp transient_resume_block?({:worker_active, _status}), do: true
+  defp transient_resume_block?(_), do: false
+
+  # What is holding the slot, for the log line and the escalation body — the
+  # registry key when we have one (`<task_id>:fixpass` / `:conflict` names the
+  # subordinate pass outright), else the raw reason.
+  defp resume_blocker({:worker_start_failed, inner}), do: resume_blocker(inner)
+
+  defp resume_blocker({:task_worker_live, %{registry_key: key}}) when is_binary(key), do: key
+  defp resume_blocker({:worker_active, status}), do: status
+  defp resume_blocker(other), do: other
+
+  defp deferral_suffix(%{resume_deferrals: 0}), do: ""
+
+  defp deferral_suffix(%{resume_deferrals: n, max_resume_deferrals: max}),
+    do: ", after #{n}/#{max} deferred retries"
+
+  defp schedule_resume_retry(state),
+    do: Process.send_after(self(), :retry_review_resume, state.interval_ms)
 
   defp safe_resume(state, args) do
     state.auto_resume_dispatcher.resume(args)
@@ -2228,6 +2397,27 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp max_auto_resumes_from_workspace(_), do: @default_max_auto_resumes
+
+  # Deferred-retry budget (bd-di4t6d). Same resolution shape as the auto-resume
+  # budget: opt wins; else workspace config
+  # (`merge.max_awaiting_review_resume_deferrals`); else the module default. 0 is
+  # valid (deferral off — page on the first refusal, the pre-bd-di4t6d
+  # behaviour), so `>= 0` rather than `> 0`.
+  defp resolve_max_resume_deferrals(opts, workspace) do
+    case Keyword.get(opts, :max_resume_deferrals) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> max_resume_deferrals_from_workspace(workspace)
+    end
+  end
+
+  defp max_resume_deferrals_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
+    case get_in(config, ["merge", "max_awaiting_review_resume_deferrals"]) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_max_resume_deferrals
+    end
+  end
+
+  defp max_resume_deferrals_from_workspace(_), do: @default_max_resume_deferrals
 
   defp escalate_watchdog(state) do
     snap =
