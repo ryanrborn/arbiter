@@ -97,7 +97,17 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts("Anthropic quota (workspace #{data["workspace_id"]}):")
     IO.puts("  representative window: #{q["representative_claim"] || "—"}")
     IO.puts("  overage status:        #{q["overage_status"] || "—"}")
-    IO.puts("  captured at:           #{q["captured_at"] || "—"}")
+
+    captured_at_str = q["captured_at"] || "—"
+
+    stale_indicator =
+      if q["stale"] == true do
+        " ⚠️ STALE (too old to trust — dispatches may be incorrectly held)"
+      else
+        ""
+      end
+
+    IO.puts("  captured at:           #{captured_at_str}#{stale_indicator}")
     IO.puts("")
 
     IO.puts(

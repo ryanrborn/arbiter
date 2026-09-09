@@ -61,6 +61,32 @@ defmodule Arbiter.Quota.GateTest do
       future = DateTime.utc_now() |> DateTime.add(3600, :second)
       refute Gate.stale?(quota(%{reset_5h_at: future, utilization_5h: 0.95}))
     end
+
+    test "staleness threshold is configurable via app-env" do
+      Application.put_env(:arbiter, :quota, staleness_threshold_seconds: 60)
+      on_exit(fn -> restore_quota_env() end)
+
+      # 45 seconds ago: not yet stale (below 60s threshold)
+      fresh_45s =
+        DateTime.utc_now()
+        |> DateTime.add(-45, :second)
+
+      refute Gate.stale?(quota(%{captured_at: fresh_45s, reset_5h_at: nil}))
+
+      # 75 seconds ago: stale (above 60s threshold)
+      stale_75s =
+        DateTime.utc_now()
+        |> DateTime.add(-75, :second)
+
+      assert Gate.stale?(quota(%{captured_at: stale_75s, reset_5h_at: nil}))
+    end
+
+    test "staleness_threshold_seconds defaults to 300 (5 minutes)" do
+      Application.put_env(:arbiter, :quota, [])
+      on_exit(fn -> restore_quota_env() end)
+
+      assert Gate.staleness_threshold_seconds() == 300
+    end
   end
 
   describe "Workspace.quota_on_exhaustion/1 precedence" do
@@ -237,6 +263,29 @@ defmodule Arbiter.Quota.GateTest do
         })
 
       assert {:hold, _} = Gate.Throttle.check(nil, fresh, ws(%{}), [])
+    end
+
+    # Regression (bd-y0yup0): a snapshot captured 40+ minutes ago with
+    # reset_5h_at still in the future must fail open if captured_at is older
+    # than the staleness threshold. The issue: `/limit-reset` cleared the cap,
+    # but the gate did not notice because the snapshot was never updated (no
+    # requests could go through while held) and 40 min < 5 hours.
+    test "snapshot older than staleness threshold fails open even if reset_5h_at is in the future" do
+      forty_mins_ago = DateTime.utc_now() |> DateTime.add(-2400, :second)
+      future_reset = DateTime.utc_now() |> DateTime.add(3600, :second)
+
+      stale_by_age =
+        quota(%{
+          captured_at: forty_mins_ago,
+          reset_5h_at: future_reset,
+          status_5h: "rejected",
+          utilization_5h: 0.99
+        })
+
+      # Should fail open (allow) despite over-cap values, because captured_at
+      # is older than the threshold (this test will initially fail with
+      # :hold because the threshold is 5 hours, then pass once we fix it)
+      assert Gate.Throttle.check(nil, stale_by_age, ws(%{}), []) == :allow
     end
   end
 
