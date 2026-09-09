@@ -167,12 +167,45 @@ defmodule Arbiter.Agents.RoutingTest do
              }
     end
 
-    test "D4 → premium / high (default mapping)", %{ws: ws} do
+    test "D4 → premium / max (default mapping)", %{ws: ws} do
+      # #1519: D4 is the top *non-opt-in* tier. It gets the strongest effort
+      # source knows about so it is no longer identical to D3.
       task = %Issue{difficulty: 4}
 
       assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
-               config: %{"model_tier" => "premium", "thinking" => "high"}
+               config: %{"model_tier" => "premium", "thinking" => "max"}
+             }
+    end
+
+    test "D5 → premium / max in source (flagship only via workspace rule)", %{ws: ws} do
+      # #1519: flagship exists only in workspace config. An install that has
+      # not defined a flagship tier must still get the strongest thing source
+      # knows about rather than an unresolvable tier name.
+      task = %Issue{difficulty: 5}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "max"}
+             }
+    end
+
+    test "a D5 workspace rule routes the flagship tier" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{}},
+          "routing" => %{
+            "policy" => "by_difficulty",
+            "rules" => %{
+              "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
+            }
+          }
+        }
+      }
+
+      assert Routing.choose(%Issue{difficulty: 5}, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "flagship", "thinking" => "xhigh"}
              }
     end
 
@@ -259,8 +292,9 @@ defmodule Arbiter.Agents.RoutingTest do
       assert ByDifficulty.effective_difficulty(nil) == 2
       assert ByDifficulty.effective_difficulty(0) == 0
       assert ByDifficulty.effective_difficulty(4) == 4
+      assert ByDifficulty.effective_difficulty(5) == 5
       assert ByDifficulty.effective_difficulty(-1) == 0
-      assert ByDifficulty.effective_difficulty(99) == 4
+      assert ByDifficulty.effective_difficulty(99) == 5
     end
 
     # bd-3xultf: the reviewer tier is derived from the author's nominal tier
@@ -272,6 +306,9 @@ defmodule Arbiter.Agents.RoutingTest do
       assert ByDifficulty.tier_for_difficulty(2) == "standard"
       assert ByDifficulty.tier_for_difficulty(3) == "premium"
       assert ByDifficulty.tier_for_difficulty(4) == "premium"
+      # #1519: D5's *source* tier is premium — "flagship" is not a source
+      # concept, so the ReviewGate's reviewer bump has a real tier to work from.
+      assert ByDifficulty.tier_for_difficulty(5) == "premium"
       assert ByDifficulty.tier_for_difficulty(nil) == "standard"
     end
 

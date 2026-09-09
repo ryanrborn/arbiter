@@ -51,7 +51,7 @@ defmodule Arbiter.Trackers.Shortcut.Config do
           token: String.t(),
           workflow_id: integer() | nil,
           status_map: %{atom() => String.t()},
-          estimate_buckets: [{non_neg_integer(), 0..4}] | nil
+          estimate_buckets: [{non_neg_integer(), 0..5}] | nil
         }
 
   @doc """

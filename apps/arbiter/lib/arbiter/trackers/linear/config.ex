@@ -72,6 +72,10 @@ defmodule Arbiter.Trackers.Linear.Config do
 
   # Default difficulty bucket thresholds (same as Jira). Active only when the
   # workspace sets `difficulty.buckets` in the tracker config.
+  # #1519: the scale runs to D5, but the DEFAULT buckets deliberately top out
+  # at D4 — an estimate-point threshold is not a deliberate operator
+  # escalation, and D5 routes to the flagship model. A workspace that really
+  # wants a D5 bucket must configure it explicitly.
   @default_difficulty_buckets [{1, 0}, {3, 1}, {5, 2}, {8, 3}]
 
   @type config :: %{
@@ -80,7 +84,7 @@ defmodule Arbiter.Trackers.Linear.Config do
           team_id: String.t() | nil,
           org_url_key: String.t() | nil,
           status_map: %{atom() => String.t() | nil},
-          estimate_buckets: [{non_neg_integer(), 0..4}] | nil
+          estimate_buckets: [{non_neg_integer(), 0..5}] | nil
         }
 
   @doc """

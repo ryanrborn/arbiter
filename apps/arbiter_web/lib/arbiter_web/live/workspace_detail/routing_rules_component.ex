@@ -76,7 +76,7 @@ defmodule ArbiterWeb.WorkspaceDetail.RoutingRulesComponent do
       <.rows>
         <.setting_row
           name="Routing rules"
-          consequence="routing.rules — keyed by priority (P0-P4) or difficulty (D0-D4) per the routing policy; saving a key replaces that rule wholesale"
+          consequence="routing.rules — keyed by priority (P0-P4) or difficulty (D0-D5) per the routing policy; saving a key replaces that rule wholesale"
         >
           <:below>
             <ul :if={@routing_rules != []} id="routing-rules" class={list_class()}>

@@ -175,6 +175,9 @@ defmodule Arbiter.Trackers.Jira.Config do
   # Default difficulty bucket thresholds: [{max_pts, difficulty}] sorted
   # ascending. Used when `difficulty.field_id` is configured but no custom
   # buckets are supplied. pts ≤ 1 → D0, ≤ 3 → D1, ≤ 5 → D2, ≤ 8 → D3, > 8 → D4.
+  # #1519: D4 stays the top default bucket — story points are not a deliberate
+  # operator escalation, and D5 routes to the flagship model. A workspace that
+  # wants a D5 bucket must configure `difficulty_buckets` explicitly.
   @default_difficulty_buckets [{1, 0}, {3, 1}, {5, 2}, {8, 3}]
 
   # Lifecycle events forced to gate on the QA/Deployment notes fields
@@ -198,7 +201,7 @@ defmodule Arbiter.Trackers.Jira.Config do
           gated_note_events: [atom()],
           priority_map: %{String.t() => 0..4},
           story_points_field: String.t() | nil,
-          difficulty_buckets: [{non_neg_integer(), 0..4}] | nil,
+          difficulty_buckets: [{non_neg_integer(), 0..5}] | nil,
           fix_version_name: String.t() | nil
         }
 

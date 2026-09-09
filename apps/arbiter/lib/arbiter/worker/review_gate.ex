@@ -202,9 +202,12 @@ defmodule Arbiter.Worker.ReviewGate do
   # no workspace override is set — matches D2 (moderate). See bd-3jm700.
   @default_rounds 3
 
-  # Difficulty → default round cap. D0/D1 are straightforward; D3/D4 are
+  # Difficulty → default round cap. D0/D1 are straightforward; D3/D4/D5 are
   # architecturally significant and may need more back-and-forth to converge.
-  @rounds_by_difficulty %{0 => 2, 1 => 2, 2 => 3, 3 => 4, 4 => 4}
+  # #1519: D5 needs its own entry — an unmapped difficulty falls back to
+  # @default_rounds (3), which would have given the top of the scale FEWER
+  # rounds than D3.
+  @rounds_by_difficulty %{0 => 2, 1 => 2, 2 => 3, 3 => 4, 4 => 4, 5 => 4}
 
   # bd-3xultf: how many tiers above the task's own tier the reviewer is
   # routed by default (capped at "premium" by `ByDifficulty.bump_tier/2`).
@@ -324,13 +327,14 @@ defmodule Arbiter.Worker.ReviewGate do
   | 2          | moderate | 3             |
   | 3          | hard     | 4             |
   | 4          | extreme  | 4             |
+  | 5          | flagship | 4             |
   | nil        | unknown  | 3 (D2)        |
 
   Used by `Arbiter.Worker.resolve_review_rounds/1` to derive the default cap
   from the task's difficulty when no workspace `config["review_gate"]["max_rounds"]`
   override is set.
   """
-  @spec rounds_for_difficulty(0..4 | nil) :: pos_integer()
+  @spec rounds_for_difficulty(0..5 | nil) :: pos_integer()
   def rounds_for_difficulty(difficulty) do
     Map.get(@rounds_by_difficulty, difficulty, @default_rounds)
   end

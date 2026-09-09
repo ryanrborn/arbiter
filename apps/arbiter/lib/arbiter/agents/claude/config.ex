@@ -105,11 +105,18 @@ defmodule Arbiter.Agents.Claude.Config do
   # `none` omits the flag (CLI default).
   # Workspaces can override per-level argv with `agent.config["thinking_argv"]`
   # (e.g. swap to `--max-thinking-tokens` if a newer CLI prefers that).
+  #
+  # #1519: `xhigh` and `max` are on the ladder because routing now emits them
+  # (D4/D5 → `max`). A level absent from this map resolves to `[]` — NO effort
+  # flag at all — so leaving them out would have made the top of the difficulty
+  # scale quieter than the middle of it, which is the opposite of the intent.
   @default_thinking_argv %{
     "none" => [],
     "low" => ["--effort", "low"],
     "medium" => ["--effort", "medium"],
-    "high" => ["--effort", "high"]
+    "high" => ["--effort", "high"],
+    "xhigh" => ["--effort", "xhigh"],
+    "max" => ["--effort", "max"]
   }
 
   @doc """

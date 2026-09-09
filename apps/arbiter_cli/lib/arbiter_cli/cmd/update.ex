@@ -290,10 +290,10 @@ defmodule ArbiterCli.Cmd.Update do
   defp put_if(map, key, value), do: Map.put(map, key, value)
 
   defp validate_difficulty!(nil), do: :ok
-  defp validate_difficulty!(n) when is_integer(n) and n in 0..4, do: :ok
+  defp validate_difficulty!(n) when is_integer(n) and n in 0..5, do: :ok
 
   defp validate_difficulty!(other) do
-    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..4 / D0..D4)")
+    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..5 / D0..D5)")
   end
 
   defp maybe_append_notes(payload, nil, _existing), do: payload
