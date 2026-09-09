@@ -352,30 +352,25 @@ defmodule Arbiter.QuotaTest do
       assert Quota.google_snapshots() == %{gemini: nil, antigravity: nil}
     end
 
-    test "no-ops to nils when enabled but credentials are absent" do
-      # `:creds_path` isolates `gemini/1`; `antigravity/1` reads a separate
-      # `:antigravity_state_path` (defaults to the real
-      # ~/.config/Antigravity/... state DB) — without overriding both, this
-      # test only no-ops deterministically on a machine with no Antigravity
-      # install, and hits live host state everywhere else.
+    test "no-ops gemini to nil when credentials are absent; antigravity degrades instead of nil-ing (bd-d7hmqn)" do
+      # `:creds_path` isolates `gemini/1`, which still returns `nil` when its
+      # creds file is absent. `antigravity/1` no longer reads any stored
+      # token — it shells out to the `agy` CLI — so it never returns `nil`;
+      # stub `:agy_usage_probe` so this test doesn't depend on whether `agy`
+      # is actually installed on the host running the suite.
       missing =
         Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.json")
 
-      missing_db =
-        Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.vscdb")
+      result =
+        Quota.google_snapshots(
+          enabled: true,
+          creds_path: missing,
+          agy_usage_probe: fn -> {:error, :not_installed} end
+        )
 
-      # Isolate from this machine's real state: without pinning
-      # antigravity_state_path/agy_probe, this would fall through to the
-      # real IDE state.vscdb and a real `agy` CLI shell-out (bd-4ku4ze),
-      # making "credentials absent" no longer true on a dev box with a live
-      # `agy` session.
-      assert Quota.google_snapshots(
-               enabled: true,
-               creds_path: missing,
-               antigravity_state_path: missing_db,
-               agy_probe: fn -> :not_installed end
-             ) ==
-               %{gemini: nil, antigravity: nil}
+      assert result.gemini == nil
+      refute is_nil(result.antigravity)
+      assert result.antigravity.message =~ "not installed"
     end
   end
 
