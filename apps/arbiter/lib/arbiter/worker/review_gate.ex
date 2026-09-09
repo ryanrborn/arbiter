@@ -2277,9 +2277,12 @@ defmodule Arbiter.Worker.ReviewGate do
         # the review/revise workers spawned into that repo's worktree, matching
         # the dispatch spawn path (bd-3gc18m). `state.repo` defaults to
         # "unknown", a safe no-op when no override exists.
+        # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
+        # the worker OAuth token from this workspace's `worker_env` before
+        # falling back to the server env (bd-bw3466).
         agent_opts =
           agent_opts_for_role(ws, role_atom, state.task_id) ++
-            [security: SecurityPolicy.resolve(ws, %{}, state.repo)]
+            [security: SecurityPolicy.resolve(ws, %{}, state.repo), workspace: ws]
 
         # bd-dzz6ly: same provenance backfill the main dispatch path reports
         # (Arbiter.Worker.Dispatch.build_agent_session_opts/4), so a reviewer

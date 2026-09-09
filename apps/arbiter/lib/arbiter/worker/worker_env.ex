@@ -132,16 +132,23 @@ defmodule Arbiter.Worker.WorkerEnv do
   @spec secret_values(String.t() | nil) :: [String.t()]
   def secret_values(task_id), do: task_id |> resolve() |> elem(1)
 
-  # Resolve the workspace backing a task id, or nil on any miss. Best-effort:
-  # a spawn must never crash because the env store couldn't be read.
-  #
-  # ReviewGate mints synthetic task ids for spawned reviewer/implementer/
-  # verifier workers (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`,
-  # or a chain of these) that are never real `Issue` ids on their own — so
-  # this normalizes back to the authoring task id via `ReviewGate.base_task_id/1`
-  # before looking it up. Without that, every synthetic-id worker would miss
-  # here and silently get no env vars and no redaction list.
-  defp workspace_for(task_id) when is_binary(task_id) and task_id != "" do
+  @doc """
+  Resolve the workspace backing a task id, or `nil` on any miss. Best-effort:
+  a spawn must never crash because the env store couldn't be read.
+
+  ReviewGate mints synthetic task ids for spawned reviewer/implementer/
+  verifier workers (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`,
+  or a chain of these) that are never real `Issue` ids on their own — so
+  this normalizes back to the authoring task id via `ReviewGate.base_task_id/1`
+  before looking it up. Without that, every synthetic-id worker would miss
+  here and silently get no env vars and no redaction list.
+
+  Public because `Arbiter.Worker.ClaudeSession` needs the same workspace to
+  hand `Arbiter.Agents.Claude.ConfigDir` on the spawn path that builds its own
+  env (bd-bw3466).
+  """
+  @spec workspace_for(String.t() | nil) :: Workspace.t() | nil
+  def workspace_for(task_id) when is_binary(task_id) and task_id != "" do
     base = ReviewGate.base_task_id(task_id)
 
     case Ash.get(Issue, base) do
@@ -173,5 +180,5 @@ defmodule Arbiter.Worker.WorkerEnv do
     end
   end
 
-  defp workspace_for(_), do: nil
+  def workspace_for(_), do: nil
 end

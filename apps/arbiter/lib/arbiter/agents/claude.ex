@@ -225,11 +225,18 @@ defmodule Arbiter.Agents.Claude do
   def spawn_env(opts \\ []) do
     # Worker runs get an isolated CLAUDE_CONFIG_DIR so the operator's personal
     # ~/.claude/CLAUDE.md (persona) can't bleed into the worker's context
-    # (bd-3y2mda); `ConfigDir.env/0` also composes in the install-wide
+    # (bd-3y2mda); `ConfigDir.env/1` also composes in the
     # CLAUDE_CODE_OAUTH_TOKEN (bd-2zigo1) when configured, so every
     # `ConfigDir`-based spawn path shares this single source and can't
     # diverge (bd-6umoh9). The optional API key composes on top.
-    ConfigDir.env() ++ api_key_env(opts) ++ base_url_env(opts)
+    #
+    # bd-bw3466: thread the spawn's workspace through so a token configured
+    # the per-workspace way (`worker_env`, encrypted at rest) is found —
+    # `ConfigDir.env/0` sees only the arbiter server's own process env, which
+    # on a `worker_env` install is never where the token lives. Dispatch and
+    # the ReviewGate both put `:workspace` on the adapter opts; a bare adapter
+    # call (no workspace) still falls back to the server env.
+    ConfigDir.env(Keyword.get(opts, :workspace)) ++ api_key_env(opts) ++ base_url_env(opts)
   end
 
   defp api_key_env(opts) do

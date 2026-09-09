@@ -1,6 +1,11 @@
 defmodule Arbiter.Agents.ClaudeTest do
   use ExUnit.Case, async: false
 
+  # bd-bw3466: no Ecto sandbox here, so ConfigDir's install-wide worker_env
+  # scan can't read Workspace and logs a warning on every call. Expected in this
+  # file; capture it so the run stays readable (logs still surface on failure).
+  @moduletag :capture_log
+
   alias Arbiter.Agents.Claude
 
   describe "behaviour" do
@@ -367,6 +372,67 @@ defmodule Arbiter.Agents.ClaudeTest do
                {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"},
                {"ANTHROPIC_API_KEY", "literal-token"}
              ]
+    end
+  end
+
+  describe "spawn_env/1 (workspace-scoped CLAUDE_CODE_OAUTH_TOKEN, bd-bw3466)" do
+    setup do
+      prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      on_exit(fn ->
+        Claude.Config.clear()
+
+        case prev_oauth_token do
+          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+          v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+        end
+      end)
+
+      :ok
+    end
+
+    defp workspace_with_worker_env(env) do
+      enc =
+        env
+        |> :erlang.term_to_binary()
+        |> Arbiter.Vault.encrypt!()
+        |> Base.encode64()
+
+      %Arbiter.Tasks.Workspace{
+        id: "ws-#{System.unique_integer([:positive])}",
+        name: "spawnenv",
+        encrypted_worker_env: enc
+      }
+    end
+
+    test "resolves the token from the workspace threaded on opts[:workspace]" do
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
+
+      # Without the workspace the server env is all we can see, and it is unset.
+      assert Claude.spawn_env([]) == []
+      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}]
+    end
+
+    test "the workspace token wins over a server env var of the same name" do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
+
+      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}]
+    end
+
+    test "falls back to the server env var when the workspace defines no token" do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+      ws = workspace_with_worker_env(%{"LOG_LEVEL" => "debug"})
+
+      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
+    end
+
+    test "a nil / absent :workspace opt is unchanged from the bd-2zigo1 behaviour" do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+
+      assert Claude.spawn_env(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
     end
   end
 

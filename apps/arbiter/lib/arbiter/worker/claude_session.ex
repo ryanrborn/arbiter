@@ -1310,7 +1310,10 @@ defmodule Arbiter.Worker.ClaudeSession do
     base =
       case Keyword.fetch(opts, :env) do
         {:ok, list} when is_list(list) -> list
-        _ -> ConfigDir.env()
+        # bd-bw3466: no caller-supplied env, so build our own — and resolve the
+        # task's workspace so a `worker_env`-configured CLAUDE_CODE_OAUTH_TOKEN
+        # gates credential seeding here too, not just on the adapter path.
+        _ -> ConfigDir.env(Arbiter.Worker.WorkerEnv.workspace_for(task_id))
       end
 
     release_clean = Arbiter.Worker.ReleaseEnv.clean_pairs()

@@ -1467,7 +1467,19 @@ defmodule Arbiter.Worker.Dispatch do
     else
       # Route the probe through the same quota-capturing proxy a real spawn
       # uses (bd-5boun6) so `claude --print ping` updates quota state too.
-      probe_opts = preflight_opts(opts) ++ anthropic_proxy_opts(adapter, workspace)
+      #
+      # bd-bw3466: thread the workspace through as well. `Preflight.check/2`
+      # defaults the probe env to the adapter's `spawn_env/1`, which resolves
+      # CLAUDE_CODE_OAUTH_TOKEN from the workspace's encrypted `worker_env` —
+      # `preflight_opts/1`'s Keyword.take used to drop `:workspace`, so the
+      # probe ran unauthenticated whenever the install-wide fallback couldn't
+      # answer (several workspaces with different tokens), failing every
+      # dispatch with {:auth_check_failed, ...} before a worker ever spawned.
+      # The workspace is loaded right here at :1456 — there is no reason to
+      # lean on the install-wide fallback for this call site.
+      probe_opts =
+        preflight_opts(opts) ++
+          [workspace: workspace] ++ anthropic_proxy_opts(adapter, workspace)
 
       case Preflight.check(adapter, probe_opts) do
         :ok ->
@@ -1843,9 +1855,12 @@ defmodule Arbiter.Worker.Dispatch do
           |> SecurityPolicy.resolve(security_override(opts), Keyword.get(opts, :repo))
           |> review_security_policy(opts)
 
+        # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
+        # the worker OAuth token from this workspace's `worker_env` before
+        # falling back to the server env (bd-bw3466).
         agent_opts =
           agent_opts_from_choice(choice) ++
-            [security: policy] ++ anthropic_proxy_opts(adapter, workspace)
+            [security: policy, workspace: workspace] ++ anthropic_proxy_opts(adapter, workspace)
 
         tracker_context = fetch_tracker_context(task, workspace)
 
