@@ -3450,13 +3450,19 @@ defmodule Arbiter.MCP.ToolsTest do
 
       {:ok, primary} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
 
+      # bd-8tjcms: `Worker.start/1` refuses a second *active* worker for one
+      # task. The two-rows-per-task_id shape this test pins is still reachable
+      # in production (a fix pass alongside a primary parked at
+      # `:awaiting_review`); the primary here is `:idle`, so opt out explicitly
+      # rather than staging the full park.
       {:ok, fixpass} =
         Worker.start(
           task_id: task.id,
           registry_key: task.id <> ":fixpass",
           repo: "test/repo",
           workspace_id: ctx.ws.id,
-          meta: %{role: :fix_pass}
+          meta: %{role: :fix_pass},
+          allow_concurrent_task_worker: true
         )
 
       on_exit(fn ->

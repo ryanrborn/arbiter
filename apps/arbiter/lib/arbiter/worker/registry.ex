@@ -77,6 +77,35 @@ defmodule Arbiter.Worker.Registry do
     |> Enum.filter(fn {_registry_key, pid} -> Process.alive?(pid) end)
   end
 
+  @doc """
+  Like `live_for/1`, but only the **exclusive** family: the task's own key plus
+  the merge-queue subordinate keys that use the `:` separator
+  (`<task_id>:fixpass`, `<task_id>:conflict`).
+
+  The `#` family (`<task_id>#review`, `<task_id>#impl<N>`, ...) is deliberately
+  excluded. Those are `Arbiter.Worker.ReviewGate` sessions: they run in their
+  own throwaway checkout, are serialised by the gate itself, and are *supposed*
+  to run while the author's worker is parked — so they are not candidates for
+  the single-active-worker rule enforced in `Arbiter.Worker.start/1` (bd-8tjcms).
+  """
+  @spec live_exclusive_for(String.t()) :: [{String.t(), pid()}]
+  def live_exclusive_for(task_id) when is_binary(task_id) do
+    task_id
+    |> live_for()
+    |> Enum.filter(fn {registry_key, _pid} -> exclusive_key?(registry_key, task_id) end)
+  end
+
+  @doc """
+  True when `registry_key` belongs to `task_id`'s exclusive family — see
+  `live_exclusive_for/1`.
+  """
+  @spec exclusive_key?(String.t(), String.t()) :: boolean()
+  def exclusive_key?(registry_key, task_id) when is_binary(registry_key) and is_binary(task_id) do
+    registry_key == task_id or String.starts_with?(registry_key, task_id <> ":")
+  end
+
+  def exclusive_key?(_registry_key, _task_id), do: false
+
   defp owned_by?(registry_key, task_id) do
     registry_key == task_id or
       String.starts_with?(registry_key, task_id <> ":") or

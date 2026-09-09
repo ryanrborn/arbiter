@@ -425,6 +425,15 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       {:error, {:already_started, pid}} ->
         {:error, {:resolver_already_running, pid}}
 
+      # bd-8tjcms / #1511: another worker for this task is already driving an
+      # agent (typically the primary, auto-resumed out of an
+      # `{:awaiting_review_timeout, _}`). Starting this pass would put two
+      # agents on one worktree and branch. Surface it distinctly so the
+      # MergeQueue's escalation names the collision instead of a generic
+      # spawn failure.
+      {:error, {:task_worker_live, info}} ->
+        {:error, {:task_worker_live, info}}
+
       {:error, reason} ->
         {:error, {:worker_start_failed, reason}}
     end

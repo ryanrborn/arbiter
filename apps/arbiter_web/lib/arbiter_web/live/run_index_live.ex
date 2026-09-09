@@ -25,7 +25,9 @@ defmodule ArbiterWeb.RunIndexLive do
     %{label: "All", value: "all"},
     %{label: "Running", value: "running"},
     %{label: "Completed", value: "completed"},
-    %{label: "Failed", value: "failed"}
+    %{label: "Failed", value: "failed"},
+    # bd-8tjcms: runs that finished cleanly but whose review never started.
+    %{label: "Review not started", value: "review_not_started"}
   ]
 
   @impl true
@@ -69,7 +71,7 @@ defmodule ArbiterWeb.RunIndexLive do
   defp filter_by_status(query, :all), do: Ash.Query.new(query)
   defp filter_by_status(query, status), do: Ash.Query.filter(query, status == ^status)
 
-  defp parse_status(%{"status" => s}) when s in ~w(running completed failed),
+  defp parse_status(%{"status" => s}) when s in ~w(running completed failed review_not_started),
     do: String.to_existing_atom(s)
 
   defp parse_status(_), do: :all
