@@ -246,6 +246,9 @@ defmodule Arbiter.Quota do
             |> Map.put(:provider, provider)
             |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
 
+          require Logger
+          Logger.debug("Quota.capture: workspace=#{ws_id}, provider=#{provider}, status_5h=#{Map.get(attrs, :status_5h)}, utilization_5h=#{Map.get(attrs, :utilization_5h)}, captured_at=#{Map.get(full, :captured_at)}")
+
           result =
             AnthropicQuota
             |> Ash.Changeset.for_create(:upsert, full)
@@ -396,6 +399,7 @@ defmodule Arbiter.Quota do
       representative_claim: q.representative_claim,
       overage_status: q.overage_status,
       captured_at: iso(q.captured_at),
+      stale: Arbiter.Quota.Gate.stale?(q),
       per_model_utilization: q.per_model_utilization || %{},
       extra_usage: q.extra_usage || %{},
       oauth_utilization_5h: q.oauth_utilization_5h,
