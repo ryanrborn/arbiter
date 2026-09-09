@@ -377,10 +377,28 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
         end
 
       "gitlab" ->
-        case get_in(config, ["merge", "config", "project_id"]) do
-          v when is_integer(v) -> ["#{v}"]
-          v when is_binary(v) and v != "" -> [v]
-          _ -> repos_from_repo_paths(config)
+        # `merge.config.project_id` identifies the forge project (needed to
+        # query the GitLab adapter) but is NOT a `repo_paths` key — and this
+        # same string is threaded straight into `Dispatch.dispatch/2`'s
+        # `repo:` opt by `PRPatrol.dispatch_follow_up/3`, which resolves
+        # `repo` against `repo_paths` KEYS (or a derived "owner/repo" slug),
+        # never a bare numeric project id. Using `project_id` here made every
+        # follow-up dispatch for a workspace with both a pinned `project_id`
+        # and a `repo_paths` map (e.g. vstim) fail with a deterministic
+        # `{:repo_not_found, project_id}` forever (bd-7rxwzc). Prefer the
+        # repo_paths-derived slug — exactly like the multi-repo case — and
+        # fall back to the raw `project_id` only when there's no repo_paths
+        # to derive from at all (nothing else identifies the sole project).
+        case repos_from_repo_paths(config) do
+          [] ->
+            case get_in(config, ["merge", "config", "project_id"]) do
+              v when is_integer(v) -> ["#{v}"]
+              v when is_binary(v) and v != "" -> [v]
+              _ -> []
+            end
+
+          repos ->
+            repos
         end
 
       _ ->
