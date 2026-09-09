@@ -279,6 +279,55 @@ defmodule Arbiter.Worker.StopReasonTest do
                ~U[2026-09-09 07:30:00Z]
     end
 
+    # Review round 1, finding 1. `classify/2` runs at session *exit*, which can
+    # be many minutes after the CLI printed the phrase -- run 7e9e5ea5's own
+    # tail says `674.5s`. A reset that elapsed inside that gap must not roll to
+    # tomorrow: that would park the worker and its worktree for ~24h, strictly
+    # worse than the 5h default the wall-clock path is meant to improve on.
+    test "a reset 12 minutes in the past does not become a 24h wait" do
+      # 03:42 local, reset was 03:30 local, host at UTC-4.
+      local_now = ~N[2026-09-08 03:42:00]
+      offset = -4 * 3600
+
+      reset = StopReason.wallclock_reset_utc(local_now, offset, 3, 30)
+
+      # The reset that just happened, not tomorrow's.
+      assert reset == ~U[2026-09-08 07:30:00Z]
+      # And therefore a wait the caller floors at 60s, not ~24h.
+      assert Arbiter.Worker.quota_resume_backoff_ms(reset) == 60_000
+    end
+
+    test "a reset an hour or less in the past stays in the past" do
+      # Exactly at the slack bound: 04:30 local against an 03:30 reset.
+      assert StopReason.wallclock_reset_utc(~N[2026-09-08 04:30:00], 0, 3, 30) ==
+               ~U[2026-09-08 03:30:00Z]
+
+      # Just past it, the roll is back on.
+      assert StopReason.wallclock_reset_utc(~N[2026-09-08 04:30:01], 0, 3, 30) ==
+               ~U[2026-09-09 03:30:00Z]
+    end
+
+    # The other half of finding 1's guard: a roll that survives but lands
+    # further out than the 5h window this wording describes means the date
+    # guess was wrong, so the whole parse is declined and the pre-existing 5h
+    # default stands -- never worse than before the branch.
+    test "declines a reset further out than the window it can describe" do
+      # On a host whose zone cannot be named this decline is the zone-mismatch
+      # one instead; the assertion below holds either way, and CI/dev hosts here
+      # do resolve a zone, so the horizon path is the one being exercised.
+      zone = StopReason.host_time_zone_name()
+      # Whatever the local hour is, this names the wall clock ~12h away.
+      far = NaiveDateTime.add(NaiveDateTime.local_now(), 12 * 3600, :second)
+
+      reason =
+        StopReason.classify(1, [
+          "You've hit your session limit \u00b7 resets #{wall_clock_12h(far)} (#{zone || "America/New_York"})"
+        ])
+
+      assert reason.category == :quota_exhausted
+      assert reason.retry_after == nil
+    end
+
     test "handles a positive UTC offset" do
       local_now = ~N[2026-09-08 01:00:00]
 
@@ -295,10 +344,15 @@ defmodule Arbiter.Worker.StopReasonTest do
 
     test "classify/2 parses the reset when the message zone is the host zone" do
       zone = StopReason.host_time_zone_name()
+      # Named relative to now rather than as a fixed "3:30am": the horizon bound
+      # from finding 1 declines a reset further out than the window this wording
+      # can describe, so a hardcoded hour would pass or fail depending on what
+      # time of day the suite runs.
+      at = NaiveDateTime.add(NaiveDateTime.local_now(), 90 * 60, :second)
 
       reason =
         StopReason.classify(1, [
-          "You've hit your session limit \u00b7 resets 3:30am (#{zone || "America/New_York"})"
+          "You've hit your session limit \u00b7 resets #{wall_clock_12h(at)} (#{zone || "America/New_York"})"
         ])
 
       assert reason.category == :quota_exhausted
@@ -307,13 +361,69 @@ defmodule Arbiter.Worker.StopReasonTest do
         assert %DateTime{} = reason.retry_after
         # All modern IANA offsets are whole minutes, so the minute survives the
         # local->UTC conversion.
-        assert reason.retry_after.minute == 30
+        assert reason.retry_after.minute == at.minute
         diff = DateTime.diff(reason.retry_after, DateTime.utc_now())
-        assert diff >= 0 and diff <= 86_400
+        assert diff > 0 and diff <= 90 * 60
         assert reason.remediation =~ "resets at"
       else
         assert reason.retry_after == nil
       end
+    end
+
+    # Review round 1, finding 2: a parenthetical the zone-name grammar cannot
+    # span must decline, not silently fall through to "assume host-local" and
+    # apply this host's offset to a wall clock written elsewhere.
+    test "declines when the zone parenthetical is not an IANA name" do
+      for rendering <- ["(UTC-04:00)", "(GMT+5:30)", "(UTC\u221204:00)", "(Pacific Time)"] do
+        reason =
+          StopReason.classify(1, [
+            "You've hit your session limit \u00b7 resets 3:30am #{rendering}"
+          ])
+
+        assert reason.category == :quota_exhausted, "category for #{rendering}"
+        assert reason.retry_after == nil, "retry_after for #{rendering}"
+      end
+    end
+
+    # Review round 1, finding 2, at the edges a bounded raw-text class still
+    # missed. Each of these leaves the *optional* zone group unmatched, so
+    # `zone` comes back empty and the parse silently takes the "no zone named,
+    # assume host-local" path -- applying this host's offset to a wall clock
+    # that may have been written somewhere else. Anything trailing the time
+    # that is not a closed parenthetical must decline instead.
+    test "declines when text follows the time that is not a parseable zone" do
+      # Well inside the horizon bound, so the only thing that can decline
+      # these is the zone logic under test.
+      at = NaiveDateTime.add(NaiveDateTime.local_now(), 30 * 60, :second)
+      long = String.duplicate("Very_Long_Region/", 4) <> "Endsville"
+
+      for trailing <- ["(America/New_York", "(#{long})", "()", "in about 12 hours"] do
+        reason =
+          StopReason.classify(1, [
+            "You've hit your session limit \u00b7 resets #{wall_clock_12h(at)} #{trailing}"
+          ])
+
+        assert reason.category == :quota_exhausted, "category for #{trailing}"
+        assert reason.retry_after == nil, "retry_after for #{trailing}"
+      end
+    end
+
+    # The other side of that guard: declining on unaccounted trailing text must
+    # not also kill the documented host-local path, which is a line whose reset
+    # clause names no zone at all.
+    test "a message with no zone parenthetical is still read as host-local" do
+      at = NaiveDateTime.add(NaiveDateTime.local_now(), 30 * 60, :second)
+
+      reason =
+        StopReason.classify(1, [
+          "You've hit your session limit \u00b7 resets #{wall_clock_12h(at)}"
+        ])
+
+      assert reason.category == :quota_exhausted
+      assert %DateTime{} = reason.retry_after
+
+      diff = DateTime.diff(reason.retry_after, DateTime.utc_now())
+      assert diff > 0 and diff <= 3_600
     end
 
     test "declines when the message names a zone that is not the host zone" do
@@ -328,8 +438,12 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
 
     test "a 12-hour boundary reset parses as midnight/noon" do
-      assert StopReason.wallclock_reset_utc(~N[2026-09-08 01:00:00], 0, 0, 0) ==
+      # 06:00 local is well past the past-slack bound, so midnight rolls.
+      assert StopReason.wallclock_reset_utc(~N[2026-09-08 06:00:00], 0, 0, 0) ==
                ~U[2026-09-09 00:00:00Z]
+
+      assert StopReason.wallclock_reset_utc(~N[2026-09-08 06:00:00], 0, 12, 0) ==
+               ~U[2026-09-08 12:00:00Z]
     end
 
     test "the epoch form still wins when both are present" do
@@ -605,5 +719,21 @@ defmodule Arbiter.Worker.StopReasonTest do
       assert map.category == :quota_exhausted
       assert map.retry_after == DateTime.from_unix!(1_735_689_600)
     end
+  end
+
+  # Renders a NaiveDateTime the way the CLI writes a reset ("3:30am"), so a
+  # fixture can name a wall clock at a known offset from *now* instead of
+  # hardcoding an hour that drifts in and out of the horizon bound depending
+  # on what time the suite happens to run.
+  defp wall_clock_12h(%NaiveDateTime{} = at) do
+    {hour12, meridiem} =
+      case at.hour do
+        0 -> {12, "am"}
+        12 -> {12, "pm"}
+        h when h < 12 -> {h, "am"}
+        h -> {h - 12, "pm"}
+      end
+
+    "#{hour12}:#{String.pad_leading(to_string(at.minute), 2, "0")}#{meridiem}"
   end
 end

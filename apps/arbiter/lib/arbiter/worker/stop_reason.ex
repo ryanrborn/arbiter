@@ -213,11 +213,24 @@ defmodule Arbiter.Worker.StopReason do
   # bd-3wgdie line-leading anchor `@quota_signature` uses). Reading it from
   # anywhere in the tail would let prose that merely mentions a reset time
   # *shorten* a park, which is the more dangerous direction of the two.
+  #
+  # Review round 1, finding 2: nothing after the meridiem is parsed *inside* this
+  # regex. Any bounded zone-name class — an IANA-shaped one, or even raw
+  # `[^)\n]{1,40}` — makes the trailing group optional in practice: a rendering
+  # it cannot span (`(UTC-04:00)`, a non-ASCII dash, an unclosed or overlong
+  # parenthetical) fails the group, leaves `zone` empty, and silently takes the
+  # "no zone named, assume host-local" path — applying *this* host's offset to a
+  # wall clock that may have been written somewhere else, in either direction.
+  # So the regex captures the whole remainder of the line as `tail` and
+  # `zone_from_tail/1` decides: empty tail means no zone was named (host-local),
+  # a closed `(...)` yields whatever is between the parens for
+  # `host_zone_matches?/1` to accept or reject, and anything else declines the
+  # parse outright.
   @quota_reset_wallclock_signature ~r/
       ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](?:session|usage)[ ]limit
       [^\n]*?
       \bresets[ \t]+(?<hour>\d{1,2})(?::(?<minute>\d{2}))?[ \t]*(?<meridiem>am|pm)
-      (?:[ \t]*\((?<zone>[A-Za-z][A-Za-z0-9_+\/-]*)\))?
+      (?<tail>[^\n]*)
   /mix
 
   @credit_signature ~r/
@@ -697,10 +710,41 @@ defmodule Arbiter.Worker.StopReason do
   # current offset is off by up to an hour. That is a ≤1h error twice a year
   # against a 5h blanket default, and `quota_resume_backoff_ms/1` clamps the
   # result to a 60s floor, so the failure mode is one early retry, not a hang.
+  #
+  # Review round 1, finding 1: `classify/2` runs at *session exit*, not when the
+  # CLI printed the phrase, and the two can be far apart (`claude session error
+  # 674.5s` in the very run this ticket cites). If the reset instant falls
+  # inside that gap, a naive "always the next occurrence" roll turns a window
+  # that has ALREADY reset into a ~24h park -- strictly worse than the 5h
+  # default it replaces. Two bounds prevent that, both resting on the fact that
+  # this wording only ever describes the 5h window (a 7-day reset carries a
+  # date, which `@quota_reset_wallclock_signature` cannot match):
+  #
+  #   * `@wallclock_past_slack_seconds` -- a candidate less than an hour behind
+  #     the local clock is the reset we just missed, not tomorrow's. It is
+  #     returned in the past, so `Arbiter.Worker.quota_resume_backoff_ms/1`
+  #     takes its 60s floor and the worker retries promptly. A wasted retry
+  #     costs one re-detect; a wrong day costs a day.
+  #   * `@wallclock_max_horizon_seconds` -- any reset that survives the roll but
+  #     lands further out than the window itself means the date guess was wrong,
+  #     so we decline entirely and the pre-existing 5h default stands. That
+  #     makes the wall-clock path never worse than the behaviour before this
+  #     branch, in either direction.
+  @wallclock_past_slack_seconds 3_600
+  @wallclock_max_horizon_seconds 6 * 3_600
+
   defp wallclock_reset_from(haystack) do
     with {hour, minute, zone} <- parse_wallclock(haystack),
-         true <- host_zone_matches?(zone) do
-      wallclock_reset_utc(NaiveDateTime.local_now(), local_utc_offset_seconds(), hour, minute)
+         true <- host_zone_matches?(zone),
+         reset =
+           wallclock_reset_utc(
+             NaiveDateTime.local_now(),
+             local_utc_offset_seconds(),
+             hour,
+             minute
+           ),
+         true <- DateTime.diff(reset, DateTime.utc_now()) <= @wallclock_max_horizon_seconds do
+      reset
     else
       _ -> nil
     end
@@ -712,10 +756,31 @@ defmodule Arbiter.Worker.StopReason do
     with %{"hour" => raw_hour, "meridiem" => meridiem} = caps <-
            Regex.named_captures(@quota_reset_wallclock_signature, haystack),
          {hour12, ""} when hour12 in 0..12 <- Integer.parse(raw_hour),
-         minute when minute in 0..59 <- parse_minute(caps["minute"]) do
-      {to_24h(hour12, String.downcase(meridiem)), minute, presence(caps["zone"])}
+         minute when minute in 0..59 <- parse_minute(caps["minute"]),
+         {:ok, zone} <- zone_from_tail(caps["tail"]) do
+      {to_24h(hour12, String.downcase(meridiem)), minute, zone}
     else
       _ -> nil
+    end
+  end
+
+  @wallclock_zone_tail ~r/^[ \t]*\((?<zone>[^)\n]*)\)/
+
+  # See the capture note on `@quota_reset_wallclock_signature`. `{:ok, nil}` is
+  # "no zone was named"; `{:ok, zone}` hands a raw string to
+  # `host_zone_matches?/1`, which rejects anything that is not this host's zone
+  # name (so `(UTC-04:00)` and `()` alike decline); `:error` is text we cannot
+  # account for, which must not be read as an absent zone.
+  defp zone_from_tail(tail) do
+    cond do
+      String.trim(tail) == "" ->
+        {:ok, nil}
+
+      caps = Regex.named_captures(@wallclock_zone_tail, tail) ->
+        {:ok, caps["zone"]}
+
+      true ->
+        :error
     end
   end
 
@@ -727,10 +792,12 @@ defmodule Arbiter.Worker.StopReason do
   defp to_24h(hour, "pm"), do: hour + 12
   defp to_24h(hour, _am), do: hour
 
-  # `3:30am` names a wall-clock time, not a date. It is always the *next*
-  # occurrence: the CLI only prints a reset that has not happened yet, so a
-  # time already past locally belongs to tomorrow. An exact tie is treated as
-  # "now" (the window is resetting) rather than a full day out.
+  # `3:30am` names a wall-clock time, not a date. The CLI only prints a reset
+  # that had not happened yet *when it printed*, so a time well past locally
+  # belongs to tomorrow -- but only well past: within
+  # `@wallclock_past_slack_seconds` the reset is the one that elapsed between
+  # the phrase and this exit, and is returned in the past so the caller retries
+  # on its 60s floor. An exact tie is likewise "now", not a full day out.
   @doc false
   @spec wallclock_reset_utc(NaiveDateTime.t(), integer(), 0..23, 0..59) :: DateTime.t()
   def wallclock_reset_utc(%NaiveDateTime{} = local_now, offset_seconds, hour, minute)
@@ -738,7 +805,7 @@ defmodule Arbiter.Worker.StopReason do
     candidate = NaiveDateTime.new!(NaiveDateTime.to_date(local_now), Time.new!(hour, minute, 0))
 
     candidate =
-      if NaiveDateTime.compare(candidate, local_now) == :lt do
+      if NaiveDateTime.diff(local_now, candidate, :second) > @wallclock_past_slack_seconds do
         NaiveDateTime.add(candidate, 86_400, :second)
       else
         candidate
@@ -785,8 +852,11 @@ defmodule Arbiter.Worker.StopReason do
     end
   end
 
-  # A message that names no zone is taken at face value: the CLI wrote it in
-  # host-local time and we only need the offset, not the name.
+  # A message whose reset clause names no zone at all is taken at face value: the
+  # CLI wrote it in host-local time and we only need the offset, not the name.
+  # `zone_from_tail/1` guarantees this clause is reached only for a genuinely
+  # empty tail — every parenthetical, parseable or not, reaches the comparison
+  # below and must match the host's own zone name to be trusted.
   defp host_zone_matches?(nil), do: true
 
   defp host_zone_matches?(zone) do
