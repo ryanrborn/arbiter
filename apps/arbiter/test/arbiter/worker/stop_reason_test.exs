@@ -222,6 +222,28 @@ defmodule Arbiter.Worker.StopReasonTest do
         ])
 
       refute reason.category == :quota_exhausted
+      # Review round 1, finding 3, recorded honestly rather than papered over:
+      # this fixture does NOT land on :crashed. The prose quotes the atom
+      # `:quota_exhausted`, which trips the pre-existing *unanchored*
+      # `@credit_signature` alternative `(quota|billing)…(exceeded|exhausted)`.
+      # The refute above is what criterion 3 asked for and passes on its own
+      # terms, but pinning the actual category keeps a future reader from
+      # reading it as proof the line anchor is what saved us here.
+      assert reason.category == :credit_exhausted
+    end
+
+    # ...so this is the assertion that actually isolates the line anchor: the
+    # same phrase, quoted mid-line, with nothing else in the tail for another
+    # signature to catch. It must fall all the way through to :crashed.
+    test "the phrase quoted mid-line with no other signal falls through to :crashed" do
+      reason =
+        StopReason.classify(1, [
+          "   observed wording (`you've hit your session limit`, tolerant of the",
+          "   typographic vs ASCII apostrophe \u2014 the CLI emits `\u2019`)"
+        ])
+
+      assert reason.category == :crashed
+      assert reason.retry_after == nil
     end
 
     # bd-cfhj7z scope note: detection must not assume repetition. Run 7e9e5ea5
