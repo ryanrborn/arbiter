@@ -247,7 +247,10 @@ defmodule Arbiter.Quota do
             |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
 
           require Logger
-          Logger.debug("Quota.capture: workspace=#{ws_id}, provider=#{provider}, status_5h=#{Map.get(attrs, :status_5h)}, utilization_5h=#{Map.get(attrs, :utilization_5h)}, captured_at=#{Map.get(full, :captured_at)}")
+
+          Logger.debug(
+            "Quota.capture: workspace=#{ws_id}, provider=#{provider}, status_5h=#{Map.get(attrs, :status_5h)}, utilization_5h=#{Map.get(attrs, :utilization_5h)}, captured_at=#{Map.get(full, :captured_at)}"
+          )
 
           result =
             AnthropicQuota
