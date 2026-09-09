@@ -78,6 +78,59 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcherTest do
       assert msg.body =~ "a fresh dispatch is needed rather than a resume"
     end
 
+    test "the 0-attempt resume failure explains that 0 is not a decline (bd-di4t6d)", %{ws: ws} do
+      assert :ok =
+               AutoResumeDispatcher.escalate_exhausted(
+                 "bd-zeroattempts",
+                 ws.id,
+                 "!9",
+                 0,
+                 {:resume_failed, :no_outpost}
+               )
+
+      assert [msg] = escalations(ws)
+
+      # "after 0 attempts" read as "the Watchdog declined to try". It did try —
+      # the counter records auto-resumes that previously RAN.
+      assert msg.body =~ "not a decline"
+      assert msg.body =~ "the first episode for this task"
+    end
+
+    test "a resume blocked by a live subordinate pass reads as its own case (bd-di4t6d)", %{
+      ws: ws
+    } do
+      blocker =
+        {:worker_start_failed,
+         {:task_worker_live,
+          %{
+            registry_key: "bd-blocked:fixpass",
+            requested_key: "bd-blocked",
+            status: :running,
+            task_id: "bd-blocked"
+          }}}
+
+      assert :ok =
+               AutoResumeDispatcher.escalate_exhausted(
+                 "bd-blocked",
+                 ws.id,
+                 "!198",
+                 0,
+                 {:resume_blocked, blocker, 30}
+               )
+
+      assert [msg] = escalations(ws)
+
+      # Distinct from both :budget_exhausted and {:resume_failed, _}: the resume
+      # never ran, and the remedy is the wedged subordinate pass, not a resume.
+      assert msg.subject =~ "auto-resume BLOCKED after 30 deferred retries"
+      refute msg.subject =~ "exhausted"
+      refute msg.subject =~ "FAILED"
+      assert msg.body =~ "bd-blocked:fixpass"
+      assert msg.body =~ "it did\nNOT burn the auto-resume budget"
+      assert msg.body =~ "still live after 30 retries"
+      assert msg.body =~ "!198"
+    end
+
     test "reports (rather than swallows) a missing workspace_id" do
       assert {:error, :no_workspace_id} =
                AutoResumeDispatcher.escalate_exhausted("bd-nows", nil, "!1", 3, :budget_exhausted)
