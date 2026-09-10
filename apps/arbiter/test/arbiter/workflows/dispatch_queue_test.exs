@@ -12,6 +12,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.StopReason
   alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Workflows.DispatchQueueSupervisor
 
@@ -33,6 +34,28 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
         do: send(pid, {:dispatch_attempt, task_id})
 
       {:error, :always_fails}
+    end
+  end
+
+  # Always fails with a quota-exhausted pre-flight refusal, the exact shape
+  # `Arbiter.Worker.Dispatch.dispatch/2` returns from `run_preflight/2`
+  # (bd-8lnnnt) — used to prove the drain path itself holds instead of
+  # re-attempting on every drain trigger.
+  defmodule QuotaExhaustedDispatcher do
+    def dispatch(task_id, _opts) do
+      if pid = Application.get_env(:arbiter, :test_dispatch_pid),
+        do: send(pid, {:dispatch_attempt, task_id})
+
+      reset_at = Application.get_env(:arbiter, :test_quota_reset_at)
+
+      {:error,
+       {:auth_check_failed,
+        %StopReason{
+          category: :quota_exhausted,
+          summary: "5h usage limit reached",
+          remediation: "wait",
+          retry_after: reset_at
+        }}}
     end
   end
 
@@ -99,6 +122,23 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     {:ok, pid} = DispatchQueueSupervisor.start_dispatch_queue(ws.id, opts)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     pid
+  end
+
+  # The drain Task's `{:requeue, item}` cast lands on the queue asynchronously
+  # after the test process already observed the dispatcher's `dispatch_attempt`
+  # message — poll instead of asserting `state/1` immediately after.
+  defp wait_for_held_item(pid, budget_ms \\ 500) do
+    case DispatchQueue.state(pid) do
+      %{items: [item | _]} ->
+        item
+
+      _ when budget_ms > 0 ->
+        Process.sleep(10)
+        wait_for_held_item(pid, budget_ms - 10)
+
+      _ ->
+        flunk("no held item appeared in the queue in time")
+    end
   end
 
   describe ":throttle — holds near the cap" do
@@ -299,6 +339,86 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       assert drain_msgs == [],
              "Expected no pending :drain_on_reset, got #{length(drain_msgs)}"
+    end
+  end
+
+  describe "quota-exhausted pre-flight hold on the drain path (bd-8lnnnt)" do
+    test "a requeued item that failed pre-flight with :quota_exhausted is not redrained until its hold clears" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      reset_at = DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.truncate(:second)
+      Application.put_env(:arbiter, :test_quota_reset_at, reset_at)
+      on_exit(fn -> Application.delete_env(:arbiter, :test_quota_reset_at) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      pid = start_queue(ws, dispatcher: QuotaExhaustedDispatcher, auto_subscribe: false)
+
+      task = make_task(ws)
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      # The gate holds the item on the very first `hold/5` call, before any
+      # dispatcher is ever invoked — so no probe attempt yet.
+      refute_receive {:dispatch_attempt, _}, 50
+
+      # Make the gate fail open (same staleness-fix path the existing
+      # "no busy-loop" test above uses) so drain actually reaches the
+      # dispatcher and exercises the real failure/hold path.
+      past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
+
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatch_attempt, task_id}, 500
+      assert task_id == task.id
+
+      held_item = wait_for_held_item(pid)
+      assert %DateTime{} = held_item.retry_not_before
+      assert DateTime.compare(held_item.retry_not_before, DateTime.utc_now()) == :gt
+
+      # A second drain immediately after must NOT re-run the doomed probe —
+      # this is the ~5-minute `RefreshProbe`/`CloudProbe` broadcast cadence
+      # that produced 12 identical escalations for bd-7qbavq; the hold must
+      # absorb it regardless of how often the queue is woken.
+      :ok = DispatchQueue.drain(pid)
+      refute_receive {:dispatch_attempt, _}, 200
+    end
+
+    test "dispatch resumes once the hold's retry_not_before has passed" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      # A reset time far enough in the past that reset_at + the 60s escalation
+      # buffer (`Arbiter.Worker.PreflightHold`) has already elapsed by the time
+      # the failing drain computes the hold — proves the hold is temporary, not
+      # a permanent latch, without a real-time sleep in the test.
+      reset_at = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+      Application.put_env(:arbiter, :test_quota_reset_at, reset_at)
+      on_exit(fn -> Application.delete_env(:arbiter, :test_quota_reset_at) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      pid = start_queue(ws, dispatcher: QuotaExhaustedDispatcher, auto_subscribe: false)
+
+      task = make_task(ws)
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
+
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatch_attempt, task_id}, 500
+
+      held_item = wait_for_held_item(pid)
+      assert DateTime.compare(held_item.retry_not_before, DateTime.utc_now()) == :lt
+
+      # The hold has already elapsed — the very next drain must retry, exactly
+      # the "task still dispatches promptly once the window rolls" behaviour
+      # observed for bd-7qbavq at 23:20:03.
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatch_attempt, ^task_id}, 500
     end
   end
 

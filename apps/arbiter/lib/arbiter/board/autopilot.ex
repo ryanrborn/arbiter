@@ -90,6 +90,15 @@ defmodule Arbiter.Board.Autopilot do
   `{:held, id, retry_not_before}` instead. `Arbiter.Messages.CoordinatorNotifier.preflight_failed/2`
   carries its own separate dedupe for the escalation itself, so this hold is
   about not re-running the probe, not (only) about not re-paging.
+
+  This hold only covers Autopilot's own 15s tick. It is **not** what drove the
+  bd-7qbavq incident this bug tracks: that card's retries carried
+  `skip_quota_gate: true` (a flag only `Arbiter.Workflows.DispatchQueue`'s
+  drain sets — see `DispatchQueue`'s moduledoc), landed on 5-minute
+  boundaries matching `Arbiter.Quota.RefreshProbe`/`CloudProbe`'s broadcast
+  interval, and produced only one run row, all of which rule out this
+  15s-tick path. `DispatchQueue` carries the equivalent hold for the path
+  that actually produced the flood; see its `retry_not_before` handling.
   """
 
   use GenServer
@@ -417,42 +426,11 @@ defmodule Arbiter.Board.Autopilot do
   defp error_shape(reason), do: reason
 
   # bd-8lnnnt: when should the *next* dispatch attempt on this card happen?
-  #
-  # A `:quota_exhausted` pre-flight failure (`Arbiter.Worker.Dispatch.run_preflight/2`
-  # classifies it via `Arbiter.Worker.StopReason.classify/2`, same as the
-  # post-run path) already carries a `retry_after` whenever the CLI's crash
-  # output named a reset time — prefer that over any blind interval; the
-  # account provably cannot dispatch before then no matter how often Autopilot
-  # ticks. When no reset time was parsed, fall back to a bounded exponential
-  # backoff (mirrors `Arbiter.Worker.resume_backoff_ms/2`'s treatment of other
-  # recoverable categories on the post-run path) rather than hammering the CLI
-  # probe every 15s indefinitely. Every other failure shape is unaffected —
-  # `nil` here means "no hold", exactly today's always-reconsider behaviour.
-  @preflight_backoff_base_ms :timer.seconds(30)
-  @preflight_backoff_max_ms :timer.minutes(15)
-  @preflight_reset_buffer_ms :timer.seconds(60)
-
-  defp preflight_retry_not_before(
-         {:auth_check_failed,
-          %Arbiter.Worker.StopReason{category: :quota_exhausted, retry_after: %DateTime{} = at}},
-         _count,
-         _now
-       ) do
-    DateTime.add(at, @preflight_reset_buffer_ms, :millisecond)
-  end
-
-  defp preflight_retry_not_before(
-         {:auth_check_failed, %Arbiter.Worker.StopReason{category: :quota_exhausted}},
-         count,
-         now
-       ) do
-    backoff_ms =
-      min(@preflight_backoff_base_ms * Integer.pow(2, count - 1), @preflight_backoff_max_ms)
-
-    DateTime.add(now, backoff_ms, :millisecond)
-  end
-
-  defp preflight_retry_not_before(_reason, _count, _now), do: nil
+  # Delegates to `Arbiter.Worker.PreflightHold`, the policy shared with
+  # `Arbiter.Workflows.DispatchQueue`'s held-intent drain — see that module's
+  # doc for why a single policy backs both callers.
+  defp preflight_retry_not_before(reason, count, now),
+    do: Arbiter.Worker.PreflightHold.retry_not_before(reason, count, now)
 
   # Resolves the card's workspace so `CoordinatorNotifier.dispatch_stuck/3`
   # has somewhere to post — a card with no readable Issue/workspace has

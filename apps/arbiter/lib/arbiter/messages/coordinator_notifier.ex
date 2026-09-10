@@ -709,10 +709,15 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   # bd-8lnnnt: a pre-flight probe failure (exhausted usage window or expired
   # credentials) is re-detected on *every* dispatch attempt for as long as the
-  # underlying condition holds — Autopilot re-reads Ready and reconsiders the
-  # same card every tick, and nothing about a preflight refusal changes that
-  # card's state. Left undeduped, one card stuck in the Ready queue paged the
-  # coordinator on every tick — 14 identical "pre-flight auth failed"
+  # underlying condition holds. The incident this dedupes was actually driven
+  # by `Arbiter.Workflows.DispatchQueue`'s held-intent drain re-running the
+  # doomed probe on `RefreshProbe`/`CloudProbe`'s ~5-minute broadcast cadence
+  # (see that module's moduledoc) — not, as first suspected, `Autopilot`'s 15s
+  # tick — but the fix here is deliberately independent of which caller
+  # retries: it dedupes inside `preflight_failed/2` itself, which both
+  # `dispatch.ex` call sites go through regardless of what drove the retry.
+  # Left undeduped, one task stuck behind an exhausted window paged the
+  # coordinator on every retry — 14 identical "pre-flight auth failed"
   # escalations in 75 minutes for a single exhausted 5h window. Mirrors
   # `duplicate_block_escalation?/3` (bd-brwx7w): suppressed while an identical
   # page is still uncleared, and for a cooldown window after it is cleared, so
@@ -724,15 +729,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     scope = [workspace_id: ws_id, task_ref: task_id]
     coordinator = Message.coordinator_ref()
 
-    cond do
-      Message.last_with_subject(coordinator, [subject], scope ++ [uncleared: true]) != nil ->
-        true
-
-      true ->
-        case Message.last_with_subject(coordinator, [subject], scope) do
-          nil -> false
-          last -> within_preflight_cooldown?(last)
-        end
+    if Message.last_with_subject(coordinator, [subject], scope ++ [uncleared: true]) do
+      true
+    else
+      case Message.last_with_subject(coordinator, [subject], scope) do
+        nil -> false
+        last -> within_preflight_cooldown?(last)
+      end
     end
   rescue
     _ -> false
