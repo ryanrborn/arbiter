@@ -84,6 +84,14 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # flood. Override with `config :arbiter, :merge_block_escalation_cooldown_ms`.
   @default_block_escalation_cooldown_ms :timer.hours(6)
 
+  # Same idea as the merge-block cooldown above, applied to `preflight_failed/2`
+  # (bd-8lnnnt). A pre-flight refusal — expired credentials or an exhausted
+  # usage window — is something only an operator or the clock can clear, never
+  # a retry, so it earns the same "uncleared, or within cooldown after clear"
+  # treatment as an unresolvable merge block. Override with
+  # `config :arbiter, :preflight_escalation_cooldown_ms`.
+  @default_preflight_escalation_cooldown_ms :timer.hours(6)
+
   # The merge-block reasons that mean "a human reviewer has not approved yet".
   # The forge forbids the fleet approving its own PR, so these can only clear
   # out-of-band — they are one dedupe family and the only ones that earn the
@@ -186,6 +194,23 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   Best-effort, returns `:ok`.
   """
   @spec preflight_failed(snapshot(), StopReason.t()) :: :ok
+  def preflight_failed(
+        %{workspace_id: ws_id, task_id: task_id} = snapshot,
+        %StopReason{} = reason
+      )
+      when is_binary(ws_id) and is_binary(task_id) do
+    if duplicate_preflight_escalation?(ws_id, task_id, reason) do
+      Logger.debug(
+        "CoordinatorNotifier.preflight_failed/2 suppressed duplicate escalation " <>
+          "task=#{task_id} category=#{reason.category} (bd-8lnnnt)"
+      )
+
+      :ok
+    else
+      escalate(:preflight_failed, snapshot, reason)
+    end
+  end
+
   def preflight_failed(snapshot, %StopReason{} = reason),
     do: escalate(:preflight_failed, snapshot, reason)
 
@@ -682,6 +707,74 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp within_cooldown?(_), do: false
 
+  # bd-8lnnnt: a pre-flight probe failure (exhausted usage window or expired
+  # credentials) is re-detected on *every* dispatch attempt for as long as the
+  # underlying condition holds — Autopilot re-reads Ready and reconsiders the
+  # same card every tick, and nothing about a preflight refusal changes that
+  # card's state. Left undeduped, one card stuck in the Ready queue paged the
+  # coordinator on every tick — 14 identical "pre-flight auth failed"
+  # escalations in 75 minutes for a single exhausted 5h window. Mirrors
+  # `duplicate_block_escalation?/3` (bd-brwx7w): suppressed while an identical
+  # page is still uncleared, and for a cooldown window after it is cleared, so
+  # a resolved-then-recurring condition still gets a fresh page rather than
+  # resetting the flood. Fails open: an unreadable mailbox must never swallow
+  # a genuine escalation.
+  defp duplicate_preflight_escalation?(ws_id, task_id, reason) do
+    subject = preflight_subject(task_id, reason)
+    scope = [workspace_id: ws_id, task_ref: task_id]
+    coordinator = Message.coordinator_ref()
+
+    cond do
+      Message.last_with_subject(coordinator, [subject], scope ++ [uncleared: true]) != nil ->
+        true
+
+      true ->
+        case Message.last_with_subject(coordinator, [subject], scope) do
+          nil -> false
+          last -> within_preflight_cooldown?(last)
+        end
+    end
+  rescue
+    _ -> false
+  end
+
+  defp within_preflight_cooldown?(%{inserted_at: %DateTime{} = at}) do
+    cooldown =
+      Application.get_env(
+        :arbiter,
+        :preflight_escalation_cooldown_ms,
+        @default_preflight_escalation_cooldown_ms
+      )
+
+    is_integer(cooldown) and cooldown > 0 and
+      DateTime.diff(DateTime.utc_now(), at, :millisecond) < cooldown
+  end
+
+  defp within_preflight_cooldown?(_), do: false
+
+  # bd-8lnnnt: distinguishes "the account is throttled, and will recover on
+  # its own" from "credentials are actually broken" — the wording a
+  # `:quota_exhausted` refusal used to share with real auth failures
+  # ("pre-flight auth failed") misread as a credential problem for what is
+  # really a throttle with a known reset. Also doubles as the dedupe key
+  # (via `preflight_subject/2`), so the two causes never share a latch.
+  defp preflight_verb(%StopReason{category: :quota_exhausted}), do: "pre-flight throttled"
+  defp preflight_verb(_reason), do: "pre-flight auth failed"
+
+  defp preflight_subject(task_id, %StopReason{} = reason),
+    do: "#{task_id} #{preflight_verb(reason)} — #{StopReason.label(reason)}"
+
+  defp preflight_lead(task_id, %StopReason{category: :quota_exhausted} = reason) do
+    "Refused to dispatch #{title_for(task_id)} — the account's usage window is exhausted: " <>
+      "#{reason.summary}. This is a throttle, not a credential problem — dispatch resumes " <>
+      "on its own once the window resets."
+  end
+
+  defp preflight_lead(task_id, reason) do
+    "Refused to dispatch #{title_for(task_id)} — agent pre-flight auth probe failed: " <>
+      "#{reason.summary}."
+  end
+
   # Whether this workspace merges an approved PR itself. Defaults to `false` on
   # an unreadable workspace, matching `Workspace.auto_merge?/1`'s own default:
   # promising an auto-merge that never comes is the failure this guards against.
@@ -1072,7 +1165,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     verb =
       case event do
         :worker_stopped -> "stopped"
-        :preflight_failed -> "pre-flight auth failed"
+        :preflight_failed -> preflight_verb(reason)
         :spawn_failed -> "spawn failed"
       end
 
@@ -1084,8 +1177,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
           "Worker for #{title_for(task_id)} stopped: #{reason.summary}."
 
         :preflight_failed ->
-          "Refused to dispatch #{title_for(task_id)} — agent pre-flight auth probe failed: " <>
-            "#{reason.summary}."
+          preflight_lead(task_id, reason)
 
         :spawn_failed ->
           "Worker for #{title_for(task_id)} failed to spawn: #{reason.summary}."
