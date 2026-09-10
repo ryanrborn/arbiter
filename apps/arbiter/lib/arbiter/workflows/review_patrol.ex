@@ -920,13 +920,36 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # resolved by the adapter. Adapters without it (or a call that errors) fail
   # OPEN here: sticky approval never applies, so behavior is unchanged from
   # before this feature for those adapters.
+  #
+  # `review_requested?/1` is a second OPTIONAL adapter capability (bd-8us1cp):
+  # an explicit re-request of review from our own identity, made after our
+  # approval, is the author saying "the approval does not stand" — the same
+  # signal a human "approval is sticky unless a colleague asks" convention
+  # keys on. That overrides the doc/test/formatting-only classifier
+  # unconditionally, because the classifier is a proxy for "nobody asked us
+  # to look again", and here somebody explicitly did. Adapters without the
+  # capability (or a call that errors) fail OPEN on the override too: sticky
+  # approval behaves exactly as before for those adapters.
   defp sticky_approval_blocks?(%Issue{source_pr: source_pr}, diff, adapter) do
-    operator_currently_approved?(adapter, source_pr) and not invalidating_diff?(diff)
+    operator_currently_approved?(adapter, source_pr) and
+      not invalidating_diff?(diff) and
+      not review_requested?(adapter, source_pr)
   end
 
   defp operator_currently_approved?(adapter, source_pr) do
     if function_exported?(adapter, :self_approved?, 1) do
       case safe(fn -> adapter.self_approved?(source_pr) end) do
+        {:ok, true} -> true
+        _ -> false
+      end
+    else
+      false
+    end
+  end
+
+  defp review_requested?(adapter, source_pr) do
+    if function_exported?(adapter, :review_requested?, 1) do
+      case safe(fn -> adapter.review_requested?(source_pr) end) do
         {:ok, true} -> true
         _ -> false
       end
