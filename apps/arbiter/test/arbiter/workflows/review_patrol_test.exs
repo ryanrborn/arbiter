@@ -1305,6 +1305,12 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert record.status == :completed_unposted
       assert record.mode == :report_only
       assert record.verdict == :approve
+      assert record.finding_count == 1
+      assert [%{"file" => "lib/a.ex", "line" => 5}] = record.proposed_comments
+      assert record.findings_summary =~ "lib/a.ex:5"
+
+      assert hd(escalations).body =~ "lib/a.ex:5"
+      assert hd(escalations).body =~ "arb update #{eng.id} --resume-review"
     end
 
     test "a disputed re-request (unchanged head, review re-requested) trips the breaker instead of replying",

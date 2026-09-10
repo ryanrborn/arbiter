@@ -240,10 +240,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   loop on PR #<n>"`), and `circuit_breaker_tripped` is set — a one-way trip,
   same shape as `review_cap_escalated`: every subsequent tick for this
   engagement is a pure no-op (no adapter calls beyond the merged/closed check)
-  until a human clears `circuit_breaker_tripped` (and, for hygiene,
-  `circuit_breaker_reason`) on the engagement — there is no CLI shortcut for
-  this yet, so today that means a direct record update. There is no
-  *automatic* resume; adjudicating a review loop is a human call by design.
+  until a human clears it via `arb update <engagement-id> --resume-review`,
+  which resets both `circuit_breaker_tripped` and `circuit_breaker_reason` in
+  one call. There is no *automatic* resume; adjudicating a review loop is a
+  human call by design.
   """
 
   # `:transient` (not the default `:permanent`) so a patrol that self-terminates
@@ -318,6 +318,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
                 last_replied: [],
                 last_escalated: [],
                 last_declined: [],
+                last_circuit_broken: [],
                 # Workspace/repo-scoped rate-limit circuit breaker state
                 # (bd-1m8k7d): %{paused_until: nil | DateTime.t(),
                 # backoff_level: non_neg_integer()}. While paused_until is in
@@ -347,6 +348,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       last_replied: state.last_replied,
       last_escalated: state.last_escalated,
       last_declined: state.last_declined,
+      last_circuit_broken: state.last_circuit_broken,
       last_tick_at: state.last_tick_at,
       rate_limit_paused_until: state.rate_limit.paused_until,
       idle_ticks: state.idle_ticks
@@ -387,7 +389,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           last_flagged: [],
           last_replied: [],
           last_escalated: [],
-          last_declined: []
+          last_declined: [],
+          last_circuit_broken: []
       }
     else
       {outcomes, rate_limit} =
@@ -423,6 +426,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           last_replied: for({:replied, id} <- outcomes, do: id),
           last_escalated: for({:escalated, id} <- outcomes, do: id),
           last_declined: for({:declined, id} <- outcomes, do: id),
+          last_circuit_broken: for({:circuit_breaker_tripped, id} <- outcomes, do: id),
           workspace: workspace,
           rate_limit: rate_limit,
           idle_ticks: idle_ticks
@@ -672,6 +676,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   #   {:declined, id}   — sticky approval (bd-4po0nv): the operator identity
   #                        currently holds an approving review and the new push
   #                        was non-invalidating, so no re-review was conducted
+  #   {:circuit_breaker_tripped, id} — the per-engagement loop-signature breaker
+  #                        (bd-1atwts) tripped: nothing was posted, the standing
+  #                        verdict was written report-only, and one coordinator
+  #                        escalation was raised; the engagement is now frozen
   #   nil               — nothing actionable (first-sighting SHA record, no
   #                        advance, guard suppressed, no new replies, or an
   #                        adapter error)
@@ -1501,6 +1509,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   defp write_circuit_breaker_record(%Issue{workspace_id: ws_id} = engagement, verdict)
        when is_binary(ws_id) do
+    findings = engagement.posted_findings || []
+
     _ =
       safe(fn ->
         Ash.create(Record, %{
@@ -1512,6 +1522,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           verdict: verdict,
           engagement_id: engagement.id,
           dispatched_by: "review_patrol_circuit_breaker",
+          proposed_comments: Enum.map(findings, &circuit_breaker_proposed_comment/1),
+          finding_count: length(findings),
+          findings_summary: circuit_breaker_findings_summary(findings),
           started_at: now(),
           completed_at: now()
         })
@@ -1522,13 +1535,58 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   defp write_circuit_breaker_record(_engagement, _verdict), do: :ok
 
+  # A disputed finding, reshaped into the `proposed_comments` map/inline-comment
+  # shape the coordinator's greenlight path (`ExternalReview.greenlight/1`) and
+  # the review-index LiveView already know how to render/post.
+  defp circuit_breaker_proposed_comment(finding) do
+    %{
+      "file" => stored_field(finding, "file"),
+      "line" => stored_field(finding, "line"),
+      "body" => stored_field(finding, "message")
+    }
+  end
+
+  defp circuit_breaker_findings_summary([]), do: nil
+
+  defp circuit_breaker_findings_summary(findings) do
+    lines =
+      findings
+      |> Enum.map(fn f ->
+        file = stored_field(f, "file") || "?"
+        line = stored_field(f, "line")
+        sev = stored_field(f, "severity") || "info"
+        msg = stored_field(f, "message") || ""
+        loc = if line, do: "#{file}:#{line}", else: file
+        "[#{sev}] #{loc} — #{msg}"
+      end)
+      |> Enum.take(20)
+      |> Enum.join("\n")
+
+    if String.length(lines) > 500, do: String.slice(lines, 0, 497) <> "…", else: lines
+  end
+
   defp escalate_circuit_breaker(%Issue{workspace_id: ws_id} = engagement, verdict, reason)
        when is_binary(ws_id) do
+    findings = engagement.posted_findings || []
+
+    disputed_lines =
+      findings
+      |> Enum.with_index()
+      |> Enum.map_join("\n", fn {f, i} ->
+        file = stored_field(f, "file") || "?"
+        line = stored_field(f, "line")
+        loc = if line, do: "#{file}:#{line}", else: file
+        msg = stored_field(f, "message") || ""
+        "  [#{i}] #{loc}\n      #{msg}"
+      end)
+
     body =
       "ReviewPatrol's circuit breaker tripped on PR ##{engagement.source_pr}: #{reason}\n\n" <>
         "Our standing verdict is #{inspect(verdict)}; it was written to the review record as " <>
         "report_only rather than posted. No further verdicts will be posted on this " <>
-        "engagement until the coordinator greenlights or closes it."
+        "engagement until a coordinator runs `arb update #{engagement.id} --resume-review` " <>
+        "(or closes it).\n\n" <>
+        "Disputed threads (#{length(findings)}):\n" <> disputed_lines
 
     _ =
       safe(fn ->
