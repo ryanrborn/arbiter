@@ -228,10 +228,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   that still produces a fresh verdict round. This is a deliberate deferral,
   not an oversight: closing it needs per-finding refutation tracking (which
   findings have an author reply, which lines a new commit actually touched)
-  that doesn't exist yet in `posted_findings`. Tracked as a follow-up; until
-  it lands, that shape of loop is only caught after the fact by the other two
-  arms (a same-SHA repeat, or the author eventually re-requesting review at
-  an unchanged head).
+  that doesn't exist yet in `posted_findings`. Tracked as a follow-up
+  (bd-wtvu9r); until it lands, that shape of loop is only caught after the
+  fact by the other two arms (a same-SHA repeat, or the author eventually
+  re-requesting review at an unchanged head).
 
   On trip: nothing is posted. The would-be verdict is written to
   `Arbiter.Reviews.Record` as `status: :completed_unposted, mode:
@@ -242,8 +242,17 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   engagement is a pure no-op (no adapter calls beyond the merged/closed check)
   until a human clears it via `arb update <engagement-id> --resume-review`,
   which resets both `circuit_breaker_tripped` and `circuit_breaker_reason` in
-  one call. There is no *automatic* resume; adjudicating a review loop is a
-  human call by design.
+  one call and (`Issue.Changes.RecordCircuitBreakerClear`) watermarks the
+  head we tripped on into `circuit_breaker_cleared_sha`. Both trip predicates
+  below check that watermark: clearing the flag alone does not un-trip
+  anything a caller could observe (the head, `last_verdict`, and
+  `last_verdict_sha` are all exactly what they were when the breaker
+  tripped), so without the watermark the very next tick would re-trip,
+  re-escalate, and write a second `Reviews.Record` — the resume would resume
+  nothing. There is no *automatic* resume; adjudicating a review loop is a
+  human call by design. Once the author pushes a new commit (or the
+  coordinator otherwise moves the engagement forward), the watermark stops
+  mattering — it only ever matches one specific already-adjudicated SHA.
   """
 
   # `:transient` (not the default `:permanent`) so a patrol that self-terminates
@@ -789,11 +798,15 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # review from our identity since. See the moduledoc section for why the
   # double condition — not a bare re-request — is what keys the signature.
   defp disputed_re_request?(
-         %Issue{last_verdict_sha: sha, last_verdict: :request_changes} = engagement,
+         %Issue{
+           last_verdict_sha: sha,
+           last_verdict: :request_changes,
+           circuit_breaker_cleared_sha: cleared
+         } = engagement,
          %{head_sha: head},
          adapter
        )
-       when is_binary(sha) and is_binary(head) and sha == head do
+       when is_binary(sha) and is_binary(head) and sha == head and cleared != head do
     review_requested?(adapter, engagement.source_pr)
   end
 
@@ -1220,8 +1233,14 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # insurance against a future/latent caller re-triggering a post on an
   # already-verdicted commit, which is exactly the failure class this
   # breaker exists to bound.
-  defp run_rereview(%Issue{last_verdict_sha: sha} = engagement, head, _adapter, _workspace, _opts)
-       when is_binary(sha) and is_binary(head) and sha == head do
+  defp run_rereview(
+         %Issue{last_verdict_sha: sha, circuit_breaker_cleared_sha: cleared} = engagement,
+         head,
+         _adapter,
+         _workspace,
+         _opts
+       )
+       when is_binary(sha) and is_binary(head) and sha == head and cleared != head do
     trip_circuit_breaker(
       engagement,
       engagement.last_verdict,
@@ -1520,6 +1539,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           status: :completed_unposted,
           mode: :report_only,
           verdict: verdict,
+          greenlight_status: :pending,
           engagement_id: engagement.id,
           dispatched_by: "review_patrol_circuit_breaker",
           proposed_comments: Enum.map(findings, &circuit_breaker_proposed_comment/1),
@@ -1542,7 +1562,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     %{
       "file" => stored_field(finding, "file"),
       "line" => stored_field(finding, "line"),
-      "body" => stored_field(finding, "message")
+      "severity" => stored_field(finding, "severity"),
+      "message" => stored_field(finding, "message"),
+      "body" => stored_field(finding, "message"),
+      "in_diff" => nil
     }
   end
 

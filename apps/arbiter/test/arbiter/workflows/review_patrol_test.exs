@@ -1306,7 +1306,17 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert record.mode == :report_only
       assert record.verdict == :approve
       assert record.finding_count == 1
-      assert [%{"file" => "lib/a.ex", "line" => 5}] = record.proposed_comments
+
+      assert [
+               %{
+                 "file" => "lib/a.ex",
+                 "line" => 5,
+                 "severity" => "error",
+                 "message" => "prior issue",
+                 "body" => "prior issue"
+               }
+             ] = record.proposed_comments
+
       assert record.findings_summary =~ "lib/a.ex:5"
 
       assert hd(escalations).body =~ "lib/a.ex:5"
@@ -1385,6 +1395,112 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert records == []
       assert reload(eng).circuit_breaker_tripped == true
+    end
+
+    test "--resume-review actually resumes: trip -> resume -> tick escalates and records exactly once (disputed re-request arm)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 606, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "samesha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      rereview_stub_with_reviews(606, "samesha", "", [], "botreviewer", ["botreviewer"])
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      tripped = reload(eng)
+      assert tripped.circuit_breaker_tripped == true
+
+      # The coordinator resumes exactly the way `arb update --resume-review`
+      # does: clear the flag + reason, nothing else.
+      {:ok, _resumed} =
+        Ash.update(tripped, %{circuit_breaker_tripped: false, circuit_breaker_reason: nil},
+          action: :update
+        )
+
+      assert reload(eng).circuit_breaker_cleared_sha == "samesha"
+
+      assert :ok = ReviewPatrol.tick(name)
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert length(records) == 1
+      assert reload(eng).circuit_breaker_tripped == false
+    end
+
+    test "--resume-review actually resumes: trip -> resume -> tick escalates and records exactly once (same-SHA arm)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 607, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :approve,
+          last_verdict_sha: "newsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(607, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      tripped = reload(eng)
+      assert tripped.circuit_breaker_tripped == true
+
+      {:ok, _resumed} =
+        Ash.update(tripped, %{circuit_breaker_tripped: false, circuit_breaker_reason: nil},
+          action: :update
+        )
+
+      assert reload(eng).circuit_breaker_cleared_sha == "newsha"
+
+      # `last_reviewed_sha` ("oldsha") never advanced on the trip (nothing
+      # posts on trip), so this second tick still finds head ("newsha") past
+      # it and takes the new-commit re-review path into `run_rereview/5`
+      # again. Without the watermark this re-trips the same-SHA guard
+      # (`sha == head`) a second time; with it, `cleared == head` lets the
+      # real re-review through instead — the engagement moves forward rather
+      # than freezing itself right back up.
+      put_invoker([])
+
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert length(records) == 1
+      assert reload(eng).circuit_breaker_tripped == false
     end
 
     test "concurrent trip evaluations for the same engagement escalate exactly once", %{ws: ws} do
