@@ -2725,11 +2725,12 @@ defmodule Arbiter.Worker.Watchdog do
 
     state = %{state | last_head_sha: head}
 
-    cond do
-      # An approval lapse ends the episode: drop the memoised recorded SHA so a
-      # genuine re-review is picked up on the next approved poll.
-      not approved? -> %{state | recorded_reviewed_sha: nil, recorded_sha_loaded?: false}
-      true -> load_recorded_reviewed_sha(state)
+    # An approval lapse ends the episode: drop the memoised recorded SHA so a
+    # genuine re-review is picked up on the next approved poll.
+    if approved? do
+      load_recorded_reviewed_sha(state)
+    else
+      %{state | recorded_reviewed_sha: nil, recorded_sha_loaded?: false}
     end
   end
 

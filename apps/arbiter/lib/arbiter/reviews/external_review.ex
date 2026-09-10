@@ -677,7 +677,14 @@ defmodule Arbiter.Reviews.ExternalReview do
           # first-pass findings seed the engagement's `posted_findings` so
           # ReviewPatrol's relevance gate (re-review only when a new commit touches
           # a previously-flagged file) has something to match against.
-          engagement = maybe_create_engagement(prepared, opts, Map.get(final, :findings) || [])
+          engagement =
+            maybe_create_engagement(
+              prepared,
+              opts,
+              Map.get(final, :findings) || [],
+              Map.get(final, :verdict)
+            )
+
           {:ok, result(prepared, final, engagement, report_only)}
 
         {:error, _} = err ->
@@ -1138,9 +1145,9 @@ defmodule Arbiter.Reviews.ExternalReview do
   # adopts the PR. Returns %{id, created} on create, %{id, created: false} when
   # an open engagement already existed (dedup), or nil when follow-up is off /
   # anything goes wrong (best-effort — never fails the review).
-  defp maybe_create_engagement(prepared, opts, findings) do
+  defp maybe_create_engagement(prepared, opts, findings, verdict) do
     if follow_up?(prepared, opts) do
-      create_engagement(prepared, opts, findings)
+      create_engagement(prepared, opts, findings, verdict)
     else
       nil
     end
@@ -1167,7 +1174,8 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp create_engagement(
          %{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared,
          opts,
-         findings
+         findings,
+         verdict
        ) do
     case existing_engagement(mr_ref, ws_id) do
       %Issue{} = existing ->
@@ -1190,7 +1198,7 @@ defmodule Arbiter.Reviews.ExternalReview do
         nil
 
       nil ->
-        do_create_engagement(prepared, opts, findings)
+        do_create_engagement(prepared, opts, findings, verdict)
     end
   rescue
     e ->
@@ -1202,7 +1210,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       nil
   end
 
-  defp create_engagement(_prepared, _opts, _findings), do: nil
+  defp create_engagement(_prepared, _opts, _findings, _verdict), do: nil
 
   # An OPEN review_only engagement already linked to this PR in this workspace,
   # or nil when none exists. Mirrors ReviewPatrol's own engagement predicate
@@ -1221,14 +1229,19 @@ defmodule Arbiter.Reviews.ExternalReview do
     _ -> :error
   end
 
-  defp do_create_engagement(%{adapter: adapter, mr_ref: mr_ref} = prepared, opts, findings) do
+  defp do_create_engagement(
+         %{adapter: adapter, mr_ref: mr_ref} = prepared,
+         opts,
+         findings,
+         verdict
+       ) do
     # Baseline captured at review time: PR head SHA (so only later commits
     # trigger a re-review) + the PR author (for automation-mode resolution).
     {head_sha, pr_author} = fetch_pr_baseline(adapter, mr_ref)
     watermark = fetch_comment_watermark(adapter, mr_ref)
     mode = resolve_automation(opts, prepared.workspace, pr_author, Map.get(prepared, :repo_name))
 
-    case create_engagement_issue(prepared, opts, mode, head_sha, watermark, findings) do
+    case create_engagement_issue(prepared, opts, mode, head_sha, watermark, findings, verdict) do
       {:ok, issue} ->
         Logger.info(
           "ExternalReview: opened review engagement #{issue.id} for #{mr_ref} " <>
@@ -1258,8 +1271,14 @@ defmodule Arbiter.Reviews.ExternalReview do
          mode,
          head_sha,
          watermark,
-         findings
+         findings,
+         verdict
        ) do
+    # A report-only first pass posts nothing, so there is no POSTED verdict to
+    # seed `last_verdict` / `last_verdict_sha` with (bd-1atwts) — same rule
+    # `persist_rereview/4` in ReviewPatrol enforces for every later re-review.
+    report_only = Map.get(opts, :report_only) == true
+
     attrs =
       %{
         title: engagement_title(mr_ref),
@@ -1279,10 +1298,19 @@ defmodule Arbiter.Reviews.ExternalReview do
       }
       |> maybe_put(:last_reviewed_sha, head_sha)
       |> maybe_put(:last_seen_comment_id, watermark)
+      |> maybe_put(:last_verdict, verdict_or_nil(verdict, report_only))
+      |> maybe_put(:last_verdict_sha, verdict_sha_or_nil(verdict, report_only, head_sha))
       |> put_tracker_context(opts, prepared.workspace)
 
     Ash.create(Issue, attrs)
   end
+
+  defp verdict_or_nil(_verdict, true), do: nil
+  defp verdict_or_nil(verdict, false), do: verdict
+
+  defp verdict_sha_or_nil(_verdict, true, _head_sha), do: nil
+  defp verdict_sha_or_nil(nil, false, _head_sha), do: nil
+  defp verdict_sha_or_nil(_verdict, false, head_sha), do: head_sha
 
   # Map fresh (atom-keyed) check findings into the string-keyed shape
   # ReviewPatrol persists and reads (`stored_finding/1` / `stored_field/2` in

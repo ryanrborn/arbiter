@@ -102,12 +102,21 @@ defmodule Arbiter.Tasks.Issue do
         :last_seen_comment_id,
         :review_automation,
         :posted_findings,
+        # Seeds the loop-signature circuit breaker (bd-1atwts) with the
+        # verdict ExternalReview's first pass POSTED, if any — otherwise
+        # both breaker arms are blind to the initial verdict for the whole
+        # window until ReviewPatrol's first re-review. Left nil for a
+        # report-only first pass, which posts nothing.
+        :last_verdict,
+        :last_verdict_sha,
         :skills
       ]
 
-      # `review_count` / `review_cap_escalated` are deliberately NOT create-accepted:
-      # they default to their non-capped values (0 / false) for a brand-new
-      # engagement, and are only ever advanced by ReviewPatrol's own :update calls.
+      # `review_count` / `review_cap_escalated` / `circuit_breaker_tripped` /
+      # `circuit_breaker_reason` / `circuit_breaker_cleared_sha` are
+      # deliberately NOT create-accepted: they default to their non-tripped
+      # values (0 / false / nil) for a brand-new engagement, and are only ever
+      # advanced by ReviewPatrol's own :update calls.
 
       # Opt-out for `arb create --no-tracker` / `--local-only`. When true, the
       # CreateUpstream hook skips the outbound-create call even when the
@@ -161,6 +170,10 @@ defmodule Arbiter.Tasks.Issue do
         :posted_findings,
         :review_count,
         :review_cap_escalated,
+        :last_verdict,
+        :last_verdict_sha,
+        :circuit_breaker_tripped,
+        :circuit_breaker_reason,
         :skills
       ]
 
@@ -184,6 +197,10 @@ defmodule Arbiter.Tasks.Issue do
 
       # Allow open ⇄ in_progress, but block transitions involving :closed via :update
       change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :update}
+
+      # Watermark the head SHA on a circuit-breaker resume so the breaker
+      # doesn't immediately re-trip on the next tick (bd-1atwts).
+      change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
 
       # Propagate an open ⇄ in_progress status change to the linked external
       # tracker. Best-effort; no-op when status didn't change or no tracker.
@@ -725,6 +742,76 @@ defmodule Arbiter.Tasks.Issue do
       Whether ReviewPatrol has already raised the review-cap escalation for
       this engagement (bd-ahvk03). Set on the first tick that hits the cap so
       the same PR isn't re-escalated every subsequent tick.
+      """
+    end
+
+    attribute :last_verdict, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: [:approve, :request_changes]
+
+      description """
+      The verdict (`:approve` or `:request_changes`) ReviewPatrol most recently
+      POSTED to the PR (bd-1atwts). Paired with `last_verdict_sha` to detect a
+      would-be repeat verdict on a commit we've already ruled on — one arm of
+      the per-engagement circuit breaker.
+      """
+    end
+
+    attribute :last_verdict_sha, :string do
+      allow_nil? true
+      public? true
+
+      description """
+      The PR head SHA `last_verdict` was posted against (bd-1atwts). If
+      ReviewPatrol is ever about to post another verdict for this exact SHA —
+      the "same-SHA verdict" loop signature — the circuit breaker trips instead
+      of posting.
+      """
+    end
+
+    attribute :circuit_breaker_tripped, :boolean do
+      allow_nil? true
+      public? true
+      default false
+
+      description """
+      Whether ReviewPatrol's per-engagement circuit breaker has fired
+      (bd-1atwts): a same-SHA repeat verdict, or an author re-request disputing
+      a verdict we already posted for the current head with no new commits.
+      While true, ReviewPatrol posts nothing further on this engagement — no
+      verdicts, no re-reviews — until a human clears it. Mirrors
+      `review_cap_escalated`'s one-way-trip shape, but for the loop signature
+      rather than raw review volume.
+      """
+    end
+
+    attribute :circuit_breaker_reason, :string do
+      allow_nil? true
+      public? true
+
+      description """
+      Human-readable reason the circuit breaker tripped (bd-1atwts), recorded
+      alongside the coordinator escalation for later audit.
+      """
+    end
+
+    attribute :circuit_breaker_cleared_sha, :string do
+      allow_nil? true
+      public? true
+
+      description """
+      The PR head SHA in effect when a coordinator last cleared
+      `circuit_breaker_tripped` (bd-1atwts). Merely clearing the flag restores
+      the exact state that tripped it — neither the head nor `last_verdict` /
+      `last_verdict_sha` move on a trip, since tripping deliberately posts
+      nothing — so without this watermark both breaker arms re-trip on the
+      very next tick. Set automatically (from the engagement's
+      `last_verdict_sha` at the moment of the clear) by the resume path in
+      `Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear`; both trip
+      predicates in `Arbiter.Workflows.ReviewPatrol` treat `head ==
+      circuit_breaker_cleared_sha` as "already adjudicated, don't re-trip".
+      The watermark stops mattering once a new commit moves the head.
       """
     end
 

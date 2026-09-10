@@ -621,6 +621,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert finding["line"] == 1
       assert finding["message"] == "boom"
       assert finding["severity"] == "error"
+      # bd-1atwts: the verdict the first pass just POSTED is seeded onto the
+      # engagement so the circuit breaker's two arms aren't blind to it for
+      # the whole window until ReviewPatrol's first re-review.
+      assert engagement.last_verdict == :request_changes
+      assert engagement.last_verdict_sha == "sha-head-1"
     end
 
     test "an approve / zero-finding review seeds no posted_findings" do
@@ -1509,6 +1514,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       engagement = Ash.get!(Issue, result.engagement)
       assert engagement.review_automation == :report_only
+      # bd-1atwts: a report-only first pass posts nothing, so there is no
+      # POSTED verdict to seed the breaker with — same rule
+      # `persist_rereview/4` enforces for every later report-only re-review.
+      assert is_nil(engagement.last_verdict)
+      assert is_nil(engagement.last_verdict_sha)
     end
 
     # bd-887swr: the greenlight path had no DiffScope check at all — a selected
