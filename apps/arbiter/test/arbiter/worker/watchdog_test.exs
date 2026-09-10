@@ -2469,6 +2469,7 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> Worker.state(pid).status == :completed end, 3_000)
 
       assert StubMerger.merge_count("!rs6") == 1
+
       assert StubMerger.last_merge() == {"!rs6", "sha-b"},
              "the fleet's own fix-pass commit must re-baseline the guard, not deadlock it"
     end

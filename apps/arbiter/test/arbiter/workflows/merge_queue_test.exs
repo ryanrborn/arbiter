@@ -1713,6 +1713,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       :ok = MergeQueue.tick(name)
+
       assert_received {:merged, 208},
                       "the queue's own rebase must re-baseline the guard, not deadlock the item"
 
