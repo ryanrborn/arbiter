@@ -26,6 +26,14 @@ defmodule Arbiter.Worker.PreflightHold do
   @reset_buffer_ms :timer.seconds(60)
   @max_backoff_exponent 10
 
+  # Same ceiling `Worker.quota_wait_exceeds_max?/1` uses for the post-run
+  # resume path (bd-3wgdie) — a mis-parsed/adversarial far-future reset epoch
+  # must not park a held intent indefinitely (finding 4, bd-8lnnnt round 2).
+  # Duplicated rather than delegated to `Worker.quota_resume_backoff_ms/1`
+  # because that function hardcodes `DateTime.utc_now()` and would silently
+  # ignore the `now` this module accepts for deterministic tests.
+  @max_wait_ms :timer.hours(24 * 8)
+
   @doc """
   Returns the earliest time the next pre-flight attempt should run, or `nil`
   when this failure shouldn't hold at all (anything other than a
@@ -39,9 +47,14 @@ defmodule Arbiter.Worker.PreflightHold do
         {:auth_check_failed,
          %StopReason{category: :quota_exhausted, retry_after: %DateTime{} = at}},
         _count,
-        _now
+        now
       ) do
-    DateTime.add(at, @reset_buffer_ms, :millisecond)
+    # `at + buffer`, expressed as an offset from `now` so it can be capped —
+    # a negative offset (reset already passed) stays negative/near-zero, so
+    # an already-open window still resumes immediately; only a genuinely
+    # far-future `at` gets clamped.
+    offset_ms = DateTime.diff(at, now, :millisecond) + @reset_buffer_ms
+    DateTime.add(now, min(offset_ms, @max_wait_ms), :millisecond)
   end
 
   def retry_not_before(

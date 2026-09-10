@@ -383,6 +383,21 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       # absorb it regardless of how often the queue is woken.
       :ok = DispatchQueue.drain(pid)
       refute_receive {:dispatch_attempt, _}, 200
+
+      # The seeded snapshot's own `reset_5h_at` is already in the past (the
+      # fail-open path this test uses to reach the dispatcher at all), so a
+      # timer armed only off the snapshot would find nothing to schedule. The
+      # item's own `retry_not_before` (reset_at from `QuotaExhaustedDispatcher`
+      # + PreflightHold's buffer) is ~1h out — the queue must wake for THAT,
+      # not fall back to only the next `quota_updated` broadcast (finding 2,
+      # bd-8lnnnt round 2).
+      %{reset_timer_ref: ref} = :sys.get_state(pid)
+      assert is_reference(ref)
+      remaining_ms = Process.read_timer(ref)
+      assert is_integer(remaining_ms)
+
+      expected_ms = DateTime.diff(held_item.retry_not_before, DateTime.utc_now(), :millisecond)
+      assert_in_delta remaining_ms, expected_ms, 2_000
     end
 
     test "dispatch resumes once the hold's retry_not_before has passed" do

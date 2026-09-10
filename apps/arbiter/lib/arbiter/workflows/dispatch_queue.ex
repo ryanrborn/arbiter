@@ -50,9 +50,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
   policy `Autopilot` uses for its own tick: the probe's reported reset time
   when known, else a bounded exponential backoff), and `maybe_drain/1` skips
   re-checking/re-dispatching a held item until that time passes, regardless of
-  what the gate says. The existing `schedule_reset_drain/1` timer already wakes
-  the queue at the 5h reset, so this does not need its own timer — it only
-  needs to stop the *intervening* 5-minute broadcasts from re-running the probe.
+  what the gate says. `schedule_reset_drain/1`'s timer wakes the queue at
+  `next_reset_at/1` — the earliest of any held provider's snapshot reset_at
+  *or* any item's own `retry_not_before` — so a hold that falls after the raw
+  snapshot reset (the reset-buffer or a no-reset-time backoff) still gets its
+  own precise wake instead of waiting on the next 5-minute broadcast.
 
   ## `:continue` — overage alert debounce
 
@@ -357,8 +359,14 @@ defmodule Arbiter.Workflows.DispatchQueue do
     start_drain_task(fn ->
       Enum.each(items, fn item ->
         case safe_dispatch(dispatcher, item) do
-          {:ok, _} -> :ok
-          {:error, reason} -> GenServer.cast(queue, {:requeue, hold_item(item, reason)})
+          {:ok, _} ->
+            :ok
+
+          {:error, reason} ->
+            GenServer.cast(queue, {:requeue, hold_item(item, reason)})
+
+          other ->
+            GenServer.cast(queue, {:requeue, hold_item(item, other)})
         end
       end)
     end)
@@ -446,15 +454,39 @@ defmodule Arbiter.Workflows.DispatchQueue do
     end
   end
 
+  # The wake time is the earliest of: a provider's snapshot reset_at, or any
+  # held item's own `retry_not_before` (finding 2, bd-8lnnnt round 2) — a
+  # `PreflightHold`-derived hold can fall after the snapshot's reset_at (the
+  # +60s buffer, or a fallback backoff with no reset_at at all), and without
+  # this the queue only re-arms a timer for the snapshot's reset, then finds
+  # `maybe_drain/1` still holds the item and has nothing left to wake it until
+  # the next `quota_updated` broadcast (up to 5 minutes late).
   defp next_reset_at(%State{} = state) do
-    state
-    |> provider_snapshots()
-    |> Map.values()
-    |> Enum.map(&Snapshot.normalize/1)
-    |> Enum.flat_map(fn
-      %{reset_at: %DateTime{} = reset} -> [reset]
-      _ -> []
-    end)
+    snapshot_resets =
+      state
+      |> provider_snapshots()
+      |> Map.values()
+      |> Enum.map(&Snapshot.normalize/1)
+      |> Enum.flat_map(fn
+        %{reset_at: %DateTime{} = reset} -> [reset]
+        _ -> []
+      end)
+
+    item_holds =
+      state.items
+      |> Enum.flat_map(fn
+        %{retry_not_before: %DateTime{} = at} -> [at]
+        _ -> []
+      end)
+
+    now = DateTime.utc_now()
+
+    # A stale/past snapshot reset_at must not win over a still-future item
+    # hold just for being numerically smaller — `schedule_reset_drain/1`
+    # already declines to arm a timer for a past time, so filter those out
+    # here rather than letting one suppress a real future wake.
+    (snapshot_resets ++ item_holds)
+    |> Enum.filter(&(DateTime.compare(&1, now) == :gt))
     |> Enum.min_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end
 
