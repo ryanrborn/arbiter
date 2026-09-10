@@ -47,6 +47,8 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   alias Arbiter.Worker
   alias Arbiter.Test.StubMerger
 
+  require Ash.Query
+
   setup do
     StubMerger.reset()
     :ok
@@ -366,6 +368,78 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       assert Worker.state(pid).status == :failed
       assert StubMerger.merge_count("pr-55") == 0
+    end
+
+    # bd-6dxit2: `meta[:output_lines]` is capped at 1000 lines by ClaudeSession,
+    # so a reviewer that prints VERDICT: and then keeps producing findings loses
+    # its own sentinel to eviction and gets reported INCONCLUSIVE with a
+    # complete review in hand. The durable per-run transcript is uncapped —
+    # parse it before conceding.
+    test "recovers a verdict the 1000-line in-memory cap evicted, from the durable transcript" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-56"}, action: :update)
+
+      prev_root = Application.get_env(:arbiter, :output_log_root)
+      root = Path.join(System.tmp_dir!(), "rv-tail-#{System.unique_integer([:positive])}")
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev_root do
+          Application.put_env(:arbiter, :output_log_root, prev_root)
+        else
+          Application.delete_env(:arbiter, :output_log_root)
+        end
+      end)
+
+      head = for i <- 1..40, do: "reviewing hunk #{i}..."
+      tail = for i <- 1..1_200, do: "- [MEDIUM] finding #{i}: file_#{i}.ex:#{i}"
+      full = head ++ ["VERDICT: REQUEST_CHANGES", "Findings follow."] ++ tail ++ ["arb done"]
+
+      # Exactly what ClaudeSession's cap leaves behind: the sentinel is gone.
+      capped = Enum.take(full, -1_000)
+      refute Enum.any?(capped, &(&1 =~ ~r/^VERDICT:/))
+
+      pid = start_reviewer(task, capped)
+
+      # The worker's own run row is what keys the transcript on disk.
+      run_id = wait_for_run_id(task.id)
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(run_id)
+      Enum.each(full, &Arbiter.Worker.OutputLog.append(handle, &1))
+      :ok = Arbiter.Worker.OutputLog.close(handle)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      state = Worker.state(pid)
+
+      # REQUEST_CHANGES, not INCONCLUSIVE — and the findings the reviewer
+      # actually wrote, not a "produced no parseable VERDICT line" placeholder.
+      assert state.meta.failure_reason == :review_gate_rejected
+      assert state.meta.review_gate_findings =~ "VERDICT: REQUEST_CHANGES"
+      assert state.meta.review_gate_findings =~ "finding 1200:"
+      assert StubMerger.merge_count("pr-56") == 0
+    end
+  end
+
+  defp wait_for_run_id(task_id) do
+    wait_until(fn -> latest_run_id(task_id) != nil end, 4_000)
+    latest_run_id(task_id)
+  end
+
+  defp latest_run_id(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      nil -> nil
+      run -> run.id
     end
   end
 

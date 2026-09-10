@@ -214,7 +214,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
           |> maybe_add_model_arg()
           |> maybe_add_agentic_args(state)
 
-        invoke_via_stdin(path, args, prompt, review_cwd(state))
+        invoke_via_stdin(path, args, prompt, review_cwd(state), review_workspace(state))
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
@@ -281,7 +281,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # Release-env vars (ROOTDIR/BINDIR/RELEASE_*) are stripped so a node repo's
   # .nvmrc — if picked up by a shell hook — can't switch the Node runtime out
   # from under the reviewer process.
-  defp invoke_via_stdin(path, args, prompt, cwd) do
+  defp invoke_via_stdin(path, args, prompt, cwd, workspace) do
     tmp =
       Path.join(
         System.tmp_dir!(),
@@ -296,7 +296,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
       shell =
         Enum.map_join([path | args], " ", &sh_quote/1) <> " < " <> sh_quote(tmp)
 
-      env = build_invoke_env()
+      env = build_invoke_env(workspace)
 
       opts =
         [{:stderr_to_stdout, true}] ++
@@ -319,9 +319,16 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     end
   end
 
+  # The workspace this review is running under, when the caller put one in
+  # state (`ReviewPatrol` / `ExternalReview` do). `nil` for an ad-hoc,
+  # workspace-less review — `ConfigDir.env/1` then falls back to the server
+  # environment for the worker OAuth token (bd-bw3466).
+  defp review_workspace(%{workspace: %Arbiter.Tasks.Workspace{} = ws}), do: ws
+  defp review_workspace(_state), do: nil
+
   # Env pairs for the claude subprocess: release-var cleanup (converts false →
   # nil for System.cmd compatibility) + isolated CLAUDE_CONFIG_DIR.
-  defp build_invoke_env do
+  defp build_invoke_env(workspace) do
     release_clean =
       Arbiter.Worker.ReleaseEnv.clean_pairs()
       |> Enum.map(fn
@@ -329,7 +336,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         pair -> pair
       end)
 
-    config_dir = ConfigDir.env()
+    config_dir = ConfigDir.env(workspace)
     release_clean ++ config_dir
   end
 
@@ -383,6 +390,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
 
     tracker_section = tracker_context_section(Map.get(state, :tracker_context))
     pr_section = pr_section(Map.get(state, :pr))
+    incremental_note = incremental_review_note(Map.get(state, :incremental_review))
     consumer_section = consumer_refs_section(Map.get(state, :consumer_refs))
     tool_access_section = tool_access_section(review_cwd(state))
     elision_note = elision_note(elided_paths)
@@ -392,7 +400,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{task_line}#{tracker_section}#{pr_section}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}#{tracker_section}#{pr_section}#{incremental_note}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [
@@ -463,6 +471,29 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   end
 
   defp pr_section(_pr), do: ""
+
+  # ReviewPatrol re-review (bd-8vwgws): a follow-up pass hands `Checks.run/2`
+  # only the diff of commits since the last review, not the full PR diff —
+  # `state.pr` above still carries the PR's CURRENT (full) title/body, so a
+  # description claim about a file the new commit didn't touch (e.g. "bumped
+  # in three places") reads as unsubstantiated against this partial diff even
+  # though it's true of the PR as a whole. Without this note the reviewer has
+  # no way to tell the diff below is partial and reports the claim as missing.
+  defp incremental_review_note(true) do
+    """
+    --- NOTE ---
+    The diff below covers only the commits pushed since the last review of \
+    this PR, not the full PR diff. Do not report anything in the PR \
+    description as missing, not implemented, or not included in the PR on \
+    the basis of this diff alone — it may already exist in an earlier commit \
+    not shown here. Only flag issues actually introduced or left unresolved \
+    in this diff.
+    --- End NOTE ---
+
+    """
+  end
+
+  defp incremental_review_note(_), do: ""
 
   defp non_blank?(s) when is_binary(s), do: String.trim(s) != ""
   defp non_blank?(_), do: false

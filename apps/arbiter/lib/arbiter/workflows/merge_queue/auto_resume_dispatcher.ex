@@ -82,8 +82,17 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
       not run at all (typically `:no_outpost`: the worktree was cleaned up).
       Distinct because "we tried N times and it didn't stick" and "we could not
       try" call for different coordinator actions.
+    * `{:resume_blocked, reason, deferrals}` — bd-di4t6d. The resume was refused
+      because another pass on the same task still owned the worker registry slot
+      (a `fix_pass` or `conflict` subordinate). That is transient, so the
+      Watchdog deferred and retried on its poll interval; after `deferrals`
+      retries the blocker was *still* live, which is no longer plausibly
+      transient. `reason` carries the blocking registry key.
   """
-  @type give_up_reason :: :budget_exhausted | {:resume_failed, term()}
+  @type give_up_reason ::
+          :budget_exhausted
+          | {:resume_failed, term()}
+          | {:resume_blocked, term(), non_neg_integer()}
 
   @doc """
   Page the coordinator that the Watchdog has stopped auto-resuming this task.
@@ -192,6 +201,9 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
   defp subject(task_id, attempts, {:resume_failed, _}),
     do: "#{task_id}: auto-resume FAILED after #{attempts} attempts (awaiting_review)"
 
+  defp subject(task_id, _attempts, {:resume_blocked, _reason, deferrals}),
+    do: "#{task_id}: auto-resume BLOCKED after #{deferrals} deferred retries (awaiting_review)"
+
   defp body(task_id, mr_ref, attempts, :budget_exhausted) do
     """
     Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and
@@ -213,9 +225,47 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
     cause is `:no_outpost`: the task's worktree was cleaned up, so there is nothing
     to re-attach to and a fresh dispatch is needed rather than a resume.
 
+    #{attempts_note(attempts)}
+
     #{diagnosis(task_id)}
     """
   end
+
+  defp body(task_id, mr_ref, _attempts, {:resume_blocked, reason, deferrals}) do
+    """
+    Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and
+    the Watchdog could not auto-resume it because another pass on the same task still
+    holds the worker slot: #{inspect(reason)}.
+
+    This is the bd-di4t6d condition. A subordinate pass (`<task>:fixpass`,
+    `<task>:conflict`) shares the task's identity but registers under its own key, and
+    `Worker.start/1` refuses a second live worker for the same task. The Watchdog
+    treated that as transient and retried the resume on its poll interval — it did
+    NOT burn the auto-resume budget, because no resume ever started — but the blocker
+    was still live after #{deferrals} retries.
+
+    That is long enough that the subordinate pass is itself likely wedged. Check it
+    first: `worker_show #{task_id}` and look for a run whose worker_type is fix_pass or
+    conflict and whose status is still `running`. Stopping or finishing that pass frees
+    the slot; a `worker_resume #{task_id}` will then take.
+
+    #{diagnosis(task_id)}
+    """
+  end
+
+  # bd-di4t6d: "after 0 attempts" reads like the Watchdog declined to try. It
+  # did try — `attempts` counts auto-resumes that actually *ran* before this
+  # one, so a first-episode failure is legitimately 0. Say so inline rather than
+  # making the coordinator re-derive it.
+  defp attempts_note(0) do
+    """
+    ("0 attempts" is not a decline: the Watchdog did dispatch a resume and it errored.
+    The counter records auto-resumes that previously *ran* to completion, and this was
+    the first episode for this task.)
+    """
+  end
+
+  defp attempts_note(_attempts), do: ""
 
   defp lede(0) do
     """

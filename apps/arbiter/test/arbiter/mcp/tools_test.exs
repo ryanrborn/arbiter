@@ -999,6 +999,81 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "tracker_claim/2 (github) — difficulty/repo parity with the CLI" do
+    @gh_viewer "mcp-claim-worker"
+    @gh_env_var "ARBITER_MCP_CLAIM_TEST_TOKEN"
+
+    setup do
+      System.put_env(@gh_env_var, "mcp-claim-test-token")
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "mcp-claim-gh",
+          prefix: "mcgh",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "ryanrborn",
+                "repo" => "arbiter",
+                "credentials_ref" => "env:#{@gh_env_var}"
+              }
+            }
+          }
+        })
+
+      on_exit(fn ->
+        Arbiter.Trackers.GitHub.Config.clear()
+        System.delete_env(@gh_env_var)
+      end)
+
+      {:ok, gh_ws: gh_ws, gh_coordinator: %Scope{tier: :coordinator, workspace_id: gh_ws.id}}
+    end
+
+    defp stub_gh_claim(fun), do: Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fun)
+
+    test "difficulty and repo args are persisted, matching what the CLI/HTTP surface accepts",
+         ctx do
+      stub_gh_claim(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @gh_viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/77"} ->
+            Req.Test.json(conn, %{
+              "number" => 77,
+              "title" => "MCP-claimed issue",
+              "body" => "via tracker_claim",
+              "state" => "open",
+              "assignees" => [%{"login" => @gh_viewer}],
+              "labels" => [%{"name" => "bug"}]
+            })
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/77/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/77/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/77/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, data} =
+               Tools.tracker_claim(ctx.gh_coordinator, %{
+                 "ref" => "77",
+                 "difficulty" => 4,
+                 "repo" => "emricare/tonic"
+               })
+
+      assert data.claim_status == "created"
+      assert data.difficulty == 4
+      assert data.issue_type == "bug"
+      assert data.repo == "emricare/tonic"
+    end
+  end
+
   describe "workspace_list/2" do
     test "enumerates workspaces with summary fields", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "wl-other", prefix: "wlo"})
@@ -3450,13 +3525,19 @@ defmodule Arbiter.MCP.ToolsTest do
 
       {:ok, primary} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
 
+      # bd-8tjcms: `Worker.start/1` refuses a second *active* worker for one
+      # task. The two-rows-per-task_id shape this test pins is still reachable
+      # in production (a fix pass alongside a primary parked at
+      # `:awaiting_review`); the primary here is `:idle`, so opt out explicitly
+      # rather than staging the full park.
       {:ok, fixpass} =
         Worker.start(
           task_id: task.id,
           registry_key: task.id <> ":fixpass",
           repo: "test/repo",
           workspace_id: ctx.ws.id,
-          meta: %{role: :fix_pass}
+          meta: %{role: :fix_pass},
+          allow_concurrent_task_worker: true
         )
 
       on_exit(fn ->

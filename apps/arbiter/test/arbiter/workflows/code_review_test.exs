@@ -1781,6 +1781,43 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       refute prompt =~ "PR description"
     end
 
+    test "warns the reviewer the diff is partial when state.incremental_review is true (bd-8vwgws)" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      state = %{
+        mode: :adapter,
+        incremental_review: true,
+        pr: %{title: "Bump plugin version", body: "Bumps to 0.4.0 across all three places."}
+      }
+
+      assert {:ok, []} = Checks.run("DIFF", state)
+      assert_received {:prompt, prompt}
+      assert prompt =~ "only the commits pushed since the last review"
+      assert prompt =~ "Do not report anything in the PR description as missing"
+    end
+
+    test "omits the partial-diff warning when state.incremental_review is not set" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :adapter})
+      assert_received {:prompt, prompt}
+      refute prompt =~ "only the commits pushed since the last review"
+    end
+
     test "elides generated/lockfile paths from the reviewed diff, with a note of what was dropped" do
       test_pid = self()
 

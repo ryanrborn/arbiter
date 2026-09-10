@@ -1211,6 +1211,18 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:ok, 4} = GitHub.extract_difficulty(issue)
     end
 
+    test "parses 'difficulty: 5' label as D5 — the opt-in flagship tier" do
+      # #1519: a human hand-adding `difficulty: 5` is exactly the deliberate
+      # escalation D5 exists for; the old `n <= 4` cap silently dropped it.
+      issue = %{"labels" => [%{"name" => "difficulty: 5"}]}
+      assert {:ok, 5} = GitHub.extract_difficulty(issue)
+    end
+
+    test "returns nil for out-of-range difficulty values" do
+      assert nil == GitHub.extract_difficulty(%{"labels" => [%{"name" => "difficulty: 6"}]})
+      assert nil == GitHub.extract_difficulty(%{"labels" => [%{"name" => "difficulty: -1"}]})
+    end
+
     test "returns nil when no difficulty label is present" do
       issue = %{"labels" => [%{"name" => "priority: 1"}]}
       assert nil == GitHub.extract_difficulty(issue)
@@ -1218,6 +1230,71 @@ defmodule Arbiter.Trackers.GitHubTest do
 
     test "returns nil when labels key is absent" do
       assert nil == GitHub.extract_difficulty(%{})
+    end
+  end
+
+  # ---- extract_issue_type/1 --------------------------------------------------
+
+  describe "extract_issue_type/1" do
+    test "maps the bare 'bug' label to :bug" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "bug"}]})
+    end
+
+    test "maps 'enhancement' to :feature" do
+      assert {:ok, :feature} =
+               GitHub.extract_issue_type(%{"labels" => [%{"name" => "enhancement"}]})
+    end
+
+    test "maps 'chore' to :chore" do
+      assert {:ok, :chore} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "chore"}]})
+    end
+
+    test "maps 'epic' to :epic" do
+      assert {:ok, :epic} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "epic"}]})
+    end
+
+    test "a bare 'task' label does NOT map to :task (falls through to the :feature default)" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "task"}]})
+    end
+
+    test "the explicit round-trip 'type: task' label DOES map to :task" do
+      assert {:ok, :task} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: task"}]})
+    end
+
+    test "parses the round-trip 'type: bug' label written by GitHub.create/1" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: bug"}]})
+    end
+
+    test "is case-insensitive" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "Bug"}]})
+    end
+
+    test "is case-insensitive for the 'type: X' prefix" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "Type: Bug"}]})
+    end
+
+    test "returns nil for an unmapped label" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "wontfix"}]})
+    end
+
+    test "returns nil when no labels are present" do
+      assert nil == GitHub.extract_issue_type(%{})
+      assert nil == GitHub.extract_issue_type(%{"labels" => []})
+    end
+
+    test "picks the first mappable label when several are present" do
+      issue = %{"labels" => [%{"name" => "wontfix"}, %{"name" => "bug"}, %{"name" => "chore"}]}
+      assert {:ok, :bug} = GitHub.extract_issue_type(issue)
+    end
+
+    test "an explicit 'type: X' label wins over a conflicting bare label regardless of order" do
+      issue = %{"labels" => [%{"name" => "bug"}, %{"name" => "type: task"}]}
+      assert {:ok, :task} = GitHub.extract_issue_type(issue)
+    end
+
+    test "a bare 'task' label does not block a later mappable bare label" do
+      issue = %{"labels" => [%{"name" => "task"}, %{"name" => "bug"}]}
+      assert {:ok, :bug} = GitHub.extract_issue_type(issue)
     end
   end
 end

@@ -1715,7 +1715,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp present?(_), do: false
 
   defp difficulty_label(nil), do: "—"
-  defp difficulty_label(d) when is_integer(d) and d in 0..4, do: "D#{d}"
+  defp difficulty_label(d) when is_integer(d) and d in 0..5, do: "D#{d}"
   defp difficulty_label(_), do: "—"
 
   # Compact changeset summary for the timeline. Mirrors AuditLogLive.
@@ -1892,6 +1892,10 @@ defmodule ArbiterWeb.TaskDetailLive do
 
     cond do
       run_failed?(run) and run_failure_line(run) != "" -> run_failure_line(run)
+      # bd-8tjcms: `:review_not_started` is not a failure, so `run_failed?/1`
+      # (correctly) says no — but the reason is still the only thing worth
+      # showing in this column: the run itself produced nothing new to count.
+      run.status == :review_not_started and run_failure_line(run) != "" -> run_failure_line(run)
       lines == [] and run.status == :running -> "streaming…"
       true -> "#{length(lines)} lines"
     end

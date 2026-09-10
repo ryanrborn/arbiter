@@ -408,7 +408,14 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
     # `adapter.get/1`'s own approved/changes_requested calc and by
     # `self_approved?/1`'s identity-scoped lookup) and serves `GET /user` so
     # `self_approved?/1` can resolve the authenticated login (bd-4po0nv).
-    defp rereview_stub_with_reviews(number, head, diff, reviews, our_login) do
+    defp rereview_stub_with_reviews(
+           number,
+           head,
+           diff,
+           reviews,
+           our_login,
+           requested_reviewers \\ []
+         ) do
       test_pid = self()
 
       stub(fn conn ->
@@ -432,7 +439,8 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
               "number" => number,
               "state" => "open",
               "head" => %{"sha" => head},
-              "html_url" => "x"
+              "html_url" => "x",
+              "requested_reviewers" => Enum.map(requested_reviewers, &%{"login" => &1})
             })
 
           conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
@@ -498,6 +506,31 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert prompt =~ "BEGIN DIFF"
     end
 
+    test "the re-review prompt warns the reviewer the diff is partial (bd-8vwgws)", %{ws: ws} do
+      eng =
+        engagement(ws, 428, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(428, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+
+      # New-diff-only re-reviews must not let the reviewer judge the PR
+      # description's completeness against this partial diff (bd-8vwgws) —
+      # the composed prompt persisted for the engagement carries the guard.
+      assert {:ok, prompt} = Arbiter.Worker.PromptLog.read(eng.id)
+      assert prompt =~ "only the commits pushed since the last review"
+    end
+
     test "a push touching only unrelated files does NOT trigger a re-review", %{ws: ws} do
       eng =
         engagement(ws, 401, %{
@@ -561,6 +594,71 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert reloaded.notes =~ "approval stands"
       assert ReviewPatrol.state(name).last_rereviewed == []
       assert ReviewPatrol.state(name).last_declined == [eng.id]
+    end
+
+    test "sticky approval: operator re-requested for review + formatting-only push → overrides, re-reviews",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 426, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      # Formatting-only diff — would normally be declined under sticky
+      # approval, but the author explicitly re-requested review from us.
+      diff =
+        "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n" <>
+          "-  def foo do\n+def foo do\n"
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(426, "newsha", diff, reviews, "botreviewer", ["botreviewer"])
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+      assert ReviewPatrol.state(name).last_declined == []
+    end
+
+    test "sticky approval: operator re-requested for review + doc-only push → overrides, re-reviews",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 427, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("docs/guide.md", 5, "prior issue")]
+        })
+
+      diff =
+        "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n" <>
+          "+++ b/docs/guide.md\n@@ -1 +1,2 @@\n context\n+a whole new paragraph\n"
+
+      put_invoker([
+        %{
+          "severity" => "error",
+          "file" => "docs/guide.md",
+          "line" => 2,
+          "message" => "new doc issue"
+        }
+      ])
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(427, "newsha", diff, reviews, "botreviewer", ["botreviewer"])
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+      assert ReviewPatrol.state(name).last_declined == []
     end
 
     test "sticky approval: operator identity currently approved + substantive code push → still re-reviews",

@@ -574,6 +574,35 @@ defmodule Arbiter.Trackers.LinearTest do
       end
     end
 
+    test "an explicitly configured D5 bucket is honoured, not dropped (#1519)" do
+      # Defaults top out at D4; an explicit bucket table is a deliberate
+      # operator escalation, so D5 must survive parsing.
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "difficulty" => %{"buckets" => [[13, 4], [21, 5]]}
+      })
+
+      try do
+        assert {:ok, 4} = Linear.extract_difficulty(%{"estimate" => 13})
+        assert {:ok, 5} = Linear.extract_difficulty(%{"estimate" => 21})
+      after
+        Config.clear()
+      end
+    end
+
+    test "a D5-only bucket table is not silently replaced by the defaults (#1519)" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "difficulty" => %{"buckets" => [[13, 5]]}
+      })
+
+      try do
+        assert {:ok, 5} = Linear.extract_difficulty(%{"estimate" => 1})
+      after
+        Config.clear()
+      end
+    end
+
     test "returns nil when estimate field is absent" do
       Config.put_active(%{
         "credentials_ref" => "test-token",

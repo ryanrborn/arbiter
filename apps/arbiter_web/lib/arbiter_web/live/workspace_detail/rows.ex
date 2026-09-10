@@ -179,7 +179,7 @@ defmodule ArbiterWeb.WorkspaceDetail.Rows do
   The trash button that ends a list entry. `rest` carries the binding
   (`phx-click`, `phx-target`, `phx-value-*`) and `data-confirm`.
   """
-  attr :label, :string, required: true, doc: "aria-label, e.g. `Remove rule D4`"
+  attr :label, :string, required: true, doc: "aria-label, e.g. `Remove rule D5`"
   attr :rest, :global
 
   def remove_button(assigns) do

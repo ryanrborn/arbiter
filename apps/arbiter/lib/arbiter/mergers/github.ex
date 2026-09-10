@@ -336,6 +336,48 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  @doc """
+  Whether the authenticated token's own identity currently has a *pending*
+  review request on the PR — i.e. its login appears in GitHub's
+  `requested_reviewers`. GitHub clears that bit automatically the moment we
+  submit a review, so seeing it set again means someone (typically the PR
+  author) explicitly re-requested review from us since our last one — the
+  same signal a human "approval is sticky unless asked again" convention
+  keys on. Used to override ReviewPatrol's sticky-approval decline
+  (bd-8us1cp) even when the new commits would otherwise classify as
+  doc/test/formatting-only.
+
+  Returns `{:ok, boolean()}` or `{:error, term()}`. When the token's own
+  login can't be resolved, returns `{:ok, false}` — we can't tell whether the
+  request targets us, so we don't override.
+
+  Not part of the `Merger` behaviour: an optional capability the sticky-
+  approval gate probes via `function_exported?/3`, so an adapter without it
+  (e.g. GitLab) fails open (no override; unchanged prior behavior).
+  """
+  @spec review_requested?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def review_requested?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", [])
+           |> handle_json() do
+      case authenticated_login(cfg) do
+        login when is_binary(login) and login != "" ->
+          requested =
+            pr
+            |> Map.get("requested_reviewers", [])
+            |> List.wrap()
+            |> Enum.any?(&(get_in(&1, ["login"]) == login))
+
+          {:ok, requested}
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
   @impl true
   def list_review_feedback(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),

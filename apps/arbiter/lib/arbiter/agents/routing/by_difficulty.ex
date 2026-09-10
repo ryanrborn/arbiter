@@ -1,7 +1,7 @@
 defmodule Arbiter.Agents.Routing.ByDifficulty do
   @moduledoc """
   Routing policy: pick an agent config based on the task's `difficulty`
-  (0..4 / D0..D4). Sibling to `:by_priority`; difficulty answers "how
+  (0..5 / D0..D5). Sibling to `:by_priority`; difficulty answers "how
   hard?" (drives model + thinking) while priority answers "how urgent?"
   (drives scheduling order). The two are orthogonal — both can be set on
   a task, and a workspace can opt into one or the other.
@@ -10,9 +10,11 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
 
   The policy emits two abstract knobs in the chosen agent config:
 
-    * `"model_tier"` — `"economy"` | `"standard"` | `"premium"`.
-    * `"thinking"`   — `"none"` | `"low"` | `"medium"` | `"high"`
-                       (abstract reasoning effort).
+    * `"model_tier"` — `"economy"` | `"standard"` | `"premium"`. A workspace
+      may define further tiers of its own (the live installs add
+      `"flagship"`); source knows only these three.
+    * `"thinking"`   — `"none"` | `"low"` | `"medium"` | `"high"` | `"xhigh"`
+                       | `"max"` (abstract reasoning effort, ascending).
 
   Each adapter's `Config` maps these to its own concrete knobs:
 
@@ -23,21 +25,37 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
 
   Routing rubric stays abstract; provider knobs live inside each adapter.
 
-  ## Default mapping (D0..D4)
+  ## Default mapping (D0..D5)
 
       D0 → economy  / none
       D1 → economy  / low
       D2 → standard / medium    ← also the fallback when difficulty is unset
       D3 → premium  / high
-      D4 → premium  / high
+      D4 → premium  / max
+      D5 → premium  / max       ← flagship only via workspace `routing.rules`
 
   A task with `difficulty: nil` is treated as D2 (the common-feature
   default).
 
+  ### Why D5 is `premium / max` in source (#1519)
+
+  The flagship tier is not a source concept: `"flagship"` exists only where a
+  workspace defines `agent.config.tier_models.flagship`, and D5's real job is
+  to route there via `routing.rules.D5`. If the source default named
+  `"flagship"` anyway, an install that has *not* defined that tier would get
+  `model_for_tier("flagship") == nil` — no `--model` flag, so the CLI's own
+  default model, which is *weaker* than the `premium` a D4 gets. Defaulting
+  D5 to the strongest thing source can actually resolve makes an
+  unconfigured install degrade sensibly rather than silently downgrade.
+
+  D4 and D5 therefore coincide in source. That is deliberate and unlike the
+  old D3/D4 collision: D4 is the top tier source can express, and D5's
+  distinction is supplied entirely by workspace config.
+
   ## Workspace overrides
 
   `workspace.config["routing"]["rules"]` is consulted with the task's
-  difficulty key (`"D0".."D4"`). A matching rule is merged on top of the
+  difficulty key (`"D0".."D5"`). A matching rule is merged on top of the
   default mapping for that tier; any key the rule omits keeps the default.
   Unknown keys (e.g. a workspace that pins `"model"` directly) are
   passed through so power users can bypass the abstraction when needed.
@@ -53,7 +71,7 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
           "policy" => "by_difficulty",
           "rules" => %{
             "D0" => %{"model_tier" => "economy", "thinking" => "none"},
-            "D4" => %{"model_tier" => "premium", "thinking" => "high"}
+            "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
           }
         }
       }
@@ -70,18 +88,24 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
-  # Default mapping: D0..D4 → {model_tier, thinking}. The coordinator signed
-  # off on this exact table; do not adjust without re-litigation.
+  # Default mapping: D0..D5 → {model_tier, thinking}. The coordinator signed
+  # off on this exact table; do not adjust without re-litigation. Last
+  # re-litigated in #1519, which added D5 and moved D4 to max effort.
   @default_mapping %{
     0 => %{"model_tier" => "economy", "thinking" => "none"},
     1 => %{"model_tier" => "economy", "thinking" => "low"},
     2 => %{"model_tier" => "standard", "thinking" => "medium"},
     3 => %{"model_tier" => "premium", "thinking" => "high"},
-    4 => %{"model_tier" => "premium", "thinking" => "high"}
+    4 => %{"model_tier" => "premium", "thinking" => "max"},
+    5 => %{"model_tier" => "premium", "thinking" => "max"}
   }
 
   # Unset difficulty is treated as D2 — the common-feature default.
   @default_difficulty 2
+
+  # Top of the scale (#1519). Kept as one constant so the clamp and the tier
+  # key guard cannot drift apart from `@default_mapping`.
+  @max_difficulty 5
 
   # Ladder used by `bump_tier/2` (bd-3xultf) — the ReviewGate reviewer's tier
   # is the author's nominal tier moved up this many steps, capped at the end.
@@ -111,26 +135,26 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   end
 
   @doc """
-  Default mapping table (`%{0..4 => %{"model_tier" => _, "thinking" => _}}`).
+  Default mapping table (`%{0..5 => %{"model_tier" => _, "thinking" => _}}`).
   Exposed for tests / introspection; the coordinator signed off on the exact
   values.
   """
-  @spec default_mapping() :: %{(0..4) => map()}
+  @spec default_mapping() :: %{(0..5) => map()}
   def default_mapping, do: @default_mapping
 
   @doc """
   Returns the effective difficulty integer used for routing. `nil` →
   `#{@default_difficulty}` (D2). Out-of-range values are clamped to
-  [0, 4] defensively (the schema constrains this, but the policy is
+  [0, 5] defensively (the schema constrains this, but the policy is
   called from places that pass arbitrary integers in tests).
   """
-  @spec effective_difficulty(integer() | nil) :: 0..4
+  @spec effective_difficulty(integer() | nil) :: 0..5
   def effective_difficulty(nil), do: @default_difficulty
 
   def effective_difficulty(n) when is_integer(n) do
     cond do
       n < 0 -> 0
-      n > 4 -> 4
+      n > @max_difficulty -> @max_difficulty
       true -> n
     end
   end
@@ -183,5 +207,5 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
     end
   end
 
-  defp difficulty_key(d) when d in 0..4, do: "D#{d}"
+  defp difficulty_key(d) when d in 0..@max_difficulty, do: "D#{d}"
 end

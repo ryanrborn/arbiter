@@ -196,12 +196,12 @@ defmodule Arbiter.Trackers.Tracker do
   directions.
 
   Optional — adapters without a priority signal simply don't implement it,
-  and `Claim.create_task/4` skips the field so the schema default holds.
+  and `Claim.create_task/6` skips the field so the schema default holds.
   """
   @callback extract_priority(map()) :: {:ok, 0..4} | nil
 
   @doc """
-  Extracts the Arbiter difficulty (0..4, where 0 = D0 / trivial) from a raw
+  Extracts the Arbiter difficulty (0..5, where 0 = D0 / trivial) from a raw
   issue map returned by `fetch/1`, derived from the tracker's
   estimate/story-points field via configurable buckets.
 
@@ -219,7 +219,26 @@ defmodule Arbiter.Trackers.Tracker do
 
   Optional — adapters without an estimate signal simply don't implement it.
   """
-  @callback extract_difficulty(map()) :: {:ok, 0..4} | nil
+  @callback extract_difficulty(map()) :: {:ok, 0..5} | nil
+
+  @doc """
+  Derives the Arbiter `issue_type` (`:task | :bug | :feature | :epic | :chore |
+  :decision`) from a raw issue map returned by `fetch/1`, typically via the
+  tracker's own labels/type field.
+
+  Returns `{:ok, issue_type}` when a usable, unambiguous signal is present;
+  returns `nil` when unavailable, unmapped, or ambiguous — callers then fall
+  through to the schema default (`:feature`, a PR-expecting type). Implementers
+  should only map to `:task` (the non-reviewable, no-PR-expected type) from an
+  *explicit* signal (e.g. GitHub's `type: task` round-trip label) — never from
+  an ambiguous/bare one: under-mapping to `:feature` costs a reviewer a no-op
+  pass, but over-mapping to `:task` silently drops the PR a
+  `bug`/`feature`/`chore` ticket was supposed to produce.
+
+  Optional — adapters without a type signal simply don't implement it, and
+  `Claim.create_task/6` skips the field so the schema default holds.
+  """
+  @callback extract_issue_type(map()) :: {:ok, atom()} | nil
 
   @doc """
   Attach a remote link (e.g. the implementing PR/MR) to the tracked item.
@@ -315,5 +334,6 @@ defmodule Arbiter.Trackers.Tracker do
                       gating_fields: 2,
                       search_by_title: 1,
                       extract_priority: 1,
-                      extract_difficulty: 1
+                      extract_difficulty: 1,
+                      extract_issue_type: 1
 end

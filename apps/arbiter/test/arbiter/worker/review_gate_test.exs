@@ -25,6 +25,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -48,6 +50,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
+  @session_limit Path.expand("../../fixtures/review_session_limit.sh", __DIR__)
+  @long_findings Path.expand("../../fixtures/review_long_findings.sh", __DIR__)
   @no_verdict_auth_prose Path.expand(
                            "../../fixtures/review_no_verdict_auth_prose.sh",
                            __DIR__
@@ -755,6 +759,53 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
+    # bd-6dxit2: the acceptance case for "a review that emits a valid VERDICT:
+    # line is never reported as :no_verdict". The fixture prints its verdict and
+    # then 1200 more lines of findings — past ClaudeSession's 1000-line
+    # `meta[:output_lines]` cap and well past the 500-line persisted-row cap, so
+    # a naive tail scan of either buffer misses the sentinel entirely. The gate
+    # must still land REQUEST_CHANGES, with the reviewer's findings verbatim.
+    test "a verdict followed by more lines of findings than either line cap still parses",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-long-findings"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@long_findings],
+        review_timeout_ms: 20_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 25_000)
+      assert merge_commit_count(repo) == 0
+
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected,
+             "a verdict buried under 1200 lines of findings must not land INCONCLUSIVE"
+
+      escalation =
+        "admiral"
+        |> Message.inbox(workspace_id: ws.id)
+        |> Enum.find(&(&1.directive_ref == task.id))
+
+      assert escalation, "expected an escalation for the task"
+      refute escalation.body =~ "no parseable VERDICT"
+      assert escalation.body =~ "finding 1:"
+    end
+
     test "sync_from_origin fast-forwards the worktree to the latest pushed commit before review (bd-31bh37 regression)",
          %{repo: repo, ws: ws, tmp: tmp} do
       # Simulate the scenario: the per-task worktree has SOME commits (so the
@@ -1308,6 +1359,47 @@ defmodule Arbiter.Worker.ReviewGateTest do
              "expected a re-prompt to have been attempted before escalating"
     end
 
+    # bd-6dxit2: an :no_verdict outcome must say which of the two possible
+    # causes it is. "The reviewer emitted no verdict" and "the parser was
+    # handed a truncated tail" are indistinguishable in the escalation text,
+    # and the fleet carried the ambiguity for weeks. The log now names the
+    # number of lines scanned and what the uncapped durable transcript holds.
+    test "logs a diagnostic on :no_verdict naming lines scanned and the durable transcript",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-no-verdict-diag"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reprompt, "NONE"],
+        review_timeout_ms: 5_000
+      }
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} =
+            Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+          on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+          :ok = Worker.advance(pid, :claude)
+          send(pid, {:__claude_session_done__, "arb done"})
+
+          wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+        end)
+
+      assert log =~ "no VERDICT for reviewer task=#{ReviewGate.reviewer_task_id(task.id)}"
+      assert log =~ ~r/scanned \d+ in-memory line\(s\)/
+
+      assert log =~ "durable transcript",
+             "the diagnostic must say what the uncapped transcript held"
+    end
+
     # bd-b2glhm: a reviewer subprocess that dies from an infrastructure failure
     # (here, expired credentials) never gets far enough to print a VERDICT line.
     # Re-prompting it is pointless — the same expired credentials doom the retry
@@ -1405,6 +1497,56 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "did not expect a re-prompt run row for a quota-exhaustion crash"
+    end
+
+    # bd-6dxit2: the same condition in the CLI's CURRENT wording — "You've hit
+    # your session limit · resets <time>", three lines, exit 1, in under a
+    # second. This is the exact shape of run 06bdc6ee (bd-dxgris#review#r2) that
+    # made the gate escalate "Reviewer produced no parseable VERDICT line, even
+    # after a verdict re-prompt" on a review that never ran. The escalation must
+    # name the usage limit, and no re-prompt may be spent on it.
+    test "a reviewer refused with the CLI's current session-limit wording escalates as quota, no re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-session-limit"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@session_limit],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation for the task"
+
+      assert escalation.body =~ "usage limit",
+             "expected the escalation to name the 5h usage limit, got: #{escalation.body}"
+
+      refute escalation.body =~ "no parseable VERDICT",
+             "a reviewer the CLI refused must not be reported as having produced no verdict"
+
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "did not expect a re-prompt run row for a session-limit refusal"
     end
 
     # bd-b2glhm round 2: a reviewer that exits 0 (finished cleanly) but merely
@@ -3260,9 +3402,12 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert ReviewGate.rounds_for_difficulty(nil) == 3
     end
 
-    test "D3 and D4 tasks get a 4-round cap" do
+    test "D3, D4 and D5 tasks get a 4-round cap" do
       assert ReviewGate.rounds_for_difficulty(3) == 4
       assert ReviewGate.rounds_for_difficulty(4) == 4
+      # #1519: without an explicit D5 entry the new top tier would silently
+      # fall through to @default_rounds (3) — FEWER rounds than D3.
+      assert ReviewGate.rounds_for_difficulty(5) == 4
     end
   end
 

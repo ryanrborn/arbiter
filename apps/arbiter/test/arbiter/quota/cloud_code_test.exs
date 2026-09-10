@@ -30,53 +30,14 @@ defmodule Arbiter.Quota.CloudCodeTest do
     Keyword.merge([creds_path: creds_path, plug: {Req.Test, @stub}], extra)
   end
 
-  # A path guaranteed not to exist — used as the default `creds_path` /
-  # `antigravity_state_path` in antigravity tests so a test can never fall
-  # through to reading the real user's live credentials off this machine.
-  defp missing_path(suffix) do
-    Path.join(System.tmp_dir!(), "nope_#{System.unique_integer([:positive])}#{suffix}")
+  # Stub `agy_usage_probe` so tests never shell out to a real `agy` binary
+  # that may happen to be installed on the machine running the suite.
+  defp antigravity_opts(probe_result) do
+    [agy_usage_probe: fn -> probe_result end]
   end
 
-  defp antigravity_opts(extra) do
-    Keyword.merge(
-      [
-        antigravity_state_path: missing_path(".vscdb"),
-        creds_path: missing_path(".json"),
-        # Never let a test shell out to a real `agy` binary that may happen to
-        # be installed on the machine running the suite — always stub the
-        # probe unless a test explicitly overrides `agy_probe`/`agy_cmd`.
-        agy_probe: fn -> :not_installed end,
-        plug: {Req.Test, @stub}
-      ],
-      extra
-    )
-  end
-
-  # Write a throwaway Antigravity `state.vscdb` (the VS Code globalStorage
-  # sqlite DB Antigravity itself writes on every OAuth refresh) containing an
-  # `antigravityAuthStatus` row with the given apiKey, and return its path.
-  defp antigravity_state_file(api_key) do
-    dir = System.tmp_dir!()
-    path = Path.join(dir, "ag_state_#{System.unique_integer([:positive])}.vscdb")
-
-    {:ok, db} = Exqlite.Sqlite3.open(path)
-
-    :ok =
-      Exqlite.Sqlite3.execute(
-        db,
-        "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)"
-      )
-
-    value =
-      Jason.encode!(%{"apiKey" => api_key, "name" => "Test User", "email" => "t@example.com"})
-
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(db, "INSERT INTO ItemTable (key, value) VALUES (?, ?)")
-    :ok = Exqlite.Sqlite3.bind(stmt, ["antigravityAuthStatus", value])
-    :done = Exqlite.Sqlite3.step(db, stmt)
-    :ok = Exqlite.Sqlite3.close(db)
-
-    on_exit(fn -> File.rm(path) end)
-    path
+  defp agy_usage_body(groups) do
+    %{"command" => %{"data" => %{"groups" => groups}}}
   end
 
   describe "gemini/1 credential handling" do
@@ -195,219 +156,141 @@ defmodule Arbiter.Quota.CloudCodeTest do
     end
   end
 
-  describe "antigravity/1 quota fetch" do
-    test "sends antigravity headers and filters to important models" do
-      state = antigravity_state_file("agtoken")
+  describe "antigravity/1 (bd-d7hmqn: agy --output-format json --print /usage)" do
+    test "flattens both groups and both windows into per-{group,window} model rows" do
+      body =
+        agy_usage_body([
+          %{
+            "name" => "Gemini Models",
+            "buckets" => [
+              %{"window" => "weekly", "remaining_fraction" => 0.4, "reset_time" => "1782250684"},
+              %{"window" => "5h", "remaining_fraction" => 0.75, "reset_time" => "1782250684"}
+            ]
+          },
+          %{
+            "name" => "Claude and GPT models",
+            "buckets" => [
+              %{"window" => "weekly", "remaining_fraction" => 1.0, "reset_time" => "1782250684"},
+              %{"window" => "5h", "remaining_fraction" => 1.0, "reset_time" => "1782250684"}
+            ]
+          }
+        ])
 
-      Req.Test.stub(@stub, fn conn ->
-        cond do
-          String.ends_with?(conn.request_path, "loadCodeAssist") ->
-            assert Plug.Conn.get_req_header(conn, "x-request-source") == ["local"]
-
-            Req.Test.json(conn, %{
-              "cloudaicompanionProject" => "ag-proj",
-              "currentTier" => %{"name" => "Pro"}
-            })
-
-          String.ends_with?(conn.request_path, "fetchAvailableModels") ->
-            assert Plug.Conn.get_req_header(conn, "x-client-name") == ["antigravity"]
-            assert Plug.Conn.get_req_header(conn, "x-request-source") == ["local"]
-            assert ["Bearer agtoken"] = Plug.Conn.get_req_header(conn, "authorization")
-            {:ok, body, conn} = Plug.Conn.read_body(conn)
-            assert Jason.decode!(body) == %{"project" => "ag-proj"}
-
-            Req.Test.json(conn, %{
-              "models" => %{
-                "gemini-3-flash" => %{
-                  "displayName" => "Gemini 3 Flash",
-                  "quotaInfo" => %{"remainingFraction" => 0.25, "resetTime" => "1782250684"}
-                },
-                "some-internal-model" => %{
-                  "isInternal" => true,
-                  "quotaInfo" => %{"remainingFraction" => 0.9}
-                },
-                "not-important-model" => %{
-                  "quotaInfo" => %{"remainingFraction" => 0.9}
-                }
-              }
-            })
-        end
-      end)
-
-      snap = CloudCode.antigravity(antigravity_opts(antigravity_state_path: state))
+      snap = CloudCode.antigravity(antigravity_opts({:ok, body}))
 
       assert snap.provider == "antigravity"
-      assert snap.plan == "Pro"
+      assert snap.message == nil
+      assert length(snap.models) == 4
+
+      by_id = Map.new(snap.models, &{&1.model_id, &1})
+      gemini_weekly = by_id["gemini_models_weekly"]
+      assert gemini_weekly.remaining_percentage == 40.0
+      assert gemini_weekly.display_name == "Gemini Models (weekly)"
+      assert gemini_weekly.reset_at == "2026-06-23T21:38:04.000Z"
+
+      gemini_5h = by_id["gemini_models_5h"]
+      assert gemini_5h.remaining_percentage == 75.0
+
+      claude_weekly = by_id["claude_and_gpt_models_weekly"]
+      assert claude_weekly.remaining_percentage == 100.0
+      claude_5h = by_id["claude_and_gpt_models_5h"]
+      assert claude_5h.remaining_percentage == 100.0
+    end
+
+    test "does not invert remaining_fraction — a nearly-empty bucket stays low, not high" do
+      body =
+        agy_usage_body([
+          %{
+            "name" => "Gemini Models",
+            "buckets" => [%{"window" => "5h", "remaining_fraction" => 0.02, "reset_time" => nil}]
+          }
+        ])
+
+      snap = CloudCode.antigravity(antigravity_opts({:ok, body}))
       assert [model] = snap.models
-      assert model.model_id == "gemini-3-flash"
-      assert model.display_name == "Gemini 3 Flash"
-      assert model.used == 750
-      assert model.remaining_percentage == 25.0
+      assert model.remaining_percentage == 2.0
+      assert model.used == 980
     end
 
-    test "returns nil when neither the Antigravity state db nor the gemini creds fallback exist" do
-      assert CloudCode.antigravity(antigravity_opts([])) == nil
-    end
-
-    test "reads its own token from the Antigravity state db, not the Gemini CLI creds file" do
-      state = antigravity_state_file("antigravity-own-token")
-      # A stale/different Gemini CLI token must never leak into the Antigravity request.
-      gemini_creds = creds_file("stale-gemini-token")
-
-      Req.Test.stub(@stub, fn conn ->
-        assert ["Bearer antigravity-own-token"] =
-                 Plug.Conn.get_req_header(conn, "authorization")
-
-        Req.Test.json(conn, %{"models" => %{}})
-      end)
-
+    test "degrades to a clear message when the agy binary is not on PATH" do
       snap =
-        CloudCode.antigravity(
-          antigravity_state_path: state,
-          creds_path: gemini_creds,
-          project_id: "p",
-          plug: {Req.Test, @stub}
-        )
-
-      assert snap.models == []
-    end
-
-    test "falls back to the Gemini CLI creds file when the Antigravity state db is absent" do
-      missing_state =
-        Path.join(System.tmp_dir!(), "nope_#{System.unique_integer([:positive])}.vscdb")
-
-      gemini_creds = creds_file("fallback-token")
-
-      Req.Test.stub(@stub, fn conn ->
-        assert ["Bearer fallback-token"] = Plug.Conn.get_req_header(conn, "authorization")
-        Req.Test.json(conn, %{"models" => %{}})
-      end)
-
-      snap =
-        CloudCode.antigravity(
-          antigravity_state_path: missing_state,
-          creds_path: gemini_creds,
-          project_id: "p",
-          plug: {Req.Test, @stub}
-        )
-
-      assert snap.models == []
-    end
-
-    test "degrades to a message on a 403" do
-      state = antigravity_state_file("agtoken")
-
-      Req.Test.stub(@stub, fn conn ->
-        conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"error" => "forbidden"})
-      end)
-
-      snap = CloudCode.antigravity(antigravity_opts(antigravity_state_path: state))
-
-      assert snap.models == []
-      assert is_binary(snap.message)
-    end
-  end
-
-  describe "antigravity/1 agy CLI liveness probe (bd-4ku4ze)" do
-    test "reports a live-but-unreadable-credential status when no token file exists but agy CLI is authenticated" do
-      snap = CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :live end))
+        CloudCode.antigravity(agy_cmd: "definitely-not-a-real-agy-binary-xyz-#{__ENV__.line}")
 
       refute is_nil(snap)
       assert snap.provider == "antigravity"
       assert snap.models == []
-      assert is_binary(snap.message)
-      refute snap.message =~ "auth expired"
-      assert snap.message =~ "agy"
+      assert snap.message =~ "not installed"
     end
 
-    test "still returns nil when no token file exists and the agy CLI is not authenticated" do
-      assert CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :not_live end)) == nil
-    end
-
-    test "still returns nil when no token file exists and agy is not installed" do
-      assert CloudCode.antigravity(antigravity_opts(agy_probe: fn -> :not_installed end)) == nil
-    end
-
-    test "a rejected file/DB token is distinguished from no-credential-found when agy CLI is still live" do
-      state = antigravity_state_file("stale-token")
-
-      Req.Test.stub(@stub, fn conn ->
-        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"error" => "expired"})
-      end)
-
-      snap =
-        CloudCode.antigravity(
-          antigravity_opts(
-            antigravity_state_path: state,
-            project_id: "p",
-            agy_probe: fn -> :live end
-          )
-        )
+    test "degrades to a clear message when agy exits non-zero (not authenticated)" do
+      snap = CloudCode.antigravity(antigravity_opts({:error, {:exit, 1}}))
 
       assert snap.models == []
-      assert is_binary(snap.message)
-      assert snap.message =~ "agy"
-      refute snap.message == "Antigravity quota auth expired; reconnect."
+      assert snap.message =~ "not authenticated"
     end
 
-    test "a rejected file/DB token with no live agy CLI keeps the plain auth-expired message" do
-      state = antigravity_state_file("stale-token")
-
-      Req.Test.stub(@stub, fn conn ->
-        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"error" => "expired"})
-      end)
-
-      snap =
-        CloudCode.antigravity(
-          antigravity_opts(
-            antigravity_state_path: state,
-            project_id: "p",
-            agy_probe: fn -> :not_live end
-          )
-        )
+    test "degrades to a clear message on a subprocess timeout" do
+      snap = CloudCode.antigravity(antigravity_opts({:error, :timeout}))
 
       assert snap.models == []
-      assert snap.message == "Antigravity quota auth expired; reconnect."
+      assert snap.message =~ "did not respond in time"
+    end
+
+    test "degrades to a clear message on malformed JSON" do
+      snap = CloudCode.antigravity(antigravity_opts({:error, :malformed}))
+
+      assert snap.models == []
+      assert snap.message =~ "unexpected data"
+    end
+
+    test "degrades to a clear message when the decoded JSON has no usage groups" do
+      snap = CloudCode.antigravity(antigravity_opts({:ok, %{"command" => %{}}}))
+
+      assert snap.models == []
+      assert snap.message =~ "unexpected data"
+    end
+
+    test "never returns nil, unlike the old stored-token probe" do
+      for result <- [
+            {:ok, agy_usage_body([])},
+            {:error, :not_installed},
+            {:error, :timeout},
+            {:error, {:exit, 1}},
+            {:error, :malformed}
+          ] do
+        refute is_nil(CloudCode.antigravity(antigravity_opts(result)))
+      end
     end
   end
 
-  describe "antigravity/1 agy CLI real shell-out path (bd-4ku4ze, agy_cmd, no agy_probe stub)" do
-    # These exercise `agy_cli_probe_default/1` / `run_agy_probe/2` for real —
-    # `agy_cmd` points at a real executable instead of stubbing `agy_probe`,
-    # so the `System.find_executable/1` resolution, the `sh -c` argv
-    # construction, and the exit-status mapping all actually run.
-    test "a 0-exit executable is treated as a live agy credential" do
-      snap =
-        CloudCode.antigravity(
-          Keyword.merge(antigravity_opts([]), agy_cmd: "true")
-          |> Keyword.delete(:agy_probe)
-        )
+  describe "antigravity/1 real shell-out path (agy_cmd, no agy_usage_probe stub)" do
+    # These exercise `agy_usage_default/1` / `shell_out_agy_usage/2` for real —
+    # `agy_cmd` points at a real executable instead of stubbing
+    # `agy_usage_probe`, so the `System.find_executable/1` resolution, the
+    # `sh -c` argv construction, and the exit-status / output-file handling
+    # all actually run.
+    test "a 0-exit executable with no parseable output degrades to the malformed-JSON message" do
+      snap = CloudCode.antigravity(agy_cmd: "true")
 
       refute is_nil(snap)
-      assert snap.message =~ "agy"
+      assert snap.message =~ "unexpected data"
     end
 
-    test "a nonzero-exit executable is treated as not live (falls through to nil, no other creds)" do
-      snap =
-        CloudCode.antigravity(
-          Keyword.merge(antigravity_opts([]), agy_cmd: "false")
-          |> Keyword.delete(:agy_probe)
-        )
+    test "a nonzero-exit executable is reported as not authenticated" do
+      snap = CloudCode.antigravity(agy_cmd: "false")
 
-      assert snap == nil
+      assert snap.models == []
+      assert snap.message =~ "not authenticated"
     end
 
-    test "an executable name that does not resolve is treated as not installed" do
-      snap =
-        CloudCode.antigravity(
-          Keyword.merge(antigravity_opts([]), agy_cmd: "definitely-not-a-real-agy-binary-xyz")
-          |> Keyword.delete(:agy_probe)
-        )
+    test "an executable name that does not resolve is reported as not installed" do
+      snap = CloudCode.antigravity(agy_cmd: "definitely-not-a-real-agy-binary-xyz")
 
-      assert snap == nil
+      assert snap.models == []
+      assert snap.message =~ "not installed"
     end
 
-    test "the real subprocess result is memoized so repeated probes don't re-exec agy" do
+    test "the real subprocess result is memoized so repeated calls don't re-exec agy" do
       dir = System.tmp_dir!()
       script = Path.join(dir, "agy_counter_#{System.unique_integer([:positive])}.sh")
       counter = script <> ".count"
@@ -415,6 +298,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
       File.write!(script, """
       #!/bin/sh
       echo x >> "#{counter}"
+      echo '{"command":{"data":{"groups":[]}}}'
       exit 0
       """)
 
@@ -425,9 +309,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
         File.rm(counter)
       end)
 
-      opts =
-        Keyword.merge(antigravity_opts([]), agy_cmd: script)
-        |> Keyword.delete(:agy_probe)
+      opts = [agy_cmd: script]
 
       refute is_nil(CloudCode.antigravity(opts))
       refute is_nil(CloudCode.antigravity(opts))

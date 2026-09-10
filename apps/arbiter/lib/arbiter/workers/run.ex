@@ -36,7 +36,16 @@ defmodule Arbiter.Workers.Run do
     domain: Arbiter.Workers,
     data_layer: AshSqlite.DataLayer
 
-  @statuses ~w(running completed failed)a
+  # bd-8tjcms / #1511: `:review_not_started` is a *terminal, non-failure* outcome
+  # — the run reached `arb done` and exited cleanly, but the downstream review
+  # stage never started inside the Watchdog's poll ceiling
+  # (`{:awaiting_review_timeout, N}`). It was previously written as `:failed`,
+  # which reads as "the implementation run failed" and is wrong: the branch is
+  # pushed and the PR is open. Written by `Arbiter.Worker.record_run_finished/1`;
+  # the worker's in-memory FSM status stays `:failed` because that is the
+  # terminal state `Dispatch.resume/2` and the Watchdog's bounded auto-resume
+  # both require.
+  @statuses ~w(running completed failed review_not_started)a
 
   # The kind of worker that produced this run. A task can be worked by more
   # than one worker over its life: the `:main` worker that authors the change,
@@ -342,12 +351,15 @@ defmodule Arbiter.Workers.Run do
       public? true
       constraints max_length: 32, trim?: true
 
-      description ~s[Resolved abstract reasoning effort ("none" / "low" / "medium" / "high").]
+      description ~s[Resolved abstract reasoning effort ("none" / "low" / "medium" / "high" / "xhigh" / "max").]
     end
 
     attribute :difficulty_at_dispatch, :integer do
       public? true
-      constraints min: 0, max: 4
+      # #1519: must track `Issue.difficulty`'s ceiling — a D5 dispatch that
+      # could not record its own provenance would be invisible to exactly the
+      # cost analysis that motivated the tier.
+      constraints min: 0, max: 5
 
       description "The task's Issue.difficulty AT THE TIME this run was dispatched. A task's " <>
                     "difficulty can be edited later (bd-7rspia was corrected D1 -> D2 after the " <>

@@ -237,6 +237,31 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert body["difficulty"] == 3
   end
 
+  test "--difficulty 5 (the opt-in flagship tier) forwards rather than being rejected" do
+    # #1519: D5 must be reachable from the CLI or the flagship tier is
+    # unusable — typing it deliberately is the whole point of the level.
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted_difficulty, Jason.decode!(body)["difficulty"]})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"id" => "bd-006", "title" => "Flagship", "difficulty" => 5})
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Create.run(["Flagship", "--difficulty", "5"]) end)
+
+    assert exit_code == 0
+    assert_received {:posted_difficulty, 5}
+  end
+
   test "--difficulty out-of-range exits non-zero before posting" do
     stub_routes([
       {{"get", "/api/workspaces"},
@@ -244,6 +269,10 @@ defmodule ArbiterCli.Cmd.CreateTest do
     ])
 
     {_out, err, exit_code} = capture(fn -> Create.run(["X", "--difficulty", "9"]) end)
+    assert exit_code == 1
+    assert err =~ "difficulty"
+
+    {_out, err, exit_code} = capture(fn -> Create.run(["X", "--difficulty", "6"]) end)
     assert exit_code == 1
     assert err =~ "difficulty"
   end

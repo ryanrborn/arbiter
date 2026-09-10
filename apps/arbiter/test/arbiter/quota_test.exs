@@ -108,6 +108,66 @@ defmodule Arbiter.QuotaTest do
       {:ok, _} = Quota.capture(ws.id, @headers)
       assert Quota.serialize(ws.id).provider == "claude"
     end
+
+    test "includes stale indicator (false for fresh snapshots)" do
+      # Lower staleness threshold temporarily for testing
+      Application.put_env(:arbiter, :quota, staleness_threshold_seconds: 60)
+      on_exit(fn -> restore_test_env() end)
+
+      ws = workspace!()
+
+      # Use headers with a future reset time so the snapshot isn't stale by reset_at
+      future_reset = DateTime.utc_now() |> DateTime.add(7200, :second) |> DateTime.to_unix()
+
+      headers = [
+        {"anthropic-ratelimit-unified-5h-utilization", "0.24"},
+        {"anthropic-ratelimit-unified-5h-reset", Integer.to_string(future_reset)},
+        {"anthropic-ratelimit-unified-5h-status", "allowed"},
+        {"anthropic-ratelimit-unified-7d-utilization", "0.08"},
+        {"anthropic-ratelimit-unified-7d-reset", "1782748800"},
+        {"anthropic-ratelimit-unified-7d-status", "allowed"},
+        {"anthropic-ratelimit-unified-representative-claim", "five_hour"},
+        {"anthropic-ratelimit-unified-overage-status", "rejected"},
+        {"content-type", "application/json"}
+      ]
+
+      {:ok, _} = Quota.capture(ws.id, headers)
+      serialized = Quota.serialize(ws.id)
+
+      # Fresh snapshot (just captured) should not be stale
+      refute serialized.stale
+    end
+
+    test "stale indicator is true for old snapshots" do
+      # Use a very short threshold for testing
+      Application.put_env(:arbiter, :quota, staleness_threshold_seconds: 2)
+      on_exit(fn -> restore_test_env() end)
+
+      ws = workspace!()
+      {:ok, _quota} = Quota.capture(ws.id, @headers)
+
+      # Manually update the DB row's captured_at to be old using raw SQL
+      old_time = DateTime.utc_now() |> DateTime.add(-5, :second)
+
+      {:ok, _} =
+        Arbiter.Repo.query(
+          "UPDATE anthropic_quotas SET captured_at = ? WHERE workspace_id = ? AND provider = 'claude'",
+          [old_time, ws.id]
+        )
+
+      serialized = Quota.serialize(ws.id)
+
+      # Old snapshot should be stale
+      assert serialized.stale == true
+    end
+
+    defp restore_test_env do
+      Application.put_env(:arbiter, :quota,
+        on_exhaustion: :throttle,
+        throttle_threshold: 0.85,
+        overage_alert_usd: 50.0
+      )
+    end
   end
 
   describe "list_latest/1" do
@@ -292,30 +352,25 @@ defmodule Arbiter.QuotaTest do
       assert Quota.google_snapshots() == %{gemini: nil, antigravity: nil}
     end
 
-    test "no-ops to nils when enabled but credentials are absent" do
-      # `:creds_path` isolates `gemini/1`; `antigravity/1` reads a separate
-      # `:antigravity_state_path` (defaults to the real
-      # ~/.config/Antigravity/... state DB) — without overriding both, this
-      # test only no-ops deterministically on a machine with no Antigravity
-      # install, and hits live host state everywhere else.
+    test "no-ops gemini to nil when credentials are absent; antigravity degrades instead of nil-ing (bd-d7hmqn)" do
+      # `:creds_path` isolates `gemini/1`, which still returns `nil` when its
+      # creds file is absent. `antigravity/1` no longer reads any stored
+      # token — it shells out to the `agy` CLI — so it never returns `nil`;
+      # stub `:agy_usage_probe` so this test doesn't depend on whether `agy`
+      # is actually installed on the host running the suite.
       missing =
         Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.json")
 
-      missing_db =
-        Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.vscdb")
+      result =
+        Quota.google_snapshots(
+          enabled: true,
+          creds_path: missing,
+          agy_usage_probe: fn -> {:error, :not_installed} end
+        )
 
-      # Isolate from this machine's real state: without pinning
-      # antigravity_state_path/agy_probe, this would fall through to the
-      # real IDE state.vscdb and a real `agy` CLI shell-out (bd-4ku4ze),
-      # making "credentials absent" no longer true on a dev box with a live
-      # `agy` session.
-      assert Quota.google_snapshots(
-               enabled: true,
-               creds_path: missing,
-               antigravity_state_path: missing_db,
-               agy_probe: fn -> :not_installed end
-             ) ==
-               %{gemini: nil, antigravity: nil}
+      assert result.gemini == nil
+      refute is_nil(result.antigravity)
+      assert result.antigravity.message =~ "not installed"
     end
   end
 

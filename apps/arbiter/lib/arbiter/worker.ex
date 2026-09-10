@@ -191,6 +191,14 @@ defmodule Arbiter.Worker do
   # Captured stdout is mirrored verbatim into the persisted Run.output_lines
   # column on terminal transitions. Cap at 500 lines so a runaway subprocess
   # doesn't bloat the row to many MB.
+  #
+  # bd-6dxit2: retained at 500. This is the *persisted tail*, kept small on
+  # purpose — `worker_runs` rows are read in bulk by the dashboard and every
+  # extra line is paid for on every listing. It is deliberately NOT the source
+  # of truth for verdict parsing: `Arbiter.Worker.OutputLog` holds the full,
+  # uncapped transcript per run, and `ReviewGate.parse_verdict/3` consults it
+  # before reporting `:no_verdict`, so a verdict followed by more than 500 lines
+  # of findings still parses.
   @max_output_lines 500
 
   # Statuses in which a subprocess exit means "the worker stopped without
@@ -269,7 +277,195 @@ defmodule Arbiter.Worker do
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
-    DynamicSupervisor.start_child(Arbiter.Worker.Supervisor, {__MODULE__, opts})
+    case ensure_single_active_task_worker(opts) do
+      :ok ->
+        log_worker_start(opts)
+        DynamicSupervisor.start_child(Arbiter.Worker.Supervisor, {__MODULE__, opts})
+
+      {:error, _reason} = refused ->
+        refused
+    end
+  end
+
+  @doc """
+  True when `status` means the worker is (or is about to be) driving an agent
+  session: `:idle` (registered, subprocess not spawned yet), `:resuming`,
+  `:running`, `:awaiting`.
+
+  Everything else is either *parked* (`:awaiting_review`, `:awaiting_review_gate`
+  — no agent, waiting on a reviewer/merge) or *terminal* (`:completed`,
+  `:failed`). The distinction is what `start/1` enforces the single-active-worker
+  rule on: a parked or terminal worker may share a task with a new pass, an
+  active one may not (bd-8tjcms).
+  """
+  @spec active_status?(atom()) :: boolean()
+  def active_status?(status), do: status in [:idle, :resuming, :running, :awaiting]
+
+  # bd-8tjcms / #1511. A task must never have two workers driving agents at the
+  # same time. Two agents sharing one worktree and branch interleave commits and
+  # double the premium-tier spend, and the failure is silent — vs-ehjarz ran a
+  # merge-queue fix pass and a Watchdog auto-resume concurrently for ~2 minutes.
+  #
+  # This has to live HERE rather than in `Dispatch`, because the two families of
+  # caller were mutually invisible:
+  #
+  #   * `Dispatch.dispatch/2` and `.resume/2` guard via `Worker.whereis/1`, which
+  #     only resolves the *exact* task_id key — it cannot see a subordinate
+  #     holding `<task_id>:fixpass` / `<task_id>:conflict`.
+  #   * `MergeQueue.FixPassDispatcher` and `.ConflictResolver` call
+  #     `start_or_reap_terminal/1` and only ever collide with their OWN key, so
+  #     they cannot see the primary.
+  #
+  # `start/1` is the one choke point every one of them goes through.
+  #
+  # Deliberately NOT blocked:
+  #   * a parked primary (`:awaiting_review*`) — subordinate passes are designed
+  #     to run alongside it (bd-8lq2g7) and the merge queue depends on it;
+  #   * a terminal primary — `Dispatch.start_worker/3` evicts it (bd-d70whv) and
+  #     `start_or_reap_terminal/1` reaps it (bd-8lq2g7);
+  #   * `ReviewGate`'s `#`-separated synthetic sessions — see
+  #     `Registry.live_exclusive_for/1`.
+  #
+  # `allow_concurrent_task_worker: true` opts out explicitly, for a caller that
+  # has already established exclusivity some other way (and for tests).
+  defp ensure_single_active_task_worker(opts) do
+    task_id = Keyword.get(opts, :task_id)
+
+    cond do
+      Keyword.get(opts, :allow_concurrent_task_worker, false) ->
+        :ok
+
+      not (is_binary(task_id) and task_id != "") ->
+        :ok
+
+      true ->
+        requested_key = resolve_registry_key(opts, task_id)
+
+        if PRegistry.exclusive_key?(requested_key, task_id) do
+          case active_sibling(task_id, requested_key) do
+            nil -> :ok
+            info -> refuse_concurrent_start(info)
+          end
+        else
+          :ok
+        end
+    end
+  end
+
+  # The first worker for `task_id` — under any key in the exclusive family
+  # except the one we are asking for — that is still driving an agent.
+  #
+  # An alive worker that does not answer `:snapshot` within the probe timeout is
+  # counted as active (`:unknown`): it is busy or wedged, not gone, and starting
+  # a second agent against it is exactly the outcome this guard exists to
+  # prevent. `arb worker stop <task-id>` is the documented way out, and the
+  # refusal message says so.
+  defp active_sibling(task_id, requested_key) do
+    workers = worker_pids()
+
+    task_id
+    |> PRegistry.live_exclusive_for()
+    |> Enum.reject(fn {key, pid} ->
+      key == requested_key or pid == self() or not MapSet.member?(workers, pid)
+    end)
+    |> Enum.find_value(fn {key, pid} ->
+      status = probe_status(pid)
+
+      if active_status?(status) or is_nil(status) do
+        %{
+          task_id: task_id,
+          registry_key: key,
+          requested_key: requested_key,
+          pid: pid,
+          status: status || :unknown
+        }
+      end
+    end)
+  end
+
+  # Only actual `Arbiter.Worker` processes may be probed with `:snapshot`.
+  # `Arbiter.Worker.Registry` also holds non-worker entries under this task's
+  # `:`-separated keys — `<task_id>:watchdog` (an `Arbiter.Worker.Watchdog`,
+  # supervised elsewhere) among them — and calling `:snapshot` on one of those
+  # crashes it, which is the bd-2y0gd5 trap `list_children/0` documents. Same
+  # discriminator as `list_children/0`: a `:worker` child of
+  # `Arbiter.Worker.Supervisor` whose module is this one.
+  defp worker_pids do
+    Arbiter.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_id, pid, :worker, [__MODULE__]} when is_pid(pid) -> [pid]
+      _ -> []
+    end)
+    |> MapSet.new()
+  rescue
+    _ -> MapSet.new()
+  catch
+    :exit, _ -> MapSet.new()
+  end
+
+  defp probe_status(pid) do
+    case safe_snapshot(pid) do
+      %{status: status} -> status
+      _ -> nil
+    end
+  end
+
+  defp refuse_concurrent_start(info) do
+    Logger.warning(
+      "Worker.start: REFUSED a second active worker for task=#{info.task_id} " <>
+        "requested_key=#{info.requested_key} — #{info.registry_key} is already " <>
+        "#{info.status} (#{inspect(info.pid)}). Stop it first (`arb worker stop " <>
+        "#{info.task_id}`) if this dispatch should supersede it. origin=#{start_origin()}"
+    )
+
+    {:error, {:task_worker_live, info}}
+  end
+
+  # bd-8tjcms acceptance 2: the vs-ehjarz post-mortem could not say *who*
+  # started each of the two runs, because nothing recorded the caller. Every
+  # worker start now leaves a breadcrumb naming the task, the registry key, the
+  # role from `:meta`, and the first stack frame outside this module.
+  defp log_worker_start(opts) do
+    task_id = Keyword.get(opts, :task_id)
+    key = if is_binary(task_id), do: resolve_registry_key(opts, task_id), else: nil
+    role = opts |> Keyword.get(:meta, %{}) |> role_of()
+
+    Logger.info(
+      "Worker.start: task=#{inspect(task_id)} registry_key=#{inspect(key)} " <>
+        "role=#{inspect(role)} origin=#{start_origin()}"
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp role_of(%{} = meta), do: Map.get(meta, :role) || Map.get(meta, "role") || :main
+  defp role_of(_), do: :main
+
+  # The first stack frame outside this module — i.e. whatever asked for the
+  # worker (Dispatch, FixPassDispatcher, ConflictResolver, ReviewGate, an MCP
+  # tool, a LiveView). Rendered as `Module.fun/arity`; `"unknown"` if the stack
+  # is unavailable.
+  defp start_origin do
+    case Process.info(self(), :current_stacktrace) do
+      {:current_stacktrace, frames} ->
+        # Skip `Process.info/2` and this module's own frames; the first frame
+        # after them is the caller.
+        frames
+        |> Enum.drop_while(fn {mod, _fun, _arity, _loc} -> mod != __MODULE__ end)
+        |> Enum.drop_while(fn {mod, _fun, _arity, _loc} -> mod == __MODULE__ end)
+        |> List.first()
+        |> case do
+          {mod, fun, arity, _loc} when is_integer(arity) -> "#{inspect(mod)}.#{fun}/#{arity}"
+          {mod, fun, args, _loc} when is_list(args) -> "#{inspect(mod)}.#{fun}/#{length(args)}"
+          _ -> "unknown"
+        end
+
+      _ ->
+        "unknown"
+    end
   end
 
   @doc """
@@ -951,7 +1147,7 @@ defmodule Arbiter.Worker do
     model = Map.get(meta, :model)
 
     attrs = %{
-      status: state.status,
+      status: run_status(state),
       completed_at: DateTime.utc_now(),
       exit_code: Map.get(meta, :exit_status),
       output_lines: capture_output_lines(state),
@@ -1111,6 +1307,26 @@ defmodule Arbiter.Worker do
 
       :ok
   end
+
+  # bd-8tjcms / #1511. The durable run status is the FSM status, with one
+  # deliberate divergence: a worker failed with `{:awaiting_review_timeout, N}`
+  # reached `arb done`, exited 0, pushed its branch and (usually) opened a PR —
+  # what timed out is the *review* stage, downstream of the run. Recording that
+  # as `:failed` is the same class of mislabelling as bd-cfhj7z (quota
+  # exhaustion reported as `crashed (exit 1)`), and it is what made vs-ehjarz's
+  # successful run 39c6b497 read as a failure.
+  #
+  # Only the row diverges. `%State{}.status` stays `:failed`: it is the terminal
+  # state `Dispatch.resume/2` checks before re-attaching, and the Watchdog's
+  # bounded auto-resume (bd-8eheb6) fails the worker precisely so it can resume
+  # it. `failure_reason` is still written, so the reason is not lost.
+  defp run_status(%State{
+         status: :failed,
+         meta: %{failure_reason: {:awaiting_review_timeout, _}}
+       }),
+       do: :review_not_started
+
+  defp run_status(%State{status: status}), do: status
 
   defp stringify_failure(nil), do: nil
   defp stringify_failure(s) when is_binary(s), do: s
@@ -2546,10 +2762,28 @@ defmodule Arbiter.Worker do
   # back to querying the merger adapter for the PR's submitted review state. This
   # treats the adapter submission as the source of truth and avoids landing
   # INCONCLUSIVE when the review genuinely went out.
+  #
+  # bd-6dxit2: `meta[:output_lines]` is ClaudeSession's most-recent-1000-lines
+  # buffer, not the whole transcript. A reviewer that prints its VERDICT and then
+  # produces more than 1000 further lines of findings evicts its own sentinel and
+  # the review — a real verdict with a real findings list — is discarded as
+  # INCONCLUSIVE. (That eviction is a real hazard on this path but was NOT the
+  # cause of the reported false negatives; see `ReviewGate.parse_verdict/3` for
+  # what the measurements actually showed.) So parse via `parse_verdict/3`, which
+  # re-reads the uncapped durable transcript before conceding and logs which
+  # source saw what. The adapter fallback below is unchanged and still runs when
+  # neither source has a verdict.
   defp route_reviewer_completion(%State{} = state) do
     output_lines = Map.get(state.meta || %{}, :output_lines, [])
 
-    case Arbiter.Worker.ReviewGate.parse_verdict(output_lines) do
+    {verdict, _source} =
+      Arbiter.Worker.ReviewGate.parse_verdict(
+        output_lines,
+        state.run_id,
+        "review_only task=#{state.task_id}"
+      )
+
+    case verdict do
       {:approve, findings} ->
         route_approve_verdict(state, findings)
 
@@ -4308,7 +4542,7 @@ defmodule Arbiter.Worker do
     _ -> nil
   end
 
-  # Load the task's difficulty integer (0..4) from the DB. Returns nil on any
+  # Load the task's difficulty integer (0..5) from the DB. Returns nil on any
   # error so the ReviewGate falls back to its D2 default rather than crashing.
   defp task_difficulty(task_id) when is_binary(task_id) do
     case Ash.get(Arbiter.Tasks.Issue, task_id) do

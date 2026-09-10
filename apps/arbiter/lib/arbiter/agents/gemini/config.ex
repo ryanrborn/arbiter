@@ -48,7 +48,9 @@ defmodule Arbiter.Agents.Gemini.Config do
     "none" => [],
     "low" => [],
     "medium" => [],
-    "high" => []
+    "high" => [],
+    "xhigh" => [],
+    "max" => []
   }
 
   @doc """
@@ -200,6 +202,14 @@ defmodule Arbiter.Agents.Gemini.Config do
 
   def thinking_env(level) when level in ["low", "medium", "high"] do
     [{"GEMINI_THINKING_LEVEL", level}]
+  end
+
+  # #1519: routing emits `xhigh`/`max` at the top of the difficulty scale, but
+  # Gemini's own ladder stops at "high". Clamp rather than fall through to the
+  # catch-all, which would export NOTHING and quietly leave a D4/D5 Gemini
+  # dispatch with less reasoning budget than a D3 one.
+  def thinking_env(level) when level in ["xhigh", "max"] do
+    [{"GEMINI_THINKING_LEVEL", "high"}]
   end
 
   def thinking_env(_), do: []
