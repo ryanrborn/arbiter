@@ -2357,6 +2357,93 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "review_requested?/1" do
+    test "true when the token's own login is in requested_reviewers" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "requested_reviewers" => [%{"login" => "arb-bot"}]
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, true} = Github.review_requested?(@ref)
+    end
+
+    test "false when requested_reviewers names someone else" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "requested_reviewers" => [%{"login" => "coworker"}]
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, false} = Github.review_requested?(@ref)
+    end
+
+    test "false when requested_reviewers is empty" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 42, "requested_reviewers" => []})
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, false} = Github.review_requested?(@ref)
+    end
+
+    test "false (fail open) when the token's own login can't be resolved" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "requested_reviewers" => [%{"login" => "arb-bot"}]
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, false} = Github.review_requested?(@ref)
+    end
+  end
+
   describe "batch_pr_signals/1 (bd-3byp1n)" do
     # A single GraphQL PullRequest node in the shape the batched query fetches:
     # reviews (for changes_requested), reviewThreads (isResolved), and the head
