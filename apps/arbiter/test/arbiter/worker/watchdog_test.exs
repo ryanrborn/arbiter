@@ -2353,4 +2353,168 @@ defmodule Arbiter.Worker.WatchdogTest do
       refute log =~ "still parked"
     end
   end
+
+  # bd-dxgris / #1493 — the reviewed-SHA guard on the Watchdog's own merge
+  # path. Both captured production incidents went through this retry loop, so
+  # an adapter-level unit test is not enough: these drive `safe_merge/1`.
+  describe "reviewed-SHA guard on auto-merge" do
+    test "refuses the merge when the branch advanced past the recorded reviewed SHA" do
+      {pid, task_id} = running_worker()
+
+      # Approved on the forge, but the head is NOT the commit the review was
+      # recorded against — the branch was pushed to after approval.
+      StubMerger.queue_get("!rs1", [%{status: :open, approved: true, head_sha: "sha-new"}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!rs1",
+            auto_merge: true,
+            last_reviewed_sha: "sha-reviewed",
+            interval_ms: 15,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!rs1") >= 3 end, 2_000)
+        end)
+
+      assert StubMerger.merge_count("!rs1") == 0,
+             "the Watchdog merged a head no reviewer ever saw"
+
+      assert log =~ "stale_reviewed_sha"
+      refute Worker.state(pid).status == :completed
+    end
+
+    test "merges, guarded on the reviewed SHA, when the head still matches it" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rs2", [%{status: :open, approved: true, head_sha: "sha-reviewed"}])
+
+      start_watchdog(pid, task_id, "!rs2",
+        auto_merge: true,
+        last_reviewed_sha: "sha-reviewed",
+        interval_ms: 15
+      )
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert StubMerger.merge_count("!rs2") == 1
+      assert StubMerger.last_merge() == {"!rs2", "sha-reviewed"}
+    end
+
+    test "with no recorded SHA, latches the head observed at first approval and refuses a later one" do
+      {pid, task_id} = running_worker()
+
+      # Poll 1: approved at sha-a, but CI is still running -> parked, no merge.
+      # Poll 2+: still approved, head has moved to sha-b -> must NOT merge.
+      StubMerger.queue_get("!rs3", [
+        %{status: :open, approved: true, head_sha: "sha-a", pipeline: :running},
+        %{status: :open, approved: true, head_sha: "sha-b"}
+      ])
+
+      start_watchdog(pid, task_id, "!rs3",
+        auto_merge: true,
+        interval_ms: 15,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> StubMerger.get_count("!rs3") >= 4 end, 2_000)
+
+      assert StubMerger.merge_count("!rs3") == 0,
+             "the Watchdog merged commits pushed after the approval it acted on"
+    end
+
+    test "a dismissed approval drops the latch so a re-approval on the new head merges" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!rs4", [
+        # Approved at sha-a, CI still running -> latch sha-a, no merge.
+        %{status: :open, approved: true, head_sha: "sha-a", pipeline: :running},
+        # Push landed and the forge dismissed the approval -> latch drops.
+        %{status: :open, approved: false, head_sha: "sha-b"},
+        # Reviewer re-approved on sha-b -> re-latch and merge, guarded on sha-b.
+        %{status: :open, approved: true, head_sha: "sha-b"}
+      ])
+
+      start_watchdog(pid, task_id, "!rs4", auto_merge: true, interval_ms: 15)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end, 2_000)
+      assert StubMerger.last_merge() == {"!rs4", "sha-b"}
+    end
+
+    # bd-dxgris round 3, finding 1 — the fleet's own pushes land ASYNCHRONOUSLY.
+    # `clear_reviewed_latch/1` used to be a one-shot nil, and the very next poll
+    # (the fix pass has been dispatched but its commit hasn't landed yet)
+    # re-latched the SAME pre-push head. When the fix commit finally appeared the
+    # guard saw reviewed != head and refused forever — deadlocking exactly the
+    # auto-heal lane the clear exists to keep converging.
+    test "a fix-pass commit that lands several polls later still merges, guarded on the new head" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!rs6", [
+        # Poll 1: approved at sha-a but CI is red -> dispatch the fix pass and
+        # suspend the latch.
+        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed},
+        # Poll 2: the fix pass is still running; the head has NOT moved yet.
+        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed},
+        # Poll 3+: the fix commit landed and CI is green.
+        %{status: :open, approved: true, head_sha: "sha-b"}
+      ])
+
+      start_watchdog(pid, task_id, "!rs6",
+        auto_merge: true,
+        max_auto_resolve_attempts: 1,
+        interval_ms: 15,
+        fix_pass_dispatcher: StubFixPassDispatcher,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> Worker.state(pid).status == :completed end, 3_000)
+
+      assert StubMerger.merge_count("!rs6") == 1
+
+      assert StubMerger.last_merge() == {"!rs6", "sha-b"},
+             "the fleet's own fix-pass commit must re-baseline the guard, not deadlock it"
+    end
+
+    # The suspension must not become a hole in the guard: once the fleet's push
+    # has landed and the latch re-pinned, a SUBSEQUENT foreign push is refused
+    # again exactly as before.
+    test "a foreign push after the fleet's own push landed is still refused" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!rs7", [
+        %{status: :open, approved: true, head_sha: "sha-a", block_reason: :ci_failed},
+        # The fix commit lands, but CI is still running -> latch sha-b, no merge.
+        %{status: :open, approved: true, head_sha: "sha-b", pipeline: :running},
+        # Someone else pushes sha-c under the still-standing approval.
+        %{status: :open, approved: true, head_sha: "sha-c"}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!rs7",
+            auto_merge: true,
+            max_auto_resolve_attempts: 1,
+            interval_ms: 15,
+            fix_pass_dispatcher: StubFixPassDispatcher,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> StubMerger.get_count("!rs7") >= 5 end, 3_000)
+        end)
+
+      assert StubMerger.merge_count("!rs7") == 0,
+             "the suspension must lift at the fleet's own commit, not stay open forever"
+
+      assert log =~ "stale_reviewed_sha"
+    end
+
+    test "no reviewed SHA anywhere (adapter reports no head) merges unguarded" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!rs5", [%{status: :open, approved: true}])
+
+      start_watchdog(pid, task_id, "!rs5", auto_merge: true, interval_ms: 15)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert StubMerger.last_merge() == {"!rs5", nil}
+    end
+  end
 end

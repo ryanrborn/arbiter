@@ -67,7 +67,7 @@ defmodule Arbiter.Mergers do
   `Arbiter.Mergers.Gitlab.Config` / `Arbiter.Mergers.Github.Config`, exactly
   as `Arbiter.Trackers.Jira` does). A long-lived poller such as
   `Arbiter.Worker.Watchdog` runs in its own process, so it must seed that
-  config before calling `get/1` or `merge/1`.
+  config before calling `get/1` or `merge/2`.
 
   This keeps the adapter-specific coupling in one place: callers
   (`Arbiter.Worker`, `Arbiter.Worker.Watchdog`) just call `prepare/1` and stay
