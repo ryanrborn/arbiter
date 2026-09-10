@@ -1668,6 +1668,57 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert %{items: []} = MergeQueue.state(name)
       assert Ash.get!(Issue, task.id).status == :closed
     end
+
+    # bd-dxgris round 3, finding 1 — the forge applies update-branch
+    # ASYNCHRONOUSLY. A one-shot latch clear is undone by the very next tick,
+    # which re-pins the baseline to the still-unchanged pre-rebase head; when
+    # the rebase commit finally shows up the guard refuses it forever. The
+    # release has to survive until the head actually moves.
+    @tag workspace_config: @ws_github
+    test "an update-branch that lands several ticks later still merges, guarded on the new head",
+         %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            208 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "behind", "head" => %{"sha" => "sha-a"}}
+            }
+          }
+        end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#208", 2)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # Tick 1: approved and behind base → baseline latches at "sha-a" and the
+      # rebase is issued.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 208}
+
+      # Tick 2: the forge has accepted the update but has not applied it yet —
+      # no longer reported behind, CI re-running, head STILL "sha-a".
+      Agent.update(agent, fn s ->
+        put_in(s, [208, :pr], %{"mergeStateStatus" => "unstable", "head" => %{"sha" => "sha-a"}})
+      end)
+
+      :ok = MergeQueue.tick(name)
+      refute_received {:merged, 208}
+
+      # Tick 3: the rebase commit finally lands and CI goes green.
+      Agent.update(agent, fn s ->
+        put_in(s, [208, :pr], %{"mergeStateStatus" => "clean", "head" => %{"sha" => "sha-b"}})
+      end)
+
+      :ok = MergeQueue.tick(name)
+      assert_received {:merged, 208},
+                      "the queue's own rebase must re-baseline the guard, not deadlock the item"
+
+      assert %{items: []} = MergeQueue.state(name)
+      assert Ash.get!(Issue, task.id).status == :closed
+    end
   end
 
   describe "serialized merge admission (#354, Phase 3)" do

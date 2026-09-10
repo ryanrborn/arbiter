@@ -1339,37 +1339,74 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   # The task's recorded review baseline wins over the queue's own latch, exactly
-  # as in the Watchdog.
+  # as in the Watchdog — except while the latch is suspended (the queue's own
+  # push is in flight), where the baseline floats to the head of the poll we
+  # are merging on: still an atomic forge precondition, but one the queue's own
+  # rebase cannot deadlock.
   defp item_reviewed_sha(item) do
-    case Map.get(item, :last_reviewed_sha) do
-      sha when is_binary(sha) and sha != "" -> sha
-      _ -> Map.get(item, :reviewed_sha)
+    cond do
+      latch_suspended?(item, Map.get(item, :last_head_sha)) ->
+        Map.get(item, :last_head_sha)
+
+      is_binary(Map.get(item, :last_reviewed_sha)) and Map.get(item, :last_reviewed_sha) != "" ->
+        Map.get(item, :last_reviewed_sha)
+
+      true ->
+        Map.get(item, :reviewed_sha)
     end
   end
 
-  # Drop the latch when the QUEUE is the one advancing the branch — an
+  # Release the baseline when the QUEUE is the one advancing the branch — an
   # update-branch rebase or a conflict-resolver push. Mirrors
-  # `Arbiter.Worker.Watchdog.clear_reviewed_latch/1`: those pushes are this
-  # queue's own doing, already governed by their own bounded machinery, and
-  # not dropping the baseline here strands every PR the queue rebases
-  # forward on a guard that can never be satisfied again.
-  defp clear_reviewed_latch(item), do: %{item | reviewed_sha: nil, last_reviewed_sha: nil}
+  # `Arbiter.Worker.Watchdog.clear_reviewed_latch/1`, including the reason it
+  # is a SUSPENSION rather than a one-shot clear: the forge applies
+  # update-branch asynchronously and the resolver force-pushes many ticks
+  # later, so nil-ing the baseline here would simply be re-latched to the
+  # unchanged pre-push head on the next tick and then refuse the queue's own
+  # commit forever.
+  defp clear_reviewed_latch(item) do
+    %{
+      item
+      | reviewed_sha: nil,
+        last_reviewed_sha: nil,
+        latch_suspended_at_head: Map.get(item, :last_head_sha) || :unknown
+    }
+  end
 
   # Carry the reviewed baseline forward from one poll observation, mirroring
   # `Arbiter.Worker.Watchdog.track_reviewed_baseline/2`.
   defp track_reviewed_baseline(item, mr_state) do
     head = Map.get(mr_state, :head_sha)
 
-    %{
-      item
-      | last_head_sha: head,
-        reviewed_sha:
-          Mergers.ReviewedSha.latch(
-            Map.get(item, :reviewed_sha),
-            Map.get(mr_state, :approved) == true,
-            head
-          )
-    }
+    item =
+      if latch_suspended?(item, head) do
+        %{item | reviewed_sha: nil}
+      else
+        %{
+          item
+          | latch_suspended_at_head: nil,
+            reviewed_sha:
+              Mergers.ReviewedSha.latch(
+                Map.get(item, :reviewed_sha),
+                Map.get(mr_state, :approved) == true,
+                head
+              )
+        }
+      end
+
+    %{item | last_head_sha: head}
+  end
+
+  # Mirrors `Arbiter.Worker.Watchdog.latch_suspended?/2`: a head we cannot read
+  # keeps the suspension, and `:unknown` (no head observed when the queue
+  # pushed) lifts on the first head we do see.
+  defp latch_suspended?(item, head) do
+    case Map.get(item, :latch_suspended_at_head) do
+      nil -> false
+      _ when not is_binary(head) or head == "" -> true
+      :unknown -> false
+      at -> head == at
+    end
   end
 
   defp try_merge(state, item) do
@@ -1530,6 +1567,11 @@ defmodule Arbiter.Workflows.MergeQueue do
       last_reviewed_sha: nil,
       reviewed_sha: nil,
       last_head_sha: nil,
+      # Set by `clear_reviewed_latch/1` to the head the branch sat at when the
+      # queue issued its own push (update-branch, conflict-resolver rebase).
+      # Holds the latch off until the head moves off this value, which is the
+      # only observable proof that the queue's own commit has landed.
+      latch_suspended_at_head: nil,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,
