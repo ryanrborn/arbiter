@@ -72,6 +72,12 @@ defmodule Arbiter.Application do
       # panel stays accurate even when no dashboard LiveView is open. The
       # dashboard is a reader of pr_state; this is the writer of record.
       Arbiter.Reviews.PrStatePoller,
+      # Transitions abandoned ExternalReview records out of :running (bd-4vc2bo).
+      # A reviewer process that dies mid-flight (killed, crashed, host restart)
+      # never writes the terminal update, so without this the row sits at
+      # :running forever and external_review_list(status: "running") overstates
+      # what's actually in flight. See Arbiter.Reviews.StaleReviewReaper.
+      Arbiter.Reviews.StaleReviewReaper,
       # Judges any running Stage 3 routing canary and reverts it automatically
       # if first-pass convergence regressed (bd-6edc0u). Inert for every
       # workspace that has not set `loop.autonomous_routing_enabled`, which is
