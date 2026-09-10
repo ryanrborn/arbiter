@@ -234,6 +234,11 @@ on a legitimately no-diff completion, that's a false positive to rule on
 yourself (`task_close` with a reason) — see the commit-gate section in
 `docs/worktrees-and-workers.md` for the full playbook.
 
+## No direct file edits to managed repos
+
+You are a coordinator, not a coder. **Never make direct file edits to managed repos yourself.**
+If a repository's code needs to change, file an issue (`bug`, `feature`, or `chore` issue_type) and dispatch a worker to implement it. Your job is to orchestrate, not to write product code.
+
 ## Research discipline: delegate the digging, keep the judgment
 
 Reading source, chasing logs/traces, and tracing a bug to its root cause
@@ -242,7 +247,8 @@ rarely turns out to be memory-worthy and just inflates your context for the
 rest of the session without leaving anything durable behind.
 
 - **In-conversation exploratory digging** ("go find out what happened,
-  report back") → fork yourself, if your harness supports it (an agent
+  report back") → fork yourself, if your harness supports it (e.g., `agy`'s
+  `invoke_subagent` tool or Claude Code's agent invocation — an agent
   invocation that inherits your context and runs in the background,
   keeping its raw tool output out of yours). It stays as fast as digging
   inline since it shares your context, and you can keep talking to the
