@@ -178,6 +178,47 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   cycle. The pause is workspace/repo-scoped (this GenServer's own state),
   matching where the forge's rate limit itself is scoped: account-wide, not
   per-PR.
+
+  ## Per-engagement circuit breaker on the loop signature (bd-1atwts)
+
+  The review cap above bounds raw re-review *volume*; it says nothing about
+  *quality*. An engagement observed in production posted four verdict rounds
+  in 2.5 hours on one PR, the last of which re-raised threads the author had
+  already refuted in writing — well under the volume cap, but unmistakably a
+  loop. This breaker stops posting the moment the **loop signature** itself
+  appears, independent of the review cap:
+
+    * **Same-SHA repeat verdict** — we already hold a posted verdict
+      (`last_verdict` / `last_verdict_sha`) for the exact commit ReviewPatrol
+      is about to verdict again. Checked immediately before any verdict-
+      posting call, as a last-resort guard regardless of which path got us
+      there.
+
+    * **Disputed re-request** — the author re-requests review
+      (`review_requested?/1`, the same optional capability #1539 uses to
+      override sticky approval) while the head is UNCHANGED from the commit we
+      already posted a verdict for. No new commits means there is nothing new
+      to review — a re-request against our own standing verdict, with no code
+      change behind it, is the author saying our verdict doesn't hold, not
+      asking for a fresh look. This is `list_open_review_threads/1` fed by the
+      same login/author signals as the author-reply path, without a full
+      thread-text classifier: the double condition (re-request AND we already
+      verdicted this exact head) keeps ordinary "please take another look"
+      requests — which normally arrive on a NEW head — from tripping it.
+
+  Both are evaluated only for the ONE signature; a normal follow-up re-review
+  triggered by a fresh push is untouched and keeps running automatically, per
+  the guards above (debounce, relevance, sticky approval, review cap).
+
+  On trip: nothing is posted. The would-be verdict is written to
+  `Arbiter.Reviews.Record` as `status: :completed_unposted, mode:
+  :report_only` (mirroring `ExternalReview`'s own report-only bookkeeping),
+  ONE coordinator escalation is raised (`kind: :escalation`, subject `"review
+  loop on PR #<n>"`), and `circuit_breaker_tripped` is set — a one-way trip,
+  same shape as `review_cap_escalated`: every subsequent tick for this
+  engagement is a pure no-op (no adapter calls beyond the merged/closed check)
+  until a human clears the flag. There is no automatic resume; adjudicating a
+  review loop is a human call by design.
   """
 
   # `:transient` (not the default `:permanent`) so a patrol that self-terminates
@@ -199,6 +240,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.Agents
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.Messages.Message
+  alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewReply}
@@ -640,6 +683,21 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   defp process_engagement_result(_engagement, _result, _adapter, _workspace, _repo_name), do: nil
 
+  # The circuit breaker (bd-1atwts) has already tripped for this engagement —
+  # a one-way pause, same shape as the review cap: no adapter.get/1-derived
+  # work happens at all (no diff fetch, no reply handling, no re-review) until
+  # a human clears `circuit_breaker_tripped`. The merged/closed check upstream
+  # in `process_engagement_result/5` still runs, so a tripped engagement whose
+  # source PR merges or closes is still terminated normally.
+  defp handle_open_pr(
+         %Issue{circuit_breaker_tripped: true},
+         _pr,
+         _adapter,
+         _workspace,
+         _repo_name
+       ),
+       do: nil
+
   # An open source PR. First sighting (last_reviewed_sha unset) → record the head
   # SHA and stop. If the head advanced, consider a new-commit re-review under the
   # spam guards (task D). Otherwise (head unchanged — no new commits this tick)
@@ -670,12 +728,43 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     maybe_rereview(engagement, pr, adapter, workspace, repo_name)
   end
 
-  # No new commits this tick (head unchanged, or head unknown/blank). Look for
+  # No new commits this tick (head unchanged, or head unknown/blank). A
+  # re-request disputing our standing verdict (bd-1atwts: the loop signature —
+  # re-requested with nothing new to review) trips the circuit breaker instead
+  # of falling through to the ordinary author-reply path. Otherwise, look for
   # new author replies on the review threads we own and handle them per the
   # engagement's automation mode.
   defp handle_open_pr(%Issue{} = engagement, pr, adapter, workspace, repo_name) do
-    maybe_handle_author_replies(engagement, pr, adapter, workspace, repo_name)
+    if disputed_re_request?(engagement, pr, adapter) do
+      trip_circuit_breaker(
+        engagement,
+        engagement.last_verdict,
+        "the author re-requested review on PR ##{engagement.source_pr} with no new commits " <>
+          "since our last posted verdict (#{inspect(engagement.last_verdict)} on " <>
+          "#{engagement.last_verdict_sha})"
+      )
+    else
+      maybe_handle_author_replies(engagement, pr, adapter, workspace, repo_name)
+    end
   end
+
+  # ---- circuit breaker on the loop signature (bd-1atwts) -----------------
+
+  # A re-request against our own standing verdict, with no new commits behind
+  # it: the head is unchanged from the exact SHA we already posted
+  # `last_verdict` for, and the author (or a colleague) explicitly re-requested
+  # review from our identity since. See the moduledoc section for why the
+  # double condition — not a bare re-request — is what keys the signature.
+  defp disputed_re_request?(
+         %Issue{last_verdict_sha: sha} = engagement,
+         %{head_sha: head},
+         adapter
+       )
+       when is_binary(sha) and is_binary(head) and sha == head do
+    review_requested?(adapter, engagement.source_pr)
+  end
+
+  defp disputed_re_request?(_engagement, _pr, _adapter), do: false
 
   # Close the engagement's task. review_only == true, so SyncTracker skips every
   # tracker write (bd-6xaaam): terminating an engagement never touches the
@@ -1090,6 +1179,25 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # finding we already posted (unchanged-finding de-dupe) BEFORE the workflow
   # posts inline comments. On success we persist the newly-posted findings and
   # advance `last_reviewed_sha`.
+  # Last-resort circuit breaker guard (bd-1atwts): before dispatching ANY
+  # verdict-posting call, refuse to post again for a SHA we already hold a
+  # verdict for. Every reachable caller today only invokes `run_rereview/5`
+  # after confirming the head advanced past `last_reviewed_sha`, so this
+  # should never actually observe `head == last_verdict_sha` — it exists as
+  # insurance against a future/latent caller re-triggering a post on an
+  # already-verdicted commit, which is exactly the failure class this
+  # breaker exists to bound.
+  defp run_rereview(%Issue{last_verdict_sha: sha} = engagement, head, _adapter, _workspace, _opts)
+       when is_binary(sha) and is_binary(head) and sha == head do
+    trip_circuit_breaker(
+      engagement,
+      engagement.last_verdict,
+      "ReviewPatrol was about to post another verdict for commit #{head} on PR " <>
+        "##{engagement.source_pr}, but we already posted #{inspect(engagement.last_verdict)} " <>
+        "for that exact commit"
+    )
+  end
+
   defp run_rereview(%Issue{} = engagement, head, adapter, workspace, opts) do
     # `reviewer_for_workspace/1` selects the reviewer adapter; `prepare/2` seeds
     # its per-process model config so CodeReview's Claude session honors it.
@@ -1119,7 +1227,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     case Arbiter.Workflow.run(CodeReview, state) do
       {:ok, final} ->
         posted = Map.get(final, :findings) || []
-        persist_rereview(engagement, head, posted)
+        verdict = Map.get(final, :verdict)
+        persist_rereview(engagement, head, posted, verdict)
 
         Logger.info(
           "ReviewPatrol: re-reviewed engagement #{engagement.id} on #{head} " <>
@@ -1272,15 +1381,31 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     end
   end
 
-  defp persist_rereview(%Issue{} = engagement, head, posted) do
+  # `verdict` is only passed by `run_rereview/5` — the path that actually
+  # POSTS to the PR. `report_rereview/5` calls this with the 3-arity form
+  # (verdict defaults to `nil`), so a report-only run's merely-recommended
+  # verdict never gets recorded as `last_verdict` / `last_verdict_sha`
+  # (bd-1atwts): those fields must reflect only what actually posted, since
+  # the circuit breaker's same-SHA check keys directly on them.
+  defp persist_rereview(%Issue{} = engagement, head, posted, verdict \\ nil) do
     merged = (engagement.posted_findings || []) ++ Enum.map(posted, &stored_finding/1)
 
-    update_engagement(engagement, %{
-      last_reviewed_sha: head,
-      last_reviewed_at: now(),
-      posted_findings: merged,
-      review_count: (engagement.review_count || 0) + 1
-    })
+    attrs =
+      %{
+        last_reviewed_sha: head,
+        last_reviewed_at: now(),
+        posted_findings: merged,
+        review_count: (engagement.review_count || 0) + 1
+      }
+      |> maybe_put_last_verdict(verdict, head)
+
+    update_engagement(engagement, attrs)
+  end
+
+  defp maybe_put_last_verdict(attrs, nil, _head), do: attrs
+
+  defp maybe_put_last_verdict(attrs, verdict, head) do
+    attrs |> Map.put(:last_verdict, verdict) |> Map.put(:last_verdict_sha, head)
   end
 
   defp advance_cursor(%Issue{} = engagement, head) do
@@ -1289,6 +1414,81 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       last_reviewed_at: now()
     })
   end
+
+  # ---- circuit breaker trip handling (bd-1atwts) --------------------------
+
+  # Trip the per-engagement circuit breaker: write the would-be verdict to an
+  # `Arbiter.Reviews.Record` (report-only bookkeeping, mirroring
+  # `ExternalReview`'s own `:completed_unposted` salvage path), raise ONE
+  # coordinator escalation, and pause the engagement — nothing further posts
+  # until a human clears `circuit_breaker_tripped`. Best-effort throughout: a
+  # mailbox or record-write hiccup never wedges the tick, and never causes a
+  # verdict to post anyway (the caller never posts once it decided to trip).
+  defp trip_circuit_breaker(%Issue{} = engagement, verdict, reason) do
+    write_circuit_breaker_record(engagement, verdict)
+    escalate_circuit_breaker(engagement, verdict, reason)
+
+    update_engagement(engagement, %{
+      circuit_breaker_tripped: true,
+      circuit_breaker_reason: reason
+    })
+
+    Logger.info(
+      "ReviewPatrol: engagement #{engagement.id} tripped the circuit breaker (#{reason}); " <>
+        "paused pending coordinator review"
+    )
+
+    {:circuit_breaker_tripped, engagement.id}
+  end
+
+  defp write_circuit_breaker_record(%Issue{workspace_id: ws_id} = engagement, verdict)
+       when is_binary(ws_id) do
+    _ =
+      safe(fn ->
+        Ash.create(Record, %{
+          pr_ref: engagement.source_pr,
+          pr: engagement.source_pr,
+          workspace_id: ws_id,
+          status: :completed_unposted,
+          mode: :report_only,
+          verdict: verdict,
+          engagement_id: engagement.id,
+          dispatched_by: "review_patrol_circuit_breaker",
+          started_at: now(),
+          completed_at: now()
+        })
+      end)
+
+    :ok
+  end
+
+  defp write_circuit_breaker_record(_engagement, _verdict), do: :ok
+
+  defp escalate_circuit_breaker(%Issue{workspace_id: ws_id} = engagement, verdict, reason)
+       when is_binary(ws_id) do
+    body =
+      "ReviewPatrol's circuit breaker tripped on PR ##{engagement.source_pr}: #{reason}\n\n" <>
+        "Our standing verdict is #{inspect(verdict)}; it was written to the review record as " <>
+        "report_only rather than posted. No further verdicts will be posted on this " <>
+        "engagement until the coordinator greenlights or closes it."
+
+    _ =
+      safe(fn ->
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: Message.coordinator_ref(),
+          from_ref: engagement.id,
+          workspace_id: ws_id,
+          task_ref: engagement.id,
+          subject: "review loop on PR ##{engagement.source_pr}",
+          body: body
+        })
+      end)
+
+    :ok
+  end
+
+  defp escalate_circuit_breaker(_engagement, _verdict, _reason), do: :ok
 
   # Second precision: `store_action_inputs?` (paper_trail) serializes the update
   # inputs and rejects a microsecond datetime; the debounce window is in minutes,

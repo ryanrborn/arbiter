@@ -105,9 +105,11 @@ defmodule Arbiter.Tasks.Issue do
         :skills
       ]
 
-      # `review_count` / `review_cap_escalated` are deliberately NOT create-accepted:
-      # they default to their non-capped values (0 / false) for a brand-new
-      # engagement, and are only ever advanced by ReviewPatrol's own :update calls.
+      # `review_count` / `review_cap_escalated` / `last_verdict` /
+      # `last_verdict_sha` / `circuit_breaker_tripped` / `circuit_breaker_reason`
+      # are deliberately NOT create-accepted: they default to their non-tripped
+      # values (0 / false / nil) for a brand-new engagement, and are only ever
+      # advanced by ReviewPatrol's own :update calls.
 
       # Opt-out for `arb create --no-tracker` / `--local-only`. When true, the
       # CreateUpstream hook skips the outbound-create call even when the
@@ -161,6 +163,10 @@ defmodule Arbiter.Tasks.Issue do
         :posted_findings,
         :review_count,
         :review_cap_escalated,
+        :last_verdict,
+        :last_verdict_sha,
+        :circuit_breaker_tripped,
+        :circuit_breaker_reason,
         :skills
       ]
 
@@ -725,6 +731,57 @@ defmodule Arbiter.Tasks.Issue do
       Whether ReviewPatrol has already raised the review-cap escalation for
       this engagement (bd-ahvk03). Set on the first tick that hits the cap so
       the same PR isn't re-escalated every subsequent tick.
+      """
+    end
+
+    attribute :last_verdict, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: [:approve, :request_changes]
+
+      description """
+      The verdict (`:approve` or `:request_changes`) ReviewPatrol most recently
+      POSTED to the PR (bd-1atwts). Paired with `last_verdict_sha` to detect a
+      would-be repeat verdict on a commit we've already ruled on — one arm of
+      the per-engagement circuit breaker.
+      """
+    end
+
+    attribute :last_verdict_sha, :string do
+      allow_nil? true
+      public? true
+
+      description """
+      The PR head SHA `last_verdict` was posted against (bd-1atwts). If
+      ReviewPatrol is ever about to post another verdict for this exact SHA —
+      the "same-SHA verdict" loop signature — the circuit breaker trips instead
+      of posting.
+      """
+    end
+
+    attribute :circuit_breaker_tripped, :boolean do
+      allow_nil? true
+      public? true
+      default false
+
+      description """
+      Whether ReviewPatrol's per-engagement circuit breaker has fired
+      (bd-1atwts): a same-SHA repeat verdict, or an author re-request disputing
+      a verdict we already posted for the current head with no new commits.
+      While true, ReviewPatrol posts nothing further on this engagement — no
+      verdicts, no re-reviews — until a human clears it. Mirrors
+      `review_cap_escalated`'s one-way-trip shape, but for the loop signature
+      rather than raw review volume.
+      """
+    end
+
+    attribute :circuit_breaker_reason, :string do
+      allow_nil? true
+      public? true
+
+      description """
+      Human-readable reason the circuit breaker tripped (bd-1atwts), recorded
+      alongside the coordinator escalation for later audit.
       """
     end
 

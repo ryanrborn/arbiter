@@ -1,6 +1,8 @@
 defmodule Arbiter.Workflows.ReviewPatrolTest do
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Messages.Message
+  alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workflows.ReviewPatrol
   require Ash.Query
@@ -1202,6 +1204,181 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert length(escalations) == 1
       assert reload(eng).review_cap_escalated == true
+    end
+  end
+
+  describe "tick/1 — per-engagement circuit breaker (bd-1atwts)" do
+    test "a posted verdict records last_verdict / last_verdict_sha on the engagement", %{ws: ws} do
+      eng =
+        engagement(ws, 600, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(600, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+
+      reloaded = reload(eng)
+      assert reloaded.last_verdict == :request_changes
+      assert reloaded.last_verdict_sha == "newsha"
+    end
+
+    test "report-only re-reviews never record last_verdict / last_verdict_sha", %{ws: ws} do
+      eng =
+        engagement(ws, 601, %{
+          review_automation: :report_only,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(601, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
+      refute_receive {:inline_comment, _}
+
+      reloaded = reload(eng)
+      assert reloaded.last_reviewed_sha == "newsha"
+      assert is_nil(reloaded.last_verdict)
+      assert is_nil(reloaded.last_verdict_sha)
+    end
+
+    test "run_rereview refuses to post a second verdict for a SHA it already verdicted",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 602, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :approve,
+          last_verdict_sha: "newsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(602, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # The relevance gate still fetches the diff, but nothing posts.
+      assert_receive {:compare, _path}
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      reloaded = reload(eng)
+      assert reloaded.circuit_breaker_tripped == true
+      assert reloaded.circuit_breaker_reason =~ "already posted"
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+      assert hd(escalations).subject == "review loop on PR ##{eng.source_pr}"
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert [record] = records
+      assert record.status == :completed_unposted
+      assert record.mode == :report_only
+      assert record.verdict == :approve
+    end
+
+    test "a disputed re-request (unchanged head, review re-requested) trips the breaker instead of replying",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 603, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "samesha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      rereview_stub_with_reviews(603, "samesha", "", [], "botreviewer", ["botreviewer"])
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      reloaded = reload(eng)
+      assert reloaded.circuit_breaker_tripped == true
+      assert reloaded.circuit_breaker_reason =~ "re-requested review"
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+      assert hd(escalations).subject == "review loop on PR ##{eng.source_pr}"
+    end
+
+    test "a tripped engagement no-ops entirely on subsequent ticks", %{ws: ws} do
+      eng =
+        engagement(ws, 604, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "samesha",
+          circuit_breaker_tripped: true,
+          circuit_breaker_reason: "prior trip"
+        })
+
+      pr_stub(604, %{
+        "number" => 604,
+        "state" => "open",
+        "head" => %{"sha" => "samesha"},
+        "html_url" => "x"
+      })
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+      assert :ok = ReviewPatrol.tick(name)
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert escalations == []
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert records == []
+      assert reload(eng).circuit_breaker_tripped == true
     end
   end
 
