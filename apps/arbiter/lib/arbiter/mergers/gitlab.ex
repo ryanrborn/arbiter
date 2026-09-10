@@ -192,19 +192,34 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
-  def merge(mr_ref) when is_binary(mr_ref) do
+  def merge(mr_ref, expected_sha)
+
+  # bd-dxgris / #1493: the caller supplied the SHA its merge decision was
+  # computed against. Send exactly that — no head re-read. GitLab enforces it
+  # atomically: a branch that advanced since the decision comes back 409
+  # ("SHA does not match HEAD of source branch") instead of merging commits no
+  # reviewer ever saw.
+  def merge(mr_ref, expected_sha)
+      when is_binary(mr_ref) and is_binary(expected_sha) and expected_sha != "" do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      merge_with_sha(cfg, iid, expected_sha)
+    end
+  end
+
+  # No reviewed SHA to guard on (`nil`). Fall back to the MR's current head so
+  # the request is still well-formed — GitLab rejects a merge with no `sha`
+  # ("SHA must be provided when merging", bd-6i2k7u/#1491) — but note that this
+  # merges whatever head the forge reports right now. Callers reach this only
+  # on paths with no MR head to race against; see `Arbiter.Mergers.ReviewedSha`.
+  def merge(mr_ref, _expected_sha) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do
         {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 ->
           case Map.get(mr_body, "sha") do
             sha when is_binary(sha) and sha != "" ->
-              payload =
-                %{"sha" => sha}
-                |> maybe_put("squash", squash_param(cfg.merge_method))
-
-              request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
-              |> handle_ok()
+              merge_with_sha(cfg, iid, sha)
 
             _ ->
               {:error,
@@ -221,6 +236,15 @@ defmodule Arbiter.Mergers.Gitlab do
           {:error, transport_error(exception)}
       end
     end
+  end
+
+  defp merge_with_sha(cfg, iid, sha) do
+    payload =
+      %{"sha" => sha}
+      |> maybe_put("squash", squash_param(cfg.merge_method))
+
+    request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
+    |> handle_ok()
   end
 
   # GitLab's merge endpoint only accepts "squash" as a per-call parameter (boolean).

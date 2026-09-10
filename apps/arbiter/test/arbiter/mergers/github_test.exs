@@ -1325,7 +1325,7 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
-  describe "merge/1" do
+  describe "merge/2" do
     test "PUTs /merge with the configured merge_method" do
       stub(fn conn ->
         assert conn.method == "PUT"
@@ -1338,7 +1338,31 @@ defmodule Arbiter.Mergers.GithubTest do
         |> Req.Test.json(%{"merged" => true})
       end)
 
-      assert :ok = Github.merge(@ref)
+      assert :ok = Github.merge(@ref, nil)
+    end
+
+    test "sends the expected_sha as the merge precondition (bd-dxgris)" do
+      stub(fn conn ->
+        assert conn.method == "PUT"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["sha"] == "reviewed-sha"
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+      end)
+
+      assert :ok = Github.merge(@ref, "reviewed-sha")
+    end
+
+    test "omits sha entirely when the merge is deliberately unguarded" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "sha")
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+      end)
+
+      assert :ok = Github.merge(@ref, nil)
     end
 
     test "405 (not mergeable) maps to {:error, %Error{kind: :not_mergeable}}" do
@@ -1348,7 +1372,7 @@ defmodule Arbiter.Mergers.GithubTest do
         |> Req.Test.json(%{"message" => "Pull Request is not mergeable"})
       end)
 
-      assert {:error, %Error{kind: :not_mergeable, status: 405}} = Github.merge(@ref)
+      assert {:error, %Error{kind: :not_mergeable, status: 405}} = Github.merge(@ref, nil)
     end
 
     test "409 (conflict) maps to {:error, %Error{kind: :conflict}}" do
@@ -1358,7 +1382,7 @@ defmodule Arbiter.Mergers.GithubTest do
         |> Req.Test.json(%{"message" => "Head branch was modified"})
       end)
 
-      assert {:error, %Error{kind: :conflict, status: 409}} = Github.merge(@ref)
+      assert {:error, %Error{kind: :conflict, status: 409}} = Github.merge(@ref, nil)
     end
 
     test "uses merge_method from config when overridden" do
@@ -1376,7 +1400,7 @@ defmodule Arbiter.Mergers.GithubTest do
         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{})
       end)
 
-      assert :ok = Github.merge(@ref)
+      assert :ok = Github.merge(@ref, nil)
     end
   end
 
@@ -2051,7 +2075,7 @@ defmodule Arbiter.Mergers.GithubTest do
               }} = Github.get("leo-technologies-llc/verus_server#7")
     end
 
-    test "merge/1 routes to the embedded owner/repo" do
+    test "merge/2 routes to the embedded owner/repo" do
       stub(fn conn ->
         assert conn.method == "PUT"
 
@@ -2061,7 +2085,7 @@ defmodule Arbiter.Mergers.GithubTest do
         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
       end)
 
-      assert :ok = Github.merge("leo-technologies-llc/verus_server#7")
+      assert :ok = Github.merge("leo-technologies-llc/verus_server#7", nil)
     end
 
     test "open/4 with NO owner in cfg still derives both owner and repo from :repo_path (bd-a53kv2)",

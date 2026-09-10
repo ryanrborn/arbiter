@@ -11,7 +11,7 @@ defmodule Arbiter.Workflows.ReviewReplyTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -39,7 +39,7 @@ defmodule Arbiter.Workflows.ReviewReplyTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -73,7 +73,7 @@ defmodule Arbiter.Workflows.ReviewReplyTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -105,7 +105,7 @@ defmodule Arbiter.Workflows.ReviewReplyTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true

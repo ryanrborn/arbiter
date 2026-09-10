@@ -75,7 +75,7 @@ defmodule Arbiter.Workflows.CodeReview do
   A reviewer worker MUST NOT:
 
     * push code (no `Worker.Worktree.push/2` call lives in this workflow)
-    * merge PRs (no `GitHub.pr_merge/4` / `Merger.merge/1` call lives here)
+    * merge PRs (no `GitHub.pr_merge/4` / `Merger.merge/2` call lives here)
     * make non-comment mutations beyond inline comments + a single review
 
   These constraints are enforced **statically** (this module simply does

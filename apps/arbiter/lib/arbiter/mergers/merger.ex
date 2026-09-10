@@ -36,12 +36,20 @@ defmodule Arbiter.Mergers.Merger do
     * `open/4` — open the merge request (or perform the merge, for `Direct`)
       for `branch`. Returns `{:ok, mr_ref}`.
     * `get/1` — fetch the current state of the MR as an opaque map.
-    * `merge/1` — merge the MR (no-op where `open/4` already merged).
+    * `merge/2` — merge the MR (no-op where `open/4` already merged), guarded
+      on the caller's reviewed SHA. See "The reviewed-SHA guard" below.
     * `close/1` — close the MR without merging.
     * `add_comment/2` — post a comment on the MR.
     * `request_review/2` — request review from `reviewers`.
     * `link_for/1` — return a human-clickable URL for the ref (empty string
       when the backend has no web UI, e.g. `Direct`).
+
+  ## The reviewed-SHA guard
+
+  `merge/2` takes the SHA the merge decision was computed against and hands it
+  to the forge as an atomic precondition. `Arbiter.Mergers.ReviewedSha` owns
+  how callers derive that SHA (and when they refuse outright); this behaviour
+  only fixes the contract that every adapter must honour it.
 
   ## Review callbacks
 
@@ -208,7 +216,23 @@ defmodule Arbiter.Mergers.Merger do
             ) ::
               {:ok, mr_ref} | {:error, term()}
   @callback get(mr_ref) :: {:ok, map()} | {:error, term()}
-  @callback merge(mr_ref) :: :ok | {:error, term()}
+  @doc """
+  Merge the MR, guarded on `expected_sha` (bd-dxgris / #1493).
+
+  `expected_sha` is the commit the merge decision was made against — the head
+  the review verdict was computed on (`Arbiter.Mergers.ReviewedSha`). Adapters
+  MUST hand it to the forge's own atomic guard (GitHub's `sha` merge
+  parameter, GitLab's `sha` merge parameter) so a branch that advanced between
+  the decision and this call is rejected **by the forge**, not merged.
+
+  The second argument is deliberately **required**, not optional: an unguarded
+  merge is a real choice with a real failure mode (merging commits nobody
+  reviewed), so it has to be spelled `merge(ref, nil)` at the call site rather
+  than fall out of an omitted argument. `nil` means "merge whatever head the
+  forge reports" and is reserved for the paths that genuinely have no MR head
+  to race against — see `Arbiter.Mergers.ReviewedSha` for the reasoning.
+  """
+  @callback merge(mr_ref, expected_sha :: String.t() | nil) :: :ok | {:error, term()}
   @callback close(mr_ref) :: :ok | {:error, term()}
   @callback add_comment(mr_ref, body :: String.t()) :: :ok | {:error, term()}
   @callback request_review(mr_ref, reviewers :: [term()]) :: :ok | {:error, term()}

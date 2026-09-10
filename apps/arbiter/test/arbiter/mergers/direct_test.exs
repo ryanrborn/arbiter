@@ -149,8 +149,8 @@ defmodule Arbiter.Mergers.DirectTest do
       assert Direct.get("direct:anything") == {:ok, %{status: :merged}}
     end
 
-    test "merge/1, close/1, add_comment/2, request_review/2 are :ok no-ops" do
-      assert Direct.merge("direct:x") == :ok
+    test "merge/2, close/1, add_comment/2, request_review/2 are :ok no-ops" do
+      assert Direct.merge("direct:x", nil) == :ok
       assert Direct.close("direct:x") == :ok
       assert Direct.add_comment("direct:x", "hello") == :ok
       assert Direct.request_review("direct:x", [1, 2]) == :ok

@@ -6,7 +6,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest.TestMerger do
   @impl true
   def get(_ref), do: {:ok, %{status: :open, approved: false}}
   @impl true
-  def merge(_ref), do: :ok
+  def merge(_ref, _expected_sha), do: :ok
   @impl true
   def close(_ref), do: :ok
   @impl true

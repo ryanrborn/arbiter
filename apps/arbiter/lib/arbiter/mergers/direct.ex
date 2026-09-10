@@ -44,7 +44,7 @@ defmodule Arbiter.Mergers.Direct do
       an old-format or hand-constructed ref).
     * `get/1` — always `{:ok, %{status: :merged}}`; once `open/4` succeeds the
       branch is already integrated, so there is no other state to report.
-    * `merge/1`, `close/1`, `add_comment/2`, `request_review/2` — no-ops
+    * `merge/2`, `close/1`, `add_comment/2`, `request_review/2` — no-ops
       returning `:ok` (there is no MR to act on).
     * `link_for/1` — returns an empty string (no web UI).
 
@@ -129,8 +129,13 @@ defmodule Arbiter.Mergers.Direct do
   @impl true
   def get(_mr_ref), do: {:ok, %{status: :merged}}
 
+  # bd-dxgris / #1493: `open/4` above already performed the merge (that is what
+  # "direct" means — a local `git merge` + push, no MR), so by the time anyone
+  # calls this there is no pending merge left to guard and `expected_sha` has
+  # nothing to be a precondition on. The guard for this strategy lives in
+  # `open/4`, which merges the exact branch ref it was handed.
   @impl true
-  def merge(_mr_ref), do: :ok
+  def merge(_mr_ref, _expected_sha), do: :ok
 
   @impl true
   def close(_mr_ref), do: :ok

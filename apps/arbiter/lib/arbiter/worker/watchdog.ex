@@ -8,7 +8,7 @@ defmodule Arbiter.Worker.Watchdog do
   the worker to its terminal state based on the MR's fate:
 
       MR merged           -> Worker.complete(:merged)
-      MR approved         -> (auto_merge) Mergers.merge/1 then complete(:merged)
+      MR approved         -> (auto_merge) Mergers.merge/2 (guarded on the reviewed SHA) then complete(:merged)
                           -> (manual)     stay parked; a human merges, next
                                           poll sees :merged, then complete
       MR closed/rejected  -> Worker.fail({:mr_closed, ref})
@@ -17,6 +17,30 @@ defmodule Arbiter.Worker.Watchdog do
   `Arbiter.Worker.WatchdogSupervisor` (a `DynamicSupervisor`, `restart:
   :temporary`) and monitors the worker: if the worker dies, the Watchdog
   stops.
+
+  ## The reviewed-SHA guard (bd-dxgris / #1493)
+
+  Auto-merge acts on a review verdict computed against one specific commit. If
+  the branch advances between that verdict and the merge, merging "current
+  head" merges commits no reviewer ever saw — and this retry loop is where the
+  window is widest (both captured production incidents, `vs-cgh54b`/!177 and
+  `vs-a7w5g9`/!179, sat in it for many polls).
+
+  So the Watchdog carries a baseline: the task's recorded `last_reviewed_sha`
+  when it has one, otherwise the head observed on the first poll whose
+  *effective* outcome was `:approved` (which, on a `via_review_gate` lane, is
+  the commit the in-process gate approved). `safe_merge/1` refuses when the
+  current head has moved past it, and otherwise hands it to `merge/2` as the
+  forge's own atomic precondition. A refusal is a normal merge failure: the
+  lane stays parked and the coordinator is paged.
+
+  The latch is deliberately *suspended* whenever the fleet advances the branch
+  itself (update-branch, CI fix pass, conflict resolution) — see
+  `clear_reviewed_latch/1`. Those pushes land asynchronously, several polls
+  after they are issued, so the suspension has to survive until the head
+  actually moves rather than being a one-shot nil the next poll re-latches.
+  `Arbiter.Mergers.ReviewedSha` records the rest of the reasoning, including
+  why "no baseline" merges unguarded rather than refusing.
 
   ## Approval detection lives in one function
 
@@ -740,6 +764,39 @@ defmodule Arbiter.Worker.Watchdog do
         workspace: workspace,
         auto_merge: auto_merge,
         via_review_gate: via_review_gate,
+        # bd-dxgris / #1493 — the reviewed-SHA guard. `recorded_reviewed_sha` is
+        # the task's own `last_reviewed_sha` (an external-review engagement's
+        # recorded baseline); it wins when present. `reviewed_sha` is the
+        # fallback the Watchdog latches itself: the head observed on the first
+        # poll whose *effective* outcome was `:approved` — i.e. the commit this
+        # Watchdog's merge decision is actually based on, which for a
+        # `via_review_gate` lane is the commit the in-process gate approved.
+        # `last_head_sha` is the head from the most recent poll, so the guard can
+        # refuse locally (with a legible reason) instead of only learning about
+        # the advance from a forge 409. Seeded from opts for tests and callers
+        # that already hold the task; otherwise loaded once per approval
+        # episode by `load_recorded_reviewed_sha/1` — the value is stable for
+        # the life of an approval, so re-reading it on every merge attempt only
+        # buys a DB round-trip per poll of a retrying lane.
+        recorded_reviewed_sha: Keyword.get(opts, :last_reviewed_sha),
+        recorded_sha_loaded?: is_binary(Keyword.get(opts, :last_reviewed_sha)),
+        reviewed_sha: nil,
+        # Set by `clear_reviewed_latch/1` to the head the branch sat at when the
+        # fleet issued its own push. The latch stays suspended — and the guard
+        # floats to whatever head each poll reports — until the head moves off
+        # this value, which is the only observable proof that the fleet's own
+        # commit has actually landed. `:unknown` when no head had been observed
+        # yet, which lifts on the first head we do see.
+        latch_suspended_at_head: nil,
+        # The recorded baseline in effect at the moment of the most recent
+        # `clear_reviewed_latch/1`, if any. `recorded_reviewed_sha/1` treats a
+        # freshly-loaded `last_reviewed_sha` as stale while it still matches
+        # this value — a fleet-initiated advance must not be papered over by
+        # the very engagement row it just invalidated — but honours it again
+        # once ReviewPatrol has advanced the task past it, which is what a
+        # genuine re-review looks like.
+        cleared_recorded_sha: nil,
+        last_head_sha: nil,
         interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
         max_polls: Keyword.get(opts, :max_polls, default_max_polls),
         # The configured ceiling as passed at start (before any indefinite-park
@@ -976,6 +1033,7 @@ defmodule Arbiter.Worker.Watchdog do
     case safe_get(state) do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
+        state = track_reviewed_baseline(state, result)
         state = maybe_escalate_pipeline(state, result)
         state = maybe_auto_resolve_conflict(state, result)
         maybe_escalate_merge_block(state, result)
@@ -1691,6 +1749,8 @@ defmodule Arbiter.Worker.Watchdog do
 
     case safe_update_branch(state) do
       :ok ->
+        # The rebase-forward moves the branch head; see `clear_reviewed_latch/1`.
+        state = clear_reviewed_latch(state)
         reschedule(%{state | last_block_reason: :behind_base, auto_resolve_attempts: attempts})
 
       {:error, reason} ->
@@ -1733,6 +1793,8 @@ defmodule Arbiter.Worker.Watchdog do
       _ = dispatch_fix_pass(state, checks)
       _ = result
 
+      # The fix pass pushes commits; see `clear_reviewed_latch/1`.
+      state = clear_reviewed_latch(state)
       reschedule(%{state | last_block_reason: :ci_failed, auto_resolve_attempts: attempts})
     end
   end
@@ -1925,8 +1987,10 @@ defmodule Arbiter.Worker.Watchdog do
             "task=#{state.task_id} mr=#{state.mr_ref}"
         )
 
+        # The resolver rebases + force-pushes, moving the branch head; see
+        # `clear_reviewed_latch/1`.
         %{
-          state
+          clear_reviewed_latch(state)
           | conflict_attempts: attempt,
             conflict_resolving: is_pid(pid),
             conflict_resolver_pid: if(is_pid(pid), do: pid, else: nil),
@@ -2544,11 +2608,41 @@ defmodule Arbiter.Worker.Watchdog do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  defp safe_merge(%{adapter: adapter, mr_ref: mr_ref}) do
-    # No stale-SHA guard: the adapter merges whatever head the forge reports
-    # at call time. Threading a reviewed-SHA check through here is tracked
-    # separately as bd-dxgris.
-    case adapter.merge(mr_ref) do
+  # bd-dxgris / #1493. Two layers, because one is not enough:
+  #
+  #   1. A LOCAL refusal, using the head this Watchdog observed on the poll it
+  #      is merging on. This is what catches the incident shape — a branch that
+  #      advanced several polls ago, under an approval the forge still reports
+  #      as valid — and it refuses without spending a forge call, with a reason
+  #      the stall page can actually name.
+  #   2. The forge's own ATOMIC guard, by handing `expected_sha` to
+  #      `merge/2`. Layer 1 compares against a head read one poll ago; a push
+  #      landing in between would still slip past it. The forge comparing at
+  #      merge time is the only thing that closes that residual window.
+  #
+  # A refusal returns like any other merge failure, so it flows into
+  # `do_apply_approved_auto_merge/1`'s existing retry-and-page path: the lane
+  # stays parked and the coordinator is paged, rather than the worker merging
+  # commits nobody reviewed or dying silently.
+  defp safe_merge(state) do
+    case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
+      {:ok, expected_sha} ->
+        do_safe_merge(state, expected_sha)
+
+      {:error, {:stale_reviewed_sha, reviewed, head}} = err ->
+        Logger.warning(
+          "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; branch advanced past the reviewed commit " <>
+            "(reviewed=#{reviewed} head=#{head}) — merging would integrate " <>
+            "commits no reviewer saw"
+        )
+
+        err
+    end
+  end
+
+  defp do_safe_merge(%{adapter: adapter, mr_ref: mr_ref}, expected_sha) do
+    case adapter.merge(mr_ref, expected_sha) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
       other -> {:error, {:bad_return, other}}
@@ -2557,6 +2651,130 @@ defmodule Arbiter.Worker.Watchdog do
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # The baseline to guard this merge on. While the latch is suspended (the
+  # fleet's own push is in flight) the baseline floats to the head of the poll
+  # we are merging on: that still hands the forge an atomic precondition, so a
+  # commit landing between this poll and the merge call is refused by the
+  # forge, but it cannot deadlock the lane on a baseline the fleet itself
+  # invalidated. Otherwise the task's recorded `last_reviewed_sha` is
+  # authoritative when present — ReviewPatrol keeps it advanced to whatever
+  # commit it last reviewed — and the Watchdog's own latch is the fallback for
+  # the lanes that have no engagement row (every fleet-authored, ReviewGate
+  # task, which is most of them).
+  defp reviewed_sha(%{latch_suspended_at_head: at} = state) when not is_nil(at),
+    do: state.last_head_sha
+
+  defp reviewed_sha(state), do: recorded_reviewed_sha(state) || state.reviewed_sha
+
+  defp recorded_reviewed_sha(%{recorded_reviewed_sha: sha} = state)
+       when is_binary(sha) and sha != "" do
+    if sha == Map.get(state, :cleared_recorded_sha), do: nil, else: sha
+  end
+
+  defp recorded_reviewed_sha(_state), do: nil
+
+  # Load the task's recorded `last_reviewed_sha` at most once per approval
+  # episode. `recorded_sha_loaded?` is reset whenever the approval lapses or
+  # the fleet advances the branch, which are the only two ways the recorded
+  # value can become interesting again (a re-review advances it).
+  defp load_recorded_reviewed_sha(%{recorded_sha_loaded?: true} = state), do: state
+
+  defp load_recorded_reviewed_sha(%{task_id: task_id} = state) do
+    %{
+      state
+      | recorded_reviewed_sha: fetch_recorded_reviewed_sha(task_id),
+        recorded_sha_loaded?: true
+    }
+  end
+
+  defp fetch_recorded_reviewed_sha(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, %{last_reviewed_sha: sha}} when is_binary(sha) and sha != "" -> sha
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # Track the reviewed baseline across polls. Latches on the *effective*
+  # outcome, not the raw forge `approved` flag: on a `via_review_gate` lane the
+  # forge never sees the gate's approval, so the raw flag stays false forever
+  # and the guard would never bind on precisely the lanes that do most of the
+  # fleet's automated merging.
+  defp track_reviewed_baseline(state, result) do
+    head = Map.get(result, :head_sha)
+    approved? = effective_outcome(state, result) == :approved
+
+    state =
+      if latch_suspended?(state, head) do
+        # The fleet's own push has not landed yet. Keep the latch off rather
+        # than re-pinning it to the pre-push head, which is what made the
+        # one-shot clear ineffective.
+        %{state | reviewed_sha: nil}
+      else
+        %{
+          state
+          | latch_suspended_at_head: nil,
+            reviewed_sha: Mergers.ReviewedSha.latch(state.reviewed_sha, approved?, head)
+        }
+      end
+
+    state = %{state | last_head_sha: head}
+
+    cond do
+      # An approval lapse ends the episode: drop the memoised recorded SHA so a
+      # genuine re-review is picked up on the next approved poll.
+      not approved? -> %{state | recorded_reviewed_sha: nil, recorded_sha_loaded?: false}
+      true -> load_recorded_reviewed_sha(state)
+    end
+  end
+
+  # Is the latch still suspended for this poll's head? A head we cannot read
+  # keeps the suspension (we have no evidence the push landed); `:unknown`
+  # means no head had been observed when the fleet pushed, so the first head we
+  # do see lifts it.
+  defp latch_suspended?(%{latch_suspended_at_head: nil}, _head), do: false
+  defp latch_suspended?(_state, head) when not is_binary(head) or head == "", do: true
+  defp latch_suspended?(%{latch_suspended_at_head: :unknown}, _head), do: false
+  defp latch_suspended?(%{latch_suspended_at_head: at}, head), do: head == at
+
+  # Release the baseline when the FLEET is the one advancing the branch — an
+  # update-branch rebase, a CI fix pass, a conflict resolution. Those pushes are
+  # this Watchdog's own doing and are already governed by their own bounded-
+  # attempt + escalation machinery (#354 Phase 2a/2b); treating them as a stale
+  # baseline would deadlock every auto-heal lane at a coordinator page instead
+  # of letting it converge. The guard is deliberately scoped to advances the
+  # fleet did NOT initiate — a human or another process pushing to the branch
+  # between the review verdict and the merge, which is the incident shape.
+  #
+  # This is a SUSPENSION, not a one-shot clear. The fleet's pushes land
+  # asynchronously — a fix pass or a resolver run takes many polls — so simply
+  # nil-ing `reviewed_sha` here is undone by `track_reviewed_baseline/2` on the
+  # very next poll, which re-pins the latch to the still-unchanged pre-push
+  # head; when the commit finally lands the guard then refuses it forever. So
+  # we record the head the branch sat at, and hold the latch off until the head
+  # moves off it — the first observable proof that the fleet's commit landed —
+  # at which point the latch re-pins to the NEW head and the guard binds again.
+  defp clear_reviewed_latch(state) do
+    %{
+      state
+      | reviewed_sha: nil,
+        recorded_reviewed_sha: nil,
+        recorded_sha_loaded?: false,
+        cleared_recorded_sha: baseline_at_clear(state),
+        latch_suspended_at_head: state.last_head_sha || :unknown
+    }
+  end
+
+  # The baseline the fleet's own push has just invalidated. Preserved across a
+  # second clear that arrives while already suspended (when there is nothing
+  # new to record), so the suppression of a stale recorded SHA is not undone.
+  defp baseline_at_clear(state) do
+    recorded_reviewed_sha(state) || state.reviewed_sha || Map.get(state, :cleared_recorded_sha)
   end
 
   defp safe(fun) do

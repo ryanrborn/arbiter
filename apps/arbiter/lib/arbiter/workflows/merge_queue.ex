@@ -583,6 +583,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           base: base,
           repo: repo,
           priority: task_priority(task),
+          last_reviewed_sha: task.last_reviewed_sha,
           opened_at: DateTime.utc_now()
         )
 
@@ -866,6 +867,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp advance_status(state, item, mr_state) do
     now = DateTime.utc_now()
     item = %{item | last_polled_at: now}
+    item = track_reviewed_baseline(item, mr_state)
     item = clear_phantom_conflicts_unless_conflicting(item, mr_state)
 
     cond do
@@ -894,7 +896,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
       # MR was already merged externally (e.g. the Watchdog merged it for a
       # ReviewGate-approved task before the MergeQueue processed the worker_done
-      # event). Close the task directly without re-attempting adapter.merge/1
+      # event). Close the task directly without re-attempting adapter.merge/2
       # — that call would fail on an already-closed PR. bd-d1jp4r. Checked
       # before the changes-requested branch so a merged PR never triggers a
       # revise on a stale review.
@@ -1007,6 +1009,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   # conflict is surfaced by the next get/1's `conflicting` field (→ resolver),
   # not inferred from this return value.
   defp update_base(state, item) do
+    item = clear_reviewed_latch(item)
+
     case safe_update_branch(state.adapter, item.mr_ref) do
       :ok ->
         Logger.info(
@@ -1117,13 +1121,15 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:ok, _info} ->
         Logger.info("MergeQueue: spawned conflict resolver for task=#{item.task_id}")
 
-        item = %{
+        item =
           item
-          | status: :conflict_resolving,
+          |> clear_reviewed_latch()
+          |> Map.merge(%{
+            status: :conflict_resolving,
             prior_status: prior,
             phantom_conflicts: 0,
             resolver_spawned_at: DateTime.utc_now()
-        }
+          })
 
         {item, state}
 
@@ -1147,12 +1153,18 @@ defmodule Arbiter.Workflows.MergeQueue do
   # Restore item state after a successful auto-rebase.
   defp restore_after_resolution(state, %{prior_status: nil} = item) do
     safe_notify_resolution(state, item)
-    %{item | status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil}
+
+    item
+    |> clear_reviewed_latch()
+    |> Map.merge(%{status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil})
   end
 
   defp restore_after_resolution(state, %{prior_status: prior} = item) do
     safe_notify_resolution(state, item)
-    %{item | status: prior, prior_status: nil, resolver_spawned_at: nil}
+
+    item
+    |> clear_reviewed_latch()
+    |> Map.merge(%{status: prior, prior_status: nil, resolver_spawned_at: nil})
   end
 
   # ---- changes-requested → auto-revise (bd-95lsjb) ------------------------
@@ -1306,13 +1318,104 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   defp item_branch_label(%{task_id: task_id}), do: "task=" <> task_id
 
+  # bd-dxgris / #1493 — merge only the commit the review verdict was computed
+  # against. Same two layers as `Arbiter.Worker.Watchdog.safe_merge/1`: refuse
+  # locally when the head this queue last observed has moved past the reviewed
+  # baseline, and otherwise hand that baseline to the forge as an atomic
+  # precondition so the residual poll→merge window closes too.
+  defp merge_guarded(state, item) do
+    case Mergers.ReviewedSha.check(item_reviewed_sha(item), Map.get(item, :last_head_sha)) do
+      {:ok, expected_sha} ->
+        state.adapter.merge(item.mr_ref, expected_sha)
+
+      {:error, {:stale_reviewed_sha, reviewed, head}} = err ->
+        Logger.warning(
+          "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+            "branch advanced past the reviewed commit (reviewed=#{reviewed} head=#{head})"
+        )
+
+        err
+    end
+  end
+
+  # The task's recorded review baseline wins over the queue's own latch, exactly
+  # as in the Watchdog — except while the latch is suspended (the queue's own
+  # push is in flight), where the baseline floats to the head of the poll we
+  # are merging on: still an atomic forge precondition, but one the queue's own
+  # rebase cannot deadlock.
+  defp item_reviewed_sha(item) do
+    cond do
+      latch_suspended?(item, Map.get(item, :last_head_sha)) ->
+        Map.get(item, :last_head_sha)
+
+      is_binary(Map.get(item, :last_reviewed_sha)) and Map.get(item, :last_reviewed_sha) != "" ->
+        Map.get(item, :last_reviewed_sha)
+
+      true ->
+        Map.get(item, :reviewed_sha)
+    end
+  end
+
+  # Release the baseline when the QUEUE is the one advancing the branch — an
+  # update-branch rebase or a conflict-resolver push. Mirrors
+  # `Arbiter.Worker.Watchdog.clear_reviewed_latch/1`, including the reason it
+  # is a SUSPENSION rather than a one-shot clear: the forge applies
+  # update-branch asynchronously and the resolver force-pushes many ticks
+  # later, so nil-ing the baseline here would simply be re-latched to the
+  # unchanged pre-push head on the next tick and then refuse the queue's own
+  # commit forever.
+  defp clear_reviewed_latch(item) do
+    %{
+      item
+      | reviewed_sha: nil,
+        last_reviewed_sha: nil,
+        latch_suspended_at_head: Map.get(item, :last_head_sha) || :unknown
+    }
+  end
+
+  # Carry the reviewed baseline forward from one poll observation, mirroring
+  # `Arbiter.Worker.Watchdog.track_reviewed_baseline/2`.
+  defp track_reviewed_baseline(item, mr_state) do
+    head = Map.get(mr_state, :head_sha)
+
+    item =
+      if latch_suspended?(item, head) do
+        %{item | reviewed_sha: nil}
+      else
+        %{
+          item
+          | latch_suspended_at_head: nil,
+            reviewed_sha:
+              Mergers.ReviewedSha.latch(
+                Map.get(item, :reviewed_sha),
+                Map.get(mr_state, :approved) == true,
+                head
+              )
+        }
+      end
+
+    %{item | last_head_sha: head}
+  end
+
+  # Mirrors `Arbiter.Worker.Watchdog.latch_suspended?/2`: a head we cannot read
+  # keeps the suspension, and `:unknown` (no head observed when the queue
+  # pushed) lifts on the first head we do see.
+  defp latch_suspended?(item, head) do
+    case Map.get(item, :latch_suspended_at_head) do
+      nil -> false
+      _ when not is_binary(head) or head == "" -> true
+      :unknown -> false
+      at -> head == at
+    end
+  end
+
   defp try_merge(state, item) do
     Mergers.prepare_with_repo(state.workspace, item.repo)
 
-    case state.adapter.merge(item.mr_ref) do
+    case merge_guarded(state, item) do
       :ok ->
         item = %{item | status: :merging}
-        # Synchronously finalize. adapter.merge/1 returning :ok is the merge
+        # Synchronously finalize. adapter.merge/2 returning :ok is the merge
         # confirmation, so it's safe to close now.
         item = %{item | status: :done}
         state = close_task_and_finalize(state, item)
@@ -1331,6 +1434,13 @@ defmodule Arbiter.Workflows.MergeQueue do
             "mr_ref=#{item.mr_ref}: #{inspect(reason)} — will retry next tick"
         )
 
+        {%{item | last_error: reason}, state}
+
+      {:error, {:stale_reviewed_sha, _reviewed, _head} = reason} ->
+        # Leave status untouched, same rationale as the limiter clause above:
+        # a re-review (or the fleet's own clear_reviewed_latch/1 on its next
+        # rebase/resolve pass) can legitimately clear this, and :failed has
+        # no way back in.
         {%{item | last_error: reason}, state}
 
       {:error, reason} ->
@@ -1370,7 +1480,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   # bd-bqqnin: `close_task_and_finalize/2` is the single funnel every merge-
-  # success path routes through (a fresh adapter.merge/1, a poll that finds
+  # success path routes through (a fresh adapter.merge/2, a poll that finds
   # the MR already merged externally, and the direct/no-PR strategy alike),
   # so it's the right place to also fast-forward the repo's *primary* local
   # checkout — the shared directory a human/coordinator may `cd` into,
@@ -1449,6 +1559,19 @@ defmodule Arbiter.Workflows.MergeQueue do
       priority: 2,
       opened_at: nil,
       last_polled_at: nil,
+      # bd-dxgris / #1493 — the reviewed-SHA guard. `last_reviewed_sha` is the
+      # task's own recorded review baseline (captured at enqueue);
+      # `reviewed_sha` is the fallback the queue latches itself, the head
+      # observed on the first poll that reported the MR approved.
+      # `last_head_sha` is the head from the most recent poll.
+      last_reviewed_sha: nil,
+      reviewed_sha: nil,
+      last_head_sha: nil,
+      # Set by `clear_reviewed_latch/1` to the head the branch sat at when the
+      # queue issued its own push (update-branch, conflict-resolver rebase).
+      # Holds the latch off until the head moves off this value, which is the
+      # only observable proof that the queue's own commit has landed.
+      latch_suspended_at_head: nil,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,
