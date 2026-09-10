@@ -35,6 +35,31 @@ defmodule Arbiter.Worker.PreflightHoldTest do
       assert DateTime.diff(capped, now, :millisecond) == :timer.minutes(15)
     end
 
+    test "clamps a far-future reported reset time to the 8-day ceiling" do
+      now = DateTime.utc_now()
+      reset_at = DateTime.add(now, 30, :day)
+
+      reason =
+        {:auth_check_failed,
+         %StopReason{category: :quota_exhausted, summary: "s", retry_after: reset_at}}
+
+      assert PreflightHold.retry_not_before(reason, 1, now) ==
+               DateTime.add(now, 24 * 8, :hour)
+    end
+
+    test "an already-past reported reset time resumes immediately, not clamped" do
+      now = DateTime.utc_now()
+      reset_at = DateTime.add(now, -300, :second)
+
+      reason =
+        {:auth_check_failed,
+         %StopReason{category: :quota_exhausted, summary: "s", retry_after: reset_at}}
+
+      result = PreflightHold.retry_not_before(reason, 1, now)
+
+      assert DateTime.compare(result, now) == :lt
+    end
+
     test "no hold for any other failure shape" do
       now = DateTime.utc_now()
 

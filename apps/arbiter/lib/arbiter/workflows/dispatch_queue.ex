@@ -277,16 +277,19 @@ defmodule Arbiter.Workflows.DispatchQueue do
   # A drained intent whose off-process dispatch failed comes back here so it is
   # retried on a later drain trigger — no work is dropped (finding 3). Re-arm the
   # reset timer since we may have gone from empty back to non-empty.
+  #
+  # A competing `hold/5` for the same task can land while the drain Task that
+  # produces this cast is still in flight (finding 2, bd-8lnnnt round 2):
+  # `maybe_drain/1` removes the task from `state.items` optimistically before
+  # dispatching, so a fresh `hold/5` for that same task in the gap sees
+  # `already_held?/2` false and inserts a new `retry_not_before: nil` item.
+  # If this cast then just no-op'd on "already held", the computed hold would
+  # be silently discarded and the task left eligible to redrain immediately —
+  # so merge the requeued hold fields onto whatever is currently present
+  # instead of dropping them.
   @impl true
   def handle_cast({:requeue, item}, %State{} = state) do
-    state =
-      if already_held?(state, item.task_id) do
-        state
-      else
-        %{state | items: [item | state.items]}
-      end
-
-    {:noreply, schedule_reset_drain(state)}
+    {:noreply, schedule_reset_drain(%{state | items: merge_requeued_item(state.items, item)})}
   end
 
   # ---- drain --------------------------------------------------------------
@@ -541,6 +544,47 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   defp already_held?(%State{items: items}, task_id),
     do: Enum.any?(items, &(&1.task_id == task_id))
+
+  # Insert `item` if its task isn't already present; otherwise merge its hold
+  # fields onto the existing entry rather than dropping them (finding 2,
+  # bd-8lnnnt round 2) — takes the later of the two `retry_not_before` values
+  # and the higher `preflight_failures` count, on the theory that either
+  # represents a hold computed from real information and neither should be
+  # allowed to erase the other.
+  defp merge_requeued_item(items, item) do
+    case Enum.find(items, &(&1.task_id == item.task_id)) do
+      nil ->
+        [item | items]
+
+      existing ->
+        merged = merge_hold_fields(existing, item)
+
+        Enum.map(items, fn
+          %{task_id: task_id} when task_id == item.task_id -> merged
+          other -> other
+        end)
+    end
+  end
+
+  defp merge_hold_fields(existing, requeued) do
+    %{
+      existing
+      | retry_not_before: later_retry(existing.retry_not_before, requeued.retry_not_before),
+        preflight_failures:
+          max(
+            Map.get(existing, :preflight_failures, 0),
+            Map.get(requeued, :preflight_failures, 0)
+          )
+    }
+  end
+
+  defp later_retry(nil, nil), do: nil
+  defp later_retry(nil, %DateTime{} = b), do: b
+  defp later_retry(%DateTime{} = a, nil), do: a
+
+  defp later_retry(%DateTime{} = a, %DateTime{} = b) do
+    if DateTime.compare(a, b) == :gt, do: a, else: b
+  end
 
   defp new_item(%State{} = state, task_id, opts, reason, provider) do
     %{

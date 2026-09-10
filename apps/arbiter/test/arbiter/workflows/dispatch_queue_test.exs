@@ -59,6 +59,23 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  # Returns a non-conforming reply (not `{:ok, _}` / `{:error, _}`) for the
+  # task named by `:test_boom_task_id`, and a normal success for everything
+  # else — used to exercise `spawn_drain/2`'s catch-all clause (finding 4,
+  # bd-8lnnnt round 2) without aborting the rest of the drained batch.
+  defmodule OddDispatcher do
+    def dispatch(task_id, _opts) do
+      if pid = Application.get_env(:arbiter, :test_dispatch_pid),
+        do: send(pid, {:dispatch_attempt, task_id})
+
+      if Application.get_env(:arbiter, :test_boom_task_id) == task_id do
+        :boom
+      else
+        {:ok, %{task_id: task_id}}
+      end
+    end
+  end
+
   # Records overage alerts to the pid in app-env.
   defmodule RecordingNotifier do
     def overage_alert(snapshot, spend, threshold) do
@@ -434,6 +451,70 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       # observed for bd-7qbavq at 23:20:03.
       :ok = DispatchQueue.drain(pid)
       assert_receive {:dispatch_attempt, ^task_id}, 500
+    end
+
+    test "the armed :drain_on_reset timer fires on its own and redrains, without a manual drain/1 call" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      # Chosen so PreflightHold's retry_not_before (reset_at + the 60s escalation
+      # buffer) lands ~200ms in the future — short enough to observe the timer
+      # fire for real inside the test's timeout budget (round-2 finding 1).
+      now = DateTime.utc_now()
+      reset_at = DateTime.add(now, -59_800, :millisecond)
+      Application.put_env(:arbiter, :test_quota_reset_at, reset_at)
+      on_exit(fn -> Application.delete_env(:arbiter, :test_quota_reset_at) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      pid = start_queue(ws, dispatcher: QuotaExhaustedDispatcher, auto_subscribe: false)
+
+      task = make_task(ws)
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
+
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatch_attempt, task_id}, 500
+
+      # Do NOT call drain/1 again — the hold's own :drain_on_reset timer should
+      # wake the queue on its own and re-run the (still-failing) probe.
+      assert_receive {:dispatch_attempt, ^task_id}, 2_000
+    end
+  end
+
+  describe "spawn_drain/2 catch-all on a non-conforming dispatcher reply (bd-8lnnnt round 2)" do
+    test "a non-conforming reply is requeued without aborting or dropping the rest of the batch" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      pid = start_queue(ws, dispatcher: OddDispatcher, auto_subscribe: false)
+
+      boom = make_task(ws, %{priority: 0})
+      ok = make_task(ws, %{priority: 1})
+      Application.put_env(:arbiter, :test_boom_task_id, boom.id)
+      on_exit(fn -> Application.delete_env(:arbiter, :test_boom_task_id) end)
+
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(boom.id, start_driver: false)
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(ok.id, start_driver: false)
+
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+      :ok = DispatchQueue.drain(pid)
+
+      assert_receive {:dispatch_attempt, first}, 500
+      assert_receive {:dispatch_attempt, second}, 500
+      assert first == boom.id
+      assert second == ok.id
+
+      # The "boom" task's non-conforming reply must requeue it (not drop it),
+      # and must not have aborted the batch before `ok` was attempted.
+      held = wait_for_held_item(pid)
+      assert held.task_id == boom.id
+      assert DispatchQueue.state(pid).items |> length() == 1
     end
   end
 
