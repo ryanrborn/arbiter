@@ -1380,6 +1380,46 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert records == []
       assert reload(eng).circuit_breaker_tripped == true
     end
+
+    test "concurrent trip evaluations for the same engagement escalate exactly once", %{ws: ws} do
+      eng =
+        engagement(ws, 605, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "samesha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      rereview_stub_with_reviews(605, "samesha", "", [], "botreviewer", ["botreviewer"])
+
+      # 7 independent patrol processes all evaluating the SAME disputed-
+      # re-request trip concurrently, same shape as bd-4po0nv's review-cap
+      # race — the atomic `claim_circuit_breaker_trip/1` guard must ensure
+      # only one of them writes the record + escalation.
+      patrols = for _ <- 1..7, do: start_patrol(ws)
+
+      patrols
+      |> Enum.map(fn {_pid, name} -> Task.async(fn -> ReviewPatrol.tick(name) end) end)
+      |> Task.await_many()
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert length(records) == 1
+      assert reload(eng).circuit_breaker_tripped == true
+    end
   end
 
   describe "tick/1 — author-reply handling (bd-8fg64x)" do

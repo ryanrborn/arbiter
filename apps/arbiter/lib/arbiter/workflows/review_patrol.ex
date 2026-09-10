@@ -194,21 +194,44 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       posting call, as a last-resort guard regardless of which path got us
       there.
 
-    * **Disputed re-request** — the author re-requests review
-      (`review_requested?/1`, the same optional capability #1539 uses to
-      override sticky approval) while the head is UNCHANGED from the commit we
-      already posted a verdict for. No new commits means there is nothing new
-      to review — a re-request against our own standing verdict, with no code
-      change behind it, is the author saying our verdict doesn't hold, not
-      asking for a fresh look. This is `list_open_review_threads/1` fed by the
-      same login/author signals as the author-reply path, without a full
-      thread-text classifier: the double condition (re-request AND we already
-      verdicted this exact head) keeps ordinary "please take another look"
-      requests — which normally arrive on a NEW head — from tripping it.
+    * **Disputed re-request** — our standing verdict for this engagement is
+      `last_verdict == :request_changes`, the head is UNCHANGED from the
+      commit we posted it against (`last_verdict_sha == head_sha`), AND the
+      author re-requests review (`review_requested?/2`, the same optional
+      capability #1539 uses to override sticky approval) since. No new
+      commits means there is nothing new to review — a re-request against a
+      standing CHANGES_REQUESTED, with no code change behind it, is the
+      author saying our verdict doesn't hold, not asking for a fresh look.
+      There is no thread-text classifier here: the triple condition
+      (request_changes verdict AND unchanged head AND re-request) is what
+      keeps ordinary "please take another look" requests — which normally
+      either arrive on a NEW head or follow an APPROVE, where there is
+      nothing to dispute — from tripping it.
 
   Both are evaluated only for the ONE signature; a normal follow-up re-review
   triggered by a fresh push is untouched and keeps running automatically, per
   the guards above (debounce, relevance, sticky approval, review cap).
+
+  The issue's third named signature — "more than N verdict rounds on the
+  engagement regardless of SHA" — is deliberately NOT a third arm here; it is
+  the pre-existing `review_capped?/2` / `handle_review_cap/2` path (reusing
+  `review.rounds`), which escalates and freezes the engagement the same way
+  this breaker does, just via its own `review_cap_escalated` flag rather than
+  `circuit_breaker_tripped`.
+
+  The issue's second named signature — "previous round was `request_changes`,
+  every blocking finding has an author reply, and no new commits touch the
+  flagged lines" (the actual round-4-of-4 shape from the 2026-09-09 incident,
+  where the push touched a flagged FILE but not a flagged LINE) — is NOT
+  implemented by either arm above. `gate_on_relevance/5`'s file-level
+  relevance gate does not know which findings were refuted, so a push like
+  that still produces a fresh verdict round. This is a deliberate deferral,
+  not an oversight: closing it needs per-finding refutation tracking (which
+  findings have an author reply, which lines a new commit actually touched)
+  that doesn't exist yet in `posted_findings`. Tracked as a follow-up; until
+  it lands, that shape of loop is only caught after the fact by the other two
+  arms (a same-SHA repeat, or the author eventually re-requesting review at
+  an unchanged head).
 
   On trip: nothing is posted. The would-be verdict is written to
   `Arbiter.Reviews.Record` as `status: :completed_unposted, mode:
@@ -217,8 +240,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   loop on PR #<n>"`), and `circuit_breaker_tripped` is set — a one-way trip,
   same shape as `review_cap_escalated`: every subsequent tick for this
   engagement is a pure no-op (no adapter calls beyond the merged/closed check)
-  until a human clears the flag. There is no automatic resume; adjudicating a
-  review loop is a human call by design.
+  until a human clears `circuit_breaker_tripped` (and, for hygiene,
+  `circuit_breaker_reason`) on the engagement — there is no CLI shortcut for
+  this yet, so today that means a direct record update. There is no
+  *automatic* resume; adjudicating a review loop is a human call by design.
   """
 
   # `:transient` (not the default `:permanent`) so a patrol that self-terminates
@@ -756,7 +781,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # review from our identity since. See the moduledoc section for why the
   # double condition — not a bare re-request — is what keys the signature.
   defp disputed_re_request?(
-         %Issue{last_verdict_sha: sha} = engagement,
+         %Issue{last_verdict_sha: sha, last_verdict: :request_changes} = engagement,
          %{head_sha: head},
          adapter
        )
@@ -1424,21 +1449,54 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # until a human clears `circuit_breaker_tripped`. Best-effort throughout: a
   # mailbox or record-write hiccup never wedges the tick, and never causes a
   # verdict to post anyway (the caller never posts once it decided to trip).
+  #
+  # Claimed atomically FIRST via `claim_circuit_breaker_trip/1` (mirroring
+  # `claim_review_cap_escalation/1`) — the trip condition here is persistent,
+  # not edge-triggered: we deliberately post nothing, so GitHub never clears
+  # the re-request that trips `disputed_re_request?/3`, and it would
+  # re-evaluate true on every subsequent tick. Without an atomic claim, a
+  # failed flag write or two overlapping evaluations would re-escalate and
+  # create a new `Reviews.Record` on every tick, forever (the bd-4po0nv
+  # shape this guards against). Record-write + escalation only happen once
+  # the claim actually flips the row.
   defp trip_circuit_breaker(%Issue{} = engagement, verdict, reason) do
-    write_circuit_breaker_record(engagement, verdict)
-    escalate_circuit_breaker(engagement, verdict, reason)
+    if claim_circuit_breaker_trip(engagement) do
+      write_circuit_breaker_record(engagement, verdict)
+      escalate_circuit_breaker(engagement, verdict, reason)
+      update_engagement(engagement, %{circuit_breaker_reason: reason})
 
-    update_engagement(engagement, %{
-      circuit_breaker_tripped: true,
-      circuit_breaker_reason: reason
-    })
+      Logger.info(
+        "ReviewPatrol: engagement #{engagement.id} tripped the circuit breaker (#{reason}); " <>
+          "paused pending coordinator review"
+      )
 
-    Logger.info(
-      "ReviewPatrol: engagement #{engagement.id} tripped the circuit breaker (#{reason}); " <>
-        "paused pending coordinator review"
-    )
+      {:circuit_breaker_tripped, engagement.id}
+    else
+      nil
+    end
+  end
 
-    {:circuit_breaker_tripped, engagement.id}
+  # Atomically claim the circuit-breaker trip for one engagement: a single
+  # `UPDATE issues SET circuit_breaker_tripped = true WHERE id = ? AND
+  # circuit_breaker_tripped = false` — so at most one caller ever proceeds to
+  # write the record + escalate for a given trip, even across overlapping
+  # evaluations or retried ticks. Same shape as `claim_review_cap_escalation/1`
+  # and for the same reason: the custom `:update` change (status-guard logic)
+  # doesn't implement Ash's atomic optimizer, so a raw Ecto `UPDATE ... WHERE`
+  # is used instead of `Ash.bulk_update/4`, touching only this one boolean.
+  defp claim_circuit_breaker_trip(%Issue{id: id}) do
+    import Ecto.Query
+
+    query =
+      from(i in "issues",
+        where: i.id == ^id and i.circuit_breaker_tripped == type(^false, :boolean),
+        update: [set: [circuit_breaker_tripped: type(^true, :boolean)]]
+      )
+
+    {count, _} = Arbiter.Repo.update_all(query, [])
+    count == 1
+  rescue
+    _ -> false
   end
 
   defp write_circuit_breaker_record(%Issue{workspace_id: ws_id} = engagement, verdict)
