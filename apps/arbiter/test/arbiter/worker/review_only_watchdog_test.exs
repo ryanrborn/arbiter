@@ -828,6 +828,41 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert reloaded.status == :in_progress
     end
 
+    # bd-dxgris / #1493 — the reviewed-SHA baseline is loaded from the TASK row
+    # on lanes that carry an external-review engagement (`review_only`), where
+    # ReviewPatrol is what keeps `last_reviewed_sha` advanced. The Watchdog is
+    # not handed it in opts on this path, so this covers the DB load that
+    # `load_recorded_reviewed_sha/1` performs once per approval episode.
+    test "refuses to merge a head that advanced past the task's recorded last_reviewed_sha" do
+      ws = new_github_workspace()
+      task = new_task(ws)
+
+      {:ok, task} =
+        Ash.update(task, %{pr_ref: "pr-510", last_reviewed_sha: "sha-reviewed"}, action: :update)
+
+      # The branch was pushed to after the review was recorded.
+      StubMerger.queue_get("pr-510", [%{status: :open, approved: true, head_sha: "sha-pushed"}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          worker_pid =
+            start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+              merger_workspace_override: ws,
+              watchdog_initial_delay_ms: 0,
+              watchdog_interval_ms: 25
+            })
+
+          send(worker_pid, {:__claude_session_done__, "arb done"})
+
+          wait_until(fn -> StubMerger.get_count("pr-510") >= 3 end, 3_000)
+        end)
+
+      assert StubMerger.merge_count("pr-510") == 0,
+             "the Watchdog merged past the engagement's recorded reviewed SHA"
+
+      assert log =~ "stale_reviewed_sha"
+    end
+
     test "auto_merge:false workspace: APPROVE parks the Watchdog but does NOT merge (bd-38e34o)" do
       # Regression for bd-38e34o, mirroring bd-dkwhbn: trigger_watchdog_on_approval
       # (the coordinator-dispatched review_only APPROVE path) must not force a
