@@ -234,6 +234,34 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end)
   end
 
+  # Full-cycle stub whose PR reports `head_sha`, and whose merge PUT reports the
+  # `sha` precondition it was called with back to `test_pid` (bd-dxgris).
+  defp sha_stub(number, head_sha, test_pid) do
+    stub(fn conn ->
+      cond do
+        conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => number})
+
+        conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews_payload("APPROVED"))
+
+        conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{number}") ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(pr_payload(%{"number" => number, "head" => %{"sha" => head_sha}}))
+
+        conn.method == "PUT" and String.ends_with?(conn.request_path, "/merge") ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:merge_sha, Jason.decode!(body)["sha"]})
+
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+
+        true ->
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+      end
+    end)
+  end
+
   # ---- tests --------------------------------------------------------------
 
   describe "start_link/1" do
@@ -809,6 +837,43 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed
+    end
+
+    # bd-dxgris / #1493 — the queue must merge the commit the review was
+    # computed against, not whatever head the forge reports at merge time.
+    @tag workspace_config: @ws_github
+    test "merges guarded on the task's recorded reviewed SHA", %{workspace: ws, task: task} do
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: "reviewed-sha"}, action: :update)
+
+      test_pid = self()
+      sha_stub(60, "reviewed-sha", test_pid)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      :ok = MergeQueue.tick(name)
+
+      assert_received {:merge_sha, "reviewed-sha"}
+      assert Ash.get!(Issue, task.id).status == :closed
+    end
+
+    @tag workspace_config: @ws_github
+    test "refuses to merge when the head advanced past the recorded reviewed SHA", %{
+      workspace: ws,
+      task: task
+    } do
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: "reviewed-sha"}, action: :update)
+
+      test_pid = self()
+      # Approved on the forge, but the branch has been pushed to since.
+      sha_stub(61, "pushed-after-approval-sha", test_pid)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      capture_log(fn -> :ok = MergeQueue.tick(name) end)
+
+      refute_received {:merge_sha, _}
+      assert Ash.get!(Issue, task.id).status == :open
     end
 
     @tag workspace_config: @ws_github
@@ -1563,6 +1628,97 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :conflict_resolving
       assert Ash.get!(Issue, task.id).status == :open
+    end
+
+    @tag workspace_config: @ws_github
+    test "rebase-forward advances the head but does not strand the PR behind a stale reviewed-SHA guard",
+         %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            207 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "behind", "head" => %{"sha" => "sha-a"}}
+            }
+          }
+        end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#207", 2)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # Cycle 1: approved and behind base → the reviewed baseline latches at
+      # "sha-a", then the rebase is issued in the same tick.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 207}
+
+      # The rebase landed — the head moved to "sha-b" even though `approved`
+      # stays true (GitHub doesn't dismiss reviews on a rebase-forward).
+      Agent.update(agent, fn s ->
+        put_in(s, [207, :pr], %{"mergeStateStatus" => "clean", "head" => %{"sha" => "sha-b"}})
+      end)
+
+      # Cycle 2: caught up → merges on the new head instead of refusing
+      # forever on the baseline the queue's own rebase invalidated.
+      :ok = MergeQueue.tick(name)
+      assert_received {:merged, 207}
+
+      assert %{items: []} = MergeQueue.state(name)
+      assert Ash.get!(Issue, task.id).status == :closed
+    end
+
+    # bd-dxgris round 3, finding 1 — the forge applies update-branch
+    # ASYNCHRONOUSLY. A one-shot latch clear is undone by the very next tick,
+    # which re-pins the baseline to the still-unchanged pre-rebase head; when
+    # the rebase commit finally shows up the guard refuses it forever. The
+    # release has to survive until the head actually moves.
+    @tag workspace_config: @ws_github
+    test "an update-branch that lands several ticks later still merges, guarded on the new head",
+         %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            208 => %{
+              reviews: "APPROVED",
+              pr: %{"mergeStateStatus" => "behind", "head" => %{"sha" => "sha-a"}}
+            }
+          }
+        end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#208", 2)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # Tick 1: approved and behind base → baseline latches at "sha-a" and the
+      # rebase is issued.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 208}
+
+      # Tick 2: the forge has accepted the update but has not applied it yet —
+      # no longer reported behind, CI re-running, head STILL "sha-a".
+      Agent.update(agent, fn s ->
+        put_in(s, [208, :pr], %{"mergeStateStatus" => "unstable", "head" => %{"sha" => "sha-a"}})
+      end)
+
+      :ok = MergeQueue.tick(name)
+      refute_received {:merged, 208}
+
+      # Tick 3: the rebase commit finally lands and CI goes green.
+      Agent.update(agent, fn s ->
+        put_in(s, [208, :pr], %{"mergeStateStatus" => "clean", "head" => %{"sha" => "sha-b"}})
+      end)
+
+      :ok = MergeQueue.tick(name)
+
+      assert_received {:merged, 208},
+                      "the queue's own rebase must re-baseline the guard, not deadlock the item"
+
+      assert %{items: []} = MergeQueue.state(name)
+      assert Ash.get!(Issue, task.id).status == :closed
     end
   end
 

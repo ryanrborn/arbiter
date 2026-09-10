@@ -12,8 +12,9 @@ defmodule Arbiter.Test.StubMerger do
       StubMerger.queue_get("!1", [%{status: :open, approved: false}, %{status: :merged}])
 
   Each `get/1` pops the next queued result for that ref; once the queue is
-  drained the last result repeats. `merge/1` records the call (assert via
-  `merge_count/1`). `open/4` records its args (assert via `last_open/0`) and
+  drained the last result repeats. `merge/2` records the call (assert via
+  `merge_count/1`, and on the `expected_sha` it was guarded with via
+  `last_merge/0`). `open/4` records its args (assert via `last_open/0`) and
   returns the ref from `next_open_ref/0` (default `"!stub"`).
   """
 
@@ -30,6 +31,7 @@ defmodule Arbiter.Test.StubMerger do
       %{
         gets: %{},
         merges: %{},
+        last_merge: nil,
         open_ref: "!stub",
         opens: [],
         review_feedbacks: %{},
@@ -81,10 +83,21 @@ defmodule Arbiter.Test.StubMerger do
     :ok
   end
 
-  @doc "How many times `merge/1` was called for `ref`."
+  @doc "How many times `merge/2` was called for `ref`."
   def merge_count(ref) do
     ensure_started()
     Agent.get(@name, fn s -> Map.get(s.merges, ref, 0) end)
+  end
+
+  @doc """
+  The most recent `merge/2` call as `{ref, expected_sha}`, or nil.
+
+  `expected_sha` is the reviewed-SHA guard the caller merged under
+  (bd-dxgris) — `nil` means the merge was deliberately unguarded.
+  """
+  def last_merge do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :last_merge) end)
   end
 
   @doc "The args of the most recent `open/4` call, or nil."
@@ -120,7 +133,7 @@ defmodule Arbiter.Test.StubMerger do
     :ok
   end
 
-  @doc "Set the result `merge/1` returns (`:ok` or `{:error, term}`)."
+  @doc "Set the result `merge/2` returns (`:ok` or `{:error, term}`)."
   def set_merge_result(result) do
     ensure_started()
     Agent.update(@name, fn s -> %{s | merge_result: result} end)
@@ -180,11 +193,12 @@ defmodule Arbiter.Test.StubMerger do
   end
 
   @impl true
-  def merge(ref) do
+  def merge(ref, expected_sha) do
     ensure_started()
 
     Agent.get_and_update(@name, fn s ->
       s = update_in(s, [:merges, ref], &((&1 || 0) + 1))
+      s = Map.put(s, :last_merge, {ref, expected_sha})
       {s.merge_result, s}
     end)
   end
@@ -305,6 +319,7 @@ defmodule Arbiter.Test.StubMerger do
                  %{
                    gets: %{},
                    merges: %{},
+                   last_merge: nil,
                    open_ref: "!stub",
                    opens: [],
                    review_feedbacks: %{},

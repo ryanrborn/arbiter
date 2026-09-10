@@ -15,7 +15,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -44,7 +44,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(mr_ref), do: {:ok, %{ref: mr_ref, branch: "feat/y", status: :open}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -73,7 +73,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:error, :not_found}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -102,7 +102,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -132,7 +132,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -163,7 +163,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -192,7 +192,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -225,7 +225,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -254,7 +254,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -287,7 +287,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -328,7 +328,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -366,7 +366,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
@@ -402,7 +402,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     @impl true
     def get(_), do: {:ok, %{}}
     @impl true
-    def merge(_), do: :ok
+    def merge(_, _), do: :ok
     @impl true
     def close(_), do: :ok
     @impl true
