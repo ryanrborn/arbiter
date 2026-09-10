@@ -150,6 +150,12 @@ config :arbiter, :quota_refresh_probe, enabled: false
 # synchronously with a Req.Test stub and start their own disabled instance.
 config :arbiter, :pr_state_poller, enabled: false
 
+# Disable the stale-review reaper in test — it would otherwise sweep every
+# :running ExternalReview record a test creates on a timer, off the sandbox
+# connection. Tests drive `Arbiter.Reviews.StaleReviewReaper.reap/1`
+# synchronously with an explicit :timeout_ms.
+config :arbiter, :stale_review_reaper, enabled: false
+
 # Disable the Stage 3 canary ticker in test — it would otherwise walk every
 # workspace a test creates on a timer, off the sandbox connection. Tests drive
 # `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.
