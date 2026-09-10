@@ -506,6 +506,31 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert prompt =~ "BEGIN DIFF"
     end
 
+    test "the re-review prompt warns the reviewer the diff is partial (bd-8vwgws)", %{ws: ws} do
+      eng =
+        engagement(ws, 428, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(428, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+
+      # New-diff-only re-reviews must not let the reviewer judge the PR
+      # description's completeness against this partial diff (bd-8vwgws) —
+      # the composed prompt persisted for the engagement carries the guard.
+      assert {:ok, prompt} = Arbiter.Worker.PromptLog.read(eng.id)
+      assert prompt =~ "only the commits pushed since the last review"
+    end
+
     test "a push touching only unrelated files does NOT trigger a re-review", %{ws: ws} do
       eng =
         engagement(ws, 401, %{

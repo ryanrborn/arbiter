@@ -1104,6 +1104,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       mr_ref: engagement.source_pr,
       workspace: workspace,
       adapter_opts: opts,
+      # bd-8vwgws: the diff `opts` above fetches is new-diff-only
+      # (`last_reviewed_sha..head_sha`), not the full PR diff — tell the
+      # reviewer prompt so it doesn't judge the PR description's
+      # completeness against a partial diff.
+      incremental_review: true,
       check_runner: dedupe_runner(prior_keys),
       # bd-9rdwe4 (#1017 gap G5): a re-review never spawns through
       # `Arbiter.Worker` — this is its only prompt-persistence choke-point,
@@ -1151,6 +1156,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       workspace: workspace,
       adapter_opts: opts,
       report_only: true,
+      # bd-8vwgws: see the mirroring comment in run_rereview/5.
+      incremental_review: true,
       check_runner: dedupe_runner(prior_keys),
       # bd-9rdwe4 (#1017 gap G5): see the mirroring comment in run_rereview/5.
       review_record_id: engagement.id

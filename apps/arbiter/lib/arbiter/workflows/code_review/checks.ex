@@ -390,6 +390,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
 
     tracker_section = tracker_context_section(Map.get(state, :tracker_context))
     pr_section = pr_section(Map.get(state, :pr))
+    incremental_note = incremental_review_note(Map.get(state, :incremental_review))
     consumer_section = consumer_refs_section(Map.get(state, :consumer_refs))
     tool_access_section = tool_access_section(review_cwd(state))
     elision_note = elision_note(elided_paths)
@@ -399,7 +400,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{task_line}#{tracker_section}#{pr_section}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}#{tracker_section}#{pr_section}#{incremental_note}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [
@@ -470,6 +471,29 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   end
 
   defp pr_section(_pr), do: ""
+
+  # ReviewPatrol re-review (bd-8vwgws): a follow-up pass hands `Checks.run/2`
+  # only the diff of commits since the last review, not the full PR diff —
+  # `state.pr` above still carries the PR's CURRENT (full) title/body, so a
+  # description claim about a file the new commit didn't touch (e.g. "bumped
+  # in three places") reads as unsubstantiated against this partial diff even
+  # though it's true of the PR as a whole. Without this note the reviewer has
+  # no way to tell the diff below is partial and reports the claim as missing.
+  defp incremental_review_note(true) do
+    """
+    --- NOTE ---
+    The diff below covers only the commits pushed since the last review of \
+    this PR, not the full PR diff. Do not report anything in the PR \
+    description as missing, not implemented, or not included in the PR on \
+    the basis of this diff alone — it may already exist in an earlier commit \
+    not shown here. Only flag issues actually introduced or left unresolved \
+    in this diff.
+    --- End NOTE ---
+
+    """
+  end
+
+  defp incremental_review_note(_), do: ""
 
   defp non_blank?(s) when is_binary(s), do: String.trim(s) != ""
   defp non_blank?(_), do: false
