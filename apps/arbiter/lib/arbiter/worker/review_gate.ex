@@ -562,7 +562,8 @@ defmodule Arbiter.Worker.ReviewGate do
       # RECENTLY armed pass is running under — it is what the timeout escalation
       # reports, so the message can never name a budget the pass did not use.
       timeout_override_ms: Keyword.get(opts, :timeout_ms),
-      timeout_ms: resolve_timeout_ms(Keyword.get(opts, :workspace_id), Keyword.get(opts, :timeout_ms)),
+      timeout_ms:
+        resolve_timeout_ms(Keyword.get(opts, :workspace_id), Keyword.get(opts, :timeout_ms)),
       # Reviewing-pass timeout retry budget (bd-78vg4v). Consumed by the
       # reviewing-phase timeout handler; not reset per round — it guards against
       # a whole ReviewGate stalling on transient API hangs, not per-round noise.

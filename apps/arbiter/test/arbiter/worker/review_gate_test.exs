@@ -780,7 +780,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # `review_gate.timeout_ms` itself — and the escalation reports that value.
     test "the per-pass timeout is read from workspace config with no meta override",
          %{repo: repo, ws: ws} do
-      {:ok, ws} = Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 1_200})})
+      {:ok, ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 1_200})})
 
       task = new_task(ws)
       branch = "feature/rev"
@@ -824,7 +825,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # message reports. Under the init-resolved behaviour it reports 1s.
     test "a config change reaches a RUNNING gate on its next pass",
          %{repo: repo, ws: ws} do
-      {:ok, ws} = Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 1_500})})
+      {:ok, ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 1_500})})
 
       task = new_task(ws)
       branch = "feature/rev"
