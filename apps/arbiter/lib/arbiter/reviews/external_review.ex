@@ -68,7 +68,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   alias Arbiter.Reviews.{Checkout, PrState, Record}
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
-  alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
+  alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.CodeReview.DiffScope
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
@@ -1162,22 +1162,98 @@ defmodule Arbiter.Reviews.ExternalReview do
   end
 
   # follow_up resolution: an explicit boolean wins; otherwise engage by default
-  # only when the workspace actually has a ReviewPatrol running (no point filing
-  # an engagement nothing will pick up).
+  # when the repo is eligible (not in :off mode and resolvable from workspace
+  # config). bd-arl0bu: the patrol will lazy-start on engagement creation, so
+  # we check eligibility (same predicate start_patrol/2 uses before the lazy
+  # gate) rather than process presence.
   defp follow_up?(prepared, opts) do
     case Map.get(opts, :follow_up) do
       v when is_boolean(v) -> v
-      _ -> review_patrol_active?(prepared.workspace)
+      _ -> follow_up_eligible?(prepared)
     end
   end
 
-  defp review_patrol_active?(%Workspace{id: id}) when is_binary(id) do
-    ReviewPatrolSupervisor.whereis_all(id) != []
+  # A PR is eligible for follow-up when its repo is resolvable via the
+  # workspace config AND the review_automation mode is not :off. Mirrors the
+  # predicate ReviewPatrolSupervisor.start_patrol/2 uses before its lazy-start
+  # gate (check for has_open_engagement).
+  defp follow_up_eligible?(%{workspace: %Workspace{} = workspace, repo_name: repo_name}) do
+    config = workspace_config(workspace)
+    repos = patrol_repos_for(workspace)
+
+    case ReviewAutomation.repo_override_mode(config, repo_name) do
+      :off -> false
+      nil -> not default_off?(config)
+      _ -> repos != []
+    end
   rescue
     _ -> false
   end
 
-  defp review_patrol_active?(_workspace), do: false
+  defp follow_up_eligible?(_prepared), do: false
+
+  # Enumerate repos the workspace would patrol, same logic as
+  # ReviewPatrolSupervisor.patrol_repos/1 — returns [] when the merge
+  # strategy is unsupported or no repos can be derived.
+  defp patrol_repos_for(%Workspace{} = workspace) do
+    config = workspace.config || %{}
+
+    case get_in(config, ["merge", "strategy"]) do
+      "github" ->
+        owner = get_in(config, ["merge", "config", "owner"])
+        repo = get_in(config, ["merge", "config", "repo"])
+
+        if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
+          ["#{owner}/#{repo}"]
+        else
+          repos_from_repo_paths(config)
+        end
+
+      "gitlab" ->
+        case get_in(config, ["merge", "config", "project_id"]) do
+          v when is_integer(v) -> ["#{v}"]
+          v when is_binary(v) and v != "" -> [v]
+          _ -> repos_from_repo_paths(config)
+        end
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp repos_from_repo_paths(config) do
+    case Map.get(config, "repo_paths") do
+      repo_map when is_map(repo_map) ->
+        repo_map
+        |> Map.values()
+        |> Enum.map(&RepoConfig.repo_path_from_config/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.flat_map(fn path ->
+          case Arbiter.Mergers.Github.RepoResolver.from_remote(path) do
+            {:ok, {owner, repo}} ->
+              ["#{owner}/#{repo}"]
+
+            {:error, _err} ->
+              []
+          end
+        end)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp default_off?(%{"review_automation" => %{"default" => default}}) do
+    ReviewAutomation.normalize(default) == :off
+  end
+
+  defp default_off?(_config), do: false
 
   defp create_engagement(
          %{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared,
