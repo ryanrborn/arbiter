@@ -175,6 +175,7 @@ defmodule Arbiter.Tasks.Issue do
         :last_verdict_sha,
         :circuit_breaker_tripped,
         :circuit_breaker_reason,
+        :circuit_breaker_sha,
         :skills
       ]
 
@@ -730,13 +731,19 @@ defmodule Arbiter.Tasks.Issue do
       refuted our finding with cited evidence, we conceded it in-thread, or the
       thread was resolved (bd-cccjtn). Each entry is a map with "thread_id",
       "file", "line", "finding", "reason" ("we_conceded" | "resolved" |
-      "author_refuted"), "author_reply", "settled_at" and "settled_sha".
+      "author_refuted"), "author_reply", "reply_ids", "settled_at" and
+      "settled_sha". "reply_ids" (bd-wtvu9r) is the per-finding refutation
+      state: WHICH comment id(s) actually answered this finding — the author's
+      cited-evidence reply, or our own conceding comment — so "every blocking
+      finding has an author reply" is an auditable claim rather than a guess.
 
-      Two uses on a re-review, both in `Arbiter.Workflows.ReviewPatrol.ThreadMemory`:
+      Three uses on a re-review, all in `Arbiter.Workflows.ReviewPatrol.ThreadMemory`:
       the reviewer prompt carries the settled threads so it knows what is already
-      answered, and the check-runner wrapper DROPS any finding re-raised within a
+      answered, the check-runner wrapper DROPS any finding re-raised within a
       few lines of a settled thread unless the new commits actually touch those
-      lines. Persisting this matters because `list_open_review_threads/1` returns
+      lines, and the circuit breaker's answered-findings arm (bd-wtvu9r) reads
+      the finding -> reply-id join to decide whether another verdict round could
+      contain anything but re-litigation. Persisting this matters because `list_open_review_threads/1` returns
       only UNRESOLVED threads — resolving a conceded thread would otherwise erase
       every trace that we conceded it.
       """
@@ -819,6 +826,22 @@ defmodule Arbiter.Tasks.Issue do
       """
     end
 
+    attribute :circuit_breaker_sha, :string do
+      allow_nil? true
+      public? true
+
+      description """
+      The PR head SHA the circuit breaker last tripped AT (bd-wtvu9r). The two
+      bd-1atwts arms only trip on an unchanged head, so for them this equals
+      `last_verdict_sha`; the answered-findings arm trips on a head that has
+      already moved past the verdicted commit, so the tripped head has to be
+      recorded separately. `Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear`
+      prefers it over `last_verdict_sha` when watermarking a resume — otherwise
+      a resume of that arm would watermark the older, wrong commit and the very
+      next tick would re-trip.
+      """
+    end
+
     attribute :circuit_breaker_cleared_sha, :string do
       allow_nil? true
       public? true
@@ -828,9 +851,9 @@ defmodule Arbiter.Tasks.Issue do
       `circuit_breaker_tripped` (bd-1atwts). Merely clearing the flag restores
       the exact state that tripped it — neither the head nor `last_verdict` /
       `last_verdict_sha` move on a trip, since tripping deliberately posts
-      nothing — so without this watermark both breaker arms re-trip on the
-      very next tick. Set automatically (from the engagement's
-      `last_verdict_sha` at the moment of the clear) by the resume path in
+      nothing — so without this watermark the breaker arms re-trip on the
+      very next tick. Set automatically (from `circuit_breaker_sha`, falling
+      back to `last_verdict_sha`, at the moment of the clear) by the resume path in
       `Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear`; both trip
       predicates in `Arbiter.Workflows.ReviewPatrol` treat `head ==
       circuit_breaker_cleared_sha` as "already adjudicated, don't re-trip".

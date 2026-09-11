@@ -274,4 +274,136 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemoryTest do
       refute ThreadMemory.concession?(nil)
     end
   end
+
+  describe "settle/4 — per-finding refutation state (bd-wtvu9r)" do
+    test "an author_refuted entry records the reply id(s) that answered it" do
+      threads = [
+        %{
+          id: "RT1",
+          resolved: false,
+          path: "lib/a.ex",
+          line: 12,
+          comments: [
+            %{id: 100, author: "botreviewer", body: "{:error, :unauthorized} returns 500 here"},
+            %{id: 101, author: "prauthor", body: "no — mapped at lib/fallback.ex:41"},
+            %{id: 102, author: "prauthor", body: "thanks"}
+          ]
+        }
+      ]
+
+      assert [entry] = ThreadMemory.settle(threads, "botreviewer", "prauthor", "sha1")
+      assert entry["reason"] == "author_refuted"
+      # Only the cited-evidence reply answered it; the bare "thanks" did not.
+      assert entry["reply_ids"] == ["101"]
+    end
+
+    test "a we_conceded entry records OUR conceding comment id" do
+      threads = [
+        %{
+          id: "RT2",
+          resolved: false,
+          path: "lib/a.ex",
+          line: 12,
+          comments: [
+            %{id: 200, author: "botreviewer", body: "this looks wrong"},
+            %{id: 201, author: "prauthor", body: "it is handled"},
+            %{id: 202, author: "botreviewer", body: "my comment was wrong. Resolving."}
+          ]
+        }
+      ]
+
+      assert [entry] = ThreadMemory.settle(threads, "botreviewer", "prauthor", "sha1")
+      assert entry["reason"] == "we_conceded"
+      assert entry["reply_ids"] == ["202"]
+    end
+  end
+
+  describe "answered?/2 — join a posted finding to a settled thread" do
+    setup do
+      %{
+        settled: [
+          %{
+            "thread_id" => "RT1",
+            "file" => "lib/a.ex",
+            "line" => 12,
+            "reason" => "author_refuted",
+            "reply_ids" => ["101"]
+          }
+        ]
+      }
+    end
+
+    test "matches a stored finding on the same file within the anchor window", %{settled: settled} do
+      assert ThreadMemory.answered?(%{"file" => "lib/a.ex", "line" => 12}, settled)
+      assert ThreadMemory.answered?(%{"file" => "lib/a.ex", "line" => 15}, settled)
+      assert ThreadMemory.answered?(%{file: "lib/a.ex", line: 9}, settled)
+    end
+
+    test "does not match another file or a line outside the window", %{settled: settled} do
+      refute ThreadMemory.answered?(%{"file" => "lib/b.ex", "line" => 12}, settled)
+      refute ThreadMemory.answered?(%{"file" => "lib/a.ex", "line" => 40}, settled)
+    end
+
+    test "no settled threads answers nothing" do
+      refute ThreadMemory.answered?(%{"file" => "lib/a.ex", "line" => 12}, [])
+      refute ThreadMemory.answered?(%{"file" => "lib/a.ex", "line" => 12}, nil)
+    end
+  end
+
+  describe "refutations/2 — the auditable finding -> reply id join" do
+    test "pairs each answered finding with the thread and reply ids that answered it" do
+      settled = [
+        %{
+          "thread_id" => "RT1",
+          "file" => "lib/a.ex",
+          "line" => 12,
+          "reason" => "author_refuted",
+          "reply_ids" => ["101"]
+        }
+      ]
+
+      findings = [
+        %{"file" => "lib/a.ex", "line" => 12, "message" => "unauthorized 500s"},
+        %{"file" => "lib/z.ex", "line" => 3, "message" => "unanswered"}
+      ]
+
+      assert [refutation] = ThreadMemory.refutations(findings, settled)
+      assert refutation["file"] == "lib/a.ex"
+      assert refutation["line"] == 12
+      assert refutation["message"] == "unauthorized 500s"
+      assert refutation["thread_id"] == "RT1"
+      assert refutation["reason"] == "author_refuted"
+      assert refutation["reply_ids"] == ["101"]
+    end
+  end
+
+  describe "touches_finding?/2 — line-level (not file-level) diff relevance" do
+    test "an added line inside the window touches the finding" do
+      diff =
+        "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n" <>
+          "@@ -10,2 +10,3 @@\n ten\n+eleven\n twelve\n"
+
+      touched = ThreadMemory.touched_lines(diff)
+      assert ThreadMemory.touches_finding?(%{"file" => "lib/a.ex", "line" => 12}, touched)
+    end
+
+    test "a push that touches the FILE but not the flagged lines does not touch the finding" do
+      diff =
+        "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n" <>
+          "@@ -90,1 +90,2 @@\n ninety\n+ninety-one\n"
+
+      touched = ThreadMemory.touched_lines(diff)
+      refute ThreadMemory.touches_finding?(%{"file" => "lib/a.ex", "line" => 12}, touched)
+    end
+
+    test "a finding with no line falls back to file-level (never treated as untouched)" do
+      diff =
+        "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n" <>
+          "@@ -90,1 +90,2 @@\n ninety\n+ninety-one\n"
+
+      touched = ThreadMemory.touched_lines(diff)
+      assert ThreadMemory.touches_finding?(%{"file" => "lib/a.ex", "line" => nil}, touched)
+      refute ThreadMemory.touches_finding?(%{"file" => "lib/other.ex", "line" => nil}, touched)
+    end
+  end
 end
