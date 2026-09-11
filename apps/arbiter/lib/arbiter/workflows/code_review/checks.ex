@@ -772,14 +772,12 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     Enum.any?(@broad_failure_patterns, &Regex.match?(&1, message))
   end
 
-  defp pipeline_status(state) when is_map(state) do
+  defp pipeline_status(state) do
     case Map.get(state, :pr) do
       %{} = pr -> Map.get(pr, :pipeline) || Map.get(pr, "pipeline")
       _ -> nil
     end
   end
-
-  defp pipeline_status(_state), do: nil
 
   # bd-a16rgk: "give the reviewer a way to check." The deterministic caps
   # above (`cap_hedged_severity/2`, `cap_ci_contradicted_severity/3`) only
