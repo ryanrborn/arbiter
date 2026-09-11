@@ -1217,6 +1217,42 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert task.repo == "emricare/tonic"
     end
 
+    # Regression test for bd-8l4n04: when claiming an already-claimed issue,
+    # --repo should apply to the existing task, not be silently ignored.
+    test "applies --repo override to an already-claimed task", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      # First claim: creates task with no repo
+      assert {:ok, :created, first_task} = Claim.claim(ws, "43")
+      assert first_task.repo == nil
+
+      # Second claim with --repo: should update the existing task
+      assert {:ok, :existing, second_task} = Claim.claim(ws, "43", repo: "server/verus")
+      assert second_task.id == first_task.id
+      assert second_task.repo == "server/verus"
+
+      # Verify the repo persisted by fetching fresh
+      {:ok, fresh_task} = Ash.get(Issue, first_task.id)
+      assert fresh_task.repo == "server/verus"
+    end
+
     test "Jira: Highest priority maps to P0 — priority 0 is highest", %{jira_ws: ws} do
       payload =
         jira_issue_payload(%{
