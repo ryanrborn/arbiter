@@ -526,6 +526,60 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "review_gate_max_fix_rounds/1 (bd-a9zb7w)" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmfr-int",
+          config: %{"review_gate" => %{"max_fix_rounds" => 3}}
+        })
+
+      assert Workspace.review_gate_max_fix_rounds(ws) == 3
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmfr-str",
+          config: %{"review_gate" => %{"max_fix_rounds" => "2"}}
+        })
+
+      assert Workspace.review_gate_max_fix_rounds(ws) == 2
+    end
+
+    # 0 is the documented off switch, not a malformed value — it must survive
+    # both validation and the reader, or an operator cannot turn the auto fix
+    # round off.
+    test "accepts and returns 0" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmfr-zero",
+          config: %{"review_gate" => %{"max_fix_rounds" => 0}}
+        })
+
+      assert Workspace.review_gate_max_fix_rounds(ws) == 0
+    end
+
+    test "returns nil when unset (the built-in default applies)" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "tmfr-unset"})
+      assert Workspace.review_gate_max_fix_rounds(ws) == nil
+    end
+
+    test "validate_config rejects negative / malformed max_fix_rounds" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmfr-bad",
+                 config: %{"review_gate" => %{"max_fix_rounds" => -1}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmfr-bad2",
+                 config: %{"review_gate" => %{"max_fix_rounds" => "lots"}}
+               })
+    end
+  end
+
   describe "review_automation config validation" do
     test "accepts a valid review_automation block with default and auto_authors" do
       config = %{
