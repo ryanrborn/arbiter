@@ -142,7 +142,17 @@ defmodule ArbiterCli.ConfigSchema do
     quota  (map — quota-aware dispatch throttle)
       on_exhaustion       one of: #{Enum.join(@quota_modes, ", ")}
       overage_alert_usd   positive number (or its JSON string form)
-      throttle_threshold  number in (0, 1]
+      throttle_threshold  number in (0, 1] — 5h/session window ceiling
+                          (default: 0.85)
+      weekly_threshold    number in (0, 1] — 7d/weekly window ceiling
+                          (default: 0.90; higher than the 5h ceiling because
+                          the weekly window resets at most once a week, so
+                          holding early parks the fleet for days)
+      weekly_warning_policy  one of: ignore, hold — what a 7d `allowed_warning`
+                          does. Default `ignore`: the warning tier is advisory,
+                          `weekly_threshold` is the control. `hold` treats the
+                          warning like a reject. A 7d `rejected` always holds
+                          either way.
 
     conductor  (map)
       max_concurrent  positive integer — cap on concurrently-dispatched workers

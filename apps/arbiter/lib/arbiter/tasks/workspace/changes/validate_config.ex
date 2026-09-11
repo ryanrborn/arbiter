@@ -598,22 +598,14 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   # `throttle_threshold` and the 7d `weekly_threshold`.
   defp validate_fraction(changeset, block, key) do
     case Map.get(block, key) do
-      nil ->
-        changeset
-
-      n when is_number(n) and n > 0 and n <= 1 ->
-        changeset
-
-      s when is_binary(s) ->
-        case Float.parse(s) do
-          {f, ""} when f > 0 and f <= 1 -> changeset
-          _ -> fraction_error(changeset, key, s)
-        end
-
-      other ->
-        fraction_error(changeset, key, other)
+      nil -> changeset
+      value -> if fraction?(value), do: changeset, else: fraction_error(changeset, key, value)
     end
   end
+
+  defp fraction?(n) when is_number(n), do: n > 0 and n <= 1
+  defp fraction?(s) when is_binary(s), do: match?({f, ""} when f > 0 and f <= 1, Float.parse(s))
+  defp fraction?(_), do: false
 
   defp fraction_error(changeset, key, got) do
     Changeset.add_error(changeset,

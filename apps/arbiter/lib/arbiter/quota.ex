@@ -328,8 +328,11 @@ defmodule Arbiter.Quota do
       %{gating_window: nil, gating_reason: nil}
     else
       case Arbiter.Quota.Gate.gating_window(q, workspace) do
-        nil -> %{gating_window: nil, gating_reason: nil}
-        %{window: w} -> %{gating_window: w, gating_reason: Arbiter.Quota.Gate.hold_phrase(q, workspace)}
+        nil ->
+          %{gating_window: nil, gating_reason: nil}
+
+        %{window: w} ->
+          %{gating_window: w, gating_reason: Arbiter.Quota.Gate.hold_phrase(q, workspace)}
       end
     end
   end

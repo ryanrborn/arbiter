@@ -238,7 +238,8 @@ defmodule Arbiter.Quota.GateWeeklyTest do
         provider: "claude",
         utilization_5h: 0.23,
         status_5h: "allowed",
-        reset_5h_at: DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second),
+        reset_5h_at:
+          DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second),
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
       }
 
@@ -254,7 +255,8 @@ defmodule Arbiter.Quota.GateWeeklyTest do
       record_quota!(workspace.id, %{
         utilization_7d: 0.91,
         status_7d: "allowed",
-        reset_7d_at: DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
+        reset_7d_at:
+          DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
       })
 
       assert {:hold, "7d quota 0.91 ≥ 0.90"} = Arbiter.Board.Snapshot.quota_hold(workspace.id)
@@ -270,7 +272,11 @@ defmodule Arbiter.Quota.GateWeeklyTest do
     end
 
     test "a 5h hold still reads with the 5h wording", %{workspace: workspace} do
-      record_quota!(workspace.id, %{utilization_5h: 0.9, utilization_7d: 0.1, status_7d: "allowed"})
+      record_quota!(workspace.id, %{
+        utilization_5h: 0.9,
+        utilization_7d: 0.1,
+        status_7d: "allowed"
+      })
 
       assert {:hold, phrase} = Arbiter.Board.Snapshot.quota_hold(workspace.id)
       assert phrase =~ "quota near exhaustion"
@@ -286,7 +292,8 @@ defmodule Arbiter.Quota.GateWeeklyTest do
       record_quota!(workspace.id, %{
         utilization_7d: 0.91,
         status_7d: "allowed",
-        reset_7d_at: DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
+        reset_7d_at:
+          DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
       })
 
       assert %{gating_window: "7d", gating_reason: "7d quota 0.91 ≥ 0.90"} =

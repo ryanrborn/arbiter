@@ -112,6 +112,7 @@ defmodule ArbiterCli.Cmd.Quota do
       end
 
     IO.puts("  captured at:           #{captured_at_str}#{stale_indicator}")
+    IO.puts("  gating dispatch:       #{gating_line(q)}")
     IO.puts("")
 
     IO.puts(
@@ -124,6 +125,17 @@ defmodule ArbiterCli.Cmd.Quota do
 
     emit_spend(data, "claude")
     emit_oauth_usage(q)
+  end
+
+  # Which window, if any, is currently holding dispatch (bd-1tuxv8). Both the 5h
+  # and the 7d figures are printed above; this line says which one the gate is
+  # actually acting on, so "7d is at 76%" can no longer be misread as the reason
+  # Autopilot is idle when the gate is not looking at it.
+  defp gating_line(q) do
+    case q["gating_window"] do
+      nil -> "none — dispatch is not quota-held"
+      window -> "#{window} — #{q["gating_reason"] || "held"}"
+    end
   end
 
   # Codex (OpenAI): windows already normalized to a 0..100 used-percent.
