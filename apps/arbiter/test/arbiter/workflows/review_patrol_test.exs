@@ -1323,6 +1323,54 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert hd(escalations).body =~ "arb update #{eng.id} --resume-review"
     end
 
+    # bd-3948ey: the local circuit breaker above keys on the engagement's own
+    # `last_verdict_sha` — but that bookkeeping can be stale (e.g. a verdict
+    # posted out-of-band via a forced ExternalReview dispatch that didn't
+    # update this engagement's `last_reviewed_sha`/`last_verdict_sha`). This
+    # test reproduces exactly that gap: local state says the head is new
+    # ("newsha" != last_reviewed_sha "oldsha") so the re-review dispatches,
+    # but GitHub's own review history shows our identity already posted an
+    # APPROVED verdict against that exact commit. The CodeReview `:verdict`
+    # step's adapter-level guard (independent of local bookkeeping) must
+    # still refuse to post a second, possibly-conflicting verdict for it.
+    test "the CodeReview verdict-step guard catches a stale-local-bookkeeping repeat that the engagement-level breaker misses",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 605, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: nil,
+          last_verdict_sha: nil,
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+
+      rereview_stub_with_reviews(
+        605,
+        "newsha",
+        diff,
+        [
+          %{"state" => "APPROVED", "user" => %{"login" => "botreviewer"}, "commit_id" => "newsha"}
+        ],
+        "botreviewer"
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
+
+      reloaded = reload(eng)
+      assert reloaded.last_reviewed_sha == "newsha"
+      assert is_nil(reloaded.last_verdict)
+      assert is_nil(reloaded.last_verdict_sha)
+    end
+
     test "a disputed re-request (unchanged head, review re-requested) trips the breaker instead of replying",
          %{ws: ws} do
       eng =

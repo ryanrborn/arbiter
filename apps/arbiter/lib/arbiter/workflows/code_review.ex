@@ -309,7 +309,7 @@ defmodule Arbiter.Workflows.CodeReview do
     verdict = compute_verdict(Map.get(state, :findings, []))
     path = Map.fetch!(state, :review_path)
     :ok = LocalMode.set_verdict(path, verdict)
-    {:ok, Map.put(state, :verdict, verdict)}
+    {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, true)}
   end
 
   # Report-only: compute the recommended verdict + summary and post NOTHING.
@@ -322,6 +322,7 @@ defmodule Arbiter.Workflows.CodeReview do
     {:ok,
      state
      |> Map.put(:verdict, verdict)
+     |> Map.put(:verdict_posted, false)
      |> Map.put(:proposed_review_body, body)}
   end
 
@@ -331,18 +332,56 @@ defmodule Arbiter.Workflows.CodeReview do
     findings = Map.get(state, :findings, [])
     out_of_diff = Map.get(state, :out_of_diff_findings, [])
     verdict = compute_verdict(findings)
-    body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
     opts = adapter_opts(state)
 
-    case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
-      {:ok, response} ->
-        {:ok,
-         state
-         |> Map.put(:verdict, verdict)
-         |> maybe_capture_path(response)}
+    # bd-3948ey: one verdict per SHA. Before posting, ask the adapter (if it
+    # exposes the optional capability) for the commit SHA our own latest
+    # verdict review was posted against. If it matches the PR's current head,
+    # we've already verdicted this exact commit — skip posting again rather
+    # than trusting local bookkeeping, which can be stale or bypassed (e.g. a
+    # forced re-dispatch that never updated the engagement record).
+    cond do
+      same_sha_already_verdicted?(adapter, mr_ref, pr_head_sha(state)) ->
+        Logger.info(
+          "CodeReview: skipping duplicate verdict — adapter's latest own review already " <>
+            "covers head SHA #{inspect(pr_head_sha(state))} (mr_ref=#{mr_ref})"
+        )
 
-      {:error, _} = err ->
-        err
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+
+      # bd-3948ey: monotonic on a fixed head. Even when the head SHA has
+      # moved (so the guard above doesn't apply), a downgrade FROM a prior
+      # approval must be backed by new information — new commits that
+      # actually touch a line one of this pass's blocking findings is
+      # anchored on. Without this, a re-review round triggered by something
+      # other than a real code change (an author's inline reply, a
+      # re-requested review with no push) can flip an approval to
+      # request_changes purely because the pass re-litigated findings that
+      # were already visible — and implicitly accepted — at approval time.
+      verdict == :request_changes and
+          downgrade_without_new_info?(adapter, mr_ref, pr_head_sha(state), findings) ->
+        Logger.info(
+          "CodeReview: no new information — declining to downgrade prior approval for " <>
+            "mr_ref=#{mr_ref} at head #{inspect(pr_head_sha(state))}: no blocking finding is " <>
+            "anchored on a line the new commits changed"
+        )
+
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+
+      true ->
+        body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
+
+        case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
+          {:ok, response} ->
+            {:ok,
+             state
+             |> Map.put(:verdict, verdict)
+             |> Map.put(:verdict_posted, true)
+             |> maybe_capture_path(response)}
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
 
@@ -563,6 +602,54 @@ defmodule Arbiter.Workflows.CodeReview do
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp pr_head_sha(%{pr: pr}) when is_map(pr),
+    do: Map.get(pr, :head_sha) || Map.get(pr, "head_sha")
+
+  defp pr_head_sha(_state), do: nil
+
+  # Fails open: nil head SHA, an adapter without the optional capability, or
+  # any error resolving it all mean "don't block" — we can't prove we've
+  # already verdicted this commit, so we let the caller proceed as before.
+  defp same_sha_already_verdicted?(_adapter, _mr_ref, nil), do: false
+
+  defp same_sha_already_verdicted?(adapter, mr_ref, head_sha) when is_binary(head_sha) do
+    if function_exported?(adapter, :latest_own_review_sha, 1) do
+      case safe_adapter_call(adapter, :latest_own_review_sha, [mr_ref]) do
+        {:ok, ^head_sha} -> true
+        _ -> false
+      end
+    else
+      false
+    end
+  end
+
+  # Fails open in every way: no blocking findings, no prior-approval SHA, the
+  # adapter lacking either optional capability, an errored lookup, or a
+  # failed/empty diff fetch all mean "can't prove this is a stale re-litigation"
+  # — so the caller posts the downgrade as usual. Only an actual diff fetch
+  # that comes back clean of every blocking finding's (file, line) counts as
+  # "no new information".
+  defp downgrade_without_new_info?(_adapter, _mr_ref, nil, _findings), do: false
+
+  defp downgrade_without_new_info?(adapter, mr_ref, head_sha, findings)
+       when is_binary(head_sha) do
+    blocking = Enum.filter(findings, &(&1[:severity] == :error))
+
+    with true <- blocking != [],
+         true <- function_exported?(adapter, :latest_own_review_sha, 1),
+         {:ok, prev_sha} when is_binary(prev_sha) and prev_sha != head_sha <-
+           safe_adapter_call(adapter, :latest_own_review_sha, [mr_ref]),
+         true <- function_exported?(adapter, :self_approved?, 1),
+         {:ok, true} <- safe_adapter_call(adapter, :self_approved?, [mr_ref]),
+         {:ok, diff} when is_binary(diff) <-
+           safe_adapter_call(adapter, :get_diff, [mr_ref, %{base: prev_sha, head: head_sha}]) do
+      scope = DiffScope.build(diff)
+      not Enum.any?(blocking, &DiffScope.in_diff?(scope, &1[:file], &1[:line]))
+    else
+      _ -> false
+    end
   end
 
   defp read_diff_via_adapter(%{adapter: adapter, mr_ref: mr_ref} = state)

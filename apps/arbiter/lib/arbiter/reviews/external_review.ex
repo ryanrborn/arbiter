@@ -677,12 +677,19 @@ defmodule Arbiter.Reviews.ExternalReview do
           # first-pass findings seed the engagement's `posted_findings` so
           # ReviewPatrol's relevance gate (re-review only when a new commit touches
           # a previously-flagged file) has something to match against.
+          # bd-3948ey: when CodeReview's :verdict step skipped posting (this
+          # exact SHA was already verdicted — e.g. a forced re-dispatch racing
+          # a prior pass), there is no new verdict to seed engagement
+          # bookkeeping with. Treat it the same as report-only: nil.
+          verdict_for_engagement =
+            if Map.get(final, :verdict_posted, true), do: Map.get(final, :verdict)
+
           engagement =
             maybe_create_engagement(
               prepared,
               opts,
               Map.get(final, :findings) || [],
-              Map.get(final, :verdict)
+              verdict_for_engagement
             )
 
           {:ok, result(prepared, final, engagement, report_only)}
@@ -1116,6 +1123,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       mode: if(report_only, do: :report_only, else: :auto),
       report_only: report_only,
       verdict: Map.get(final, :verdict),
+      verdict_posted: Map.get(final, :verdict_posted, true),
       findings: length(Map.get(final, :findings) || []),
       findings_list: Map.get(final, :findings) || [],
       # Report-only: the per-finding proposed inline comments (posted nothing).
