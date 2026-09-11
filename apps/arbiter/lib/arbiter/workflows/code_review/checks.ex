@@ -67,6 +67,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.Security
+  alias Arbiter.Workflows.ReviewPatrol.ThreadMemory
 
   require Logger
 
@@ -391,6 +392,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     tracker_section = tracker_context_section(Map.get(state, :tracker_context))
     pr_section = pr_section(Map.get(state, :pr))
     incremental_note = incremental_review_note(Map.get(state, :incremental_review))
+    settled_section = ThreadMemory.prompt_section(Map.get(state, :settled_threads))
     consumer_section = consumer_refs_section(Map.get(state, :consumer_refs))
     tool_access_section = tool_access_section(review_cwd(state))
     elision_note = elision_note(elided_paths)
@@ -400,7 +402,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{task_line}#{tracker_section}#{pr_section}#{incremental_note}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}#{tracker_section}#{pr_section}#{incremental_note}#{settled_section}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [

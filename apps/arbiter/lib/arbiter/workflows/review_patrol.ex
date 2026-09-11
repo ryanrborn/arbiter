@@ -99,6 +99,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     * **Never re-post an unchanged finding** — new findings are de-duped against
       `posted_findings` by `{file, line, message}` before anything is posted.
 
+    * **Never re-raise a settled thread** — see *Thread memory* below.
+
   On a completed re-review we append the newly-posted findings to `posted_findings`
   and advance `last_reviewed_sha` to `head_sha` (and stamp `last_reviewed_at`).
 
@@ -124,6 +126,42 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   Either way we advance `last_seen_comment_id` past the handled reply so it is
   processed (or escalated) exactly once, never per-tick.
+
+  ## Thread memory across re-review rounds (bd-cccjtn)
+
+  The reply handling above and the verdict pass used to be blind to each other.
+  The author would refute a finding with a `file:line` citation, our own reply
+  handler would sometimes concede it outright ("my comment was wrong.
+  Resolving."), and the next verdict pass would read the diff cold and re-raise
+  the finding — occasionally verbatim. On the 2026-09-09 incident, round 4
+  re-raised 9 of the 10 findings the author had answered, two of which we had
+  already conceded.
+
+  `Arbiter.Workflows.ReviewPatrol.ThreadMemory` closes that loop. A thread we
+  own is **settled** when we conceded it, it was resolved, or the author refuted
+  it with a cited `file:line` (a bare "seems fine to me" settles nothing).
+  Settled threads are persisted on the engagement as `settled_threads` — they
+  have to be, because `list_open_review_threads/1` returns only UNRESOLVED
+  threads, so a conceded-then-resolved thread leaves no trace on the forge.
+
+  Three write points feed it, so the memory survives every ordering of push and
+  reply:
+
+    * the reply-handling tick folds current thread state in on every
+      head-unchanged tick, whatever the automation mode;
+    * `dispatch_reply/6` records a concession the moment our reply posts — the
+      only moment it is observable;
+    * the re-review path refreshes from the live threads immediately before
+      dispatching the reviewer, which covers an author who answers our findings
+      AND pushes inside the same window.
+
+  Two read points consume it, and deliberately both — a prompt alone is
+  advisory. The reviewer prompt carries the settled threads (our finding, the
+  author's reply, why it is settled, and that a re-raise must name what
+  changed), and the check-runner wrapper DROPS any finding anchored within a few
+  lines of a settled thread unless the new commits actually add a line in that
+  window. Settled stays settled on a fixed head; new code on those lines
+  re-opens the question.
 
   ## Hard invariant
 
@@ -222,16 +260,19 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   The issue's second named signature — "previous round was `request_changes`,
   every blocking finding has an author reply, and no new commits touch the
   flagged lines" (the actual round-4-of-4 shape from the 2026-09-09 incident,
-  where the push touched a flagged FILE but not a flagged LINE) — is NOT
-  implemented by either arm above. `gate_on_relevance/5`'s file-level
-  relevance gate does not know which findings were refuted, so a push like
-  that still produces a fresh verdict round. This is a deliberate deferral,
-  not an oversight: closing it needs per-finding refutation tracking (which
-  findings have an author reply, which lines a new commit actually touched)
-  that doesn't exist yet in `posted_findings`. Tracked as a follow-up
-  (bd-wtvu9r); until it lands, that shape of loop is only caught after the
-  fact by the other two arms (a same-SHA repeat, or the author eventually
-  re-requesting review at an unchanged head).
+  where the push touched a flagged FILE but not a flagged LINE) — is still NOT
+  a breaker arm. `gate_on_relevance/5`'s relevance gate remains file-level, so
+  a push like that still produces a fresh verdict round and the breaker does
+  not trip on it.
+
+  What HAS changed (bd-cccjtn) is that such a round is no longer allowed to
+  repeat the settled findings: the refutation tracking this note used to call
+  missing now exists as `settled_threads` (see *Thread memory* above), and the
+  check-runner wrapper drops a re-raise whose anchored lines the push didn't
+  touch. So the round still happens, but it can only carry genuinely new
+  findings — and a round left with none of them submits an approval rather than
+  a repeat of the last verdict. Promoting the shape to a breaker arm of its own
+  is still tracked as a follow-up (bd-wtvu9r).
 
   On trip: nothing is posted. The would-be verdict is written to
   `Arbiter.Reviews.Record` as `status: :completed_unposted, mode:
@@ -279,6 +320,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewReply}
+  alias Arbiter.Workflows.ReviewPatrol.ThreadMemory
   require Ash.Query
   require Logger
 
@@ -1022,7 +1064,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
             decline_for_sticky_approval(engagement, pr.head_sha)
 
           true ->
-            act_on_new_commits(engagement, pr.head_sha, adapter, workspace, opts, repo_name)
+            act_on_new_commits(engagement, pr, adapter, workspace, opts, repo_name)
         end
 
       {:error, reason} ->
@@ -1209,13 +1251,28 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   defp normalize_ws(s), do: s |> String.trim() |> String.replace(~r/\s+/, " ")
 
-  defp act_on_new_commits(engagement, head, adapter, workspace, opts, repo_name) do
+  defp act_on_new_commits(engagement, %{head_sha: head} = pr, adapter, workspace, opts, repo_name) do
     case automation_mode(engagement, workspace, repo_name) do
-      :auto -> run_rereview(engagement, head, adapter, workspace, opts)
-      :report_only -> report_rereview(engagement, head, adapter, workspace, opts)
+      # bd-cccjtn: refresh the settled-thread memory from the PR's live review
+      # threads immediately before dispatching the reviewer. The reply-handling
+      # path (below) already folds thread state in on every head-unchanged tick,
+      # but an author who answers our findings AND pushes in the same window is
+      # only ever seen here — that is exactly the round that used to re-raise
+      # the refuted findings. Only the two dispatching modes pay for the call.
+      :auto ->
+        engagement
+        |> refresh_thread_memory(pr, adapter, workspace)
+        |> run_rereview(head, adapter, workspace, opts)
+
+      :report_only ->
+        engagement
+        |> refresh_thread_memory(pr, adapter, workspace)
+        |> report_rereview(head, adapter, workspace, opts)
+
       # :off (bd-7opdaf) is a hard opt-out — never dispatch a reviewer, same
       # non-dispatching behavior as :flag (surface a flag, don't review).
-      mode when mode in [:flag, :off] -> flag_new_commits(engagement, head, workspace)
+      mode when mode in [:flag, :off] ->
+        flag_new_commits(engagement, head, workspace)
     end
   end
 
@@ -1257,6 +1314,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     :ok = Agents.prepare(workspace, :review_agent)
 
     prior_keys = prior_finding_keys(engagement.posted_findings)
+    settled = engagement.settled_threads || []
 
     state = %{
       mode: :adapter,
@@ -1264,12 +1322,16 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       mr_ref: engagement.source_pr,
       workspace: workspace,
       adapter_opts: opts,
+      # bd-cccjtn: the threads already argued out on this PR. Feeds the
+      # reviewer prompt (so it knows what is answered) AND the check-runner
+      # wrapper below (which enforces it — a prompt alone is advisory).
+      settled_threads: settled,
       # bd-8vwgws: the diff `opts` above fetches is new-diff-only
       # (`last_reviewed_sha..head_sha`), not the full PR diff — tell the
       # reviewer prompt so it doesn't judge the PR description's
       # completeness against a partial diff.
       incremental_review: true,
-      check_runner: dedupe_runner(prior_keys),
+      check_runner: dedupe_runner(prior_keys, settled),
       # bd-9rdwe4 (#1017 gap G5): a re-review never spawns through
       # `Arbiter.Worker` — this is its only prompt-persistence choke-point,
       # keyed on the engagement (an `Issue` row, not a Reviews.Record).
@@ -1314,6 +1376,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     :ok = Agents.prepare(workspace, :review_agent)
 
     prior_keys = prior_finding_keys(engagement.posted_findings)
+    settled = engagement.settled_threads || []
 
     state = %{
       mode: :adapter,
@@ -1322,9 +1385,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       workspace: workspace,
       adapter_opts: opts,
       report_only: true,
+      # bd-cccjtn: see the mirroring comment in run_rereview/5.
+      settled_threads: settled,
       # bd-8vwgws: see the mirroring comment in run_rereview/5.
       incremental_review: true,
-      check_runner: dedupe_runner(prior_keys),
+      check_runner: dedupe_runner(prior_keys, settled),
       # bd-9rdwe4 (#1017 gap G5): see the mirroring comment in run_rereview/5.
       review_record_id: engagement.id
     }
@@ -1426,11 +1491,21 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   # A check runner that runs the real CodeReview checks and then drops any finding
   # whose {file, line, message} we've already posted on this engagement.
-  defp dedupe_runner(prior_keys) do
+  # Two filters, in order. The exact `{file, line, message}` de-dupe catches a
+  # verbatim repeat; the settled-thread filter (bd-cccjtn) catches the far more
+  # common reworded repeat of a finding the author already refuted with cited
+  # evidence — or that we ourselves conceded — and lets it through only when the
+  # new commits actually touch the lines the thread is anchored to.
+  defp dedupe_runner(prior_keys, settled) do
     fn diff, st ->
       case CodeReview.Checks.run(diff, st) do
         {:ok, findings} when is_list(findings) ->
-          {:ok, Enum.reject(findings, &MapSet.member?(prior_keys, finding_key(&1)))}
+          kept =
+            findings
+            |> Enum.reject(&MapSet.member?(prior_keys, finding_key(&1)))
+            |> ThreadMemory.filter_findings(settled, diff)
+
+          {:ok, kept}
 
         other ->
           other
@@ -1672,19 +1747,82 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          true <- function_exported?(adapter, :list_open_review_threads, 1),
          {:ok, threads} when is_list(threads) <-
            adapter.list_open_review_threads(engagement.source_pr) do
+      ours = filter_our_threads(threads, adapter, our_login)
+
+      # bd-cccjtn: fold the CURRENT thread state into the engagement's settled
+      # memory before doing anything with the replies. This runs whether or not
+      # there is a new reply to act on, and whatever the automation mode — the
+      # verdict pass needs the memory even when the reply path posts nothing.
+      engagement = record_settled(engagement, ours, our_login, pr_author, Map.get(pr, :head_sha))
+
       cursor = parse_comment_cursor(engagement.last_seen_comment_id)
 
-      replies =
-        threads
-        |> filter_our_threads(adapter, our_login)
-        |> new_author_replies(cursor, pr_author)
-
-      case replies do
+      case new_author_replies(ours, cursor, pr_author) do
         [] -> nil
-        _ -> act_on_author_replies(engagement, replies, adapter, workspace, repo_name)
+        replies -> act_on_author_replies(engagement, replies, pr, adapter, workspace, repo_name)
       end
     else
       _ -> nil
+    end
+  end
+
+  # ---- settled-thread memory (bd-cccjtn) ----------------------------------
+
+  # Re-read the PR's open review threads and fold their settle state into the
+  # engagement. Best-effort in every direction: no `our_login`, an adapter that
+  # can't list threads, or a failed call all leave the engagement untouched —
+  # thread memory never blocks a re-review, it only informs one.
+  defp refresh_thread_memory(%Issue{} = engagement, pr, adapter, workspace) do
+    with our_login when is_binary(our_login) and our_login != "" <- our_login(workspace),
+         true <- function_exported?(adapter, :list_open_review_threads, 1),
+         {:ok, threads} when is_list(threads) <-
+           safe(fn -> adapter.list_open_review_threads(engagement.source_pr) end) do
+      record_settled(
+        engagement,
+        filter_our_threads(threads, adapter, our_login),
+        our_login,
+        Map.get(pr, :author),
+        Map.get(pr, :head_sha)
+      )
+    else
+      _ -> engagement
+    end
+  end
+
+  # Merge the freshly-settled threads into `settled_threads` and persist. Returns
+  # the engagement to carry on with — updated on a successful write, unchanged
+  # otherwise, so an in-memory copy never claims a thread is settled when the row
+  # doesn't say so.
+  defp record_settled(%Issue{} = engagement, threads, our_login, pr_author, head_sha) do
+    existing = engagement.settled_threads || []
+
+    case ThreadMemory.settle(threads, our_login, pr_author, head_sha) do
+      [] ->
+        engagement
+
+      fresh ->
+        merged = ThreadMemory.merge(existing, fresh)
+        if merged == existing, do: engagement, else: persist_settled(engagement, merged)
+    end
+  end
+
+  defp persist_settled(%Issue{} = engagement, merged) do
+    case Ash.update(engagement, %{settled_threads: merged}, action: :update) do
+      {:ok, updated} ->
+        Logger.info(
+          "ReviewPatrol: engagement #{engagement.id} now has #{length(merged)} settled " <>
+            "review thread(s) [trigger=thread_memory]"
+        )
+
+        updated
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewPatrol: failed to record settled threads for engagement " <>
+            "#{engagement.id}: #{inspect(reason)}"
+        )
+
+        engagement
     end
   end
 
@@ -1692,14 +1830,14 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # the single most-recent reply (the current question) and advance the cursor
   # past ALL new replies in this batch — so a burst of replies yields exactly one
   # action and never re-fires.
-  defp act_on_author_replies(%Issue{} = engagement, replies, adapter, workspace, repo_name) do
+  defp act_on_author_replies(%Issue{} = engagement, replies, pr, adapter, workspace, repo_name) do
     {thread, comment} = Enum.max_by(replies, fn {_t, c} -> c[:id] end)
     max_id = replies |> Enum.map(fn {_t, c} -> c[:id] end) |> Enum.max()
 
     outcome =
       case automation_mode(engagement, workspace, repo_name) do
         :auto ->
-          dispatch_reply(engagement, thread, comment, adapter, workspace)
+          dispatch_reply(engagement, thread, comment, pr, adapter, workspace)
 
         # report-only, flag, and off all post NOTHING to the PR — escalate the
         # reply to the coordinator and let a human decide (bd-36qzgx, bd-7opdaf).
@@ -1717,7 +1855,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # :auto — dispatch the distinct ReviewReply workflow (task F). It composes and
   # posts a threaded reply via the adapter; it runs review_only (no worktree, no
   # tracker writes), so the hard invariant holds.
-  defp dispatch_reply(%Issue{} = engagement, thread, comment, adapter, workspace) do
+  defp dispatch_reply(%Issue{} = engagement, thread, comment, pr, adapter, workspace) do
     state = %{
       adapter: adapter,
       mr_ref: engagement.source_pr,
@@ -1728,7 +1866,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     }
 
     case Arbiter.Workflow.run(ReviewReply, state) do
-      {:ok, _final} ->
+      {:ok, final} ->
+        settle_if_conceded(engagement, thread, Map.get(final, :reply_body), pr, workspace)
+
         Logger.info(
           "ReviewPatrol: replied to author on engagement #{engagement.id} " <>
             "(comment #{comment[:id]}) [trigger=author_reply]"
@@ -1743,6 +1883,32 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         )
 
         nil
+    end
+  end
+
+  # bd-cccjtn: the reply we just posted may CONCEDE the finding outright ("my
+  # comment was wrong. Resolving."). That is the strongest settle signal there
+  # is, and the moment it is posted is the only chance to record it: a conceded
+  # thread usually gets resolved, and `list_open_review_threads/1` returns only
+  # UNRESOLVED threads — the next tick would find no trace of the concession.
+  defp settle_if_conceded(%Issue{} = engagement, thread, body, pr, workspace) do
+    our_login = our_login(workspace)
+
+    if is_binary(our_login) and our_login != "" and ThreadMemory.concession?(body) do
+      conceded =
+        Map.update(thread, :comments, [%{author: our_login, body: body}], fn comments ->
+          List.wrap(comments) ++ [%{author: our_login, body: body}]
+        end)
+
+      record_settled(
+        engagement,
+        [conceded],
+        our_login,
+        Map.get(pr, :author),
+        Map.get(pr, :head_sha)
+      )
+    else
+      engagement
     end
   end
 

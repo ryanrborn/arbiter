@@ -1971,6 +1971,322 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
     end
   end
 
+  describe "tick/1 — thread memory across re-review rounds (bd-cccjtn)" do
+    # A settled-thread entry as ReviewPatrol persists it on the engagement.
+    defp settled_thread(id, file, line, reason, finding \\ "prior finding") do
+      %{
+        "thread_id" => id,
+        "file" => file,
+        "line" => line,
+        "reason" => reason,
+        "finding" => finding,
+        "author_reply" => "handled at lib/fallback.ex:41",
+        "settled_at" => "2026-09-09T20:17:00Z",
+        "settled_sha" => "oldsha"
+      }
+    end
+
+    # Like `rereview_stub/3` but also answers the review-thread GraphQL query
+    # (the re-review path refreshes thread memory before dispatching).
+    defp rereview_stub_with_threads(number, head, diff, thread_nodes, pr_author) do
+      test_pid = self()
+
+      stub(fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "POST" and path == "/graphql" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{"reviewThreads" => %{"nodes" => thread_nodes}}
+                }
+              }
+            })
+
+          conn.method == "GET" and String.starts_with?(path, "/repos/owner/repo/compare/") ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, diff)
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => number,
+              "state" => "open",
+              "head" => %{"sha" => head},
+              "html_url" => "x",
+              "user" => %{"login" => pr_author}
+            })
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/comments" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:inline_comment, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:submit_review, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 99})
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "unhandled #{path}"})
+        end
+      end)
+    end
+
+    test "a settled finding is NOT re-raised when the new commits miss its lines", %{ws: ws} do
+      eng =
+        engagement(ws, 520, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          settled_threads: [settled_thread("RT1", "lib/a.ex", 5, "author_refuted")]
+        })
+
+      # The reviewer re-raises the settled finding, REWORDED — so the exact
+      # {file,line,message} de-dupe can't catch it. Line 5 is untouched by the
+      # diff below (which only adds line 20).
+      put_invoker([
+        %{
+          "severity" => "error",
+          "file" => "lib/a.ex",
+          "line" => 5,
+          "message" => "unauthorized still falls through to a 500"
+        }
+      ])
+
+      rereview_stub(520, "newsha", wide_diff("lib/a.ex"))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:inline_comment, _}
+      assert_receive {:submit_review, review}
+      assert review["event"] == "APPROVE"
+
+      # Nothing new was posted, so nothing was appended to posted_findings.
+      assert length(reload(eng).posted_findings) == 1
+    end
+
+    test "a settled finding IS re-raised when the new commits touch its lines", %{ws: ws} do
+      eng =
+        engagement(ws, 521, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          settled_threads: [settled_thread("RT1", "lib/a.ex", 20, "author_refuted")]
+        })
+
+      put_invoker([
+        %{
+          "severity" => "error",
+          "file" => "lib/a.ex",
+          "line" => 20,
+          "message" => "the new commit reintroduces the 500 path"
+        }
+      ])
+
+      # wide_diff adds line 20 — the settled thread's own anchor.
+      rereview_stub(521, "newsha", wide_diff("lib/a.ex"))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:inline_comment, comment}
+      assert comment["line"] == 20
+      assert length(reload(eng).posted_findings) == 2
+    end
+
+    test "the re-review prompt carries the settled-thread memory", %{ws: ws} do
+      eng =
+        engagement(ws, 522, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          settled_threads: [
+            settled_thread("RT1", "lib/a.ex", 5, "we_conceded", "unused UserCache alias")
+          ]
+        })
+
+      put_invoker([])
+      rereview_stub(522, "newsha", wide_diff("lib/a.ex"))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert {:ok, prompt} = Arbiter.Worker.PromptLog.read(eng.id)
+      assert prompt =~ "SETTLED REVIEW THREADS"
+      assert prompt =~ "lib/a.ex:5"
+      assert prompt =~ "unused UserCache alias"
+      assert prompt =~ "we conceded"
+    end
+
+    test "a first-round PR with no settled threads gets an unchanged prompt", %{ws: ws} do
+      eng =
+        engagement(ws, 523, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([])
+      rereview_stub(523, "newsha", wide_diff("lib/a.ex"))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert {:ok, prompt} = Arbiter.Worker.PromptLog.read(eng.id)
+      refute prompt =~ "SETTLED REVIEW THREADS"
+    end
+
+    test "an author reply citing file:line settles the thread in engagement state", %{ws: ws} do
+      # Head unchanged → reply-handling path. :flag posts nothing, so the settle
+      # is purely the data-flow fix, independent of whether we reply.
+      eng =
+        engagement(ws, 525, %{
+          review_automation: :flag,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "800"
+        })
+
+      nodes = [
+        thread_node("RT5", "lib/a.ex", [
+          {800, "botreviewer", "@tag :skip_auth has no setup handling"},
+          {801, "prauthor", "ConnCase honours it — see test/support/conn_case.ex:22"}
+        ])
+      ]
+
+      reply_stub(525, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert [entry] = reload(eng).settled_threads
+      assert entry["thread_id"] == "RT5"
+      assert entry["reason"] == "author_refuted"
+      assert entry["file"] == "lib/a.ex"
+      assert entry["finding"] =~ "skip_auth"
+      assert entry["author_reply"] =~ "conn_case.ex:22"
+    end
+
+    test "an author reply with no citation settles nothing", %{ws: ws} do
+      eng =
+        engagement(ws, 526, %{
+          review_automation: :flag,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "800"
+        })
+
+      nodes = [
+        thread_node("RT6", "lib/a.ex", [
+          {800, "botreviewer", "this is wrong"},
+          {801, "prauthor", "I disagree, it looks fine"}
+        ])
+      ]
+
+      reply_stub(526, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert reload(eng).settled_threads == []
+    end
+
+    test "a conceding reply from our own reply handler settles the thread", %{ws: ws} do
+      eng =
+        engagement(ws, 527, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "900"
+        })
+
+      stub_reply_composer("You're right — my comment was wrong. Resolving.")
+
+      # The author's reply carries NO citation, so only the concession can settle
+      # this thread — and the concession only exists in the reply we just posted.
+      nodes = [
+        thread_node("RT7", "lib/b.ex", [
+          {900, "botreviewer", "with_app_env is scoped wrong"},
+          {901, "prauthor", "it is scoped per-test"}
+        ])
+      ]
+
+      reply_stub(527, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:reply_posted, _path, _body}
+
+      assert [entry] = reload(eng).settled_threads
+      assert entry["thread_id"] == "RT7"
+      assert entry["reason"] == "we_conceded"
+    end
+
+    test "a non-conceding reply from our reply handler settles nothing", %{ws: ws} do
+      eng =
+        engagement(ws, 528, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "900"
+        })
+
+      stub_reply_composer("I still think this needs to change — please add the guard.")
+
+      nodes = [
+        thread_node("RT8", "lib/b.ex", [
+          {900, "botreviewer", "with_app_env is scoped wrong"},
+          {901, "prauthor", "it is scoped per-test"}
+        ])
+      ]
+
+      reply_stub(528, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:reply_posted, _path, _body}
+      assert reload(eng).settled_threads == []
+    end
+
+    test "the re-review path refreshes thread memory from the live threads", %{ws: ws} do
+      eng =
+        engagement(ws, 524, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([])
+
+      nodes = [
+        thread_node("RT9", "lib/a.ex", [
+          {900, "botreviewer", "{:error, :unauthorized} returns 500"},
+          {901, "prauthor", "no — FallbackController maps it at lib/fallback.ex:41"}
+        ])
+      ]
+
+      rereview_stub_with_threads(524, "newsha", wide_diff("lib/a.ex"), nodes, "prauthor")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert [entry] = reload(eng).settled_threads
+      assert entry["thread_id"] == "RT9"
+      assert entry["reason"] == "author_refuted"
+      assert entry["settled_sha"] == "newsha"
+    end
+  end
+
   describe "tick/1 — error handling" do
     test "adapter get failure → bumps tick counter, does not crash", %{ws: ws} do
       _eng = engagement(ws, 105)

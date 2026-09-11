@@ -168,6 +168,7 @@ defmodule Arbiter.Tasks.Issue do
         :review_automation,
         :last_reviewed_at,
         :posted_findings,
+        :settled_threads,
         :review_count,
         :review_cap_escalated,
         :last_verdict,
@@ -716,6 +717,28 @@ defmodule Arbiter.Tasks.Issue do
       new-commit re-review: the relevance gate (only re-review when the new diff
       touches a file we previously flagged) and unchanged-finding de-dupe (never
       re-post a finding whose file/line/message we already posted).
+      """
+    end
+
+    attribute :settled_threads, {:array, :map} do
+      allow_nil? true
+      public? true
+      default []
+
+      description """
+      The review threads on this engagement's PR that are CLOSED — the author
+      refuted our finding with cited evidence, we conceded it in-thread, or the
+      thread was resolved (bd-cccjtn). Each entry is a map with "thread_id",
+      "file", "line", "finding", "reason" ("we_conceded" | "resolved" |
+      "author_refuted"), "author_reply", "settled_at" and "settled_sha".
+
+      Two uses on a re-review, both in `Arbiter.Workflows.ReviewPatrol.ThreadMemory`:
+      the reviewer prompt carries the settled threads so it knows what is already
+      answered, and the check-runner wrapper DROPS any finding re-raised within a
+      few lines of a settled thread unless the new commits actually touch those
+      lines. Persisting this matters because `list_open_review_threads/1` returns
+      only UNRESOLVED threads — resolving a conceded thread would otherwise erase
+      every trace that we conceded it.
       """
     end
 
