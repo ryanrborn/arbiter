@@ -246,7 +246,35 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       either arrive on a NEW head or follow an APPROVE, where there is
       nothing to dispute — from tripping it.
 
-  Both are evaluated only for the ONE signature; a normal follow-up re-review
+    * **Answered findings, untouched lines (bd-wtvu9r)** — the issue's second
+      named signature, and the actual round-4-of-4 shape of the 2026-09-09
+      incident: our standing verdict is `request_changes`, every BLOCKING
+      (`severity: :error`) finding behind it already has an author reply, and
+      the push that woke us touches the flagged FILE but not the flagged
+      LINES. `gate_on_relevance/5`'s relevance gate is file-level, so a push
+      like that gets through it; the line-level test that distinguishes the
+      loop lives here, on `ThreadMemory.touched_lines/1` (which lines the
+      diff ADDS, context lines excluded) rather than on the diff's file
+      headers. Checked in `rereview_unless_looping/7`, i.e. AFTER
+      `refresh_thread_memory/4` — the incident's author answered our findings
+      and pushed inside the same window, so the refutation state only exists
+      in the threads read on that tick — and only for the two DISPATCHING
+      automation modes, since `:flag` / `:off` post nothing and so have no
+      loop to break.
+
+      "Has an author reply" is a per-finding claim, not a per-engagement mood:
+      `ThreadMemory.answered?/2` joins each posted finding's `{file, line}` to
+      a settled thread within the same ±5-line anchor window the re-raise
+      filter uses, and `ThreadMemory.refutations/2` renders the join —
+      finding → thread → the **reply id(s)** that answered it — into the trip
+      reason, which the escalation quotes. One unanswered blocking finding is
+      enough to keep the round running; unanswered *non-blocking* findings are
+      not part of the signature (a nit never justified `request_changes`).
+      An engagement with no blocking findings at all never trips this arm —
+      `Enum.all?/2` over an empty list is vacuously true, which would
+      otherwise trip every quiet engagement.
+
+  Each is evaluated only for its own signature; a normal follow-up re-review
   triggered by a fresh push is untouched and keeps running automatically, per
   the guards above (debounce, relevance, sticky approval, review cap).
 
@@ -257,22 +285,12 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   this breaker does, just via its own `review_cap_escalated` flag rather than
   `circuit_breaker_tripped`.
 
-  The issue's second named signature — "previous round was `request_changes`,
-  every blocking finding has an author reply, and no new commits touch the
-  flagged lines" (the actual round-4-of-4 shape from the 2026-09-09 incident,
-  where the push touched a flagged FILE but not a flagged LINE) — is still NOT
-  a breaker arm. `gate_on_relevance/5`'s relevance gate remains file-level, so
-  a push like that still produces a fresh verdict round and the breaker does
-  not trip on it.
-
-  What HAS changed (bd-cccjtn) is that such a round is no longer allowed to
-  repeat the settled findings: the refutation tracking this note used to call
-  missing now exists as `settled_threads` (see *Thread memory* above), and the
-  check-runner wrapper drops a re-raise whose anchored lines the push didn't
-  touch. So the round still happens, but it can only carry genuinely new
-  findings — and a round left with none of them submits an approval rather than
-  a repeat of the last verdict. Promoting the shape to a breaker arm of its own
-  is still tracked as a follow-up (bd-wtvu9r).
+  Complementary to the answered-findings arm, and not replaced by it:
+  bd-cccjtn's thread memory means a round that DOES run can no longer repeat
+  the settled findings (the check-runner wrapper drops a re-raise whose
+  anchored lines the push didn't touch). The arm is what stops the round from
+  being dispatched at all when re-litigation is the only thing it could
+  contain.
 
   On trip: nothing is posted. The would-be verdict is written to
   `Arbiter.Reviews.Record` as `status: :completed_unposted, mode:
@@ -284,8 +302,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   until a human clears it via `arb update <engagement-id> --resume-review`,
   which resets both `circuit_breaker_tripped` and `circuit_breaker_reason` in
   one call and (`Issue.Changes.RecordCircuitBreakerClear`) watermarks the
-  head we tripped on into `circuit_breaker_cleared_sha`. Both trip predicates
-  below check that watermark: clearing the flag alone does not un-trip
+  head we tripped on (`circuit_breaker_sha`, recorded on the trip — the
+  answered-findings arm trips at a head PAST `last_verdict_sha`, so the two
+  are not interchangeable) into `circuit_breaker_cleared_sha`. Every trip
+  predicate below checks that watermark: clearing the flag alone does not un-trip
   anything a caller could observe (the head, `last_verdict`, and
   `last_verdict_sha` are all exactly what they were when the breaker
   tripped), so without the watermark the very next tick would re-trip,
@@ -1064,7 +1084,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
             decline_for_sticky_approval(engagement, pr.head_sha)
 
           true ->
-            act_on_new_commits(engagement, pr, adapter, workspace, opts, repo_name)
+            act_on_new_commits(engagement, pr, adapter, workspace, opts, repo_name, diff)
         end
 
       {:error, reason} ->
@@ -1251,7 +1271,15 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   defp normalize_ws(s), do: s |> String.trim() |> String.replace(~r/\s+/, " ")
 
-  defp act_on_new_commits(engagement, %{head_sha: head} = pr, adapter, workspace, opts, repo_name) do
+  defp act_on_new_commits(
+         engagement,
+         %{head_sha: head} = pr,
+         adapter,
+         workspace,
+         opts,
+         repo_name,
+         diff
+       ) do
     case automation_mode(engagement, workspace, repo_name) do
       # bd-cccjtn: refresh the settled-thread memory from the PR's live review
       # threads immediately before dispatching the reviewer. The reply-handling
@@ -1262,18 +1290,109 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       :auto ->
         engagement
         |> refresh_thread_memory(pr, adapter, workspace)
-        |> run_rereview(head, adapter, workspace, opts)
+        |> rereview_unless_looping(head, adapter, workspace, opts, diff, &run_rereview/5)
 
       :report_only ->
         engagement
         |> refresh_thread_memory(pr, adapter, workspace)
-        |> report_rereview(head, adapter, workspace, opts)
+        |> rereview_unless_looping(head, adapter, workspace, opts, diff, &report_rereview/5)
 
       # :off (bd-7opdaf) is a hard opt-out — never dispatch a reviewer, same
       # non-dispatching behavior as :flag (surface a flag, don't review).
       mode when mode in [:flag, :off] ->
         flag_new_commits(engagement, head, workspace)
     end
+  end
+
+  # ---- loop-signature arm: answered findings, untouched lines (bd-wtvu9r) --
+  #
+  # The second named loop signature from bd-1atwts, and the actual round-4-of-4
+  # shape of the 2026-09-09 incident: our standing verdict is
+  # `request_changes`, every BLOCKING finding behind it has an author reply,
+  # and the push that woke us touches the flagged FILE but not the flagged
+  # LINES. The file-level relevance gate lets that push through, so without
+  # this arm we dispatch another verdict round whose only possible content is
+  # the settled findings (which `ThreadMemory.filter_findings/3` then drops) —
+  # i.e. a round that costs a model run and posts either a repeat or a
+  # contradictory approval. That is the loop, and it is a human call.
+  #
+  # Evaluated AFTER `refresh_thread_memory/4`, deliberately: the incident's
+  # author answered our findings and pushed inside the same window, so the
+  # refutation state only exists in the threads read this tick. And only in
+  # the two DISPATCHING modes — `:flag` / `:off` post nothing, so they have no
+  # loop to break.
+  defp rereview_unless_looping(engagement, head, adapter, workspace, opts, diff, dispatch) do
+    case loop_signature_reason(engagement, head, diff) do
+      nil -> dispatch.(engagement, head, adapter, workspace, opts)
+      reason -> trip_circuit_breaker(engagement, engagement.last_verdict, reason, head)
+    end
+  end
+
+  # The human-readable trip reason, or `nil` when this is not the signature.
+  # Every condition is necessary:
+  #
+  #   * `last_verdict == :request_changes` with a recorded SHA — there is a
+  #     standing verdict for this round to repeat. A first round, or one
+  #     following an approval, has nothing to loop on.
+  #   * at least one BLOCKING (`severity: error`) posted finding — the
+  #     findings that make the verdict what it is. An `all?/2` over an empty
+  #     list is vacuously true and would trip every quiet engagement.
+  #   * every one of them is answered (`ThreadMemory.answered?/2`) — an
+  #     unanswered blocking finding means the round still has something real
+  #     to say. Non-blocking findings are not part of the signature: an
+  #     unanswered nit never justified `request_changes` in the first place.
+  #   * the new commits touch none of their lines — the line-level test the
+  #     file-level relevance gate cannot make.
+  #   * the resume watermark (`circuit_breaker_cleared_sha`) is not this head —
+  #     otherwise a human's `--resume-review` would resume nothing, since the
+  #     four conditions above are all exactly what they were at trip time.
+  defp loop_signature_reason(
+         %Issue{
+           last_verdict: :request_changes,
+           last_verdict_sha: verdict_sha,
+           circuit_breaker_cleared_sha: cleared
+         } = engagement,
+         head,
+         diff
+       )
+       when is_binary(verdict_sha) and verdict_sha != "" and cleared != head do
+    settled = engagement.settled_threads || []
+    blocking = blocking_findings(engagement.posted_findings)
+    touched = ThreadMemory.touched_lines(diff)
+
+    if blocking != [] and Enum.all?(blocking, &ThreadMemory.answered?(&1, settled)) and
+         not Enum.any?(blocking, &ThreadMemory.touches_finding?(&1, touched)) do
+      "ReviewPatrol was about to post another verdict round on PR " <>
+        "##{engagement.source_pr}, but every blocking finding behind our standing " <>
+        "#{inspect(engagement.last_verdict)} (posted on #{verdict_sha}) already has an " <>
+        "author reply, and the new commits #{verdict_sha}..#{head} touch none of those " <>
+        "lines: #{refutation_summary(blocking, settled)} [trigger=answered_findings_untouched]"
+    end
+  end
+
+  defp loop_signature_reason(_engagement, _head, _diff), do: nil
+
+  # Blocking == `severity: :error` — the severity CodeReview turns into a
+  # `request_changes` verdict (`Arbiter.Workflows.CodeReview.verdict/1`).
+  defp blocking_findings(posted_findings) do
+    posted_findings
+    |> List.wrap()
+    |> Enum.filter(&(to_string(stored_field(&1, "severity") || "") == "error"))
+  end
+
+  # The auditable finding -> thread -> reply-id join, rendered for the trip
+  # reason (which the coordinator escalation quotes verbatim), so a human can
+  # open each answering reply rather than take "already answered" on faith.
+  defp refutation_summary(findings, settled) do
+    findings
+    |> ThreadMemory.refutations(settled)
+    |> Enum.take(10)
+    |> Enum.map_join("; ", fn r ->
+      loc = if r["line"], do: "#{r["file"]}:#{r["line"]}", else: to_string(r["file"])
+      replies = r["reply_ids"] |> List.wrap() |> Enum.join(",")
+      replies = if replies == "", do: "no reply id recorded", else: "reply #{replies}"
+      "#{loc} answered in thread #{r["thread_id"]} (#{r["reason"]}, #{replies})"
+    end)
   end
 
   # Dispatch a `review_only` CodeReview sub-run in `:adapter` mode through the
@@ -1568,11 +1687,21 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # create a new `Reviews.Record` on every tick, forever (the bd-4po0nv
   # shape this guards against). Record-write + escalation only happen once
   # the claim actually flips the row.
-  defp trip_circuit_breaker(%Issue{} = engagement, verdict, reason) do
+  defp trip_circuit_breaker(%Issue{} = engagement, verdict, reason, head \\ nil) do
     if claim_circuit_breaker_trip(engagement) do
       write_circuit_breaker_record(engagement, verdict)
       escalate_circuit_breaker(engagement, verdict, reason)
-      update_engagement(engagement, %{circuit_breaker_reason: reason})
+
+      # `circuit_breaker_sha` is the head we tripped AT — the watermark the
+      # resume path stamps into `circuit_breaker_cleared_sha`. For the two
+      # bd-1atwts arms it equals `last_verdict_sha` (they only trip on an
+      # unchanged head); the bd-wtvu9r arm trips on a head that has moved
+      # PAST the verdicted commit, so the head has to be carried explicitly
+      # or a resume would watermark the wrong (older) commit and re-trip.
+      update_engagement(engagement, %{
+        circuit_breaker_reason: reason,
+        circuit_breaker_sha: head || engagement.last_verdict_sha
+      })
 
       Logger.info(
         "ReviewPatrol: engagement #{engagement.id} tripped the circuit breaker (#{reason}); " <>

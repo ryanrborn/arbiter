@@ -2362,6 +2362,303 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
     end
   end
 
+  describe "tick/1 — loop-signature breaker: answered findings, untouched lines (bd-wtvu9r)" do
+    # A settled entry carrying the per-finding refutation state bd-wtvu9r adds:
+    # WHICH reply id(s) answered this finding.
+    defp answered_thread(id, file, line, reply_ids, reason \\ "author_refuted") do
+      %{
+        "thread_id" => id,
+        "file" => file,
+        "line" => line,
+        "reason" => reason,
+        "finding" => "prior finding",
+        "author_reply" => "handled at lib/fallback.ex:41",
+        "reply_ids" => reply_ids,
+        "settled_at" => "2026-09-09T20:17:00Z",
+        "settled_sha" => "oldsha"
+      }
+    end
+
+    # A one-hunk diff over new-file lines 1..20 whose single ADDED line is at
+    # `at` — so a finding's line is either inside or outside the ±5 window of
+    # what the push actually changed.
+    defp diff_adding_line(file, at) do
+      body =
+        Enum.map_join(1..20, "\n", fn n ->
+          if n == at, do: "+added#{n}", else: " line#{n}"
+        end)
+
+      "diff --git a/#{file} b/#{file}\n--- a/#{file}\n+++ b/#{file}\n" <>
+        "@@ -1,19 +1,20 @@\n#{body}\n"
+    end
+
+    test "a push that misses every answered blocking finding's lines trips the breaker",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 620, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          settled_threads: [answered_thread("RT1", "lib/a.ex", 5, ["101"])]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 5, "message" => "prior issue"}
+      ])
+
+      # The push touches the flagged FILE, but only at line 20 — nowhere near
+      # the line the author already answered. Exactly the round-4 shape.
+      rereview_stub(620, "newsha", diff_adding_line("lib/a.ex", 20))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      reloaded = reload(eng)
+      assert reloaded.circuit_breaker_tripped == true
+      assert reloaded.circuit_breaker_reason =~ "every blocking finding"
+      # The refutation join is auditable: finding -> thread -> reply id.
+      assert reloaded.circuit_breaker_reason =~ "lib/a.ex:5"
+      assert reloaded.circuit_breaker_reason =~ "RT1"
+      assert reloaded.circuit_breaker_reason =~ "101"
+
+      # The engagement is frozen where it was: the un-reviewed head is NOT
+      # recorded, so a resume re-examines this very push.
+      assert reloaded.last_reviewed_sha == "oldsha"
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+      assert hd(escalations).subject == "review loop on PR ##{eng.source_pr}"
+      assert hd(escalations).body =~ "RT1"
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert [record] = records
+      assert record.status == :completed_unposted
+      assert record.mode == :report_only
+      assert record.verdict == :request_changes
+    end
+
+    test "a push that DOES touch an answered finding's lines re-reviews normally", %{ws: ws} do
+      eng =
+        engagement(ws, 621, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          settled_threads: [answered_thread("RT1", "lib/a.ex", 5, ["101"])]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 5, "message" => "still broken"}
+      ])
+
+      rereview_stub(621, "newsha", diff_adding_line("lib/a.ex", 5))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+      refute reload(eng).circuit_breaker_tripped
+    end
+
+    test "an UNanswered blocking finding keeps the breaker from tripping", %{ws: ws} do
+      eng =
+        engagement(ws, 622, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "oldsha",
+          posted_findings: [
+            finding("lib/a.ex", 5, "answered issue"),
+            finding("lib/a.ex", 90, "nobody replied to this one")
+          ],
+          settled_threads: [answered_thread("RT1", "lib/a.ex", 5, ["101"])]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 12, "message" => "new bug"}
+      ])
+
+      rereview_stub(622, "newsha", diff_adding_line("lib/a.ex", 20))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+      refute reload(eng).circuit_breaker_tripped
+    end
+
+    test "an unanswered NON-blocking finding does not hold the breaker back", %{ws: ws} do
+      eng =
+        engagement(ws, 623, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "oldsha",
+          posted_findings: [
+            finding("lib/a.ex", 5, "answered issue"),
+            finding("lib/a.ex", 90, "style nit", "info")
+          ],
+          settled_threads: [answered_thread("RT1", "lib/a.ex", 5, ["101"])]
+        })
+
+      put_invoker([])
+      rereview_stub(623, "newsha", diff_adding_line("lib/a.ex", 20))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
+      assert reload(eng).circuit_breaker_tripped == true
+    end
+
+    test "no standing request_changes verdict → no trip, the round runs", %{ws: ws} do
+      eng =
+        engagement(ws, 624, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          settled_threads: [answered_thread("RT1", "lib/a.ex", 5, ["101"])]
+        })
+
+      put_invoker([])
+      rereview_stub(624, "newsha", diff_adding_line("lib/a.ex", 20))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+      refute reload(eng).circuit_breaker_tripped
+    end
+
+    test "an engagement with no posted findings never trips this arm", %{ws: ws} do
+      eng =
+        engagement(ws, 625, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "oldsha",
+          posted_findings: [],
+          settled_threads: [answered_thread("RT1", "lib/a.ex", 5, ["101"])]
+        })
+
+      rereview_stub(625, "newsha", diff_adding_line("lib/a.ex", 20))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Nothing flagged → the pre-existing relevance gate skips the push, and
+      # the breaker stays untripped.
+      refute_receive {:submit_review, _}
+      refute reload(eng).circuit_breaker_tripped
+    end
+
+    test "the refutation state is refreshed from the live threads before the arm is evaluated",
+         %{ws: ws} do
+      # The engagement holds NO settled threads: the author answered our
+      # findings and pushed inside the same window, so the only place the
+      # refutation is visible is the live thread read this tick.
+      eng =
+        engagement(ws, 626, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 1, "prior issue")]
+        })
+
+      put_invoker([])
+
+      nodes = [
+        thread_node("RT9", "lib/a.ex", [
+          {900, "botreviewer", "this 500s on unauthorized"},
+          {901, "prauthor", "no — mapped at lib/fallback.ex:41"}
+        ])
+      ]
+
+      rereview_stub_with_threads(
+        626,
+        "newsha",
+        diff_adding_line("lib/a.ex", 20),
+        nodes,
+        "prauthor"
+      )
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
+
+      reloaded = reload(eng)
+      assert reloaded.circuit_breaker_tripped == true
+      assert reloaded.circuit_breaker_reason =~ "RT9"
+      assert reloaded.circuit_breaker_reason =~ "901"
+      assert [entry] = reloaded.settled_threads
+      assert entry["reply_ids"] == ["901"]
+    end
+
+    test "the resume watermark stops the arm re-tripping at the same head", %{ws: ws} do
+      eng =
+        engagement(ws, 627, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_verdict: :request_changes,
+          last_verdict_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          settled_threads: [answered_thread("RT1", "lib/a.ex", 5, ["101"])]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 5, "message" => "prior issue"}
+      ])
+
+      rereview_stub(627, "newsha", diff_adding_line("lib/a.ex", 20))
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      tripped = reload(eng)
+      assert tripped.circuit_breaker_tripped == true
+
+      # `arb update --resume-review`: clear the flag + reason, nothing else.
+      {:ok, _resumed} =
+        Ash.update(tripped, %{circuit_breaker_tripped: false, circuit_breaker_reason: nil},
+          action: :update
+        )
+
+      assert reload(eng).circuit_breaker_cleared_sha == "newsha"
+
+      assert :ok = ReviewPatrol.tick(name)
+
+      # The resume actually resumed: the round runs instead of re-tripping.
+      assert reload(eng).circuit_breaker_tripped == false
+
+      escalations =
+        Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+    end
+  end
+
   describe "tick/1 — error handling" do
     test "adapter get failure → bumps tick counter, does not crash", %{ws: ws} do
       _eng = engagement(ws, 105)
