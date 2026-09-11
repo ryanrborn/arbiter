@@ -65,6 +65,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   require Ash.Query
 
   alias Arbiter.Mergers
+  alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Reviews.{Checkout, PrState, Record}
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
@@ -1230,28 +1231,31 @@ defmodule Arbiter.Reviews.ExternalReview do
     config = workspace.config || %{}
 
     case get_in(config, ["merge", "strategy"]) do
-      "github" ->
-        owner = get_in(config, ["merge", "config", "owner"])
-        repo = get_in(config, ["merge", "config", "repo"])
-
-        if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
-          ["#{owner}/#{repo}"]
-        else
-          repos_from_repo_paths(config)
-        end
-
-      "gitlab" ->
-        case get_in(config, ["merge", "config", "project_id"]) do
-          v when is_integer(v) -> ["#{v}"]
-          v when is_binary(v) and v != "" -> [v]
-          _ -> repos_from_repo_paths(config)
-        end
-
-      _ ->
-        []
+      "github" -> patrol_repos_for_github(config)
+      "gitlab" -> patrol_repos_for_gitlab(config)
+      _ -> []
     end
   rescue
     _ -> []
+  end
+
+  defp patrol_repos_for_github(config) do
+    owner = get_in(config, ["merge", "config", "owner"])
+    repo = get_in(config, ["merge", "config", "repo"])
+
+    if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
+      ["#{owner}/#{repo}"]
+    else
+      repos_from_repo_paths(config)
+    end
+  end
+
+  defp patrol_repos_for_gitlab(config) do
+    case get_in(config, ["merge", "config", "project_id"]) do
+      v when is_integer(v) -> ["#{v}"]
+      v when is_binary(v) and v != "" -> [v]
+      _ -> repos_from_repo_paths(config)
+    end
   end
 
   defp repos_from_repo_paths(config) do
@@ -1262,7 +1266,7 @@ defmodule Arbiter.Reviews.ExternalReview do
         |> Enum.map(&RepoConfig.repo_path_from_config/1)
         |> Enum.reject(&is_nil/1)
         |> Enum.flat_map(fn path ->
-          case Arbiter.Mergers.Github.RepoResolver.from_remote(path) do
+          case RepoResolver.from_remote(path) do
             {:ok, {owner, repo}} ->
               ["#{owner}/#{repo}"]
 
