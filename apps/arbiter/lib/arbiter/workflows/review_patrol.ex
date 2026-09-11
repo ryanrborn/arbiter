@@ -99,6 +99,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     * **Never re-post an unchanged finding** — new findings are de-duped against
       `posted_findings` by `{file, line, message}` before anything is posted.
 
+    * **Never re-raise a settled thread** — see *Thread memory* below.
+
   On a completed re-review we append the newly-posted findings to `posted_findings`
   and advance `last_reviewed_sha` to `head_sha` (and stamp `last_reviewed_at`).
 
@@ -124,6 +126,42 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   Either way we advance `last_seen_comment_id` past the handled reply so it is
   processed (or escalated) exactly once, never per-tick.
+
+  ## Thread memory across re-review rounds (bd-cccjtn)
+
+  The reply handling above and the verdict pass used to be blind to each other.
+  The author would refute a finding with a `file:line` citation, our own reply
+  handler would sometimes concede it outright ("my comment was wrong.
+  Resolving."), and the next verdict pass would read the diff cold and re-raise
+  the finding — occasionally verbatim. On the 2026-09-09 incident, round 4
+  re-raised 9 of the 10 findings the author had answered, two of which we had
+  already conceded.
+
+  `Arbiter.Workflows.ReviewPatrol.ThreadMemory` closes that loop. A thread we
+  own is **settled** when we conceded it, it was resolved, or the author refuted
+  it with a cited `file:line` (a bare "seems fine to me" settles nothing).
+  Settled threads are persisted on the engagement as `settled_threads` — they
+  have to be, because `list_open_review_threads/1` returns only UNRESOLVED
+  threads, so a conceded-then-resolved thread leaves no trace on the forge.
+
+  Three write points feed it, so the memory survives every ordering of push and
+  reply:
+
+    * the reply-handling tick folds current thread state in on every
+      head-unchanged tick, whatever the automation mode;
+    * `dispatch_reply/6` records a concession the moment our reply posts — the
+      only moment it is observable;
+    * the re-review path refreshes from the live threads immediately before
+      dispatching the reviewer, which covers an author who answers our findings
+      AND pushes inside the same window.
+
+  Two read points consume it, and deliberately both — a prompt alone is
+  advisory. The reviewer prompt carries the settled threads (our finding, the
+  author's reply, why it is settled, and that a re-raise must name what
+  changed), and the check-runner wrapper DROPS any finding anchored within a few
+  lines of a settled thread unless the new commits actually add a line in that
+  window. Settled stays settled on a fixed head; new code on those lines
+  re-opens the question.
 
   ## Hard invariant
 
@@ -222,16 +260,19 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   The issue's second named signature — "previous round was `request_changes`,
   every blocking finding has an author reply, and no new commits touch the
   flagged lines" (the actual round-4-of-4 shape from the 2026-09-09 incident,
-  where the push touched a flagged FILE but not a flagged LINE) — is NOT
-  implemented by either arm above. `gate_on_relevance/5`'s file-level
-  relevance gate does not know which findings were refuted, so a push like
-  that still produces a fresh verdict round. This is a deliberate deferral,
-  not an oversight: closing it needs per-finding refutation tracking (which
-  findings have an author reply, which lines a new commit actually touched)
-  that doesn't exist yet in `posted_findings`. Tracked as a follow-up
-  (bd-wtvu9r); until it lands, that shape of loop is only caught after the
-  fact by the other two arms (a same-SHA repeat, or the author eventually
-  re-requesting review at an unchanged head).
+  where the push touched a flagged FILE but not a flagged LINE) — is still NOT
+  a breaker arm. `gate_on_relevance/5`'s relevance gate remains file-level, so
+  a push like that still produces a fresh verdict round and the breaker does
+  not trip on it.
+
+  What HAS changed (bd-cccjtn) is that such a round is no longer allowed to
+  repeat the settled findings: the refutation tracking this note used to call
+  missing now exists as `settled_threads` (see *Thread memory* above), and the
+  check-runner wrapper drops a re-raise whose anchored lines the push didn't
+  touch. So the round still happens, but it can only carry genuinely new
+  findings — and a round left with none of them submits an approval rather than
+  a repeat of the last verdict. Promoting the shape to a breaker arm of its own
+  is still tracked as a follow-up (bd-wtvu9r).
 
   On trip: nothing is posted. The would-be verdict is written to
   `Arbiter.Reviews.Record` as `status: :completed_unposted, mode:
