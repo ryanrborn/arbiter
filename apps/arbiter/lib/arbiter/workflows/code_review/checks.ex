@@ -850,7 +850,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # dependency's own upstream repo, not this one — a fetch there 404s and
   # falls back to the existing caps rather than resolving the pin, which is
   # out of scope here.
-  @path_ref_pattern ~r{\b([\w.-]+/[\w.-]+\.\w+)\b}
+  @path_ref_pattern ~r{\b([\w.-]+(?:/[\w.-]+)+\.\w+)\b}
   @module_ref_pattern ~r/\b([A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+)\b/
 
   defp referenced_out_of_diff_path(message, adapter, mr_ref) do
