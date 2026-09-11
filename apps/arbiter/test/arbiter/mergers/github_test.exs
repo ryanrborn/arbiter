@@ -2381,6 +2381,68 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "file_content/3 (bd-a16rgk)" do
+    test "decodes base64 contents-API response at the given ref" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path, conn.query_string} do
+          {"GET", "/repos/octo/widget/contents/lib/foo.ex", "ref=deadbeef"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "content" => Base.encode64("def call(conn), do: conn\n"),
+              "encoding" => "base64"
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, "def call(conn), do: conn\n"} =
+               Github.file_content(@ref, "lib/foo.ex", "deadbeef")
+    end
+
+    test "a 404 at that ref surfaces as an ordinary not_found error" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found}} =
+               Github.file_content(@ref, "lib/missing.ex", "deadbeef")
+    end
+  end
+
+  describe "search_path/2 (bd-a16rgk)" do
+    test "returns the first matching path from code search" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/search/code"} ->
+            assert conn.query_string =~ "filename%3Afallback_controller.ex"
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "items" => [%{"path" => "lib/widget_web/controllers/fallback_controller.ex"}]
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, "lib/widget_web/controllers/fallback_controller.ex"} =
+               Github.search_path(@ref, "fallback_controller.ex")
+    end
+
+    test "returns :error when search has no matches" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"items" => []})
+      end)
+
+      assert :error = Github.search_path(@ref, "nonexistent.ex")
+    end
+  end
+
   describe "latest_own_review_sha/1" do
     test "returns the commit_id of our most recent verdict review" do
       stub(fn conn ->
