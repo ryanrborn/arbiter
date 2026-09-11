@@ -155,14 +155,22 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemoryTest do
     test "drops a finding re-raised on a settled thread's untouched lines" do
       findings = [%{severity: :error, file: "lib/a.ex", line: 12, message: "returns 500"}]
 
-      assert ThreadMemory.filter_findings(findings, [settled("lib/a.ex", 12)], diff_touching_line_40()) ==
+      assert ThreadMemory.filter_findings(
+               findings,
+               [settled("lib/a.ex", 12)],
+               diff_touching_line_40()
+             ) ==
                []
     end
 
     test "drops a re-raise whose line drifted slightly from the anchor" do
       findings = [%{severity: :error, file: "lib/a.ex", line: 14, message: "returns 500"}]
 
-      assert ThreadMemory.filter_findings(findings, [settled("lib/a.ex", 12)], diff_touching_line_40()) ==
+      assert ThreadMemory.filter_findings(
+               findings,
+               [settled("lib/a.ex", 12)],
+               diff_touching_line_40()
+             ) ==
                []
     end
 
@@ -176,14 +184,22 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemoryTest do
     test "keeps findings elsewhere in the same file" do
       findings = [%{severity: :error, file: "lib/a.ex", line: 90, message: "new bug"}]
 
-      assert ThreadMemory.filter_findings(findings, [settled("lib/a.ex", 12)], diff_touching_line_40()) ==
+      assert ThreadMemory.filter_findings(
+               findings,
+               [settled("lib/a.ex", 12)],
+               diff_touching_line_40()
+             ) ==
                findings
     end
 
     test "keeps findings in other files" do
       findings = [%{severity: :error, file: "lib/z.ex", line: 12, message: "new bug"}]
 
-      assert ThreadMemory.filter_findings(findings, [settled("lib/a.ex", 12)], diff_touching_line_40()) ==
+      assert ThreadMemory.filter_findings(
+               findings,
+               [settled("lib/a.ex", 12)],
+               diff_touching_line_40()
+             ) ==
                findings
     end
 
