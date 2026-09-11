@@ -25,6 +25,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"review_gate"` is present, it must be a map.
     * If `"review_gate.max_rounds"` is present, it must be a positive integer.
     * If `"review_gate.timeout_ms"` is present, it must be a positive integer.
+    * If `"review_gate.max_fix_rounds"` is present, it must be a NON-NEGATIVE
+      integer — `0` is the documented switch that disables the auto fix round
+      (bd-a9zb7w), so it cannot share the positive-integer validator.
     * If `"conductor"` is present, it must be a map.
     * If `"conductor.max_concurrent"` is present, it must be a positive integer.
     * If `"review_automation"` is present, it must be a map.
@@ -269,6 +272,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_positive_int(review_gate, "max_rounds", "review_gate.max_rounds")
     |> validate_positive_int(review_gate, "timeout_ms", "review_gate.timeout_ms")
+    |> validate_non_negative_int(
+      review_gate,
+      "max_fix_rounds",
+      "review_gate.max_fix_rounds"
+    )
   end
 
   defp validate_review_gate(changeset, _) do
@@ -302,6 +310,37 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
         Changeset.add_error(changeset,
           field: :config,
           message: "#{label} must be a positive integer; got: #{inspect(other)}"
+        )
+    end
+  end
+
+  # bd-a9zb7w: `review_gate.max_fix_rounds`'s twin of `validate_positive_int/4`.
+  # Zero is meaningful here (it turns the auto fix round off), so it must be
+  # accepted rather than rejected as "not positive".
+  defp validate_non_negative_int(changeset, map, key, label) do
+    case Map.get(map, key) do
+      nil ->
+        changeset
+
+      n when is_integer(n) and n >= 0 ->
+        changeset
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n >= 0 ->
+            changeset
+
+          _ ->
+            Changeset.add_error(changeset,
+              field: :config,
+              message: "#{label} must be a non-negative integer; got: #{inspect(s)}"
+            )
+        end
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label} must be a non-negative integer; got: #{inspect(other)}"
         )
     end
   end

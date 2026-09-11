@@ -2731,6 +2731,39 @@ defmodule Arbiter.Worker.DispatchTest do
              )
     end
 
+    # bd-a9zb7w: same reasoning for the ReviewGate fix-round budget. Each fix
+    # round mints a fresh worker, so both the attempt counter and the digest of
+    # the findings the round was dispatched against have to be re-stamped or
+    # neither the cap nor the convergence check can bind on the next rejection.
+    test "resume/2 re-stamps the ReviewGate fix-round counter and findings digest",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "fix-round counter", workspace_id: ws.id})
+      _first = stop_worker_with_outpost(task.id)
+
+      {:ok, result} =
+        Dispatch.resume(task.id,
+          start_driver: false,
+          claude_command: ["sleep", "2"],
+          review_gate_fix_round_attempts: 2,
+          review_gate_findings_digest: "deadbeefdeadbeef"
+        )
+
+      meta = Worker.state(result.worker_pid).meta
+      assert meta[:review_gate_fix_round_attempts] == 2
+      assert meta[:review_gate_findings_digest] == "deadbeefdeadbeef"
+    end
+
+    test "a resume without the opts leaves the fix-round counter absent", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no fix-round counter", workspace_id: ws.id})
+      _first = stop_worker_with_outpost(task.id)
+
+      {:ok, result} =
+        Dispatch.resume(task.id, start_driver: false, claude_command: ["sleep", "2"])
+
+      refute Map.has_key?(Worker.state(result.worker_pid).meta, :review_gate_fix_round_attempts)
+      refute Map.has_key?(Worker.state(result.worker_pid).meta, :review_gate_findings_digest)
+    end
+
     test "the resumed worker's prompt is briefed with the prior work", %{ws: ws, repo: repo} do
       {:ok, task} = Ash.create(Issue, %{title: "briefed resume", workspace_id: ws.id})
       first = stop_worker_with_outpost(task.id)

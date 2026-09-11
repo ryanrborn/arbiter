@@ -78,6 +78,16 @@ config :arbiter, :github_http_stub, true
 # drive it via Req.Test stubs).
 config :arbiter, :github_limiter_probe, false
 
+# bd-a9zb7w: a ReviewGate REQUEST_CHANGES verdict now auto-dispatches an
+# implementer fix round (`Arbiter.Worker.maybe_dispatch_fix_round/3`). The real
+# dispatcher calls `Dispatch.resume/2` — a worktree, a fresh worker, a live
+# agent — which no test that merely drives a rejection verdict wants. Point the
+# suite at the recording stub instead: tests that care assert against
+# `Arbiter.Test.StubFixRoundDispatcher`, and every other one gets a no-op.
+config :arbiter,
+       :review_gate_fix_round_dispatcher,
+       Arbiter.Test.StubFixRoundDispatcher
+
 # bd-8y1i58: the app-wide limiter singleton outlives every individual test, and
 # a secondary-limit trip parks background traffic for a *wall-clock* cooldown.
 # One test stubbing a 403-with-headroom therefore poisoned every later test that
