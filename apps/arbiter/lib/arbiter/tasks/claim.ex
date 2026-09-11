@@ -166,7 +166,11 @@ defmodule Arbiter.Tasks.Claim do
          :ok <- check_assignment(adapter, issue_map, current_user_id, force?) do
       case find_existing(workspace, type, ref) do
         {:ok, task} ->
-          {:ok, :existing, task}
+          case maybe_apply_overrides(task, overrides) do
+            {:ok, updated_task} -> {:ok, :existing, updated_task}
+            :no_changes -> {:ok, :existing, task}
+            {:error, err} -> {:error, err}
+          end
 
         :none ->
           with :ok <- maybe_check_prior_claim(adapter, ref, force?) do
@@ -205,6 +209,25 @@ defmodule Arbiter.Tasks.Claim do
     case Ash.create(Issue, attrs) do
       {:ok, task} -> {:ok, :created, task}
       {:error, err} -> {:error, err}
+    end
+  end
+
+  # Apply caller-supplied overrides to an already-claimed task. Returns
+  # {:ok, updated_task} if updates were made, :no_changes if no overrides
+  # applied, or {:error, reason} on failure.
+  defp maybe_apply_overrides(task, overrides) do
+    attrs =
+      overrides
+      |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
+      |> Enum.into(%{})
+
+    if map_size(attrs) == 0 do
+      :no_changes
+    else
+      case Ash.update(task, attrs) do
+        {:ok, updated_task} -> {:ok, updated_task}
+        {:error, err} -> {:error, err}
+      end
     end
   end
 
