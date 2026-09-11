@@ -1098,7 +1098,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       # The reviewer subprocess fires and exits; argv lands on disk. Outcome
       # (escalation as :no_verdict) is incidental — we assert on the spawn.
-      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      wait_until(
+        fn -> File.exists?(argv_file) and String.contains?(File.read!(argv_file), "--model") end,
+        6_000
+      )
+
       args = File.read!(argv_file) |> String.split("\n", trim: true)
       assert "--model" in args
       assert "haiku" in args
@@ -1266,7 +1270,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       task = new_task(ws, %{difficulty: 1})
       spawn_reviewer_for_tier_test(ws, task, repo)
 
-      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      wait_until(
+        fn -> File.exists?(argv_file) and String.contains?(File.read!(argv_file), "--model") end,
+        6_000
+      )
+
       args = File.read!(argv_file) |> String.split("\n", trim: true)
       assert "--model" in args
       assert "sonnet" in args
@@ -1278,7 +1286,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       task = new_task(ws, %{difficulty: 3})
       spawn_reviewer_for_tier_test(ws, task, repo)
 
-      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      wait_until(
+        fn -> File.exists?(argv_file) and String.contains?(File.read!(argv_file), "--model") end,
+        6_000
+      )
+
       args = File.read!(argv_file) |> String.split("\n", trim: true)
       assert "--model" in args
       assert "opus" in args
@@ -1290,7 +1302,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       task = new_task(ws, %{difficulty: 1})
       spawn_reviewer_for_tier_test(ws, task, repo)
 
-      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      wait_until(
+        fn -> File.exists?(argv_file) and String.contains?(File.read!(argv_file), "--model") end,
+        6_000
+      )
+
       args = File.read!(argv_file) |> String.split("\n", trim: true)
       assert "--model" in args
       assert "haiku" in args
@@ -1307,7 +1323,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       task = new_task(ws, %{difficulty: 3})
       spawn_reviewer_for_tier_test(ws, task, repo)
 
-      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      wait_until(
+        fn -> File.exists?(argv_file) and String.contains?(File.read!(argv_file), "--model") end,
+        6_000
+      )
+
       args = File.read!(argv_file) |> String.split("\n", trim: true)
       assert "--model" in args
       assert "haiku" in args
@@ -1346,7 +1366,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      wait_until(
+        fn -> File.exists?(argv_file) and String.contains?(File.read!(argv_file), "--model") end,
+        6_000
+      )
+
       args = File.read!(argv_file) |> String.split("\n", trim: true)
       assert "--model" in args
       # Still sonnet (D1 → economy → standard) — NOT opus, which is what a
