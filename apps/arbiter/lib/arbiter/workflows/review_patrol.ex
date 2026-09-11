@@ -1348,6 +1348,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         # which the circuit breaker's same-SHA check keys directly on.
         verdict = if Map.get(final, :verdict_posted, true), do: Map.get(final, :verdict)
         persist_rereview(engagement, head, posted, verdict)
+        if verdict, do: write_rereview_record(engagement, :auto, posted, verdict, final)
 
         Logger.info(
           "ReviewPatrol: re-reviewed engagement #{engagement.id} on #{head} " <>
@@ -1402,6 +1403,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
         report_to_coordinator(engagement, head, proposed, verdict)
         persist_rereview(engagement, head, findings)
+        write_rereview_record(engagement, :report_only, findings, verdict, final)
 
         Logger.info(
           "ReviewPatrol: report-only re-review of engagement #{engagement.id} on #{head} " <>
@@ -1634,6 +1636,56 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   end
 
   defp write_circuit_breaker_record(_engagement, _verdict), do: :ok
+
+  # ---- re-review audit record (bd-xdkwsg) ----------------------------------
+  #
+  # A ReviewPatrol re-review used to update only the engagement (`Issue`) row
+  # — `external_review_list`/`external_review_show` never saw it, so a PR's
+  # follow-up rounds (and their model/cost) were invisible outside GitHub.
+  # Mirrors `ExternalReview`'s own record bookkeeping (bd-31fh9e): one
+  # `:completed` row per round, linked via `engagement_id` so the audit
+  # ledger sums cost per PR across the first pass and every re-review.
+  # Best-effort — a record-write hiccup never affects the posted verdict or
+  # the engagement update it accompanies.
+  defp write_rereview_record(
+         %Issue{workspace_id: ws_id} = engagement,
+         mode,
+         findings,
+         verdict,
+         final
+       )
+       when is_binary(ws_id) do
+    usage = Map.get(final, :check_usage) || %{}
+    report_only = mode == :report_only
+
+    _ =
+      safe(fn ->
+        Ash.create(Record, %{
+          pr_ref: engagement.source_pr,
+          pr: engagement.source_pr,
+          workspace_id: ws_id,
+          status: :completed,
+          mode: mode,
+          verdict: verdict,
+          greenlight_status: if(report_only, do: :pending, else: nil),
+          engagement_id: engagement.id,
+          dispatched_by: "review_patrol",
+          proposed_comments: Enum.map(findings, &circuit_breaker_proposed_comment/1),
+          finding_count: length(findings),
+          findings_summary: circuit_breaker_findings_summary(findings),
+          model: Map.get(usage, :model),
+          cost_usd: Map.get(usage, :cost_usd),
+          tokens_in: Map.get(usage, :tokens_in),
+          tokens_out: Map.get(usage, :tokens_out),
+          started_at: now(),
+          completed_at: now()
+        })
+      end)
+
+    :ok
+  end
+
+  defp write_rereview_record(_engagement, _mode, _findings, _verdict, _final), do: :ok
 
   # A disputed finding, reshaped into the `proposed_comments` map/inline-comment
   # shape the coordinator's greenlight path (`ExternalReview.greenlight/1`) and
