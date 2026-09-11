@@ -261,26 +261,25 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
 
   # Builds the `quota.*` patch/unset pair (quota-aware dispatch throttle):
   # `on_exhaustion` is an enum with a `throttle` server default, while
-  # `overage_alert_usd`/`throttle_threshold` are optional numbers kept as
-  # their raw string form (the validator accepts either a number or its JSON
+  # `overage_alert_usd`/`throttle_threshold`/`weekly_threshold` are optional
+  # numbers kept as their raw string form (the validator accepts either a number or its JSON
   # string form, same as `merge.watchdog_max_polls`) — a blank field unsets
   # rather than writing an empty string.
   defp quota_settings_patch(params) do
-    {patch, unset} =
-      case blank_to_nil(params["quota_on_exhaustion"]) do
-        nil -> {%{}, ["quota.on_exhaustion"]}
-        v -> {%{"on_exhaustion" => v}, []}
-      end
+    Enum.reduce(
+      ~w[on_exhaustion overage_alert_usd throttle_threshold weekly_threshold
+         weekly_warning_policy],
+      {%{}, []},
+      &put_optional_quota_field(&2, params, &1)
+    )
+  end
 
-    {patch, unset} =
-      case blank_to_nil(params["quota_overage_alert_usd"]) do
-        nil -> {patch, unset ++ ["quota.overage_alert_usd"]}
-        v -> {Map.put(patch, "overage_alert_usd", v), unset}
-      end
-
-    case blank_to_nil(params["quota_throttle_threshold"]) do
-      nil -> {patch, unset ++ ["quota.throttle_threshold"]}
-      v -> {Map.put(patch, "throttle_threshold", v), unset}
+  # One `quota.*` field: a present value goes in the patch, a blank one unsets
+  # the key rather than writing an empty string.
+  defp put_optional_quota_field({patch, unset}, params, key) do
+    case blank_to_nil(params["quota_#{key}"]) do
+      nil -> {patch, unset ++ ["quota.#{key}"]}
+      v -> {Map.put(patch, key, v), unset}
     end
   end
 
@@ -715,6 +714,39 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
                   placeholder="e.g. 0.8"
                   size="sm"
                   class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Weekly (7d) threshold"
+              consequence="quota.weekly_threshold — dispatch holds at this fraction of the 7-day window (default 0.90); the 7d window resets at most weekly, so a hold here lasts days"
+            >
+              <:control>
+                <Forms.input
+                  name="config[quota_weekly_threshold]"
+                  value={cfg(@workspace, ["quota", "weekly_threshold"], "")}
+                  placeholder="e.g. 0.9"
+                  size="sm"
+                  class="w-[120px]"
+                />
+              </:control>
+            </.setting_row>
+
+            <.setting_row
+              name="Weekly warning policy"
+              consequence="quota.weekly_warning_policy — what a 7d allowed_warning does: ignore (default, advisory only) or hold (stop dispatching). A 7d rejected always holds either way."
+            >
+              <:control>
+                <Forms.select
+                  name="config[quota_weekly_warning_policy]"
+                  options={[
+                    {"(unset — defaults to ignore)", ""}
+                    | Enum.map(@quota_weekly_warning_policies, &{&1, &1})
+                  ]}
+                  value={cfg(@workspace, ["quota", "weekly_warning_policy"], "")}
+                  size="sm"
+                  class="w-[220px]"
                 />
               </:control>
             </.setting_row>
