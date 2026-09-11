@@ -416,6 +416,15 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
       - "warning": a likely issue or risk that deserves attention.
       - "info":    a non-blocking suggestion.
 
+    "error" is blocking — it fails the PR. Only use "error" for something you
+    directly observed in the diff (or, when you have tool access, in a file
+    you actually opened). If your claim depends on code outside the diff that
+    you have not read — "unless X has a Y clause…", "if Z has no…", "verify
+    that…", "this is unverified…" — it is not a finding you have checked, so
+    it must never be "error". Either open the file to check (when you have
+    tool access) or report it at "info" phrased as a question to the author,
+    not as a defect.
+
     If you find nothing to flag, respond with: {"findings": []}
 
     --- BEGIN DIFF ---
@@ -665,13 +674,48 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
          file when is_binary(file) and file != "" <- Map.get(entry, "file"),
          line when is_integer(line) and line > 0 <- normalize_line(Map.get(entry, "line")),
          message when is_binary(message) and message != "" <- Map.get(entry, "message") do
-      %{severity: severity, file: file, line: line, message: message}
+      %{
+        severity: cap_hedged_severity(severity, message),
+        file: file,
+        line: line,
+        message: message
+      }
     else
       _ -> nil
     end
   end
 
   defp normalize_finding(_), do: nil
+
+  # bd-a16rgk: an ERROR finding is blocking (`compute_verdict/1` turns any
+  # `:error` severity into `:request_changes`). The diff-only reviewer can't
+  # check conditions outside the diff, so it sometimes hedges ("unless X has a
+  # Y clause…", "verify that…", "is unverified…") and still tags the claim
+  # `error` — a claim the reviewer never actually checked should never block a
+  # PR. Downgrade any `:error` finding whose message reads as hedged/
+  # conditional to `:info` regardless of what the model asserted; this is a
+  # deterministic net independent of the prompt instructions (see
+  # `build_prompt/3`) asking the reviewer not to do this in the first place.
+  @hedge_patterns [
+    ~r/\bunless\b/i,
+    ~r/\bif\b[^.!?]{0,80}\bhas no\b/i,
+    ~r/\bverify (that|whether)\b/i,
+    ~r/\b(is|looks|seems) unverified\b/i,
+    ~r/\bnothing (has )?exercis/i,
+    ~r/\bunclear (whether|if)\b/i,
+    ~r/\bcan(?:no|')t confirm\b/i,
+    ~r/\bassuming (that|the)\b/i
+  ]
+
+  defp cap_hedged_severity(:error, message) do
+    if hedged?(message), do: :info, else: :error
+  end
+
+  defp cap_hedged_severity(severity, _message), do: severity
+
+  defp hedged?(message) when is_binary(message) do
+    Enum.any?(@hedge_patterns, &Regex.match?(&1, message))
+  end
 
   defp normalize_severity("error"), do: {:ok, :error}
   defp normalize_severity("warning"), do: {:ok, :warning}

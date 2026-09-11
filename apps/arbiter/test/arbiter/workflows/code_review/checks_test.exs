@@ -76,6 +76,45 @@ defmodule Arbiter.Workflows.CodeReview.ChecksTest do
     assert {:ok, []} = Checks.run(@diff, state)
   end
 
+  describe "hedged findings (bd-a16rgk)" do
+    test "a hedged ERROR finding is capped at INFO severity" do
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:ok, ~s({"findings": [
+           {"severity": "error", "file": "lib/foo.ex", "line": 1,
+            "message": "unless the FallbackController has an :unauthorized clause this raises"}
+         ]})}
+      end)
+
+      assert {:ok, [finding]} = Checks.run(@diff, %{})
+      assert finding.severity == :info
+      assert finding.message =~ "unless"
+    end
+
+    test "an un-hedged ERROR finding stays ERROR" do
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:ok, ~s({"findings": [
+           {"severity": "error", "file": "lib/foo.ex", "line": 1,
+            "message": "calls Foo.bar/0 which was removed in this diff"}
+         ]})}
+      end)
+
+      assert {:ok, [finding]} = Checks.run(@diff, %{})
+      assert finding.severity == :error
+    end
+
+    test "a hedged WARNING finding stays WARNING (only blocking ERROR is capped)" do
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:ok, ~s({"findings": [
+           {"severity": "warning", "file": "lib/foo.ex", "line": 1,
+            "message": "verify that this handles the nil case"}
+         ]})}
+      end)
+
+      assert {:ok, [finding]} = Checks.run(@diff, %{})
+      assert finding.severity == :warning
+    end
+  end
+
   describe "transcript persistence (bd-7efini)" do
     @stream_json Enum.join(
                    [
