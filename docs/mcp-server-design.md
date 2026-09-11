@@ -113,8 +113,35 @@ scope in `apps/arbiter_web/lib/arbiter_web/router.ex`. Clients POST JSON-RPC
 2.0; the server returns a single JSON body for fast calls and upgrades to SSE
 only for long ones. This works behind the load balancer / reverse proxy an
 operator may already front :4848 with, and avoids spawning a fresh stdio MCP
-server per session per agent type. The legacy two-endpoint HTTP+SSE transport is
-deprecated upstream; we do not implement it.
+server per session per agent type.
+
+Streamable HTTP is the **only** transport `/mcp` serves, and `GET /mcp` with
+`Accept: text/event-stream` is only its server → client channel: keepalives and
+server-initiated messages, no POST-back `endpoint` handshake. See the moduledoc
+of `ArbiterWeb.MCP.Plug` for the authoritative contract.
+
+The legacy two-endpoint HTTP+SSE transport (2024-11-05) is deprecated upstream
+and we do not implement it. Serving *half* of it is strictly worse than not
+serving it (bd-3e58bd): an `event: endpoint` handshake whose POSTs are answered
+inline leaves a `"type": "sse"` client waiting on the stream for a reply that
+already came back on its POST, so it blocks to its 30s ceiling and reports
+`CONNECT_TIMEOUT` — the server looks down. A client pinned to that transport
+(Claude Code `"type": "sse"`, Antigravity / `agy` in its SSE mode) must be
+pointed at the streamable-HTTP entry instead; every such client supports one.
+
+Every MCP config Arbiter generates already uses **Streamable HTTP**:
+`Arbiter.MCP.AgentConfig.Claude` writes `"type": "http"`, `.Gemini` writes
+`httpUrl`, `.Codex` writes `[mcp_servers.arbiter] url`, and the `arb init`
+template (`apps/arbiter_cli/priv/templates/mcp_json.eex`) writes `"type":
+"http"`. Operators should use `"type": "http"` too. The GET stream is
+coordinator-tier, so a worker token gets `401` on it and workspace isolation
+holds.
+
+Note that `/.well-known/oauth-protected-resource` (and `/.../mcp`) must stay
+**unrouted**: an unauthenticated `/mcp` is a bare `401`, which makes MCP clients
+probe that path for OAuth discovery. A `404` tells them there is no OAuth and
+they fall back to the configured token; anything else (e.g. the MCP plug's
+`405`) strands them in the OAuth branch. Arbiter uses a scope token, not OAuth.
 
 ### 2.2 Build vs. buy the protocol layer
 
