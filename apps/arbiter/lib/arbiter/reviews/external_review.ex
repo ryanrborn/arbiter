@@ -65,10 +65,11 @@ defmodule Arbiter.Reviews.ExternalReview do
   require Ash.Query
 
   alias Arbiter.Mergers
+  alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Reviews.{Checkout, PrState, Record}
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
-  alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
+  alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.CodeReview.DiffScope
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
@@ -235,7 +236,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
       start_async(prepared, opts, record)
-      {:ok, ack(prepared, record)}
+      {:ok, ack(prepared, opts, record)}
     end
   end
 
@@ -1098,8 +1099,13 @@ defmodule Arbiter.Reviews.ExternalReview do
     _ -> :ok
   end
 
-  defp ack(prepared, record) do
-    %{
+  defp ack(prepared, opts, record) do
+    follow_up_enabled = follow_up?(prepared, opts)
+    workspace = prepared.workspace
+    our_login = Workspace.review_patrol_our_login(workspace)
+    our_login_missing? = follow_up_enabled and is_nil(our_login)
+
+    ack = %{
       external: true,
       status: "dispatched",
       pr: prepared.pr,
@@ -1107,8 +1113,19 @@ defmodule Arbiter.Reviews.ExternalReview do
       strategy: prepared.strategy,
       link: prepared.link,
       review_record_id: record && record.id,
-      mode: record && record.mode
+      mode: record && record.mode,
+      follow_up: follow_up_enabled
     }
+
+    if our_login_missing? do
+      Map.put(
+        ack,
+        :follow_up_note,
+        "follow-up enabled but review_patrol.our_login is not configured — author-reply handling will be skipped"
+      )
+    else
+      ack
+    end
   end
 
   defp result(prepared, final, engagement, report_only) do
@@ -1162,22 +1179,116 @@ defmodule Arbiter.Reviews.ExternalReview do
   end
 
   # follow_up resolution: an explicit boolean wins; otherwise engage by default
-  # only when the workspace actually has a ReviewPatrol running (no point filing
-  # an engagement nothing will pick up).
+  # when the repo is eligible (not in :off mode and resolvable from workspace
+  # config). bd-arl0bu: the patrol will lazy-start on engagement creation, so
+  # we check eligibility (same predicate start_patrol/2 uses before the lazy
+  # gate) rather than process presence.
   defp follow_up?(prepared, opts) do
     case Map.get(opts, :follow_up) do
       v when is_boolean(v) -> v
-      _ -> review_patrol_active?(prepared.workspace)
+      _ -> follow_up_eligible?(prepared)
     end
   end
 
-  defp review_patrol_active?(%Workspace{id: id}) when is_binary(id) do
-    ReviewPatrolSupervisor.whereis_all(id) != []
+  # A PR is eligible for follow-up when its repo is resolvable via the
+  # workspace config AND the review_automation mode is not :off. Mirrors the
+  # predicate ReviewPatrolSupervisor.start_patrol/2 uses before its lazy-start
+  # gate (check for has_open_engagement).
+  defp follow_up_eligible?(%{
+         workspace: %Workspace{} = workspace,
+         repo_name: repo_name,
+         mr_ref: mr_ref
+       }) do
+    config = workspace_config(workspace)
+    repos = patrol_repos_for(workspace)
+
+    # Short-circuit if no repos are configured to patrol
+    if repos == [] do
+      false
+    else
+      # Verify the PR's repo is in the configured patrol repos
+      repo_match? =
+        Enum.any?(repos, fn repo ->
+          Arbiter.Workflows.PatrolRepoScope.ref_matches_repo?(mr_ref, repo)
+        end)
+
+      case ReviewAutomation.repo_override_mode(config, repo_name) do
+        :off -> false
+        nil -> repo_match? and not default_off?(config)
+        _ -> repo_match?
+      end
+    end
   rescue
     _ -> false
   end
 
-  defp review_patrol_active?(_workspace), do: false
+  defp follow_up_eligible?(_prepared), do: false
+
+  # Enumerate repos the workspace would patrol, same logic as
+  # ReviewPatrolSupervisor.patrol_repos/1 — returns [] when the merge
+  # strategy is unsupported or no repos can be derived.
+  defp patrol_repos_for(%Workspace{} = workspace) do
+    config = workspace.config || %{}
+
+    case get_in(config, ["merge", "strategy"]) do
+      "github" -> patrol_repos_for_github(config)
+      "gitlab" -> patrol_repos_for_gitlab(config)
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp patrol_repos_for_github(config) do
+    owner = get_in(config, ["merge", "config", "owner"])
+    repo = get_in(config, ["merge", "config", "repo"])
+
+    if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
+      ["#{owner}/#{repo}"]
+    else
+      repos_from_repo_paths(config)
+    end
+  end
+
+  defp patrol_repos_for_gitlab(config) do
+    case get_in(config, ["merge", "config", "project_id"]) do
+      v when is_integer(v) -> ["#{v}"]
+      v when is_binary(v) and v != "" -> [v]
+      _ -> repos_from_repo_paths(config)
+    end
+  end
+
+  defp repos_from_repo_paths(config) do
+    case Map.get(config, "repo_paths") do
+      repo_map when is_map(repo_map) ->
+        repo_map
+        |> Map.values()
+        |> Enum.map(&RepoConfig.repo_path_from_config/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.flat_map(fn path ->
+          case RepoResolver.from_remote(path) do
+            {:ok, {owner, repo}} ->
+              ["#{owner}/#{repo}"]
+
+            {:error, _err} ->
+              []
+          end
+        end)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp default_off?(%{"review_automation" => %{"default" => default}}) do
+    ReviewAutomation.normalize(default) == :off
+  end
+
+  defp default_off?(_config), do: false
 
   defp create_engagement(
          %{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared,

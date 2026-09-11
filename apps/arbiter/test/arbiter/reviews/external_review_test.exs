@@ -645,7 +645,29 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert engagement.posted_findings == []
     end
 
-    test "without follow_up the flow is unchanged (no engagement)" do
+    test "when follow_up is nil and repo is eligible, defaults to creating engagement" do
+      ws = github_ws("er-default-follow-up")
+      stub_full_review(head_sha: "sha-eligible", author: "coworker", max_comment_id: 1)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 check_runner: one_finding()
+               )
+
+      # follow_up defaults to true for an eligible repo (not in :off mode)
+      assert result.engagement_created == true
+      assert is_binary(result.engagement)
+      assert engagements_for(ws.id, "octo/widget#42") != []
+
+      engagement = Ash.get!(Issue, result.engagement)
+      assert engagement.review_only == true
+      assert engagement.source_pr == "octo/widget#42"
+      assert engagement.workspace_id == ws.id
+    end
+
+    test "with follow_up: false, the review is a pure one-shot (no engagement)" do
       ws = github_ws("er-noeng")
       stub_full_review(head_sha: "sha-x", author: "coworker", max_comment_id: 1)
 
@@ -653,6 +675,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
                ExternalReview.review(
                  pr: "octo/widget#42",
                  workspace: ws.name,
+                 follow_up: false,
                  check_runner: one_finding()
                )
 
