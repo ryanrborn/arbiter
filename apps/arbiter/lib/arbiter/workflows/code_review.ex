@@ -309,7 +309,7 @@ defmodule Arbiter.Workflows.CodeReview do
     verdict = compute_verdict(Map.get(state, :findings, []))
     path = Map.fetch!(state, :review_path)
     :ok = LocalMode.set_verdict(path, verdict)
-    {:ok, Map.put(state, :verdict, verdict)}
+    {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, true)}
   end
 
   # Report-only: compute the recommended verdict + summary and post NOTHING.
@@ -322,6 +322,7 @@ defmodule Arbiter.Workflows.CodeReview do
     {:ok,
      state
      |> Map.put(:verdict, verdict)
+     |> Map.put(:verdict_posted, false)
      |> Map.put(:proposed_review_body, body)}
   end
 
@@ -331,18 +332,35 @@ defmodule Arbiter.Workflows.CodeReview do
     findings = Map.get(state, :findings, [])
     out_of_diff = Map.get(state, :out_of_diff_findings, [])
     verdict = compute_verdict(findings)
-    body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
     opts = adapter_opts(state)
 
-    case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
-      {:ok, response} ->
-        {:ok,
-         state
-         |> Map.put(:verdict, verdict)
-         |> maybe_capture_path(response)}
+    # bd-3948ey: one verdict per SHA. Before posting, ask the adapter (if it
+    # exposes the optional capability) for the commit SHA our own latest
+    # verdict review was posted against. If it matches the PR's current head,
+    # we've already verdicted this exact commit — skip posting again rather
+    # than trusting local bookkeeping, which can be stale or bypassed (e.g. a
+    # forced re-dispatch that never updated the engagement record).
+    if same_sha_already_verdicted?(adapter, mr_ref, pr_head_sha(state)) do
+      Logger.info(
+        "CodeReview: skipping duplicate verdict — adapter's latest own review already " <>
+          "covers head SHA #{inspect(pr_head_sha(state))} (mr_ref=#{mr_ref})"
+      )
 
-      {:error, _} = err ->
-        err
+      {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+    else
+      body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
+
+      case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
+        {:ok, response} ->
+          {:ok,
+           state
+           |> Map.put(:verdict, verdict)
+           |> Map.put(:verdict_posted, true)
+           |> maybe_capture_path(response)}
+
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -563,6 +581,27 @@ defmodule Arbiter.Workflows.CodeReview do
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp pr_head_sha(%{pr: pr}) when is_map(pr),
+    do: Map.get(pr, :head_sha) || Map.get(pr, "head_sha")
+
+  defp pr_head_sha(_state), do: nil
+
+  # Fails open: nil head SHA, an adapter without the optional capability, or
+  # any error resolving it all mean "don't block" — we can't prove we've
+  # already verdicted this commit, so we let the caller proceed as before.
+  defp same_sha_already_verdicted?(_adapter, _mr_ref, nil), do: false
+
+  defp same_sha_already_verdicted?(adapter, mr_ref, head_sha) when is_binary(head_sha) do
+    if function_exported?(adapter, :latest_own_review_sha, 1) do
+      case safe_adapter_call(adapter, :latest_own_review_sha, [mr_ref]) do
+        {:ok, ^head_sha} -> true
+        _ -> false
+      end
+    else
+      false
+    end
   end
 
   defp read_diff_via_adapter(%{adapter: adapter, mr_ref: mr_ref} = state)

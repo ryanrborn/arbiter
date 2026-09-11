@@ -390,6 +390,76 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     end
   end
 
+  # bd-3948ey: adapters exposing the optional `latest_own_review_sha/1`
+  # capability, used to test the :verdict step's same-SHA skip guard.
+  defmodule SameShaAdapter do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_, _), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(mr_ref, verdict, body, _opts) do
+      send(:verdict_test_pid, {:submitted, mr_ref, verdict, body})
+      {:ok, %{}}
+    end
+
+    def latest_own_review_sha(_mr_ref), do: {:ok, "abc123"}
+  end
+
+  defmodule DifferentShaAdapter do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_, _), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(mr_ref, verdict, body, _opts) do
+      send(:verdict_test_pid, {:submitted, mr_ref, verdict, body})
+      {:ok, %{}}
+    end
+
+    def latest_own_review_sha(_mr_ref), do: {:ok, "some-older-sha"}
+  end
+
   # Simulates the adapter behaviour AFTER the self-review fallback has been
   # applied: submit_review/4 returns {:ok, %{}} (success) even though the
   # formal review was rejected. This tests that the CodeReview workflow does
@@ -1211,6 +1281,73 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert_received {:submitted, "#1", :approve, body}
       assert body =~ "neighbor.ex:40"
       assert body =~ "flagged context"
+    end
+  end
+
+  # bd-3948ey: one verdict per SHA — before posting, the :verdict step checks
+  # the adapter's own latest verdict review against the PR's current head. If
+  # they match, we've already verdicted this exact commit (regardless of
+  # local bookkeeping, which can be stale or bypassed via force re-dispatch),
+  # so submit_review must not be called again.
+  describe "run_step(:verdict, ...) — same-SHA skip (bd-3948ey)" do
+    setup do
+      Process.register(self(), :verdict_test_pid)
+      on_exit(fn -> :ok end)
+      :ok
+    end
+
+    test "skips submit_review when the adapter's latest own review already covers this head SHA" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.SameShaAdapter,
+        mr_ref: "#1",
+        findings: [],
+        pr: %{head_sha: "abc123"}
+      }
+
+      assert {:ok, %{verdict: :approve, verdict_posted: false}} =
+               CodeReview.run_step(:verdict, state)
+
+      refute_received {:submitted, _, _, _}
+    end
+
+    test "still submits when the adapter's latest own review is for a different (older) SHA" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.DifferentShaAdapter,
+        mr_ref: "#1",
+        findings: [],
+        pr: %{head_sha: "def456"}
+      }
+
+      assert {:ok, %{verdict: :approve, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :approve, _body}
+    end
+
+    test "still submits when the adapter doesn't implement latest_own_review_sha/1 (fails open)" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.VerdictSpy,
+        mr_ref: "#1",
+        findings: [],
+        pr: %{head_sha: "abc123"}
+      }
+
+      assert {:ok, %{verdict: :approve, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :approve, _body}
+    end
+
+    test "still submits when there's no :pr key on state (unchanged prior behavior)" do
+      state = %{mode: :adapter, adapter: Stubs.SameShaAdapter, mr_ref: "#1", findings: []}
+
+      assert {:ok, %{verdict: :approve, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :approve, _body}
     end
   end
 

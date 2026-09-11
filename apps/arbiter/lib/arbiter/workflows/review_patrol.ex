@@ -783,7 +783,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         engagement.last_verdict,
         "the author re-requested review on PR ##{engagement.source_pr} with no new commits " <>
           "since our last posted verdict (#{inspect(engagement.last_verdict)} on " <>
-          "#{engagement.last_verdict_sha})"
+          "#{engagement.last_verdict_sha}) [trigger=review_requested]"
       )
     else
       maybe_handle_author_replies(engagement, pr, adapter, workspace, repo_name)
@@ -1279,12 +1279,17 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     case Arbiter.Workflow.run(CodeReview, state) do
       {:ok, final} ->
         posted = Map.get(final, :findings) || []
-        verdict = Map.get(final, :verdict)
+        # bd-3948ey: CodeReview's :verdict step may have skipped posting (this
+        # exact SHA was already verdicted). When that happens there's no new
+        # verdict to record — persisting it here would let a report-only-style
+        # "recommended but not posted" verdict masquerade as `last_verdict`,
+        # which the circuit breaker's same-SHA check keys directly on.
+        verdict = if Map.get(final, :verdict_posted, true), do: Map.get(final, :verdict)
         persist_rereview(engagement, head, posted, verdict)
 
         Logger.info(
           "ReviewPatrol: re-reviewed engagement #{engagement.id} on #{head} " <>
-            "(#{length(posted)} new finding(s))"
+            "(#{length(posted)} new finding(s)) [trigger=new_commit]"
         )
 
         {:rereviewed, engagement.id}
@@ -1335,7 +1340,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
         Logger.info(
           "ReviewPatrol: report-only re-review of engagement #{engagement.id} on #{head} " <>
-            "(#{length(proposed)} proposed, posted 0)"
+            "(#{length(proposed)} proposed, posted 0) [trigger=new_commit]"
         )
 
         {:reported, engagement.id}
@@ -1726,7 +1731,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       {:ok, _final} ->
         Logger.info(
           "ReviewPatrol: replied to author on engagement #{engagement.id} " <>
-            "(comment #{comment[:id]})"
+            "(comment #{comment[:id]}) [trigger=author_reply]"
         )
 
         {:replied, engagement.id}

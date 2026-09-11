@@ -2381,6 +2381,128 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "latest_own_review_sha/1" do
+    test "returns the commit_id of our most recent verdict review" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "user" => %{"login" => "arb-bot"},
+                "state" => "APPROVED",
+                "commit_id" => "442ce5d"
+              }
+            ])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, "442ce5d"} = Github.latest_own_review_sha(@ref)
+    end
+
+    test "picks the LATEST of several verdict reviews from us, ignoring other reviewers" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "user" => %{"login" => "arb-bot"},
+                "state" => "APPROVED",
+                "commit_id" => "aaa111"
+              },
+              %{
+                "user" => %{"login" => "coworker"},
+                "state" => "APPROVED",
+                "commit_id" => "bbb222"
+              },
+              %{
+                "user" => %{"login" => "arb-bot"},
+                "state" => "CHANGES_REQUESTED",
+                "commit_id" => "ccc333"
+              }
+            ])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, "ccc333"} = Github.latest_own_review_sha(@ref)
+    end
+
+    test "requests reviews with per_page=100 so a long history isn't truncated at GitHub's default 30" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            assert conn.query_params["per_page"] == "100"
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, nil} = Github.latest_own_review_sha(@ref)
+    end
+
+    test "nil when we hold no verdict review yet" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, nil} = Github.latest_own_review_sha(@ref)
+    end
+
+    test "nil (fail open) when the token's own login can't be resolved" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "user" => %{"login" => "arb-bot"},
+                "state" => "APPROVED",
+                "commit_id" => "442ce5d"
+              }
+            ])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, nil} = Github.latest_own_review_sha(@ref)
+    end
+  end
+
   describe "review_requested?/1" do
     test "true when the token's own login is in requested_reviewers" do
       stub(fn conn ->
