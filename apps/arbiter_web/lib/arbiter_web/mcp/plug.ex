@@ -6,44 +6,52 @@ defmodule ArbiterWeb.MCP.Plug do
 
   ## Transport contract
 
-  `/mcp` serves **both** MCP HTTP transports, and which one a request gets is
-  decided by one explicit signal: the `sessionId` query parameter on a POST.
+  `/mcp` speaks **exactly one** MCP transport: **Streamable HTTP** (MCP spec
+  2025-03-26 / 2025-06-18). The deprecated two-endpoint HTTP+SSE transport
+  (2024-11-05) is **not** served — see "Why not HTTP+SSE" below.
 
-  ### Streamable HTTP (MCP 2025-03-26 / 2025-06-18) — the default
-
-    * **`POST /mcp`** with **no `sessionId` query parameter** — the client →
-      server request/response channel. The reply is returned **inline** as a
-      single `application/json` body. The `initialize` response carries an
-      `Mcp-Session-Id` header the client threads back on later requests and on
-      the GET stream.
+    * **`POST /mcp`** — the client → server request/response channel. Every
+      request is answered **inline**, in that POST's own `application/json`
+      body; no reply is ever written to the GET stream. The `initialize`
+      response carries an `Mcp-Session-Id` header the client threads back on
+      later requests and on the GET stream.
     * **`GET /mcp`** with `Accept: text/event-stream` — the server → client SSE
-      stream, held open with periodic keepalives. Server-initiated messages are
-      routed to it via `ArbiterWeb.MCP.Session`.
+      stream, held open with periodic keepalives. It carries **only**
+      server-initiated messages, routed to it by `ArbiterWeb.MCP.Session`. It
+      advertises no POST-back `endpoint` event, because there is nothing to
+      advertise: clients POST to `/mcp` itself.
+    * A GET without `Accept: text/event-stream`, or any other verb, is `405`.
 
-  Clients: Claude Code (`"type": "http"`), Gemini CLI (`httpUrl`), Codex CLI
-  (`[mcp_servers.*] url`). This is what every config Arbiter generates uses —
-  see `Arbiter.MCP.AgentConfig.Claude`, `.Gemini`, `.Codex` and the CLI's
-  `.mcp.json` template.
+  Clients this supports, and how each is configured:
 
-  ### HTTP+SSE (MCP 2024-11-05, deprecated but still spoken)
+    * Claude Code — `"type": "http"` in `.mcp.json` (**never** `"type": "sse"`).
+    * Gemini CLI — `httpUrl`.
+    * Codex CLI — `[mcp_servers.arbiter] url`.
+    * Antigravity / `agy` — its streamable-HTTP (`url`) server entry.
 
-    * **`GET /mcp`** with `Accept: text/event-stream` emits an `event: endpoint`
-      frame whose `data:` line is the POST-back URL. That URL carries a
-      **`sessionId` query parameter** naming the stream just opened (plus any
-      `?token=` the stream authenticated with).
-    * **`POST` to that advertised URL** — because it carries `sessionId`, the
-      reply is **not** returned inline. The POST is acknowledged with **`202
-      Accepted` and an empty body**, and the JSON-RPC reply is written to the
-      matching SSE stream as an `event: message` frame. A `sessionId` with no
-      open stream is `404` rather than a silent inline answer, so a client whose
-      stream died fails loudly instead of hanging on a reply that went nowhere.
+  That is what every MCP config Arbiter generates already writes — see
+  `Arbiter.MCP.AgentConfig.Claude` (`"type" => "http"`), `.Gemini`, `.Codex`,
+  and the `arb init` template (`apps/arbiter_cli/priv/templates/mcp_json.eex`).
 
-  Clients: Claude Code (`"type": "sse"`), Antigravity / `agy`, and anything else
-  pinned to the 2024-11-05 transport. Because the SSE stream is coordinator-tier
-  (below), only a coordinator token can use this transport; worker spawns are
-  configured for Streamable HTTP.
+  ### Why not HTTP+SSE
 
-  A GET without `Accept: text/event-stream`, or any other verb, is `405`.
+  A client pinned to the 2024-11-05 transport (Claude Code's `"type": "sse"`)
+  POSTs `initialize` and then waits for the reply **on the stream**. Serving
+  half of that contract — an `event: endpoint` handshake whose POSTs are
+  answered inline — is worse than not serving it at all: the client blocks to
+  its 30s ceiling and reports `CONNECT_TIMEOUT`, which reads as "server down"
+  (bd-3e58bd). So rather than carry both transports on one path, `/mcp` carries
+  the single one every client Arbiter targets speaks, and `"type": "sse"` is an
+  unsupported configuration — switch such a client to `"type": "http"`.
+
+  ### `/.well-known/oauth-protected-resource` must stay a 404
+
+  An unauthenticated request here is a bare `401`, which makes MCP clients probe
+  `/.well-known/oauth-protected-resource` (and `/.../mcp`) for OAuth discovery.
+  Those paths must stay **unrouted**: a `404` tells the client there is no OAuth
+  and it falls back to its configured token, whereas routing them into this plug
+  answers `405` and strands the client in the OAuth branch. Arbiter
+  authenticates with a scope token, never OAuth.
 
   ## Capability is the token
 
@@ -105,8 +113,7 @@ defmodule ArbiterWeb.MCP.Plug do
         end
 
       conn.method == "GET" and accepts_event_stream?(conn) ->
-        # The server → client SSE stream, shared by both transports.
-        # Coordinator-only.
+        # The server → client SSE stream (Streamable HTTP). Coordinator-only.
         case authenticate(conn) do
           {:ok, %Scope{tier: :coordinator} = scope} -> open_sse(conn, scope)
           {:ok, %Scope{}} -> unauthorized(conn, :forbidden)
@@ -163,12 +170,22 @@ defmodule ArbiterWeb.MCP.Plug do
     |> Enum.any?(&String.contains?(&1, "text/event-stream"))
   end
 
-  # Open the chunked SSE stream, register the session for routing, flush an
-  # initial keepalive, then hold the connection open until the client
-  # disconnects or the configured lifetime elapses.
+  # Open the chunked SSE stream, claim the session for routing, flush an initial
+  # keepalive, then hold the connection open until the client disconnects or the
+  # configured lifetime elapses. Nothing here advertises a POST-back endpoint:
+  # under Streamable HTTP the client POSTs to `/mcp` and reads the reply inline,
+  # and an `event: endpoint` frame would promise the HTTP+SSE flow we do not
+  # serve.
   defp open_sse(conn, _scope) do
-    session_id = register_stream(resolve_session_id(conn))
+    session_id = resolve_session_id(conn)
 
+    case Session.claim(session_id) do
+      :ok -> stream_sse(conn, session_id)
+      {:error, :session_in_use} -> session_in_use(conn, session_id)
+    end
+  end
+
+  defp stream_sse(conn, session_id) do
     conn =
       conn
       |> put_resp_header("mcp-session-id", session_id)
@@ -176,44 +193,30 @@ defmodule ArbiterWeb.MCP.Plug do
       |> put_resp_content_type("text/event-stream")
       |> send_chunked(200)
 
-    uri = endpoint_uri(conn, session_id)
-
-    payload = """
-    : arbiter-mcp session=#{session_id}
-
-    event: endpoint
-    data: #{uri}
-
-    """
-
-    case chunk(conn, payload) do
-      {:ok, conn} -> sse_loop(conn, sse_deadline())
-      {:error, _closed} -> conn
+    try do
+      case chunk(conn, ": arbiter-mcp session=#{session_id}\n\n") do
+        {:ok, conn} -> sse_loop(conn, sse_deadline())
+        {:error, _closed} -> conn
+      end
+    after
+      # Release the routing entry the moment the stream ends. A Bandit
+      # connection process outlives the request it served, so a left-behind
+      # entry would black-hole every later message for this session id.
+      Session.unregister(session_id)
     end
   end
 
-  # Claim `session_id` for this stream. A second GET for an id that already has
-  # a live stream falls back to a fresh id rather than opening an unroutable
-  # stream — the advertised endpoint then names the id that actually routes here.
-  defp register_stream(session_id) do
-    case Session.register(session_id) do
-      :ok -> session_id
-      {:error, :already_registered} -> register_stream(Session.new_id())
-    end
-  end
-
-  # The POST-back URL advertised to HTTP+SSE clients. Same path (Arbiter serves
-  # GET and POST on `/mcp`), the stream's own query string preserved so a
-  # `?token=` carries over, plus the `sessionId` that routes a POST's reply back
-  # to this stream.
-  defp endpoint_uri(conn, session_id) do
-    query =
-      conn.query_string
-      |> URI.decode_query()
-      |> Map.put("sessionId", session_id)
-      |> URI.encode_query()
-
-    conn.request_path <> "?" <> query
+  # `Session.claim/1` displaces a stale stream holding the same id, so this is
+  # only reached when a genuinely live stream refuses to let go inside the
+  # takeover window. Say so, rather than quietly moving the client to a
+  # different session id than the one it POSTs with.
+  defp session_in_use(conn, session_id) do
+    send_json(conn, 409, %{
+      "error" => %{
+        "type" => "session_in_use",
+        "message" => "Another open stream still holds session #{session_id}; retry"
+      }
+    })
   end
 
   # Each pass waits up to the keepalive interval (bounded by the stream deadline)
@@ -305,45 +308,11 @@ defmodule ArbiterWeb.MCP.Plug do
     params = Map.get(req, "params", %{})
     response = handle_method(method, params, scope, id)
 
-    case routed_session_id(conn) do
-      nil -> reply_inline(conn, method, response)
-      session_id -> reply_on_stream(conn, session_id, response)
-    end
-  end
-
-  # Streamable HTTP: the answer is the POST's own body.
-  defp reply_inline(conn, method, response) do
+    # Streamable HTTP: the answer is this POST's own body, whatever query
+    # parameters the request carried.
     conn
     |> maybe_assign_session(method)
     |> send_json(200, response)
-  end
-
-  # HTTP+SSE: acknowledge the POST and write the answer to the named stream.
-  defp reply_on_stream(conn, session_id, response) do
-    case Session.notify(session_id, response) do
-      :ok ->
-        conn
-        |> put_resp_header("mcp-session-id", session_id)
-        |> send_resp(202, "")
-
-      {:error, :no_session} ->
-        send_json(conn, 404, %{
-          "error" => %{
-            "type" => "no_session",
-            "message" => "No open SSE stream for session #{session_id}"
-          }
-        })
-    end
-  end
-
-  # The `sessionId` query parameter is the only signal that selects the
-  # HTTP+SSE transport: it is present exactly when the client POSTed to the URL
-  # the `endpoint` event advertised.
-  defp routed_session_id(conn) do
-    case conn.query_params do
-      %{"sessionId" => id} when is_binary(id) and id != "" -> id
-      _ -> nil
-    end
   end
 
   # The `initialize` response mints the session id the client threads back on

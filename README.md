@@ -100,9 +100,14 @@ CLI) or a plain `url` (Codex CLI), and pass the token as
 }
 ```
 
-The deprecated HTTP+SSE transport (`"type": "sse"`) is still served for clients
-pinned to it, but it requires a coordinator token and is not what `arb init` or
-worker dispatch writes. Prefer `"type": "http"`.
+Streamable HTTP is the **only** transport `/mcp` serves. The deprecated HTTP+SSE
+transport (2024-11-05, Claude Code's `"type": "sse"`) is not served: a client
+configured that way POSTs `initialize` and then waits for the reply on the SSE
+stream, which never arrives, so it times out and reports the server as down. Use
+`"type": "http"` — which is what `arb init` and worker dispatch write. The
+`GET /mcp` SSE stream still exists, but only as Streamable HTTP's server →
+client channel (server-initiated messages and keepalives); it requires a
+coordinator token.
 
 ## Quick-start
 
