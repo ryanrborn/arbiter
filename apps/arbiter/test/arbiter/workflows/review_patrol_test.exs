@@ -1264,6 +1264,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert record.mode == :auto
       assert record.verdict == :request_changes
       assert record.finding_count == 1
+      assert length(record.proposed_comments) == 1
       assert record.pr_ref == eng.source_pr
       assert record.workspace_id == ws.id
     end
@@ -1323,6 +1324,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert record.mode == :report_only
       assert record.greenlight_status == :pending
       assert record.finding_count == 1
+      assert length(record.proposed_comments) == 1
     end
 
     test "run_rereview refuses to post a second verdict for a SHA it already verdicted",
@@ -1371,6 +1373,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert record.mode == :report_only
       assert record.verdict == :approve
       assert record.finding_count == 1
+      assert length(record.proposed_comments) == 1
 
       assert [
                %{

@@ -1670,6 +1670,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           greenlight_status: if(report_only, do: :pending, else: nil),
           engagement_id: engagement.id,
           dispatched_by: "review_patrol",
+          proposed_comments: Enum.map(findings, &circuit_breaker_proposed_comment/1),
           finding_count: length(findings),
           findings_summary: circuit_breaker_findings_summary(findings),
           model: Map.get(usage, :model),
