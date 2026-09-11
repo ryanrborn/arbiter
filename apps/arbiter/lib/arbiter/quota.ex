@@ -337,7 +337,7 @@ defmodule Arbiter.Quota do
     end
   end
 
-  defp safe_workspace(workspace_id) when is_binary(workspace_id) do
+  defp safe_workspace(workspace_id) do
     case Ash.get(Workspace, workspace_id) do
       {:ok, ws} -> ws
       _ -> nil
@@ -345,8 +345,6 @@ defmodule Arbiter.Quota do
   rescue
     _ -> nil
   end
-
-  defp safe_workspace(_), do: nil
 
   # ---- uniform multi-provider view (bd-ajh7bd) ---------------------------
 
