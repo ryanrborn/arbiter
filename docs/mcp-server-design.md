@@ -113,8 +113,30 @@ scope in `apps/arbiter_web/lib/arbiter_web/router.ex`. Clients POST JSON-RPC
 2.0; the server returns a single JSON body for fast calls and upgrades to SSE
 only for long ones. This works behind the load balancer / reverse proxy an
 operator may already front :4848 with, and avoids spawning a fresh stdio MCP
-server per session per agent type. The legacy two-endpoint HTTP+SSE transport is
-deprecated upstream; we do not implement it.
+server per session per agent type.
+
+The legacy two-endpoint HTTP+SSE transport (2024-11-05) is deprecated upstream,
+but clients pinned to it are still in the field (Antigravity / `agy`, Claude
+Code's `"type": "sse"`), so `/mcp` also speaks it. The two transports are
+disambiguated by one signal: a POST carrying a `sessionId` query parameter — the
+parameter the SSE stream's `event: endpoint` frame advertises — is answered with
+`202 Accepted` and an empty body, and its JSON-RPC reply is written to the named
+stream. A POST without `sessionId` is Streamable HTTP and is answered inline.
+See the moduledoc of `ArbiterWeb.MCP.Plug` for the authoritative contract.
+
+Every MCP config Arbiter generates uses **Streamable HTTP**:
+`Arbiter.MCP.AgentConfig.Claude` writes `"type": "http"`, `.Gemini` writes
+`httpUrl`, `.Codex` writes `[mcp_servers.arbiter] url`, and the `arb init`
+template (`apps/arbiter_cli/priv/templates/mcp_json.eex`) writes `"type":
+"http"`. Operators should prefer `"type": "http"` too; `"type": "sse"` works but
+is the deprecated path, and it needs a **coordinator** token because the GET
+stream is coordinator-tier.
+
+Note that `/.well-known/oauth-protected-resource` (and `/.../mcp`) must stay
+**unrouted**: an unauthenticated `/mcp` is a bare `401`, which makes MCP clients
+probe that path for OAuth discovery. A `404` tells them there is no OAuth and
+they fall back to the configured token; anything else (e.g. the MCP plug's
+`405`) strands them in the OAuth branch. Arbiter uses a scope token, not OAuth.
 
 ### 2.2 Build vs. buy the protocol layer
 

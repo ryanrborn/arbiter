@@ -83,6 +83,27 @@ To mint a token for a coordinator to use:
 arb mcp token mint --tier coordinator
 ```
 
+The server speaks MCP over **Streamable HTTP** at `http://127.0.0.1:4848/mcp`,
+so configure a client with `"type": "http"` (Claude Code), `httpUrl` (Gemini
+CLI) or a plain `url` (Codex CLI), and pass the token as
+`Authorization: Bearer <token>`:
+
+```json
+{
+  "mcpServers": {
+    "arbiter": {
+      "type": "http",
+      "url": "http://127.0.0.1:4848/mcp",
+      "headers": { "Authorization": "Bearer <coordinator-token>" }
+    }
+  }
+}
+```
+
+The deprecated HTTP+SSE transport (`"type": "sse"`) is still served for clients
+pinned to it, but it requires a coordinator token and is not what `arb init` or
+worker dispatch writes. Prefer `"type": "http"`.
+
 ## Quick-start
 
 ### 1. Start the server
