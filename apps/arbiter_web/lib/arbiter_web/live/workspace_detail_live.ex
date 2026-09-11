@@ -109,6 +109,10 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
          |> assign(:routing_policies, Routing.valid_policies())
          |> assign(:review_automation_modes, ValidateConfig.valid_review_automation_modes())
          |> assign(:quota_modes, ValidateConfig.valid_quota_modes())
+         |> assign(
+           :quota_weekly_warning_policies,
+           Arbiter.Quota.Gate.weekly_warning_policies()
+         )
          |> assign(:security_modes, SecurityPolicy.valid_modes())
          |> assign(:security_filesystems, SecurityPolicy.valid_filesystems())
          |> assign(:safe_default_categories, SecurityPolicy.safe_default_categories())}
@@ -382,6 +386,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               routing_policies={@routing_policies}
               review_automation_modes={@review_automation_modes}
               quota_modes={@quota_modes}
+              quota_weekly_warning_policies={@quota_weekly_warning_policies}
             />
 
             <.live_component

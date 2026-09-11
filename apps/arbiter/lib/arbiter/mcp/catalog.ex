@@ -236,7 +236,9 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @both,
       description:
         "Current rate-limit / quota state for the scope's workspace. `claude`: Anthropic's 5h + " <>
-          "7d utilization, reset times, status, and which window binds (captured by the local " <>
+          "7d utilization, reset times, status, which window Anthropic says binds, and " <>
+          "`gating_window` / `gating_reason` — which window (if any) is currently holding " <>
+          "dispatch, per this workspace's quota config (captured by the local " <>
           "proxy; `null` until the first proxied request), plus an on-demand per-model weekly " <>
           "utilization + extra_usage overage refresh. `codex`: OpenAI session + weekly " <>
           "windows fetched live from the rate-limit endpoint (`null` with a `codex_message` when " <>

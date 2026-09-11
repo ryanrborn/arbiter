@@ -47,6 +47,40 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "representative window: five_hour"
     end
 
+    # bd-1tuxv8: the 5h and 7d numbers are both printed, but only one window (or
+    # neither) is actually gating dispatch — say which, so "7d is at 76%" can't
+    # be read as the reason Autopilot is idle.
+    test "names the window that is gating dispatch" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "utilization_7d" => 0.91,
+              "gating_window" => "7d",
+              "gating_reason" => "7d quota 0.91 ≥ 0.90"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "gating dispatch:       7d — 7d quota 0.91 ≥ 0.90"
+    end
+
+    test "says so when no window is gating dispatch" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"gating_window" => nil, "gating_reason" => nil})
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "gating dispatch:       none — dispatch is not quota-held"
+    end
+
     test "renders codex session + weekly windows in text mode" do
       stub_get("/api/quota", %{
         "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "codex" => @codex}

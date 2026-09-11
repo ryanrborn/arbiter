@@ -50,7 +50,6 @@
   {"lib/arbiter/agents/gemini.ex", :pattern_match_cov},
   {"lib/arbiter/agents/gemini/stream.ex", :pattern_match_cov},
   {"lib/arbiter/agents/security_policy.ex", :pattern_match_cov},
-  {"lib/arbiter/board/snapshot.ex", :pattern_match_cov},
   {"lib/arbiter/reviews/external_review.ex", :pattern_match_cov},
   {"lib/arbiter/skills/selection.ex", :pattern_match_cov},
   {"lib/arbiter/tasks/claim.ex", :pattern_match_cov},

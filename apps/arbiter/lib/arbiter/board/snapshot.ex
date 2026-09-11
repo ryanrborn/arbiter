@@ -95,7 +95,6 @@ defmodule Arbiter.Board.Snapshot do
 
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
-  alias Arbiter.Quota.Gate.Snapshot, as: QuotaSnapshot
   alias Arbiter.Worker.Watchdog
 
   require Ash.Query
@@ -339,7 +338,7 @@ defmodule Arbiter.Board.Snapshot do
 
   Reads the workspace's default agent provider's snapshot
   (`Arbiter.Quota.default_provider/1`) and defers the over-cap decision to
-  `Arbiter.Quota.Gate.over_cap?/2` — the same shared implementation the
+  `Arbiter.Quota.Gate.hold_phrase/2` (`gating_window/2`) — the same shared implementation the
   Conductor's `Arbiter.Workflows.QuotaGate.Default` and the `dispatch/2`
   quota seam both use (bd-5j6nmn), so Autopilot's one-per-tick promotion gate
   and the Conductor's per-drain cap-clamp agree on the same underlying data.
@@ -824,32 +823,15 @@ defmodule Arbiter.Board.Snapshot do
     _ -> nil
   end
 
-  defp describe_quota(snapshot, workspace) do
-    if Arbiter.Quota.Gate.over_cap?(snapshot, workspace) do
-      {:hold, quota_phrase(snapshot, workspace)}
-    else
-      :ok
-    end
-  end
-
   # "Exhausted" and "near exhaustion" are different operator problems: the
   # first clears when the window resets, the second clears if you raise the
-  # ceiling. Naming the ceiling in the second case saves the lookup.
-  defp quota_phrase(snapshot, workspace) do
-    case QuotaSnapshot.normalize(snapshot) do
-      nil ->
-        "quota exhausted"
-
-      %{status: status} when status not in [nil, "allowed"] ->
-        "quota exhausted"
-
-      %{utilization: utilization} ->
-        "quota near exhaustion (#{percent(utilization)} of window used, " <>
-          "ceiling #{percent(Arbiter.Quota.Gate.threshold(workspace))})"
+  # ceiling. A 7d hold is a third: it clears at the weekly reset, days away, so
+  # `Arbiter.Quota.Gate.hold_phrase/2` labels it with the window explicitly
+  # (`7d quota 0.91 ≥ 0.90`) rather than reusing the 5h wording (bd-1tuxv8).
+  defp describe_quota(snapshot, workspace) do
+    case Arbiter.Quota.Gate.hold_phrase(snapshot, workspace) do
+      nil -> :ok
+      phrase -> {:hold, phrase}
     end
   end
-
-  defp percent(nil), do: "—"
-  defp percent(n) when is_number(n), do: "#{round(n * 100)}%"
-  defp percent(_), do: "—"
 end

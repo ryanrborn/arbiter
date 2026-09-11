@@ -45,6 +45,46 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert resp["data"]["claude"]["status_5h"] == "allowed"
   end
 
+  # bd-1tuxv8: the gate reads both windows, so the API has to say which one is
+  # holding dispatch — `arb quota` renders this line straight from here.
+  test "reports the 7d window as the one gating dispatch", %{conn: conn, ws: ws} do
+    {:ok, _} =
+      Quota.capture(ws.id, [
+        {"anthropic-ratelimit-unified-5h-utilization", "0.23"},
+        {"anthropic-ratelimit-unified-5h-status", "allowed"},
+        {"anthropic-ratelimit-unified-5h-reset", reset_epoch(3600)},
+        {"anthropic-ratelimit-unified-7d-utilization", "0.91"},
+        {"anthropic-ratelimit-unified-7d-status", "allowed"},
+        {"anthropic-ratelimit-unified-representative-claim", "seven_day"}
+      ])
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["claude"]["gating_window"] == "7d"
+    assert resp["data"]["claude"]["gating_reason"] == "7d quota 0.91 ≥ 0.90"
+  end
+
+  test "reports no gating window when both windows have headroom", %{conn: conn, ws: ws} do
+    {:ok, _} =
+      Quota.capture(ws.id, [
+        {"anthropic-ratelimit-unified-5h-utilization", "0.23"},
+        {"anthropic-ratelimit-unified-5h-status", "allowed"},
+        {"anthropic-ratelimit-unified-5h-reset", reset_epoch(3600)},
+        {"anthropic-ratelimit-unified-7d-utilization", "0.76"},
+        {"anthropic-ratelimit-unified-7d-status", "allowed_warning"}
+      ])
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["claude"]["gating_window"] == nil
+    assert resp["data"]["claude"]["gating_reason"] == nil
+  end
+
+  defp reset_epoch(offset_seconds) do
+    DateTime.utc_now()
+    |> DateTime.add(offset_seconds, :second)
+    |> DateTime.to_unix()
+    |> to_string()
+  end
+
   test "resolves an explicit ?workspace= by id", %{conn: conn} do
     other = Ash.create!(Workspace, %{name: "by-id"})
     {:ok, _} = Quota.capture(other.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.6"}])

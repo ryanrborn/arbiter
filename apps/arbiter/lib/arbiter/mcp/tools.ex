@@ -83,7 +83,10 @@ defmodule Arbiter.MCP.Tools do
 
   `claude` is the latest captured snapshot (`nil` until the first proxied
   request), including the per-model weekly + `extra_usage` overage layer when the
-  oauth-usage probe has run. `codex` is `nil` with a `codex_message` until the
+  oauth-usage probe has run, and `gating_window` / `gating_reason` naming which
+  window (if any) is currently holding dispatch (bd-1tuxv8) — both the 5h and the
+  7d figures are reported, but only one of them, or neither, is what the gate is
+  acting on. `codex` is `nil` with a `codex_message` until the
   Codex probe has stored a snapshot (i.e. the `codex` CLI is authenticated on
   this host). `gemini` / `antigravity` are the persisted per-model Cloud Code
   Assist snapshots (`nil` until the Gemini CLI is authenticated and probed).
