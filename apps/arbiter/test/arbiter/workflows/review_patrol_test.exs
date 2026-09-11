@@ -1233,6 +1233,41 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert reloaded.last_verdict_sha == "newsha"
     end
 
+    test "a posted re-review writes an ExternalReview record visible via external_review_list (bd-xdkwsg)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 610, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(610, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert [record] = records
+      assert record.status == :completed
+      assert record.mode == :auto
+      assert record.verdict == :request_changes
+      assert record.finding_count == 1
+      assert record.pr_ref == eng.source_pr
+      assert record.workspace_id == ws.id
+    end
+
     test "report-only re-reviews never record last_verdict / last_verdict_sha", %{ws: ws} do
       eng =
         engagement(ws, 601, %{
@@ -1258,6 +1293,36 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert reloaded.last_reviewed_sha == "newsha"
       assert is_nil(reloaded.last_verdict)
       assert is_nil(reloaded.last_verdict_sha)
+    end
+
+    test "a report-only re-review also writes an ExternalReview record (bd-xdkwsg)", %{ws: ws} do
+      eng =
+        engagement(ws, 611, %{
+          review_automation: :report_only,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(611, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      records =
+        Record
+        |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.read!()
+
+      assert [record] = records
+      assert record.status == :completed
+      assert record.mode == :report_only
+      assert record.greenlight_status == :pending
+      assert record.finding_count == 1
     end
 
     test "run_rereview refuses to post a second verdict for a SHA it already verdicted",
@@ -1542,12 +1607,19 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert length(escalations) == 1
 
+      # One record from the trip (`:completed_unposted`, bd-1atwts), and one
+      # from the real re-review that the cleared watermark then let through
+      # (bd-xdkwsg) — the ledger now sees both rounds instead of collapsing
+      # the successful follow-up into invisibility.
       records =
         Record
         |> Ash.Query.filter(engagement_id == ^eng.id)
+        |> Ash.Query.sort(started_at: :asc)
         |> Ash.read!()
 
-      assert length(records) == 1
+      assert [trip_record, rereview_record] = records
+      assert trip_record.status == :completed_unposted
+      assert rereview_record.status == :completed
       assert reload(eng).circuit_breaker_tripped == false
     end
 
