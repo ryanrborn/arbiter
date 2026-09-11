@@ -113,10 +113,10 @@ defmodule Arbiter.Worker do
 
   require Logger
 
-  alias Arbiter.Workflows.ReviewGateFixRoundDispatcher, as: FixRound
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewVerification
+  alias Arbiter.Workflows.ReviewGateFixRoundDispatcher, as: FixRound
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
   @type status ::
