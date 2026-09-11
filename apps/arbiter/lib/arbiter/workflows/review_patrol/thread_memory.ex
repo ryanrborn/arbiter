@@ -82,7 +82,7 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemory do
     |> Enum.flat_map(fn thread ->
       case settle_reason(thread, our_login, pr_author) do
         nil -> []
-        reason -> [entry(thread, reason, pr_author, head_sha)]
+        reason -> [entry(thread, reason, pr_author, head_sha, our_login)]
       end
     end)
   end
@@ -182,6 +182,98 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemory do
 
   def cited_evidence?(_body), do: false
 
+  @doc """
+  Whether `finding` is answered by one of the `settled` threads (bd-wtvu9r).
+
+  The join key is the finding's `{file, line}`: a settled thread answers a
+  finding when it anchors to the same file within `#{@anchor_window}` lines of
+  it (the same drift tolerance `filter_findings/3` uses — a review comment and
+  the finding it came from move apart by a line or two as the file changes).
+  A settled thread with no line is file-level and answers any finding in that
+  file; a finding with no line is answered by any settled thread in its file.
+  """
+  @spec answered?(map(), [entry()] | nil) :: boolean()
+  def answered?(finding, settled), do: answered_by(finding, settled) != nil
+
+  @doc """
+  The settled entry that answers `finding`, or `nil`. See `answered?/2`.
+  """
+  @spec answered_by(map(), [entry()] | nil) :: entry() | nil
+  def answered_by(finding, settled) do
+    file = field(finding, "file")
+    line = field(finding, "line")
+
+    if is_binary(file) and file != "" do
+      settled
+      |> List.wrap()
+      |> Enum.find(&answers?(&1, file, line))
+    end
+  end
+
+  @doc """
+  The auditable per-finding refutation join (bd-wtvu9r).
+
+  One entry per answered finding: the finding's own `{file, line, message}`
+  key plus the thread and the **reply id(s)** that answered it. This is what
+  makes "every blocking finding has an author reply" a checkable claim rather
+  than a guess — the breaker's escalation quotes it so a human can open each
+  reply.
+  """
+  @spec refutations([map()] | nil, [entry()] | nil) :: [map()]
+  def refutations(findings, settled) do
+    findings
+    |> List.wrap()
+    |> Enum.flat_map(fn finding ->
+      case answered_by(finding, settled) do
+        nil ->
+          []
+
+        entry ->
+          [
+            %{
+              "file" => field(finding, "file"),
+              "line" => field(finding, "line"),
+              "message" => field(finding, "message"),
+              "thread_id" => entry["thread_id"],
+              "reason" => entry["reason"],
+              "reply_ids" => List.wrap(entry["reply_ids"])
+            }
+          ]
+      end
+    end)
+  end
+
+  @doc """
+  `%{file => MapSet.t(line numbers the diff ADDS)}` — which LINES a push
+  actually touched, not just which files (bd-wtvu9r).
+
+  Context lines don't count: they are the unchanged code a settled finding is
+  still anchored to.
+  """
+  @spec touched_lines(String.t() | nil) :: %{String.t() => MapSet.t(pos_integer())}
+  def touched_lines(diff), do: added_lines(diff)
+
+  @doc """
+  Whether the push described by `touched` (from `touched_lines/1`) changed the
+  code `finding` is anchored to — an added line within `#{@anchor_window}`
+  lines of it.
+
+  A finding with no line falls back to file-level: we cannot be precise about
+  it, and the callers of this function (the loop-signature breaker) must never
+  conclude "untouched" from imprecision.
+  """
+  @spec touches_finding?(map(), %{String.t() => MapSet.t(pos_integer())}) :: boolean()
+  def touches_finding?(finding, touched) do
+    file = field(finding, "file")
+    line = field(finding, "line")
+
+    cond do
+      not (is_binary(file) and file != "") -> false
+      is_integer(line) -> window_touched?(touched, file, line)
+      true -> Map.has_key?(touched, file)
+    end
+  end
+
   # ---- internals ----------------------------------------------------------
 
   defp ours?(thread, our_login) do
@@ -213,7 +305,7 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemory do
     Enum.any?(comments(thread), &(&1[:author] == pr_author and cited_evidence?(&1[:body])))
   end
 
-  defp entry(thread, reason, pr_author, head_sha) do
+  defp entry(thread, reason, pr_author, head_sha, our_login) do
     %{
       "thread_id" => to_string(Map.get(thread, :id)),
       "file" => Map.get(thread, :path),
@@ -221,10 +313,36 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemory do
       "finding" => snippet(opening_body(thread)),
       "reason" => reason,
       "author_reply" => snippet(last_author_body(thread, pr_author)),
+      "reply_ids" => reply_ids(thread, reason, pr_author, our_login),
       "settled_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
       "settled_sha" => head_sha
     }
   end
+
+  # The comment id(s) that actually ANSWERED the finding (bd-wtvu9r) — the
+  # per-finding refutation state the loop-signature breaker arm needs to say
+  # *which* reply closed *which* finding, rather than "this thread is settled
+  # somehow". Reason-specific, because the answering comment differs:
+  # a refutation is the author's cited-evidence reply, a concession is our own
+  # comment, and a bare resolve is attributed to whatever the author last said.
+  defp reply_ids(thread, reason, pr_author, our_login) do
+    thread
+    |> comments()
+    |> Enum.filter(&answering_comment?(&1, reason, pr_author, our_login))
+    |> Enum.map(& &1[:id])
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&to_string/1)
+    |> Enum.uniq()
+  end
+
+  defp answering_comment?(comment, "we_conceded", _pr_author, our_login),
+    do: comment[:author] == our_login and concession?(comment[:body])
+
+  defp answering_comment?(comment, "author_refuted", pr_author, _our_login),
+    do: comment[:author] == pr_author and cited_evidence?(comment[:body])
+
+  defp answering_comment?(comment, _reason, pr_author, _our_login),
+    do: is_binary(pr_author) and pr_author != "" and comment[:author] == pr_author
 
   defp opening_body(thread) do
     case comments(thread) do
@@ -267,9 +385,27 @@ defmodule Arbiter.Workflows.ReviewPatrol.ThreadMemory do
     end)
   end
 
+  # Does a settled entry anchor to this finding's {file, line}? See `answered?/2`.
+  defp answers?(entry, file, line) do
+    entry["file"] == file and
+      case {entry["line"], line} do
+        {anchor, l} when is_integer(anchor) and is_integer(l) -> abs(anchor - l) <= @anchor_window
+        _ -> true
+      end
+  end
+
+  # Read a finding field tolerating both the atom-keyed fresh shape and the
+  # string-keyed persisted one.
+  defp field(%{} = finding, key), do: Map.get(finding, key) || Map.get(finding, atom_key(key))
+  defp field(_finding, _key), do: nil
+
+  defp atom_key("file"), do: :file
+  defp atom_key("line"), do: :line
+  defp atom_key("message"), do: :message
+
   defp suppress?(finding, anchors, touched) do
-    file = finding[:file] || finding["file"]
-    line = finding[:line] || finding["line"]
+    file = field(finding, "file")
+    line = field(finding, "line")
 
     is_binary(file) and is_integer(line) and
       Enum.any?(anchors, fn a ->
