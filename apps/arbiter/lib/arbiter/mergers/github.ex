@@ -345,6 +345,80 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @doc """
+  bd-a16rgk: best-effort fetch of a single file's content at `ref` (normally
+  the PR's head SHA), so a reviewer finding that depends on code outside the
+  diff can be checked before its severity is finalized instead of posted as
+  a blocking, unverified guess. Not part of the `Merger` behaviour — like
+  `self_approved?/1` above, `CodeReview.Checks` probes for it via
+  `function_exported?/3`, so an adapter without it (GitLab, Direct) simply
+  skips verification and falls back to the existing hedge/CI-based capping.
+
+  Returns `{:ok, content}` (raw file text) or `{:error, term}` — a 404 (file
+  doesn't exist at that ref) surfaces as an ordinary error, same as any
+  other fetch failure, so the caller can fail open.
+  """
+  @spec file_content(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def file_content(mr_ref, path, ref)
+      when is_binary(mr_ref) and is_binary(path) and is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/contents/#{URI.encode(path)}",
+             params: [ref: ref]
+           )
+           |> handle_json() do
+      decode_content(body)
+    end
+  end
+
+  defp decode_content(%{"content" => b64, "encoding" => "base64"}) when is_binary(b64) do
+    case Base.decode64(String.replace(b64, "\n", "")) do
+      {:ok, bin} ->
+        {:ok, bin}
+
+      :error ->
+        {:error,
+         %Error{kind: :validation_failed, status: 200, message: "bad base64 content", raw: b64}}
+    end
+  end
+
+  defp decode_content(other) do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: 200,
+       message: "unexpected contents shape",
+       raw: other
+     }}
+  end
+
+  @doc """
+  bd-a16rgk: resolve a bare filename or module reference mentioned in
+  reviewer prose (e.g. "FallbackController", with no path attached) to an
+  actual repo path, via GitHub code search — `file_content/3` above needs a
+  real path, and the reviewer's own claim text rarely includes one. Returns
+  `{:ok, path}` for the first match or `:error` for no match / any failure
+  (best-effort: the Search API only indexes the default branch, so a file
+  added on the PR branch itself can be missed — that just means
+  verification is skipped for that finding, not that it produces a wrong
+  answer).
+  """
+  @spec search_path(String.t(), String.t()) :: {:ok, String.t()} | :error
+  def search_path(mr_ref, filename) when is_binary(mr_ref) and is_binary(filename) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, %{"items" => [%{"path" => path} | _]}} <-
+           request(cfg, :get, "/search/code",
+             params: [q: "filename:#{filename} repo:#{owner}/#{repo}"]
+           )
+           |> handle_json() do
+      {:ok, path}
+    else
+      _ -> :error
+    end
+  end
+
+  @doc """
   The commit SHA the authenticated identity's most recent submitted verdict
   review (APPROVED or CHANGES_REQUESTED) was posted against — the
   source-of-truth check for "have we already verdicted this exact commit,"

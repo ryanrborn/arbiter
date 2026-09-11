@@ -95,8 +95,8 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
 
       invoke_reviewer(build_prompt(filtered_diff, elided_paths, state), state)
       |> case do
-        {:ok, raw} -> {:ok, parse_findings(raw)}
-        {:ok, raw, usage} -> {:ok, parse_findings(raw), usage}
+        {:ok, raw} -> {:ok, parse_findings(raw, state)}
+        {:ok, raw, usage} -> {:ok, parse_findings(raw, state), usage}
         {:error, _} = err -> err
       end
     end
@@ -391,6 +391,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
 
     tracker_section = tracker_context_section(Map.get(state, :tracker_context))
     pr_section = pr_section(Map.get(state, :pr))
+    ci_section = ci_status_section(pipeline_status(state))
     incremental_note = incremental_review_note(Map.get(state, :incremental_review))
     settled_section = ThreadMemory.prompt_section(Map.get(state, :settled_threads))
     consumer_section = consumer_refs_section(Map.get(state, :consumer_refs))
@@ -402,7 +403,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{task_line}#{tracker_section}#{pr_section}#{incremental_note}#{settled_section}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}#{tracker_section}#{pr_section}#{ci_section}#{incremental_note}#{settled_section}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [
@@ -482,6 +483,27 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   end
 
   defp pr_section(_pr), do: ""
+
+  # bd-a16rgk: the PR head SHA's CI status (from the same `adapter.get/1` call
+  # that populated `pr_section` above) is ground truth the reviewer would
+  # otherwise have no way to check from a diff alone — surfacing it up front
+  # heads off a finding like "every bearer-authenticated test 401s" before it
+  # gets written, rather than only catching it after the fact in
+  # `cap_ci_contradicted_severity/3`.
+  defp ci_status_section(:success) do
+    """
+    --- CI status ---
+    CI is GREEN on this PR's head commit. Do not report a finding that \
+    predicts a broad test/request failure ("every test fails", "all calls \
+    401", etc.) for code covered by that passing CI — it is directly \
+    contradicted by the passing run. If you still believe a path is broken, \
+    say why CI wouldn't catch it (untested path, flaky/skipped check).
+    --- End CI status ---
+
+    """
+  end
+
+  defp ci_status_section(_status), do: ""
 
   # ReviewPatrol re-review (bd-8vwgws): a follow-up pass hands `Checks.run/2`
   # only the diff of commits since the last review, not the full PR diff —
@@ -626,7 +648,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # The model occasionally surrounds its JSON with prose ("Here's the
   # review:") despite the prompt. Be permissive: pull the first balanced
   # `{...}` block out of the response and parse that.
-  defp parse_findings(raw) when is_binary(raw) do
+  defp parse_findings(raw, state) when is_binary(raw) do
     case extract_json_object(raw) do
       nil ->
         Logger.debug("CodeReview.Checks: no JSON object in reviewer output; treating as empty")
@@ -636,7 +658,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         case Jason.decode(json) do
           {:ok, %{"findings" => findings}} when is_list(findings) ->
             findings
-            |> Enum.map(&normalize_finding/1)
+            |> Enum.map(&normalize_finding(&1, state))
             |> Enum.reject(&is_nil/1)
 
           _ ->
@@ -646,7 +668,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     end
   end
 
-  defp parse_findings(_), do: []
+  defp parse_findings(_, _state), do: []
 
   # Walk the string and grab the first balanced `{...}` substring. The
   # reviewer's prompt asks for a single JSON object, so the first `{` is
@@ -671,13 +693,19 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     end
   end
 
-  defp normalize_finding(%{} = entry) do
+  defp normalize_finding(%{} = entry, state) do
     with {:ok, severity} <- normalize_severity(Map.get(entry, "severity")),
          file when is_binary(file) and file != "" <- Map.get(entry, "file"),
          line when is_integer(line) and line > 0 <- normalize_line(Map.get(entry, "line")),
          message when is_binary(message) and message != "" <- Map.get(entry, "message") do
+      severity =
+        severity
+        |> cap_hedged_severity(message)
+        |> cap_ci_contradicted_severity(message, pipeline_status(state))
+        |> verify_with_github(message, state)
+
       %{
-        severity: cap_hedged_severity(severity, message),
+        severity: severity,
         file: file,
         line: line,
         message: message
@@ -687,7 +715,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     end
   end
 
-  defp normalize_finding(_), do: nil
+  defp normalize_finding(_entry, _state), do: nil
 
   # bd-a16rgk: an ERROR finding is blocking (`compute_verdict/1` turns any
   # `:error` severity into `:request_changes`). The diff-only reviewer can't
@@ -718,6 +746,181 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   defp hedged?(message) when is_binary(message) do
     Enum.any?(@hedge_patterns, &Regex.match?(&1, message))
   end
+
+  # bd-a16rgk: "Green CI is evidence." `state[:pr]` (set by `:load_pr` for
+  # `mode: :adapter` — both the first-pass review and every ReviewPatrol
+  # re-review go through the same step) carries the adapter's `pipeline`
+  # status for the exact SHA under review. A finding that predicts a *broad*
+  # test/request failure ("every test 401s", "raises ... for every call")
+  # is directly contradicted when that same SHA's CI is green — the claim was
+  # never checked against the one signal that was checkable for free, no repo
+  # access required. Downgrade to :info rather than drop it outright: the
+  # reviewer may be right that CI doesn't cover the path it's worried about,
+  # so it's still worth a non-blocking question to the author.
+  @broad_failure_patterns [
+    ~r/\bevery\b[^.!?]{0,80}\b(test|call|request)\b[^.!?]{0,60}\b(fail|401|403|404|500|error|crash|raise)/i,
+    ~r/\ball\b[^.!?]{0,80}\btests?\b[^.!?]{0,60}\b(fail|break|error|crash)/i
+  ]
+
+  defp cap_ci_contradicted_severity(:error, message, :success) do
+    if broad_failure_claim?(message), do: :info, else: :error
+  end
+
+  defp cap_ci_contradicted_severity(severity, _message, _pipeline), do: severity
+
+  defp broad_failure_claim?(message) when is_binary(message) do
+    Enum.any?(@broad_failure_patterns, &Regex.match?(&1, message))
+  end
+
+  defp pipeline_status(state) when is_map(state) do
+    case Map.get(state, :pr) do
+      %{} = pr -> Map.get(pr, :pipeline) || Map.get(pr, "pipeline")
+      _ -> nil
+    end
+  end
+
+  defp pipeline_status(_state), do: nil
+
+  # bd-a16rgk: "give the reviewer a way to check." The deterministic caps
+  # above (`cap_hedged_severity/2`, `cap_ci_contradicted_severity/3`) only
+  # catch a finding that HEDGES its own uncertainty, or that predicts a
+  # broad failure CI already contradicts. They miss a finding stated
+  # confidently but still wrong — e.g. "string-keyed claims raise
+  # FunctionClauseError for every app-switch call" — where one file read
+  # would have shown otherwise. For `strategy: github` (an adapter exposing
+  # `file_content/3`) with no Tier-2 checkout already granting file access
+  # (`review_cwd/1` nil — see `maybe_add_agentic_args/2`), fetch the specific
+  # out-of-diff file the finding names at the PR's head SHA and ask the
+  # reviewer to confirm or retract the finding against that evidence, before
+  # letting the ERROR stand. Every step here is best-effort and fails open —
+  # no adapter capability, no extractable file reference, a 404, or a
+  # network error all leave the severity exactly as the earlier caps decided
+  # (i.e. unchanged from today's behavior). This only ever downgrades a
+  # finding the fetched file actually refutes; it never invents a reason to
+  # keep one.
+  defp verify_with_github(:error, message, state) do
+    do_verify_with_github(message, state)
+  rescue
+    e ->
+      Logger.debug("CodeReview.Checks: verify_with_github/3 failed: #{Exception.message(e)}")
+      :error
+  end
+
+  defp verify_with_github(severity, _message, _state), do: severity
+
+  defp do_verify_with_github(message, state) do
+    with nil <- review_cwd(state),
+         {adapter, mr_ref, sha} <- github_context(state),
+         true <- Code.ensure_loaded?(adapter),
+         true <- function_exported?(adapter, :file_content, 3),
+         {:ok, path} <- referenced_out_of_diff_path(message, adapter, mr_ref),
+         {:ok, content} <- adapter.file_content(mr_ref, path, sha) do
+      case ask_reviewer_to_verify(message, path, content, state) do
+        :refuted -> :info
+        _ -> :error
+      end
+    else
+      _ -> :error
+    end
+  end
+
+  defp github_context(state) do
+    case {Map.get(state, :adapter), Map.get(state, :mr_ref), pr_head_sha(state)} do
+      {adapter, mr_ref, sha}
+      when is_atom(adapter) and not is_nil(adapter) and is_binary(mr_ref) and is_binary(sha) ->
+        {adapter, mr_ref, sha}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp pr_head_sha(state) do
+    case Map.get(state, :pr) do
+      %{} = pr -> Map.get(pr, :head_sha) || Map.get(pr, "head_sha")
+      _ -> nil
+    end
+  end
+
+  # A message that already cites a real relative path ("deps/verus_auth/
+  # lib/.../authorize_jwt.ex:223-226") is fetched directly. Otherwise, look
+  # for a CamelCase module-ish reference ("FallbackController",
+  # "AuthorizeJwt") and, when the adapter also exposes `search_path/2`,
+  # resolve it to a path via code search. `deps/` paths belong to a vendored
+  # dependency's own upstream repo, not this one — a fetch there 404s and
+  # falls back to the existing caps rather than resolving the pin, which is
+  # out of scope here.
+  @path_ref_pattern ~r{\b([\w.-]+/[\w.-]+\.\w+)\b}
+  @module_ref_pattern ~r/\b([A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+)\b/
+
+  defp referenced_out_of_diff_path(message, adapter, mr_ref) do
+    case Regex.run(@path_ref_pattern, message) do
+      [_, path] ->
+        {:ok, path}
+
+      nil ->
+        with [_, name] <- Regex.run(@module_ref_pattern, message),
+             true <- function_exported?(adapter, :search_path, 2),
+             {:ok, path} <- adapter.search_path(mr_ref, snake_filename(name)) do
+          {:ok, path}
+        else
+          _ -> :error
+        end
+    end
+  end
+
+  defp snake_filename(name) do
+    name
+    |> String.replace(~r/([a-z0-9])([A-Z])/, "\\1_\\2")
+    |> String.downcase()
+    |> Kernel.<>(".ex")
+  end
+
+  # A short, focused follow-up call to the same invoker (bypassing the full
+  # review prompt) asking a yes/no question against real evidence. Reuses
+  # `invoke_reviewer/2` so it gets the same test-override seam
+  # (`Application.put_env(:arbiter, :code_review_invoker, ...)`) as the main
+  # review call — tests can distinguish the two by prompt content.
+  defp ask_reviewer_to_verify(message, path, content, state) do
+    prompt = """
+    You previously flagged this as an ERROR-severity code review finding,
+    but it depends on code outside the diff you reviewed:
+
+    "#{message}"
+
+    Here is the actual content of #{path} at the PR's head commit:
+
+    --- BEGIN FILE ---
+    #{String.slice(content, 0, 4000)}
+    --- END FILE ---
+
+    Does this file content REFUTE the finding above (i.e. show the claimed
+    problem does not actually happen)? Respond with a SINGLE JSON object and
+    nothing else: {"refuted": true | false}
+    """
+
+    case invoke_reviewer(prompt, state) do
+      {:ok, raw} -> parse_refuted(raw)
+      {:ok, raw, _usage} -> parse_refuted(raw)
+      _ -> :unknown
+    end
+  end
+
+  defp parse_refuted(raw) when is_binary(raw) do
+    case extract_json_object(raw) do
+      nil ->
+        :unknown
+
+      json ->
+        case Jason.decode(json) do
+          {:ok, %{"refuted" => true}} -> :refuted
+          {:ok, %{"refuted" => false}} -> :confirmed
+          _ -> :unknown
+        end
+    end
+  end
+
+  defp parse_refuted(_raw), do: :unknown
 
   defp normalize_severity("error"), do: {:ok, :error}
   defp normalize_severity("warning"), do: {:ok, :warning}
