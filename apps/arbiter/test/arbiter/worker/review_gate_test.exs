@@ -48,6 +48,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
+  @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
   @session_limit Path.expand("../../fixtures/review_session_limit.sh", __DIR__)
@@ -160,6 +161,42 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert String.valid?(capped), "cap_transcript/2 must never emit invalid UTF-8"
       assert String.trim(capped) == capped |> String.trim()
+    end
+  end
+
+  # ---- per-pass timeout resolution (bd-216r3e) -----------------------------
+
+  describe "resolve_timeout_ms/2" do
+    test "reads the workspace's review_gate.timeout_ms", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 900_000})})
+
+      assert ReviewGate.resolve_timeout_ms(ws.id) == 900_000
+    end
+
+    test "re-reads config on every call, so a change reaches a running gate", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 1_200_000})})
+
+      assert ReviewGate.resolve_timeout_ms(ws.id) == 1_200_000
+
+      {:ok, ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 2_400_000})})
+
+      assert ReviewGate.resolve_timeout_ms(ws.id) == 2_400_000
+    end
+
+    test "an explicit override wins over config", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 900_000})})
+
+      assert ReviewGate.resolve_timeout_ms(ws.id, 5_000) == 5_000
+    end
+
+    test "falls back to the built-in default with no workspace or no config", %{ws: ws} do
+      assert ReviewGate.resolve_timeout_ms(nil) == 20 * 60 * 1000
+      assert ReviewGate.resolve_timeout_ms(ws.id) == 20 * 60 * 1000
+      assert ReviewGate.resolve_timeout_ms("no-such-workspace-id") == 20 * 60 * 1000
     end
   end
 
@@ -671,10 +708,19 @@ defmodule Arbiter.Worker.ReviewGateTest do
              "expected a distinct timeout-retry reviewer run row"
     end
 
-    # bd-78vg4v: with the timeout-retry budget exhausted (0), a hung reviewing
-    # pass escalates as timed-out with no merge — the pre-existing behaviour is
-    # preserved when retries are disabled.
-    test "a hung reviewer with no retry budget escalates as timed out — no merge",
+    # bd-78vg4v / bd-216r3e: with the timeout-retry budget exhausted (0), a hung
+    # reviewing pass escalates as timed-out with no merge — and it escalates as
+    # INCONCLUSIVE, never as REQUEST_CHANGES.
+    #
+    # bd-216r3e: a REQUEST_CHANGES carrying a single synthetic "the gate timed
+    # out" finding is a self-sustaining re-dispatch loop. REQUEST_CHANGES sends
+    # the task back to an implementer; the implementer re-verifies an unchanged
+    # branch, finds nothing to fix (there are zero code findings), signals `arb
+    # done`, and the gate runs — and times out — again. No amount of worker
+    # iteration can clear a verdict no reviewer ever produced. A timeout is an
+    # infrastructure/budget failure, so it must park as
+    # `:review_gate_inconclusive` (a human/coordinator decision) instead.
+    test "a hung reviewer with no retry budget escalates as INCONCLUSIVE — no merge, no re-dispatch",
          %{repo: repo, ws: ws} do
       task = new_task(ws)
       branch = "feature/rev"
@@ -703,14 +749,17 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
       snap = Worker.state(pid)
-      assert snap.meta.failure_reason == :review_gate_rejected
+      assert snap.meta.failure_reason == :review_gate_inconclusive
+      assert snap.meta.review_gate_verdict == :no_verdict
       assert snap.meta.review_gate_findings =~ "timed out"
+      # The escalation must name the remediation, not read as a code finding.
+      assert snap.meta.review_gate_findings =~ "review_gate.timeout_ms"
       assert merge_commit_count(repo) == 0
 
-      # bd-dp7hiw: a timeout still reports as REQUEST_CHANGES and the task
-      # note points at `review_gate_rounds_list` for the full findings — so a
-      # round row must exist for THIS round, or that pointer would resolve to
-      # nothing for a task that timed out on its very first round.
+      # bd-dp7hiw: `/api/review_gate_rounds` is the only readable surface for a
+      # gate's rounds, so a timeout must still leave a row — but an HONEST one:
+      # verdict `:timed_out` with zero findings, not a REQUEST_CHANGES carrying
+      # one synthetic finding.
       require Ash.Query
 
       [round] =
@@ -719,8 +768,107 @@ defmodule Arbiter.Worker.ReviewGateTest do
         |> Ash.read!()
 
       assert round.role == :review
-      assert round.verdict == :request_changes
+      assert round.verdict == :timed_out
+      assert round.finding_count == 0
+      assert round.converged == false
       assert round.findings =~ "timed out"
+    end
+
+    # bd-216r3e (second defect): the per-pass timeout must come from LIVE
+    # workspace config, not a value the author stamped at dispatch. With no
+    # `review_timeout_ms` meta override, the gate resolves
+    # `review_gate.timeout_ms` itself — and the escalation reports that value.
+    test "the per-pass timeout is read from workspace config with no meta override",
+         %{repo: repo, ws: ws} do
+      {:ok, ws} = Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 1_200})})
+
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@hang],
+        review_timeout_retries: 0
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      snap = Worker.state(pid)
+      assert snap.meta.failure_reason == :review_gate_inconclusive
+      assert snap.meta.review_gate_findings =~ "timed out after 1s"
+    end
+
+    # bd-216r3e (second defect, the operational trap): raising
+    # `review_gate.timeout_ms` while a gate is RUNNING must take effect on that
+    # gate's next pass. Observed in production: the config was raised at ~19:33Z
+    # and a round that started at ~19:53Z still timed out reporting the old
+    # 1200s, because the value was resolved once at gate init and held in state
+    # for the gate's whole lifetime. Only `worker stop` + `worker resume` applied
+    # it — an operator reasonably concludes the config key does not work.
+    #
+    # Here: pass 1 arms the initial 1.5s. Once it is in flight the config is
+    # raised to 4s, so the timeout-retry pass must arm 4s — which the escalation
+    # message reports. Under the init-resolved behaviour it reports 1s.
+    test "a config change reaches a RUNNING gate on its next pass",
+         %{repo: repo, ws: ws} do
+      {:ok, ws} = Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 1_500})})
+
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@hang],
+        # One retry, so there is a SECOND pass to pick the new value up.
+        review_timeout_retries: 1
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Wait until the FIRST reviewer pass is actually in flight (its run row
+      # exists), so the config change lands after that pass armed its timer.
+      review_id = ReviewGate.reviewer_task_id(task.id)
+
+      wait_until(
+        fn -> Enum.any?(Ash.read!(Arbiter.Workers.Run), &(&1.task_id == review_id)) end,
+        5_000
+      )
+
+      {:ok, _ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 4_000})})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 15_000)
+      snap = Worker.state(pid)
+      assert snap.meta.failure_reason == :review_gate_inconclusive
+
+      assert snap.meta.review_gate_findings =~ "timed out after 4s",
+             "the retry pass must re-resolve timeout_ms from live config, got: " <>
+               inspect(snap.meta.review_gate_findings)
     end
 
     test "a reviewer requests changes → no merge, task parked + escalated",

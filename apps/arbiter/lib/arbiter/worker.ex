@@ -4521,22 +4521,20 @@ defmodule Arbiter.Worker do
     _ -> nil
   end
 
-  # Resolve the ReviewGate per-pass timeout (ms).
+  # An explicit meta `:review_timeout_ms` override for the ReviewGate per-pass
+  # timeout (ms), or `nil`.
   #
-  # Resolution order:
-  #   1. An explicit meta `:review_timeout_ms` override (tests / advanced callers).
-  #   2. The workspace `config["review_gate"]["timeout_ms"]` (bd-78vg4v).
-  #   3. `nil` — let the ReviewGate apply its built-in default.
-  defp resolve_review_timeout(%State{meta: meta} = state) do
+  # bd-216r3e: the workspace `config["review_gate"]["timeout_ms"]` lookup used to
+  # live here, resolved once at gate spawn and then held in the gate's state for
+  # its whole lifetime — so a timeout raised while the gate was running never
+  # reached it (only `worker stop` + `worker resume` applied the new value). The
+  # config read now belongs to `ReviewGate.resolve_timeout_ms/2`, which runs once
+  # per pass. Only the explicit override is stamped here, because an override IS
+  # meant to pin the value for the gate's lifetime.
+  defp review_timeout_override(%State{meta: meta}) do
     case meta && Map.get(meta, :review_timeout_ms) do
-      n when is_integer(n) and n > 0 ->
-        n
-
-      _ ->
-        case state.workspace_id && Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
-          {:ok, ws} -> Arbiter.Tasks.Workspace.review_gate_timeout_ms(ws)
-          _ -> nil
-        end
+      n when is_integer(n) and n > 0 -> n
+      _ -> nil
     end
   rescue
     _ -> nil
@@ -4623,7 +4621,7 @@ defmodule Arbiter.Worker do
         ]
         |> maybe_opt(:command, Map.get(meta, :review_command))
         |> maybe_opt(:revise_command, Map.get(meta, :revise_command))
-        |> maybe_opt(:timeout_ms, resolve_review_timeout(state))
+        |> maybe_opt(:timeout_ms, review_timeout_override(state))
         |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
         |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
