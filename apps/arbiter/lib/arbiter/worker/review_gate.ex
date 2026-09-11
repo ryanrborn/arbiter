@@ -1828,63 +1828,26 @@ defmodule Arbiter.Worker.ReviewGate do
     converged = Keyword.fetch!(opts, :converged)
     {run_id, reviewer_model, cost_usd} = pass_usage(state.current_id)
 
-    # Record the reviewer's per-criterion CRITERIA breakdown structurally
-    # (bd-4yhv4x): {total, unmet} for a :review row that carried a breakdown,
-    # {nil, nil} otherwise. :impl rows never carry a breakdown. Makes "APPROVE
-    # with N criteria unmet" queryable without re-reading the transcript.
-    # bd-216r3e: a `:timed_out` row carries an operator note, not reviewer
-    # output — it has no findings, no criteria breakdown and no dispositions.
-    # Scoring it like a real verdict is what made a timeout read as
-    # "REQUEST_CHANGES, 1 finding" in the first place.
-    review_outcome? = role == :review and verdict != :timed_out
-
-    {criteria_total, criteria_unmet} =
-      if review_outcome?, do: ReviewVerification.criteria_counts(findings), else: {nil, nil}
-
     # bd-3xultf: the resolved tier that governed this pass — recorded only
     # for :review rows, alongside `reviewer_model`, so analysis can control
     # for the judge instead of a routed-by-difficulty reviewer reading as a
     # quality change.
     reviewer_tier = if role == :review, do: reviewer_tier_for(state), else: nil
 
-    # bd-6r8caj: give the round's findings identity, and record what this round
-    # said about every finding carried INTO it. `undispositioned_count` is the
-    # queryable form of the defect: an APPROVE row with a non-zero count is a
-    # round that approved without accounting for an open Medium+ finding.
-    open = Map.get(state, :open_findings, [])
-
-    {finding_ids, dispositions, undispositioned} =
-      if review_outcome? do
-        {ReviewFindings.encode_ids(ReviewFindings.extract(findings, state.round)),
-         ReviewFindings.encode_dispositions(open, findings),
-         length(ReviewFindings.approval_gap(open, findings, nil).missing)}
-      else
-        {nil, nil, nil}
-      end
-
-    attrs = %{
-      task_id: state.task_id,
-      run_id: run_id,
-      round: state.round,
-      role: role,
-      verdict: verdict,
-      findings: findings,
-      finding_count:
-        cond do
-          role != :review -> nil
-          verdict == :timed_out -> 0
-          true -> count_findings(findings)
-        end,
-      reviewer_model: reviewer_model,
-      reviewer_tier: reviewer_tier,
-      cost_usd: cost_usd,
-      criteria_total: criteria_total,
-      criteria_unmet: criteria_unmet,
-      finding_ids: finding_ids,
-      dispositions: dispositions,
-      undispositioned_count: undispositioned,
-      converged: converged
-    }
+    attrs =
+      %{
+        task_id: state.task_id,
+        run_id: run_id,
+        round: state.round,
+        role: role,
+        verdict: verdict,
+        findings: findings,
+        reviewer_model: reviewer_model,
+        reviewer_tier: reviewer_tier,
+        cost_usd: cost_usd,
+        converged: converged
+      }
+      |> Map.merge(review_outcome_attrs(role, verdict, findings, state))
 
     case Ash.create(Round, attrs) do
       {:ok, _row} ->
@@ -1904,6 +1867,55 @@ defmodule Arbiter.Worker.ReviewGate do
       )
 
       :error
+  end
+
+  # Record the reviewer's per-criterion CRITERIA breakdown, and per-finding
+  # identity/dispositions, structurally — but only for a `:review` row that
+  # carries a genuine reviewer verdict.
+  # bd-4yhv4x: {total, unmet} for a :review row that carried a breakdown,
+  # {nil, nil} otherwise. :impl rows never carry a breakdown. Makes "APPROVE
+  # with N criteria unmet" queryable without re-reading the transcript.
+  # bd-6r8caj: give the round's findings identity, and record what this round
+  # said about every finding carried INTO it. `undispositioned_count` is the
+  # queryable form of the defect: an APPROVE row with a non-zero count is a
+  # round that approved without accounting for an open Medium+ finding.
+  # bd-216r3e: a `:timed_out` row carries an operator note, not reviewer
+  # output — it has no findings, no criteria breakdown and no dispositions.
+  # Scoring it like a real verdict is what made a timeout read as
+  # "REQUEST_CHANGES, 1 finding" in the first place.
+  defp review_outcome_attrs(role, verdict, findings, state) do
+    review_outcome? = role == :review and verdict != :timed_out
+
+    {criteria_total, criteria_unmet} =
+      if review_outcome?, do: ReviewVerification.criteria_counts(findings), else: {nil, nil}
+
+    {finding_ids, dispositions, undispositioned} =
+      if review_outcome? do
+        open = Map.get(state, :open_findings, [])
+
+        {ReviewFindings.encode_ids(ReviewFindings.extract(findings, state.round)),
+         ReviewFindings.encode_dispositions(open, findings),
+         length(ReviewFindings.approval_gap(open, findings, nil).missing)}
+      else
+        {nil, nil, nil}
+      end
+
+    %{
+      finding_count: finding_count(role, verdict, findings),
+      criteria_total: criteria_total,
+      criteria_unmet: criteria_unmet,
+      finding_ids: finding_ids,
+      dispositions: dispositions,
+      undispositioned_count: undispositioned
+    }
+  end
+
+  defp finding_count(role, verdict, findings) do
+    cond do
+      role != :review -> nil
+      verdict == :timed_out -> 0
+      true -> count_findings(findings)
+    end
   end
 
   # Recompute the same tier `reviewer_model_tier/2` resolved for this pass's
