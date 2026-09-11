@@ -306,10 +306,44 @@ defmodule Arbiter.Quota do
   @spec serialize(String.t(), String.t()) :: map() | nil
   def serialize(workspace_id, provider \\ @default_provider) do
     case latest(workspace_id, provider) do
-      nil -> nil
-      %AnthropicQuota{} = q -> serialize_quota(q)
+      nil ->
+        nil
+
+      %AnthropicQuota{} = q ->
+        q
+        |> serialize_quota()
+        |> Map.merge(gating_fields(q, safe_workspace(workspace_id)))
     end
   end
+
+  # Which window (if any) is currently gating dispatch for this workspace, as
+  # `arb quota` / the `quota_get` MCP tool render it (bd-1tuxv8). Before this,
+  # both surfaces showed the 5h and 7d numbers side by side with no indication
+  # that only the 5h one was ever consulted — the coordinator read the 7d row as
+  # the thing holding Autopilot back when the gate never looked at it.
+  defp gating_fields(%AnthropicQuota{} = q, workspace) do
+    if Arbiter.Quota.continue_mode?(workspace) do
+      # `:continue` workspaces dispatch past the cap by design, so no window
+      # gates them — mirroring `Board.Snapshot.quota_hold/1`'s short-circuit.
+      %{gating_window: nil, gating_reason: nil}
+    else
+      case Arbiter.Quota.Gate.gating_window(q, workspace) do
+        nil -> %{gating_window: nil, gating_reason: nil}
+        %{window: w} -> %{gating_window: w, gating_reason: Arbiter.Quota.Gate.hold_phrase(q, workspace)}
+      end
+    end
+  end
+
+  defp safe_workspace(workspace_id) when is_binary(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp safe_workspace(_), do: nil
 
   # ---- uniform multi-provider view (bd-ajh7bd) ---------------------------
 

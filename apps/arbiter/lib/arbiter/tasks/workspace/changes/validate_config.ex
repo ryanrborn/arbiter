@@ -543,11 +543,15 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset, field: :config, message: "review_automation must be a map")
   end
 
-  # Quota-aware dispatch throttle config (bd-7cd38f):
+  # Quota-aware dispatch throttle config (bd-7cd38f, bd-1tuxv8):
   #   * on_exhaustion ∈ {"throttle","continue"}
   #   * overage_alert_usd a positive number (or its JSON string form)
-  #   * throttle_threshold a number in (0, 1]
+  #   * throttle_threshold a number in (0, 1] — the 5h/session window ceiling
+  #   * weekly_threshold a number in (0, 1] — the 7d/weekly window ceiling
+  #   * weekly_warning_policy ∈ {"ignore","hold"} — what a 7d `allowed_warning`
+  #     does (default "ignore"; see Arbiter.Quota.Gate.weekly_warning_policy/1)
   @valid_quota_modes ~w[throttle continue]
+  @valid_weekly_warning_policies ~w[ignore hold]
 
   @doc "Valid `quota.on_exhaustion` value strings."
   @spec valid_quota_modes() :: [String.t()]
@@ -580,37 +584,60 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> then(fn cs ->
       validate_positive_number(cs, quota, "overage_alert_usd")
     end)
-    |> then(fn cs ->
-      case Map.get(quota, "throttle_threshold") do
-        nil ->
-          cs
-
-        n when is_number(n) and n > 0 and n <= 1 ->
-          cs
-
-        s when is_binary(s) ->
-          case Float.parse(s) do
-            {f, ""} when f > 0 and f <= 1 ->
-              cs
-
-            _ ->
-              Changeset.add_error(cs,
-                field: :config,
-                message: "quota.throttle_threshold must be a number in (0, 1]; got: #{inspect(s)}"
-              )
-          end
-
-        other ->
-          Changeset.add_error(cs,
-            field: :config,
-            message: "quota.throttle_threshold must be a number in (0, 1]; got: #{inspect(other)}"
-          )
-      end
-    end)
+    |> then(fn cs -> validate_fraction(cs, quota, "throttle_threshold") end)
+    |> then(fn cs -> validate_fraction(cs, quota, "weekly_threshold") end)
+    |> then(fn cs -> validate_weekly_warning_policy(cs, quota) end)
   end
 
   defp validate_quota(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "quota must be a map")
+  end
+
+  # A 0..1 utilization ceiling that may arrive as a number or its JSON string
+  # form (the workspace config form posts strings). Shared by the 5h
+  # `throttle_threshold` and the 7d `weekly_threshold`.
+  defp validate_fraction(changeset, block, key) do
+    case Map.get(block, key) do
+      nil ->
+        changeset
+
+      n when is_number(n) and n > 0 and n <= 1 ->
+        changeset
+
+      s when is_binary(s) ->
+        case Float.parse(s) do
+          {f, ""} when f > 0 and f <= 1 -> changeset
+          _ -> fraction_error(changeset, key, s)
+        end
+
+      other ->
+        fraction_error(changeset, key, other)
+    end
+  end
+
+  defp fraction_error(changeset, key, got) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "quota.#{key} must be a number in (0, 1]; got: #{inspect(got)}"
+    )
+  end
+
+  defp validate_weekly_warning_policy(changeset, quota) do
+    case Map.get(quota, "weekly_warning_policy") do
+      nil ->
+        changeset
+
+      p when p in @valid_weekly_warning_policies ->
+        changeset
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "quota.weekly_warning_policy must be one of " <>
+              "#{Enum.join(@valid_weekly_warning_policies, ", ")}; got: #{inspect(other)}"
+        )
+    end
   end
 
   # Shared validator for a strictly-positive numeric config value that may

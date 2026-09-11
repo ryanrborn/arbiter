@@ -15,11 +15,20 @@ defmodule Arbiter.Quota.Gate.Snapshot do
       plan-allowed; anything else is past-plan and holds. Codex's
       `limit_reached: true` maps to `"limit_reached"`; Google reports no status.
     * `reset_at` / `captured_at` — the staleness inputs (`Gate.stale?/1`).
+    * `secondary_utilization` / `secondary_status` / `secondary_reset_at` —
+      the same three things for the provider's **long** window (Anthropic 7d,
+      Codex weekly), named by `secondary_window_label`.
 
-  Only the **primary** window is projected, matching the Anthropic gating this
-  generalizes (which keys on the 5h window and ignores the 7d one). Codex's
-  weekly window and Google's non-representative models are carried on the row
-  for the dashboard but are deliberately not gating inputs here.
+  ## Both windows are projected (bd-1tuxv8)
+
+  This used to project only the primary window, collapsing `utilization_5h` /
+  `status_5h` onto one pair and dropping `utilization_7d` / `status_7d` on the
+  floor — so a workspace at `utilization_7d 0.76, status_7d allowed_warning`
+  dispatched straight through on a 23% 5h window, and the fleet would only
+  discover the weekly budget was gone when every worker started failing at once.
+  Both windows are now carried, and `Arbiter.Quota.Gate.gating_window/2` decides
+  which (if either) binds. Google's Cloud Code Assist API reports a single
+  representative model window, so its secondary fields stay `nil`.
 
   `overage_status` is Anthropic-only (there is no paid-overage passthrough for
   Codex or Google); it stays `nil` for those providers, so `Gate.in_overage?/2`
@@ -41,7 +50,11 @@ defmodule Arbiter.Quota.Gate.Snapshot do
           reset_at: DateTime.t() | nil,
           captured_at: DateTime.t() | nil,
           overage_status: String.t() | nil,
-          window_label: String.t()
+          window_label: String.t(),
+          secondary_utilization: float() | nil,
+          secondary_status: String.t() | nil,
+          secondary_reset_at: DateTime.t() | nil,
+          secondary_window_label: String.t() | nil
         }
 
   defstruct provider: nil,
@@ -50,7 +63,11 @@ defmodule Arbiter.Quota.Gate.Snapshot do
             reset_at: nil,
             captured_at: nil,
             overage_status: nil,
-            window_label: "primary"
+            window_label: "primary",
+            secondary_utilization: nil,
+            secondary_status: nil,
+            secondary_reset_at: nil,
+            secondary_window_label: nil
 
   @doc """
   Project a persisted quota row onto the provider-neutral gate shape.
@@ -72,7 +89,11 @@ defmodule Arbiter.Quota.Gate.Snapshot do
       reset_at: q.reset_5h_at,
       captured_at: q.captured_at,
       overage_status: q.overage_status,
-      window_label: "5h"
+      window_label: "5h",
+      secondary_utilization: q.utilization_7d,
+      secondary_status: q.status_7d,
+      secondary_reset_at: q.reset_7d_at,
+      secondary_window_label: "7d"
     }
   end
 
@@ -83,7 +104,14 @@ defmodule Arbiter.Quota.Gate.Snapshot do
       status: if(q.limit_reached == true, do: "limit_reached"),
       reset_at: q.session_reset_at,
       captured_at: q.captured_at,
-      window_label: "session"
+      window_label: "session",
+      secondary_utilization: fraction(q.weekly_used_percent),
+      # Codex reports one `limit_reached` flag for the account, not per window;
+      # it is already carried on the primary window, so the weekly window gates
+      # on utilization alone.
+      secondary_status: nil,
+      secondary_reset_at: q.weekly_reset_at,
+      secondary_window_label: "weekly"
     }
   end
 
