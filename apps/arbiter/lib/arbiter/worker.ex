@@ -116,6 +116,7 @@ defmodule Arbiter.Worker do
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewVerification
+  alias Arbiter.Workflows.ReviewGateFixRoundDispatcher, as: FixRound
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
   @type status ::
@@ -2097,6 +2098,15 @@ defmodule Arbiter.Worker do
        {:no_verdict,
         "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
      )}
+  end
+
+  # bd-a9zb7w: decide (and, if warranted, dispatch) the implementer fix round for
+  # a ReviewGate rejection this worker just parked on. Posted to self by
+  # `park_rejected/3` so it lands after that call's reply, with `status` already
+  # `:failed`. Never crashes the worker: the whole decision is best-effort.
+  def handle_info({:__review_gate_fix_round__, verdict, findings}, %State{} = state) do
+    maybe_dispatch_fix_round(state, verdict, findings)
+    {:noreply, state}
   end
 
   # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
@@ -4695,7 +4705,18 @@ defmodule Arbiter.Worker do
       |> Map.put(:review_gate_findings, findings)
       |> Map.put(:failure_summary, review_gate_failure_summary(verdict, findings))
 
-    fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
+    failed = fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
+
+    # bd-a9zb7w: the rejection is recorded and paged — now schedule the
+    # implementer. Deferred to a self-message rather than run inline because the
+    # dispatch is `Dispatch.resume/2`, which refuses a task whose worker is not
+    # yet terminal and then stops that worker: inline it would read our own
+    # pre-reply `:awaiting_review_gate` status and deadlock stopping ourselves.
+    # By the time this message is handled the caller's reply has been sent and
+    # `status` is `:failed`.
+    send(self(), {:__review_gate_fix_round__, verdict, findings})
+
+    failed
   end
 
   defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
@@ -4708,6 +4729,163 @@ defmodule Arbiter.Worker do
 
   defp review_gate_failure?(%State{meta: meta}),
     do: Map.get(meta, :failure_reason) in @review_gate_failure_reasons
+
+  # ---- bd-a9zb7w: the implementer fix round -------------------------------
+  #
+  # The rejection half of the ReviewGate cycle used to end here: run recorded
+  # `:failed` / `:review_gate_rejected`, coordinator paged, worker parked, and
+  # nothing scheduled the implementer that would address the findings. Every one
+  # of the seven observed occurrences was cleared by a human `worker_resume`
+  # that took immediately — the implementer was never enqueued, not enqueued and
+  # never drained. This re-dispatches it automatically, under a bound.
+  #
+  # Only a `:request_changes` verdict qualifies. `:no_verdict`
+  # (`:review_gate_inconclusive`) means the reviewer produced nothing actionable;
+  # a fix round against an empty finding set is not a fix round, so that path is
+  # left exactly as it was.
+  defp maybe_dispatch_fix_round(%State{} = state, :request_changes, findings) do
+    dispatcher = fix_round_dispatcher(state)
+    attempts = fix_round_attempts(state)
+    cap = resolve_max_fix_rounds(state)
+    digest = FixRound.findings_digest(findings)
+
+    cond do
+      cap <= 0 ->
+        # Turned off for this workspace: the rejection escalation
+        # (`escalate_review_gate/3`) already went out, so stay silent rather than
+        # paging twice about the same verdict.
+        :ok
+
+      attempts >= cap ->
+        give_up_fix_round(dispatcher, state, attempts, :budget_exhausted)
+
+      attempts > 0 and Map.get(state.meta, :review_gate_findings_digest) == digest ->
+        # The last fix round was dispatched against these exact findings and the
+        # reviewer raised them again verbatim. Another identical round would
+        # spend the rest of the budget to reach this same escalation later.
+        give_up_fix_round(dispatcher, state, attempts, :not_converging)
+
+      true ->
+        start_fix_round(dispatcher, state, findings, digest, attempts + 1)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: fix-round decision failed for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp maybe_dispatch_fix_round(%State{}, _verdict, _findings), do: :ok
+
+  # The dispatch itself must not run in this process: `Dispatch.resume/2` stops
+  # the task's lingering `:failed` worker — us — as its first act. Hand it to the
+  # app-wide Task.Supervisor so the stop lands on a worker that is no longer
+  # mid-callback, and so a slow resume (repo resolution, worktree, agent spawn)
+  # doesn't block this worker's teardown.
+  defp start_fix_round(dispatcher, %State{} = state, findings, digest, attempt) do
+    args =
+      %{
+        task_id: state.task_id,
+        workspace_id: state.workspace_id,
+        attempt: attempt,
+        verdict: :request_changes,
+        findings: findings,
+        findings_digest: digest
+      }
+      |> maybe_arg(:claude_command, Map.get(state.meta, :fix_round_command))
+
+    task_id = state.task_id
+    workspace_id = state.workspace_id
+    prior_attempts = attempt - 1
+
+    run = fn ->
+      case dispatcher.dispatch(args) do
+        {:ok, _result} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "Worker: ReviewGate fix round #{attempt} could not be dispatched for " <>
+              "task=#{task_id}: #{inspect(reason)}"
+          )
+
+          dispatcher.escalate_exhausted(
+            task_id,
+            workspace_id,
+            prior_attempts,
+            {:dispatch_failed, reason}
+          )
+      end
+    end
+
+    case Task.Supervisor.start_child(Arbiter.TaskSupervisor, run) do
+      {:ok, _pid} ->
+        :ok
+
+      other ->
+        Logger.warning(
+          "Worker: could not start the ReviewGate fix-round task for " <>
+            "task=#{task_id}: #{inspect(other)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp give_up_fix_round(dispatcher, %State{} = state, attempts, reason) do
+    Logger.info(
+      "Worker: not dispatching a ReviewGate fix round for task=#{state.task_id} " <>
+        "after #{attempts} round(s): #{inspect(reason)}"
+    )
+
+    _ = dispatcher.escalate_exhausted(state.task_id, state.workspace_id, attempts, reason)
+    :ok
+  end
+
+  # Swappable per worker (`meta[:fix_round_dispatcher]`) and per environment
+  # (`FixRound.impl/0`, which the test config points at a recording stub so the
+  # suite never spawns a real agent).
+  defp fix_round_dispatcher(%State{meta: meta}) do
+    case Map.get(meta, :fix_round_dispatcher) do
+      mod when is_atom(mod) and not is_nil(mod) -> mod
+      _ -> FixRound.impl()
+    end
+  end
+
+  # How many fix rounds have already run for this task. Re-stamped onto each
+  # resumed worker by `Arbiter.Worker.Dispatch` — a fresh worker per round means
+  # the counter has to ride the meta or the cap would never bind.
+  defp fix_round_attempts(%State{meta: meta}) do
+    case Map.get(meta, :review_gate_fix_round_attempts) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 0
+    end
+  end
+
+  # Resolution order: an explicit meta override (tests / advanced callers), the
+  # workspace's `review_gate.max_fix_rounds`, then the built-in default.
+  defp resolve_max_fix_rounds(%State{meta: meta} = state) do
+    case Map.get(meta, :review_gate_max_fix_rounds) do
+      n when is_integer(n) and n >= 0 ->
+        n
+
+      _ ->
+        workspace_max_fix_rounds(state) || FixRound.default_max_fix_rounds()
+    end
+  end
+
+  defp workspace_max_fix_rounds(%State{workspace_id: nil}), do: nil
+
+  defp workspace_max_fix_rounds(%State{workspace_id: workspace_id}) do
+    case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
+      {:ok, ws} -> Arbiter.Tasks.Workspace.review_gate_max_fix_rounds(ws)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
 
   # Undo a ReviewGate rejection that a later round overturned, then run the
   # ordinary approve path. The stale `failure_reason` / `failure_summary` are
@@ -5864,4 +6042,8 @@ defmodule Arbiter.Worker do
 
   defp maybe_opt(opts, _key, nil), do: opts
   defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # `maybe_opt/3`'s map twin, for the dispatcher arg maps.
+  defp maybe_arg(args, _key, nil), do: args
+  defp maybe_arg(args, key, value), do: Map.put(args, key, value)
 end
