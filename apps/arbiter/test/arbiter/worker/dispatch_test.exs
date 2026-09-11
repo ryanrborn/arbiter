@@ -400,6 +400,40 @@ defmodule Arbiter.Worker.DispatchTest do
                )
     end
 
+    # bd-8lnnnt: a genuinely quota-exhausted probe must escalate ONCE across
+    # repeated dispatch attempts (not once per attempt) and must read as a
+    # throttle, not a credential problem. This drives the real classifier
+    # (`StopReason.classify/2`) and the real `PreflightHold`/dedup path
+    # through the production `Dispatch.dispatch/2` entry point, rather than
+    # a hand-built `%StopReason{}` stub.
+    test "a quota-exhausted probe escalates once, not once per attempt, and reads as a throttle",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "quota gate", workspace_id: ws.id})
+      epoch = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_unix()
+
+      opts = [
+        repo: "test/repo",
+        start_driver: false,
+        start_claude: true,
+        probe_command: ["sh", "-c", "echo 'Claude AI usage limit reached|#{epoch}'; exit 1"],
+        probe_env: []
+      ]
+
+      for _ <- 1..5 do
+        assert {:error,
+                {:auth_check_failed,
+                 %Arbiter.Worker.StopReason{category: :quota_exhausted, retry_after: %DateTime{}}}} =
+                 Dispatch.dispatch(task.id, opts)
+      end
+
+      assert [escalation] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.directive_ref == task.id))
+
+      assert escalation.subject =~ "pre-flight throttled"
+      refute escalation.subject =~ "auth failed"
+    end
+
     test "preflight: false bypasses the probe even with start_claude", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
 

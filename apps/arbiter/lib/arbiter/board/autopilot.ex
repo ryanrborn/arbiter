@@ -74,6 +74,31 @@ defmodule Arbiter.Board.Autopilot do
   (card, error shape): once sent, it does not repeat on every tick — a
   successful dispatch or a change in error shape is what re-arms it. See
   `Arbiter.Messages.CoordinatorNotifier.dispatch_stuck/3`.
+
+  ## A quota-exhausted pre-flight failure is held, not retried every tick (bd-8lnnnt)
+
+  `Arbiter.Worker.Dispatch.run_preflight/2`'s cheap auth probe can fail with a
+  classified `Arbiter.Worker.StopReason` of `:quota_exhausted` — the account's
+  5h usage window, not a broken credential. Because that card never leaves
+  Ready on a dispatch failure, and the window does not reset on Autopilot's
+  15s tick, every tick before is a wasted CLI probe destined to fail the
+  identical way. `record_failure/3` computes a `retry_not_before` for this
+  shape — the probe's own reported reset time when known, else a bounded
+  exponential backoff — and `promote/1` honours it: the card stays the
+  board's `promote:` pick (Scheduler has no notion of "skip this one"), but
+  Autopilot declines to actually dispatch it until the hold clears, reporting
+  `{:held, id, retry_not_before}` instead. `Arbiter.Messages.CoordinatorNotifier.preflight_failed/2`
+  carries its own separate dedupe for the escalation itself, so this hold is
+  about not re-running the probe, not (only) about not re-paging.
+
+  This hold only covers Autopilot's own 15s tick. It is **not** what drove the
+  bd-7qbavq incident this bug tracks: that card's retries carried
+  `skip_quota_gate: true` (a flag only `Arbiter.Workflows.DispatchQueue`'s
+  drain sets — see `DispatchQueue`'s moduledoc), landed on 5-minute
+  boundaries matching `Arbiter.Quota.RefreshProbe`/`CloudProbe`'s broadcast
+  interval, and produced only one run row, all of which rule out this
+  15s-tick path. `DispatchQueue` carries the equivalent hold for the path
+  that actually produced the flood; see its `retry_not_before` handling.
   """
 
   use GenServer
@@ -97,7 +122,13 @@ defmodule Arbiter.Board.Autopilot do
   @dispatch_failure_retry_threshold 3
 
   @typedoc "What one tick did."
-  @type outcome :: {:ok, String.t()} | {:error, term()} | :idle | :paused | {:busy, String.t()}
+  @type outcome ::
+          {:ok, String.t()}
+          | {:error, term()}
+          | :idle
+          | :paused
+          | {:busy, String.t()}
+          | {:held, String.t(), DateTime.t()}
 
   @doc """
   The PubSub topic carrying `{:board_dispatched, task_id}` and
@@ -177,10 +208,13 @@ defmodule Arbiter.Board.Autopilot do
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
       escalate: Keyword.get(opts, :escalate, &default_escalate/3),
+      now: Keyword.get(opts, :now, &DateTime.utc_now/0),
       # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
       dispatching: nil,
-      # Per-card dispatch failure tracking: id => %{count:, shape:, escalated?:}.
-      # See "A dispatch that keeps failing gets escalated" above.
+      # Per-card dispatch failure tracking:
+      # id => %{count:, shape:, escalated?:, retry_not_before:}.
+      # See "A dispatch that keeps failing gets escalated" above, and
+      # "A quota-exhausted pre-flight failure is held, not retried" below.
       failures: %{}
     }
 
@@ -261,8 +295,30 @@ defmodule Arbiter.Board.Autopilot do
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
     case snapshot do
-      %{promote: id} when is_binary(id) -> {:started, start_dispatch(state, id)}
+      %{promote: id} when is_binary(id) -> promote_or_hold(state, id)
       _ -> {:idle, state}
+    end
+  end
+
+  # A quota-exhausted pre-flight failure (bd-8lnnnt) is not transient the way
+  # a network blip is: every tick before the usage window resets fails the
+  # exact same way. `record_failure/3` records how long this card should sit
+  # out before the next attempt; honour that hold here rather than re-running
+  # the CLI probe (and, via `run_preflight/2`, re-escalating) every tick.
+  #
+  # Scheduler always names the single highest-priority Ready card, with no
+  # notion of "skip this one, try the next" (`Arbiter.Board.Scheduler.plan/1`)
+  # — so a held card does sit at the head of the queue until its hold clears,
+  # same as any other card Autopilot has not yet cleared out of `failures`.
+  # For a quota hold specifically this is the right call anyway: the window is
+  # account-wide, so any other Ready card would hit the identical exhausted
+  # quota if dispatched right now.
+  defp promote_or_hold(%{failures: failures, now: now} = state, id) do
+    with %{retry_not_before: %DateTime{} = at} <- Map.get(failures, id),
+         :lt <- DateTime.compare(now.(), at) do
+      {{:held, id, at}, state}
+    else
+      _ -> {:started, start_dispatch(state, id)}
     end
   end
 
@@ -341,8 +397,13 @@ defmodule Arbiter.Board.Autopilot do
       if previous && previous.shape == shape do
         %{previous | count: previous.count + 1}
       else
-        %{count: 1, shape: shape, escalated?: false}
+        %{count: 1, shape: shape, escalated?: false, retry_not_before: nil}
       end
+
+    entry = %{
+      entry
+      | retry_not_before: preflight_retry_not_before(reason, entry.count, state.now.())
+    }
 
     entry =
       if not entry.escalated? and escalate_dispatch_failure?(shape, entry.count) do
@@ -363,6 +424,13 @@ defmodule Arbiter.Board.Autopilot do
   defp error_shape(%module{}), do: module
   defp error_shape(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
   defp error_shape(reason), do: reason
+
+  # bd-8lnnnt: when should the *next* dispatch attempt on this card happen?
+  # Delegates to `Arbiter.Worker.PreflightHold`, the policy shared with
+  # `Arbiter.Workflows.DispatchQueue`'s held-intent drain — see that module's
+  # doc for why a single policy backs both callers.
+  defp preflight_retry_not_before(reason, count, now),
+    do: Arbiter.Worker.PreflightHold.retry_not_before(reason, count, now)
 
   # Resolves the card's workspace so `CoordinatorNotifier.dispatch_stuck/3`
   # has somewhere to post — a card with no readable Issue/workspace has

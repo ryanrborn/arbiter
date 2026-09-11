@@ -30,6 +30,32 @@ defmodule Arbiter.Workflows.DispatchQueue do
   don't re-enter the gate and loop). Order is priority-first, FIFO tiebreak —
   the same `{priority, opened_at}` key `MergeQueue` uses.
 
+  ## A quota-exhausted pre-flight failure is held, not redrained every cycle (bd-8lnnnt)
+
+  A gate `:allow` only means the *quota snapshot* has headroom — it says
+  nothing about whether the CLI's own cheap auth probe (`Dispatch.run_preflight/2`)
+  will actually succeed right now, since that probe can fail with a classified
+  `:quota_exhausted` `StopReason` (the account's 5h window) even when the last
+  captured snapshot looked fine. Without a hold, a held intent whose dispatch
+  fails this way gets `{:requeue, item}`'d (below) and re-attempted on the very
+  next drain trigger — and `RefreshProbe`/`CloudProbe` broadcast `quota_updated`
+  every 5 minutes for as long as anything is held, so the doomed probe reran on
+  a ~5-minute cadence for the whole incident this bug tracks (bd-7qbavq: 12
+  identical failures, each preceded by a `quota_gate_bypass` event, landing on
+  5-minute wall-clock boundaries — the queue drain, not `Arbiter.Board.Autopilot`'s
+  15s tick, which would have produced ~300 attempts in that window, not 12).
+
+  So a quota-exhausted pre-flight failure sets `retry_not_before` on the
+  requeued item (`Arbiter.Worker.PreflightHold.retry_not_before/3` — the same
+  policy `Autopilot` uses for its own tick: the probe's reported reset time
+  when known, else a bounded exponential backoff), and `maybe_drain/1` skips
+  re-checking/re-dispatching a held item until that time passes, regardless of
+  what the gate says. `schedule_reset_drain/1`'s timer wakes the queue at
+  `next_reset_at/1` — the earliest of any held provider's snapshot reset_at
+  *or* any item's own `retry_not_before` — so a hold that falls after the raw
+  snapshot reset (the reset-buffer or a no-reset-time backoff) still gets its
+  own precise wake instead of waiting on the next 5-minute broadcast.
+
   ## `:continue` — overage alert debounce
 
   When the gate returns `{:overage, spend_usd}` (dispatch proceeds past the cap),
@@ -55,6 +81,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.PreflightHold
   alias Arbiter.Workflows.DispatchQueueSupervisor
 
   @typedoc """
@@ -69,7 +96,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
           priority: non_neg_integer(),
           opened_at: DateTime.t(),
           reason: term(),
-          provider: atom()
+          provider: atom(),
+          preflight_failures: non_neg_integer(),
+          retry_not_before: DateTime.t() | nil
         }
 
   defmodule State do
@@ -248,16 +277,19 @@ defmodule Arbiter.Workflows.DispatchQueue do
   # A drained intent whose off-process dispatch failed comes back here so it is
   # retried on a later drain trigger — no work is dropped (finding 3). Re-arm the
   # reset timer since we may have gone from empty back to non-empty.
+  #
+  # A competing `hold/5` for the same task can land while the drain Task that
+  # produces this cast is still in flight (finding 2, bd-8lnnnt round 2):
+  # `maybe_drain/1` removes the task from `state.items` optimistically before
+  # dispatching, so a fresh `hold/5` for that same task in the gap sees
+  # `already_held?/2` false and inserts a new `retry_not_before: nil` item.
+  # If this cast then just no-op'd on "already held", the computed hold would
+  # be silently discarded and the task left eligible to redrain immediately —
+  # so merge the requeued hold fields onto whatever is currently present
+  # instead of dropping them.
   @impl true
   def handle_cast({:requeue, item}, %State{} = state) do
-    state =
-      if already_held?(state, item.task_id) do
-        state
-      else
-        %{state | items: [item | state.items]}
-      end
-
-    {:noreply, schedule_reset_drain(state)}
+    {:noreply, schedule_reset_drain(%{state | items: merge_requeued_item(state.items, item)})}
   end
 
   # ---- drain --------------------------------------------------------------
@@ -278,6 +310,12 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp maybe_drain(%State{items: []} = state), do: state
 
   defp maybe_drain(%State{} = state) do
+    # A quota-exhausted pre-flight failure holds its item until its own
+    # `retry_not_before` passes (bd-8lnnnt) — set aside before the gate check
+    # even runs, since the gate has no notion of this per-item hold.
+    now = DateTime.utc_now()
+    {on_hold, eligible} = Enum.split_with(state.items, &preflight_held?(&1, now))
+
     # One snapshot read per distinct provider held in this queue (bd-2mpo3f) —
     # a Codex hold must be re-checked against CodexQuota, not AnthropicQuota, or
     # it would drain on Anthropic's headroom (or never drain at all, since a
@@ -291,7 +329,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # is handed off to a supervised Task below so it never runs inside (and
     # blocks) this GenServer's message loop (finding 3).
     {to_dispatch, keep} =
-      state.items
+      eligible
       |> Enum.sort_by(&queue_order_key/1)
       |> Enum.split_with(fn item ->
         quota = Map.get(snapshots, item_provider(item))
@@ -305,8 +343,13 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # Optimistically remove the to-dispatch intents now; the drain Task casts
     # `{:requeue, item}` back for any that fail, so nothing is dropped.
     _ = spawn_drain(state, to_dispatch)
-    %{state | items: keep}
+    %{state | items: on_hold ++ keep}
   end
+
+  defp preflight_held?(%{retry_not_before: %DateTime{} = at}, now),
+    do: DateTime.compare(now, at) == :lt
+
+  defp preflight_held?(_item, _now), do: false
 
   # Dispatch the drained intents off-process, sequentially in the priority order
   # already established by the caller, so headroom is consumed highest-priority
@@ -319,11 +362,34 @@ defmodule Arbiter.Workflows.DispatchQueue do
     start_drain_task(fn ->
       Enum.each(items, fn item ->
         case safe_dispatch(dispatcher, item) do
-          {:ok, _} -> :ok
-          _err -> GenServer.cast(queue, {:requeue, item})
+          {:ok, _} ->
+            :ok
+
+          {:error, reason} ->
+            GenServer.cast(queue, {:requeue, hold_item(item, reason)})
+
+          other ->
+            GenServer.cast(queue, {:requeue, hold_item(item, other)})
         end
       end)
     end)
+  end
+
+  # A dispatch that failed on this drain gets requeued (below) so it isn't
+  # dropped. If the failure was a quota-exhausted pre-flight refusal
+  # (bd-8lnnnt), set `retry_not_before` so `maybe_drain/1` doesn't re-run the
+  # same doomed CLI probe on the next 5-minute broadcast — see this module's
+  # moduledoc and `Arbiter.Worker.PreflightHold`. Any other failure shape
+  # requeues with no hold, unchanged from before.
+  defp hold_item(item, reason) do
+    count = Map.get(item, :preflight_failures, 0) + 1
+
+    item
+    |> Map.put(:preflight_failures, count)
+    |> Map.put(
+      :retry_not_before,
+      PreflightHold.retry_not_before(reason, count, DateTime.utc_now())
+    )
   end
 
   # Prefer the app-supervised Task.Supervisor; fall back to an unsupervised
@@ -391,15 +457,39 @@ defmodule Arbiter.Workflows.DispatchQueue do
     end
   end
 
+  # The wake time is the earliest of: a provider's snapshot reset_at, or any
+  # held item's own `retry_not_before` (finding 2, bd-8lnnnt round 2) — a
+  # `PreflightHold`-derived hold can fall after the snapshot's reset_at (the
+  # +60s buffer, or a fallback backoff with no reset_at at all), and without
+  # this the queue only re-arms a timer for the snapshot's reset, then finds
+  # `maybe_drain/1` still holds the item and has nothing left to wake it until
+  # the next `quota_updated` broadcast (up to 5 minutes late).
   defp next_reset_at(%State{} = state) do
-    state
-    |> provider_snapshots()
-    |> Map.values()
-    |> Enum.map(&Snapshot.normalize/1)
-    |> Enum.flat_map(fn
-      %{reset_at: %DateTime{} = reset} -> [reset]
-      _ -> []
-    end)
+    snapshot_resets =
+      state
+      |> provider_snapshots()
+      |> Map.values()
+      |> Enum.map(&Snapshot.normalize/1)
+      |> Enum.flat_map(fn
+        %{reset_at: %DateTime{} = reset} -> [reset]
+        _ -> []
+      end)
+
+    item_holds =
+      state.items
+      |> Enum.flat_map(fn
+        %{retry_not_before: %DateTime{} = at} -> [at]
+        _ -> []
+      end)
+
+    now = DateTime.utc_now()
+
+    # A stale/past snapshot reset_at must not win over a still-future item
+    # hold just for being numerically smaller — `schedule_reset_drain/1`
+    # already declines to arm a timer for a past time, so filter those out
+    # here rather than letting one suppress a real future wake.
+    (snapshot_resets ++ item_holds)
+    |> Enum.filter(&(DateTime.compare(&1, now) == :gt))
     |> Enum.min_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end
 
@@ -455,6 +545,47 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp already_held?(%State{items: items}, task_id),
     do: Enum.any?(items, &(&1.task_id == task_id))
 
+  # Insert `item` if its task isn't already present; otherwise merge its hold
+  # fields onto the existing entry rather than dropping them (finding 2,
+  # bd-8lnnnt round 2) — takes the later of the two `retry_not_before` values
+  # and the higher `preflight_failures` count, on the theory that either
+  # represents a hold computed from real information and neither should be
+  # allowed to erase the other.
+  defp merge_requeued_item(items, item) do
+    case Enum.find(items, &(&1.task_id == item.task_id)) do
+      nil ->
+        [item | items]
+
+      existing ->
+        merged = merge_hold_fields(existing, item)
+
+        Enum.map(items, fn
+          %{task_id: task_id} when task_id == item.task_id -> merged
+          other -> other
+        end)
+    end
+  end
+
+  defp merge_hold_fields(existing, requeued) do
+    %{
+      existing
+      | retry_not_before: later_retry(existing.retry_not_before, requeued.retry_not_before),
+        preflight_failures:
+          max(
+            Map.get(existing, :preflight_failures, 0),
+            Map.get(requeued, :preflight_failures, 0)
+          )
+    }
+  end
+
+  defp later_retry(nil, nil), do: nil
+  defp later_retry(nil, %DateTime{} = b), do: b
+  defp later_retry(%DateTime{} = a, nil), do: a
+
+  defp later_retry(%DateTime{} = a, %DateTime{} = b) do
+    if DateTime.compare(a, b) == :gt, do: a, else: b
+  end
+
   defp new_item(%State{} = state, task_id, opts, reason, provider) do
     %{
       task_id: task_id,
@@ -462,7 +593,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
       priority: task_priority(state, task_id),
       opened_at: DateTime.utc_now(),
       reason: reason,
-      provider: provider
+      provider: provider,
+      preflight_failures: 0,
+      retry_not_before: nil
     }
   end
 

@@ -768,6 +768,146 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
     end
   end
 
+  describe "preflight_failed/2 quota vs. credential wording (bd-8lnnnt)" do
+    alias Arbiter.Worker.StopReason
+
+    defp future_epoch(seconds_from_now),
+      do: DateTime.utc_now() |> DateTime.add(seconds_from_now) |> DateTime.to_unix()
+
+    defp quota_exhausted_reason(seconds_until_reset \\ 3600) do
+      StopReason.classify(1, [
+        "Claude AI usage limit reached|#{future_epoch(seconds_until_reset)}"
+      ])
+    end
+
+    test "a quota-exhausted refusal reads as a throttle, not a credential failure" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      reason = quota_exhausted_reason()
+
+      assert :ok =
+               CoordinatorNotifier.preflight_failed(
+                 %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
+                 reason
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.subject =~ "pre-flight throttled"
+      refute escalation.subject =~ "auth failed"
+      assert escalation.body =~ "throttle, not a credential problem"
+    end
+
+    test "an expired-credential refusal keeps the auth-failed wording" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               CoordinatorNotifier.preflight_failed(
+                 %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
+                 reason
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.subject =~ "pre-flight auth failed"
+      refute escalation.subject =~ "throttled"
+    end
+  end
+
+  describe "preflight_failed/2 dedupe (bd-8lnnnt)" do
+    alias Arbiter.Worker.StopReason
+
+    defp preflight_escalations(ws), do: Message.inbox("admiral", workspace_id: ws)
+
+    defp quota_reason do
+      epoch = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_unix()
+      StopReason.classify(1, ["Claude AI usage limit reached|#{epoch}"])
+    end
+
+    test "a repeated preflight failure for the same task+cause escalates once, not once per attempt" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}}
+      reason = quota_reason()
+
+      for _ <- 1..14 do
+        assert :ok = CoordinatorNotifier.preflight_failed(snapshot, reason)
+      end
+
+      assert [_only_one] = preflight_escalations(ws)
+    end
+
+    test "an outstanding (read-but-uncleared) escalation still dedupes" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}}
+      reason = quota_reason()
+
+      assert :ok = CoordinatorNotifier.preflight_failed(snapshot, reason)
+      assert [msg] = preflight_escalations(ws)
+      Message.mark_read(msg.id)
+
+      assert :ok = CoordinatorNotifier.preflight_failed(snapshot, reason)
+
+      assert [_still_one] = Message.outstanding("admiral", workspace_id: ws)
+      assert preflight_escalations(ws) == []
+    end
+
+    test "a cleared escalation re-escalates only after the cooldown elapses" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+      snapshot = %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}}
+      reason = quota_reason()
+
+      assert :ok = CoordinatorNotifier.preflight_failed(snapshot, reason)
+      assert [msg] = preflight_escalations(ws)
+      Message.mark_cleared(msg.id)
+
+      # Cleared but still inside the cooldown window: silence.
+      assert :ok = CoordinatorNotifier.preflight_failed(snapshot, reason)
+      assert preflight_escalations(ws) == []
+
+      with_preflight_cooldown(0, fn ->
+        assert :ok = CoordinatorNotifier.preflight_failed(snapshot, reason)
+      end)
+
+      assert [_fresh] = preflight_escalations(ws)
+    end
+
+    test "a different task with the same cause is not suppressed" do
+      ws = uniq("ws")
+      reason = quota_reason()
+
+      assert :ok =
+               CoordinatorNotifier.preflight_failed(
+                 %{task_id: uniq("bd"), workspace_id: ws, repo: "r", meta: %{}},
+                 reason
+               )
+
+      assert :ok =
+               CoordinatorNotifier.preflight_failed(
+                 %{task_id: uniq("bd"), workspace_id: ws, repo: "r", meta: %{}},
+                 reason
+               )
+
+      assert [_a, _b] = preflight_escalations(ws)
+    end
+
+    defp with_preflight_cooldown(ms, fun) do
+      prev = Application.get_env(:arbiter, :preflight_escalation_cooldown_ms)
+      Application.put_env(:arbiter, :preflight_escalation_cooldown_ms, ms)
+
+      try do
+        fun.()
+      after
+        case prev do
+          nil -> Application.delete_env(:arbiter, :preflight_escalation_cooldown_ms)
+          val -> Application.put_env(:arbiter, :preflight_escalation_cooldown_ms, val)
+        end
+      end
+    end
+  end
+
   describe "spawn_failed/2 (bd-bi5pn0)" do
     alias Arbiter.Worker.StopReason
 

@@ -257,6 +257,144 @@ defmodule Arbiter.Board.AutopilotTest do
     end
   end
 
+  describe "a quota-exhausted pre-flight failure is held, not retried every tick (bd-8lnnnt)" do
+    alias Arbiter.Worker.StopReason
+
+    defp quota_reason(retry_after) do
+      %StopReason{
+        category: :quota_exhausted,
+        summary: "5h usage limit reached",
+        remediation: nil,
+        exit_status: 1,
+        signal: nil,
+        retry_after: retry_after
+      }
+    end
+
+    test "does not re-run the probe on the next tick while the reset is still ahead" do
+      test = self()
+      retry_after = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn id ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:auth_check_failed, quota_reason(retry_after)}}
+          end
+        )
+
+      assert {:error, {:auth_check_failed, _}} = Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", held_until} = Autopilot.tick(pid)
+      assert DateTime.compare(held_until, retry_after) != :lt
+      refute_receive {:dispatch_attempt, _}, 50
+    end
+
+    test "dispatches again once the known reset time has passed" do
+      test = self()
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+      retry_after = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+      pid =
+        start(
+          paused: false,
+          now: fn -> Agent.get(clock, & &1) end,
+          dispatch: fn id ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:auth_check_failed, quota_reason(retry_after)}}
+          end
+        )
+
+      Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", _} = Autopilot.tick(pid)
+      refute_receive {:dispatch_attempt, _}, 50
+
+      Agent.update(clock, fn _ -> DateTime.add(retry_after, 120, :second) end)
+      Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+    end
+
+    test "without a known reset time, falls back to a bounded backoff instead of retrying every tick" do
+      test = self()
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+
+      pid =
+        start(
+          paused: false,
+          now: fn -> Agent.get(clock, & &1) end,
+          dispatch: fn id ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:auth_check_failed, quota_reason(nil)}}
+          end
+        )
+
+      Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", _} = Autopilot.tick(pid)
+      refute_receive {:dispatch_attempt, _}, 50
+
+      Agent.update(clock, fn now -> DateTime.add(now, 3600, :second) end)
+      Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+    end
+
+    test "a card that dispatches successfully clears a live hold, so the next failure restarts at count 1" do
+      test = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+      retry_after = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+      dispatch_fun = fn id ->
+        case Agent.get_and_update(counter, &{&1, &1 + 1}) do
+          0 ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:auth_check_failed, quota_reason(retry_after)}}
+
+          1 ->
+            send(test, {:dispatch_attempt, id})
+            {:ok, %{task_id: id}}
+
+          _ ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:auth_check_failed, quota_reason(nil)}}
+        end
+      end
+
+      pid = start(paused: false, now: fn -> Agent.get(clock, & &1) end, dispatch: dispatch_fun)
+
+      Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      # The hold is still live (retry_after is 1h out) — a tick now must not
+      # re-attempt.
+      assert {:held, "bd-1", _} = Autopilot.tick(pid)
+      refute_receive {:dispatch_attempt, _}, 50
+
+      # Advance the clock past the known reset time so the hold expires, and
+      # this attempt succeeds — exercising `clear_failure/2` on a hold that
+      # was actually live, not one that had already lapsed on its own.
+      Agent.update(clock, fn _ -> DateTime.add(retry_after, 120, :second) end)
+      assert {:ok, "bd-1"} = Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      # A fresh failure right after the success should compute its backoff at
+      # count: 1 (the base backoff window), not carry the earlier failure's
+      # count forward — proof the success actually cleared the entry rather
+      # than just leaving a stale `retry_not_before` behind.
+      before_next_failure = Agent.get(clock, & &1)
+      assert {:error, {:auth_check_failed, _}} = Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", held_until} = Autopilot.tick(pid)
+      assert DateTime.compare(held_until, DateTime.add(before_next_failure, 30, :second)) != :gt
+    end
+  end
+
   describe "a dispatch does not take the process with it" do
     # The board refreshes *because* a dispatch is happening — Worker.init
     # broadcasts :started mid-flight — so the one moment every open board asks
