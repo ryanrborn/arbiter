@@ -318,6 +318,38 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   @doc """
+  Resolve the per-pass reviewer/implementer timeout in milliseconds.
+
+  Resolution order:
+
+    1. `override` — an explicit `:timeout_ms` opt (tests / advanced callers),
+       held for the gate's lifetime.
+    2. The workspace's `config["review_gate"]["timeout_ms"]`, read **live**.
+    3. `#{@default_timeout_ms}` ms (#{div(@default_timeout_ms, 60_000)} minutes).
+
+  Called once per pass from `launch_worker/5` rather than once at gate init
+  (bd-216r3e). A gate outlives many passes — a timeout retry, a verdict
+  re-prompt, every revise round — and resolving the budget once meant a
+  `review_gate.timeout_ms` raised mid-run could not reach the running gate: the
+  only way to apply it was `worker stop` + `worker resume`. An operator who
+  raised the value, saw the next round still time out on the old budget, and
+  concluded the config key does not work was reading a real trap, not a
+  mistake of their own.
+  """
+  @spec resolve_timeout_ms(String.t() | nil, pos_integer() | nil) :: pos_integer()
+  def resolve_timeout_ms(workspace_id, override \\ nil)
+
+  def resolve_timeout_ms(_workspace_id, override) when is_integer(override) and override > 0,
+    do: override
+
+  def resolve_timeout_ms(workspace_id, _override) do
+    case load_workspace(workspace_id) do
+      %Workspace{} = ws -> Workspace.review_gate_timeout_ms(ws) || @default_timeout_ms
+      _ -> @default_timeout_ms
+    end
+  end
+
+  @doc """
   The default revise-and-rediscuss round cap for a task's difficulty level.
 
   | Difficulty | Label    | Default rounds |
@@ -521,7 +553,17 @@ defmodule Arbiter.Worker.ReviewGate do
       pr_ref: Keyword.get(opts, :pr_ref),
       command: Keyword.get(opts, :command),
       revise_command: Keyword.get(opts, :revise_command),
-      timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
+      # bd-216r3e: `:timeout_ms` is an explicit OVERRIDE (tests / advanced
+      # callers) and is held for the gate's lifetime. With no override the
+      # per-pass timeout is re-resolved from live workspace config every time a
+      # pass is armed (`launch_worker/5`), so raising `review_gate.timeout_ms`
+      # reaches a gate that is already running instead of requiring a `worker
+      # stop` + `worker resume`. `timeout_ms` below is the value the MOST
+      # RECENTLY armed pass is running under — it is what the timeout escalation
+      # reports, so the message can never name a budget the pass did not use.
+      timeout_override_ms: Keyword.get(opts, :timeout_ms),
+      timeout_ms:
+        resolve_timeout_ms(Keyword.get(opts, :workspace_id), Keyword.get(opts, :timeout_ms)),
       # Reviewing-pass timeout retry budget (bd-78vg4v). Consumed by the
       # reviewing-phase timeout handler; not reset per round — it guards against
       # a whole ReviewGate stalling on transient API hangs, not per-round noise.
@@ -1721,25 +1763,58 @@ defmodule Arbiter.Worker.ReviewGate do
     {:stop, :normal, %{state | reported?: true}}
   end
 
-  # Escalate the current pass as timed-out: report a REQUEST_CHANGES carrying the
-  # timeout note plus (when a thread exists) the full escalation payload, and
-  # stop. Shared by the reviewing-retry-exhausted path and the revising path.
+  # Escalate the current pass as timed-out: report an INCONCLUSIVE verdict
+  # carrying the timeout note plus (when a thread exists) the full escalation
+  # payload, and stop. Shared by the reviewing-retry-exhausted path and the
+  # revising path.
+  #
+  # bd-216r3e: this used to report `:request_changes` with the timeout note as
+  # its single "finding", which is a self-sustaining re-dispatch loop.
+  # REQUEST_CHANGES means "a reviewer found problems, send it back to an
+  # implementer" — so the implementer re-verifies an unchanged branch, finds
+  # nothing to fix (there are zero code findings, only the synthetic timeout
+  # text), signals `arb done`, and the gate runs and times out again. Observed
+  # on vs-2d0xxa: three rounds, all labelled "round 1", all with the identical
+  # synthetic finding. No amount of worker iteration can clear a verdict no
+  # reviewer ever produced.
+  #
+  # A timeout is an infrastructure/budget failure, not a review outcome, so it
+  # reports `:no_verdict` — which the author parks as
+  # `:review_gate_inconclusive` and escalates to the coordinator, where a human
+  # decision (raise the budget, shrink the review, re-run) can actually break
+  # the cycle.
   defp escalate_timeout(state) do
-    msg =
-      "ReviewGate #{state.phase} pass timed out after #{div(state.timeout_ms, 1000)}s " <>
-        "with no verdict (round #{state.round})."
-
+    msg = timeout_message(state)
     payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
 
-    # bd-dp7hiw: this reports as a REQUEST_CHANGES, and worker.ex's note-writer
-    # points to `review_gate_rounds_list` for the full findings — so, unlike
-    # the malformed/re-prompted passes round.ex deliberately skips, record a
-    # row for THIS round too, or that pointer resolves to nothing for a task
-    # that timed out on round 1.
-    record_round(state, :review, :request_changes, payload, converged: false)
+    # `/api/review_gate_rounds` is the only readable surface for a gate's
+    # rounds, so a timeout must still leave a row — but an honest one:
+    # `verdict: :timed_out` with `finding_count: 0`, which makes the loop
+    # signature (repeated timed-out rounds on the same task) queryable instead
+    # of indistinguishable from a reviewer that really did request changes.
+    record_round(state, :review, :timed_out, payload, converged: false)
 
-    report(state, {:request_changes, payload})
+    report(state, {:no_verdict, payload})
     {:stop, :normal, %{state | reported?: true}}
+  end
+
+  # The timeout note. States the budget that was actually in force for the pass
+  # (`state.timeout_ms` is re-resolved per pass — see `resolve_timeout_ms/2`),
+  # that there are NO findings to act on, and the remediation — so neither the
+  # coordinator nor a re-dispatched implementer reads it as review feedback.
+  defp timeout_message(state) do
+    seconds = div(state.timeout_ms, 1000)
+
+    "ReviewGate #{state.phase} pass timed out after #{seconds}s with no verdict " <>
+      "(round #{state.round}).\n\n" <>
+      "This is an INFRASTRUCTURE/BUDGET failure, not a review finding: no reviewer " <>
+      "verdict was produced, so there is nothing for an implementer to fix and " <>
+      "re-dispatching the task unchanged will simply time out again.\n\n" <>
+      "Remediation: raise `review_gate.timeout_ms` for this workspace (the pass ran " <>
+      "under #{state.timeout_ms}ms) or reduce what the review has to do — a cold " <>
+      "build plus a full test suite can exceed the default budget on a large repo — " <>
+      "then re-run the review. The new value applies to the next pass of a running " <>
+      "gate; no worker restart is needed."
   end
 
   # ---- structured round outcomes (bd-aqyjuc) -------------------------------
@@ -1753,52 +1828,26 @@ defmodule Arbiter.Worker.ReviewGate do
     converged = Keyword.fetch!(opts, :converged)
     {run_id, reviewer_model, cost_usd} = pass_usage(state.current_id)
 
-    # Record the reviewer's per-criterion CRITERIA breakdown structurally
-    # (bd-4yhv4x): {total, unmet} for a :review row that carried a breakdown,
-    # {nil, nil} otherwise. :impl rows never carry a breakdown. Makes "APPROVE
-    # with N criteria unmet" queryable without re-reading the transcript.
-    {criteria_total, criteria_unmet} =
-      if role == :review, do: ReviewVerification.criteria_counts(findings), else: {nil, nil}
-
     # bd-3xultf: the resolved tier that governed this pass — recorded only
     # for :review rows, alongside `reviewer_model`, so analysis can control
     # for the judge instead of a routed-by-difficulty reviewer reading as a
     # quality change.
     reviewer_tier = if role == :review, do: reviewer_tier_for(state), else: nil
 
-    # bd-6r8caj: give the round's findings identity, and record what this round
-    # said about every finding carried INTO it. `undispositioned_count` is the
-    # queryable form of the defect: an APPROVE row with a non-zero count is a
-    # round that approved without accounting for an open Medium+ finding.
-    open = Map.get(state, :open_findings, [])
-
-    {finding_ids, dispositions, undispositioned} =
-      if role == :review do
-        {ReviewFindings.encode_ids(ReviewFindings.extract(findings, state.round)),
-         ReviewFindings.encode_dispositions(open, findings),
-         length(ReviewFindings.approval_gap(open, findings, nil).missing)}
-      else
-        {nil, nil, nil}
-      end
-
-    attrs = %{
-      task_id: state.task_id,
-      run_id: run_id,
-      round: state.round,
-      role: role,
-      verdict: verdict,
-      findings: findings,
-      finding_count: if(role == :review, do: count_findings(findings), else: nil),
-      reviewer_model: reviewer_model,
-      reviewer_tier: reviewer_tier,
-      cost_usd: cost_usd,
-      criteria_total: criteria_total,
-      criteria_unmet: criteria_unmet,
-      finding_ids: finding_ids,
-      dispositions: dispositions,
-      undispositioned_count: undispositioned,
-      converged: converged
-    }
+    attrs =
+      %{
+        task_id: state.task_id,
+        run_id: run_id,
+        round: state.round,
+        role: role,
+        verdict: verdict,
+        findings: findings,
+        reviewer_model: reviewer_model,
+        reviewer_tier: reviewer_tier,
+        cost_usd: cost_usd,
+        converged: converged
+      }
+      |> Map.merge(review_outcome_attrs(role, verdict, findings, state))
 
     case Ash.create(Round, attrs) do
       {:ok, _row} ->
@@ -1818,6 +1867,55 @@ defmodule Arbiter.Worker.ReviewGate do
       )
 
       :error
+  end
+
+  # Record the reviewer's per-criterion CRITERIA breakdown, and per-finding
+  # identity/dispositions, structurally — but only for a `:review` row that
+  # carries a genuine reviewer verdict.
+  # bd-4yhv4x: {total, unmet} for a :review row that carried a breakdown,
+  # {nil, nil} otherwise. :impl rows never carry a breakdown. Makes "APPROVE
+  # with N criteria unmet" queryable without re-reading the transcript.
+  # bd-6r8caj: give the round's findings identity, and record what this round
+  # said about every finding carried INTO it. `undispositioned_count` is the
+  # queryable form of the defect: an APPROVE row with a non-zero count is a
+  # round that approved without accounting for an open Medium+ finding.
+  # bd-216r3e: a `:timed_out` row carries an operator note, not reviewer
+  # output — it has no findings, no criteria breakdown and no dispositions.
+  # Scoring it like a real verdict is what made a timeout read as
+  # "REQUEST_CHANGES, 1 finding" in the first place.
+  defp review_outcome_attrs(role, verdict, findings, state) do
+    review_outcome? = role == :review and verdict != :timed_out
+
+    {criteria_total, criteria_unmet} =
+      if review_outcome?, do: ReviewVerification.criteria_counts(findings), else: {nil, nil}
+
+    {finding_ids, dispositions, undispositioned} =
+      if review_outcome? do
+        open = Map.get(state, :open_findings, [])
+
+        {ReviewFindings.encode_ids(ReviewFindings.extract(findings, state.round)),
+         ReviewFindings.encode_dispositions(open, findings),
+         length(ReviewFindings.approval_gap(open, findings, nil).missing)}
+      else
+        {nil, nil, nil}
+      end
+
+    %{
+      finding_count: finding_count(role, verdict, findings),
+      criteria_total: criteria_total,
+      criteria_unmet: criteria_unmet,
+      finding_ids: finding_ids,
+      dispositions: dispositions,
+      undispositioned_count: undispositioned
+    }
+  end
+
+  defp finding_count(role, verdict, findings) do
+    cond do
+      role != :review -> nil
+      verdict == :timed_out -> 0
+      true -> count_findings(findings)
+    end
   end
 
   # Recompute the same tier `reviewer_model_tier/2` resolved for this pass's
@@ -2145,7 +2243,12 @@ defmodule Arbiter.Worker.ReviewGate do
 
     case spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
-        Process.send_after(self(), {:timeout, attempt}, state.timeout_ms)
+        # bd-216r3e: resolve the budget for THIS pass now, not once at gate
+        # init. A gate can outlive several passes (timeout retry, verdict
+        # re-prompt, every revise round), and an operator who raises
+        # `review_gate.timeout_ms` mid-run must see it applied on the next pass.
+        timeout_ms = resolve_timeout_ms(state.workspace_id, state.timeout_override_ms)
+        Process.send_after(self(), {:timeout, attempt}, timeout_ms)
 
         {:ok,
          %{
@@ -2154,7 +2257,8 @@ defmodule Arbiter.Worker.ReviewGate do
              current_id: id,
              attempt: attempt,
              lines: [],
-             current_prompt: prompt
+             current_prompt: prompt,
+             timeout_ms: timeout_ms
          }}
 
       {:error, _reason} = err ->

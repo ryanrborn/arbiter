@@ -31,8 +31,16 @@ defmodule Arbiter.ReviewGate.Round do
     * `round`          — 1-indexed revise-and-rediscuss round this pass belongs to.
     * `role`           — `:review` (a reviewer pass) or `:impl` (an implementer
                           revise pass).
-    * `verdict`        — `:approve` or `:request_changes` for a `:review` row;
-                          always nil for `:impl` (implementers don't issue verdicts).
+    * `verdict`        — `:approve`, `:request_changes` or `:timed_out` for a
+                          `:review` row; always nil for `:impl` (implementers
+                          don't issue verdicts). `:timed_out` (bd-216r3e) is a
+                          pass that exhausted its budget without producing a
+                          verdict — an infrastructure failure, recorded with
+                          `finding_count: 0` because no reviewer said anything.
+                          It used to be written as a `:request_changes` row
+                          carrying a single synthetic "the gate timed out"
+                          finding, which re-dispatched an implementer that had
+                          nothing to fix, which timed out again.
     * `findings`        — the reviewer's findings text (from the `VERDICT:` line
                           onward) for a `:review` row, or the implementer's raw
                           revise-response transcript for an `:impl` row.
@@ -97,7 +105,7 @@ defmodule Arbiter.ReviewGate.Round do
     data_layer: AshSqlite.DataLayer
 
   @roles ~w(review impl)a
-  @verdicts ~w(approve request_changes)a
+  @verdicts ~w(approve request_changes timed_out)a
 
   sqlite do
     table "review_gate_rounds"
@@ -167,7 +175,7 @@ defmodule Arbiter.ReviewGate.Round do
     attribute :verdict, :atom do
       public? true
       constraints one_of: @verdicts
-      description "approve or request_changes; nil for :impl rows."
+      description "approve, request_changes or timed_out; nil for :impl rows."
     end
 
     attribute :findings, :string do
