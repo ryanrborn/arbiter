@@ -1045,6 +1045,20 @@ defmodule Arbiter.Worker.Dispatch do
           :awaiting_review_resume_attempts,
           Keyword.get(opts, :awaiting_review_resume_attempts)
         )
+        # bd-a9zb7w: the same trick for the ReviewGate fix-round budget. A
+        # `request_changes` verdict auto-dispatches an implementer fix round, and
+        # each round mints a fresh worker — so both the attempt counter and the
+        # digest of the findings that round was dispatched against have to ride
+        # the worker's meta, or neither the cap nor the convergence check can
+        # bind. Absent on every other resume path.
+        |> put_if_present(
+          :review_gate_fix_round_attempts,
+          Keyword.get(opts, :review_gate_fix_round_attempts)
+        )
+        |> put_if_present(
+          :review_gate_findings_digest,
+          Keyword.get(opts, :review_gate_findings_digest)
+        )
 
       _ ->
         base

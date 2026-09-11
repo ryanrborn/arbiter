@@ -35,8 +35,12 @@ defmodule Arbiter.Tasks.Workspace do
         "review_gate" => %{
           "max_rounds" => 2,                   # optional integer ≥ 1; caps the difficulty
                                                # default (min wins). See review_gate_max_rounds/1.
-          "timeout_ms" => 1_200_000            # optional integer > 0; per-pass reviewer/
+          "timeout_ms" => 1_200_000,           # optional integer > 0; per-pass reviewer/
                                                # implementer timeout. See review_gate_timeout_ms/1.
+          "max_fix_rounds" => 1                # optional integer >= 0; how many implementer
+                                               # fix rounds auto-dispatch after a REQUEST_CHANGES
+                                               # verdict. 0 disables. See
+                                               # review_gate_max_fix_rounds/1.
         }
       }
 
@@ -811,6 +815,36 @@ defmodule Arbiter.Tasks.Workspace do
       s when is_binary(s) ->
         case Integer.parse(s) do
           {n, ""} when n > 0 -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  Optional workspace override for how many implementer **fix rounds** auto-
+  dispatch after the ReviewGate returns REQUEST_CHANGES, from
+  `config["review_gate"]["max_fix_rounds"]` (bd-a9zb7w).
+
+  Unlike the sibling helpers this one is meaningful at `0` — that is the switch
+  that turns the auto fix round off entirely and restores the pre-bd-a9zb7w
+  behaviour (rejected → escalate → park, wait for a human `worker_resume`) — so
+  it accepts any non-negative integer and only returns `nil` when unconfigured,
+  letting `Arbiter.Workflows.ReviewGateFixRoundDispatcher.default_max_fix_rounds/0`
+  apply. Accepts an integer or the stringified integer that round-trips through
+  JSON config.
+  """
+  @spec review_gate_max_fix_rounds(t()) :: non_neg_integer() | nil
+  def review_gate_max_fix_rounds(workspace) do
+    case get_in(workspace.config || %{}, ["review_gate", "max_fix_rounds"]) do
+      n when is_integer(n) and n >= 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n >= 0 -> n
           _ -> nil
         end
 
