@@ -76,6 +76,10 @@ defmodule Arbiter.Mergers.Github do
 
   @stub_name Arbiter.Mergers.Github.HTTP
 
+  # Cap pages so a runaway response can't hammer the API. 50 pages × 100/page
+  # = 5,000 reviews, well above any long-lived PR's review history.
+  @max_review_pages 50
+
   # Check-run conclusions that count as a CI failure (shared by the pipeline
   # classifier and the `:ci_failed` log fetch).
   @failing_conclusions ["failure", "timed_out", "action_required", "cancelled"]
@@ -351,9 +355,11 @@ defmodule Arbiter.Mergers.Github do
   (ReviewPatrol's tick, a `force: true` `ExternalReview` re-dispatch, …) got
   there.
 
-  Requests `per_page: 100` — GitHub's default page size (30) was silently
+  Paginates through GitHub's `pulls/N/reviews` (walking `rel="next"` via
+  `Arbiter.Http.Client.paginate/4`) — the default page size (30) was silently
   truncating this list on a long-lived engagement with many re-review rounds,
-  hiding recent reviews behind older ones on the unfetched page.
+  hiding the actual latest review (at the end of the chronological list)
+  behind older ones on unfetched pages.
 
   Returns `{:ok, sha_or_nil}` or `{:error, term()}`. `nil` when we hold no
   verdict review yet, or when the token's own login can't be resolved (fails
@@ -367,11 +373,7 @@ defmodule Arbiter.Mergers.Github do
   def latest_own_review_sha(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
-         {:ok, reviews} <-
-           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews",
-             params: [per_page: 100]
-           )
-           |> handle_json() do
+         {:ok, reviews} <- paginate_reviews(cfg, owner, repo, number) do
       case authenticated_login(cfg) do
         login when is_binary(login) and login != "" ->
           {:ok, latest_own_review_commit(reviews, login)}
@@ -380,6 +382,16 @@ defmodule Arbiter.Mergers.Github do
           {:ok, nil}
       end
     end
+  end
+
+  defp paginate_reviews(cfg, owner, repo, number) do
+    Client.paginate(
+      client(cfg),
+      "/repos/#{owner}/#{repo}/pulls/#{number}/reviews",
+      [params: [per_page: 100]],
+      max_pages: @max_review_pages,
+      next_page: &Provider.next_page/3
+    )
   end
 
   # The commit_id of our own most recent verdict review. Mirrors

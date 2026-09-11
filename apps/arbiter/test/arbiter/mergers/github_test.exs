@@ -2460,6 +2460,53 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, nil} = Github.latest_own_review_sha(@ref)
     end
 
+    test "follows the Link rel=\"next\" header, so the latest review isn't lost behind a page boundary" do
+      {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            page = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
+
+            case page do
+              0 ->
+                conn
+                |> Plug.Conn.put_resp_header(
+                  "link",
+                  ~s(</repos/octo/widget/pulls/42/reviews?page=2>; rel="next")
+                )
+                |> Plug.Conn.put_status(200)
+                |> Req.Test.json([
+                  %{
+                    "user" => %{"login" => "arb-bot"},
+                    "state" => "APPROVED",
+                    "commit_id" => "aaa111"
+                  }
+                ])
+
+              1 ->
+                conn
+                |> Plug.Conn.put_status(200)
+                |> Req.Test.json([
+                  %{
+                    "user" => %{"login" => "arb-bot"},
+                    "state" => "CHANGES_REQUESTED",
+                    "commit_id" => "zzz999"
+                  }
+                ])
+            end
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, "zzz999"} = Github.latest_own_review_sha(@ref)
+    end
+
     test "nil when we hold no verdict review yet" do
       stub(fn conn ->
         case {conn.method, conn.request_path} do

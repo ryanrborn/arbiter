@@ -340,27 +340,48 @@ defmodule Arbiter.Workflows.CodeReview do
     # we've already verdicted this exact commit — skip posting again rather
     # than trusting local bookkeeping, which can be stale or bypassed (e.g. a
     # forced re-dispatch that never updated the engagement record).
-    if same_sha_already_verdicted?(adapter, mr_ref, pr_head_sha(state)) do
-      Logger.info(
-        "CodeReview: skipping duplicate verdict — adapter's latest own review already " <>
-          "covers head SHA #{inspect(pr_head_sha(state))} (mr_ref=#{mr_ref})"
-      )
+    cond do
+      same_sha_already_verdicted?(adapter, mr_ref, pr_head_sha(state)) ->
+        Logger.info(
+          "CodeReview: skipping duplicate verdict — adapter's latest own review already " <>
+            "covers head SHA #{inspect(pr_head_sha(state))} (mr_ref=#{mr_ref})"
+        )
 
-      {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
-    else
-      body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
 
-      case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
-        {:ok, response} ->
-          {:ok,
-           state
-           |> Map.put(:verdict, verdict)
-           |> Map.put(:verdict_posted, true)
-           |> maybe_capture_path(response)}
+      # bd-3948ey: monotonic on a fixed head. Even when the head SHA has
+      # moved (so the guard above doesn't apply), a downgrade FROM a prior
+      # approval must be backed by new information — new commits that
+      # actually touch a line one of this pass's blocking findings is
+      # anchored on. Without this, a re-review round triggered by something
+      # other than a real code change (an author's inline reply, a
+      # re-requested review with no push) can flip an approval to
+      # request_changes purely because the pass re-litigated findings that
+      # were already visible — and implicitly accepted — at approval time.
+      verdict == :request_changes and
+          downgrade_without_new_info?(adapter, mr_ref, pr_head_sha(state), findings) ->
+        Logger.info(
+          "CodeReview: no new information — declining to downgrade prior approval for " <>
+            "mr_ref=#{mr_ref} at head #{inspect(pr_head_sha(state))}: no blocking finding is " <>
+            "anchored on a line the new commits changed"
+        )
 
-        {:error, _} = err ->
-          err
-      end
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+
+      true ->
+        body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
+
+        case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
+          {:ok, response} ->
+            {:ok,
+             state
+             |> Map.put(:verdict, verdict)
+             |> Map.put(:verdict_posted, true)
+             |> maybe_capture_path(response)}
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
 
@@ -601,6 +622,33 @@ defmodule Arbiter.Workflows.CodeReview do
       end
     else
       false
+    end
+  end
+
+  # Fails open in every way: no blocking findings, no prior-approval SHA, the
+  # adapter lacking either optional capability, an errored lookup, or a
+  # failed/empty diff fetch all mean "can't prove this is a stale re-litigation"
+  # — so the caller posts the downgrade as usual. Only an actual diff fetch
+  # that comes back clean of every blocking finding's (file, line) counts as
+  # "no new information".
+  defp downgrade_without_new_info?(_adapter, _mr_ref, nil, _findings), do: false
+
+  defp downgrade_without_new_info?(adapter, mr_ref, head_sha, findings)
+       when is_binary(head_sha) do
+    blocking = Enum.filter(findings, &(&1[:severity] == :error))
+
+    with true <- blocking != [],
+         true <- function_exported?(adapter, :latest_own_review_sha, 1),
+         {:ok, prev_sha} when is_binary(prev_sha) and prev_sha != head_sha <-
+           safe_adapter_call(adapter, :latest_own_review_sha, [mr_ref]),
+         true <- function_exported?(adapter, :self_approved?, 1),
+         {:ok, true} <- safe_adapter_call(adapter, :self_approved?, [mr_ref]),
+         {:ok, diff} when is_binary(diff) <-
+           safe_adapter_call(adapter, :get_diff, [mr_ref, %{base: prev_sha, head: head_sha}]) do
+      scope = DiffScope.build(diff)
+      not Enum.any?(blocking, &DiffScope.in_diff?(scope, &1[:file], &1[:line]))
+    else
+      _ -> false
     end
   end
 
