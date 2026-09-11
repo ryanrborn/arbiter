@@ -562,6 +562,117 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  describe "a held intent for a closed task (bd-atjyzu)" do
+    # Returns the terminal `{:error, {:task_closed, id}}` shape
+    # `Arbiter.Worker.Dispatch.dispatch/2` returns from `ensure_not_closed/1`.
+    defmodule TaskClosedDispatcher do
+      def dispatch(task_id, _opts) do
+        if pid = Application.get_env(:arbiter, :test_dispatch_pid),
+          do: send(pid, {:dispatch_attempt, task_id})
+
+        {:error, {:task_closed, task_id}}
+      end
+    end
+
+    test "closing the task drops its held intent immediately, without waiting for a drain" do
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      task = make_task(ws)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert DispatchQueue.held?(ws.id, task.id)
+
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      refute DispatchQueue.held?(ws.id, task.id)
+
+      if pid = DispatchQueueSupervisor.whereis(ws.id) do
+        on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      end
+    end
+
+    test "hold, close, then drain: queue ends empty and the dispatcher is called at most once" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      pid = start_queue(ws, dispatcher: TaskClosedDispatcher, auto_subscribe: false)
+
+      task = make_task(ws)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert DispatchQueue.held?(ws.id, task.id)
+
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+      :ok = DispatchQueue.drain(pid)
+      Process.sleep(100)
+
+      assert DispatchQueue.state(pid).items == []
+
+      dispatch_attempts =
+        Stream.repeatedly(fn ->
+          receive do
+            {:dispatch_attempt, _} -> 1
+          after
+            0 -> nil
+          end
+        end)
+        |> Enum.take_while(&(&1 != nil))
+        |> length()
+
+      assert dispatch_attempts <= 1
+    end
+
+    test "a drain that finds the task closed drops the intent instead of re-queueing it" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      pid = start_queue(ws, dispatcher: TaskClosedDispatcher, auto_subscribe: false)
+
+      task = make_task(ws)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert length(DispatchQueue.state(pid).items) == 1
+
+      # Headroom returns so the gate lets the drain through to the dispatcher,
+      # which reports the task closed underneath it.
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+      :ok = DispatchQueue.drain(pid)
+
+      assert_receive {:dispatch_attempt, task_id}, 500
+      assert task_id == task.id
+
+      # Give the async requeue-or-drop decision (posted via cast from the drain
+      # Task) a moment to land, then assert it was dropped, not requeued.
+      Process.sleep(100)
+      assert DispatchQueue.state(pid).items == []
+    end
+
+    test "a retryable dispatch failure still re-queues the held intent (no regression)" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      pid = start_queue(ws, dispatcher: FailingDispatcher, auto_subscribe: false)
+
+      task = make_task(ws)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+      :ok = DispatchQueue.drain(pid)
+
+      assert_receive {:dispatch_attempt, task_id}, 500
+      assert task_id == task.id
+
+      held_item = wait_for_held_item(pid)
+      assert held_item.task_id == task.id
+    end
+  end
+
   defp seed_usage(ws, cost_usd) do
     Ash.create!(Arbiter.Usage.Event, %{
       task_id: "usage-#{System.unique_integer([:positive])}",
