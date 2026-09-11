@@ -58,6 +58,12 @@ defmodule ArbiterCli.Cmd.Update do
   the task's single canonical PR with (Summary / Test plan / References). It
   overwrites the field.
 
+  `--resume-review` clears a ReviewPatrol engagement's per-engagement circuit
+  breaker (`circuit_breaker_tripped` + `circuit_breaker_reason`, bd-1atwts),
+  letting the engagement post again after a coordinator has adjudicated a
+  review loop. It's a resume-only switch: it never sets the flag, only clears
+  it.
+
   `--append-notes` appends the given string to the existing `notes` field
   (separated by two newlines). This requires fetching the issue first so we
   don't lose existing notes.
@@ -101,6 +107,7 @@ defmodule ArbiterCli.Cmd.Update do
     title: :string,
     assignee: :string,
     repo: :string,
+    resume_review: :boolean,
     json: :boolean
   ]
 
@@ -274,9 +281,12 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("assignee", opts[:assignee])
       |> put_if("repo", opts[:repo])
       |> maybe_append_notes(opts[:append_notes], existing)
+      |> maybe_resume_review(opts[:resume_review])
 
     if map_size(payload) == 0 do
-      Output.die("update requires at least one field flag (e.g. --priority, --append-notes)")
+      Output.die(
+        "update requires at least one field flag (e.g. --priority, --append-notes, --resume-review)"
+      )
     end
 
     case Client.patch("/api/issues/" <> id, payload) do
@@ -307,4 +317,12 @@ defmodule ArbiterCli.Cmd.Update do
 
     Map.put(payload, "notes", combined)
   end
+
+  defp maybe_resume_review(payload, true) do
+    payload
+    |> Map.put("circuit_breaker_tripped", false)
+    |> Map.put("circuit_breaker_reason", nil)
+  end
+
+  defp maybe_resume_review(payload, _), do: payload
 end

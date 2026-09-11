@@ -90,6 +90,28 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert exit_code == 0
   end
 
+  test "--resume-review clears circuit_breaker_tripped and circuit_breaker_reason (bd-1atwts)" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         decoded = Jason.decode!(body)
+         assert decoded["circuit_breaker_tripped"] == false
+         assert Map.has_key?(decoded, "circuit_breaker_reason")
+         assert decoded["circuit_breaker_reason"] == nil
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "bd-001", "circuit_breaker_tripped" => false})
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Update.run(["bd-001", "--resume-review"]) end)
+
+    assert exit_code == 0
+  end
+
   test "--repo is sent as the repo field (bd-2jum8j)" do
     stub_routes([
       {{"patch", "/api/issues/bd-001"},
