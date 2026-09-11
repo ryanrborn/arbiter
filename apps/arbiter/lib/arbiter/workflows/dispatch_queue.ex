@@ -30,6 +30,27 @@ defmodule Arbiter.Workflows.DispatchQueue do
   don't re-enter the gate and loop). Order is priority-first, FIFO tiebreak —
   the same `{priority, opened_at}` key `MergeQueue` uses.
 
+  ## A held intent for a task that has since closed is dropped, not retried forever (bd-atjyzu)
+
+  A held intent outlives the task it was created for: nothing un-holds it when
+  the task closes out from under it. Two mechanisms together make sure that
+  doesn't turn into a permanent, silently-failing re-dispatch every drain:
+
+    * `drop/2` — the task's `:close` action calls this directly
+      (`Arbiter.Tasks.Issue.Changes.DropDispatchHold`) so the hold is removed
+      the instant the task closes, not on the next drain.
+    * a terminal-vs-retryable split in the requeue path — a drain that still
+      finds a stale hold (the close raced the drop, or predates this fix)
+      re-dispatches it and gets back a **terminal** failure, which is dropped
+      instead of requeued:
+        - `{:task_closed, _}` — `Dispatch.dispatch/2`'s `ensure_not_closed/1`
+        - `{:task_not_found, _}` — `Dispatch.dispatch/2`'s `load_task/1`
+      Every other failure shape is **retryable** and requeues unchanged —
+      quota still held, a live agent session already on the task, a
+      migration/preflight hiccup, a transient exception/exit, or the
+      quota-exhausted pre-flight refusal below (which gets its own backoff,
+      not a drop).
+
   ## A quota-exhausted pre-flight failure is held, not redrained every cycle (bd-8lnnnt)
 
   A gate `:allow` only means the *quota snapshot* has headroom — it says
@@ -179,6 +200,28 @@ defmodule Arbiter.Workflows.DispatchQueue do
   @spec drain(GenServer.server()) :: :ok
   def drain(server \\ __MODULE__), do: GenServer.call(server, :drain)
 
+  @doc """
+  Drop any held intent for `task_id` in `workspace_id`'s queue (bd-atjyzu).
+
+  Called from the task's `:close` teardown so a closed task's hold is
+  removed the moment it closes rather than waiting to be discovered — and
+  requeued anyway — on the next drain trigger. Best-effort: `:ok` whether or
+  not a queue is running, or the task was ever held there.
+  """
+  @spec drop(String.t(), String.t()) :: :ok
+  def drop(workspace_id, task_id) when is_binary(workspace_id) and is_binary(task_id) do
+    case DispatchQueueSupervisor.whereis(workspace_id) do
+      pid when is_pid(pid) -> GenServer.call(pid, {:drop, task_id})
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def drop(_workspace_id, _task_id), do: :ok
+
   @doc "Return a snapshot of the queue state for inspection / tests."
   @spec state(GenServer.server()) :: map()
   def state(server \\ __MODULE__), do: GenServer.call(server, :state)
@@ -257,6 +300,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   def handle_call(:drain, _from, %State{} = state) do
     {:reply, :ok, drain_and_reschedule(state)}
+  end
+
+  def handle_call({:drop, task_id}, _from, %State{} = state) do
+    items = Enum.reject(state.items, &(&1.task_id == task_id))
+    {:reply, :ok, schedule_reset_drain(%{state | items: items})}
   end
 
   def handle_call(:state, _from, %State{} = state) do
@@ -366,14 +414,46 @@ defmodule Arbiter.Workflows.DispatchQueue do
             :ok
 
           {:error, reason} ->
-            GenServer.cast(queue, {:requeue, hold_item(item, reason)})
+            requeue_or_drop(queue, item, reason)
 
           other ->
-            GenServer.cast(queue, {:requeue, hold_item(item, other)})
+            requeue_or_drop(queue, item, other)
         end
       end)
     end)
   end
+
+  # A dispatch failure is either terminal (the task can never dispatch again
+  # as-is, e.g. it closed underneath the hold) or retryable (a later drain
+  # might succeed, e.g. quota is still held). Terminal failures are dropped —
+  # `maybe_drain/1` already removed the item from `state.items` optimistically
+  # before dispatch, so "drop" here just means "don't requeue it" — a
+  # requeue would otherwise re-dispatch and fail the same way forever
+  # (bd-atjyzu). Retryable failures requeue exactly as before.
+  #
+  # Terminal (drop, don't requeue):
+  #   * `{:task_closed, _}`     — `Dispatch.dispatch/2`'s `ensure_not_closed/1`
+  #   * `{:task_not_found, _}`  — `Dispatch.dispatch/2`'s `load_task/1`
+  #
+  # Retryable (requeue, same as before): everything else — quota still held,
+  # a live agent session already running the task, a migration/preflight
+  # hiccup, a transient exception/exit, the quota-exhausted pre-flight
+  # refusal `hold_item/2` already gives its own backoff.
+  defp requeue_or_drop(queue, item, reason) do
+    if terminal_dispatch_failure?(reason) do
+      Logger.info(
+        "DispatchQueue: dropping held intent for #{item.task_id}, terminal dispatch failure: #{inspect(reason)}"
+      )
+
+      :ok
+    else
+      GenServer.cast(queue, {:requeue, hold_item(item, reason)})
+    end
+  end
+
+  defp terminal_dispatch_failure?({:task_closed, _}), do: true
+  defp terminal_dispatch_failure?({:task_not_found, _}), do: true
+  defp terminal_dispatch_failure?(_), do: false
 
   # A dispatch that failed on this drain gets requeued (below) so it isn't
   # dropped. If the failure was a quota-exhausted pre-flight refusal
