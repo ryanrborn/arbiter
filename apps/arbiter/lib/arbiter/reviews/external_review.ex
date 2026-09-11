@@ -235,7 +235,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
       start_async(prepared, opts, record)
-      {:ok, ack(prepared, record)}
+      {:ok, ack(prepared, opts, record)}
     end
   end
 
@@ -1098,8 +1098,13 @@ defmodule Arbiter.Reviews.ExternalReview do
     _ -> :ok
   end
 
-  defp ack(prepared, record) do
-    %{
+  defp ack(prepared, opts, record) do
+    follow_up_enabled = follow_up?(prepared, opts)
+    workspace = prepared.workspace
+    our_login = Workspace.review_patrol_our_login(workspace)
+    our_login_missing? = follow_up_enabled and is_nil(our_login)
+
+    ack = %{
       external: true,
       status: "dispatched",
       pr: prepared.pr,
@@ -1107,8 +1112,19 @@ defmodule Arbiter.Reviews.ExternalReview do
       strategy: prepared.strategy,
       link: prepared.link,
       review_record_id: record && record.id,
-      mode: record && record.mode
+      mode: record && record.mode,
+      follow_up: follow_up_enabled
     }
+
+    if our_login_missing? do
+      Map.put(
+        ack,
+        :follow_up_note,
+        "follow-up enabled but review_patrol.our_login is not configured — author-reply handling will be skipped"
+      )
+    else
+      ack
+    end
   end
 
   defp result(prepared, final, engagement, report_only) do
@@ -1177,14 +1193,29 @@ defmodule Arbiter.Reviews.ExternalReview do
   # workspace config AND the review_automation mode is not :off. Mirrors the
   # predicate ReviewPatrolSupervisor.start_patrol/2 uses before its lazy-start
   # gate (check for has_open_engagement).
-  defp follow_up_eligible?(%{workspace: %Workspace{} = workspace, repo_name: repo_name}) do
+  defp follow_up_eligible?(%{
+         workspace: %Workspace{} = workspace,
+         repo_name: repo_name,
+         mr_ref: mr_ref
+       }) do
     config = workspace_config(workspace)
     repos = patrol_repos_for(workspace)
 
-    case ReviewAutomation.repo_override_mode(config, repo_name) do
-      :off -> false
-      nil -> not default_off?(config)
-      _ -> repos != []
+    # Short-circuit if no repos are configured to patrol
+    if repos == [] do
+      false
+    else
+      # Verify the PR's repo is in the configured patrol repos
+      repo_match? =
+        Enum.any?(repos, fn repo ->
+          Arbiter.Workflows.PatrolRepoScope.ref_matches_repo?(mr_ref, repo)
+        end)
+
+      case ReviewAutomation.repo_override_mode(config, repo_name) do
+        :off -> false
+        nil -> repo_match? and not default_off?(config)
+        _ -> repo_match?
+      end
     end
   rescue
     _ -> false
