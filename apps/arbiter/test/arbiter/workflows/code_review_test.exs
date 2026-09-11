@@ -390,6 +390,119 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     end
   end
 
+  # bd-3948ey: adapters exposing the optional `latest_own_review_sha/1`
+  # capability, used to test the :verdict step's same-SHA skip guard.
+  defmodule SameShaAdapter do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_, _), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(mr_ref, verdict, body, _opts) do
+      send(:verdict_test_pid, {:submitted, mr_ref, verdict, body})
+      {:ok, %{}}
+    end
+
+    def latest_own_review_sha(_mr_ref), do: {:ok, "abc123"}
+  end
+
+  defmodule DifferentShaAdapter do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_, _), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(mr_ref, verdict, body, _opts) do
+      send(:verdict_test_pid, {:submitted, mr_ref, verdict, body})
+      {:ok, %{}}
+    end
+
+    def latest_own_review_sha(_mr_ref), do: {:ok, "some-older-sha"}
+  end
+
+  # bd-3948ey: monotonic-on-a-fixed-head — an adapter that reports a prior
+  # APPROVED verdict at an older SHA, plus a diff between that SHA and the
+  # new head that the test controls via an Agent, so both the "no new
+  # information" skip and the "genuine downgrade" post can be exercised.
+  defmodule MonotonicDowngradeAdapter do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_, _), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def list_review_feedback(_),
+      do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+    @impl true
+    def get_diff(_mr_ref, %{base: "some-older-sha", head: "def456"}) do
+      diff = Agent.get(:monotonic_downgrade_diff, & &1)
+      {:ok, diff}
+    end
+
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(mr_ref, verdict, body, _opts) do
+      send(:verdict_test_pid, {:submitted, mr_ref, verdict, body})
+      {:ok, %{}}
+    end
+
+    def latest_own_review_sha(_mr_ref), do: {:ok, "some-older-sha"}
+    def self_approved?(_mr_ref), do: {:ok, true}
+  end
+
   # Simulates the adapter behaviour AFTER the self-review fallback has been
   # applied: submit_review/4 returns {:ok, %{}} (success) even though the
   # formal review was rejected. This tests that the CodeReview workflow does
@@ -1211,6 +1324,143 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert_received {:submitted, "#1", :approve, body}
       assert body =~ "neighbor.ex:40"
       assert body =~ "flagged context"
+    end
+  end
+
+  # bd-3948ey: one verdict per SHA — before posting, the :verdict step checks
+  # the adapter's own latest verdict review against the PR's current head. If
+  # they match, we've already verdicted this exact commit (regardless of
+  # local bookkeeping, which can be stale or bypassed via force re-dispatch),
+  # so submit_review must not be called again.
+  describe "run_step(:verdict, ...) — same-SHA skip (bd-3948ey)" do
+    setup do
+      Process.register(self(), :verdict_test_pid)
+      on_exit(fn -> :ok end)
+      :ok
+    end
+
+    test "skips submit_review when the adapter's latest own review already covers this head SHA" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.SameShaAdapter,
+        mr_ref: "#1",
+        findings: [],
+        pr: %{head_sha: "abc123"}
+      }
+
+      assert {:ok, %{verdict: :approve, verdict_posted: false}} =
+               CodeReview.run_step(:verdict, state)
+
+      refute_received {:submitted, _, _, _}
+    end
+
+    test "still submits when the adapter's latest own review is for a different (older) SHA" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.DifferentShaAdapter,
+        mr_ref: "#1",
+        findings: [],
+        pr: %{head_sha: "def456"}
+      }
+
+      assert {:ok, %{verdict: :approve, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :approve, _body}
+    end
+
+    test "still submits when the adapter doesn't implement latest_own_review_sha/1 (fails open)" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.VerdictSpy,
+        mr_ref: "#1",
+        findings: [],
+        pr: %{head_sha: "abc123"}
+      }
+
+      assert {:ok, %{verdict: :approve, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :approve, _body}
+    end
+
+    test "still submits when there's no :pr key on state (unchanged prior behavior)" do
+      state = %{mode: :adapter, adapter: Stubs.SameShaAdapter, mr_ref: "#1", findings: []}
+
+      assert {:ok, %{verdict: :approve, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :approve, _body}
+    end
+  end
+
+  # bd-3948ey: monotonic on a fixed head — even when the head SHA advanced
+  # (so the same-SHA guard above doesn't apply), a downgrade from a prior
+  # approval must be backed by new commits that actually touch a line one of
+  # this pass's blocking findings is anchored on.
+  describe "run_step(:verdict, ...) — monotonic downgrade guard (bd-3948ey)" do
+    setup do
+      Process.register(self(), :verdict_test_pid)
+      {:ok, agent} = Agent.start_link(fn -> "" end)
+      Process.register(agent, :monotonic_downgrade_diff)
+      on_exit(fn -> :ok end)
+      :ok
+    end
+
+    test "declines to downgrade when the new commits never touch the flagged line" do
+      Agent.update(:monotonic_downgrade_diff, fn _ ->
+        """
+        diff --git a/other.ex b/other.ex
+        index 1111111..2222222 100644
+        --- a/other.ex
+        +++ b/other.ex
+        @@ -1,1 +1,1 @@
+        -old line
+        +new unrelated line
+        """
+      end)
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.MonotonicDowngradeAdapter,
+        mr_ref: "#1",
+        findings: [%{severity: :error, file: "flagged.ex", line: 40, message: "still bad"}],
+        pr: %{head_sha: "def456"}
+      }
+
+      assert {:ok, %{verdict: :request_changes, verdict_posted: false}} =
+               CodeReview.run_step(:verdict, state)
+
+      refute_received {:submitted, _, _, _}
+    end
+
+    test "posts the downgrade when new commits touch the flagged line" do
+      Agent.update(:monotonic_downgrade_diff, fn _ ->
+        """
+        diff --git a/flagged.ex b/flagged.ex
+        index 1111111..2222222 100644
+        --- a/flagged.ex
+        +++ b/flagged.ex
+        @@ -38,3 +38,3 @@
+         context
+        -old line
+        +still bad
+         context
+        """
+      end)
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.MonotonicDowngradeAdapter,
+        mr_ref: "#1",
+        findings: [%{severity: :error, file: "flagged.ex", line: 40, message: "still bad"}],
+        pr: %{head_sha: "def456"}
+      }
+
+      assert {:ok, %{verdict: :request_changes, verdict_posted: true}} =
+               CodeReview.run_step(:verdict, state)
+
+      assert_received {:submitted, "#1", :request_changes, _body}
     end
   end
 
