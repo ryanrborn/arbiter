@@ -182,24 +182,7 @@ defmodule Arbiter.Worker.SessionArchive do
 
   def archive(run_id, config_dir, session_id, opts)
       when is_binary(run_id) and run_id != "" do
-    cond do
-      # Session id first: a workflow-mode (bookkeeping-only) run has neither
-      # coordinate, and `:no_session_id` — "never opened an agent session" — is
-      # the informative half. That ordering also keeps `:no_config_dir` meaning
-      # exactly one thing: a run that *did* open a session, on another
-      # provider. See `Arbiter.Workers.SessionArchiveBackfill`'s report.
-      not (is_binary(session_id) and session_id != "") ->
-        {:ok, blank(run_id, :no_session_id)}
-
-      not (is_binary(config_dir) and config_dir != "") ->
-        {:ok, blank(run_id, :no_config_dir)}
-
-      true ->
-        case ClaudeSessionFile.locate(config_dir, session_id) do
-          {:ok, path} -> do_archive(run_id, path, Keyword.get(opts, :redact_values) || [])
-          :not_found -> {:ok, blank(run_id, :no_session_file)}
-        end
-    end
+    dispatch_archive(run_id, config_dir, session_id, opts)
   rescue
     e ->
       Logger.warning("SessionArchive.archive/4 raised for run=#{run_id}: #{Exception.message(e)}")
@@ -237,6 +220,27 @@ defmodule Arbiter.Worker.SessionArchive do
   end
 
   # ---- internals ---------------------------------------------------------
+
+  # Session id first: a workflow-mode (bookkeeping-only) run has neither
+  # coordinate, and `:no_session_id` — "never opened an agent session" — is
+  # the informative half. That ordering also keeps `:no_config_dir` meaning
+  # exactly one thing: a run that *did* open a session, on another provider.
+  # See `Arbiter.Workers.SessionArchiveBackfill`'s report.
+  defp dispatch_archive(run_id, config_dir, session_id, opts) do
+    cond do
+      not (is_binary(session_id) and session_id != "") ->
+        {:ok, blank(run_id, :no_session_id)}
+
+      not (is_binary(config_dir) and config_dir != "") ->
+        {:ok, blank(run_id, :no_config_dir)}
+
+      true ->
+        case ClaudeSessionFile.locate(config_dir, session_id) do
+          {:ok, path} -> do_archive(run_id, path, Keyword.get(opts, :redact_values) || [])
+          :not_found -> {:ok, blank(run_id, :no_session_file)}
+        end
+    end
+  end
 
   defp do_archive(run_id, path, redact_values) do
     case File.stat(path) do
