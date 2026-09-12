@@ -6,10 +6,14 @@ defmodule Arbiter.Worker.SessionArchiveTest do
 
   setup do
     prev = Application.get_env(:arbiter, :output_log_root)
-    root = Path.join(System.tmp_dir!(), "session-archive-test-#{System.unique_integer([:positive])}")
+
+    root =
+      Path.join(System.tmp_dir!(), "session-archive-test-#{System.unique_integer([:positive])}")
+
     Application.put_env(:arbiter, :output_log_root, root)
 
-    cfg = Path.join(System.tmp_dir!(), "session-archive-cfg-#{System.unique_integer([:positive])}")
+    cfg =
+      Path.join(System.tmp_dir!(), "session-archive-cfg-#{System.unique_integer([:positive])}")
 
     on_exit(fn ->
       File.rm_rf(root)
@@ -110,7 +114,12 @@ defmodule Arbiter.Worker.SessionArchiveTest do
       assert {:ok, report} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
       assert report.subagents == 1
 
-      sub = Path.join(SessionArchive.subagents_dir_for(ctx.run_id), "agent-aad6d0303db231aef.jsonl.gz")
+      sub =
+        Path.join(
+          SessionArchive.subagents_dir_for(ctx.run_id),
+          "agent-aad6d0303db231aef.jsonl.gz"
+        )
+
       assert File.regular?(sub)
       assert gunzip_at!(sub) =~ ~s("sub":true)
     end

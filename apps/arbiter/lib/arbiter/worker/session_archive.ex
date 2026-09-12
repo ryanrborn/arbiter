@@ -140,7 +140,9 @@ defmodule Arbiter.Worker.SessionArchive do
 
   @doc "True when `run_id` has a session-JSONL archive on disk."
   @spec archived?(String.t() | nil) :: boolean()
-  def archived?(run_id) when is_binary(run_id) and run_id != "", do: File.regular?(path_for(run_id))
+  def archived?(run_id) when is_binary(run_id) and run_id != "",
+    do: File.regular?(path_for(run_id))
+
   def archived?(_), do: false
 
   @doc """
@@ -234,7 +236,10 @@ defmodule Arbiter.Worker.SessionArchive do
   defp do_archive(run_id, path, redact_values) do
     case File.stat(path) do
       {:ok, %File.Stat{size: size}} when size > @max_bytes ->
-        Logger.warning("SessionArchive: skipping oversized session file run=#{run_id} size=#{size}")
+        Logger.warning(
+          "SessionArchive: skipping oversized session file run=#{run_id} size=#{size}"
+        )
+
         {:ok, %{blank(run_id, :too_large) | source: path, bytes_in: size}}
 
       {:ok, _stat} ->
