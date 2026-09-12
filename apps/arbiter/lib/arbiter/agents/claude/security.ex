@@ -196,6 +196,16 @@ defmodule Arbiter.Agents.Claude.Security do
   # prompt guidance alone to stop a worker from arming one and exiting on the
   # spot. Bare tool names (no `(...)` pattern) deny the whole tool, matching
   # `sandbox_deny/1`'s `"WebFetch"` / `"WebSearch"` below.
+  #
+  # `Bash`'s `run_in_background` parameter is deliberately NOT denied here:
+  # unlike `Monitor`/`ScheduleWakeup`, there is no separate tool name or
+  # `Bash(...)` command-pattern to match against a boolean parameter, and
+  # permission rules in this adapter can only allow/deny by tool name or
+  # command prefix. Backgrounding itself isn't the hazard — a worker that
+  # backgrounds a command and then drains it with `TaskOutput` in the same
+  # turn is fine; the hazard is ending the turn while it's still pending, and
+  # that failure mode is closed by the prompt guidance in
+  # `PromptBuilder.async_tools_section/3`, not by tool denial.
   defp expand_category(:no_async_wait) do
     ["Monitor", "ScheduleWakeup"]
   end

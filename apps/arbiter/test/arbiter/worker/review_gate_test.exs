@@ -3063,7 +3063,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "Monitor"
       assert prompt =~ "ScheduleWakeup"
       assert prompt =~ ~r/non-interactive/i
-      assert prompt =~ "TaskOutput"
+      assert prompt =~ ~r/foreground/i
+      assert prompt =~ "mix precommit"
     end
 
     test "tells the implementer to commit before running long verification", %{ws: ws} do
@@ -3822,8 +3823,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "ASYNC TOOLS",
              "Claude workspace must include the ASYNC TOOLS block"
 
-      assert prompt =~ "including in parallel or with background execution modes",
-             "Claude workspace must permit parallel and background execution"
+      assert prompt =~ "HEADLESS AND NON-INTERACTIVE",
+             "Claude workspace must include the headless-session warning"
 
       refute prompt =~ "synchronously",
              "Claude workspace must not include the sync-only instruction"
@@ -3834,7 +3835,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, ws), :no_verdict)
 
       assert prompt =~ "ASYNC TOOLS"
-      assert prompt =~ "including in parallel or with background execution modes"
+      assert prompt =~ "HEADLESS AND NON-INTERACTIVE"
       refute prompt =~ "synchronously"
     end
 
@@ -3856,8 +3857,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       refute prompt =~ "ASYNC TOOLS",
              "Gemini workspace must not include the ASYNC TOOLS heading"
 
-      refute prompt =~ "including in parallel or with background execution modes",
-             "Gemini workspace must not include the Claude parallel-execution phrase"
+      refute prompt =~ "HEADLESS AND NON-INTERACTIVE",
+             "Gemini workspace must not include the Claude headless-session phrase"
 
       assert prompt =~ "synchronously",
              "Gemini workspace must include the sync-only instruction"
@@ -3943,7 +3944,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "ASYNC TOOLS",
              "nil workspace must fall back to the Claude async block"
 
-      assert prompt =~ "background execution modes"
+      assert prompt =~ "HEADLESS AND NON-INTERACTIVE"
     end
 
     test "missing workspace_id key defaults to the Claude async block" do
