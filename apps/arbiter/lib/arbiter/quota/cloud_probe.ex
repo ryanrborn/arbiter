@@ -27,18 +27,23 @@ defmodule Arbiter.Quota.CloudProbe do
     * `Arbiter.Quota.CloudCode.refresh/3` for `:gemini` and `:antigravity` — a
       direct Cloud Code Assist call using the Gemini CLI's stored token; upserts
       `GoogleQuota` + broadcasts.
-    * `Arbiter.Quota.capture_oauth_usage/2` — Anthropic's *secondary*
-      `/api/oauth/usage` source (per-model weekly + `extra_usage` overage,
-      bd-8tpha6). The header-capture `RefreshProbe` keeps Claude's primary
-      aggregate fresh, but once the quota surface stopped fetching live nothing
-      else refreshed this layer, so it rides along here (best-effort; its own
-      429 cooldown protects it).
+    * `Arbiter.Quota.capture_oauth_usage_for_group/2` — Anthropic's
+      *secondary* `/api/oauth/usage` source (per-model weekly + `extra_usage`
+      overage, bd-8tpha6). The header-capture `RefreshProbe` keeps Claude's
+      primary aggregate fresh, but once the quota surface stopped fetching
+      live nothing else refreshed this layer, so it rides along here
+      (best-effort; its own 429 cooldown protects it). Unlike the other three
+      providers, this endpoint is rate-limited **per account, not per
+      workspace/token** (bd-5xuneh), so it is fetched once per distinct OAuth
+      token — see `spawn_oauth_usage_refresh/1` — rather than fanned out per
+      workspace like the rest of this module.
 
-  Each degrades to a no-op (no row written, no broadcast) when its CLI isn't
-  authenticated on this host, so a logged-out provider simply never appears
-  rather than wiping the last good reading. Credentials are host-global, so the
-  figures written under each workspace id are identical — we still fan out per
-  workspace (mirroring `RefreshProbe`) so every workspace's dashboard is fed.
+  The other three providers each degrade to a no-op (no row written, no
+  broadcast) when their CLI isn't authenticated on this host, so a logged-out
+  provider simply never appears rather than wiping the last good reading.
+  Their credentials are host-global, so the figures written under each
+  workspace id are identical — we still fan those three out per workspace
+  (mirroring `RefreshProbe`) so every workspace's dashboard is fed.
 
   ## Cadence
 
@@ -137,21 +142,55 @@ defmodule Arbiter.Quota.CloudProbe do
 
     if workspaces != [] do
       Logger.debug("Arbiter.Quota.CloudProbe: refreshing #{length(workspaces)} workspace(s)")
+      spawn_oauth_usage_refresh(workspaces)
       Enum.each(workspaces, &spawn_refresh(state.refresh_fun, &1.id))
     end
 
     %{state | probe_count: state.probe_count + 1}
   end
 
+  # `/api/oauth/usage` is account-wide and rate-limited per account, not per
+  # workspace (bd-5xuneh). Group workspaces by their resolved OAuth token
+  # first — workspaces sharing a token (the common case: one account behind
+  # every workspace) fetch once and get the same snapshot written, instead of
+  # each burning the shared rate-limit budget for an identical number.
+  defp spawn_oauth_usage_refresh(workspaces) do
+    workspaces
+    |> Enum.group_by(&Arbiter.Agents.Claude.ConfigDir.oauth_token/1)
+    |> Enum.each(fn {token, group} ->
+      workspace_ids = Enum.map(group, & &1.id)
+      spawn_task(fn -> call_oauth_usage_refresh(token, workspace_ids) end)
+    end)
+  end
+
+  defp call_oauth_usage_refresh(token, workspace_ids) do
+    opts = if token, do: [token: token], else: []
+    Arbiter.Quota.capture_oauth_usage_for_group(workspace_ids, opts)
+  rescue
+    e ->
+      Logger.debug(
+        "Arbiter.Quota.CloudProbe: oauth usage refresh for #{inspect(workspace_ids)} raised: #{Exception.message(e)}"
+      )
+  catch
+    :exit, r ->
+      Logger.debug(
+        "Arbiter.Quota.CloudProbe: oauth usage refresh for #{inspect(workspace_ids)} exited: #{inspect(r)}"
+      )
+  end
+
   defp spawn_refresh(refresh_fun, workspace_id) do
+    spawn_task(fn -> call_refresh(refresh_fun, workspace_id) end)
+  end
+
+  defp spawn_task(fun) do
     supervisor = Arbiter.Quota.CloudProbeSupervisor
 
     case Process.whereis(supervisor) do
       pid when is_pid(pid) ->
-        Task.Supervisor.start_child(pid, fn -> call_refresh(refresh_fun, workspace_id) end)
+        Task.Supervisor.start_child(pid, fun)
 
       _ ->
-        spawn(fn -> call_refresh(refresh_fun, workspace_id) end)
+        spawn(fun)
     end
   rescue
     _ -> :ok
@@ -169,15 +208,13 @@ defmodule Arbiter.Quota.CloudProbe do
       Logger.debug("Arbiter.Quota.CloudProbe: refresh for #{workspace_id} exited: #{inspect(r)}")
   end
 
-  # The real refresh. Each call persists + broadcasts on success and no-ops (no
-  # row written) when its credentials aren't present on this host. Since the
-  # controller / MCP quota surface no longer fetches live (bd-ajh7bd), this
-  # probe also tops up Anthropic's *secondary* `/api/oauth/usage` source
-  # (per-model weekly + overage, bd-8tpha6) — the header-capture RefreshProbe
-  # keeps the primary Claude aggregate fresh, but nothing else refreshes the
-  # oauth-usage layer once it's out of the request path.
+  # The real per-workspace provider refresh. Each call persists + broadcasts
+  # on success and no-ops (no row written) when its credentials aren't
+  # present on this host. Anthropic's secondary `/api/oauth/usage` source
+  # (per-model weekly + overage, bd-8tpha6) is refreshed separately, once per
+  # distinct OAuth token, by `spawn_oauth_usage_refresh/1` — see that
+  # function and bd-5xuneh for why it isn't fanned out per workspace here.
   defp default_refresh(workspace_id) do
-    Arbiter.Quota.capture_oauth_usage(workspace_id)
     Arbiter.Quota.Codex.fetch(workspace_id)
     Arbiter.Quota.CloudCode.refresh(workspace_id, :gemini)
     Arbiter.Quota.CloudCode.refresh(workspace_id, :antigravity)
