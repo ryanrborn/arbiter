@@ -162,6 +162,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewFindings
   alias Arbiter.Worker.ReviewVerification
@@ -1230,13 +1231,30 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  # bd-1mksks: compare HEAD SHA before and after a revise round to detect whether
-  # the implementer committed new changes. Appends a system entry to the in-memory
-  # thread (for the escalation payload / re-review prompt context) but does NOT
-  # persist it to the durable mailbox — HEAD-change notes are internal ReviewGate
-  # bookkeeping, not part of the implementer↔reviewer conversation. Returns
-  # {updated_state, new_head_sha}.
-  defp note_head_change(state) do
+  @doc """
+  Compare HEAD SHA before and after a revise round to detect whether the
+  implementer committed new changes. Appends a system entry to the in-memory
+  thread (for the escalation payload / re-review prompt context) but does NOT
+  persist it to the durable mailbox — HEAD-change notes are internal ReviewGate
+  bookkeeping, not part of the implementer↔reviewer conversation. Returns
+  {updated_state, new_head_sha}.
+
+  bd-d534xo: an implementer that backgrounded a long verification command and
+  then abandoned its turn to "wait for the notification" (`claude --print`
+  ends the process the instant a turn has no tool call, so the notification
+  never arrives) exits with HEAD unchanged — the exact same git state a
+  genuine "REBUTTED, no code change" round leaves. Left alone, a real,
+  finished fix sitting unstaged in the worktree gets mislabeled as a
+  rebuttal and silently carried forward; the next round or the no-progress
+  resume guard can then discard it. When HEAD is unchanged, also check the
+  worktree for uncommitted changes and say so explicitly instead — this is
+  the "the run's failure summary shouldn't hide it" half of the fix; the
+  guidance to commit before backgrounding is the prevention half
+  (`PromptBuilder.async_tools_section/3`, threaded into `revise_prompt/2`).
+  Public for inspection in tests.
+  """
+  @spec note_head_change(map()) :: {map(), String.t() | nil}
+  def note_head_change(state) do
     new_sha = current_head_sha(state)
     old_sha = state.head_sha
     state = record_touched_files(state, old_sha, new_sha)
@@ -1247,17 +1265,7 @@ defmodule Arbiter.Worker.ReviewGate do
         {state, new_sha}
 
       new_sha == old_sha ->
-        entry = %{
-          round: state.round,
-          role: :system,
-          subject:
-            "Round #{state.round} — HEAD unchanged after revise (rebuttal only, no new commits)",
-          body:
-            "HEAD remained at #{new_sha} after the revise round. " <>
-              "The implementer's response was a rebuttal, not a code change. " <>
-              "The re-reviewer evaluates the rebuttal argument; the diff is the same as the previous round."
-        }
-
+        entry = head_unchanged_entry(state, new_sha)
         {%{state | thread: state.thread ++ [entry]}, new_sha}
 
       true ->
@@ -1272,6 +1280,61 @@ defmodule Arbiter.Worker.ReviewGate do
 
         {%{state | thread: state.thread ++ [entry]}, new_sha}
     end
+  end
+
+  defp head_unchanged_entry(%{worktree_path: wt} = state, sha) when is_binary(wt) do
+    if uncommitted_worktree_changes?(wt) do
+      %{
+        round: state.round,
+        role: :system,
+        subject:
+          "Round #{state.round} — HEAD unchanged but UNCOMMITTED changes remain in the worktree",
+        body:
+          "HEAD remained at #{sha} after the revise round, but the worktree has uncommitted " <>
+            "changes (`git status --porcelain` is non-empty). This is NOT a rebuttal — the " <>
+            "implementer likely wrote a real fix and then abandoned its turn (e.g. backgrounded " <>
+            "a long verification command and yielded the turn to 'wait for the notification', " <>
+            "which never arrives in a non-interactive session) before committing it. The " <>
+            "re-reviewer will see the SAME diff as last round and cannot evaluate this work; " <>
+            "escalate or resume the implementer to commit before re-reviewing."
+      }
+    else
+      %{
+        round: state.round,
+        role: :system,
+        subject:
+          "Round #{state.round} — HEAD unchanged after revise (rebuttal only, no new commits)",
+        body:
+          "HEAD remained at #{sha} after the revise round. " <>
+            "The implementer's response was a rebuttal, not a code change. " <>
+            "The re-reviewer evaluates the rebuttal argument; the diff is the same as the previous round."
+      }
+    end
+  end
+
+  defp head_unchanged_entry(state, sha) do
+    %{
+      round: state.round,
+      role: :system,
+      subject:
+        "Round #{state.round} — HEAD unchanged after revise (rebuttal only, no new commits)",
+      body:
+        "HEAD remained at #{sha} after the revise round. " <>
+          "The implementer's response was a rebuttal, not a code change. " <>
+          "The re-reviewer evaluates the rebuttal argument; the diff is the same as the previous round."
+    }
+  end
+
+  # Best-effort: a git failure (or a worktree the round already tore down)
+  # must never crash the round — it just falls back to the rebuttal-only
+  # wording above, which was the entire behavior pre-bd-d534xo.
+  defp uncommitted_worktree_changes?(wt) when is_binary(wt) do
+    case System.cmd("git", ["-C", wt, "status", "--porcelain"], stderr_to_stdout: true) do
+      {out, 0} -> String.trim(out) != ""
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   # bd-6r8caj: the mechanical backstop's raw material — which files the revise
@@ -3031,6 +3094,8 @@ defmodule Arbiter.Worker.ReviewGate do
 
     *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
     no `mix run`. (Reading files, editing, and running `git` is fine.)
+
+    #{PromptBuilder.async_tools_section("`arb done`", nil)}
 
     When you have addressed every finding, print, on a line by itself:
 

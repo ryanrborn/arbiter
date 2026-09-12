@@ -90,9 +90,12 @@ while its `utilization_5h` describes a window that has since rolled several
 times — capacity would come out inflated by roughly the number of elapsed
 windows, and every share deflated by the same factor, while the frame still
 claimed `:calibrated`. `Arbiter.Loop.Corpus` therefore runs the snapshot through
-`Arbiter.Quota.Gate.stale?/1` — the same predicate the dispatch gate refuses to
-throttle on (`reset_at` elapsed, or `captured_at` older than 5h) — and treats a
-stale reading as an absence, `reason: :stale_snapshot`. It is still used to infer
+`Arbiter.Quota.Gate.stale?/1` — the same predicate the dispatch gate fails open
+on for its **primary** (5h) window (`reset_5h_at` elapsed, or `captured_at`
+older than the staleness threshold) — and treats a stale reading as an absence,
+`reason: :stale_snapshot`. That is the right predicate here because calibration
+divides by `utilization_5h`; the gate's long-window counterpart
+(`long_window_stale?/1`, bd-b7umwj) governs the 7d hold and does not apply. It is still used to infer
 the *billing mode*: a stale reading is weak evidence about the current window but
 perfectly good evidence that this plan has windows at all.
 
