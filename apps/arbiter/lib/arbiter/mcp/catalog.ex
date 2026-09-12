@@ -44,7 +44,7 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_prompt` | coordinator | `Arbiter.Worker.PromptLog.read/1` for one run (by `run_id` or the task's most recent) |
   | `run_log_list` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: … or …#…)`, task + synthetic children |
   | `external_review_transcript` | coordinator | `Arbiter.Reviews.Transcript.read_lines/1` + `tool_uses/1` for one non-task-linked review (by review record id) |
-  | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, capture rate over Claude-driven runs |
+  | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, rendered-transcript capture rate plus the session-JSONL archive rate (reported separately) |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
   | `task_list` | coordinator | `Ash.read(Issue, …)` with filters |
@@ -986,7 +986,13 @@ defmodule Arbiter.MCP.Catalog do
           "separately as workflow_only_runs and excluded from claude_sessions / capture_rate_pct " <>
           "rather than counted as capture failures. Returns corpus_start_date, total_runs, " <>
           "claude_sessions, transcript_missing, workflow_only_runs, capture_rate_pct (nil when " <>
-          "claude_sessions is 0). Optional `workspace` to target a workspace other than the default.",
+          "claude_sessions is 0). bd-db0p38: the richer artifact — the agent CLI's own session " <>
+          "JSONL, archived per run as <run_id>.jsonl.gz — is counted separately, since the two " <>
+          "losses are independent and a single rate hides the JSONL's absence: jsonl_sessions " <>
+          "(Claude-driven runs, i.e. those carrying a config_dir), jsonl_archived, jsonl_missing, " <>
+          "jsonl_archive_rate_pct, and non_claude_sessions (session-bearing runs on another " <>
+          "provider, which never had a Claude JSONL to lose). " <>
+          "Optional `workspace` to target a workspace other than the default.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
