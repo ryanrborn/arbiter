@@ -2636,8 +2636,11 @@ defmodule Arbiter.Worker.Watchdog do
   # commits nobody reviewed or dying silently.
   defp guarded_merge_decision(state) do
     case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
-      {:ok, expected_sha} -> {:merge, expected_sha, state}
-      {:error, {:stale_reviewed_sha, reviewed, head}} -> reconsider_stale_head(state, reviewed, head)
+      {:ok, expected_sha} ->
+        {:merge, expected_sha, state}
+
+      {:error, {:stale_reviewed_sha, reviewed, head}} ->
+        reconsider_stale_head(state, reviewed, head)
     end
   end
 
