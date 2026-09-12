@@ -395,7 +395,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       assert DateTime.compare(held_item.retry_not_before, DateTime.utc_now()) == :gt
 
       # A second drain immediately after must NOT re-run the doomed probe —
-      # this is the ~5-minute `RefreshProbe`/`CloudProbe` broadcast cadence
+      # this is the ~5-minute `CloudProbe` broadcast cadence
       # that produced 12 identical escalations for bd-7qbavq; the hold must
       # absorb it regardless of how often the queue is woken.
       :ok = DispatchQueue.drain(pid)

@@ -117,18 +117,14 @@ defmodule Arbiter.Application do
       # for its duration (bd-7cd38f, reviewer round 1 finding 3).
       {Task.Supervisor, name: Arbiter.Workflows.DispatchDrainSupervisor},
       DispatchQueueSupervisor,
-      # Periodic lightweight probe that keeps the Anthropic quota snapshot fresh
-      # when the fleet is idle (bd-jzg8t0). Issues a minimal `claude --print`
-      # round-trip through each workspace's proxy URL so the proxy captures fresh
-      # rate-limit headers and broadcasts a quota_updated event — draining any
-      # held DispatchQueue intents. Runs outside the QuotaGate (never throttled).
-      {Task.Supervisor, name: Arbiter.Quota.RefreshProbeSupervisor},
-      Arbiter.Quota.RefreshProbe,
-      # Periodic refresh of the non-Anthropic quota providers (Codex, Gemini
-      # CLI, Antigravity) which have no passive proxy signal (bd-ajh7bd). Each
+      # Periodic refresh of every quota provider (bd-atyrrq: Anthropic's own
+      # `/api/oauth/usage` poll now drives the primary + long-window columns
+      # `Arbiter.Quota.Gate` reads, alongside Codex, Gemini CLI, and
+      # Antigravity, which have no passive proxy signal — bd-ajh7bd). Each
       # cycle fetches per workspace, upserts the persisted snapshot, and
-      # broadcasts a quota_updated event so the web dashboard updates live and
-      # `GET /api/quota` stays a pure DB read.
+      # broadcasts a quota_updated event so the web dashboard updates live,
+      # `GET /api/quota` stays a pure DB read, and any held DispatchQueue
+      # intents drain.
       {Task.Supervisor, name: Arbiter.Quota.CloudProbeSupervisor},
       Arbiter.Quota.CloudProbe,
       # One Conductor per running Graph, started on demand by

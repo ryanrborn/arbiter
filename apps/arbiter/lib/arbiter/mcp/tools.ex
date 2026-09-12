@@ -75,11 +75,11 @@ defmodule Arbiter.MCP.Tools do
   `workspace_show`.
 
   This is a pure DB read (bd-ajh7bd): every provider's figures are read from the
-  persisted quota tables, kept fresh by the background probes
-  (`Arbiter.Quota.RefreshProbe` for Claude's header capture,
-  `Arbiter.Quota.CloudProbe` for Codex / Gemini CLI / Antigravity and Anthropic's
-  secondary `/api/oauth/usage` layer). Nothing here fetches live, so there's no
-  request-time latency or rate-limit exposure.
+  persisted quota tables, kept fresh by proxied header capture for Claude
+  and the background `Arbiter.Quota.CloudProbe` (Codex / Gemini CLI /
+  Antigravity, plus Anthropic's own `/api/oauth/usage` poll, which is the
+  primary driver once the fleet goes idle — bd-atyrrq). Nothing here fetches
+  live, so there's no request-time latency or rate-limit exposure.
 
   `claude` is the latest captured snapshot (`nil` until the first proxied
   request), including the per-model weekly + `extra_usage` overage layer when the
