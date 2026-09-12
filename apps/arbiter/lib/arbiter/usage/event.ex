@@ -32,6 +32,24 @@ defmodule Arbiter.Usage.Event do
   id). The ledger row still needs the real workspace so
   `Arbiter.Usage.summarize/1` doesn't silently drop review/impl spend.
 
+  ## Source (bd-adyhvn)
+
+  `task_id` is nullable, and `source` says what kind of caller spent the
+  tokens:
+
+  | source | `task_id` | who writes it |
+  |---|---|---|
+  | `:task` | set | `Arbiter.Worker` (work / review / impl), `Arbiter.Reviews.ExternalReview` |
+  | `:probe` | nil | `Arbiter.Quota.RefreshProbe` — one `claude --print` per workspace to refresh the quota snapshot |
+  | `:preflight` | the task being dispatched, when there is one | `Arbiter.Agents.Preflight` — the per-dispatch / per-resume auth check, and the `CredentialWatchdog`'s task-less probe |
+  | `:coordinator_session` | nil | a browser-hosted coordinator session (bd-cyxzvq), attributed by `session_id` |
+  | `:terminal_session` | nil | an interactive terminal session, likewise by `session_id` |
+  | `:maintenance` | nil | Arbiter's own internal passes (the Loop analysis pass; formerly the synthetic `loop-analyze` task id) |
+
+  A `nil` `task_id` is never a missing value — it means "this spend belongs to
+  no task", which is why `Arbiter.Usage.summarize/1` drops those rows from
+  `:task` rollups rather than inventing a group for them.
+
   ## Graceful degradation
 
   Every cost / token / duration field is optional. A CLI that doesn't return
@@ -45,6 +63,7 @@ defmodule Arbiter.Usage.Event do
     data_layer: AshSqlite.DataLayer
 
   @steps ~w(work review impl other)a
+  @sources ~w(task probe preflight coordinator_session terminal_session maintenance)a
 
   sqlite do
     table "usage_events"
@@ -57,6 +76,7 @@ defmodule Arbiter.Usage.Event do
       index [:workspace_id, :occurred_at]
       index [:task_id, :occurred_at]
       index [:base_task_id, :occurred_at]
+      index [:source, :occurred_at]
     end
   end
 
@@ -68,6 +88,7 @@ defmodule Arbiter.Usage.Event do
 
       accept [
         :task_id,
+        :source,
         :workspace_id,
         :repo,
         :step,
@@ -95,10 +116,24 @@ defmodule Arbiter.Usage.Event do
     uuid_primary_key :id
 
     attribute :task_id, :string do
-      allow_nil? false
+      # Nullable since bd-adyhvn: probes, auth pre-flights and coordinator /
+      # terminal sessions spend real quota with no task to attribute it to.
+      # `source` says which kind of row this is; a `nil` here is never a
+      # missing value, it is "this spend belongs to no task".
+      allow_nil? true
       public? true
       constraints max_length: 255, trim?: true
-      description "Task this session worked. For ReviewGate reviewers carries a `#review` suffix."
+
+      description "Task this session worked. For ReviewGate reviewers carries a `#review` suffix. Nil for non-task sources."
+    end
+
+    attribute :source, :atom do
+      allow_nil? false
+      public? true
+      default :task
+      constraints one_of: @sources
+
+      description ~s[What kind of caller spent this. `task` — a worker/reviewer session on a task (the only source with a non-nil `task_id`). `probe` — `Arbiter.Quota.RefreshProbe`. `preflight` — `Arbiter.Agents.Preflight`. `coordinator_session` / `terminal_session` — an interactive session, attributed by `session_id`. `maintenance` — Arbiter's own internal passes (e.g. the Loop analysis pass).]
     end
 
     attribute :workspace_id, :string do
@@ -214,4 +249,14 @@ defmodule Arbiter.Usage.Event do
 
   @doc "All valid step atoms."
   def steps, do: @steps
+
+  @doc "All valid source atoms."
+  def sources, do: @sources
+
+  @doc """
+  Sources whose rows carry a real `task_id`. Everything else is spend that
+  belongs to no task and must be kept out of task-shaped rollups — see
+  `Arbiter.Usage.summarize/1`.
+  """
+  def task_sources, do: [:task]
 end

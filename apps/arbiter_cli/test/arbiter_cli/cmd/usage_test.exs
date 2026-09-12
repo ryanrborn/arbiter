@@ -72,4 +72,69 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert out =~ "0.4321"
     end
   end
+
+  describe "source discriminator (bd-adyhvn)" do
+    test "--by source renders the whole-bill split" do
+      stub_get("/api/usage", %{
+        "by" => "source",
+        "data" => [
+          %{"group" => "task", "rows" => 10, "total_cost_usd" => 12.5},
+          %{"group" => "probe", "rows" => 243, "total_cost_usd" => 3.08},
+          %{"group" => "preflight", "rows" => 322, "total_cost_usd" => 2.05}
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "source"]) end)
+
+      assert code == 0
+      assert out =~ "Usage rollup by source"
+      assert out =~ "probe"
+      assert out =~ "preflight"
+      assert out =~ "3.08"
+    end
+
+    test "events --source is forwarded to the API as a query param" do
+      pid = self()
+
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           send(pid, {:query, conn.query_string})
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["events", "--source", "probe"]) end)
+
+      assert code == 0
+      assert_receive {:query, query}
+      assert query =~ "source=probe"
+    end
+
+    test "a task-less event line shows its source and a dash for the task" do
+      stub_get("/api/usage/events", %{
+        "data" => [
+          %{
+            "occurred_at" => "2026-09-12T10:00:00Z",
+            "source" => "probe",
+            "task_id" => nil,
+            "step" => "other",
+            "model" => "claude-opus-5",
+            "cost_usd" => 0.25,
+            "tokens_in" => 4,
+            "tokens_out" => 7,
+            "duration_ms" => 1200
+          }
+        ]
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Usage.run(["events"]) end)
+
+      assert code == 0
+      assert out =~ "source=probe"
+      assert out =~ "task=-"
+    end
+  end
 end
