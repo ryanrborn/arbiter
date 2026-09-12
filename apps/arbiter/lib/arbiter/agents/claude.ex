@@ -212,9 +212,28 @@ defmodule Arbiter.Agents.Claude do
     # block waiting for piped input. An expired OAuth / bad key makes this print
     # "401 / invalid authentication credentials" and exit non-zero, which
     # Arbiter.Worker.StopReason classifies as :auth_expired.
+    #
+    # bd-adyhvn: `--output-format json` so the CLI reports what this round-trip
+    # actually spent (~39K cache-read tokens a call, ~322 calls a day) and
+    # `Arbiter.Agents.Preflight` can write it to the ledger. The flag changes
+    # only the *success* output — an auth failure still prints its error text
+    # and exits non-zero, and `Arbiter.Usage.Probe.parse/1` strips the success
+    # payload before the classifier sees it so its integers can't be misread as
+    # a `401`/`402` signature.
     case resolve_claude_executable() do
       {:ok, claude} ->
-        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", claude, "--print", "ping"]}
+        {:ok,
+         [
+           "sh",
+           "-c",
+           ~s(exec "$@" < /dev/null),
+           "sh",
+           claude,
+           "--print",
+           "--output-format",
+           "json",
+           "ping"
+         ]}
 
       {:error, _} = err ->
         err

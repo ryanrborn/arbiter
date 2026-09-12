@@ -16,10 +16,18 @@ defmodule Arbiter.Usage do
   `:work` row, a ReviewGate review adds a `:review` row, etc. Rework is then
   visible as the spend across rows for the same task.
 
+  Not every row has a task, though. Since bd-adyhvn `task_id` is nullable and
+  every row carries a `source` (`:task | :probe | :preflight |
+  :coordinator_session | :terminal_session | :maintenance`), so the quota
+  `RefreshProbe`, the dispatch auth pre-flight and future coordinator /
+  terminal sessions land here too — see `Arbiter.Usage.Event` and
+  `Arbiter.Usage.Probe`.
+
   ## Aggregation
 
   `summarize/1` rolls events up by one of `:day`, `:task`, `:epic`,
-  `:workspace`, `:repo`, `:model`, or `:step`. It returns a list
+  `:workspace`, `:repo`, `:model`, `:step`, `:provider`, or `:source`. It
+  returns a list
   of maps with `{group:, total_cost_usd:, tokens_in:, tokens_out:, ...}`.
   `:campaign` (the old name for `:epic`) is still accepted as a deprecated
   alias — see `summarize/1` below.
@@ -40,7 +48,7 @@ defmodule Arbiter.Usage do
   end
 
   @type group_by ::
-          :day | :task | :epic | :workspace | :repo | :model | :step | :provider
+          :day | :task | :epic | :workspace | :repo | :model | :step | :provider | :source
 
   @type since :: DateTime.t() | nil
 
@@ -55,7 +63,7 @@ defmodule Arbiter.Usage do
           required(:duration_ms) => non_neg_integer()
         }
 
-  @valid_by ~w(day task epic workspace repo model step provider)a
+  @valid_by ~w(day task epic workspace repo model step provider source)a
 
   # `campaign` was the old name for the `epic` grouping. Accepted as a
   # deprecated alias for one release; normalized to `:epic` before validation
@@ -80,6 +88,15 @@ defmodule Arbiter.Usage do
   one parent is counted in each, mirroring the parent-with-progress rollup.
   Tasks with *no* parent don't disappear; they fall into the catch-all sentinel
   `(no_epic)` so spend isn't silently lost.
+
+  ## Task-less rows (bd-adyhvn)
+
+  Rows whose `source` isn't `:task` carry a `nil` `task_id` — quota probes,
+  auth pre-flights, coordinator / terminal sessions. `:task` is the one
+  grouping that **drops** them: a rollup keyed by task must not grow a `nil`
+  or sentinel group for spend that belongs to no task. Every other grouping
+  counts them, so `:day`, `:workspace`, `:provider` and `:source` totals are
+  the real consumption. Use `:source` to see the split.
   """
   @spec summarize(keyword()) :: {:ok, [rollup()]} | {:error, term()}
   def summarize(opts) when is_list(opts) do
@@ -200,7 +217,18 @@ defmodule Arbiter.Usage do
     Enum.group_by(events, fn ev -> Date.to_iso8601(DateTime.to_date(ev.occurred_at)) end)
   end
 
-  defp group_events(events, :task), do: Enum.group_by(events, & &1.task_id)
+  # bd-adyhvn: only task-attributed rows. A probe / pre-flight / session row
+  # has no task, and grouping it under `nil` (or a synthetic sentinel) is
+  # exactly the phantom-task pollution this grouping has to stay free of.
+  # Nothing is lost — `:source` and `:day` still count those rows.
+  defp group_events(events, :task) do
+    events
+    |> Enum.filter(&task_attributed?/1)
+    |> Enum.group_by(& &1.task_id)
+  end
+
+  defp group_events(events, :source),
+    do: Enum.group_by(events, &Atom.to_string(&1.source || :task))
 
   defp group_events(events, :workspace),
     do: Enum.group_by(events, &(&1.workspace_id || "(none)"))
@@ -223,8 +251,13 @@ defmodule Arbiter.Usage do
     end)
   end
 
+  defp task_attributed?(ev), do: is_binary(ev.task_id) and ev.task_id != ""
+
   # Drop any ReviewGate synthetic-id suffix (`#review`, `#r2`, ...) so a
   # review event is still attributable to the author task for epic lookup.
+  # A task-less row (bd-adyhvn) has nothing to strip and no epic — it falls
+  # into the `(no_epic)` catch-all so its spend is still counted there.
+  def base_task_id(nil), do: nil
   defdelegate base_task_id(task_id), to: Arbiter.Worker.ReviewGate
 
   # Map each event's task to the parent task(s) it hangs under via `:parent_of`
@@ -235,6 +268,7 @@ defmodule Arbiter.Usage do
     task_ids =
       events
       |> Enum.map(&base_task_id(&1.task_id))
+      |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
     case task_ids do

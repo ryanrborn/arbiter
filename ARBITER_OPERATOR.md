@@ -371,6 +371,57 @@ cannot catch a key a subprocess happened to print. Archives are written `0600`
 and the root `0700`. Don't sync it to shared storage or back it up with weaker
 access control than the host account. Full guide: `docs/session-archive.md`.
 
+## 19. Reading the usage ledger — not all spend is a task
+
+`usage_events` records every model round-trip Arbiter dispatches. Until
+bd-adyhvn it could only attribute spend to a **task**: `task_id` was `NOT NULL`,
+so the two largest task-less spenders wrote nothing at all.
+
+Every row now carries a `source` discriminator:
+
+| source | `task_id` | who writes it |
+| --- | --- | --- |
+| `task` | always set | `Arbiter.Worker` / `Dispatch` — real worker sessions |
+| `probe` | never set | `Arbiter.Quota.RefreshProbe` — quota-snapshot refresh |
+| `preflight` | set when a task is being gated | `Arbiter.Agents.Preflight` — the auth check before every dispatch and resume |
+| `coordinator_session` | never set | a browser-hosted coordinator session |
+| `terminal_session` | never set | an interactive terminal session |
+| `maintenance` | never set | scheduled internal passes (e.g. `arb loop analyze`) |
+
+Start a spend review with the split, not the task list:
+
+    arb usage --by source --since 7d      # the whole bill
+    arb usage --by task   --since 7d      # the task-attributed part of it
+    arb usage events --source probe --since 24h
+
+`--by task` deliberately **drops** task-less rows rather than bucketing them
+under a placeholder, so it shows no phantom or sentinel ids. Every other
+grouping (`--by day`, `--by source`, `--by workspace`, `--by provider`,
+`--by model`) counts all rows, so nothing is lost — the two views just answer
+different questions. `--by task` still totals less than `--by day`; that gap is
+the task-less spend, and it is real.
+
+### Measurement consequence — older figures understate consumption
+
+Any figure derived from ledger spend **before** this change understates real
+consumption, because the probe and pre-flight draws were invisible to it.
+Measured on the fleet at the time of the change:
+
+  * `RefreshProbe` — 243 calls/day at ~57K mean cache-read tokens ≈ **$3.08/day**
+  * pre-flight auth check — 322 calls/day at ~39K mean tokens ≈ **$2.05/day**
+
+That is ~565 calls/day, ~$5/day, that no ledger-derived number included. A
+one-word prompt is not a cheap call: the CLI still ships its whole system
+prompt and tool definitions on every round-trip, which is where the cache-read
+tokens come from.
+
+When you compare a window that straddles the change, expect an apparent
+step-up in total spend that is **measurement, not behaviour**. Any quota
+baseline captured before 2026-09-12 is low by roughly the figures above, and
+scarcity and utilization estimates derived from one were biased in the same
+direction. Re-baseline from ledger data
+after this change rather than adjusting old numbers by hand.
+
 ---
 
 _Generic — not operator-personal. Edit freely as you learn._
