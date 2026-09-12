@@ -68,6 +68,8 @@ defmodule Arbiter.Quota.CloudProbe do
   use GenServer
   require Logger
 
+  alias Arbiter.Agents.Claude.ConfigDir
+
   @default_interval_ms 300_000
 
   defmodule State do
@@ -156,7 +158,7 @@ defmodule Arbiter.Quota.CloudProbe do
   # each burning the shared rate-limit budget for an identical number.
   defp spawn_oauth_usage_refresh(workspaces) do
     workspaces
-    |> Enum.group_by(&Arbiter.Agents.Claude.ConfigDir.oauth_token/1)
+    |> Enum.group_by(&ConfigDir.oauth_token/1)
     |> Enum.each(fn {token, group} ->
       workspace_ids = Enum.map(group, & &1.id)
       spawn_task(fn -> call_oauth_usage_refresh(token, workspace_ids) end)
