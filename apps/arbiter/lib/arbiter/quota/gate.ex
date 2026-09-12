@@ -56,6 +56,10 @@ defmodule Arbiter.Quota.Gate do
   # margin of the header capture.
   @default_staleness_threshold_seconds 300
   @default_polled_staleness_threshold_seconds 600
+  # Mirrors `Arbiter.Quota.oauth_poll_source/0`. Inlined rather than called
+  # because it is matched in a function head, and a compile-time reference to
+  # the domain module from here would be a compile dependency in the wrong
+  # direction (`Arbiter.Quota` calls this module).
   @oauth_poll_source "oauth_poll"
   @weekly_warning_policies ~w[ignore hold]
 
