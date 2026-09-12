@@ -106,7 +106,10 @@ defmodule ArbiterCli.Cmd.Quota do
 
     stale_indicator =
       if q["stale"] == true do
-        " ⚠️ STALE (too old to trust — dispatches may be incorrectly held)"
+        # bd-b7umwj: staleness is scoped per window, and the two windows go
+        # opposite ways — say which is which rather than the old blanket
+        # "dispatches may be incorrectly held", which was backwards for both.
+        " ⚠️ STALE (older than the gate trusts — the 5h gate fails open; a 7d hold stays in force)"
       else
         ""
       end
