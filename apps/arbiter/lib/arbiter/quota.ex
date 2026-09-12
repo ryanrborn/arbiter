@@ -515,27 +515,62 @@ defmodule Arbiter.Quota do
 
     with {:ok, ws_id} <- resolve_workspace_id(workspace_id),
          {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(opts) do
-      attrs = %{
-        workspace_id: ws_id,
-        provider: provider,
-        per_model_utilization: usage.per_model_utilization,
-        extra_usage: usage.extra_usage,
-        oauth_utilization_5h: usage.utilization_5h,
-        oauth_utilization_7d: usage.utilization_7d,
-        oauth_captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
-      }
-
-      result =
-        AnthropicQuota
-        |> Ash.Changeset.for_create(:record_oauth_usage, attrs)
-        |> Ash.create()
-
-      with {:ok, quota} <- result do
-        broadcast_quota_update(ws_id, quota)
-      end
-
-      result
+      record_oauth_usage(ws_id, provider, usage)
     end
+  end
+
+  @doc """
+  `capture_oauth_usage/2`, but for a *group of workspaces known to share the
+  same OAuth token* (bd-5xuneh). `/api/oauth/usage` is account-wide and
+  rate-limited per account, not per workspace, so fetching it once per
+  workspace in a group burns the shared rate-limit budget for an identical
+  number. This fetches **once** and writes (+ broadcasts) the resulting
+  snapshot to every workspace in `workspace_ids`.
+
+  Callers are responsible for the grouping itself (see
+  `Arbiter.Quota.CloudProbe`, which groups by
+  `Arbiter.Agents.Claude.ConfigDir.oauth_token/1`). Returns the list of
+  per-workspace `record_oauth_usage` results, in the same order as
+  `workspace_ids`, if the single fetch succeeded.
+  """
+  @spec capture_oauth_usage_for_group([String.t()], keyword()) ::
+          {:ok, [{:ok, AnthropicQuota.t()} | {:error, term()}]} | {:error, term()}
+  def capture_oauth_usage_for_group(workspace_ids, opts \\ []) when is_list(workspace_ids) do
+    provider = Keyword.get(opts, :provider, @default_provider)
+
+    with {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(opts) do
+      results =
+        Enum.map(workspace_ids, fn workspace_id ->
+          with {:ok, ws_id} <- resolve_workspace_id(workspace_id) do
+            record_oauth_usage(ws_id, provider, usage)
+          end
+        end)
+
+      {:ok, results}
+    end
+  end
+
+  defp record_oauth_usage(ws_id, provider, usage) do
+    attrs = %{
+      workspace_id: ws_id,
+      provider: provider,
+      per_model_utilization: usage.per_model_utilization,
+      extra_usage: usage.extra_usage,
+      oauth_utilization_5h: usage.utilization_5h,
+      oauth_utilization_7d: usage.utilization_7d,
+      oauth_captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    }
+
+    result =
+      AnthropicQuota
+      |> Ash.Changeset.for_create(:record_oauth_usage, attrs)
+      |> Ash.create()
+
+    with {:ok, quota} <- result do
+      broadcast_quota_update(ws_id, quota)
+    end
+
+    result
   end
 
   @doc """

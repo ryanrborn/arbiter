@@ -450,6 +450,67 @@ defmodule Arbiter.QuotaTest do
     end
   end
 
+  describe "capture_oauth_usage_for_group/2" do
+    setup do
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("test-token") end)
+      :ok
+    end
+
+    test "fetches once and writes the same snapshot to every workspace in the group" do
+      ws_a = workspace!("a")
+      ws_b = workspace!("b")
+      ws_c = workspace!("c")
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        send(test_pid, :http_call)
+
+        Req.Test.json(conn, %{
+          "five_hour" => %{"utilization" => 24},
+          "seven_day_sonnet" => %{"utilization" => 55}
+        })
+      end)
+
+      assert {:ok, results} =
+               Quota.capture_oauth_usage_for_group([ws_a.id, ws_b.id, ws_c.id],
+                 token: "test-token",
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+
+      assert length(results) == 3
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      # exactly one HTTP request for the whole group
+      assert_received :http_call
+      refute_received :http_call
+
+      for ws <- [ws_a, ws_b, ws_c] do
+        serialized = Quota.serialize(ws.id)
+        assert serialized.oauth_utilization_5h == 0.24
+        assert serialized.per_model_utilization == %{"sonnet" => 0.55}
+      end
+    end
+
+    test "propagates the fetch error without writing any workspace" do
+      ws_a = workspace!("a")
+      ws_b = workspace!("b")
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 500, "")
+      end)
+
+      assert {:error, {:http_error, 500}} =
+               Quota.capture_oauth_usage_for_group([ws_a.id, ws_b.id],
+                 token: "test-token",
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+
+      assert Quota.serialize(ws_a.id) == nil
+      assert Quota.serialize(ws_b.id) == nil
+    end
+  end
+
   describe "refresh_and_serialize/2" do
     setup do
       on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("test-token") end)

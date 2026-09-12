@@ -79,6 +79,70 @@ defmodule Arbiter.Quota.CloudProbeTest do
     end
   end
 
+  describe "probe/1 oauth usage de-duplication (bd-5xuneh)" do
+    defp workspace_with_token!(name, token) do
+      Ash.create!(Workspace, %{
+        name: name,
+        worker_env: %{"CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => token}}
+      })
+    end
+
+    setup do
+      Application.put_env(:arbiter, :oauth_usage_http_stub, true)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :oauth_usage_http_stub, true)
+        Arbiter.Quota.OAuthUsage.reset_cooldown!("shared-token")
+        Arbiter.Quota.OAuthUsage.reset_cooldown!("distinct-token")
+      end)
+
+      :ok
+    end
+
+    test "fires exactly one /api/oauth/usage request per distinct token, and writes every workspace in the group",
+         context do
+      # CloudProbe fans oauth-usage refreshes out onto dynamically-spawned
+      # Task processes, so the private per-pid Req.Test ownership (the
+      # default) can't see the stub set below from the test process.
+      Req.Test.set_req_test_to_shared(context)
+
+      alpha = workspace_with_token!("alpha", "shared-token")
+      beta = workspace_with_token!("beta", "shared-token")
+      gamma = workspace_with_token!("gamma", "distinct-token")
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        token =
+          conn
+          |> Plug.Conn.get_req_header("authorization")
+          |> List.first()
+          |> String.replace_prefix("Bearer ", "")
+
+        send(test_pid, {:oauth_usage_call, token})
+        Req.Test.json(conn, %{"seven_day_sonnet" => %{"utilization" => 42}})
+      end)
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end
+        )
+
+      CloudProbe.probe(pid)
+
+      assert_receive {:oauth_usage_call, "shared-token"}, 2_000
+      assert_receive {:oauth_usage_call, "distinct-token"}, 2_000
+      # No second call for the shared-token group (alpha + beta covered by one).
+      refute_receive {:oauth_usage_call, _}, 300
+
+      for ws <- [alpha, beta, gamma] do
+        assert Arbiter.Quota.serialize(ws.id).per_model_utilization == %{"sonnet" => 0.42}
+      end
+    end
+  end
+
   describe "state/1" do
     test "reports enabled + a probe counter" do
       pid = start_probe(enabled: true, interval_ms: 3_600_000, refresh_fun: fn _ -> :ok end)
