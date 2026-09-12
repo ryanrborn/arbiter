@@ -50,6 +50,13 @@ defmodule Arbiter.Quota.Gate do
   alias Arbiter.Tasks.Workspace
 
   @default_weekly_threshold 0.90
+
+  # Staleness thresholds, per `capture_source` — see
+  # `staleness_threshold_seconds/1` for why the polled source gets twice the
+  # margin of the header capture.
+  @default_staleness_threshold_seconds 300
+  @default_polled_staleness_threshold_seconds 600
+  @oauth_poll_source "oauth_poll"
   @weekly_warning_policies ~w[ignore hold]
 
   # Both long windows this gate sees — Anthropic's 7d and Codex's weekly — are
@@ -190,12 +197,13 @@ defmodule Arbiter.Quota.Gate do
     * `reset_at` is set and lies in the past — the window has rolled (Anthropic
       5h, Codex session, Google representative model), so `utilization` /
       `status` no longer reflect the current window.
-    * `captured_at` is older than the configured staleness threshold
-      (default 300 seconds / 5 minutes) — the snapshot is too old to trust for
-      dispatch decisions even if the window hasn't rolled yet. After `/limit-reset`
-      or other API state changes, the snapshot won't reflect the new state until
-      a request is made, and if the gate holds all requests, the stale snapshot
-      never updates (bd-y0yup0).
+    * `captured_at` is older than the staleness threshold for the snapshot's
+      own `capture_source` (300 s for proxy header capture, 600 s for a
+      `/api/oauth/usage` poll — see `staleness_threshold_seconds/1`) — the
+      snapshot is too old to trust for dispatch decisions even if the window
+      hasn't rolled yet. After `/limit-reset` or other API state changes, the
+      snapshot won't reflect the new state until a request is made, and if the
+      gate holds all requests, the stale snapshot never updates (bd-y0yup0).
 
   This is the *primary-window* predicate, and it is what callers outside the
   gate mean by "too old to trust" — `Arbiter.Quota.RefreshProbe` uses it to
@@ -218,7 +226,10 @@ defmodule Arbiter.Quota.Gate do
 
   defp snapshot_stale?(%Snapshot{} = snapshot) do
     reset_elapsed?(snapshot.reset_at) or
-      captured_older_than?(snapshot.captured_at, staleness_threshold_seconds())
+      captured_older_than?(
+        snapshot.captured_at,
+        staleness_threshold_seconds(snapshot.capture_source)
+      )
   end
 
   @doc """
@@ -293,9 +304,44 @@ defmodule Arbiter.Quota.Gate do
   def staleness_threshold_seconds do
     case Application.get_env(:arbiter, :quota, [])[:staleness_threshold_seconds] do
       n when is_integer(n) and n > 0 -> n
-      _ -> 300
+      _ -> @default_staleness_threshold_seconds
     end
   end
+
+  @doc """
+  The staleness threshold for a snapshot written by `capture_source`
+  (bd-b0zody).
+
+  Header capture rides on traffic the fleet is making anyway, so a gap in it
+  means the fleet went quiet — 300 s is a fine trip-wire. The
+  `/api/oauth/usage` poll is different: that endpoint's account-wide budget is
+  roughly **one request per 5 minutes**, which is exactly the 300 s threshold,
+  so a single 429 (the endpoint 429s readily, and
+  `Arbiter.Quota.OAuthUsage` then sits out a 180 s cooldown) would age the row
+  past the threshold and fail the primary window **open** — the fleet would
+  dispatch straight into a cap it had just measured.
+
+  A polled row therefore gets #{@default_polled_staleness_threshold_seconds} s
+  (`:polled_staleness_threshold_seconds` app-env): two whole missed polls of
+  margin, so it takes a sustained outage rather than one 429 to lose the gate.
+  Raising the threshold was chosen over polling faster (e.g. every 240 s)
+  because polling faster *spends* more of the same scarce budget to buy the
+  margin, and with a 180 s cooldown after a 429 the next successful poll can
+  still land ~480 s after the last one — more requests, and still no margin.
+
+  Anything other than the poll marker — the proxy's `"headers"`, `nil` on
+  legacy rows, and every non-Anthropic provider (Codex / Google, which carry
+  no `capture_source`) — keeps `staleness_threshold_seconds/0`.
+  """
+  @spec staleness_threshold_seconds(String.t() | nil) :: integer()
+  def staleness_threshold_seconds(@oauth_poll_source) do
+    case Application.get_env(:arbiter, :quota, [])[:polled_staleness_threshold_seconds] do
+      n when is_integer(n) and n > 0 -> n
+      _ -> max(@default_polled_staleness_threshold_seconds, staleness_threshold_seconds())
+    end
+  end
+
+  def staleness_threshold_seconds(_source), do: staleness_threshold_seconds()
 
   @doc """
   Whether the snapshot indicates the provider is at/over a cap in **either** of

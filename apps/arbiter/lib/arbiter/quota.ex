@@ -9,6 +9,26 @@ defmodule Arbiter.Quota do
   back for the MCP `quota_get` tool, the `GET /api/quota` endpoint, and
   `arb quota`.
 
+  ## Two sources write the same row (bd-b0zody)
+
+  Header capture only ever sees traffic the fleet is already making, so a
+  quota-held or idle fleet stops refreshing the very figures the gate needs to
+  decide whether to un-hold. `capture_oauth_usage/2` — Anthropic's polled
+  `/api/oauth/usage` snapshot, driven by `Arbiter.Quota.CloudProbe` — therefore
+  writes the **same primary columns** `capture/3` does (`utilization_5h`,
+  `status_5h`, `reset_5h_at`, the 7d trio, `representative_claim`,
+  `overage_status`, `captured_at`), not just the secondary `oauth_*` layer it
+  started as. `Arbiter.Quota.Gate` consequently works on a fleet that makes no
+  proxied requests at all.
+
+  Both sources stay live on purpose: this is an overlap window in which the two
+  can be watched for agreement before the proxy capture is retired. Each write
+  stamps `capture_source` (`"headers"` / `"oauth_poll"`, see `header_source/0`
+  and `oauth_poll_source/0`) so a row says which one produced it — `arb quota`
+  prints it, and `Arbiter.Quota.Gate.staleness_threshold_seconds/1` keys the
+  staleness margin off it, because the polled source has a far tighter request
+  budget than free header capture does.
+
   ## Proxy wiring
 
   This module also owns the `ANTHROPIC_BASE_URL` the Claude adapter exports at
@@ -33,6 +53,21 @@ defmodule Arbiter.Quota do
 
   @default_provider "claude"
   @default_base_url "http://127.0.0.1:4848/proxy/anthropic"
+
+  # `capture_source` provenance markers (bd-b0zody). Both sources write the
+  # same primary columns during the overlap window, so the row records which
+  # one last wrote it — `arb quota` prints it, and `Arbiter.Quota.Gate` picks
+  # its staleness threshold off it.
+  @header_source "headers"
+  @oauth_poll_source "oauth_poll"
+
+  @doc "The `capture_source` value the proxy header capture stamps."
+  @spec header_source() :: String.t()
+  def header_source, do: @header_source
+
+  @doc "The `capture_source` value the `/api/oauth/usage` poll stamps."
+  @spec oauth_poll_source() :: String.t()
+  def oauth_poll_source, do: @oauth_poll_source
 
   # Cost pricing (bd-ajh7bd). Rather than invent a second price table, we reuse
   # the real per-session `cost_usd` already recorded in the `Arbiter.Usage`
@@ -244,6 +279,7 @@ defmodule Arbiter.Quota do
             attrs
             |> Map.put(:workspace_id, ws_id)
             |> Map.put(:provider, provider)
+            |> Map.put(:capture_source, @header_source)
             |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
 
           require Logger
@@ -377,6 +413,7 @@ defmodule Arbiter.Quota do
       oauth_utilization_5h: nil,
       oauth_utilization_7d: nil,
       oauth_captured_at: nil,
+      capture_source: nil,
       primary_label: "5h",
       secondary_label: "7d",
       plan: nil,
@@ -405,7 +442,8 @@ defmodule Arbiter.Quota do
       extra_usage: q.extra_usage || %{},
       oauth_utilization_5h: q.oauth_utilization_5h,
       oauth_utilization_7d: q.oauth_utilization_7d,
-      oauth_captured_at: q.oauth_captured_at
+      oauth_captured_at: q.oauth_captured_at,
+      capture_source: q.capture_source
     })
   end
 
@@ -442,7 +480,8 @@ defmodule Arbiter.Quota do
       extra_usage: q.extra_usage || %{},
       oauth_utilization_5h: q.oauth_utilization_5h,
       oauth_utilization_7d: q.oauth_utilization_7d,
-      oauth_captured_at: iso(q.oauth_captured_at)
+      oauth_captured_at: iso(q.oauth_captured_at),
+      capture_source: q.capture_source
     }
   end
 
@@ -550,20 +589,63 @@ defmodule Arbiter.Quota do
     end
   end
 
+  # Persist one parsed `/api/oauth/usage` snapshot (bd-b0zody).
+  #
+  # The poll is the *primary* quota source now, not just a per-model garnish:
+  # when the body carried an aggregate 5h figure we write the same columns the
+  # proxy's header capture writes (`utilization_5h` / `status_5h` /
+  # `reset_5h_at` / the 7d trio / `representative_claim` / `overage_status`)
+  # plus a fresh `captured_at`, so `Arbiter.Quota.Gate` gates off the poll
+  # rather than off worker traffic.
+  #
+  # Two guards keep a thin or broken body from erasing a good row:
+  #
+  #   * no aggregate 5h figure → fall back to the narrow secondary-only write,
+  #     which touches neither the primary columns nor `captured_at`;
+  #   * any individual `nil` field is dropped from the attrs, so the upsert
+  #     never nils out a column another source had filled in (`AshSqlite`
+  #     narrows `upsert_fields` to the attributes actually on the changeset).
+  #
+  # A fetch that failed outright (429 / cooldown / transport) never reaches
+  # here at all, so the previous row survives untouched.
   defp record_oauth_usage(ws_id, provider, usage) do
-    attrs = %{
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    secondary = %{
       workspace_id: ws_id,
       provider: provider,
       per_model_utilization: usage.per_model_utilization,
       extra_usage: usage.extra_usage,
       oauth_utilization_5h: usage.utilization_5h,
       oauth_utilization_7d: usage.utilization_7d,
-      oauth_captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      oauth_captured_at: now
     }
+
+    {action, attrs} =
+      if is_number(usage.utilization_5h) do
+        primary =
+          %{
+            utilization_5h: usage.utilization_5h,
+            status_5h: usage.status_5h,
+            reset_5h_at: usage.reset_5h_at,
+            utilization_7d: usage.utilization_7d,
+            status_7d: usage.status_7d,
+            reset_7d_at: usage.reset_7d_at,
+            representative_claim: usage.representative_claim,
+            overage_status: usage.overage_status
+          }
+          |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+          |> Map.new()
+          |> Map.merge(%{captured_at: now, capture_source: @oauth_poll_source})
+
+        {:record_oauth_snapshot, Map.merge(secondary, primary)}
+      else
+        {:record_oauth_usage, secondary}
+      end
 
     result =
       AnthropicQuota
-      |> Ash.Changeset.for_create(:record_oauth_usage, attrs)
+      |> Ash.Changeset.for_create(action, attrs)
       |> Ash.create()
 
     with {:ok, quota} <- result do
@@ -711,6 +793,7 @@ defmodule Arbiter.Quota do
       :extra_usage,
       :oauth_utilization_5h,
       :oauth_utilization_7d,
+      :capture_source,
       :utilization_5h,
       :utilization_7d,
       :primary_label,
