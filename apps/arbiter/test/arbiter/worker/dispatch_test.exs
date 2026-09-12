@@ -3,6 +3,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.{BranchNamer, Dispatch, Worktree}
   alias Arbiter.Workers.Run
@@ -330,6 +331,53 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert escalation.subject =~ "pre-flight auth failed"
       assert escalation.body =~ "Re-authenticate"
+    end
+
+    # bd-adyhvn: acceptance 3 is about the *real* dispatch path, not
+    # `Preflight.check/2` called by hand — `:usage_task_id` is threaded by
+    # `Dispatch.run_preflight/2` and nowhere else, so a test that passes it
+    # directly would stay green with that threading deleted.
+    test "a pre-flight run by a real dispatch bills its spend to the task it gated",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "preflight ledger", workspace_id: ws.id})
+
+      result_json =
+        ~s({"type":"result","subtype":"success","is_error":false,"duration_ms":1234,) <>
+          ~s("session_id":"sess-preflight-1","total_cost_usd":0.021,) <>
+          ~s("usage":{"input_tokens":4,"output_tokens":7,) <>
+          ~s("cache_creation_input_tokens":1024,"cache_read_input_tokens":38952}})
+
+      # A probe that authenticates cleanly, so the dispatch proceeds past the
+      # gate (and then fails later for unrelated, un-provisioned reasons).
+      _ =
+        Dispatch.dispatch(task.id,
+          repo: "test/repo",
+          start_driver: false,
+          start_claude: true,
+          probe_command: ["sh", "-c", "printf '%s\\n' '#{result_json}'"],
+          probe_env: []
+        )
+
+      assert [row] =
+               UsageEvent
+               |> Ash.Query.filter(source == :preflight and task_id == ^task.id)
+               |> Ash.read!()
+
+      assert row.source == :preflight
+      assert row.task_id == task.id
+      assert row.workspace_id == ws.id
+      assert row.cache_read_tokens == 38_952
+      assert row.tokens_in == 4
+      assert row.tokens_out == 7
+      assert row.cache_creation_tokens == 1024
+      assert row.session_id == "sess-preflight-1"
+      assert row.step == :other
+
+      # ...and that spend must not surface as a phantom task-attributed row:
+      # it is a real task id, so `--by task` legitimately carries it, but the
+      # source split must keep it separable from the worker session's own draw.
+      {:ok, by_source} = Arbiter.Usage.summarize(by: :source, workspace_id: ws.id)
+      assert Enum.any?(by_source, &(&1.group == "preflight"))
     end
 
     test "pre-flight is skipped when start_claude is false (default path unaffected)", %{ws: ws} do

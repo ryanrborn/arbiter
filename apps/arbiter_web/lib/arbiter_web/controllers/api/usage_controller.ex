@@ -6,13 +6,16 @@ defmodule ArbiterWeb.Api.UsageController do
 
     * `GET /api/usage`          — aggregated rollup. Required query: `by` (one of
                                   `day | task | epic | workspace | repo |
-                                  model | step | provider`; `campaign` also
-                                  accepted as a deprecated alias for `epic`).
-                                  Optional: `workspace_id`, `since` (ISO8601),
-                                  `limit`.
+                                  model | step | provider | source`; `campaign`
+                                  also accepted as a deprecated alias for
+                                  `epic`). Optional: `workspace_id`, `since`
+                                  (ISO8601), `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
                                   filters: `workspace_id`, `task_id`, `since`,
-                                  `step`, `limit` (default 50).
+                                  `step`, `source`, `limit` (default 50).
+
+  `by=task` covers task-attributed spend only — probe / pre-flight / session
+  rows carry no `task_id` (bd-adyhvn). Use `by=source` for the full split.
 
   Both back the `arb usage` CLI; the rollup is the primary surface (per-day
   spend, top tasks, rework cost). `events` is for debugging / drill-down.
@@ -54,12 +57,14 @@ defmodule ArbiterWeb.Api.UsageController do
   def events(conn, params) do
     with {:ok, since} <- parse_since(params["since"]),
          {:ok, step} <- parse_step(params["step"]),
+         {:ok, source} <- parse_source(params["source"]),
          {:ok, limit} <- parse_limit(params["limit"]) do
       events =
         Event
         |> filter_eq(:workspace_id, params["workspace_id"])
         |> filter_eq(:task_id, params["task_id"])
         |> filter_eq(:step, step)
+        |> filter_eq(:source, source)
         |> filter_since(since)
         |> Ash.Query.sort(occurred_at: :desc)
         |> Ash.Query.limit(limit)
@@ -92,6 +97,7 @@ defmodule ArbiterWeb.Api.UsageController do
     %{
       id: ev.id,
       task_id: ev.task_id,
+      source: Atom.to_string(ev.source || :task),
       workspace_id: ev.workspace_id,
       repo: ev.repo,
       step: Atom.to_string(ev.step),
@@ -131,6 +137,7 @@ defmodule ArbiterWeb.Api.UsageController do
   end
 
   defp filter_eq(query, :step, v), do: Ash.Query.filter(query, step == ^v)
+  defp filter_eq(query, :source, v), do: Ash.Query.filter(query, source == ^v)
 
   defp filter_since(query, nil), do: query
   defp filter_since(query, %DateTime{} = dt), do: Ash.Query.filter(query, occurred_at >= ^dt)
@@ -182,6 +189,21 @@ defmodule ArbiterWeb.Api.UsageController do
     end
   rescue
     ArgumentError -> {:error, {:invalid_request, "invalid step: #{inspect(raw)}"}}
+  end
+
+  defp parse_source(nil), do: {:ok, nil}
+  defp parse_source(""), do: {:ok, nil}
+
+  defp parse_source(raw) when is_binary(raw) do
+    atom = String.to_existing_atom(raw)
+
+    if atom in Event.sources() do
+      {:ok, atom}
+    else
+      {:error, {:invalid_request, "invalid source: #{inspect(raw)}"}}
+    end
+  rescue
+    ArgumentError -> {:error, {:invalid_request, "invalid source: #{inspect(raw)}"}}
   end
 
   defp parse_limit(nil), do: {:ok, @default_event_limit}
