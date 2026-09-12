@@ -320,10 +320,26 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
-  def get_diff(mr_ref, _opts) when is_binary(mr_ref) do
+  def get_diff(mr_ref, opts) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
-      case request(cfg, :get, "/merge_requests/#{iid}/changes", []) do
+      {path, req_opts} =
+        case diff_range(opts) do
+          # bd-6bg54c / #1573: a bounded `base...head` compare, the same range
+          # GitHub's adapter already served. The merge guard uses it to ask
+          # whether a head that moved past the reviewed commit still has the
+          # SAME net diff against the base (a merge from main), and ReviewPatrol
+          # uses it for new-diff-only re-reviews. Answering it with the MR's own
+          # changes — which is what this used to do for every caller, `opts`
+          # ignored — makes both comparisons vacuous.
+          {base, head} ->
+            {"/repository/compare", [params: [from: base, to: head]]}
+
+          nil ->
+            {"/merge_requests/#{iid}/changes", []}
+        end
+
+      case request(cfg, :get, path, req_opts) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           {:ok, changes_to_diff(body)}
 
@@ -335,6 +351,22 @@ defmodule Arbiter.Mergers.Gitlab do
       end
     end
   end
+
+  # Extract a `{base, head}` compare range from the caller's opts, or nil for
+  # the whole-MR diff. Mirrors the GitHub adapter's helper of the same name,
+  # including reading both atom (the internal call sites) and string keys.
+  defp diff_range(opts) when is_map(opts) do
+    base = Map.get(opts, :base) || Map.get(opts, "base")
+    head = Map.get(opts, :head) || Map.get(opts, "head")
+
+    if is_binary(base) and base != "" and is_binary(head) and head != "" do
+      {base, head}
+    else
+      nil
+    end
+  end
+
+  defp diff_range(_opts), do: nil
 
   @impl true
   def post_inline_comment(mr_ref, finding, _opts)
@@ -1029,6 +1061,12 @@ defmodule Arbiter.Mergers.Gitlab do
   # check runner can feed to its reviewer.
   defp changes_to_diff(%{"changes" => changes}) when is_list(changes) do
     changes
+    |> Enum.map_join("", &render_change/1)
+  end
+
+  # `/repository/compare` returns the identical per-file shape under "diffs".
+  defp changes_to_diff(%{"diffs" => diffs}) when is_list(diffs) do
+    diffs
     |> Enum.map_join("", &render_change/1)
   end
 
