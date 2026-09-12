@@ -21,7 +21,7 @@ defmodule ArbiterCli.ConfigSchema do
   @routing_policies ~w(static by_priority by_difficulty by_budget round_robin)
   @security_modes ~w(auto strict bypass)
   @sandbox_filesystems ~w(worktree none)
-  @safe_default_categories ~w(no_destructive_fs no_force_push no_secret_reads no_outside_writes no_pr_create)
+  @safe_default_categories ~w(no_destructive_fs no_force_push no_secret_reads no_outside_writes no_pr_create no_async_wait)
   @review_automation_modes ~w(auto report_only propose flag notify off never disabled)
   @quota_modes ~w(throttle continue)
 

@@ -260,10 +260,15 @@ defmodule Arbiter.Worker.AsyncWaitPromptGuidanceTest do
     end
   end
 
-  test "every async-tools block gives the working alternative: a blocking TaskOutput drain" do
+  test "every async-tools block gives the working alternative: run verification in the foreground" do
     for {label, prompt} <- surfaces() do
-      assert prompt =~ "TaskOutput", "#{label} must point at TaskOutput as the drain"
-      assert prompt =~ ~r/block/i, "#{label} must say the drain is blocking"
+      assert prompt =~ ~r/foreground/i, "#{label} must say verification runs in the foreground"
+
+      assert prompt =~ "mix test",
+             "#{label} must name `mix test` as a command that must run in the foreground"
+
+      assert prompt =~ "mix precommit",
+             "#{label} must name `mix precommit` as a command that must run in the foreground"
     end
   end
 
