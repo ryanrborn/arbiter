@@ -65,16 +65,11 @@ config :arbiter,
     Arbiter.Events
   ]
 
-# Local HTTP proxy that intercepts Claude CLI traffic to capture Anthropic's
-# `anthropic-ratelimit-unified-*` quota headers (bd-5boun6). Worker spawns get
-# `ANTHROPIC_BASE_URL` pointed at this proxy so every request is recorded.
-config :arbiter, :anthropic_proxy,
-  enabled: true,
-  base_url: "http://127.0.0.1:4848/proxy/anthropic"
-
 # Quota-aware dispatch throttle (bd-7cd38f). Governs what the fleet dispatcher
 # does when the workspace nears / crosses the Anthropic 5h quota cap, consuming
-# the quota snapshots captured by the proxy above (bd-5boun6):
+# the quota snapshots `Arbiter.Quota.CloudProbe` polls off `/api/oauth/usage`
+# (bd-b0zody; the pass-through proxy that used to capture the same figures off
+# response headers was removed in bd-7cvh8z):
 #
 #   * on_exhaustion: :throttle (default) — near the cap, HOLD new dispatches in a
 #     per-workspace draining queue and drain them in priority order as headroom
@@ -129,13 +124,6 @@ config :arbiter, :cloud_code_quota, enabled: true
 # broadcasts a quota_updated event; `GET /api/quota` then reads the persisted
 # rows rather than fetching live. `config/test.exs` turns it off.
 config :arbiter, :cloud_quota_probe, enabled: true, interval_ms: 300_000
-
-# Finch receive_timeout for the proxy's upstream requests to api.anthropic.com,
-# in milliseconds. Because the proxy streams chunk-by-chunk, this is a
-# per-chunk idle timeout — a generous value buys time-to-first-token headroom
-# for large-context Opus calls without capping long healthy generations.
-# Override at runtime with ANTHROPIC_PROXY_RECEIVE_TIMEOUT (ms).
-config :arbiter_web, :anthropic_proxy, receive_timeout: 120_000
 
 # Install-wide default worker security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline

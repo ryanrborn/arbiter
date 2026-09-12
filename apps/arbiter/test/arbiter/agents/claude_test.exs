@@ -316,9 +316,7 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
 
     test "spawn_env ignores a stray `:anthropic_base_url` opt (proxy removed, bd-7cvh8z)" do
-      assert Claude.spawn_env(anthropic_base_url: "http://127.0.0.1:4848/proxy/anthropic/ws-1") ==
-               []
-
+      assert Claude.spawn_env(anthropic_base_url: "http://localhost/whatever") == []
       assert Claude.spawn_env([]) == []
     end
   end

@@ -17,12 +17,12 @@ defmodule Arbiter.Usage.Probe do
   ## Capture path: the CLI's own `--output-format json`, not the proxy
 
   Both probes now ask the CLI for `--output-format json` and read the `usage`
-  object out of their own stdout. The alternative — teaching
-  `ArbiterWeb.AnthropicProxyController` to parse response bodies — is more
-  general (it would cover any provider traffic through the proxy) but means
-  buffering and parsing a **streaming hot path** that every real worker's
-  traffic flows through, to recover numbers the CLI hands us for free at the
-  one place we already own the port. The proxy stays a pass-through.
+  object out of their own stdout. The alternative — teaching the (since
+  removed, bd-7cvh8z) local Anthropic pass-through proxy to parse response
+  bodies — would have been more general (it would have covered any provider
+  traffic through the proxy) but meant buffering and parsing a **streaming
+  hot path** that every real worker's traffic flowed through, to recover
+  numbers the CLI hands us for free at the one place we already own the port.
 
   ## Why not read the CLI's own session JSONL
 

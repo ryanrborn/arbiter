@@ -848,11 +848,7 @@ defmodule Arbiter.Worker.Dispatch do
     workspace = load_workspace(task)
     provider = quota_gate_provider(task, workspace, opts)
 
-    if quota_gate_applies?(provider) do
-      apply_quota_gate(task, workspace, provider, ws_id, opts)
-    else
-      :ok
-    end
+    apply_quota_gate(task, workspace, provider, ws_id, opts)
   rescue
     e ->
       # A bug in the gate must never wedge dispatch — fail open.
@@ -860,11 +856,6 @@ defmodule Arbiter.Worker.Dispatch do
       Logger.warning("Dispatch: quota gate crashed for #{task.id}: #{Exception.message(e)}")
       :ok
   end
-
-  # Claude's snapshot only exists when the local Anthropic proxy is capturing
-  # headers; every other provider is fed by the periodic CloudProbe.
-  defp quota_gate_applies?(:claude), do: Arbiter.Quota.proxy_enabled?()
-  defp quota_gate_applies?(_provider), do: true
 
   # Which provider this dispatch will run on. Mirrors `start_agent/4`'s
   # resolution order so the gate reads the same provider the worker is spawned
