@@ -264,6 +264,12 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
         reset_7d_at: ahead(3 * 86_400) |> DateTime.truncate(:second)
       })
 
+      # The board/Autopilot promotion seam (`Board.Snapshot.quota_hold/1`) sees
+      # the hold, so Autopilot never even offers the task for dispatch...
+      assert {:hold, "7d quota 0.96 ≥ 0.90"} = Arbiter.Board.Snapshot.quota_hold(workspace.id)
+
+      # ...and the dispatch path Autopilot calls (`Dispatch.dispatch/1`) holds
+      # it anyway, which is the choke point that actually matters.
       assert {:error, {:quota_held, held_id}} = Dispatch.dispatch(task.id, start_driver: false)
       assert held_id == task.id
 
