@@ -75,7 +75,8 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
     test "utilization over weekly_threshold still binds past the staleness threshold" do
       q = aged_incident_quota()
 
-      assert Gate.stale?(q), "the snapshot must genuinely be age-stale for this test to mean anything"
+      assert Gate.stale?(q),
+             "the snapshot must genuinely be age-stale for this test to mean anything"
 
       assert %{window: "7d", signal: :utilization, utilization: 0.96, threshold: 0.9} =
                Gate.gating_window(q, ws())
@@ -98,7 +99,12 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
     end
 
     test "the 5h window rolling does not lift the 7d hold" do
-      q = aged_incident_quota(%{reset_5h_at: ago(3600), status_5h: "rejected", utilization_5h: 0.99})
+      q =
+        aged_incident_quota(%{
+          reset_5h_at: ago(3600),
+          status_5h: "rejected",
+          utilization_5h: 0.99
+        })
 
       # The 5h signals are dropped (that window has rolled and its numbers are
       # meaningless), but the 7d hold survives and is what is reported.

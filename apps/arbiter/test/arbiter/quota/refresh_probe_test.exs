@@ -389,7 +389,8 @@ defmodule Arbiter.Quota.RefreshProbeTest do
         status_7d: "allowed_warning",
         reset_7d_at:
           DateTime.utc_now() |> DateTime.add(3 * 86_400, :second) |> DateTime.truncate(:second),
-        captured_at: DateTime.utc_now() |> DateTime.add(-600, :second) |> DateTime.truncate(:second)
+        captured_at:
+          DateTime.utc_now() |> DateTime.add(-600, :second) |> DateTime.truncate(:second)
       })
 
       held = Quota.latest(ws.id)
