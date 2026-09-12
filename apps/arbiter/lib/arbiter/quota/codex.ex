@@ -17,7 +17,7 @@ defmodule Arbiter.Quota.Codex do
   here: the `codex` CLI refreshes the token during normal worker dispatch. If
   the token is expired at read time the endpoint returns `401`, and we skip the
   cycle gracefully (no snapshot written) rather than trying to refresh it
-  ourselves — matching `Arbiter.Quota.RefreshProbe`'s degrade pattern.
+  ourselves.
 
   ## Response shape
 

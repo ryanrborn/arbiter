@@ -18,10 +18,11 @@ defmodule Arbiter.Usage do
 
   Not every row has a task, though. Since bd-adyhvn `task_id` is nullable and
   every row carries a `source` (`:task | :probe | :preflight |
-  :coordinator_session | :terminal_session | :maintenance`), so the quota
-  `RefreshProbe`, the dispatch auth pre-flight and future coordinator /
-  terminal sessions land here too — see `Arbiter.Usage.Event` and
-  `Arbiter.Usage.Probe`.
+  :coordinator_session | :terminal_session | :maintenance`), so the dispatch
+  auth pre-flight and future coordinator / terminal sessions land here too —
+  see `Arbiter.Usage.Event` and `Arbiter.Usage.Probe`. (`:probe` was the quota
+  `RefreshProbe`'s source before it was deleted, bd-atyrrq — historical rows
+  may still carry it.)
 
   ## Aggregation
 

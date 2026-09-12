@@ -85,9 +85,6 @@
   #     `@git_dirty` is `false` there and the warning never fires — a filter
   #     for it would sit unused and fail `list_unused_filters`. It only
   #     appears on a dev machine with a dirty tree.
-  #   * quota/refresh_probe.ex — `if env == []`, where `env` is
-  #     `ConfigDir.env() ++ [{"ANTHROPIC_BASE_URL", base_url}]` and so is
-  #     never empty. Kept as a guard against the tail being made optional.
   #   * worker/review_gate.ex, workflows/conductor.ex — a bare `:no_verdict`
   #     atom clause beside the `{:no_verdict, reason}` tuple one, and a
   #     `load_member_issues([])` clause. Both are cheap total-function
@@ -95,7 +92,6 @@
   {"lib/arbiter/agents/preflight.ex", :pattern_match},
   {"lib/arbiter/mcp/tools.ex", :pattern_match},
   {"lib/arbiter/mcp/tools/loop_pending.ex", :pattern_match},
-  {"lib/arbiter/quota/refresh_probe.ex", :pattern_match},
   {"lib/arbiter/worker/driver.ex", :pattern_match},
   {"lib/arbiter/worker/review_gate.ex", :pattern_match},
   {"lib/arbiter/workflows/conductor.ex", :pattern_match},
@@ -144,10 +140,9 @@
   # OTP 28 added an `:exact_compare` warning class that dialyxir 1.4.7 can
   # neither format ("Unknown warning: :exact_compare / Please file a bug") nor
   # filter — `Dialyxir.Formatter.filter_warning/3` only consults the ignore
-  # file for warning types it knows, so no entry here can silence one. Both
-  # sites were therefore rewritten in source rather than suppressed
-  # (refresh_probe.ex `Enum.empty?(env)`, pr_patrol.ex `meta: nil` in the
-  # clause head). pr_patrol's rewrite moves the nil check into a clause the
-  # analysed types say is unreachable, i.e. group 1 again.
+  # file for warning types it knows, so no entry here can silence one. The
+  # site was therefore rewritten in source rather than suppressed
+  # (pr_patrol.ex `meta: nil` in the clause head), moving the nil check into
+  # a clause the analysed types say is unreachable, i.e. group 1 again.
   {"lib/arbiter/workflows/pr_patrol.ex", :pattern_match}
 ]

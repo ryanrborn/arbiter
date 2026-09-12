@@ -6,7 +6,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
   file covers the two things that need a real row — resolving a workspace by
   **id**, and the install-wide fallback (source 3 of `ConfigDir.oauth_token/1`)
   that the workspace-less call sites (`Arbiter.Agents.CredentialWatchdog`,
-  `quota/refresh_probe.ex`, `workflows/code_review/checks.ex`) rely on.
+  `workflows/code_review/checks.ex`) rely on.
 
   The load-bearing property here is the **lockstep invariant**: seeding is
   suppressed exactly when a token is injected. Breaking it leaves the

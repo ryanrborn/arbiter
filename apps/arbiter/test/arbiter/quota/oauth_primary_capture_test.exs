@@ -12,6 +12,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Quota
+  alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Overage
   alias Arbiter.Tasks.Workspace
@@ -242,6 +243,53 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
 
       assert %{window: "7d", signal: :warning, status: "allowed_warning"} =
                Gate.gating_window(quota, held)
+    end
+  end
+
+  describe "a sticky 7d hold lifts on a fresh poll, with no probe (bd-b7umwj)" do
+    test "an age-stale 7d hold clears once capture_oauth_usage/2 writes a fresh under-cap snapshot" do
+      ws = workspace!()
+
+      Ash.create!(AnthropicQuota, %{
+        workspace_id: ws.id,
+        provider: "claude",
+        utilization_5h: 0.23,
+        status_5h: "allowed",
+        reset_5h_at:
+          DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.truncate(:second),
+        utilization_7d: 0.96,
+        status_7d: "allowed_warning",
+        reset_7d_at:
+          DateTime.utc_now() |> DateTime.add(3 * 86_400, :second) |> DateTime.truncate(:second),
+        captured_at:
+          DateTime.utc_now() |> DateTime.add(-600, :second) |> DateTime.truncate(:second)
+      })
+
+      held = Quota.latest(ws.id)
+      assert Gate.stale?(held), "the primary window is age-stale"
+
+      assert %{window: "7d"} = Gate.gating_window(held, nil),
+             "the 7d hold is sticky before the poll"
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, "quota:#{ws.id}")
+
+      quota =
+        poll!(ws, %{
+          "seven_day" => %{
+            "utilization" => 12,
+            "resets_at" =>
+              DateTime.utc_now() |> DateTime.add(3 * 86_400, :second) |> DateTime.to_iso8601()
+          }
+        })
+
+      assert_receive {:quota_updated, ws_id, _quota}, 1_000
+      assert ws_id == ws.id
+
+      # No worker dispatch happened anywhere in this test — the poll alone,
+      # with no RefreshProbe (or any other probe) in the tree, cleared the
+      # sticky hold.
+      assert Gate.gating_window(quota, nil) == nil
+      assert Gate.gating_window(Quota.latest(ws.id), nil) == nil
     end
   end
 

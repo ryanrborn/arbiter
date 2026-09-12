@@ -382,7 +382,7 @@ Every row now carries a `source` discriminator:
 | source | `task_id` | who writes it |
 | --- | --- | --- |
 | `task` | always set | `Arbiter.Worker` / `Dispatch` — real worker sessions |
-| `probe` | never set | `Arbiter.Quota.RefreshProbe` — quota-snapshot refresh |
+| `probe` | never set | historical: `Arbiter.Quota.RefreshProbe` — quota-snapshot refresh, deleted in bd-atyrrq once the quota poll made it unnecessary |
 | `preflight` | set when a task is being gated | `Arbiter.Agents.Preflight` — the auth check before every dispatch and resume |
 | `coordinator_session` | never set | a browser-hosted coordinator session |
 | `terminal_session` | never set | an interactive terminal session |
@@ -408,6 +408,8 @@ consumption, because the probe and pre-flight draws were invisible to it.
 Measured on the fleet at the time of the change:
 
   * `RefreshProbe` — 243 calls/day at ~57K mean cache-read tokens ≈ **$3.08/day**
+    (historical: the probe was deleted in bd-atyrrq once the quota poll made it
+    unnecessary, so it no longer draws any quota)
   * pre-flight auth check — 322 calls/day at ~39K mean tokens ≈ **$2.05/day**
 
 That is ~565 calls/day, ~$5/day, that no ledger-derived number included. A
@@ -425,6 +427,11 @@ Sizing the whole gap, measured over one Max 5x weekly window (2026-09-07 16:00Z
 | `RefreshProbe` | $13.55 | yes, after this change |
 | pre-flight auth check | $9.02 | yes, after this change |
 | **total** | **$1,057.42** | |
+
+`RefreshProbe`'s row above is historical: the measurement window predates its
+deletion in bd-atyrrq. The probe no longer runs and no longer spends any
+quota — its $3.08/day and $13.55 figures are frozen artifacts of the window
+they were measured in, not an ongoing cost.
 
 The worker-only ledger implied **$8.60 per 1%** of the weekly window; the true
 figure was **$11.01 per 1%** — a 28% understatement. Read that table carefully

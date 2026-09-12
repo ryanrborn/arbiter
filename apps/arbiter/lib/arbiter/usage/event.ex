@@ -40,7 +40,7 @@ defmodule Arbiter.Usage.Event do
   | source | `task_id` | who writes it |
   |---|---|---|
   | `:task` | set | `Arbiter.Worker` (work / review / impl), `Arbiter.Reviews.ExternalReview` |
-  | `:probe` | nil | `Arbiter.Quota.RefreshProbe` — one `claude --print` per workspace to refresh the quota snapshot |
+  | `:probe` | nil | historical: `Arbiter.Quota.RefreshProbe` — one `claude --print` per workspace to refresh the quota snapshot, deleted in bd-atyrrq once the quota poll made it unnecessary |
   | `:preflight` | the task being dispatched, when there is one | `Arbiter.Agents.Preflight` — the per-dispatch / per-resume auth check, and the `CredentialWatchdog`'s task-less probe |
   | `:coordinator_session` | nil | a browser-hosted coordinator session (bd-cyxzvq), attributed by `session_id` |
   | `:terminal_session` | nil | an interactive terminal session, likewise by `session_id` |
@@ -133,7 +133,7 @@ defmodule Arbiter.Usage.Event do
       default :task
       constraints one_of: @sources
 
-      description ~s[What kind of caller spent this. `task` — a worker/reviewer session on a task (the only source with a non-nil `task_id`). `probe` — `Arbiter.Quota.RefreshProbe`. `preflight` — `Arbiter.Agents.Preflight`. `coordinator_session` / `terminal_session` — an interactive session, attributed by `session_id`. `maintenance` — Arbiter's own internal passes (e.g. the Loop analysis pass).]
+      description ~s[What kind of caller spent this. `task` — a worker/reviewer session on a task (the only source with a non-nil `task_id`). `probe` — historical: `Arbiter.Quota.RefreshProbe`, deleted in bd-atyrrq. `preflight` — `Arbiter.Agents.Preflight`. `coordinator_session` / `terminal_session` — an interactive session, attributed by `session_id`. `maintenance` — Arbiter's own internal passes (e.g. the Loop analysis pass).]
     end
 
     attribute :workspace_id, :string do

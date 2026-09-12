@@ -1,8 +1,8 @@
 defmodule Arbiter.Usage.ProbeTest do
   @moduledoc """
   bd-adyhvn: one-shot `claude --print --output-format json` round-trips (the
-  quota RefreshProbe and the dispatch auth pre-flight) read `usage` out of
-  their own stdout and write it to the ledger.
+  dispatch auth pre-flight, and formerly the quota RefreshProbe, deleted in
+  bd-atyrrq) read `usage` out of their own stdout and write it to the ledger.
   """
   use Arbiter.DataCase, async: false
 

@@ -210,9 +210,8 @@ defmodule Arbiter.Quota.Gate do
       gate holds all requests, the stale snapshot never updates (bd-y0yup0).
 
   This is the *primary-window* predicate, and it is what callers outside the
-  gate mean by "too old to trust" — `Arbiter.Quota.RefreshProbe` uses it to
-  decide a workspace is worth a real refresh request, `Arbiter.Loop.Scarcity`
-  uses it to refuse to calibrate, and `arb quota` prints it as `STALE`.
+  gate mean by "too old to trust" — `Arbiter.Loop.Scarcity` uses it to refuse
+  to calibrate, and `arb quota` prints it as `STALE`.
 
   Staleness fails open **for the primary window only**: `over_cap?/2` and
   `in_overage?/2` drop the primary signals of a stale snapshot. If the
@@ -259,10 +258,10 @@ defmodule Arbiter.Quota.Gate do
 
   So a long-window hold is sticky. It lifts when a **fresh** snapshot shows it
   cleared, or when the long window's own `reset_at` rolls — never on age alone.
-  Refreshing the snapshot does not need a worker dispatch:
-  `Arbiter.Quota.RefreshProbe` already issues a tiny direct request per held
-  workspace every `active_interval_ms` (default 5 min), and it keys off
-  `stale?/1`, which still goes true on age.
+  Refreshing the snapshot does not need a worker dispatch: `Arbiter.Quota.CloudProbe`
+  polls Anthropic's `/api/oauth/usage` on a timer (bd-atyrrq) and writes the
+  primary + long-window columns straight from that poll, independent of any
+  worker traffic — the fleet being idle no longer stalls the refresh.
 
   The one age-based exception is a bounded safety valve: when the provider
   reports no long-window `reset_at` there is no rollover to key on, so a

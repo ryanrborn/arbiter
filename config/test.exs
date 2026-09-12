@@ -151,10 +151,6 @@ config :phoenix, :plug_init_mode, :runtime
 config :phoenix_live_view, enable_expensive_runtime_checks: true
 config :phoenix, sort_verified_routes_query_params: true
 
-# Disable the quota refresh probe in test — there's no proxy or real Claude CLI;
-# tests that exercise probe logic inject a :probe_fun stub and enable explicitly.
-config :arbiter, :quota_refresh_probe, enabled: false
-
 # Disable the pr_state background poller in test — it would otherwise hit the
 # forge on a timer. Tests drive `Arbiter.Reviews.PrStatePoller.poll/1`
 # synchronously with a Req.Test stub and start their own disabled instance.

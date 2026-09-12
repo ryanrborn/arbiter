@@ -5,13 +5,15 @@ defmodule Arbiter.Quota.CloudProbe do
 
   ## Motivation
 
-  Claude quota stays fresh on its own: the local proxy scrapes rate-limit
-  headers off every worker request and `Arbiter.Quota.RefreshProbe` tops it up
-  when the fleet is idle. Codex / Gemini CLI / Antigravity have no such passive
-  signal — their figures only ever came from a *live fetch on each
-  `GET /api/quota` call*, and (before this change) Gemini/Antigravity were never
-  persisted at all. So the web dashboard, which reads only the persisted quota
-  tables, could never show them, and there was no history to audit.
+  Claude quota stays fresh on its own timer: this same GenServer also polls
+  Anthropic's `/api/oauth/usage` (bd-b0zody, bd-atyrrq — see
+  `capture_oauth_usage_for_group/2` below), so an idle fleet's snapshot never
+  goes stale for lack of proxied traffic. Codex / Gemini CLI / Antigravity
+  have no such passive signal either — their figures only ever came from a
+  *live fetch on each `GET /api/quota` call*, and (before this change)
+  Gemini/Antigravity were never persisted at all. So the web dashboard, which
+  reads only the persisted quota tables, could never show them, and there was
+  no history to audit.
 
   This GenServer closes that gap. On a recurring timer it refreshes each
   provider for every workspace, which upserts the snapshot and broadcasts
@@ -45,14 +47,14 @@ defmodule Arbiter.Quota.CloudProbe do
   broadcast) when their CLI isn't authenticated on this host, so a logged-out
   provider simply never appears rather than wiping the last good reading.
   Their credentials are host-global, so the figures written under each
-  workspace id are identical — we still fan those three out per workspace
-  (mirroring `RefreshProbe`) so every workspace's dashboard is fed.
+  workspace id are identical — we still fan those three out per workspace so
+  every workspace's dashboard is fed.
 
   ## Cadence
 
-  A single `interval_ms` (default 5 min). Unlike `RefreshProbe`, these are
-  cheap metadata calls that spend no model quota, so there's no active/idle
-  split or reset-boundary gating — a plain heartbeat is enough.
+  A single `interval_ms` (default 5 min). These are cheap metadata calls that
+  spend no model quota, so there's no active/idle split or reset-boundary
+  gating — a plain heartbeat is enough.
 
   ## Configuration
 

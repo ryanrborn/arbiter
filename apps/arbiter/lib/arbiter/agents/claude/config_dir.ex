@@ -133,8 +133,8 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   The env pairs to inject into a worker spawn: `[{"CLAUDE_CONFIG_DIR", dir}]`
   when isolation is enabled and the dir is ready (`[]` otherwise — inherit the
   host config unchanged), plus `{"CLAUDE_CODE_OAUTH_TOKEN", token}` whenever a
-  worker OAuth token (bd-2zigo1) is configured. All four `ConfigDir` consumers
-  (`claude.ex`, `quota/refresh_probe.ex`, `worker/claude_session.ex`,
+  worker OAuth token (bd-2zigo1) is configured. All three `ConfigDir` consumers
+  (`claude.ex`, `worker/claude_session.ex`,
   `workflows/code_review/checks.ex`) call this single function, so the token
   reaches every worker spawn path rather than only the ones that separately
   remember to compose it in (bd-6umoh9).

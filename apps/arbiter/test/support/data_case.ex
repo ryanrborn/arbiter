@@ -49,7 +49,7 @@ defmodule Arbiter.DataCase do
     # `Arbiter.Workflows.ConductorSupervisor`. Several other call paths
     # (`Arbiter.Workflows.DispatchQueue.spawn_drain/2`,
     # `Arbiter.Worker.Dispatch.maybe_verify_codex_mcp_connection/4`,
-    # `Arbiter.Reviews.ExternalReview.start_async/3`, `Arbiter.Quota.RefreshProbe`,
+    # `Arbiter.Reviews.ExternalReview.start_async/3`,
     # `Arbiter.Quota.CloudProbe`, `Arbiter.GitHub.Limiter.start_task/2`)
     # deliberately fire a detached
     # `Task.Supervisor.start_child/2` under a VM-global Task.Supervisor. None
@@ -77,7 +77,6 @@ defmodule Arbiter.DataCase do
       drain_task_supervisor(Arbiter.Workflows.DispatchDrainSupervisor)
       drain_task_supervisor(Arbiter.Worker.MCPVerifySupervisor)
       drain_task_supervisor(Arbiter.Reviews.TaskSupervisor)
-      drain_task_supervisor(Arbiter.Quota.RefreshProbeSupervisor)
       drain_task_supervisor(Arbiter.Quota.CloudProbeSupervisor)
       drain_task_supervisor(Arbiter.TaskSupervisor)
       Ecto.Adapters.SQL.Sandbox.stop_owner(pid)
