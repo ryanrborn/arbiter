@@ -64,3 +64,6 @@ MORNING-BRIEF.md
 # Multi-hundred-MB binaries derived entirely from mix.lock; CI caches them
 # instead of committing them.
 /priv/plts/
+
+# Scratch test files at root — never commit (prevents test.exs scratch scripts).
+/test.exs

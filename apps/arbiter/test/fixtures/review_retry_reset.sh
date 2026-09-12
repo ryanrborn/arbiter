@@ -20,9 +20,9 @@
 # `[ADDRESSED]`: the paired `revise.sh` implementer commits nothing, so an
 # "addressed" claim would fail the no-diff backstop.
 verdict="${1:-APPROVE}"
-M1="./.trib_retry_reset_m1"
-M2="./.trib_retry_reset_m2"
-M3="./.trib_retry_reset_m3"
+M1="$(git rev-parse --git-dir)/trib_retry_reset_m1"
+M2="$(git rev-parse --git-dir)/trib_retry_reset_m2"
+M3="$(git rev-parse --git-dir)/trib_retry_reset_m3"
 
 if [ ! -f "$M1" ]; then
   touch "$M1"

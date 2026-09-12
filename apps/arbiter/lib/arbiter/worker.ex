@@ -5186,11 +5186,7 @@ defmodule Arbiter.Worker do
   # the reviewer's findings. Requires a workspace (messages are workspace-scoped).
   defp escalate_review_gate(%State{workspace_id: ws_id, task_id: task_id}, verdict, findings)
        when is_binary(ws_id) do
-    subject =
-      case verdict do
-        :no_verdict -> "ReviewGate: review inconclusive for #{task_id}"
-        _ -> "ReviewGate: changes requested for #{task_id}"
-      end
+    subject = review_gate_escalation_subject(verdict, findings, task_id)
 
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
@@ -5212,6 +5208,30 @@ defmodule Arbiter.Worker do
   end
 
   defp escalate_review_gate(_state, _verdict, _findings), do: :ok
+
+  # bd-2eyf9y: a `:no_verdict` escalation is either the generic "reviewer
+  # produced nothing actionable" case or one of the ReviewGate revise-round
+  # commit-gate escalations (`Arbiter.Worker.ReviewGate.escalate_commit_gate/2`)
+  # — both report the same `{:no_verdict, message}` shape (so they file as
+  # `:review_gate_inconclusive` and never trigger `maybe_dispatch_fix_round/3`),
+  # but must page the coordinator with a subject that says which happened
+  # instead of a generic "inconclusive". Detected by the message's leading
+  # sentence rather than a new verdict shape.
+  defp review_gate_escalation_subject(:no_verdict, findings, task_id) do
+    cond do
+      String.starts_with?(findings, Arbiter.Worker.ReviewGate.commit_gate_uncommitted_marker()) ->
+        "ReviewGate: implementer left uncommitted work for #{task_id}"
+
+      String.starts_with?(findings, Arbiter.Worker.ReviewGate.commit_gate_no_changes_marker()) ->
+        "ReviewGate: fix round produced no changes for #{task_id}"
+
+      true ->
+        "ReviewGate: review inconclusive for #{task_id}"
+    end
+  end
+
+  defp review_gate_escalation_subject(_verdict, _findings, task_id),
+    do: "ReviewGate: changes requested for #{task_id}"
 
   defp log_review_gate_warning(task_id, reason) do
     Logger.warning(

@@ -17,7 +17,7 @@
 # script itself must remember it already ran. Stands in for a real `claude
 # --print` reviewer so tests never invoke the paid CLI.
 retry="${1:-UNMET}"
-marker="./.review_gate_unmet_criteria_attempt"
+marker="$(git rev-parse --git-dir)/review_gate_unmet_criteria_attempt"
 
 if [ -f "$marker" ]; then
   # Re-prompt pass.

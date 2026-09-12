@@ -12,6 +12,10 @@ while [ "$i" -lt 4000 ]; do
   echo "noise line $i: reading files and narrating tool calls xxxxxxxxxxxxxxxxxxxxxxxx"
   i=$((i + 1))
 done
+echo "guard" > guard-huge.txt
+git add guard-huge.txt >/dev/null 2>&1
+git -c user.email=fixture@example.com -c user.name=Fixture \
+  commit -q -m "address reviewer finding" >/dev/null 2>&1
 echo "IMPL_TAIL_MARKER: FIXED feature.txt:1 by adding the requested guard, committed"
 echo "arb done"
 exit 0
