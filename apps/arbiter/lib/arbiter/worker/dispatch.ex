@@ -1479,9 +1479,6 @@ defmodule Arbiter.Worker.Dispatch do
       CoordinatorNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
       {:error, {:auth_check_failed, reason}}
     else
-      # Route the probe through the same quota-capturing proxy a real spawn
-      # uses (bd-5boun6) so `claude --print ping` updates quota state too.
-      #
       # bd-bw3466: thread the workspace through as well. `Preflight.check/2`
       # defaults the probe env to the adapter's `spawn_env/1`, which resolves
       # CLAUDE_CODE_OAUTH_TOKEN from the workspace's encrypted `worker_env` —
@@ -1496,9 +1493,7 @@ defmodule Arbiter.Worker.Dispatch do
       # in the ledger attributed to the task it was gating. `:workspace` already
       # carries the workspace the row is attributed to.
       probe_opts =
-        preflight_opts(opts) ++
-          [workspace: workspace, usage_task_id: task.id] ++
-          anthropic_proxy_opts(adapter, workspace)
+        preflight_opts(opts) ++ [workspace: workspace, usage_task_id: task.id]
 
       case Preflight.check(adapter, probe_opts) do
         :ok ->
@@ -1878,8 +1873,7 @@ defmodule Arbiter.Worker.Dispatch do
         # the worker OAuth token from this workspace's `worker_env` before
         # falling back to the server env (bd-bw3466).
         agent_opts =
-          agent_opts_from_choice(choice) ++
-            [security: policy, workspace: workspace] ++ anthropic_proxy_opts(adapter, workspace)
+          agent_opts_from_choice(choice) ++ [security: policy, workspace: workspace]
 
         tracker_context = fetch_tracker_context(task, workspace)
 
@@ -2082,21 +2076,6 @@ defmodule Arbiter.Worker.Dispatch do
       []
     end
   end
-
-  # Route Claude CLI traffic through the local quota-capturing proxy (bd-5boun6)
-  # by exporting ANTHROPIC_BASE_URL with the workspace id baked into the path, so
-  # captured rate-limit headers are attributed to this workspace. Claude-only —
-  # Gemini ignores it — and a no-op when the proxy is disabled (e.g. test env).
-  defp anthropic_proxy_opts(Arbiter.Agents.Claude, workspace) do
-    if Arbiter.Quota.proxy_enabled?() do
-      ws_id = workspace && workspace.id
-      [anthropic_base_url: Arbiter.Quota.worker_base_url(ws_id)]
-    else
-      []
-    end
-  end
-
-  defp anthropic_proxy_opts(_adapter, _workspace), do: []
 
   # The concrete model the adapter will dispatch with, if it can name one ahead
   # of the stream (optional `resolved_model/1` callback). Returns nil for
