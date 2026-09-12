@@ -11,7 +11,16 @@ defmodule Arbiter.Repo.Migrations.AddSourceToUsageEvents do
   task-grouped rollup with phantom tasks.
 
   `source` is one of `task | probe | preflight | coordinator_session |
-  terminal_session | maintenance`.
+  terminal_session | maintenance`. The values are deliberately
+  **provider-agnostic** — they name the kind of caller, not the vendor — so the
+  same set describes a codex or gemini probe without a new value.
+
+  The column is deliberately plain `TEXT` with **no `CHECK` constraint**: the
+  enumeration is enforced at the resource layer (`Arbiter.Usage.Event`'s
+  `one_of` constraint), so adding a seventh source later is a one-line change
+  and needs no migration at all. A DB-level enum would have cost a second
+  table rebuild for every new caller, and buys nothing that the resource
+  constraint doesn't already give us — every writer goes through Ash.
 
   ## Backfill
 
