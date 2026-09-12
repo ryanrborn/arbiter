@@ -1190,9 +1190,13 @@ defmodule Arbiter.Worker do
       end
 
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
-         {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
+         {:ok, updated} <- Ash.update(run, attrs, action: :update) do
       # bd-61hnbb: Parse transcript for skill invocations and update usage counters.
       _ = parse_skill_invocations(run_id, run.workspace_id)
+      # bd-db0p38: copy the agent CLI's own session JSONL — the only
+      # full-fidelity record of this run — out of the CLI's self-pruning store
+      # (~21 days) and into the durable log root, beside `<run_id>.log`.
+      _ = archive_session_jsonl(state, updated)
       :ok
     else
       {:error, reason} -> log_run_warning("update", state.task_id, reason)
@@ -2220,6 +2224,40 @@ defmodule Arbiter.Worker do
     end
   rescue
     e -> log_run_warning("backfill_model", task_id, e)
+  end
+
+  # bd-db0p38: archive this run's session JSONL on completion. Best-effort in
+  # the strongest sense — `SessionArchive.archive_run/2` never returns an
+  # error, and a run with no Claude session (workflow-mode, Gemini-driven) or
+  # whose file was already pruned is a logged *result*, not a failure. The
+  # redaction list is the run's own workspace secrets, resolved the same way
+  # `ClaudeSession` resolves them for the live emit path.
+  defp archive_session_jsonl(%State{} = state, run) do
+    {:ok, report} =
+      Arbiter.Worker.SessionArchive.archive_run(run,
+        redact_values: Arbiter.Worker.WorkerEnv.secret_values(state.task_id)
+      )
+
+    case report.status do
+      :ok ->
+        Logger.debug(
+          "Worker: archived session JSONL for task=#{state.task_id} run=#{run.id} " <>
+            "#{report.bytes_in}B -> #{report.bytes_out}B subagents=#{report.subagents}"
+        )
+
+      :no_session_file ->
+        Logger.warning(
+          "Worker: session JSONL already gone for task=#{state.task_id} run=#{run.id} " <>
+            "session=#{run.session_id} — nothing to archive"
+        )
+
+      _other ->
+        :ok
+    end
+
+    :ok
+  rescue
+    e -> log_run_warning("archive_session_jsonl", state.task_id, e)
   end
 
   # Generic best-effort field patch onto the run row: originally the on-disk

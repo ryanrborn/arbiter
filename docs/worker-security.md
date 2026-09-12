@@ -259,3 +259,12 @@ whether the declared posture is actually being enforced by the running adapter.
 * **REST** — `GET /api/workspaces/:id` includes a resolved `security_posture`
   object with `provider`, `policy_enforced`, and the full policy summary. This
   is the single source of truth both surfaces read.
+
+## Related: the durable log root is secret-bearing
+
+Worker output — including each run's archived session JSONL — lands in
+`output_log_root` (default `~/dev/arbiter-worker-logs`). Archives are redacted
+on ingest through `Arbiter.Redaction`, but that only covers secrets a human
+marked; a key printed by a subprocess is not covered. The root is therefore
+also protected by filesystem permissions (`0700` root, `0600` archives) and
+must be treated as secret-bearing storage. See `docs/session-archive.md`.
