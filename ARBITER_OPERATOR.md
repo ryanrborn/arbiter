@@ -415,6 +415,26 @@ one-word prompt is not a cheap call: the CLI still ships its whole system
 prompt and tool definitions on every round-trip, which is where the cache-read
 tokens come from.
 
+Sizing the whole gap, measured over one Max 5x weekly window (2026-09-07 16:00Z
+→ 2026-09-12 01:35Z, which reached 96%):
+
+| component | spend | in the ledger? |
+| --- | --- | --- |
+| workers | $825.21 | yes, before this change |
+| coordinator session | $209.64 | **no — needs bd-cyxzvq** |
+| `RefreshProbe` | $13.55 | yes, after this change |
+| pre-flight auth check | $9.02 | yes, after this change |
+| **total** | **$1,057.42** | |
+
+The worker-only ledger implied **$8.60 per 1%** of the weekly window; the true
+figure was **$11.01 per 1%** — a 28% understatement. Read that table carefully
+before re-baselining: this change closes $22.57 of the $232.21 gap, so the
+per-1% figure moves to about **$8.83**. The single largest missing component is
+the coordinator's own session, which this schema can now represent
+(`source: coordinator_session`, keyed by `session_id`) but which nothing writes
+yet. Until bd-cyxzvq lands, a ledger-derived total is still low — by much less
+than before, but not by zero.
+
 When you compare a window that straddles the change, expect an apparent
 step-up in total spend that is **measurement, not behaviour**. Any quota
 baseline captured before 2026-09-12 is low by roughly the figures above, and

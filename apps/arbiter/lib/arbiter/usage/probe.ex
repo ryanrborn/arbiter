@@ -22,6 +22,31 @@ defmodule Arbiter.Usage.Probe do
   traffic flows through, to recover numbers the CLI hands us for free at the
   one place we already own the port. The proxy stays a pass-through.
 
+  ## Why not read the CLI's own session JSONL
+
+  A third option was proposed and preferred on the ticket: read the session
+  JSONL the CLI writes at `<config_dir>/projects/<slug>/<session-id>.jsonl`,
+  which `Arbiter.Usage.ClaudeSessionFile` already locates and parses. It is the
+  right answer for a **PTY/coordinator session** (bd-cyxzvq), where stdout is a
+  rendered TUI and the result object does not exist, and it is mechanically
+  reachable here too — `claude --session-id <uuid>` lets the caller name the
+  file in advance, so no glob race.
+
+  It is the wrong answer for *these two* callers, for one reason: **the JSONL
+  carries no cost figure.** `Arbiter.Worker` already says so where it
+  reconciles from disk (`@disk_reconciled_cost_note`, `worker.ex:218`), and
+  `ClaudeSessionFile.read_totals/2` accordingly returns tokens only. The
+  per-session `cost-state` record that does carry `totalCostUSD` is emitted
+  periodically during long sessions; a one-shot `--print` round-trip is over
+  before one is written. Since the whole point of this ticket is that ~$3/day
+  and ~$2/day of *spend* were invisible, and this repo has no Claude price
+  table to derive dollars from tokens (only `Arbiter.Agents.Gemini.Pricing`),
+  a JSONL-only probe would have recorded tokens and a "cost unavailable" note
+  — replacing an invisible number with an unpriced one.
+
+  The `result` object gives tokens **and** `total_cost_usd`, priced by the CLI
+  itself. So: result object for one-shot probes, session JSONL for sessions.
+
   ## Why the result object is stripped from the classifier's view
 
   `Arbiter.Worker.StopReason.classify/2` matches provider-error signatures by
