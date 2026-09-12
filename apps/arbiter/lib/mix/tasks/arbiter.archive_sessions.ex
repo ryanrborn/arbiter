@@ -82,7 +82,10 @@ defmodule Mix.Tasks.Arbiter.ArchiveSessions do
   defp banner(false),
     do: "Archiving session JSONLs — DRY RUN, no writes. Re-run with --apply.\n"
 
-  defp report(r, apply?) do
+  # Public only so the rendering — the part an operator actually reads — can be
+  # tested without booting the app under the sandbox.
+  @doc false
+  def report(r, apply?) do
     verb = if apply?, do: "archived", else: "would archive"
 
     """
