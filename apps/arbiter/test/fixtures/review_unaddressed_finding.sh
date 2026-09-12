@@ -22,7 +22,7 @@
 # round, so the script itself must remember it already ran. Stands in for a real
 # `claude --print` reviewer so tests never invoke the paid CLI.
 mode="${1:-BLIND}"
-marker="./.review_gate_unaddressed_attempt"
+marker="$(git rev-parse --git-dir)/review_gate_unaddressed_attempt"
 
 if [ -f "$marker" ]; then
   echo "re-reviewing the updated diff after the implementer's revision"

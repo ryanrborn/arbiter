@@ -12,7 +12,7 @@
 # script itself must remember it already ran. Stands in for a real `claude
 # --print` reviewer so tests never invoke the paid CLI.
 retry_verdict="${1:-NONE}"
-marker="./.review_gate_reprompt_attempt"
+marker="$(git rev-parse --git-dir)/review_gate_reprompt_attempt"
 
 if [ -f "$marker" ]; then
   # Re-prompt pass.

@@ -13,7 +13,7 @@
 # first pass apart from the re-prompt — the ReviewGate re-runs this same argv.
 # Stands in for a real `claude --print` reviewer so tests never invoke the CLI.
 retry="${1:-EMPTY}"
-marker="./.review_gate_empty_findings_attempt"
+marker="$(git rev-parse --git-dir)/review_gate_empty_findings_attempt"
 
 if [ -f "$marker" ]; then
   # Re-prompt pass.
