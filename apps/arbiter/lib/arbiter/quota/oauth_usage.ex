@@ -46,8 +46,9 @@ defmodule Arbiter.Quota.OAuthUsage do
   / the `quota_get` MCP tool is invoked. The cadence is deliberately *not*
   faster than 5 min — see `Arbiter.Quota.Gate.staleness_threshold_seconds/1`,
   which buys the gate's margin by trusting a polled row for longer rather than
-  by spending more of this endpoint's scarce budget. `Arbiter.Quota.RefreshProbe`
-  keeps its hands off this endpoint entirely (see its moduledoc).
+  by spending more of this endpoint's scarce budget. This poll is the *only*
+  thing that refreshes the snapshot for an idle fleet (bd-atyrrq) — there is
+  no separate probe that spends a billed request to keep it warm.
   """
 
   require Logger

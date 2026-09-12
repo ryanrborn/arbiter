@@ -711,7 +711,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # credentials) is re-detected on *every* dispatch attempt for as long as the
   # underlying condition holds. The incident this dedupes was actually driven
   # by `Arbiter.Workflows.DispatchQueue`'s held-intent drain re-running the
-  # doomed probe on `RefreshProbe`/`CloudProbe`'s ~5-minute broadcast cadence
+  # doomed probe on `CloudProbe`'s ~5-minute broadcast cadence
   # (see that module's moduledoc) — not, as first suspected, `Autopilot`'s 15s
   # tick — but the fix here is deliberately independent of which caller
   # retries: it dedupes inside `preflight_failed/2` itself, which both

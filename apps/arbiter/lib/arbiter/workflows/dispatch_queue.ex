@@ -59,7 +59,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
   `:quota_exhausted` `StopReason` (the account's 5h window) even when the last
   captured snapshot looked fine. Without a hold, a held intent whose dispatch
   fails this way gets `{:requeue, item}`'d (below) and re-attempted on the very
-  next drain trigger — and `RefreshProbe`/`CloudProbe` broadcast `quota_updated`
+  next drain trigger — and `CloudProbe` broadcasts `quota_updated`
   every 5 minutes for as long as anything is held, so the doomed probe reran on
   a ~5-minute cadence for the whole incident this bug tracks (bd-7qbavq: 12
   identical failures, each preceded by a `quota_gate_bypass` event, landing on

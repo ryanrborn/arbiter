@@ -95,7 +95,7 @@ defmodule Arbiter.Board.Autopilot do
   bd-7qbavq incident this bug tracks: that card's retries carried
   `skip_quota_gate: true` (a flag only `Arbiter.Workflows.DispatchQueue`'s
   drain sets — see `DispatchQueue`'s moduledoc), landed on 5-minute
-  boundaries matching `Arbiter.Quota.RefreshProbe`/`CloudProbe`'s broadcast
+  boundaries matching `Arbiter.Quota.CloudProbe`'s broadcast
   interval, and produced only one run row, all of which rule out this
   15s-tick path. `DispatchQueue` carries the equivalent hold for the path
   that actually produced the flood; see its `retry_not_before` handling.

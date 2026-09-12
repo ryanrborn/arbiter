@@ -6,11 +6,11 @@ defmodule ArbiterWeb.Api.QuotaController do
   the installation default.
 
   A pure DB read (bd-ajh7bd): every provider is read from its persisted quota
-  table, kept fresh by the background probes (`Arbiter.Quota.RefreshProbe` for
-  Claude's header capture, `Arbiter.Quota.CloudProbe` for Codex / Gemini CLI /
-  Antigravity and Anthropic's secondary `/api/oauth/usage` layer). No provider is
-  fetched live here, so a dashboard/CLI load carries no request-time latency or
-  rate-limit exposure.
+  table, kept fresh by proxied header capture for Claude and the background
+  `Arbiter.Quota.CloudProbe` (Codex / Gemini CLI / Antigravity, plus
+  Anthropic's own `/api/oauth/usage` poll, which is the primary driver once
+  the fleet goes idle — bd-atyrrq). No provider is fetched live here, so a
+  dashboard/CLI load carries no request-time latency or rate-limit exposure.
 
   `quotas` carries every tracked provider as the uniform view shape (each
   including its own `provider` field) — `claude` is kept as a top-level key too

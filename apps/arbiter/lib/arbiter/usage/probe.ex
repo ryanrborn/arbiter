@@ -2,15 +2,17 @@ defmodule Arbiter.Usage.Probe do
   @moduledoc """
   Ledger capture for Arbiter's one-shot agent-CLI round-trips (bd-adyhvn).
 
-  Two callers spend real plan quota without ever going through
-  `Arbiter.Worker` — which is the only path that writes `usage_events`:
+  One caller spends real plan quota without ever going through
+  `Arbiter.Worker` — which is the only other path that writes `usage_events`:
 
-    * `Arbiter.Quota.RefreshProbe` — one `claude --print "ok"` per workspace
-      whenever the quota snapshot needs refreshing (~57K cache-read tokens a
-      call, because a one-token prompt still ships the CLI's system prompt and
-      tool definitions);
     * `Arbiter.Agents.Preflight` — one `claude --print "ping"` per dispatch
       **and** per resume, plus the `CredentialWatchdog`'s periodic check.
+
+  (A second caller, `Arbiter.Quota.RefreshProbe` — one `claude --print "ok"`
+  per workspace whenever the quota snapshot needed refreshing — was deleted in
+  bd-atyrrq once `Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll made a
+  billed round-trip unnecessary for that purpose. Historical `usage_events`
+  rows with `source: :probe` are its legacy.)
 
   ## Capture path: the CLI's own `--output-format json`, not the proxy
 
@@ -89,11 +91,10 @@ defmodule Arbiter.Usage.Probe do
   @doc """
   Split a probe's captured output into `{usage_or_nil, lines_for_the_classifier}`.
 
-  `lines` is oldest-first, exactly as `Arbiter.Agents.Preflight` and
-  `Arbiter.Quota.RefreshProbe` collect it. When one of them is the CLI's
-  successful `result` object, its token counts are extracted and that line is
-  removed from the returned list (see the moduledoc). Anything else passes
-  through untouched.
+  `lines` is oldest-first, exactly as `Arbiter.Agents.Preflight` collects it.
+  When one of them is the CLI's successful `result` object, its token counts
+  are extracted and that line is removed from the returned list (see the
+  moduledoc). Anything else passes through untouched.
   """
   @spec parse([String.t()]) :: {usage() | nil, [String.t()]}
   def parse(lines) when is_list(lines) do

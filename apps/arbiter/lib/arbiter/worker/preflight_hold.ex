@@ -8,7 +8,7 @@ defmodule Arbiter.Worker.PreflightHold do
 
     * `Arbiter.Board.Autopilot` — the 15s board tick.
     * `Arbiter.Workflows.DispatchQueue` — the held-intent drain, woken by
-      `Arbiter.Quota.RefreshProbe`/`CloudProbe` PubSub broadcasts (every
+      `Arbiter.Quota.CloudProbe`'s PubSub broadcasts (every
       5 minutes) and by its own deterministic reset-time timer.
 
   Both need the same answer to "is it worth re-running the doomed CLI probe
