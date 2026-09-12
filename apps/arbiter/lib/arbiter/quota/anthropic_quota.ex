@@ -3,10 +3,9 @@ defmodule Arbiter.Quota.AnthropicQuota do
   Per-workspace snapshot of Anthropic's unified rate-limit / quota state.
 
   Anthropic returns `anthropic-ratelimit-unified-*` headers on *every*
-  `/v1/messages` response (success or failure). The local HTTP proxy
-  (`ArbiterWeb.AnthropicProxyController`) captures them and upserts one row
-  per workspace+provider here, so the fleet can read current utilization
-  without making an extra API call.
+  `/v1/messages` response (success or failure). `Arbiter.Quota.capture/3`
+  upserts one row per workspace+provider here, so the fleet can read current
+  utilization without making an extra API call.
 
   One row per `{workspace_id, provider}` — the `:upsert` action overwrites the
   prior snapshot in place, so this table stays tiny (it is a cache of the

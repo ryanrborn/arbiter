@@ -255,24 +255,12 @@ defmodule Arbiter.Agents.Claude do
     # on a `worker_env` install is never where the token lives. Dispatch and
     # the ReviewGate both put `:workspace` on the adapter opts; a bare adapter
     # call (no workspace) still falls back to the server env.
-    ConfigDir.env(Keyword.get(opts, :workspace)) ++ api_key_env(opts) ++ base_url_env(opts)
+    ConfigDir.env(Keyword.get(opts, :workspace)) ++ api_key_env(opts)
   end
 
   defp api_key_env(opts) do
     case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
       key when is_binary(key) and key != "" -> [{"ANTHROPIC_API_KEY", key}]
-      _ -> []
-    end
-  end
-
-  # Point the CLI at the local quota-capturing proxy (bd-5boun6) when the caller
-  # threads an `:anthropic_base_url` opt. Dispatch / Preflight compute the URL
-  # (with the workspace id baked into the path) only when the proxy is enabled,
-  # so a bare adapter call still spawns against the real api.anthropic.com.
-  # Set explicitly so any inherited ANTHROPIC_BASE_URL is overridden.
-  defp base_url_env(opts) do
-    case Keyword.get(opts, :anthropic_base_url) do
-      url when is_binary(url) and url != "" -> [{"ANTHROPIC_BASE_URL", url}]
       _ -> []
     end
   end

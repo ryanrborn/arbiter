@@ -212,14 +212,6 @@ defmodule ArbiterWeb.Router do
     get("/scheduler/status", SchedulerController, :status)
   end
 
-  # Local transparent proxy to api.anthropic.com (bd-5boun6). Workers route
-  # Claude CLI traffic here so the `anthropic-ratelimit-unified-*` quota headers
-  # are captured. Not piped through `:api` — the controller forwards the raw
-  # body/headers and streams SSE responses itself, owning content negotiation.
-  scope "/proxy/anthropic", ArbiterWeb do
-    match(:*, "/*path", AnthropicProxyController, :forward)
-  end
-
   # Server-push event stream — long-lived chunked HTTP connection for coordinator
   # sessions. Auth via query-string token; not piped through :api because the
   # response is application/x-ndjson (not JSON) and content negotiation would

@@ -315,20 +315,8 @@ defmodule Arbiter.Agents.ClaudeTest do
              ]
     end
 
-    test "exports `ANTHROPIC_BASE_URL` from `opts[:anthropic_base_url]` (proxy wiring)" do
-      assert Claude.spawn_env(anthropic_base_url: "http://127.0.0.1:4848/proxy/anthropic/ws-1") ==
-               [{"ANTHROPIC_BASE_URL", "http://127.0.0.1:4848/proxy/anthropic/ws-1"}]
-    end
-
-    test "composes ANTHROPIC_BASE_URL after the API key" do
-      assert Claude.spawn_env(api_key: "k", anthropic_base_url: "http://localhost/p") == [
-               {"ANTHROPIC_API_KEY", "k"},
-               {"ANTHROPIC_BASE_URL", "http://localhost/p"}
-             ]
-    end
-
-    test "omits ANTHROPIC_BASE_URL when the opt is absent or blank" do
-      assert Claude.spawn_env(anthropic_base_url: "") == []
+    test "spawn_env ignores a stray `:anthropic_base_url` opt (proxy removed, bd-7cvh8z)" do
+      assert Claude.spawn_env(anthropic_base_url: "http://localhost/whatever") == []
       assert Claude.spawn_env([]) == []
     end
   end

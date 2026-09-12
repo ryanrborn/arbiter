@@ -230,18 +230,6 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
   end
 
   describe "end to end: Autopilot's dispatch path stays held" do
-    setup do
-      prev = Application.get_env(:arbiter, :anthropic_proxy)
-
-      Application.put_env(:arbiter, :anthropic_proxy,
-        enabled: true,
-        base_url: "http://127.0.0.1:4848"
-      )
-
-      on_exit(fn -> Application.put_env(:arbiter, :anthropic_proxy, prev) end)
-      :ok
-    end
-
     test "a dispatch against the stale 96%/allowed_warning snapshot is held, not spawned" do
       {:ok, workspace} =
         Ash.create(Workspace, %{

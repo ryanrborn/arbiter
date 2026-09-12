@@ -86,20 +86,6 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
-  setup do
-    # The gate is a no-op when the proxy is disabled (the test default). Flip it
-    # on so the gate actually consults the seeded quota snapshots.
-    prev = Application.get_env(:arbiter, :anthropic_proxy)
-
-    Application.put_env(:arbiter, :anthropic_proxy,
-      enabled: true,
-      base_url: "http://127.0.0.1:4848"
-    )
-
-    on_exit(fn -> Application.put_env(:arbiter, :anthropic_proxy, prev) end)
-    :ok
-  end
-
   defp make_workspace(config) do
     {:ok, ws} =
       Ash.create(Workspace, %{
@@ -253,18 +239,6 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
   end
 
   describe "fail-open" do
-    test "proxy disabled → dispatch proceeds regardless of quota/config" do
-      Application.put_env(:arbiter, :anthropic_proxy, enabled: false)
-
-      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
-      task = make_task(ws)
-      # Even an over-cap snapshot is ignored because the proxy is off.
-      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
-
-      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
-      assert result.task.status == :in_progress
-    end
-
     test "no snapshot (latest == nil) → dispatch proceeds" do
       ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
       task = make_task(ws)
