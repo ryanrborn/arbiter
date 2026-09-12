@@ -2,40 +2,31 @@ defmodule Arbiter.Quota do
   @moduledoc """
   Ash domain + public API for per-workspace Anthropic quota state (bd-5boun6).
 
-  The local HTTP proxy in `arbiter_web` forwards Claude CLI traffic to
-  `api.anthropic.com` and feeds the `anthropic-ratelimit-unified-*` response
-  headers through `capture/3`, which upserts an `AnthropicQuota` snapshot for
-  the originating workspace. `get/2` / `serialize/2` read the latest snapshot
-  back for the MCP `quota_get` tool, the `GET /api/quota` endpoint, and
-  `arb quota`.
+  `capture/3` takes `anthropic-ratelimit-unified-*` response headers and
+  upserts an `AnthropicQuota` snapshot for the originating workspace. `get/2` /
+  `serialize/2` read the latest snapshot back for the MCP `quota_get` tool,
+  the `GET /api/quota` endpoint, and `arb quota`.
 
   ## Two sources write the same row (bd-b0zody)
 
-  Header capture only ever sees traffic the fleet is already making, so a
-  quota-held or idle fleet stops refreshing the very figures the gate needs to
-  decide whether to un-hold. `capture_oauth_usage/2` — Anthropic's polled
-  `/api/oauth/usage` snapshot, driven by `Arbiter.Quota.CloudProbe` — therefore
-  writes the **same primary columns** `capture/3` does (`utilization_5h`,
+  `capture/3` used to be fed by a local pass-through proxy that intercepted
+  worker traffic to `api.anthropic.com` — removed in bd-7cvh8z once it became
+  clear header capture only ever sees traffic the fleet is already making, so
+  a quota-held or idle fleet stops refreshing the very figures the gate needs
+  to decide whether to un-hold. `capture_oauth_usage/2` — Anthropic's polled
+  `/api/oauth/usage` snapshot, driven by `Arbiter.Quota.CloudProbe` — writes
+  the **same primary columns** `capture/3` does (`utilization_5h`,
   `status_5h`, `reset_5h_at`, the 7d trio, `representative_claim`,
   `overage_status`, `captured_at`), not just the secondary `oauth_*` layer it
-  started as. `Arbiter.Quota.Gate` consequently works on a fleet that makes no
-  proxied requests at all.
+  started as, so `Arbiter.Quota.Gate` works on a fleet that makes no proxied
+  requests at all.
 
-  Both sources stay live on purpose: this is an overlap window in which the two
-  can be watched for agreement before the proxy capture is retired. Each write
-  stamps `capture_source` (`"headers"` / `"oauth_poll"`, see `header_source/0`
-  and `oauth_poll_source/0`) so a row says which one produced it — `arb quota`
-  prints it, and `Arbiter.Quota.Gate.staleness_threshold_seconds/1` keys the
-  staleness margin off it, because the polled source has a far tighter request
-  budget than free header capture does.
-
-  ## Proxy wiring
-
-  This module also owns the `ANTHROPIC_BASE_URL` the Claude adapter exports at
-  spawn time so every worker request is intercepted. The base URL embeds the
-  workspace id as the first path segment (`/proxy/anthropic/<workspace_id>`)
-  so the proxy can attribute captured headers without a custom request header
-  the CLI would never send.
+  Each write stamps `capture_source` (`"headers"` / `"oauth_poll"`, see
+  `header_source/0` and `oauth_poll_source/0`) so a row says which one
+  produced it — `arb quota` prints it, and
+  `Arbiter.Quota.Gate.staleness_threshold_seconds/1` keys the staleness margin
+  off it, because the polled source has a far tighter request budget than
+  free header capture does.
   """
 
   use Ash.Domain
@@ -52,7 +43,6 @@ defmodule Arbiter.Quota do
   end
 
   @default_provider "claude"
-  @default_base_url "http://127.0.0.1:4848/proxy/anthropic"
 
   # `capture_source` provenance markers (bd-b0zody). Both sources write the
   # same primary columns during the overlap window, so the row records which
@@ -61,7 +51,7 @@ defmodule Arbiter.Quota do
   @header_source "headers"
   @oauth_poll_source "oauth_poll"
 
-  @doc "The `capture_source` value the proxy header capture stamps."
+  @doc "The `capture_source` value `capture/3` (header capture) stamps."
   @spec header_source() :: String.t()
   def header_source, do: @header_source
 
@@ -90,38 +80,6 @@ defmodule Arbiter.Quota do
 
   # Trailing window over which per-provider spend is summed for the cost figure.
   @cost_window_days 30
-
-  # ---- proxy config ------------------------------------------------------
-
-  @doc """
-  Whether worker spawns should route Anthropic traffic through the local
-  proxy. Defaults to `true`; the test env disables it so adapter/dispatch
-  specs that assert the raw spawn env stay deterministic.
-  """
-  @spec proxy_enabled?() :: boolean()
-  def proxy_enabled?, do: Keyword.get(proxy_config(), :enabled, true) == true
-
-  @doc "The proxy base URL (no workspace segment)."
-  @spec proxy_base_url() :: String.t()
-  def proxy_base_url do
-    proxy_config()
-    |> Keyword.get(:base_url, @default_base_url)
-    |> String.trim_trailing("/")
-  end
-
-  @doc """
-  The `ANTHROPIC_BASE_URL` a worker for `workspace_id` should export. The
-  workspace id rides as the first path segment so the proxy can attribute the
-  captured quota headers. A `nil` workspace (workspace-agnostic probe) yields
-  the bare base URL.
-  """
-  @spec worker_base_url(String.t() | nil) :: String.t()
-  def worker_base_url(workspace_id) when is_binary(workspace_id) and workspace_id != "",
-    do: proxy_base_url() <> "/" <> workspace_id
-
-  def worker_base_url(_), do: proxy_base_url()
-
-  defp proxy_config, do: Application.get_env(:arbiter, :anthropic_proxy, [])
 
   # ---- dispatch gate (bd-7cd38f) -----------------------------------------
 

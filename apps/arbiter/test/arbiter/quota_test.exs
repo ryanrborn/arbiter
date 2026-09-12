@@ -570,24 +570,4 @@ defmodule Arbiter.QuotaTest do
       assert Quota.refresh_and_serialize(ws.id) == nil
     end
   end
-
-  describe "proxy config" do
-    test "worker_base_url bakes in the workspace id" do
-      Application.put_env(:arbiter, :anthropic_proxy,
-        enabled: true,
-        base_url: "http://127.0.0.1:4848/proxy/anthropic"
-      )
-
-      on_exit(fn ->
-        Application.put_env(:arbiter, :anthropic_proxy,
-          enabled: false,
-          base_url: "http://127.0.0.1:4848/proxy/anthropic"
-        )
-      end)
-
-      assert Quota.proxy_enabled?()
-      assert Quota.worker_base_url("ws-123") == "http://127.0.0.1:4848/proxy/anthropic/ws-123"
-      assert Quota.worker_base_url(nil) == "http://127.0.0.1:4848/proxy/anthropic"
-    end
-  end
 end
