@@ -47,6 +47,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
+  @revise_dirty Path.expand("../../fixtures/revise_dirty.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
@@ -1876,7 +1877,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             review_rounds: 2,
             worktree_path: repo,
             review_command: [@rounds_empty_mid, "APPROVE"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 10_000
           }
         )
@@ -1889,6 +1890,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # enter_revise fires, the implementer addresses the re-prompt findings, and
       # the round-3 reviewer approves → merge.
       wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+
       assert merge_commit_count(repo) == 1
 
       # A round-2 implementer ran, proving the findings DID reach it.
@@ -1929,7 +1931,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             # Round 2 first pass → empty RC (needs 1 retry — reset budget proves fix).
             # Round 2 reprompt → APPROVE → merge.
             review_command: [@retry_reset, "APPROVE"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 12_000
           }
         )
@@ -1981,7 +1983,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             review_rounds: 3,
             worktree_path: repo,
             review_command: [@rounds_empty_last, "APPROVE"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 14_000
           }
         )
@@ -2425,7 +2427,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             review_rounds: 2,
             worktree_path: repo,
             review_command: [@unaddressed, "BLIND"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 5_000
           }
         )
@@ -2675,7 +2677,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             review_rounds: 2,
             worktree_path: repo,
             review_command: [@unaddressed, "OBSOLETE"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 5_000
           }
         )
@@ -2789,7 +2791,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             review_rounds: 2,
             worktree_path: repo,
             review_command: [@rounds, "APPROVE"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 5_000
           }
         )
@@ -2934,7 +2936,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             review_rounds: 2,
             worktree_path: repo,
             review_command: [@rounds, "REQUEST_CHANGES"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 5_000
           }
         )
@@ -3033,6 +3035,202 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
              "rounds: 1 must not spawn an implementer"
+    end
+  end
+
+  # ---- revise-round commit gate (bd-2eyf9y) --------------------------------
+
+  describe "revise-round commit gate (bd-2eyf9y)" do
+    # Dirty tree, HEAD unchanged: the implementer is resumed once with an
+    # explicit "commit and push" instruction (@revise_dirty always leaves an
+    # untracked edit behind). It's still dirty after the resume, so the
+    # ReviewGate escalates instead of dispatching a second re-review of the
+    # same (nonexistent) diff.
+    test "dirty tree: implementer is resumed once, then escalates if still dirty",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "APPROVE"],
+            revise_command: [@revise_dirty],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      # The dirty round-1 implementer ran once, then a distinct resume ("nudge")
+      # run under its own id — proving it was actually given a second chance to
+      # commit rather than being escalated on the first pass.
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
+             "expected the round-1 implementer run"
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1-commit")),
+             "expected a distinct commit-gate resume run"
+
+      # No round-2 reviewer was ever spawned — the diff never changed.
+      refute Enum.any?(runs, &(&1.task_id == review_id <> "#r2")),
+             "must not re-review an unchanged diff"
+
+      # The escalation gets a distinct subject, not a generic "inconclusive" one.
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.subject =~ "implementer left uncommitted work"
+      refute escalation.subject =~ "review inconclusive"
+      refute escalation.subject =~ "changes requested"
+
+      # The recorded round reflects the escalated-uncommitted outcome, and the
+      # gate did not silently masquerade as a rejected review.
+      require Ash.Query
+
+      impl_rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.Query.sort(inserted_at: :asc)
+        |> Ash.read!()
+
+      assert [%{commit_gate: :reprompted}, %{commit_gate: :escalated_uncommitted}] = impl_rounds
+    end
+
+    # Clean tree, HEAD unchanged: @revise fixture only talks, never touches the
+    # worktree. There is no new diff to re-review, so the ReviewGate escalates
+    # immediately rather than dispatching a round-2 reviewer against the exact
+    # same diff round 1 already rejected.
+    test "clean tree, no new commit: escalates immediately, no review dispatched",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "APPROVE"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
+             "expected the round-1 implementer run"
+
+      # No commit-gate resume (nothing to commit) and no round-2 reviewer.
+      refute Enum.any?(runs, &(&1.task_id == review_id <> "#impl1-commit")),
+             "a clean tree has nothing to commit — must not resume the implementer"
+
+      refute Enum.any?(runs, &(&1.task_id == review_id <> "#r2")),
+             "must not re-review an identical diff"
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.subject =~ "fix round produced no changes"
+      refute escalation.subject =~ "review inconclusive"
+
+      require Ash.Query
+
+      [impl_round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.read!()
+
+      assert impl_round.commit_gate == :escalated_no_changes
+    end
+
+    # New commit: unchanged behavior. This is already exercised implicitly by
+    # every other revise-and-rediscuss test (they all use @revise_commit), but
+    # is asserted explicitly here as the acceptance-criteria "control" case.
+    test "new commit: review dispatched as today, commit_gate is nil",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "APPROVE"],
+            revise_command: [@revise_commit],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 1
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#r2")),
+             "a real commit must still dispatch round 2 as before"
+
+      require Ash.Query
+
+      [impl_round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :impl)
+        |> Ash.read!()
+
+      assert impl_round.commit_gate == nil
     end
   end
 
@@ -3857,7 +4055,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             worktree_path: repo,
             # @rounds rejects round 1, approves round 2 — within a D0 cap of 2.
             review_command: [@rounds, "APPROVE"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 5_000
           }
         )
@@ -3905,7 +4103,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
             worktree_path: repo,
             # @rounds always REQUEST_CHANGES — the cap determines when to escalate.
             review_command: [@rounds, "REQUEST_CHANGES"],
-            revise_command: [@revise],
+            revise_command: [@revise_commit],
             review_timeout_ms: 5_000
           }
         )

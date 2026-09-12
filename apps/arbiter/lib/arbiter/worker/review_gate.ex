@@ -221,6 +221,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # coordinator's mailbox row beyond reason.
   @diff_cap_bytes 50_000
 
+  # bd-2eyf9y: the revise-round commit gate. Both escalation messages below
+  # start with one of these exact sentences so `Worker.escalate_review_gate/3`
+  # can give each a mailbox subject distinct from the generic "review
+  # inconclusive" wording, without adding a new verdict shape (both still
+  # report as `{:no_verdict, message}` — see `escalate_commit_gate/2`).
+  @commit_gate_uncommitted_marker "ReviewGate fix round: implementer left uncommitted work"
+  @commit_gate_no_changes_marker "ReviewGate fix round: fix round produced no changes"
+
   # StopReason categories that mean the reviewer/implementer subprocess died for
   # an infrastructure reason (expired credentials, exhausted credits/quota, rate
   # limiting, a gateway blip, an exec failure, or an unrecognized stream schema)
@@ -303,6 +311,22 @@ defmodule Arbiter.Worker.ReviewGate do
   """
   @spec reviewer_task_id(String.t()) :: String.t()
   def reviewer_task_id(task_id) when is_binary(task_id), do: task_id <> "#review"
+
+  @doc """
+  The exact leading sentence of a bd-2eyf9y commit-gate escalation reporting
+  uncommitted work left behind after a resumed revise round. Exposed so
+  `Arbiter.Worker.escalate_review_gate/3` can give it a distinct mailbox
+  subject without hardcoding (and risking drift from) the literal text.
+  """
+  @spec commit_gate_uncommitted_marker() :: String.t()
+  def commit_gate_uncommitted_marker, do: @commit_gate_uncommitted_marker
+
+  @doc """
+  The exact leading sentence of a bd-2eyf9y commit-gate escalation reporting a
+  revise round that left HEAD unchanged on a clean worktree (no code change).
+  """
+  @spec commit_gate_no_changes_marker() :: String.t()
+  def commit_gate_no_changes_marker, do: @commit_gate_no_changes_marker
 
   @doc """
   Strip any synthetic-id suffix (`#review`, `#r<N>`, `#impl<N>`, `#v<N>`,
@@ -615,7 +639,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # actually changed, accumulated across rounds. nil until the first revise
       # round completes (and stays nil without a worktree / git), which keeps the
       # untouched-file backstop silent rather than guessing.
-      revise_touched_files: nil
+      revise_touched_files: nil,
+      # bd-2eyf9y: whether the CURRENT round's implementer has already been
+      # resumed once to commit uncommitted work. Reset to false whenever a
+      # round genuinely advances (finish_revise/1's dispatch_next_review/1) so
+      # each new round gets its own one-shot nudge budget.
+      commit_nudge_used: false
     }
 
     Process.monitor(author)
@@ -1187,9 +1216,6 @@ defmodule Arbiter.Worker.ReviewGate do
         do: "(implementer produced no output)",
         else: cap_transcript(response)
 
-    record_round(state, :impl, nil, response, converged: false)
-    state = record_thread(state, :implementer, "Round #{state.round} response", response)
-
     # bd-1mksks: detect whether the revise implementer committed new changes.
     # If HEAD is unchanged from when the reviewer last ran, the implementer's
     # round was a rebuttal only (no code change). Record this in the thread so
@@ -1197,9 +1223,59 @@ defmodule Arbiter.Worker.ReviewGate do
     # advanced, record the new commit so the re-reviewer can verify it too.
     {state, new_head_sha} = note_head_change(state)
 
+    # bd-2eyf9y: the commit gate. A round that leaves HEAD unchanged must not
+    # go straight to re-review of the same diff — distinguish "the implementer
+    # left real work uncommitted" (resume it once, then escalate if it's still
+    # dirty) from "nothing changed at all" (escalate immediately; there is no
+    # new diff to re-review).
+    {outcome, commit_gate} = commit_gate_outcome(state, new_head_sha)
+
+    record_round(state, :impl, nil, response, converged: false, commit_gate: commit_gate)
+    state = record_thread(state, :implementer, "Round #{state.round} response", response)
+
     # The implementer's subprocess has exited; stop its worker so it can't linger.
     stop_worker(state)
 
+    case outcome do
+      :advanced ->
+        dispatch_next_review(%{state | head_sha: new_head_sha, commit_nudge_used: false})
+
+      :reprompt ->
+        nudge_uncommitted_implementer(%{state | head_sha: new_head_sha})
+
+      :escalate_uncommitted ->
+        {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
+
+      :escalate_no_changes ->
+        {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :no_changes)}
+    end
+  end
+
+  # Decide what the commit gate does with this revise round, and what to
+  # record on its `Arbiter.ReviewGate.Round` row. HEAD advancing (or being
+  # unknowable — no worktree/git) always proceeds exactly as before this
+  # fix; only an UNCHANGED head is gated. `state.head_sha` here is still the
+  # SHA from BEFORE this round (note_head_change/1 returns it separately).
+  defp commit_gate_outcome(%{head_sha: old_sha}, new_sha)
+       when is_nil(old_sha) or is_nil(new_sha) or old_sha != new_sha do
+    {:advanced, nil}
+  end
+
+  defp commit_gate_outcome(%{worktree_path: wt} = state, _new_sha) when is_binary(wt) do
+    if uncommitted_worktree_changes?(wt) do
+      if state.commit_nudge_used,
+        do: {:escalate_uncommitted, :escalated_uncommitted},
+        else: {:reprompt, :reprompted}
+    else
+      {:escalate_no_changes, :escalated_no_changes}
+    end
+  end
+
+  # No worktree to inspect — can't tell dirty from clean, so fall back to the
+  # pre-bd-2eyf9y behavior (proceed) rather than escalate on a guess.
+  defp commit_gate_outcome(_state, _new_sha), do: {:advanced, nil}
+
+  defp dispatch_next_review(state) do
     # Reset the per-round retry budget so a reprompt used in this round does not
     # prevent a reprompt in the next round (bug bd-79goxj).
     # Also reset attempt counter so reprompts in the new round start fresh (bd-bgeo6i).
@@ -1207,7 +1283,6 @@ defmodule Arbiter.Worker.ReviewGate do
       state
       | round: state.round + 1,
         phase: :reviewing,
-        head_sha: new_head_sha,
         retries_left: state.initial_retries,
         attempt: 0
     }
@@ -1229,6 +1304,81 @@ defmodule Arbiter.Worker.ReviewGate do
 
         {:done, finish(next, {:request_changes, escalation_payload(next)})}
     end
+  end
+
+  # bd-2eyf9y: resume the SAME round's implementer exactly once with an
+  # explicit "commit and push" instruction instead of dispatching a re-review
+  # of an unchanged diff. `phase` stays `:revising` and `round` is untouched —
+  # the relaunch is just another pass of this round, so its exit routes back
+  # into finish_revise/1 above via the normal :revising dispatch, where
+  # `commit_nudge_used: true` means a still-dirty tree now escalates instead
+  # of nudging again.
+  defp nudge_uncommitted_implementer(state) do
+    state = %{state | commit_nudge_used: true}
+    id = commit_nudge_task_id(state.review_id, state.round)
+
+    case launch_worker(state, id, :implementer, commit_nudge_prompt(state), state.revise_command) do
+      {:ok, state} ->
+        {:continue, state}
+
+      {:error, reason} ->
+        state =
+          record_thread(
+            state,
+            :system,
+            "Round #{state.round} commit-gate resume could not start",
+            "The implementer could not be resumed to commit its work: #{inspect(reason)}"
+          )
+
+        {:done, escalate_commit_gate(state, :uncommitted)}
+    end
+  end
+
+  defp commit_nudge_prompt(state) do
+    """
+    bd-2eyf9y commit gate: your round #{state.round} revise pass for task #{state.task_id} \
+    ended with the worktree on branch `#{state.branch}` left DIRTY (`git status --porcelain` \
+    is non-empty) and HEAD unchanged. The re-reviewer diffs committed history only, so this \
+    work is invisible until it is committed.
+
+    Do EXACTLY this, then print `arb done` again on its own line:
+
+      1. `git status` to see what is uncommitted.
+      2. `git add -A`
+      3. `git commit -m "<a short message describing the work>"`
+      4. (`git push -u origin #{state.branch}` is OPTIONAL — the merge reads local HEAD.)
+
+    Do not redo the work — just commit what is already on disk. If a hunk looks
+    half-finished or wrong, finish it first, then commit it.
+    """
+  end
+
+  # bd-2eyf9y: both escalations report `{:no_verdict, message}` — same
+  # protocol as `escalate_timeout/1` — so `park_rejected/3` files them as
+  # `:review_gate_inconclusive` and `maybe_dispatch_fix_round/3` does NOT
+  # auto-redispatch a fresh fix round against them (that dispatcher only acts
+  # on `:request_changes`). The message starts with the module's marker
+  # sentence so `Worker.escalate_review_gate/3` can give each a subject
+  # distinct from the generic "review inconclusive" wording.
+  defp escalate_commit_gate(state, :uncommitted) do
+    msg =
+      "#{@commit_gate_uncommitted_marker} (task #{state.task_id}, round #{state.round}). " <>
+        "The implementer was resumed once with an explicit instruction to commit and push, " <>
+        "but the worktree still has uncommitted changes and HEAD has not moved. The " <>
+        "re-reviewer would see the same diff as last round, so no further review round " <>
+        "was dispatched.\n\n" <> escalation_payload(state)
+
+    finish(state, {:no_verdict, msg})
+  end
+
+  defp escalate_commit_gate(state, :no_changes) do
+    msg =
+      "#{@commit_gate_no_changes_marker} (task #{state.task_id}, round #{state.round}). " <>
+        "HEAD did not move and the worktree is clean — the revise round produced no code " <>
+        "change. No further review round was dispatched against an identical diff.\n\n" <>
+        escalation_payload(state)
+
+    finish(state, {:no_verdict, msg})
   end
 
   @doc """
@@ -1329,9 +1479,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # must never crash the round — it just falls back to the rebuttal-only
   # wording above, which was the entire behavior pre-bd-d534xo.
   defp uncommitted_worktree_changes?(wt) when is_binary(wt) do
-    case System.cmd("git", ["-C", wt, "status", "--porcelain"], stderr_to_stdout: true) do
-      {out, 0} -> String.trim(out) != ""
-      _ -> false
+    case Arbiter.Worker.Worktree.has_uncommitted?(wt) do
+      {:ok, dirty?} -> dirty?
+      {:error, _} -> false
     end
   rescue
     _ -> false
@@ -1890,6 +2040,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # nil` and `finding_count: nil` (implementers don't issue verdicts).
   defp record_round(state, role, verdict, findings, opts) do
     converged = Keyword.fetch!(opts, :converged)
+    # bd-2eyf9y: which commit-gate outcome (if any) this :impl round hit —
+    # nil for a normal round (HEAD advanced, or no worktree to check) and for
+    # every :review row.
+    commit_gate = Keyword.get(opts, :commit_gate)
     {run_id, reviewer_model, cost_usd} = pass_usage(state.current_id)
 
     # bd-3xultf: the resolved tier that governed this pass — recorded only
@@ -1909,7 +2063,8 @@ defmodule Arbiter.Worker.ReviewGate do
         reviewer_model: reviewer_model,
         reviewer_tier: reviewer_tier,
         cost_usd: cost_usd,
-        converged: converged
+        converged: converged,
+        commit_gate: commit_gate
       }
       |> Map.merge(review_outcome_attrs(role, verdict, findings, state))
 
@@ -2698,6 +2853,12 @@ defmodule Arbiter.Worker.ReviewGate do
   # attempt so it registers its own worker / run row and never collides with the
   # (now-stopped) hung pass. bd-78vg4v.
   defp timeout_retry_id(current_id, attempt), do: "#{current_id}#t#{attempt + 1}"
+
+  # bd-2eyf9y: the id for the one-shot commit-gate resume of a round's
+  # implementer — distinct from `implementer_task_id/2`'s original pass so it
+  # registers its own worker / run row.
+  defp commit_nudge_task_id(review_id, round),
+    do: implementer_task_id(review_id, round) <> "-commit"
 
   # ---- misc ---------------------------------------------------------------
 

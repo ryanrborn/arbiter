@@ -86,6 +86,19 @@ defmodule Arbiter.ReviewGate.Round do
                           AND whose CRITERIA breakdown left no criterion unmet;
                           false otherwise (including all `:impl` rows, and an
                           APPROVE that admits an unmet criterion).
+    * `commit_gate`     — bd-2eyf9y: which commit-gate outcome an `:impl` row
+                          hit, if any. `:reprompted` — the round ended with
+                          HEAD unchanged and a dirty worktree, so the
+                          implementer was resumed once to commit instead of
+                          dispatching a re-review of the same diff.
+                          `:escalated_uncommitted` — still dirty after that
+                          resume; escalated instead of re-prompting again.
+                          `:escalated_no_changes` — HEAD unchanged and the
+                          worktree was clean (no code change at all);
+                          escalated instead of re-reviewing an identical diff.
+                          Nil for a round whose HEAD advanced normally, for a
+                          round with no worktree to check, and for every
+                          `:review` row.
 
   ## Metric start date
 
@@ -106,6 +119,7 @@ defmodule Arbiter.ReviewGate.Round do
 
   @roles ~w(review impl)a
   @verdicts ~w(approve request_changes timed_out)a
+  @commit_gates ~w(reprompted escalated_uncommitted escalated_no_changes)a
 
   sqlite do
     table "review_gate_rounds"
@@ -139,7 +153,8 @@ defmodule Arbiter.ReviewGate.Round do
         :finding_ids,
         :dispositions,
         :undispositioned_count,
-        :converged
+        :converged,
+        :commit_gate
       ]
     end
   end
@@ -244,6 +259,12 @@ defmodule Arbiter.ReviewGate.Round do
       description "True for a :review APPROVE with no criterion left unmet."
     end
 
+    attribute :commit_gate, :atom do
+      public? true
+      constraints one_of: @commit_gates
+      description "bd-2eyf9y commit-gate outcome for an :impl row. Nil otherwise."
+    end
+
     create_timestamp :inserted_at
   end
 
@@ -252,4 +273,7 @@ defmodule Arbiter.ReviewGate.Round do
 
   @doc "All valid verdict atoms."
   def verdicts, do: @verdicts
+
+  @doc "All valid commit_gate atoms."
+  def commit_gates, do: @commit_gates
 end

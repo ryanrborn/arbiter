@@ -7,9 +7,13 @@
 #        "REQUEST_CHANGES" (hold the line → escalate after the cap). Default
 #        APPROVE.
 #
-# A marker file in the CWD (the shared worktree, unique per test) tells the first
-# pass apart from later ones — the ReviewGate spawns a fresh reviewer mind per
-# round, so the script itself must remember it already ran. The implementer
+# A marker file tells the first pass apart from later ones — the ReviewGate
+# spawns a fresh reviewer mind per round, so the script itself must remember it
+# already ran. It lives inside `.git` rather than the worktree proper so it
+# never shows up as an untracked file in `git status --porcelain` — bd-2eyf9y's
+# commit gate reads that output to tell a genuinely clean worktree apart from
+# one with real uncommitted work, and a stray reviewer-side marker file would
+# have made every "clean, no new commit" round look dirty. The implementer
 # fixture runs in the same CWD between passes but uses a different marker name.
 # Stands in for a real `claude --print` reviewer so tests never invoke the paid
 # CLI.
@@ -21,7 +25,7 @@
 # "addressed" claim would (correctly) fail the mechanical no-diff backstop. A
 # reviewer persuaded by a rebuttal is exactly the case `[OBSOLETE]` exists for.
 later_verdict="${1:-APPROVE}"
-marker="./.review_gate_round_attempt"
+marker="$(git rev-parse --git-dir)/review_gate_round_attempt"
 
 if [ -f "$marker" ]; then
   echo "re-reviewing the updated diff after the implementer's revision"

@@ -20,10 +20,10 @@
 # implementer commits nothing, so an "addressed" claim would fail the no-diff
 # backstop.
 verdict="${1:-APPROVE}"
-M1="./.rounds_empty_last_m1"
-M2="./.rounds_empty_last_m2"
-M3="./.rounds_empty_last_m3"
-M4="./.rounds_empty_last_m4"
+M1="$(git rev-parse --git-dir)/rounds_empty_last_m1"
+M2="$(git rev-parse --git-dir)/rounds_empty_last_m2"
+M3="$(git rev-parse --git-dir)/rounds_empty_last_m3"
+M4="$(git rev-parse --git-dir)/rounds_empty_last_m4"
 
 if [ ! -f "$M1" ]; then
   touch "$M1"

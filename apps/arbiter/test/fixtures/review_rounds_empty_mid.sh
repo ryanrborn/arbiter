@@ -17,9 +17,9 @@
 # implementer commits nothing, so an "addressed" claim would fail the no-diff
 # backstop.
 verdict="${1:-APPROVE}"
-marker1="./.rounds_empty_mid_pass1"
-marker2="./.rounds_empty_mid_pass2"
-marker3="./.rounds_empty_mid_pass3"
+marker1="$(git rev-parse --git-dir)/rounds_empty_mid_pass1"
+marker2="$(git rev-parse --git-dir)/rounds_empty_mid_pass2"
+marker3="$(git rev-parse --git-dir)/rounds_empty_mid_pass3"
 
 if [ ! -f "$marker1" ]; then
   : > "$marker1"
