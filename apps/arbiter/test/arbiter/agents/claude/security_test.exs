@@ -99,5 +99,24 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
       refute Enum.any?(rules, &(&1 =~ "gh pr create"))
     end
+
+    # bd-d534xo: `claude --print` ends the whole session the instant a turn
+    # produces no tool call — so `Monitor` and `ScheduleWakeup`, which exist to
+    # let an INTERACTIVE session yield a turn and be woken by a later event,
+    # can never fire here: the process that would receive the wakeup is
+    # already gone. A worker that arms one anyway ends its turn "waiting" and
+    # discards any uncommitted work. Deny both outright rather than relying on
+    # prompt guidance alone.
+    test "the no_async_wait baseline denies Monitor and ScheduleWakeup outright" do
+      rules = Security.deny_rules(policy())
+      assert "Monitor" in rules
+      assert "ScheduleWakeup" in rules
+    end
+
+    test "opting out of safe_defaults also drops the async-wait deny" do
+      rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
+      refute "Monitor" in rules
+      refute "ScheduleWakeup" in rules
+    end
   end
 end

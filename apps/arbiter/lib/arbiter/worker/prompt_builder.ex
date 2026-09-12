@@ -148,27 +148,26 @@ defmodule Arbiter.Worker.PromptBuilder do
       end
 
     """
-    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
-    tool — including in parallel or with background execution modes. But this
-    session is NON-INTERACTIVE: the agent loop ends the instant one of your
-    turns contains no tool call. An asynchronous notification can therefore
-    never reach you — `Monitor` events, `ScheduleWakeup` wakeups and
-    background-task completion notices are all delivered to a session that has
-    already exited. Ending a turn to "wait" for one is not waiting: it ends the
-    run on the spot and discards any uncommitted work. So:
+    *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+    turn ends the session outright, and no notification can ever reach you
+    afterward — not from `Monitor`, not `ScheduleWakeup`, not a backgrounded
+    shell job. The process that would receive it no longer exists. If you
+    background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+    similar) and end your turn to "wait" for it, the run ends on the spot, the
+    command is killed with it, and any uncommitted work is lost. So:
 
     #{commit_bullet}\
-      * Make the command fit inside one tool call: raise the `Bash` tool's own
-        `timeout` parameter (up to 600000 ms / 10 minutes), or narrow the
-        command — the specific failing test files, not the whole suite.
-      * If a command is backgrounded anyway, drain it in the SAME turn: call
-        `TaskOutput` with `"block": true` and a generous `timeout`, repeatedly
-        if needed, until it reports the task finished. `Read` its output file
-        if you want interim progress.
-      * NEVER wait via `Monitor` or `ScheduleWakeup`, and NEVER end a turn
-        while a background task is still pending.
+      * Run `mix test`, `mix precommit`, `dialyzer`, and any other long
+        verification command in the FOREGROUND, in the same tool call, and
+        wait for it to finish before your turn ends. Raise the `Bash` tool's
+        own `timeout` parameter (up to 600000 ms / 10 minutes) if the default
+        is too short, or narrow the command — the specific failing test
+        files, not the whole suite.
+      * NEVER background a verification command and end your turn expecting to
+        be woken up later. NEVER call `Monitor` or `ScheduleWakeup` to wait for
+        one. There is no "later" in a headless session.
 
-    You MUST read every background task's full output #{tail}\
+    You MUST read every command's full output #{tail}\
     """
   end
 

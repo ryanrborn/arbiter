@@ -67,6 +67,13 @@ defmodule Arbiter.Agents.SecurityPolicy do
     * `:no_pr_create`       — opening a PR/MR from the worker (`gh pr create`,
       `glab mr create`). The MergeQueue owns PR creation; a worker that opens its
       own PR produces a duplicate on the wrong base (bd-53xrmi).
+    * `:no_async_wait`      — `Monitor` / `ScheduleWakeup`. These tools yield a
+      turn and resume it when a later event fires, which only works in an
+      interactive session. `claude --print` ends the whole process the instant
+      a turn produces no tool call, so a worker that arms one ends its turn
+      "waiting" and is never woken — the notification has nowhere to arrive
+      (bd-d534xo). Denying the tools outright backs the prompt guidance that
+      says the same thing.
 
   Replaceable as a whole (set `safe_defaults: []` to opt a domain out — not
   recommended), but defaults non-empty. They are enforced in **every** mode
@@ -147,7 +154,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
     :no_force_push,
     :no_secret_reads,
     :no_outside_writes,
-    :no_pr_create
+    :no_pr_create,
+    :no_async_wait
   ]
 
   @doc "Valid `permissions.mode` atoms."

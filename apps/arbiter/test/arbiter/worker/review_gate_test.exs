@@ -3038,6 +3038,121 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  # bd-d534xo: the revise-round implementer is dispatched by ReviewGate, not by
+  # `Arbiter.Worker.Dispatch` — so it never went through `PromptBuilder`'s
+  # `async_tools_section` (bd-606zlr). Two real ReviewGate fix rounds on
+  # bd-a16rgk backgrounded `mix precommit`, said "waiting for the notification",
+  # and ended their turn — a `claude --print` session that ends the turn ends
+  # the process, so the notification (and the finished-but-uncommitted work)
+  # was lost both times. The same non-interactive-session guidance the main
+  # dispatch prompt carries must reach this prompt too.
+  describe "revise_prompt/2 ASYNC TOOLS guidance (bd-d534xo)" do
+    test "names Monitor and ScheduleWakeup as unusable for waiting", %{ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+
+      state = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix it")
+
+      assert prompt =~ "Monitor"
+      assert prompt =~ "ScheduleWakeup"
+      assert prompt =~ ~r/non-interactive/i
+      assert prompt =~ ~r/foreground/i
+      assert prompt =~ "mix precommit"
+    end
+
+    test "tells the implementer to commit before running long verification", %{ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+
+      state = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix it")
+
+      assert prompt =~ ~r/commit[^.]{0,80}before[^.]{0,80}verif/i
+    end
+  end
+
+  # bd-d534xo: an implementer that backgrounds a long verification command and
+  # then abandons its turn to "wait for the notification" exits with the fix
+  # already written but never `git commit`-ed. HEAD is therefore unchanged —
+  # exactly the same git state a genuine "REBUTTED, no code change" round
+  # leaves. Without checking the worktree itself, `note_head_change/1` cannot
+  # tell the two apart, so it silently reported a rebuttal in a case where 501
+  # lines of finished work were actually sitting unstaged (bd-a16rgk).
+  describe "note_head_change/1 detects uncommitted work left behind (bd-d534xo)" do
+    test "flags UNCOMMITTED work distinctly from a genuine rebuttal when HEAD is unchanged",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+      branch = "feature/abandoned"
+
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      {_, 0} = git(["commit", "-q", "--allow-empty", "-m", "round 1"], repo)
+      sha = String.trim(elem(git(["rev-parse", "--short", "HEAD"], repo), 0))
+
+      # The abandoned round: a real edit sits in the worktree, never committed.
+      File.write!(Path.join(repo, "checks.ex"), "defmodule Checks, do: nil\n")
+
+      state = %{
+        task_id: task.id,
+        branch: branch,
+        target_branch: "main",
+        worktree_path: repo,
+        round: 1,
+        head_sha: sha,
+        thread: [],
+        revise_touched_files: MapSet.new()
+      }
+
+      {state, new_sha} = ReviewGate.note_head_change(state)
+
+      assert new_sha == sha
+      [entry] = state.thread
+      assert entry.subject =~ ~r/uncommitted/i
+      refute entry.subject =~ ~r/rebuttal/i
+      assert entry.body =~ ~r/uncommitted/i
+    end
+
+    test "a genuine rebuttal (HEAD unchanged, clean worktree) keeps the old message",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+      branch = "feature/rebuttal"
+
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      {_, 0} = git(["commit", "-q", "--allow-empty", "-m", "round 1"], repo)
+      sha = String.trim(elem(git(["rev-parse", "--short", "HEAD"], repo), 0))
+
+      state = %{
+        task_id: task.id,
+        branch: branch,
+        target_branch: "main",
+        worktree_path: repo,
+        round: 1,
+        head_sha: sha,
+        thread: [],
+        revise_touched_files: MapSet.new()
+      }
+
+      {state, new_sha} = ReviewGate.note_head_change(state)
+
+      assert new_sha == sha
+      [entry] = state.thread
+      assert entry.subject =~ ~r/rebuttal/i
+      refute entry.subject =~ ~r/uncommitted/i
+    end
+  end
+
   # ---- Pre-spawn commit gate and HEAD-SHA anchoring (bd-1mksks) ------------
 
   describe "pre-spawn commit gate (bd-1mksks)" do
@@ -3708,8 +3823,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "ASYNC TOOLS",
              "Claude workspace must include the ASYNC TOOLS block"
 
-      assert prompt =~ "including in parallel or with background execution modes",
-             "Claude workspace must permit parallel and background execution"
+      assert prompt =~ "HEADLESS AND NON-INTERACTIVE",
+             "Claude workspace must include the headless-session warning"
 
       refute prompt =~ "synchronously",
              "Claude workspace must not include the sync-only instruction"
@@ -3720,7 +3835,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, ws), :no_verdict)
 
       assert prompt =~ "ASYNC TOOLS"
-      assert prompt =~ "including in parallel or with background execution modes"
+      assert prompt =~ "HEADLESS AND NON-INTERACTIVE"
       refute prompt =~ "synchronously"
     end
 
@@ -3742,8 +3857,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       refute prompt =~ "ASYNC TOOLS",
              "Gemini workspace must not include the ASYNC TOOLS heading"
 
-      refute prompt =~ "including in parallel or with background execution modes",
-             "Gemini workspace must not include the Claude parallel-execution phrase"
+      refute prompt =~ "HEADLESS AND NON-INTERACTIVE",
+             "Gemini workspace must not include the Claude headless-session phrase"
 
       assert prompt =~ "synchronously",
              "Gemini workspace must include the sync-only instruction"
@@ -3829,7 +3944,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "ASYNC TOOLS",
              "nil workspace must fall back to the Claude async block"
 
-      assert prompt =~ "background execution modes"
+      assert prompt =~ "HEADLESS AND NON-INTERACTIVE"
     end
 
     test "missing workspace_id key defaults to the Claude async block" do
