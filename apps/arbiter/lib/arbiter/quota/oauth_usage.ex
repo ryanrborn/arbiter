@@ -46,11 +46,30 @@ defmodule Arbiter.Quota.OAuthUsage do
   @anthropic_beta "oauth-2025-04-20"
   @cooldown_ms 180_000
 
+  # Mirrors the `warningThresholds` table shipped in Anthropic's own Claude
+  # Code CLI v2.1.269 (bd-3uwku6 / bd-3x0na3): burn-rate-ahead-of-schedule
+  # warnings, keyed by window. Each `{utilization, elapsed_fraction}` pair
+  # means "warn once utilization is at least this high while elapsed_fraction
+  # is still at or below this" — i.e. burning faster than the window's own
+  # clock. This is a mirrored constant, not a derivation; re-check it against
+  # the CLI if the observed behavior ever drifts.
+  @warning_thresholds %{
+    five_hour: [{0.90, 0.72}],
+    seven_day: [{0.75, 0.60}, {0.50, 0.35}, {0.25, 0.15}]
+  }
+  @window_seconds %{five_hour: 18_000, seven_day: 604_800}
+
   @type usage :: %{
           utilization_5h: float() | nil,
           utilization_7d: float() | nil,
           per_model_utilization: %{String.t() => float()},
-          extra_usage: map()
+          extra_usage: map(),
+          reset_5h_at: DateTime.t() | nil,
+          reset_7d_at: DateTime.t() | nil,
+          status_5h: String.t() | nil,
+          status_7d: String.t() | nil,
+          representative_claim: String.t() | nil,
+          overage_status: String.t() | nil
         }
 
   @doc """
@@ -167,11 +186,21 @@ defmodule Arbiter.Quota.OAuthUsage do
   # fractions (see `Arbiter.Quota.parse_unified_headers/1`). Normalize to the
   # same 0-1 fraction scale so both sources render identically downstream.
   defp parse_usage(body) when is_map(body) do
+    five_hour = Map.get(body, "five_hour")
+    seven_day = Map.get(body, "seven_day")
+    extra_usage = Map.get(body, "extra_usage")
+
     %{
-      utilization_5h: utilization(Map.get(body, "five_hour")),
-      utilization_7d: utilization(Map.get(body, "seven_day")),
+      utilization_5h: utilization(five_hour),
+      utilization_7d: utilization(seven_day),
       per_model_utilization: per_model_utilization(body),
-      extra_usage: normalize_extra_usage(Map.get(body, "extra_usage"))
+      extra_usage: normalize_extra_usage(extra_usage),
+      reset_5h_at: resets_at(five_hour),
+      reset_7d_at: resets_at(seven_day),
+      status_5h: window_status(five_hour, :five_hour),
+      status_7d: window_status(seven_day, :seven_day),
+      representative_claim: representative_claim(Map.get(body, "limits")),
+      overage_status: overage_status(extra_usage)
     }
   end
 
@@ -180,11 +209,93 @@ defmodule Arbiter.Quota.OAuthUsage do
       utilization_5h: nil,
       utilization_7d: nil,
       per_model_utilization: %{},
-      extra_usage: %{}
+      extra_usage: %{},
+      reset_5h_at: nil,
+      reset_7d_at: nil,
+      status_5h: nil,
+      status_7d: nil,
+      representative_claim: nil,
+      overage_status: nil
     }
 
   defp utilization(%{"utilization" => u}) when is_number(u), do: u / 100.0
   defp utilization(_), do: nil
+
+  defp resets_at(%{"resets_at" => raw}) when is_binary(raw) do
+    case DateTime.from_iso8601(raw) do
+      {:ok, dt, _offset} -> DateTime.truncate(dt, :second)
+      _ -> nil
+    end
+  end
+
+  defp resets_at(_), do: nil
+
+  defp window_locked_reason(%{"locked_reason" => reason}) when is_binary(reason) and reason != "",
+    do: reason
+
+  defp window_locked_reason(_), do: nil
+
+  defp window_status(window, key) do
+    case utilization(window) do
+      nil ->
+        nil
+
+      u ->
+        cond do
+          u >= 1.0 or not is_nil(window_locked_reason(window)) -> "rejected"
+          warning?(key, u, resets_at(window)) -> "allowed_warning"
+          true -> "allowed"
+        end
+    end
+  end
+
+  defp warning?(key, utilization, resets_at) do
+    window = Map.fetch!(@window_seconds, key)
+    thresholds = Map.fetch!(@warning_thresholds, key)
+    elapsed_fraction = elapsed_fraction(resets_at, window)
+
+    Enum.any?(thresholds, fn {u_threshold, elapsed_threshold} ->
+      utilization >= u_threshold and elapsed_fraction <= elapsed_threshold
+    end)
+  end
+
+  # No resets_at to anchor the window on — can't tell how far along we are,
+  # so don't synthesize a warning off unknown data.
+  defp elapsed_fraction(nil, _window), do: 1.0
+
+  defp elapsed_fraction(%DateTime{} = resets_at, window) do
+    window_start = DateTime.add(resets_at, -window, :second)
+    elapsed = DateTime.diff(DateTime.utc_now(), window_start, :second)
+
+    (elapsed / window)
+    |> max(0.0)
+    |> min(1.0)
+  end
+
+  defp representative_claim(limits) when is_list(limits) do
+    limits
+    |> Enum.find(&match?(%{"is_active" => true}, &1))
+    |> case do
+      %{"group" => "session"} -> "five_hour"
+      %{"group" => "weekly"} -> "seven_day"
+      _ -> nil
+    end
+  end
+
+  defp representative_claim(_), do: nil
+
+  defp overage_status(%{"is_enabled" => is_enabled} = extra_usage) do
+    disabled_reason = Map.get(extra_usage, "disabled_reason")
+    spend_limit_reached = Map.get(extra_usage, "spend_limit_reached", false)
+
+    if is_enabled == false or spend_limit_reached == true or not is_nil(disabled_reason) do
+      "rejected"
+    else
+      "allowed"
+    end
+  end
+
+  defp overage_status(_), do: nil
 
   defp per_model_utilization(body) do
     for {key, %{"utilization" => u}} <- body,
