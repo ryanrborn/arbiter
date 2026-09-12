@@ -160,7 +160,8 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
         poll!(ws, %{
           "five_hour" => %{
             "utilization" => 100,
-            "resets_at" => DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
+            "resets_at" =>
+              DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
           }
         })
 
@@ -238,6 +239,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       assert Gate.gating_window(quota, %Workspace{id: ws.id, config: %{}}) == nil
 
       held = %Workspace{id: ws.id, config: %{"quota" => %{"weekly_warning_policy" => "hold"}}}
+
       assert %{window: "7d", signal: :warning, status: "allowed_warning"} =
                Gate.gating_window(quota, held)
     end
