@@ -188,6 +188,18 @@ defmodule Arbiter.Agents.Claude.Security do
     ]
   end
 
+  # bd-d534xo: `Monitor` and `ScheduleWakeup` exist to let an interactive
+  # session yield a turn and be woken by a later event. `claude --print` ends
+  # the whole process the instant a turn produces no tool call, so neither
+  # tool can ever do what a worker would use it for — the wakeup has no
+  # session left to arrive in. Deny both tools outright rather than relying on
+  # prompt guidance alone to stop a worker from arming one and exiting on the
+  # spot. Bare tool names (no `(...)` pattern) deny the whole tool, matching
+  # `sandbox_deny/1`'s `"WebFetch"` / `"WebSearch"` below.
+  defp expand_category(:no_async_wait) do
+    ["Monitor", "ScheduleWakeup"]
+  end
+
   defp expand_category(_unknown), do: []
 
   # When the policy cuts network, deny the agent's network-egress tools.
