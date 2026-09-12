@@ -632,6 +632,23 @@ defmodule Arbiter.MCP.Tools.Worker do
   `capture_rate_pct`. `capture_rate_pct` is `nil` when there are no
   Claude-driven runs in the window (avoids a divide-by-zero misread as 0%).
 
+  ## Two artifacts, two rates (bd-db0p38)
+
+  The rendered transcript is only half the story, and the cheaper half: it
+  truncates every tool result to 40 lines and keeps no thinking blocks, tool
+  inputs or per-message usage. The full-fidelity record is the agent CLI's own
+  session JSONL, archived per-run by `Arbiter.Worker.SessionArchive`. The two
+  losses are independent — a run can have neither — so they are counted
+  separately rather than folded into one number that hides the richer
+  artifact's absence:
+
+    * `claude_sessions` / `transcript_missing` / `capture_rate_pct` — the
+      rendered `<run_id>.log`, over every session-bearing run (all providers
+      write one).
+    * `jsonl_sessions` / `jsonl_archived` / `jsonl_missing` /
+      `jsonl_archive_rate_pct` — the `<run_id>.jsonl.gz` archive, over
+      Claude-driven runs only. `non_claude_sessions` reports the rest.
+
   Coordinator only. Optional `workspace` (resolved the same way as
   `worker_list` / `task_ready`).
   """
@@ -644,22 +661,40 @@ defmodule Arbiter.MCP.Tools.Worker do
         |> Ash.Query.filter(workspace_id == ^ws_id and started_at >= ^@corpus_start_date)
         |> Ash.read!()
 
-      {claude_sessions, workflow_only} =
+      {agent_sessions, workflow_only} =
         Enum.split_with(runs, &(&1.session_id not in [nil, ""]))
 
       missing =
-        Enum.count(claude_sessions, fn run ->
+        Enum.count(agent_sessions, fn run ->
           not File.regular?(Arbiter.Worker.OutputLog.path_for(run.id))
         end)
+
+      # bd-db0p38: the JSONL archive has its own denominator. `config_dir` is a
+      # Claude-only column (see `Arbiter.Workers.Run`), so a session-bearing run
+      # without one is a non-Claude run — its session lives in that provider's
+      # own store and it never had a Claude JSONL to lose. Counting those as
+      # missing manufactures a loss that isn't there: all 32 such runs in the
+      # production corpus are Gemini reviewer runs whose conversations are
+      # intact under `~/.gemini/antigravity-cli/conversations/`.
+      {jsonl_sessions, non_claude} =
+        Enum.split_with(agent_sessions, &(&1.config_dir not in [nil, ""]))
+
+      jsonl_missing =
+        Enum.count(jsonl_sessions, &(not Arbiter.Worker.SessionArchive.archived?(&1.id)))
 
       {:ok,
        %{
          corpus_start_date: Date.to_iso8601(DateTime.to_date(@corpus_start_date)),
          total_runs: length(runs),
-         claude_sessions: length(claude_sessions),
+         claude_sessions: length(agent_sessions),
          transcript_missing: missing,
          workflow_only_runs: length(workflow_only),
-         capture_rate_pct: capture_rate_pct(claude_sessions, missing)
+         capture_rate_pct: capture_rate_pct(agent_sessions, missing),
+         non_claude_sessions: length(non_claude),
+         jsonl_sessions: length(jsonl_sessions),
+         jsonl_archived: length(jsonl_sessions) - jsonl_missing,
+         jsonl_missing: jsonl_missing,
+         jsonl_archive_rate_pct: capture_rate_pct(jsonl_sessions, jsonl_missing)
        }}
     end
   rescue
