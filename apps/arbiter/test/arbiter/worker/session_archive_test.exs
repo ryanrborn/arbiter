@@ -131,9 +131,16 @@ defmodule Arbiter.Worker.SessionArchiveTest do
       refute File.exists?(SessionArchive.path_for(ctx.run_id))
     end
 
-    test "a non-Claude run (blank config_dir) reports :no_config_dir", ctx do
+    test "a non-Claude run (session id, no config_dir) reports :no_config_dir", ctx do
       assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive(ctx.run_id, "", "sid")
       assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive(ctx.run_id, nil, "sid")
+    end
+
+    test "a workflow-mode run (neither coordinate) reports :no_session_id", ctx do
+      assert {:ok, %{status: :no_session_id}} = SessionArchive.archive(ctx.run_id, nil, nil)
+
+      assert {:ok, %{status: :no_session_id}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, "")
     end
 
     test "re-archiving overwrites rather than appending (idempotent)", ctx do

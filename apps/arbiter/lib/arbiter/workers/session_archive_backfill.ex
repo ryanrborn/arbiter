@@ -118,11 +118,11 @@ defmodule Arbiter.Workers.SessionArchiveBackfill do
   # `SessionArchive.archive/4` makes, so the dry report matches the apply run.
   defp dry_status(run) do
     cond do
-      run.config_dir in [nil, ""] ->
-        :no_config_dir
-
       run.session_id in [nil, ""] ->
         :no_session_id
+
+      run.config_dir in [nil, ""] ->
+        :no_config_dir
 
       true ->
         case Arbiter.Usage.ClaudeSessionFile.locate(run.config_dir, run.session_id) do
