@@ -203,6 +203,32 @@ defmodule Arbiter.Worker.SessionArchive do
     {:ok, %{blank(to_string(run_id), :error) | reason: :invalid_run_id}}
   end
 
+  @doc """
+  `archive/4` for a `Arbiter.Workers.Run` struct (or any map carrying `:id`,
+  `:config_dir`, `:session_id` and `:task_id`).
+
+  This is the single entry point both callers use — the run-completion hook in
+  `Arbiter.Worker` and the one-time sweep in
+  `Arbiter.Workers.SessionArchiveBackfill` — so there is exactly one place
+  that decides what gets redacted and where the bytes land.
+
+  `:redact_values` defaults to the run's workspace secret values
+  (`Arbiter.Worker.WorkerEnv.secret_values/1`). On the live path that list is
+  the run's *own* secrets; on a backfill it is whatever the workspace holds
+  today, which is strictly weaker — a since-rotated credential is no longer in
+  the list to scrub. That is the second reason the archive root is treated as
+  secret-bearing regardless.
+  """
+  @spec archive_run(map(), keyword()) :: {:ok, report()}
+  def archive_run(run, opts \\ []) do
+    opts =
+      Keyword.put_new_lazy(opts, :redact_values, fn ->
+        Arbiter.Worker.WorkerEnv.secret_values(Map.get(run, :task_id))
+      end)
+
+    archive(Map.get(run, :id), Map.get(run, :config_dir), Map.get(run, :session_id), opts)
+  end
+
   # ---- internals ---------------------------------------------------------
 
   defp do_archive(run_id, path, redact_values) do

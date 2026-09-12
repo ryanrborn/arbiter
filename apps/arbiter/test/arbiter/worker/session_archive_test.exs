@@ -158,4 +158,28 @@ defmodule Arbiter.Worker.SessionArchiveTest do
       assert {:error, :enoent} = SessionArchive.read(ctx.run_id)
     end
   end
+
+  describe "archive_run/2" do
+    test "reads config_dir / session_id off a run struct", ctx do
+      sid = "77777777-7777-7777-7777-777777777777"
+      seed_session(ctx.config_dir, sid, [%{"type" => "assistant", "via" => "run"}])
+
+      run = %{id: ctx.run_id, config_dir: ctx.config_dir, session_id: sid, task_id: nil}
+
+      assert {:ok, %{status: :ok}} = SessionArchive.archive_run(run, redact_values: [])
+      assert gunzip_at!(SessionArchive.path_for(ctx.run_id)) =~ ~s("via":"run")
+    end
+
+    test "a Gemini run (session_id but no config_dir) is :no_config_dir, not a loss", ctx do
+      run = %{
+        id: ctx.run_id,
+        config_dir: nil,
+        session_id: "3ab7e7ea-8b87-4537-a271-840980e60907",
+        task_id: nil
+      }
+
+      assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive_run(run, redact_values: [])
+      refute SessionArchive.archived?(ctx.run_id)
+    end
+  end
 end
