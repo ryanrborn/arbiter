@@ -12,7 +12,7 @@
 # mind, so the script itself must remember it already ran. Stands in for a real
 # `claude --print` reviewer so tests never invoke the paid CLI.
 retry_verdict="${1:-APPROVE}"
-marker="./.review_gate_timeout_attempt"
+marker="$(git rev-parse --git-dir)/review_gate_timeout_attempt"
 
 if [ -f "$marker" ]; then
   # Retry pass: emit a real verdict promptly.
