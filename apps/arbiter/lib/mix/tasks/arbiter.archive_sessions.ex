@@ -36,7 +36,7 @@ defmodule Mix.Tasks.Arbiter.ArchiveSessions do
   Files are written `0600` under `output_log_root` (best-effort `0700`), and
   the content is redacted only against the workspace's *current* secret
   values — weaker than the live path, which redacts against the run's own.
-  See `docs/operations/session-archive.md`.
+  See `docs/session-archive.md`.
   """
 
   use Mix.Task

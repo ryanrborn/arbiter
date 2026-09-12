@@ -344,6 +344,33 @@ one cost-ledger row — you read it and decide. Evidence bar for any fleet-wide
 change: ≥ 3 incidents across ≥ 2 tasks; a single incident is a per-task
 override. Full guide: `docs/loop-review.md`.
 
+## 18. Run archives & retention
+
+Each finished run leaves its artifacts in the durable log root
+(`~/dev/arbiter-worker-logs` by default), all keyed by `run_id`:
+
+    <run_id>.log          rendered transcript
+    <run_id>.prompt       composed prompt
+    <run_id>.jsonl.gz     the agent CLI's own session JSONL (gzipped, redacted)
+    <run_id>.subagents/   subagent transcripts, same treatment
+
+The `.jsonl.gz` is the only full-fidelity record — untruncated tool inputs and
+results, thinking blocks, per-message token usage and model lineage. Everything
+else is a rendering.
+
+**Claude Code prunes its session store at ~21 days**, so that artifact expires
+unless Arbiter copies it. Gemini and Codex were not observed pruning. Live runs
+archive themselves; rescue pre-existing ones with
+`mix arbiter.archive_sessions --apply` (dry-run by default, idempotent).
+Monitor coverage with the `transcript_capture_stats` MCP tool, which reports
+the rendered log and the JSONL archive as **separate** rates.
+
+**The log root is secret-bearing.** Archives are redacted on ingest through
+`Arbiter.Redaction`, but redaction only knows secrets someone marked — it
+cannot catch a key a subprocess happened to print. Archives are written `0600`
+and the root `0700`. Don't sync it to shared storage or back it up with weaker
+access control than the host account. Full guide: `docs/session-archive.md`.
+
 ---
 
 _Generic — not operator-personal. Edit freely as you learn._

@@ -56,7 +56,7 @@ defmodule Arbiter.Worker.SessionArchive do
       own transcript (2026-09-12). So archives are written `0600` and the
       archive root is best-effort `chmod 0700`. **Operators must treat
       `output_log_root` as secret-bearing storage** — see
-      `docs/operations/session-archive.md`.
+      `docs/session-archive.md`.
 
   The alternative — redacting *nothing* to protect ground-truth fidelity —
   was rejected: `Arbiter.Redaction` only ever removes values a human
