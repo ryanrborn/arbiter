@@ -2994,6 +2994,84 @@ defmodule Arbiter.MCP.ToolsTest do
       assert stats.workflow_only_runs == 1
       assert stats.capture_rate_pct == 50.0
       assert is_binary(missing.id)
+      # No config_dir on either fixture, so neither is a JSONL-archivable run.
+      assert stats.jsonl_sessions == 0
+      assert stats.jsonl_archive_rate_pct == nil
+    end
+
+    test "JSONL-archive presence is counted separately from the rendered log (bd-db0p38)", ctx do
+      base = ~U[2026-07-02 00:00:00Z]
+
+      # A run with BOTH artifacts.
+      {:ok, both} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-both",
+          config_dir: "/tmp/cfg",
+          started_at: base
+        })
+
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(both.id)
+      Arbiter.Worker.OutputLog.append(handle, "line")
+      Arbiter.Worker.OutputLog.close(handle)
+
+      File.write!(
+        Arbiter.Worker.SessionArchive.path_for(both.id),
+        :zlib.gzip(~s({"type":"assistant"}\n))
+      )
+
+      # A run with the rendered log but NO JSONL archive — exactly the case the
+      # old 60.6% figure hid.
+      {:ok, log_only} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-log-only",
+          config_dir: "/tmp/cfg",
+          started_at: DateTime.add(base, 60, :second)
+        })
+
+      {:ok, h2} = Arbiter.Worker.OutputLog.open(log_only.id)
+      Arbiter.Worker.OutputLog.append(h2, "line")
+      Arbiter.Worker.OutputLog.close(h2)
+
+      # A Gemini run: has a session_id but no config_dir, so it never had a
+      # Claude JSONL to lose. It must not be counted as a Claude session.
+      {:ok, gemini} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-gemini",
+          started_at: DateTime.add(base, 120, :second)
+        })
+
+      on_exit(fn ->
+        for r <- [both, log_only, gemini] do
+          File.rm(Arbiter.Worker.OutputLog.path_for(r.id))
+          File.rm(Arbiter.Worker.SessionArchive.path_for(r.id))
+        end
+      end)
+
+      assert {:ok, stats} = Tools.transcript_capture_stats(ctx.coordinator, %{})
+
+      # The rendered-log denominator is unchanged: every provider writes one.
+      assert stats.claude_sessions == 3
+      assert stats.transcript_missing == 1
+
+      # The JSONL denominator excludes the Gemini run — it never had a Claude
+      # session file to lose, so counting it would manufacture a loss.
+      assert stats.non_claude_sessions == 1
+      assert stats.jsonl_sessions == 2
+      assert stats.jsonl_archived == 1
+      assert stats.jsonl_missing == 1
+      assert stats.jsonl_archive_rate_pct == 50.0
     end
   end
 

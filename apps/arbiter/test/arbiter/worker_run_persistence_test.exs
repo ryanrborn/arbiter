@@ -482,6 +482,83 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.stop_category == nil
   end
 
+  test "run completion archives the agent's own session JSONL (bd-db0p38)" do
+    # End-to-end over the real path: the CLAUDE_CONFIG_DIR the session spawns
+    # under lands on the Run row, the stream's `init` event supplies the
+    # session id, and `record_run_finished/1` copies the CLI's own JSONL into
+    # the durable log root before the CLI can prune it at ~21 days.
+    task_id = "bd-archivejsonl-#{System.unique_integer([:positive])}"
+    uniq = System.unique_integer([:positive])
+
+    root = Path.join(System.tmp_dir!(), "run-archive-root-#{uniq}")
+    cfg = Path.join(System.tmp_dir!(), "run-archive-cfg-#{uniq}")
+    cwd = Path.join(System.tmp_dir!(), "run-archive-cwd-#{uniq}")
+    File.mkdir_p!(cwd)
+
+    session_id = "aaaaaaaa-bbbb-cccc-dddd-#{String.pad_leading("#{uniq}", 12, "0")}"
+
+    # Seed the CLI's on-disk session file exactly where `locate/2` globs.
+    slug = Arbiter.Usage.ClaudeSessionFile.project_slug(cwd)
+    proj = Path.join([cfg, "projects", slug])
+    File.mkdir_p!(proj)
+
+    File.write!(
+      Path.join(proj, session_id <> ".jsonl"),
+      Jason.encode!(%{"type" => "assistant", "thinking" => "ground truth"}) <> "\n"
+    )
+
+    prev_root = Application.get_env(:arbiter, :output_log_root)
+    Application.put_env(:arbiter, :output_log_root, root)
+
+    on_exit(fn ->
+      File.rm_rf(root)
+      File.rm_rf(cfg)
+      File.rm_rf(cwd)
+
+      if prev_root,
+        do: Application.put_env(:arbiter, :output_log_root, prev_root),
+        else: Application.delete_env(:arbiter, :output_log_root)
+    end)
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    init_event =
+      Jason.encode!(%{
+        "type" => "system",
+        "subtype" => "init",
+        "session_id" => session_id,
+        "model" => "claude-opus-5"
+      })
+
+    events_path = Path.join(cwd, "init-events.jsonl")
+    File.write!(events_path, init_event <> "\n")
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        env: [{"CLAUDE_CONFIG_DIR", cfg}],
+        command: ["cat", events_path]
+      )
+
+    # The init event lands on the Run row asynchronously; wait for it before
+    # completing, so the archive has coordinates to work from.
+    :ok = wait_until(fn -> match?([%{session_id: ^session_id}], runs_for(task_id)) end, 3_000)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.complete(pid, :done)
+
+    [run] = runs_for(task_id)
+    assert run.config_dir == cfg
+
+    assert Arbiter.Worker.SessionArchive.archived?(run.id)
+    assert {:ok, body} = Arbiter.Worker.SessionArchive.read(run.id)
+    assert body =~ "ground truth"
+  end
+
   defp wait_until(fun, timeout_ms \\ 500, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)
