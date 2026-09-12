@@ -92,9 +92,15 @@ defmodule Arbiter.Loop.Corpus do
   ## The one write
 
   `record_pass_cost/1` inserts a single `Arbiter.Usage.Event` row (step
-  `:other`, task `loop-analyze`) so the loop's own cost lands in the ledger it
-  is optimising. It is the **only** write the pass performs — no skills, no
-  config, no issue overrides.
+  `:other`, `source: :maintenance`, no task) so the loop's own cost lands in
+  the ledger it is optimising. It is the **only** write the pass performs — no
+  skills, no config, no issue overrides.
+
+  Before bd-adyhvn that row carried a synthetic `task_id` of `loop-analyze`,
+  because `task_id` was NOT NULL — which made `arb usage --by task` grow a
+  phantom "task" that never existed. `task_id` is nullable now and `source`
+  says what the row is, so the sentinel is gone (the migration clears it from
+  the historical rows too).
   """
 
   require Logger
@@ -108,7 +114,6 @@ defmodule Arbiter.Loop.Corpus do
   alias Arbiter.Worker.OutputLog
 
   @tail_n 40
-  @pass_task_id "loop-analyze"
 
   # Finding-residue retention bound (bd-5ja2vb): at most this many residue
   # units are retained in `meta.finding_residue.units`, newest-first — the
@@ -269,14 +274,17 @@ defmodule Arbiter.Loop.Corpus do
 
   @doc """
   Record the pass's own cost as a single `usage_events` row (step `:other`,
-  task `#{@pass_task_id}`). Returns the new row id, or `nil` if the insert
-  failed (the pass never crashes on a ledger hiccup). This is the pass's only
-  write.
+  `source: :maintenance`, no task). Returns the new row id, or `nil` if the
+  insert failed (the pass never crashes on a ledger hiccup). This is the pass's
+  only write.
   """
   @spec record_pass_cost(map()) :: String.t() | nil
   def record_pass_cost(%{} = info) do
     attrs = %{
-      task_id: @pass_task_id,
+      # bd-adyhvn: no synthetic task id. The pass belongs to no task; `source`
+      # is what says which non-task caller this is.
+      task_id: nil,
+      source: :maintenance,
       workspace_id: Map.get(info, :workspace_id),
       step: :other,
       model: "loop-analysis-pass",

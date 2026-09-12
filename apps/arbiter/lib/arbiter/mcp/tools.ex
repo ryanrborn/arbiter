@@ -511,6 +511,10 @@ defmodule Arbiter.MCP.Tools do
   optional. `workspace_id` is forced to the scope's workspace. Backs onto
   `Arbiter.Usage.summarize/1`.
 
+  `by: "source"` is the grouping that shows the whole bill: spend with no task
+  (quota probes, auth pre-flights, coordinator/terminal sessions) is excluded
+  from `by: "task"` by design (bd-adyhvn).
+
   Also surfaces a `warnings` list (bd-2fzwlc) when a provider's rows are
   wholly zero-token over the same `since`/workspace window — the same
   blindness `Arbiter.Loop.Analysis` flags in the loop report, so a

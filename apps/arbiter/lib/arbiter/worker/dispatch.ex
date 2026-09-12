@@ -1491,9 +1491,14 @@ defmodule Arbiter.Worker.Dispatch do
       # dispatch with {:auth_check_failed, ...} before a worker ever spawned.
       # The workspace is loaded right here at :1456 — there is no reason to
       # lean on the install-wide fallback for this call site.
+      # bd-adyhvn: `:usage_task_id` so the pre-flight's own spend (~39K
+      # cache-read tokens a call, once per dispatch and once per resume) lands
+      # in the ledger attributed to the task it was gating. `:workspace` already
+      # carries the workspace the row is attributed to.
       probe_opts =
         preflight_opts(opts) ++
-          [workspace: workspace] ++ anthropic_proxy_opts(adapter, workspace)
+          [workspace: workspace, usage_task_id: task.id] ++
+          anthropic_proxy_opts(adapter, workspace)
 
       case Preflight.check(adapter, probe_opts) do
         :ok ->

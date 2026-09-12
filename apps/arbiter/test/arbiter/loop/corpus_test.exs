@@ -230,13 +230,16 @@ defmodule Arbiter.Loop.CorpusTest do
       assert is_binary(id)
       assert count_events() == before + 1
 
-      %{rows: [[task_id, step, model]]} =
+      %{rows: [[task_id, source, step, model]]} =
         Repo.query!(
-          "SELECT task_id, step, model FROM usage_events WHERE id = ?1",
+          "SELECT task_id, source, step, model FROM usage_events WHERE id = ?1",
           [id]
         )
 
-      assert task_id == "loop-analyze"
+      # bd-adyhvn: no synthetic `loop-analyze` task id any more — the pass
+      # belongs to no task, and `source` is what identifies it.
+      assert task_id == nil
+      assert source == "maintenance"
       assert step == "other"
       assert model == "loop-analysis-pass"
     end

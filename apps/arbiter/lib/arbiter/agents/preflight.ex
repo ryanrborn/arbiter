@@ -24,6 +24,19 @@ defmodule Arbiter.Agents.Preflight do
       classified cause (`:auth_expired`, `:credit_exhausted`, …) + remediation.
     * `:skipped` — the adapter exposes no probe, so there's nothing to check.
 
+  ## The spend this costs (bd-adyhvn)
+
+  A pre-flight is not free: it runs per dispatch *and* per resume, and a
+  one-word prompt still ships the CLI's whole system prompt and tool
+  definitions (~39K cache-read tokens a call, measured). Every probe that
+  actually spawns therefore writes one `usage_events` row with
+  `source: :preflight` via `Arbiter.Usage.Probe` — carrying real token counts
+  when the CLI returned a structured result, and an explained null cost when
+  it didn't. The ledger write is best-effort and never changes the verdict.
+
+  A `:skipped` (adapter has no probe) or an un-runnable probe (CLI missing)
+  writes nothing: no process ran, so nothing was spent.
+
   ## Test injection
 
   Pass `:probe_command` (an argv list) to bypass the adapter and run an
@@ -34,6 +47,7 @@ defmodule Arbiter.Agents.Preflight do
 
   require Logger
 
+  alias Arbiter.Usage
   alias Arbiter.Worker.StopReason
 
   @default_timeout_ms 30_000
@@ -49,6 +63,10 @@ defmodule Arbiter.Agents.Preflight do
       adapter's `spawn_env/1` so the probe authenticates exactly as a real
       worker spawn would.
     * `:timeout_ms` — max wait before declaring the probe hung (default 30s).
+    * `:usage_task_id` — the task this check is gating, when there is one.
+      Recorded on the ledger row (bd-adyhvn).
+    * `:usage_workspace_id` — workspace to attribute the spend to; defaults to
+      the id of the `:workspace` opt when one is threaded through.
     * any keys the adapter's `auth_probe_argv/1` / `spawn_env/1` read
       (`:api_key`, `:model`, …).
   """
@@ -88,14 +106,14 @@ defmodule Arbiter.Agents.Preflight do
       {:ok, resolved} ->
         env = Keyword.get(opts, :probe_env) || safe_spawn_env(adapter, opts)
         timeout = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
-        spawn_and_classify(resolved, argv, env, timeout)
+        spawn_and_classify(resolved, argv, env, timeout, adapter, opts)
 
       {:error, reason} ->
         {:error, probe_unavailable(reason)}
     end
   end
 
-  defp spawn_and_classify(resolved, [_ | rest], env, timeout) do
+  defp spawn_and_classify(resolved, [_ | rest], env, timeout, adapter, opts) do
     port =
       Port.open(
         {:spawn_executable, resolved},
@@ -108,33 +126,40 @@ defmodule Arbiter.Agents.Preflight do
         ] ++ env_opt(env)
       )
 
-    collect(port, timeout, [])
+    started_at = System.monotonic_time(:millisecond)
+    {status, lines} = collect(port, timeout, [])
+
+    # bd-adyhvn: the process ran, so it spent — split the CLI's structured
+    # result out of the output *before* classifying (its integers would
+    # otherwise read as provider-error signatures) and record the draw.
+    {usage, diagnostic_lines} = Usage.Probe.parse(lines)
+    record_usage(adapter, usage, status, opts, System.monotonic_time(:millisecond) - started_at)
+
+    verdict(status, diagnostic_lines)
   rescue
     e -> {:error, probe_unavailable(Exception.message(e))}
   end
 
   # Accumulate output lines (oldest-first) until the port exits or we time out.
-  # On exit, classify the stop from the exit status + output; treat a clean exit
-  # (0) with no failure signature as authenticated. On timeout, kill the port
-  # and classify as a stall.
+  # Returns `{exit_status_or_nil, lines}`; classification happens in
+  # `verdict/2` once the structured usage payload has been split off.
   defp collect(port, timeout, acc) do
     receive do
       {^port, {:data, {:eol, line}}} -> collect(port, timeout, [line | acc])
       {^port, {:data, {:noeol, line}}} -> collect(port, timeout, [line | acc])
-      {^port, {:exit_status, 0}} -> verdict(0, acc)
-      {^port, {:exit_status, status}} -> {:error, StopReason.classify(status, Enum.reverse(acc))}
+      {^port, {:exit_status, status}} -> {status, Enum.reverse(acc)}
     after
       timeout ->
         safe_close(port)
-        {:error, StopReason.classify(nil, Enum.reverse(acc))}
+        {nil, Enum.reverse(acc)}
     end
   end
 
   # A clean exit usually means auth is fine — but a CLI can print an auth/credit
   # error and still exit 0, so we run the output through the classifier and only
   # accept when it sees no failure signature.
-  defp verdict(0, acc) do
-    reason = StopReason.classify(0, Enum.reverse(acc))
+  defp verdict(0, lines) do
+    reason = StopReason.classify(0, lines)
 
     case reason.category do
       :exited_without_done -> :ok
@@ -144,6 +169,41 @@ defmodule Arbiter.Agents.Preflight do
       :async_wait_abandoned -> :ok
       _ -> {:error, reason}
     end
+  end
+
+  defp verdict(status, lines), do: {:error, StopReason.classify(status, lines)}
+
+  defp record_usage(adapter, usage, status, opts, elapsed_ms) do
+    Usage.Probe.record(:preflight, usage,
+      task_id: Keyword.get(opts, :usage_task_id),
+      workspace_id: usage_workspace_id(opts),
+      provider: safe_provider(adapter),
+      exit_status: status,
+      duration_ms: elapsed_ms
+    )
+
+    :ok
+  end
+
+  defp usage_workspace_id(opts) do
+    case Keyword.get(opts, :usage_workspace_id) do
+      id when is_binary(id) and id != "" ->
+        id
+
+      _ ->
+        case Keyword.get(opts, :workspace) do
+          %{id: id} when is_binary(id) -> id
+          _ -> nil
+        end
+    end
+  end
+
+  defp safe_provider(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :provider, 0) do
+      adapter.provider()
+    end
+  rescue
+    _ -> nil
   end
 
   # ---- helpers -----------------------------------------------------------

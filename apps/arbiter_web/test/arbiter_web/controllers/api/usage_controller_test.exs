@@ -135,4 +135,56 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert hd(data)["step"] == "review"
     end
   end
+
+  describe "source discriminator (bd-adyhvn)" do
+    test "by=source splits task-attributed spend from probe spend", %{conn: conn} do
+      _ = insert_event!(%{task_id: "bd-src1", source: :task, cost_usd: 1.0})
+
+      _ =
+        insert_event!(%{task_id: nil, source: :probe, cost_usd: 0.25, cache_read_tokens: 57_062})
+
+      _ = insert_event!(%{task_id: nil, source: :preflight, cost_usd: 0.1})
+
+      conn = get(conn, ~p"/api/usage", %{by: "source", workspace_id: @ws})
+      body = json_response(conn, 200)
+      assert body["by"] == "source"
+
+      data = Map.new(body["data"], &{&1["group"], &1})
+      assert_in_delta data["task"]["total_cost_usd"], 1.0, 0.001
+      assert_in_delta data["probe"]["total_cost_usd"], 0.25, 0.001
+      assert data["probe"]["cache_read_tokens"] == 57_062
+      assert_in_delta data["preflight"]["total_cost_usd"], 0.1, 0.001
+    end
+
+    test "by=task carries no phantom group for task-less rows", %{conn: conn} do
+      _ = insert_event!(%{task_id: "bd-src2", source: :task, cost_usd: 1.0})
+      _ = insert_event!(%{task_id: nil, source: :probe, cost_usd: 0.25})
+
+      conn = get(conn, ~p"/api/usage", %{by: "task", workspace_id: @ws})
+      groups = json_response(conn, 200)["data"] |> Enum.map(& &1["group"])
+
+      assert "bd-src2" in groups
+      refute nil in groups
+      refute "" in groups
+      refute "probe" in groups
+      refute "loop-analyze" in groups
+    end
+
+    test "events are filterable by source and always render one", %{conn: conn} do
+      _ = insert_event!(%{task_id: "bd-src3", source: :task, cost_usd: 1.0})
+      _ = insert_event!(%{task_id: nil, source: :probe, cost_usd: 0.25})
+
+      conn = get(conn, ~p"/api/usage/events", %{source: "probe", workspace_id: @ws})
+      data = json_response(conn, 200)["data"]
+
+      assert [event] = data
+      assert event["source"] == "probe"
+      assert event["task_id"] == nil
+    end
+
+    test "an unknown source is a 400, not a crash", %{conn: conn} do
+      conn = get(conn, ~p"/api/usage/events", %{source: "not_a_source", workspace_id: @ws})
+      assert json_response(conn, 400)
+    end
+  end
 end

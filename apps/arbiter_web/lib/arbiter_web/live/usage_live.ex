@@ -129,8 +129,13 @@ defmodule ArbiterWeb.UsageLive do
   # Tasks with more than one `:work` row are re-dispatchs — the rework story.
   # Queried directly (not via `Usage.summarize/1`, which lumps every step
   # together per task) so the session count is `:work` sessions specifically.
+  #
+  # bd-adyhvn: `task_id` is nullable now (probes / pre-flights / sessions), and
+  # a nil id would collapse into one bogus `""` bucket here. Those rows carry
+  # `step: :other` so the step filter already excludes them, but the `not
+  # is_nil` predicate makes the invariant explicit rather than incidental.
   defp load_work_sessions(since) do
-    base_query = Ash.Query.filter(Event, step == :work)
+    base_query = Ash.Query.filter(Event, step == :work and not is_nil(task_id))
 
     query =
       case since do

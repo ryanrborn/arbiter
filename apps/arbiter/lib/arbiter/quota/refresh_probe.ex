@@ -101,6 +101,7 @@ defmodule Arbiter.Quota.RefreshProbe do
   require Logger
 
   alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Usage
   alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Workflows.DispatchQueueSupervisor
 
@@ -253,12 +254,39 @@ defmodule Arbiter.Quota.RefreshProbe do
 
   # ---- default probe (real claude CLI) -----------------------------------
 
-  defp default_probe(workspace_id, timeout_ms) do
+  @doc """
+  Run one real probe against `workspace_id` synchronously and return its
+  result. This is the production capture path — the timer path calls it — and
+  is public so a test can exercise it end to end with `:claude_path` pointed
+  at a stub binary instead of injecting a `:probe_fun` that skips it entirely.
+
+  Options: `:claude_path` (override the `claude` executable), `:timeout_ms`.
+  """
+  @spec probe_once(String.t(), keyword()) :: :ok | {:error, term()}
+  def probe_once(workspace_id, opts \\ []) do
+    timeout_ms =
+      Keyword.get(opts, :timeout_ms) || cfg(:probe_timeout_ms, [], @default_probe_timeout_ms)
+
     with {:ok, sh} <- find_executable("sh"),
-         {:ok, claude} <- find_executable("claude") do
+         {:ok, claude} <- resolve_claude(Keyword.get(opts, :claude_path)) do
       base_url = Arbiter.Quota.worker_base_url(workspace_id)
       env = probe_env(workspace_id, base_url)
-      rest_args = ["-c", ~s(exec "$@" < /dev/null), "sh", claude, "--print", "ok"]
+
+      # bd-adyhvn: `--output-format json` makes the CLI print its own `result`
+      # object — the only place the probe's real token counts (~57K cache-read
+      # per call) are available without teaching the streaming proxy to parse
+      # response bodies. See `Arbiter.Usage.Probe`.
+      rest_args = [
+        "-c",
+        ~s(exec "$@" < /dev/null),
+        "sh",
+        claude,
+        "--print",
+        "--output-format",
+        "json",
+        "ok"
+      ]
+
       run_port(sh, rest_args, env, workspace_id, timeout_ms)
     else
       {:error, {:not_found, what}} ->
@@ -267,6 +295,12 @@ defmodule Arbiter.Quota.RefreshProbe do
         {:error, {:not_found, what}}
     end
   end
+
+  defp default_probe(workspace_id, timeout_ms),
+    do: probe_once(workspace_id, timeout_ms: timeout_ms)
+
+  defp resolve_claude(nil), do: find_executable("claude")
+  defp resolve_claude(path) when is_binary(path), do: {:ok, path}
 
   # bd-bw3466: the probe is already per-workspace, so it authenticates exactly
   # as that workspace's workers do — including a `CLAUDE_CODE_OAUTH_TOKEN`
@@ -301,7 +335,10 @@ defmodule Arbiter.Quota.RefreshProbe do
         [{:args, rest_args}, :binary, :exit_status, :stderr_to_stdout | env_opt]
       )
 
-    await_exit(port, workspace_id, timeout_ms)
+    started_at = System.monotonic_time(:millisecond)
+    {result, chunks} = await_exit(port, workspace_id, timeout_ms, [])
+    record_usage(workspace_id, chunks, result, System.monotonic_time(:millisecond) - started_at)
+    result
   rescue
     e ->
       Logger.debug(
@@ -311,19 +348,23 @@ defmodule Arbiter.Quota.RefreshProbe do
       {:error, :spawn_failed}
   end
 
-  defp await_exit(port, workspace_id, timeout_ms) do
+  # Accumulates the probe's stdout (newest-first) alongside its verdict: with
+  # `--output-format json` those bytes are the only record of what the probe
+  # actually spent (bd-adyhvn). The output is bounded by construction — a
+  # single `result` object for a one-word prompt.
+  defp await_exit(port, workspace_id, timeout_ms, chunks) do
     receive do
-      {^port, {:data, _}} ->
-        await_exit(port, workspace_id, timeout_ms)
+      {^port, {:data, chunk}} ->
+        await_exit(port, workspace_id, timeout_ms, [chunk | chunks])
 
       {^port, {:exit_status, 0}} ->
         Logger.debug("Arbiter.Quota.RefreshProbe: probe ok (#{workspace_id})")
-        :ok
+        {:ok, chunks}
 
       {^port, {:exit_status, code}} ->
         Logger.debug("Arbiter.Quota.RefreshProbe: probe exited #{code} (#{workspace_id})")
 
-        {:error, {:exit_code, code}}
+        {{:error, {:exit_code, code}}, chunks}
     after
       timeout_ms ->
         safe_close(port)
@@ -332,9 +373,35 @@ defmodule Arbiter.Quota.RefreshProbe do
           "Arbiter.Quota.RefreshProbe: probe timed out after #{timeout_ms}ms (#{workspace_id})"
         )
 
-        {:error, :timeout}
+        {{:error, :timeout}, chunks}
     end
   end
+
+  # bd-adyhvn: one ledger row per probe, `source: :probe`, attributed to the
+  # workspace it refreshed. Written even when the probe failed — the request
+  # was still made and still drew on the window.
+  defp record_usage(workspace_id, chunks, result, elapsed_ms) do
+    lines =
+      chunks
+      |> Enum.reverse()
+      |> Enum.join()
+      |> String.split("\n", trim: true)
+
+    {usage, _rest} = Usage.Probe.parse(lines)
+
+    Usage.Probe.record(:probe, usage,
+      workspace_id: workspace_id,
+      provider: "claude",
+      exit_status: exit_status_of(result),
+      duration_ms: elapsed_ms
+    )
+
+    :ok
+  end
+
+  defp exit_status_of(:ok), do: 0
+  defp exit_status_of({:error, {:exit_code, code}}), do: code
+  defp exit_status_of(_), do: nil
 
   defp safe_close(port) do
     if is_port(port) and Port.info(port) != nil, do: Port.close(port)

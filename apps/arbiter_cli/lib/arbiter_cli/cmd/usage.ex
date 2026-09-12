@@ -10,12 +10,13 @@ defmodule ArbiterCli.Cmd.Usage do
 
   Usage:
 
-      arb usage [--by day|task|epic|workspace|repo|model|step|provider]
+      arb usage [--by day|task|epic|workspace|repo|model|step|provider|source]
                 [--since YYYY-MM-DD | <iso8601>]
                 [--workspace <id>]
                 [--limit N]
                 [--json]
       arb usage events [--task <task-id>] [--workspace <id>] [--step work|review|impl]
+                       [--source task|probe|preflight|coordinator_session|terminal_session|maintenance]
                        [--since ...] [--limit N] [--json]
 
   `--by campaign` is still accepted as a deprecated alias for `--by epic`.
@@ -23,6 +24,18 @@ defmodule ArbiterCli.Cmd.Usage do
   Defaults to `--by day`. `--since 7d` and `--since 24h` are accepted as
   shortcuts. `events` lists raw rows newest-first (default limit 50) and is
   the drill-down path when a rollup catches your eye.
+
+  ## Not all spend belongs to a task (bd-adyhvn)
+
+  Quota refresh probes, the per-dispatch auth pre-flight, and (soon)
+  coordinator / terminal sessions spend real plan quota with no task attached.
+  They carry `source` instead, and `--by task` deliberately **excludes** them
+  rather than inventing a phantom task id. `--by day`, `--by workspace` and
+  `--by source` all count them, so:
+
+      arb usage --by source --since 7d
+
+  is the one rollup that shows the whole bill.
   """
 
   alias ArbiterCli.{Client, Output}
@@ -82,6 +95,7 @@ defmodule ArbiterCli.Cmd.Usage do
           task: :string,
           workspace: :string,
           step: :string,
+          source: :string,
           since: :string,
           limit: :integer
         ]
@@ -92,6 +106,7 @@ defmodule ArbiterCli.Cmd.Usage do
       |> maybe_put(:task_id, Keyword.get(opts, :task))
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
       |> maybe_put(:step, Keyword.get(opts, :step))
+      |> maybe_put(:source, Keyword.get(opts, :source))
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
       |> maybe_put(:limit, Keyword.get(opts, :limit) || @default_event_limit)
 
@@ -150,7 +165,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
     Enum.each(rows, fn ev ->
       IO.puts(
-        "  #{ev["occurred_at"]}  task=#{ev["task_id"]}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
+        "  #{ev["occurred_at"]}  source=#{ev["source"] || "task"}  task=#{ev["task_id"] || "-"}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
       )
     end)
   end
