@@ -205,17 +205,36 @@ defmodule Arbiter.Quota.GateWeeklyTest do
       assert Gate.over_cap?(quota(%{status_5h: "rejected"}), ws()) == true
     end
 
-    test "a stale snapshot fails open on the 7d window too" do
-      stale =
+    # Reversed by bd-b7umwj. This used to assert that a stale snapshot failed
+    # open on the 7d window too — which is precisely how the weekly stop was
+    # defeated: the 5h window rolling (or the snapshot merely ageing out) threw
+    # away a 7d reject that was still true. Staleness is now scoped per window,
+    # so the 5h signals are dropped and the 7d hold survives. What lifts a 7d
+    # hold is covered in `Arbiter.Quota.GateWeeklyStalenessTest`.
+    test "a stale 5h window does not take the 7d hold down with it" do
+      stale_5h =
         quota(%{
           reset_5h_at: DateTime.add(DateTime.utc_now(), -3600, :second),
           utilization_7d: 0.99,
           status_7d: "rejected"
         })
 
-      refute Gate.over_cap?(stale, ws())
-      assert Gate.gating_window(stale, ws()) == nil
-      assert Gate.Throttle.check(nil, stale, ws(), []) == :allow
+      assert Gate.over_cap?(stale_5h, ws())
+      assert %{window: "7d", signal: :status} = Gate.gating_window(stale_5h, ws())
+      assert {:hold, %{window: "7d"}} = Gate.Throttle.check(nil, stale_5h, ws(), [])
+    end
+
+    test "a stale 5h window with a clean 7d window still fails open" do
+      stale_5h =
+        quota(%{
+          reset_5h_at: DateTime.add(DateTime.utc_now(), -3600, :second),
+          status_5h: "rejected",
+          utilization_7d: 0.10,
+          status_7d: "allowed"
+        })
+
+      refute Gate.over_cap?(stale_5h, ws())
+      assert Gate.Throttle.check(nil, stale_5h, ws(), []) == :allow
     end
 
     test "fails open on a nil snapshot" do

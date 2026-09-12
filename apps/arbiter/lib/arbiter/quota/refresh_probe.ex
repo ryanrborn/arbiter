@@ -26,9 +26,11 @@ defmodule Arbiter.Quota.RefreshProbe do
 
     * No snapshot exists yet for the workspace — probe, to get the clock
       started.
-    * The latest snapshot's 5h window has already elapsed
-      (`Arbiter.Quota.Gate.stale?/1`) — probe, to observe the new window's
-      state promptly (the "reset boundary" case).
+    * The latest snapshot is no longer trusted for the 5h window
+      (`Arbiter.Quota.Gate.stale?/1`: `reset_5h_at` has elapsed, or
+      `captured_at` is older than the staleness threshold) — probe, to observe
+      the current state promptly (the "reset boundary" case, and the idle-fleet
+      case below).
     * Otherwise the workspace is skipped: a fresh, non-exhausted snapshot
       doesn't need a real request to stay useful, and a fresh *exhausted*
       snapshot can't be relieved by probing anyway — only the window's
@@ -39,6 +41,34 @@ defmodule Arbiter.Quota.RefreshProbe do
 
   The probe runs outside `Arbiter.Worker.Dispatch`, so it is never subject to
   the QuotaGate. It runs even when the gate would hold real worker dispatches.
+
+  ## This is the long window's only way out (bd-b7umwj)
+
+  A **primary**-window hold can refresh itself: staleness fails that window
+  open, so one dispatch attempt per staleness window gets through, is refused
+  by the provider, and re-captures a real `rejected` (bd-y0yup0). A **long**
+  window (Anthropic 7d, Codex weekly) hold cannot — it happens at
+  `allowed_warning`, where the provider still accepts the request, so a
+  let-through dispatch succeeds and runs a worker for hours against the budget
+  the hold is protecting. `Arbiter.Quota.Gate.long_window_stale?/1` therefore
+  makes that hold sticky, and this probe becomes the only thing that refreshes
+  the snapshot it is based on.
+
+  That works without any change here, and without spending a worker: the
+  probe's `due_for_probe?/1` keys off `Arbiter.Quota.Gate.stale?/1` — the
+  *primary*-window predicate, which still goes true purely on `captured_at`
+  age. A fleet held on 7d makes no traffic, its snapshot ages past the
+  staleness threshold, and this probe issues its one tiny `claude --print "ok"`
+  per `active_interval_ms` (5 min, since the DispatchQueue has held intents).
+  The proxy captures the `anthropic-ratelimit-unified-7d-*` headers off that
+  response, so the 7d figures are refreshed by a single small request rather
+  than by a worker running for hours.
+
+  `Arbiter.Quota.OAuthUsage` (`/api/oauth/usage`) also reports 7d utilization,
+  but it is deliberately **not** used for this: it is fetched on demand only
+  (it 429s readily and carries a 180s cooldown), and it writes the separate
+  `oauth_utilization_7d` / `oauth_captured_at` columns rather than the
+  header-capture fields the gate reads.
 
   ## Cadence
 
@@ -181,9 +211,11 @@ defmodule Arbiter.Quota.RefreshProbe do
     end
   end
 
-  # Whether `workspace` is worth spending a real probe request on right now:
-  # no snapshot yet, or its 5h window has already rolled (reset-boundary
-  # warm-up). A fresh snapshot — exhausted or not — is skipped; see moduledoc.
+  # Whether `workspace` is worth spending a real probe request on right now: no
+  # snapshot yet, or the latest one is no longer trusted for the 5h window —
+  # that window rolled (reset-boundary warm-up), or the reading simply aged out
+  # (the idle/held-fleet case, and the sticky 7d hold's only refresh path). A
+  # fresh snapshot — exhausted or not — is skipped; see moduledoc.
   defp due_for_probe?(workspace) do
     case Arbiter.Quota.latest(workspace.id) do
       nil -> true

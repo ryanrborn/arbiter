@@ -11,6 +11,7 @@ defmodule Arbiter.Quota.RefreshProbeTest do
 
   alias Arbiter.Quota
   alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.Gate
   alias Arbiter.Quota.RefreshProbe
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -366,6 +367,60 @@ defmodule Arbiter.Quota.RefreshProbeTest do
   end
 
   # ---- end-to-end: probe → snapshot → drain ----------------------------------
+
+  # bd-b7umwj: a 7d hold no longer fails open on age, so the probe is the only
+  # thing that can refresh the snapshot that hold is based on — and it must do
+  # it without spending a worker. `due_for_probe?/1` keys off
+  # `Gate.stale?/1` (the *primary*-window predicate), which still goes true on
+  # age, so a workspace held only by a sticky 7d reading is still probed.
+  describe "the sticky 7d hold's refresh path" do
+    test "an age-stale 7d hold is still due for a real probe, and a fresh capture lifts it" do
+      enable_proxy()
+      ws = make_workspace()
+
+      Ash.create!(AnthropicQuota, %{
+        workspace_id: ws.id,
+        provider: "claude",
+        utilization_5h: 0.23,
+        status_5h: "allowed",
+        reset_5h_at:
+          DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.truncate(:second),
+        utilization_7d: 0.96,
+        status_7d: "allowed_warning",
+        reset_7d_at:
+          DateTime.utc_now() |> DateTime.add(3 * 86_400, :second) |> DateTime.truncate(:second),
+        captured_at:
+          DateTime.utc_now() |> DateTime.add(-600, :second) |> DateTime.truncate(:second)
+      })
+
+      held = Quota.latest(ws.id)
+      assert Gate.stale?(held), "the probe's due? check keys off primary staleness"
+      assert %{window: "7d"} = Gate.gating_window(held, nil), "the 7d hold is sticky"
+
+      now = DateTime.utc_now()
+
+      cleared_headers = [
+        {"anthropic-ratelimit-unified-5h-utilization", "0.10"},
+        {"anthropic-ratelimit-unified-5h-status", "allowed"},
+        {"anthropic-ratelimit-unified-5h-reset",
+         to_string(DateTime.to_unix(DateTime.add(now, 3600, :second)))},
+        {"anthropic-ratelimit-unified-7d-utilization", "0.12"},
+        {"anthropic-ratelimit-unified-7d-status", "allowed"},
+        {"anthropic-ratelimit-unified-7d-reset",
+         to_string(DateTime.to_unix(DateTime.add(now, 3 * 86_400, :second)))},
+        {"anthropic-ratelimit-unified-representative-claim", "five_hour"}
+      ]
+
+      pid = start_probe(probe_fun: recording_probe_fun(self(), cleared_headers))
+      :ok = RefreshProbe.probe(pid)
+
+      assert_receive {:probed, probed_ws_id, _quota}, 2_000
+      assert probed_ws_id == ws.id
+
+      # No worker was dispatched — the probe alone cleared the hold.
+      assert Gate.gating_window(Quota.latest(ws.id), nil) == nil
+    end
+  end
 
   describe "end-to-end: idle-stale → probe → drain" do
     test "probe captures fresh snapshot which broadcasts and drains held DispatchQueue intents" do

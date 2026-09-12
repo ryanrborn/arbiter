@@ -68,6 +68,45 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "gating dispatch:       7d — 7d quota 0.91 ≥ 0.90"
     end
 
+    # bd-b7umwj: the STALE label used to read "dispatches may be incorrectly
+    # held", which is backwards — staleness makes the gate fail OPEN. It is now
+    # per-window, because the two windows behave differently: the 5h window
+    # fails open on age (bd-y0yup0's recovery valve), the 7d hold is sticky.
+    test "the STALE label says what the gate actually does for each window" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "stale" => true,
+              "utilization_7d" => 0.96,
+              "status_7d" => "allowed_warning",
+              "gating_window" => "7d",
+              "gating_reason" => "7d quota 0.96 ≥ 0.90"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "STALE"
+      assert out =~ "5h gate fails open"
+      assert out =~ "7d hold stays in force"
+      refute out =~ "incorrectly held"
+      # And the 7d hold is still reported as gating, stale snapshot or not.
+      assert out =~ "gating dispatch:       7d — 7d quota 0.96 ≥ 0.90"
+    end
+
+    test "no STALE label on a fresh snapshot" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => Map.put(@snapshot, "stale", false)}
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "STALE"
+    end
+
     test "says so when no window is gating dispatch" do
       stub_get("/api/quota", %{
         "data" => %{

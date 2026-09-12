@@ -71,8 +71,11 @@ defmodule Arbiter.Loop.Scarcity do
   roughly the number of elapsed windows and deflating every share by the same
   factor. `calibrate/3` therefore takes an explicit `:stale` snapshot and
   refuses to calibrate from it (`reason: :stale_snapshot`), reusing
-  `Arbiter.Quota.Gate.stale?/1` — the predicate the dispatch gate already
-  throttles on — as the single definition of "too old to trust".
+  `Arbiter.Quota.Gate.stale?/1` — the predicate the dispatch gate already fails
+  open on for the 5h window — as the single definition of "too old to trust".
+  (The gate's long-window predicate, `long_window_stale?/1`, is deliberately
+  stickier; it is irrelevant here because calibration divides by
+  `utilization_5h`.)
 
   ## Coverage: capacity is a lower bound, shares are upper bounds
 

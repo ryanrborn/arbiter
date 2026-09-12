@@ -52,6 +52,11 @@ defmodule Arbiter.Quota.Gate do
   @default_weekly_threshold 0.90
   @weekly_warning_policies ~w[ignore hold]
 
+  # Both long windows this gate sees — Anthropic's 7d and Codex's weekly — are
+  # seven days long. Used only as the bounded fallback in `long_window_stale?/1`
+  # for a snapshot that carries no long-window `reset_at`.
+  @long_window_seconds 7 * 24 * 60 * 60
+
   @type decision :: :allow | {:hold, term()} | {:overage, float()}
 
   @typedoc """
@@ -177,9 +182,9 @@ defmodule Arbiter.Quota.Gate do
   defp parse_policy_string(_), do: nil
 
   @doc """
-  Whether the snapshot's primary window has already elapsed and can no longer be
-  trusted for gate decisions. Returns `false` for `nil` (nil is handled as
-  fail-open by both `over_cap?/2` and `in_overage?/2`).
+  Whether the snapshot's **primary** window has already elapsed and can no
+  longer be trusted for gate decisions. Returns `false` for `nil` (nil is
+  handled as fail-open by both `over_cap?/2` and `in_overage?/2`).
 
   A snapshot is stale when either:
     * `reset_at` is set and lies in the past — the window has rolled (Anthropic
@@ -192,11 +197,19 @@ defmodule Arbiter.Quota.Gate do
       a request is made, and if the gate holds all requests, the stale snapshot
       never updates (bd-y0yup0).
 
-  Stale snapshots fail open: `over_cap?/2` and `in_overage?/2` treat a stale
-  snapshot as `nil` and return `false`. If the workspace is still genuinely
-  exhausted, at most one dispatch attempt per staleness window (default 5 min)
-  will be let through before the gate re-captures the real `rejected` status
-  and starts holding again (the clock resets on the captured_at timestamp).
+  This is the *primary-window* predicate, and it is what callers outside the
+  gate mean by "too old to trust" — `Arbiter.Quota.RefreshProbe` uses it to
+  decide a workspace is worth a real refresh request, `Arbiter.Loop.Scarcity`
+  uses it to refuse to calibrate, and `arb quota` prints it as `STALE`.
+
+  Staleness fails open **for the primary window only**: `over_cap?/2` and
+  `in_overage?/2` drop the primary signals of a stale snapshot. If the
+  workspace is still genuinely exhausted, at most one dispatch attempt per
+  staleness window (default 5 min) will be let through before the gate
+  re-captures the real `rejected` status and starts holding again (the clock
+  resets on the captured_at timestamp).
+
+  The **long** window does not fail open on age — see `long_window_stale?/1`.
   """
   @spec stale?(quota_source()) :: boolean()
   def stale?(quota), do: quota |> Snapshot.normalize() |> snapshot_stale?()
@@ -204,20 +217,66 @@ defmodule Arbiter.Quota.Gate do
   defp snapshot_stale?(nil), do: false
 
   defp snapshot_stale?(%Snapshot{} = snapshot) do
-    now = DateTime.utc_now()
-
-    reset_elapsed =
-      match?(%DateTime{}, snapshot.reset_at) and
-        DateTime.compare(snapshot.reset_at, now) == :lt
-
-    threshold_seconds = staleness_threshold_seconds()
-
-    too_old =
-      match?(%DateTime{}, snapshot.captured_at) and
-        DateTime.diff(now, snapshot.captured_at, :second) >= threshold_seconds
-
-    reset_elapsed or too_old
+    reset_elapsed?(snapshot.reset_at) or
+      captured_older_than?(snapshot.captured_at, staleness_threshold_seconds())
   end
+
+  @doc """
+  Whether the snapshot's **long** window (Anthropic 7d, Codex weekly) can no
+  longer be trusted. Returns `false` for `nil` and for providers that report no
+  long window at all (Google), whose long-window rules never bind anyway.
+
+  Deliberately *not* the same predicate as `stale?/1` (bd-b7umwj). Age alone
+  never invalidates a long-window reading, because the fail-open recovery
+  `stale?/1` exists for does not work on this window:
+
+    * On the primary window a hold means the provider is *refusing* requests.
+      The one attempt per staleness window that fail-open lets through is
+      rejected in milliseconds and re-captures a real `rejected` — cheap, and
+      the only way out of the deadlock bd-y0yup0 describes.
+    * On the long window a hold happens at `allowed_warning` — the provider
+      still **accepts** the request. The let-through dispatch therefore
+      succeeds and runs a worker for hours against the very budget the hold
+      exists to protect, and because a held fleet makes no traffic, the
+      snapshot is stale again five minutes later. That is not a recovery
+      valve, it is a loop that burns the week (observed 2026-09-11: the 7d
+      window walked 94% → 96% *after* the stop went live).
+
+  So a long-window hold is sticky. It lifts when a **fresh** snapshot shows it
+  cleared, or when the long window's own `reset_at` rolls — never on age alone.
+  Refreshing the snapshot does not need a worker dispatch:
+  `Arbiter.Quota.RefreshProbe` already issues a tiny direct request per held
+  workspace every `active_interval_ms` (default 5 min), and it keys off
+  `stale?/1`, which still goes true on age.
+
+  The one age-based exception is a bounded safety valve: when the provider
+  reports no long-window `reset_at` there is no rollover to key on, so a
+  reading older than the long window's own length (#{@long_window_seconds}s /
+  7 days — both Anthropic's 7d and Codex's weekly window) stops binding,
+  since by then the window must have rolled at least once.
+  """
+  @spec long_window_stale?(quota_source()) :: boolean()
+  def long_window_stale?(quota), do: quota |> Snapshot.normalize() |> snapshot_long_stale?()
+
+  defp snapshot_long_stale?(nil), do: false
+
+  defp snapshot_long_stale?(%Snapshot{secondary_window_label: nil}), do: false
+
+  defp snapshot_long_stale?(%Snapshot{secondary_reset_at: %DateTime{} = reset_at}),
+    do: reset_elapsed?(reset_at)
+
+  defp snapshot_long_stale?(%Snapshot{} = snapshot),
+    do: captured_older_than?(snapshot.captured_at, @long_window_seconds)
+
+  defp reset_elapsed?(%DateTime{} = reset_at),
+    do: DateTime.compare(reset_at, DateTime.utc_now()) == :lt
+
+  defp reset_elapsed?(_), do: false
+
+  defp captured_older_than?(%DateTime{} = captured_at, seconds),
+    do: DateTime.diff(DateTime.utc_now(), captured_at, :second) >= seconds
+
+  defp captured_older_than?(_, _), do: false
 
   @doc """
   The staleness threshold in seconds. A snapshot older than this is treated as
@@ -242,9 +301,10 @@ defmodule Arbiter.Quota.Gate do
   Whether the snapshot indicates the provider is at/over a cap in **either** of
   its windows. Sugar for `gating_window/2 != nil`.
 
-  A `nil` snapshot is never "over cap" (fail open). A stale snapshot (window
-  already elapsed, or captured too long ago) is treated as nil — fail open, for
-  both windows. Shared by both gate implementations.
+  A `nil` snapshot is never "over cap" (fail open). Staleness is scoped to the
+  window it actually describes (bd-b7umwj): a stale **primary** window fails
+  open, a stale **long** window stays held. Shared by both gate
+  implementations.
   """
   @spec over_cap?(quota_source(), Workspace.t() | nil) :: boolean()
   def over_cap?(quota, workspace), do: gating_window(quota, workspace) != nil
@@ -265,6 +325,12 @@ defmodule Arbiter.Quota.Gate do
     5. long-window `"allowed_warning"`, when `weekly_warning_policy/1` is
        `:hold`.
 
+  Each window's rules are skipped when *that* window's reading can no longer be
+  trusted — `stale?/1` drops rules 1 and 3, `long_window_stale?/1` drops rules
+  2, 4 and 5 (bd-b7umwj). The severity order above is preserved across whatever
+  survives, so a fail-open 5h window still reports the 7d hold underneath it
+  rather than reporting nothing.
+
   Note the asymmetry in how `status` is treated between the two windows, and
   that it is deliberate. On the primary window *any* non-`"allowed"` status
   holds, including `"allowed_warning"` — that window resets in hours, so
@@ -280,21 +346,23 @@ defmodule Arbiter.Quota.Gate do
         nil
 
       %Snapshot{} = snapshot ->
-        if snapshot_stale?(snapshot), do: nil, else: binding(snapshot, workspace)
+        binding(snapshot, workspace)
     end
   end
 
   defp binding(%Snapshot{} = s, workspace) do
-    Enum.find_value(
-      [
-        &primary_status_binding/3,
-        &secondary_status_binding/3,
-        &primary_utilization_binding/3,
-        &secondary_utilization_binding/3,
-        &secondary_warning_binding/3
-      ],
-      fn rule -> rule.(s, workspace, nil) end
-    )
+    primary? = not snapshot_stale?(s)
+    long? = not snapshot_long_stale?(s)
+
+    [
+      {primary?, &primary_status_binding/3},
+      {long?, &secondary_status_binding/3},
+      {primary?, &primary_utilization_binding/3},
+      {long?, &secondary_utilization_binding/3},
+      {long?, &secondary_warning_binding/3}
+    ]
+    |> Enum.filter(fn {trusted?, _rule} -> trusted? end)
+    |> Enum.find_value(fn {_trusted?, rule} -> rule.(s, workspace, nil) end)
   end
 
   defp primary_status_binding(%Snapshot{} = s, _ws, _acc) do
@@ -438,7 +506,10 @@ defmodule Arbiter.Quota.Gate do
   `"allowed_warning"` is not overage either; only an outright long-window
   reject is (bd-1tuxv8).
 
-  A stale snapshot (window already elapsed) is treated as nil — fail open.
+  Staleness is scoped per window exactly as in `gating_window/2` (bd-b7umwj):
+  a stale primary window drops the `overage_status` / primary `status` signals
+  (fail open), while a long-window reject keeps counting until
+  `long_window_stale?/1` says otherwise.
   """
   @spec in_overage?(quota_source(), Workspace.t() | nil) :: boolean()
   def in_overage?(quota, _workspace) do
@@ -447,13 +518,17 @@ defmodule Arbiter.Quota.Gate do
         false
 
       %Snapshot{} = snapshot ->
-        if snapshot_stale?(snapshot) do
-          false
-        else
-          snapshot.overage_status == "in_overage" or status_not_allowed?(snapshot.status) or
-            secondary_rejected?(snapshot.secondary_status)
-        end
+        primary_overage?(snapshot) or long_window_overage?(snapshot)
     end
+  end
+
+  defp primary_overage?(%Snapshot{} = s) do
+    not snapshot_stale?(s) and
+      (s.overage_status == "in_overage" or status_not_allowed?(s.status))
+  end
+
+  defp long_window_overage?(%Snapshot{} = s) do
+    not snapshot_long_stale?(s) and secondary_rejected?(s.secondary_status)
   end
 
   defp status_not_allowed?(status) when is_binary(status), do: status != "allowed"
