@@ -4467,6 +4467,10 @@ defmodule Arbiter.Worker do
     |> maybe_put_meta(:interval_ms, Map.get(meta, :watchdog_interval_ms))
     |> maybe_put_meta(:initial_delay_ms, Map.get(meta, :watchdog_initial_delay_ms))
     |> maybe_put_meta(:max_polls, Map.get(meta, :watchdog_max_polls))
+    |> maybe_put_meta(
+      :auto_resume_dispatcher,
+      Map.get(meta, :watchdog_auto_resume_dispatcher)
+    )
   end
 
   defp maybe_put_meta(map, _key, nil), do: map
@@ -5867,6 +5871,7 @@ defmodule Arbiter.Worker do
       :max_polls,
       Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace)
     )
+    |> maybe_opt(:auto_resume_dispatcher, Map.get(opts, :auto_resume_dispatcher))
   end
 
   # The slice of the MR-open-time `opts` a later Watchdog restart cannot
@@ -5889,7 +5894,8 @@ defmodule Arbiter.Worker do
     :auto_merge,
     :interval_ms,
     :initial_delay_ms,
-    :max_polls
+    :max_polls,
+    :auto_resume_dispatcher
   ]
 
   defp record_watchdog_opts(meta, opts) when is_map(opts),

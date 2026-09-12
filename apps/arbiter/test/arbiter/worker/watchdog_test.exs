@@ -2371,16 +2371,20 @@ defmodule Arbiter.Worker.WatchdogTest do
             auto_merge: true,
             last_reviewed_sha: "sha-reviewed",
             interval_ms: 15,
-            workspace: test_workspace()
+            workspace: test_workspace(),
+            auto_resume_dispatcher: StubAutoResumeDispatcher
           )
 
-          wait_until(fn -> StubMerger.get_count("!rs1") >= 3 end, 2_000)
+          # bd-6bg54c: the refusal is now TERMINAL for the merge loop — the
+          # Watchdog routes the PR back to review instead of re-attempting the
+          # same refused merge every poll forever.
+          wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end, 2_000)
         end)
 
       assert StubMerger.merge_count("!rs1") == 0,
              "the Watchdog merged a head no reviewer ever saw"
 
-      assert log =~ "stale_reviewed_sha"
+      assert log =~ "branch advanced past the reviewed commit"
       refute Worker.state(pid).status == :completed
     end
 
@@ -2412,10 +2416,11 @@ defmodule Arbiter.Worker.WatchdogTest do
       start_watchdog(pid, task_id, "!rs3",
         auto_merge: true,
         interval_ms: 15,
-        workspace: test_workspace()
+        workspace: test_workspace(),
+        auto_resume_dispatcher: StubAutoResumeDispatcher
       )
 
-      wait_until(fn -> StubMerger.get_count("!rs3") >= 4 end, 2_000)
+      wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end, 2_000)
 
       assert StubMerger.merge_count("!rs3") == 0,
              "the Watchdog merged commits pushed after the approval it acted on"
@@ -2495,16 +2500,17 @@ defmodule Arbiter.Worker.WatchdogTest do
             max_auto_resolve_attempts: 1,
             interval_ms: 15,
             fix_pass_dispatcher: StubFixPassDispatcher,
-            workspace: test_workspace()
+            workspace: test_workspace(),
+            auto_resume_dispatcher: StubAutoResumeDispatcher
           )
 
-          wait_until(fn -> StubMerger.get_count("!rs7") >= 5 end, 3_000)
+          wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end, 3_000)
         end)
 
       assert StubMerger.merge_count("!rs7") == 0,
              "the suspension must lift at the fleet's own commit, not stay open forever"
 
-      assert log =~ "stale_reviewed_sha"
+      assert log =~ "branch advanced past the reviewed commit"
     end
 
     test "no reviewed SHA anywhere (adapter reports no head) merges unguarded" do

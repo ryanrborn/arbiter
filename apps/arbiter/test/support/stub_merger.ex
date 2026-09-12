@@ -44,7 +44,9 @@ defmodule Arbiter.Test.StubMerger do
         merge_result: :ok,
         inline_comments: [],
         submitted_reviews: [],
-        get_counts: %{}
+        get_counts: %{},
+        diffs: %{},
+        diff_calls: []
       }
     end)
 
@@ -262,8 +264,38 @@ defmodule Arbiter.Test.StubMerger do
   @impl true
   def link_for(ref), do: "https://stub.example/mr/" <> ref
 
+  @doc """
+  Set the `get_diff/2` result for `ref` at compare head `head`.
+
+  `head` is the `:head` key of the compare range the caller asks for; `nil`
+  registers the whole-MR diff (the no-range call). bd-6bg54c needs this so a
+  test can give the reviewed commit and a later head either the SAME net diff
+  (a merge from the base branch) or different ones (authored content).
+  """
+  def set_diff(ref, head, diff) when is_binary(ref) and is_binary(diff) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:diffs, {ref, head}], diff) end)
+    :ok
+  end
+
+  @doc "Every `get_diff/2` call as `{ref, base, head}`, oldest first."
+  def diff_calls do
+    ensure_started()
+    Agent.get(@name, fn s -> Enum.reverse(Map.get(s, :diff_calls, [])) end)
+  end
+
   @impl true
-  def get_diff(_ref, _opts), do: {:ok, ""}
+  def get_diff(ref, opts) do
+    ensure_started()
+    opts = if is_map(opts), do: opts, else: %{}
+    base = Map.get(opts, :base) || Map.get(opts, "base")
+    head = Map.get(opts, :head) || Map.get(opts, "head")
+
+    Agent.get_and_update(@name, fn s ->
+      s = Map.update(s, :diff_calls, [{ref, base, head}], &[{ref, base, head} | &1])
+      {{:ok, Map.get(Map.get(s, :diffs, %{}), {ref, head}, "")}, s}
+    end)
+  end
 
   @impl true
   def post_inline_comment(ref, finding, opts) do
@@ -330,7 +362,9 @@ defmodule Arbiter.Test.StubMerger do
                    merge_result: :ok,
                    inline_comments: [],
                    submitted_reviews: [],
-                   get_counts: %{}
+                   get_counts: %{},
+                   diffs: %{},
+                   diff_calls: []
                  }
                end,
                name: @name

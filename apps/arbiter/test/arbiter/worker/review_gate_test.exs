@@ -231,6 +231,13 @@ defmodule Arbiter.Worker.ReviewGateTest do
     :ok
   end
 
+  # Full (not abbreviated) SHA of a ref in `repo` — the shape the forge reports
+  # and therefore the shape the reviewed-SHA stamp has to be in.
+  defp git_sha(repo, ref) do
+    {out, 0} = git(["rev-parse", ref], repo)
+    String.trim(out)
+  end
+
   defp merge_commit_count(repo) do
     {out, 0} = git(["rev-list", "--merges", "--count", "main"], repo)
     out |> String.trim() |> String.to_integer()
@@ -2517,6 +2524,132 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert approve.dispositions == ~s({"F1.1":"addressed"})
       assert approve.undispositioned_count == 0
       assert approve.converged == true
+    end
+
+    # bd-6bg54c / #1573 AC1 — the reviewed-SHA baseline the merge guard reads
+    # must name the commit the APPROVING round actually reviewed, not the one
+    # the gate started on. Round 1 rejects at SHA1, the revise round commits
+    # SHA2, round 2 approves SHA2: the stamp has to be SHA2, in FULL form (the
+    # forge reports full SHAs, so a short stamp would never match a head).
+    test "an APPROVE after a revise round stamps the task's reviewed SHA to the approved head",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      # What the ROUND-1 reviewer sees. (This harness reuses `repo` as the
+      # worktree with HEAD on the target branch, so the reviewer's head is the
+      # worktree HEAD rather than the branch tip; production worktrees are
+      # always on the per-task branch. Either way the point under test is the
+      # same: the stamp must follow the revise round, not predate it.)
+      pre_revise_head = git_sha(repo, "HEAD")
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@unaddressed, "ADDRESSED"],
+            revise_command: [@revise_commit],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+
+      # The commit `revise_commit.sh` made — the head round 2 approved.
+      {out, 0} = git(["rev-list", "-1", "--grep", "address reviewer finding F1.1", "--all"], repo)
+      approved_head = String.trim(out)
+
+      refute approved_head == ""
+      refute approved_head == pre_revise_head, "the revise round should have committed"
+
+      task = Ash.get!(Issue, task.id)
+      assert task.last_reviewed_sha == approved_head
+      assert task.last_reviewed_at
+    end
+
+    # A round-1 APPROVE (no revise round) stamps too — the guard needs a
+    # baseline on the common path, not just the fix-round one.
+    test "a first-round APPROVE stamps the reviewed SHA", %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+      head = git_sha(repo, "HEAD")
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            worktree_path: repo,
+            review_command: [@reviewer, "APPROVE"],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+
+      stamped = Ash.get!(Issue, task.id).last_reviewed_sha
+      assert stamped == head
+      assert String.length(stamped) == 40, "the stamp must be a full SHA, not an abbreviation"
+    end
+
+    # A REQUEST_CHANGES terminal verdict must NOT stamp: nothing was approved,
+    # so leaving a baseline behind would let the guard wave through the very
+    # head the reviewer rejected.
+    test "a terminal REQUEST_CHANGES leaves the reviewed SHA unstamped", %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 1,
+            worktree_path: repo,
+            review_command: [@reviewer, "REQUEST_CHANGES"],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == nil
     end
 
     # AC5: a finding invalidated by a different change must be dispositionable,

@@ -45,12 +45,13 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
-  alias Arbiter.Test.StubMerger
+  alias Arbiter.Test.{StubAutoResumeDispatcher, StubMerger}
 
   require Ash.Query
 
   setup do
     StubMerger.reset()
+    StubAutoResumeDispatcher.reset()
     :ok
   end
 
@@ -849,18 +850,23 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
             start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
               merger_workspace_override: ws,
               watchdog_initial_delay_ms: 0,
-              watchdog_interval_ms: 25
+              watchdog_interval_ms: 25,
+              watchdog_auto_resume_dispatcher: StubAutoResumeDispatcher
             })
 
           send(worker_pid, {:__claude_session_done__, "arb done"})
 
-          wait_until(fn -> StubMerger.get_count("pr-510") >= 3 end, 3_000)
+          # bd-6bg54c: the stale head is now TERMINAL for the merge loop — the
+          # Watchdog routes the new head back for a review round exactly once
+          # instead of re-attempting the refused merge every poll, so waiting
+          # on a third `get/1` would hang. Wait on the routing decision itself.
+          wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end, 3_000)
         end)
 
       assert StubMerger.merge_count("pr-510") == 0,
              "the Watchdog merged past the engagement's recorded reviewed SHA"
 
-      assert log =~ "stale_reviewed_sha"
+      assert log =~ "branch advanced past the reviewed commit"
     end
 
     test "auto_merge:false workspace: APPROVE parks the Watchdog but does NOT merge (bd-38e34o)" do

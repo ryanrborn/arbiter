@@ -997,6 +997,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
           true ->
             record_round(state, :review, :approve, findings, converged: true)
+            stamp_reviewed_head(state)
             {:done, finish(state, verdict)}
         end
 
@@ -2289,6 +2290,67 @@ defmodule Arbiter.Worker.ReviewGate do
     do: current_head_sha_in(wt)
 
   defp current_head_sha(_state), do: nil
+
+  # Return the FULL HEAD SHA for the worktree at `path`, or nil on any error.
+  # Deliberately not the abbreviated form `current_head_sha_in/1` returns: this
+  # one is compared against what the forge reports, and forges report 40 hex
+  # characters.
+  defp full_head_sha_in(path) when is_binary(path) do
+    case System.cmd("git", ["-C", path, "rev-parse", "HEAD"], stderr_to_stdout: true) do
+      {sha, 0} -> String.trim(sha)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp full_head_sha_in(_path), do: nil
+
+  # bd-6bg54c / #1573 (Cause B): stamp the reviewed SHA on the AUTHORING task,
+  # every time a review round approves.
+  #
+  # Before this, `last_reviewed_sha` was only ever written on a ReviewPatrol /
+  # ExternalReview *engagement* issue (`review_only: true`), never on the task
+  # whose PR the merge guard actually protects. The Watchdog's guard therefore
+  # fell back to the head it happened to latch on the first approved poll and —
+  # because `effective_outcome/2` pins `via_review_gate` lanes to `:approved`
+  # forever, so the latch never drops — could never learn that a later round
+  # approved a NEWER head. A fix round that pushed SHA2 after a REQUEST_CHANGES
+  # on SHA1 left the guard holding SHA1 and refusing the merge ~1/min forever.
+  #
+  # Re-stamping on every APPROVE is the fix: the stamp always names the head the
+  # reviewer actually reviewed. Best-effort — a failure here must never take the
+  # gate down, it only means the guard keeps the previous (conservative) value.
+  defp stamp_reviewed_head(state) do
+    with task_id when is_binary(task_id) <- Map.get(state, :task_id),
+         sha when is_binary(sha) and sha != "" <- full_head_sha_in(Map.get(state, :worktree_path)),
+         {:ok, task} <- Ash.get(Issue, task_id) do
+      case Ash.update(task, %{last_reviewed_sha: sha, last_reviewed_at: DateTime.utc_now()}) do
+        {:ok, _} ->
+          Logger.debug("ReviewGate: stamped reviewed SHA #{sha} on task=#{task_id}")
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "ReviewGate: could not stamp reviewed SHA on task=#{task_id}: #{inspect(reason)}"
+          )
+
+          :ok
+      end
+    else
+      _ -> :ok
+    end
+  rescue
+    e ->
+      Logger.warning("ReviewGate: reviewed-SHA stamp raised: #{inspect(e)}")
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning("ReviewGate: reviewed-SHA stamp exited: #{inspect(reason)}")
+      :ok
+  end
 
   # ---- worker spawning ---------------------------------------------------
 
