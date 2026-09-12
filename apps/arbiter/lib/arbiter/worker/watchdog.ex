@@ -1219,7 +1219,17 @@ defmodule Arbiter.Worker.Watchdog do
   def ci_failed?(result), do: Map.get(result, :pipeline) == :failed
 
   defp do_apply_approved_auto_merge(state) do
-    case safe_merge(state) do
+    case guarded_merge_decision(state) do
+      {:stale, reviewed, head, state} ->
+        resolve_stale_reviewed_head(state, reviewed, head)
+
+      {:merge, expected_sha, state} ->
+        apply_guarded_merge(state, expected_sha)
+    end
+  end
+
+  defp apply_guarded_merge(state, expected_sha) do
+    case do_safe_merge(state, expected_sha) do
       :ok ->
         Logger.info(
           "Worker.Watchdog: auto-merged approved MR #{state.mr_ref} for task=#{state.task_id}"
@@ -2624,20 +2634,197 @@ defmodule Arbiter.Worker.Watchdog do
   # `do_apply_approved_auto_merge/1`'s existing retry-and-page path: the lane
   # stays parked and the coordinator is paged, rather than the worker merging
   # commits nobody reviewed or dying silently.
-  defp safe_merge(state) do
+  defp guarded_merge_decision(state) do
     case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
       {:ok, expected_sha} ->
-        do_safe_merge(state, expected_sha)
+        {:merge, expected_sha, state}
 
-      {:error, {:stale_reviewed_sha, reviewed, head}} = err ->
-        Logger.warning(
-          "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} " <>
-            "mr=#{state.mr_ref}; branch advanced past the reviewed commit " <>
-            "(reviewed=#{reviewed} head=#{head}) — merging would integrate " <>
-            "commits no reviewer saw"
+      {:error, {:stale_reviewed_sha, reviewed, head}} ->
+        reconsider_stale_head(state, reviewed, head)
+    end
+  end
+
+  # bd-6bg54c / #1573. A stale baseline used to fall straight through to the
+  # generic retry path, which re-attempted the same refused merge every poll
+  # forever (303+ attempts on one PR) and re-paged the coordinator every 30.
+  # It is now a ROUTING decision with exactly three outcomes, tried in order:
+  #
+  #   1. Re-read the task's recorded `last_reviewed_sha`. On a `via_review_gate`
+  #      lane `effective_outcome/2` pins the outcome to `:approved` forever, so
+  #      the approval never lapses, so `load_recorded_reviewed_sha/1`'s memo is
+  #      never invalidated — a round-2 APPROVE that stamped a NEWER head could
+  #      not be seen at all. Re-reading here is what makes the re-review
+  #      reachable (Cause B).
+  #   2. Ask whether the head is the reviewed content — a merge from the base
+  #      branch shifts hunk offsets and blob hashes but changes no content, so
+  #      its net diff against the base is identical (`base_merge_only?/3`).
+  #   3. Otherwise the head carries content nobody reviewed, so the PR goes
+  #      BACK to review rather than being retried (Cause A) — see
+  #      `resolve_stale_reviewed_head/3`.
+  defp reconsider_stale_head(state, reviewed, head) do
+    state = refresh_recorded_reviewed_sha(state)
+
+    case Mergers.ReviewedSha.check(reviewed_sha(state), head) do
+      {:ok, expected_sha} ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} re-read the task's " <>
+            "reviewed SHA and it now names the current head (was reviewed=#{reviewed} " <>
+            "head=#{head}) — a later review round approved this commit; merging"
         )
 
-        err
+        {:merge, expected_sha, state}
+
+      {:error, {:stale_reviewed_sha, reviewed, ^head}} ->
+        if base_merge_only?(state, reviewed, head) do
+          Logger.info(
+            "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{head} differs " <>
+              "from the reviewed commit #{reviewed} only by merges from " <>
+              "#{state.mr_base_ref} — identical net diff against the base, so the review " <>
+              "still covers it; merging pinned to #{head}"
+          )
+
+          {:merge, head, %{state | reviewed_sha: head}}
+        else
+          Logger.warning(
+            "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} " <>
+              "mr=#{state.mr_ref}; branch advanced past the reviewed commit " <>
+              "(reviewed=#{reviewed} head=#{head}) — merging would integrate " <>
+              "commits no reviewer saw"
+          )
+
+          {:stale, reviewed, head, state}
+        end
+    end
+  end
+
+  # Drop the per-episode memo and re-read the task row. Deliberately honours
+  # `cleared_recorded_sha`: a value the fleet's own push already invalidated
+  # must not be resurrected by re-reading the very row that recorded it.
+  defp refresh_recorded_reviewed_sha(%{task_id: task_id} = state) when is_binary(task_id) do
+    case fetch_recorded_reviewed_sha(task_id) do
+      sha when is_binary(sha) and sha != "" ->
+        if sha == Map.get(state, :cleared_recorded_sha) do
+          state
+        else
+          %{state | recorded_reviewed_sha: sha, recorded_sha_loaded?: true}
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp refresh_recorded_reviewed_sha(state), do: state
+
+  # AC2. Does `head` differ from `reviewed` ONLY by merges from the base branch?
+  #
+  # Answered on content, not on commit topology: both sides are diffed
+  # three-dot against the MR's own base branch (`base...sha`, the same compare
+  # ReviewPatrol uses for new-diff-only re-reviews) and the two net diffs are
+  # compared patch-id style by `Arbiter.Mergers.NetDiff`, which ignores hunk
+  # offsets and index blob hashes — the only things a clean base merge moves.
+  #
+  # A merge that RESOLVED A CONFLICT is therefore not equivalent and is not
+  # accepted: resolving a conflict means writing content into the merge commit,
+  # which shows up as added/removed/changed lines in the net diff against the
+  # base, and content lines are exactly what the fingerprint retains. The same
+  # is true of a semantic-conflict fixup or any other authored change smuggled
+  # into a merge commit.
+  #
+  # Fails CLOSED: no base ref, an adapter error, or an empty/unreadable diff on
+  # either side all answer "not equivalent", which routes to a review round
+  # rather than to a merge.
+  defp base_merge_only?(%{mr_base_ref: base} = state, reviewed, head)
+       when is_binary(base) and base != "" and is_binary(reviewed) and is_binary(head) do
+    with {:ok, reviewed_diff} <- safe_get_diff(state, base, reviewed),
+         {:ok, head_diff} <- safe_get_diff(state, base, head) do
+      Mergers.NetDiff.equivalent?(reviewed_diff, head_diff)
+    else
+      other ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not compare the " <>
+            "reviewed and current net diffs (#{inspect_short(other)}); treating the head as " <>
+            "unreviewed"
+        )
+
+        false
+    end
+  end
+
+  defp base_merge_only?(_state, _reviewed, _head), do: false
+
+  defp safe_get_diff(%{adapter: adapter, mr_ref: mr_ref}, base, head) do
+    case adapter.get_diff(mr_ref, %{base: base, head: head}) do
+      {:ok, diff} when is_binary(diff) -> {:ok, diff}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:bad_return, other}}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # AC3 + AC4. The head carries content no reviewer saw, and no re-review has
+  # covered it. `:stale_reviewed_sha` is TERMINAL for the merge loop here — the
+  # Watchdog never returns to the retry path with it — and takes one of two
+  # exits:
+  #
+  #   * route the PR back to review. The auto-resume dispatcher re-attaches a
+  #     fresh worker to the preserved worktree, which runs `route_completion`
+  #     and re-enters the ReviewGate on the NEW head. (The gate reviews the
+  #     PR's current diff; there is no delta-scoped review round to ask for
+  #     today, so the round covers the whole PR.) That worker gets its own
+  #     Watchdog, so this one stops.
+  #   * page the coordinator ONCE and stop, when there is no path back to
+  #     review (budget spent or auto-resume disabled) or the resume itself
+  #     could not run. Never the old behaviour of re-paging every
+  #     `escalation_cadence/1` polls forever.
+  defp resolve_stale_reviewed_head(state, reviewed, head) do
+    snap = snapshot(state)
+    attempts = awaiting_review_resume_attempts(snap)
+
+    if state.max_auto_resumes > 0 and attempts < state.max_auto_resumes do
+      # `Dispatch.resume/2` requires the prior worker to be terminal before it
+      # re-attaches, exactly as on the awaiting-review-timeout path.
+      safe(fn -> Worker.fail(state.worker_pid, {:unreviewed_head, head}) end)
+
+      args = %{
+        task_id: state.task_id,
+        attempt: attempts + 1,
+        workspace_id: workspace_id(state),
+        mr_ref: state.mr_ref
+      }
+
+      case safe_resume(state, args) do
+        {:ok, _} ->
+          Logger.warning(
+            "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{head} advanced " <>
+              "past the reviewed commit #{reviewed} with authored content; dispatched a " <>
+              "review round on the new head (attempt #{attempts + 1}/#{state.max_auto_resumes}) " <>
+              "instead of retrying the merge"
+          )
+
+          {:stop, :normal, state}
+
+        {:error, reason} ->
+          Logger.warning(
+            "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not dispatch a " <>
+              "review round for unreviewed head #{head}: #{inspect_short(reason)}"
+          )
+
+          escalate_auto_resume_give_up(state, snap, attempts, {:resume_failed, reason})
+          {:stop, :normal, state}
+      end
+    else
+      escalate_auto_resume_give_up(
+        state,
+        snap,
+        attempts,
+        {:stale_reviewed_sha, reviewed, head}
+      )
+
+      {:stop, :normal, state}
     end
   end
 
