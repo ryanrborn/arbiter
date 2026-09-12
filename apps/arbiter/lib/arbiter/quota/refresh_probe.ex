@@ -65,10 +65,12 @@ defmodule Arbiter.Quota.RefreshProbe do
   than by a worker running for hours.
 
   `Arbiter.Quota.OAuthUsage` (`/api/oauth/usage`) also reports 7d utilization,
-  but it is deliberately **not** used for this: it is fetched on demand only
-  (it 429s readily and carries a 180s cooldown), and it writes the separate
-  `oauth_utilization_7d` / `oauth_captured_at` columns rather than the
-  header-capture fields the gate reads.
+  and since bd-b0zody its polled snapshot *does* write the gate's primary
+  columns — but this probe still does not call it: that endpoint 429s readily
+  and carries a 180s cooldown, so its polling belongs on the single
+  account-wide 5 min timer in `Arbiter.Quota.CloudProbe`, not on a second
+  per-workspace timer that would race it for the same budget. This probe
+  keeps refreshing the same columns the cheap way, off header capture.
 
   ## Cadence
 

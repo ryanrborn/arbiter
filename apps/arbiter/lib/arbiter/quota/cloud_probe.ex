@@ -28,15 +28,18 @@ defmodule Arbiter.Quota.CloudProbe do
       direct Cloud Code Assist call using the Gemini CLI's stored token; upserts
       `GoogleQuota` + broadcasts.
     * `Arbiter.Quota.capture_oauth_usage_for_group/2` — Anthropic's
-      *secondary* `/api/oauth/usage` source (per-model weekly + `extra_usage`
-      overage, bd-8tpha6). The header-capture `RefreshProbe` keeps Claude's
-      primary aggregate fresh, but once the quota surface stopped fetching
-      live nothing else refreshed this layer, so it rides along here
+      `/api/oauth/usage` source (per-model weekly + `extra_usage` overage,
+      bd-8tpha6, *and* the primary gate columns since bd-b0zody). This is the
+      only thing that keeps Claude's snapshot current for a fleet making no
+      proxied traffic, so it is no longer merely a garnish riding along
       (best-effort; its own 429 cooldown protects it). Unlike the other three
       providers, this endpoint is rate-limited **per account, not per
       workspace/token** (bd-5xuneh), so it is fetched once per distinct OAuth
       token — see `spawn_oauth_usage_refresh/1` — rather than fanned out per
-      workspace like the rest of this module.
+      workspace like the rest of this module. Its 5 min cadence is the
+      endpoint's own budget; the gate absorbs a missed poll by trusting a
+      polled row for 600s (`Arbiter.Quota.Gate.staleness_threshold_seconds/1`)
+      rather than by polling harder.
 
   The other three providers each degrade to a no-op (no row written, no
   broadcast) when their CLI isn't authenticated on this host, so a logged-out
@@ -212,9 +215,9 @@ defmodule Arbiter.Quota.CloudProbe do
 
   # The real per-workspace provider refresh. Each call persists + broadcasts
   # on success and no-ops (no row written) when its credentials aren't
-  # present on this host. Anthropic's secondary `/api/oauth/usage` source
-  # (per-model weekly + overage, bd-8tpha6) is refreshed separately, once per
-  # distinct OAuth token, by `spawn_oauth_usage_refresh/1` — see that
+  # present on this host. Anthropic's `/api/oauth/usage` source (per-model
+  # weekly + overage + the primary gate columns) is refreshed separately, once
+  # per distinct OAuth token, by `spawn_oauth_usage_refresh/1` — see that
   # function and bd-5xuneh for why it isn't fanned out per workspace here.
   defp default_refresh(workspace_id) do
     Arbiter.Quota.Codex.fetch(workspace_id)

@@ -47,6 +47,35 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "representative window: five_hour"
     end
 
+    # bd-b0zody: two sources now write the same primary columns — the proxy's
+    # header capture and the /api/oauth/usage poll — so the row has to say
+    # which one produced it, or the overlap window is unreadable.
+    test "names the source that produced the row" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "capture_source", "oauth_poll")
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "source:                /api/oauth/usage poll"
+    end
+
+    test "names the proxy header capture as the source" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "capture_source", "headers")
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "source:                proxy rate-limit headers"
+    end
+
     # bd-1tuxv8: the 5h and 7d numbers are both printed, but only one window (or
     # neither) is actually gating dispatch — say which, so "7d is at 76%" can't
     # be read as the reason Autopilot is idle.

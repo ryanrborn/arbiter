@@ -115,6 +115,7 @@ defmodule ArbiterCli.Cmd.Quota do
       end
 
     IO.puts("  captured at:           #{captured_at_str}#{stale_indicator}")
+    IO.puts("  source:                #{capture_source_label(q["capture_source"])}")
     IO.puts("  gating dispatch:       #{gating_line(q)}")
     IO.puts("")
 
@@ -194,6 +195,15 @@ defmodule ArbiterCli.Cmd.Quota do
       IO.puts("  recent spend (30d): $#{:erlang.float_to_binary(cost / 1, decimals: 2)}")
     end
   end
+
+  # bd-b0zody: the primary columns now have two possible writers — the proxy's
+  # header capture and the /api/oauth/usage poll — and while both are live the
+  # row is unreadable without saying which one wrote it. Legacy rows predate
+  # the marker and can only have come from the proxy.
+  defp capture_source_label("oauth_poll"), do: "/api/oauth/usage poll"
+  defp capture_source_label("headers"), do: "proxy rate-limit headers"
+  defp capture_source_label(nil), do: "— (pre-dates source tracking)"
+  defp capture_source_label(other), do: to_string(other)
 
   defp emit_model(m) do
     name = m["display_name"] || m["model_id"] || "—"

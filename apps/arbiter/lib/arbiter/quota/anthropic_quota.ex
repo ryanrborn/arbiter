@@ -14,6 +14,15 @@ defmodule Arbiter.Quota.AnthropicQuota do
 
   Every field except `workspace_id` is optional: a response that carries only
   the 5h window still writes a row, with the 7d columns left `nil`.
+
+  ## Two write paths (bd-b0zody)
+
+  The header capture above (`:upsert`) is no longer the only source of the
+  primary columns: `Arbiter.Quota.capture_oauth_usage/2` polls Anthropic's
+  `/api/oauth/usage` and writes the same columns through
+  `:record_oauth_snapshot`, so the dispatch gate keeps working for a fleet
+  that is making no proxied traffic at all. Both paths stamp
+  `capture_source` so a row says which one last wrote it.
   """
 
   use Ash.Resource,
@@ -45,15 +54,16 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :status_7d,
         :representative_claim,
         :overage_status,
-        :captured_at
+        :captured_at,
+        :capture_source
       ]
     end
 
-    # On-demand secondary source (bd-8tpha6): per-model weekly utilization +
-    # extra_usage overage from `/api/oauth/usage`. A distinct action with a
-    # narrow `upsert_fields` so an oauth-only write never clobbers the
-    # header-capture columns (`utilization_5h` etc.) on an existing row, and
-    # vice versa.
+    # Secondary-only oauth write (bd-8tpha6): per-model weekly utilization +
+    # `extra_usage`. Used when the polled body carried no aggregate 5h figure
+    # to gate on — its narrow `upsert_fields` deliberately excludes
+    # `captured_at` / `capture_source`, so layering per-model data onto a row
+    # the proxy filled in never re-dates that row or claims its provenance.
     create :record_oauth_usage do
       upsert? true
       upsert_identity :workspace_provider
@@ -74,6 +84,59 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :oauth_utilization_5h,
         :oauth_utilization_7d,
         :oauth_captured_at
+      ]
+    end
+
+    # The polled `/api/oauth/usage` write path (bd-b0zody). Originally a
+    # *secondary* layer only (per-model weekly + `extra_usage`, bd-8tpha6);
+    # it now also carries the primary gate columns, so the dispatch gate no
+    # longer depends on a worker having recently gone through the proxy.
+    #
+    # `upsert_fields` lists every column either layer can write, but
+    # `AshSqlite` narrows that to the attributes actually present on the
+    # changeset — so `Arbiter.Quota.record_oauth_snapshot/3` drops the keys
+    # the parsed body had nothing for, and a partial body never nils out a
+    # column the header capture had filled in.
+    create :record_oauth_snapshot do
+      upsert? true
+      upsert_identity :workspace_provider
+
+      upsert_fields [
+        :per_model_utilization,
+        :extra_usage,
+        :oauth_utilization_5h,
+        :oauth_utilization_7d,
+        :oauth_captured_at,
+        :utilization_5h,
+        :reset_5h_at,
+        :status_5h,
+        :utilization_7d,
+        :reset_7d_at,
+        :status_7d,
+        :representative_claim,
+        :overage_status,
+        :captured_at,
+        :capture_source
+      ]
+
+      accept [
+        :workspace_id,
+        :provider,
+        :per_model_utilization,
+        :extra_usage,
+        :oauth_utilization_5h,
+        :oauth_utilization_7d,
+        :oauth_captured_at,
+        :utilization_5h,
+        :reset_5h_at,
+        :status_5h,
+        :utilization_7d,
+        :reset_7d_at,
+        :status_7d,
+        :representative_claim,
+        :overage_status,
+        :captured_at,
+        :capture_source
       ]
     end
   end
@@ -113,12 +176,20 @@ defmodule Arbiter.Quota.AnthropicQuota do
     attribute :captured_at, :utc_datetime do
       allow_nil? false
       public? true
-      # Only :upsert (header-capture) accepts this; :record_oauth_usage does
-      # not, so an oauth-only insert (no header data captured yet) still
-      # satisfies the not-null constraint without stomping a real header
-      # timestamp on an existing row (see its narrow upsert_fields).
+      # Both write paths accept this, but `:record_oauth_snapshot` only sets
+      # it when the polled body actually carried primary-window figures — an
+      # oauth write that layered on per-model data alone must not advertise
+      # the row as freshly gated. The default keeps the not-null constraint
+      # satisfiable on such an insert.
       default &DateTime.utc_now/0
-      description "When the proxy observed these headers."
+      description "When the figures in the primary columns were observed."
+    end
+
+    attribute :capture_source, :string do
+      public? true
+      constraints max_length: 32, trim?: true
+
+      description ~s(Which source last wrote the primary columns: "headers" = proxy capture, "oauth_poll" = /api/oauth/usage poll. nil on legacy rows.)
     end
 
     attribute :per_model_utilization, :map do

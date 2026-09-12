@@ -3,12 +3,22 @@ defmodule Arbiter.Quota.OAuthUsage do
   On-demand fetch of Anthropic's undocumented `/api/oauth/usage` endpoint
   (bd-8tpha6, part of bd-5qe3qs).
 
-  This is a **secondary, additive** quota source alongside the zero-cost
-  header-capture mechanism in `Arbiter.Quota` (`anthropic-ratelimit-unified-*`
-  response headers, updated on every real proxied request). The headers are
-  aggregate-only (one 5h + one 7d figure); this endpoint is the only way to
-  get a **per-model** weekly breakdown (`seven_day_sonnet`, `seven_day_opus`,
-  ...) and the account's `extra_usage` overage spend.
+  This started as a **secondary, additive** quota source alongside the
+  zero-cost header-capture mechanism in `Arbiter.Quota`
+  (`anthropic-ratelimit-unified-*` response headers, updated on every real
+  proxied request): the headers are aggregate-only (one 5h + one 7d figure),
+  while this endpoint is the only way to get a **per-model** weekly breakdown
+  (`seven_day_sonnet`, `seven_day_opus`, ...) and the account's `extra_usage`
+  overage spend.
+
+  As of bd-b0zody it is a **primary** source too. `Arbiter.Quota` writes the
+  parsed aggregate figures into the columns the dispatch gate reads, so a
+  fleet that is making no proxied traffic (because it is quota-held, or idle)
+  still has a current snapshot to un-hold on. See
+  `Arbiter.Quota.Gate.staleness_threshold_seconds/1` for why a row written
+  from here gets twice the staleness margin of a header-captured one: this
+  endpoint's budget is roughly one request per 5 minutes, and the 180s
+  cooldown below means a single 429 costs more than one poll.
 
   ## Auth
 
@@ -30,10 +40,14 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   ## Cadence
 
-  Callers are expected to invoke `fetch/1` **on demand** (e.g. when
-  `arb quota` / the `quota_get` MCP tool is invoked) rather than on a
-  periodic timer — see `Arbiter.Quota.RefreshProbe`'s moduledoc for why that
-  timer intentionally does not call this endpoint.
+  `Arbiter.Quota.CloudProbe` polls this once per distinct OAuth token every
+  `interval_ms` (default 5 min, matching the endpoint's own account-wide
+  budget), and `refresh_and_serialize/2` tops it up on demand when `arb quota`
+  / the `quota_get` MCP tool is invoked. The cadence is deliberately *not*
+  faster than 5 min — see `Arbiter.Quota.Gate.staleness_threshold_seconds/1`,
+  which buys the gate's margin by trusting a polled row for longer rather than
+  by spending more of this endpoint's scarce budget. `Arbiter.Quota.RefreshProbe`
+  keeps its hands off this endpoint entirely (see its moduledoc).
   """
 
   require Logger

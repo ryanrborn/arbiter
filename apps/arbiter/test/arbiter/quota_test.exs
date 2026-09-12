@@ -405,8 +405,10 @@ defmodule Arbiter.QuotaTest do
       assert quota.oauth_utilization_5h == 0.24
       assert quota.oauth_utilization_7d == 0.08
 
-      # never touches the header-capture columns already on the row
+      # bd-b0zody: the poll now also refreshes the primary columns the gate
+      # reads, so this row no longer depends on proxied traffic staying warm.
       assert quota.utilization_5h == 0.24
+      assert quota.capture_source == "oauth_poll"
       assert quota.provider == "claude"
 
       serialized = Quota.serialize(ws.id)

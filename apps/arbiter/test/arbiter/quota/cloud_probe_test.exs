@@ -141,6 +141,43 @@ defmodule Arbiter.Quota.CloudProbeTest do
         assert Arbiter.Quota.serialize(ws.id).per_model_utilization == %{"sonnet" => 0.42}
       end
     end
+
+    # bd-b0zody: the probe cycle is the *only* thing keeping Claude's snapshot
+    # current for a fleet making no proxied traffic, so a probe must land the
+    # columns the dispatch gate reads — not just the per-model garnish.
+    test "a probe cycle writes the primary gate columns with the poll's provenance",
+         context do
+      Req.Test.set_req_test_to_shared(context)
+
+      ws = workspace_with_token!("solo", "shared-token")
+      resets_at = DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Req.Test.json(conn, %{
+          "five_hour" => %{"utilization" => 91, "resets_at" => resets_at},
+          "seven_day" => %{"utilization" => 12, "resets_at" => resets_at},
+          "limits" => [%{"group" => "session", "is_active" => true}]
+        })
+      end)
+
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "quota:#{ws.id}")
+
+      pid =
+        start_probe(enabled: true, interval_ms: 3_600_000, refresh_fun: fn _ws_id -> :ok end)
+
+      CloudProbe.probe(pid)
+
+      assert_receive {:quota_updated, _ws_id, %{utilization_5h: 0.91}}, 2_000
+
+      q = Arbiter.Quota.latest(ws.id)
+      assert q.status_5h == "allowed"
+      assert q.utilization_7d == 0.12
+      assert q.representative_claim == "five_hour"
+      assert q.capture_source == "oauth_poll"
+      refute Arbiter.Quota.Gate.stale?(q)
+      # 0.91 is past the 0.85 5h ceiling: a polled row alone holds dispatch.
+      assert %{window: "5h", signal: :utilization} = Arbiter.Quota.Gate.gating_window(q, nil)
+    end
   end
 
   describe "state/1" do

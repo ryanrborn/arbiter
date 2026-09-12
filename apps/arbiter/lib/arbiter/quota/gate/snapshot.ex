@@ -14,7 +14,11 @@ defmodule Arbiter.Quota.Gate.Snapshot do
     * `status` — the provider's own verdict. `"allowed"` (or `nil`) means
       plan-allowed; anything else is past-plan and holds. Codex's
       `limit_reached: true` maps to `"limit_reached"`; Google reports no status.
-    * `reset_at` / `captured_at` — the staleness inputs (`Gate.stale?/1`).
+    * `reset_at` / `captured_at` — the staleness inputs (`Gate.stale?/1`),
+      alongside `capture_source`, which says which of the two Anthropic
+      sources wrote them and therefore which staleness threshold applies
+      (bd-b0zody). Codex / Google have a single source each, so it stays
+      `nil` for them.
     * `secondary_utilization` / `secondary_status` / `secondary_reset_at` —
       the same three things for the provider's **long** window (Anthropic 7d,
       Codex weekly), named by `secondary_window_label`.
@@ -49,6 +53,7 @@ defmodule Arbiter.Quota.Gate.Snapshot do
           status: String.t() | nil,
           reset_at: DateTime.t() | nil,
           captured_at: DateTime.t() | nil,
+          capture_source: String.t() | nil,
           overage_status: String.t() | nil,
           window_label: String.t(),
           secondary_utilization: float() | nil,
@@ -62,6 +67,7 @@ defmodule Arbiter.Quota.Gate.Snapshot do
             status: nil,
             reset_at: nil,
             captured_at: nil,
+            capture_source: nil,
             overage_status: nil,
             window_label: "primary",
             secondary_utilization: nil,
@@ -88,6 +94,7 @@ defmodule Arbiter.Quota.Gate.Snapshot do
       status: q.status_5h,
       reset_at: q.reset_5h_at,
       captured_at: q.captured_at,
+      capture_source: q.capture_source,
       overage_status: q.overage_status,
       window_label: "5h",
       secondary_utilization: q.utilization_7d,
