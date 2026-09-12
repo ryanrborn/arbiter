@@ -887,6 +887,84 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  # bd-6bg54c / #1573 (AC2). The merge guard needs to ask "does this head have
+  # the same net diff against the base as the reviewed commit did?" — which is a
+  # `base...head` compare, not the MR's own changes. GitHub's adapter already
+  # honoured `%{base:, head:}`; GitLab's silently ignored its opts and always
+  # answered with the whole-MR diff, which would have made every comparison
+  # trivially equal and the guard useless.
+  describe "get_diff/2" do
+    test "with no range, returns the MR's own changes" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "#{base_path()}/#{@iid}/changes"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "changes" => [
+            %{"old_path" => "a.ex", "new_path" => "a.ex", "diff" => "@@ -1 +1 @@\n-a\n+b\n"}
+          ]
+        })
+      end)
+
+      assert {:ok, diff} = Gitlab.get_diff(@ref, %{})
+      assert diff =~ "--- a/a.ex"
+      assert diff =~ "+b"
+    end
+
+    test "with a {base, head} range, compares the two refs instead" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/api/v4/projects/#{@project}/repository/compare"
+        assert conn.query_string =~ "from=main"
+        assert conn.query_string =~ "to=head-sha"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "diffs" => [
+            %{"old_path" => "a.ex", "new_path" => "a.ex", "diff" => "@@ -1 +1 @@\n-a\n+b\n"}
+          ]
+        })
+      end)
+
+      assert {:ok, diff} = Gitlab.get_diff(@ref, %{base: "main", head: "head-sha"})
+      assert diff =~ "--- a/a.ex"
+      assert diff =~ "+b"
+    end
+
+    test "string keys are honoured too, and a blank endpoint falls back to the MR diff" do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"changes" => [], "diffs" => []})
+      end)
+
+      assert {:ok, _} = Gitlab.get_diff(@ref, %{"base" => "main", "head" => "x"})
+      assert_received {:path, compare_path}
+      assert compare_path == "/api/v4/projects/#{@project}/repository/compare"
+
+      assert {:ok, _} = Gitlab.get_diff(@ref, %{base: "main", head: ""})
+      assert_received {:path, mr_path}
+      assert mr_path == "#{base_path()}/#{@iid}/changes"
+    end
+
+    test "a compare error surfaces as {:error, %Error{}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"message" => "404 Ref Not Found"})
+      end)
+
+      assert {:error, %Error{status: 404}} = Gitlab.get_diff(@ref, %{base: "main", head: "nope"})
+    end
+  end
+
   describe "close/1" do
     test "PUTs state_event=close and returns :ok" do
       stub(fn conn ->
