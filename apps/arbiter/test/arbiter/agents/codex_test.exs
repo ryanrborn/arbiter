@@ -4,6 +4,29 @@ defmodule Arbiter.Agents.CodexTest do
   alias Arbiter.Agents.Codex
   alias Arbiter.Agents.SecurityPolicy
 
+  # bd-24qzhd: OPENAI_API_KEY is a worker_env provider credential (see
+  # Arbiter.Accounts.Census's allow-list), so it is routinely present in the
+  # ambient shell a codex-backed worker runs `mix test` in. Simulate that
+  # ambient leak for the whole module — if the per-test `setup` in
+  # `describe "spawn_env/1"` below ever stops clearing the var, "returns []"
+  # fails exactly as it would on a polluted host, regardless of which host
+  # or branch runs it. ExUnit requires setup_all at module scope, not nested
+  # in a describe; it is harmless to the other describes here, which don't
+  # read OPENAI_API_KEY.
+  setup_all do
+    prev = System.get_env("OPENAI_API_KEY")
+    System.put_env("OPENAI_API_KEY", "sk-leaked-ambient-token")
+
+    on_exit(fn ->
+      case prev do
+        nil -> System.delete_env("OPENAI_API_KEY")
+        v -> System.put_env("OPENAI_API_KEY", v)
+      end
+    end)
+
+    :ok
+  end
+
   describe "behaviour" do
     test "module declares the Agent behaviour" do
       behaviours =
@@ -159,7 +182,18 @@ defmodule Arbiter.Agents.CodexTest do
   describe "spawn_env/1" do
     setup do
       Codex.Config.clear()
-      on_exit(&Codex.Config.clear/0)
+      prev_key = System.get_env("OPENAI_API_KEY")
+      System.delete_env("OPENAI_API_KEY")
+
+      on_exit(fn ->
+        Codex.Config.clear()
+
+        case prev_key do
+          nil -> System.delete_env("OPENAI_API_KEY")
+          v -> System.put_env("OPENAI_API_KEY", v)
+        end
+      end)
+
       :ok
     end
 

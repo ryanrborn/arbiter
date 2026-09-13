@@ -635,6 +635,43 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — agy print-timeout (bd-1xss5z)" do
+    test "the literal agy print-timeout warning classifies as :agent_print_timeout even on a clean exit" do
+      lines = [
+        "[agy] print timeout after 5m0s with turn in progress; returning partial output",
+        "⚙ gemini session SUCCESS · 297s · ~300k tok"
+      ]
+
+      reason = StopReason.classify(0, lines)
+
+      assert reason.category == :agent_print_timeout
+      assert reason.summary =~ "timed out"
+      assert reason.remediation =~ "timeout"
+      assert StopReason.label(reason) =~ "timed out"
+    end
+
+    test "matches regardless of the reported duration or exit status" do
+      assert StopReason.classify(1, [
+               "print timeout after 10m0s with turn in progress; returning partial output"
+             ]).category ==
+               :agent_print_timeout
+    end
+
+    test "print-timeout outranks the generic exited-without-done / crashed fallback" do
+      refute StopReason.classify(0, [
+               "print timeout after 5m0s with turn in progress; returning partial output"
+             ]).category == :exited_without_done
+
+      refute StopReason.classify(1, [
+               "print timeout after 5m0s with turn in progress; returning partial output"
+             ]).category == :crashed
+    end
+
+    test "an unrelated clean exit is not misclassified as a print timeout" do
+      refute StopReason.classify(0, ["all finished"]).category == :agent_print_timeout
+    end
+  end
+
   describe "classify/2 — context autocompact thrash (bd-8cn795)" do
     test "the exact autocompact-thrash message classifies as :context_thrash" do
       lines = [

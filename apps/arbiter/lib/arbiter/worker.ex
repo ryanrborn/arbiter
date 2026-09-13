@@ -5922,7 +5922,16 @@ defmodule Arbiter.Worker do
       workspace: workspace,
       repo: state.repo,
       auto_merge: auto_merge,
-      via_review_gate: via_review_gate
+      via_review_gate: via_review_gate,
+      # bd-ch9pmk / #1614: the branch head this worker holds locally. Every
+      # caller reaches here just after `push_for_hosted_pr/3` put exactly this
+      # commit on origin, so it is the head the PR is *about* to report — and
+      # on a ReviewGate lane it is the commit the gate's APPROVE stamped. The
+      # merge guard uses it to tell "the forge has not seen my push yet" apart
+      # from "somebody pushed a commit nobody reviewed"; the two are
+      # indistinguishable by SHA equality alone, which is what failed an
+      # approved fix round in arbiter #1607 and vstim !219.
+      local_head_sha: local_head_sha(state)
     ]
     |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
     |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
@@ -5931,6 +5940,15 @@ defmodule Arbiter.Worker do
       Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace)
     )
     |> maybe_opt(:auto_resume_dispatcher, Map.get(opts, :auto_resume_dispatcher))
+  end
+
+  # The worktree's own HEAD, or nil when this worker has no worktree on disk
+  # (a coordinator-dispatched ad-hoc run, or a test without a provisioned one).
+  defp local_head_sha(%State{meta: meta}) do
+    case meta && Map.get(meta, :worktree_path) do
+      path when is_binary(path) -> Arbiter.Worker.Worktree.head_sha(path)
+      _ -> nil
+    end
   end
 
   # The slice of the MR-open-time `opts` a later Watchdog restart cannot

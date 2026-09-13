@@ -37,6 +37,13 @@ defmodule Arbiter.Agents.Agent do
       caller — `Arbiter.Agents.Claude.Config` for Claude — resolves which
       key (single-key today; round-robin from `api_keys` list in a follow-up).
     * `:config` — adapter-specific extra config (an opaque map).
+    * `:timeout_ms` — the caller's own per-pass timeout budget in
+      milliseconds (e.g. `Arbiter.Worker.ReviewGate`'s resolved
+      `review_gate.timeout_ms`). Adapters whose CLI has its own internal
+      print/turn timeout shorter than a caller's budget should honor this so
+      the CLI doesn't cut a long turn short before the caller's own deadline
+      ever fires (the Gemini adapter maps it to agy's `--print-timeout`).
+      Adapters without such a knob ignore it.
     * `:security` — the resolved `Arbiter.Agents.SecurityPolicy` for this
       spawn (permission mode, allow/deny, sandbox). The caller (Dispatch /
       ReviewGate) resolves it from the workspace; the adapter maps it to its
