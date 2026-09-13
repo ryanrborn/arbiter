@@ -2,31 +2,30 @@ defmodule Arbiter.Quota do
   @moduledoc """
   Ash domain + public API for per-workspace Anthropic quota state (bd-5boun6).
 
-  `capture/3` takes `anthropic-ratelimit-unified-*` response headers from
-  worker responses and upserts an `AnthropicQuota` snapshot for the originating
-  workspace. `get/2` / `serialize/2` read the latest snapshot back for the MCP
-  `quota_get` tool, the `GET /api/quota` endpoint, and `arb quota`.
+  `get/2` / `serialize/2` read quota snapshots for the MCP `quota_get` tool,
+  the `GET /api/quota` endpoint, and `arb quota`.
 
-  ## Two sources write the same row (bd-b0zody)
+  ## Quota source: polling + archived header capture
 
-  `capture/3` consumes the `anthropic-ratelimit-unified-*` response headers
-  from the worker traffic the fleet is already making. This only updates when
-  the fleet is actively dispatching work — a quota-held or idle fleet stops
-  refreshing the very figures the gate needs to decide whether to un-hold.
+  The primary source is `capture_oauth_usage/2`, which consumes Anthropic's
+  polled `/api/oauth/usage` endpoint snapshot, driven by `Arbiter.Quota.CloudProbe`.
+  This allows the dispatch gate to work on a fleet that is quota-held or idle,
+  with current data. Per-model weekly breakdowns and account overage spend are
+  available only through this endpoint.
 
-  `capture_oauth_usage/2` — Anthropic's polled `/api/oauth/usage` snapshot,
-  driven by `Arbiter.Quota.CloudProbe` — writes the **same primary columns**
-  `capture/3` does (`utilization_5h`, `status_5h`, `reset_5h_at`, the 7d trio,
-  `representative_claim`, `overage_status`, `captured_at`), not just the
-  secondary `oauth_*` layer it started as. This allows `Arbiter.Quota.Gate` to
-  work on a fleet that is quota-held or idle, with current data.
+  `capture/3` is now dormant / archival-only (bd-7cvh8z): it consumed
+  `anthropic-ratelimit-unified-*` response headers from worker traffic, but
+  the Anthropic proxy that was the sole caller was deleted once endpoint polling
+  became the unified architecture across all providers. The function remains
+  for compatibility with any offline migration workflows, but produces no
+  in-production quota updates.
 
   Each write stamps `capture_source` (`"headers"` / `"oauth_poll"`, see
   `header_source/0` and `oauth_poll_source/0`) so a row says which one
   produced it — `arb quota` prints it, and
   `Arbiter.Quota.Gate.staleness_threshold_seconds/1` keys the staleness margin
   off it, because the polled source has a far tighter request budget than
-  header capture does.
+  header capture ever did.
   """
 
   use Ash.Domain

@@ -15,7 +15,7 @@ defmodule Arbiter.Quota.OAuthUsage do
   endpoint's budget is roughly one request per 5 minutes per account, and the
   180s cooldown below means a single 429 costs more than one poll. For
   rate-limit characteristics and documented behavior, see
-  `Arbiter.Quota.OAuthUsage.RateLimit` in `docs/`.
+  `docs/oauth-usage-ratelimit.md`.
 
   ## Auth
 

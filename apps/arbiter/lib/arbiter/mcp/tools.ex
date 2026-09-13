@@ -75,21 +75,20 @@ defmodule Arbiter.MCP.Tools do
   `workspace_show`.
 
   This is a pure DB read (bd-ajh7bd): every provider's figures are read from the
-  persisted quota tables, kept fresh by proxied header capture for Claude
-  and the background `Arbiter.Quota.CloudProbe` (Codex / Gemini CLI /
-  Antigravity, plus Anthropic's own `/api/oauth/usage` poll, which is the
-  primary driver once the fleet goes idle — bd-atyrrq). Nothing here fetches
-  live, so there's no request-time latency or rate-limit exposure.
+  persisted quota tables, kept fresh by the background `Arbiter.Quota.CloudProbe`
+  polling (`/api/oauth/usage` for Anthropic, and similar endpoints for Codex /
+  Gemini CLI / Antigravity). Nothing here fetches live, so there's no
+  request-time latency or rate-limit exposure.
 
-  `claude` is the latest captured snapshot (`nil` until the first proxied
-  request), including the per-model weekly + `extra_usage` overage layer when the
-  oauth-usage probe has run, and `gating_window` / `gating_reason` naming which
-  window (if any) is currently holding dispatch (bd-1tuxv8) — both the 5h and the
-  7d figures are reported, but only one of them, or neither, is what the gate is
-  acting on. `codex` is `nil` with a `codex_message` until the
-  Codex probe has stored a snapshot (i.e. the `codex` CLI is authenticated on
-  this host). `gemini` / `antigravity` are the persisted per-model Cloud Code
-  Assist snapshots (`nil` until the Gemini CLI is authenticated and probed).
+  `claude` is the latest polled snapshot, including per-model weekly breakdowns
+  and `extra_usage` overage spend, and `gating_window` / `gating_reason` naming
+  which window (if any) is currently holding dispatch (bd-1tuxv8) — both the 5h
+  and the 7d figures are reported, but only one of them, or neither, is what the
+  gate is acting on. `nil` until the first poll. `codex` is `nil` with a
+  `codex_message` until the Codex probe has stored a snapshot (i.e. the `codex`
+  CLI is authenticated on this host). `gemini` / `antigravity` are the persisted
+  per-model Cloud Code Assist snapshots (`nil` until the Gemini CLI is
+  authenticated and probed).
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
