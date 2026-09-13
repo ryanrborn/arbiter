@@ -14,7 +14,7 @@ defmodule ArbiterCli.Cmd.Issue do
                           [--deployment-notes text] [--pr-body text]
       arb issue close     <id> [--reason ...]
       arb issue reopen    <id>
-      arb issue promote   <id>
+      arb issue promote   <id> [--waive REASON]
       arb issue claim     <issue#> [--force] [--repo <repo>]
       arb issue sync      [--dry]
       arb issue ready

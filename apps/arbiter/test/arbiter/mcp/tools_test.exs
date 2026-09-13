@@ -15,7 +15,15 @@ defmodule Arbiter.MCP.ToolsTest do
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "mcp-tools-ws", prefix: "mcp"})
-    {:ok, task} = Ash.create(Issue, %{title: "the bound task", workspace_id: ws.id})
+    # bd-7mbrlg: `:promote_to_ready` refuses a gated type with blank
+    # `acceptance`; several tests in this file promote `task`, so the shared
+    # fixture carries a placeholder.
+    {:ok, task} =
+      Ash.create(Issue, %{
+        title: "the bound task",
+        workspace_id: ws.id,
+        acceptance: "- mcp tools fixture"
+      })
 
     worker = %Scope{tier: :worker, workspace_id: ws.id, task_id: task.id, repo: "shipyard"}
     coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
@@ -539,6 +547,36 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, _}} = Tools.task_create(ctx.coordinator, %{"priority" => 1})
     end
 
+    # bd-7mbrlg
+    test "warns (non-blocking) when a gated type is created with no acceptance criteria", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{"title" => "no ACs", "issue_type" => "bug"})
+
+      assert [warning] = data.warnings
+      assert warning =~ "acceptance criteria"
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.refined == false
+    end
+
+    test "no warning when acceptance criteria are given", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "has ACs",
+                 "issue_type" => "bug",
+                 "acceptance" => "- it works"
+               })
+
+      refute Map.has_key?(data, :warnings)
+    end
+
+    test "no warning for exempt types (task/decision/epic) with no acceptance criteria", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{"title" => "a task", "issue_type" => "task"})
+
+      refute Map.has_key?(data, :warnings)
+    end
+
     test "accepts a repo assignment, and task_update can retarget it (bd-2jum8j)", ctx do
       assert {:ok, created} =
                Tools.task_create(ctx.coordinator, %{
@@ -945,6 +983,34 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:error, {:not_found, _}} =
                Tools.task_promote(ctx.coordinator, %{"id" => foreign.id})
+    end
+
+    # bd-7mbrlg
+    test "refuses a bug/feature/chore with no acceptance criteria and no waiver", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "no ACs", workspace_id: ctx.ws.id, issue_type: :bug})
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_promote(ctx.coordinator, %{"id" => task.id})
+
+      assert message =~ "acceptance criteria"
+    end
+
+    test "acceptance_waived allows promotion and is persisted", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "waived", workspace_id: ctx.ws.id, issue_type: :chore})
+
+      assert {:ok, data} =
+               Tools.task_promote(ctx.coordinator, %{
+                 "id" => task.id,
+                 "acceptance_waived" => "trivial config bump"
+               })
+
+      assert data.refined == true
+      assert data.acceptance_waived == "trivial config bump"
+
+      assert {:ok, shown} = Tools.task_show(ctx.coordinator, %{"id" => task.id})
+      assert shown.acceptance_waived == "trivial config bump"
     end
   end
 

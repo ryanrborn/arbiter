@@ -30,21 +30,28 @@ defmodule ArbiterWeb.TaskDetailLive do
       nothing else: the card leaves the board's Backlog column and joins the
       Ready queue on the queue's own terms.
 
-  ## Why promotion has no modal, and no gate
+  ## Why promotion has no modal for the common case, and one gate
 
   The other three actions each destroy or spend something, so each asks first.
   Promotion spends nothing, and Ready is not a commitment — the scheduler still
-  decides on the merits. So it is one click, and no confirmation is one fewer
-  reason to leave work unrefined. It *is* one-way for now: `refined` is not on
-  any action's accept list but this one's, so there is no de-refine path from
-  the UI, CLI, REST or MCP. A demote path is a separate decision.
+  decides on the merits. So the common case is one click, and no confirmation
+  is one fewer reason to leave work unrefined. It *is* one-way for now:
+  `refined` is not on any action's accept list but this one's, so there is no
+  de-refine path from the UI, CLI, REST or MCP. A demote path is a separate
+  decision.
 
-  It is deliberately *not* gated on the task being filled in. Backlog is a
-  refinement surface, not a completeness checklist: the button is clickable
-  with an empty description and no acceptance criteria, because the operator
-  reading the ticket is a better judge of "refined enough" than a field count.
-  A softer nudge may earn its place later; a hard gate would only teach people
-  to type something into the box to get past it.
+  Description and most other fields are deliberately *not* gated on being
+  filled in — Backlog is a refinement surface, not a completeness checklist,
+  and the operator reading the ticket is a better judge of "refined enough"
+  than a field count.
+
+  Acceptance criteria are the one exception (bd-7mbrlg): the follow-up-rate
+  investigation found most issues carry none, which leaves ReviewGate's
+  criteria guards with nothing to score. A `bug`/`feature`/`chore` with blank
+  `acceptance` is refused by `:promote_to_ready` unless a waiver reason is
+  given — `task`/`decision`/`epic` are exempt, and D0 (trivial) work is
+  auto-waived. The plain click still handles every case that doesn't need a
+  waiver; only a refusal opens the waiver modal below.
   """
 
   use ArbiterWeb, :live_view
@@ -98,6 +105,9 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:close_modal, false)
      |> assign(:close_error, nil)
      |> assign(:close_params, %{})
+     |> assign(:promote_waiver_modal, false)
+     |> assign(:promote_waiver_error, nil)
+     |> assign(:promote_waiver_params, %{})
      |> assign(:dispatch_modal, false)
      |> assign(:dispatch_error, nil)
      |> assign(:dispatch_params, %{})
@@ -296,8 +306,11 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   # ---- promote to Ready ----
   #
-  # One write, no modal. `:promote_to_ready` is idempotent, so a double-click
-  # is harmless, and the button disappears on the re-render either way.
+  # One write, no modal — UNLESS `:promote_to_ready` refuses for lack of
+  # acceptance criteria (bd-7mbrlg), in which case the waiver modal below
+  # opens instead of just flashing an error, since a waiver reason is the one
+  # way to actually get past that refusal. Otherwise idempotent: a
+  # double-click is harmless, and the button disappears on the re-render.
 
   def handle_event("promote_to_ready", _params, socket) do
     case socket.assigns.task do
@@ -313,11 +326,54 @@ defmodule ArbiterWeb.TaskDetailLive do
              |> refresh_all()}
 
           {:error, err} ->
-            {:noreply, put_flash(socket, :error, TaskForm.error_message(err))}
+            if acceptance_criteria_error?(err) do
+              {:noreply,
+               assign(socket,
+                 promote_waiver_modal: true,
+                 promote_waiver_error: TaskForm.error_message(err),
+                 promote_waiver_params: %{}
+               )}
+            else
+              {:noreply, put_flash(socket, :error, TaskForm.error_message(err))}
+            end
         end
 
       _ ->
         {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_promote_waiver", _params, socket) do
+    {:noreply,
+     assign(socket,
+       promote_waiver_modal: false,
+       promote_waiver_error: nil,
+       promote_waiver_params: %{}
+     )}
+  end
+
+  def handle_event("promote_with_waiver", params, socket) do
+    waiver_params = Map.get(params, "waiver", %{})
+    reason = waiver_params |> Map.get("reason") |> TaskForm.trimmed()
+    socket = assign(socket, :promote_waiver_params, waiver_params)
+
+    case socket.assigns.task do
+      %Issue{} = task when is_binary(reason) ->
+        case Ash.update(task, %{acceptance_waived: reason}, action: :promote_to_ready) do
+          {:ok, _promoted} ->
+            {:noreply,
+             socket
+             |> assign(promote_waiver_modal: false, promote_waiver_error: nil)
+             |> put_flash(:info, "Moved to Ready with a waiver — the scheduler owns it now.")
+             |> refresh_all()}
+
+          {:error, err} ->
+            {:noreply, assign(socket, :promote_waiver_error, TaskForm.error_message(err))}
+        end
+
+      _ ->
+        {:noreply,
+         assign(socket, :promote_waiver_error, "Give a reason for waiving acceptance criteria.")}
     end
   end
 
@@ -527,6 +583,15 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp dispatch_failure(reason), do: inspect(reason)
 
   # ---- data ----
+
+  defp acceptance_criteria_error?(%Ash.Error.Invalid{errors: errors}) do
+    Enum.any?(errors, fn
+      %{field: :acceptance} -> true
+      _ -> false
+    end)
+  end
+
+  defp acceptance_criteria_error?(_), do: false
 
   defp refresh_all(socket) do
     socket
@@ -982,6 +1047,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                     </span>
                   </li>
                 </ul>
+              </.panel>
+
+              <.panel :if={present?(@task.acceptance_waived)} title="ACCEPTANCE WAIVED">
+                <p class="text-[12.5px] leading-snug text-[var(--text-secondary)]">
+                  {@task.acceptance_waived}
+                </p>
               </.panel>
 
               <%!-- bd-5lc99r: for a `task`-type directive the findings summary
@@ -1558,6 +1629,55 @@ defmodule ArbiterWeb.TaskDetailLive do
           </.form>
         </div>
         <div class="modal-backdrop" phx-click="cancel_close"></div>
+      </div>
+
+      <%!-- Promote waiver modal (bd-7mbrlg). Opens only when a plain
+           "promote_to_ready" click was refused for lack of acceptance
+           criteria — a waiver reason is the one way past that refusal. --%>
+      <div
+        :if={@promote_waiver_modal && @task}
+        class="modal modal-open"
+        id="task-promote-waiver-modal"
+      >
+        <div class="modal-box">
+          <h3 class="font-semibold text-lg mb-3">Promote without acceptance criteria</h3>
+          <p class="text-sm text-base-content/70 mb-3">
+            <code class="text-xs">{@task_id}</code>
+            has no acceptance criteria, so ReviewGate has nothing to score it against.
+            Add <code class="text-xs">acceptance</code>
+            via Edit, or give a reason to promote anyway.
+          </p>
+          <.form
+            for={%{}}
+            as={:waiver}
+            id="task-promote-waiver-form"
+            phx-submit="promote_with_waiver"
+            class="space-y-2"
+          >
+            <.input
+              type="textarea"
+              name="waiver[reason]"
+              label="Waiver reason"
+              value={TaskForm.value(@promote_waiver_params, "reason")}
+              rows="2"
+              placeholder="e.g. spike, no user-facing behavior"
+            />
+            <p :if={@promote_waiver_error} class="text-sm text-error">{@promote_waiver_error}</p>
+            <div class="modal-action">
+              <ArbiterWeb.CoreComponents.button
+                type="button"
+                phx-click="cancel_promote_waiver"
+                class="btn btn-sm btn-ghost"
+              >
+                Cancel
+              </ArbiterWeb.CoreComponents.button>
+              <ArbiterWeb.CoreComponents.button type="submit" class="btn btn-sm btn-primary">
+                Promote with waiver
+              </ArbiterWeb.CoreComponents.button>
+            </div>
+          </.form>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_promote_waiver"></div>
       </div>
 
       <%!-- Dispatch modal. The acknowledgement checkbox IS the confirmation

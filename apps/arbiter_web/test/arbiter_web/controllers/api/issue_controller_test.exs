@@ -31,6 +31,43 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert ws_id == ws.id
     end
 
+    # bd-7mbrlg
+    test "warns (non-blocking) when a gated type is created with no acceptance criteria", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        post(conn, ~p"/api/issues", %{title: "no ACs", workspace_id: ws.id, issue_type: "bug"})
+
+      body = json_response(conn, 201)
+      assert [warning] = body["warnings"]
+      assert warning =~ "acceptance criteria"
+    end
+
+    test "no warning when acceptance criteria are given", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "has ACs",
+          workspace_id: ws.id,
+          issue_type: "bug",
+          acceptance: "- it works"
+        })
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "warnings")
+    end
+
+    test "no warning for exempt types (task/decision/epic) with no acceptance criteria", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        post(conn, ~p"/api/issues", %{title: "a task", workspace_id: ws.id, issue_type: "task"})
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "warnings")
+    end
+
     test "accepts and persists `difficulty` (0..5)", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/issues", %{
@@ -479,7 +516,9 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
   describe "POST /api/issues/:id/promote" do
     test "promotes a task from Backlog to Ready", %{conn: conn, ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "promote me", workspace_id: ws.id})
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "promote me", workspace_id: ws.id, acceptance: "- works"})
+
       assert issue.refined == false
 
       conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
@@ -489,7 +528,9 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
 
     test "promoting an already-refined task is a no-op success", %{conn: conn, ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "x", workspace_id: ws.id, acceptance: "- works"})
+
       {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
       assert refined.refined == true
 
@@ -497,6 +538,48 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
       body = json_response(conn, 200)
       assert body["refined"] == true
+    end
+
+    # bd-7mbrlg
+    test "refuses a bug/feature/chore with no acceptance criteria and no waiver", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :bug})
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
+
+      body = json_response(conn, 422)
+      assert body["error"]["type"] == "validation_error"
+      assert body["error"]["message"] =~ "acceptance criteria"
+    end
+
+    test "an acceptance_waived reason allows promotion and is persisted", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "waived", workspace_id: ws.id, issue_type: :chore})
+
+      conn =
+        post(conn, ~p"/api/issues/#{issue.id}/promote", %{
+          "acceptance_waived" => "trivial config bump"
+        })
+
+      body = json_response(conn, 200)
+      assert body["refined"] == true
+      assert body["acceptance_waived"] == "trivial config bump"
+    end
+
+    test "task/decision/epic promote fine with no acceptance criteria (exempt)", %{
+      conn: conn,
+      ws: ws
+    } do
+      for type <- [:task, :decision, :epic] do
+        {:ok, issue} =
+          Ash.create(Issue, %{title: "exempt #{type}", workspace_id: ws.id, issue_type: type})
+
+        conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
+        assert json_response(conn, 200)["refined"] == true
+      end
     end
   end
 

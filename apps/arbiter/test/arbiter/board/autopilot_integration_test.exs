@@ -36,7 +36,10 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
   # only ever dispatches out of Ready. Every fixture here is meant to be a
   # queue candidate, so it is promoted on the way out.
   defp issue(ws, title, attrs) do
-    {:ok, created} = Ash.create(Issue, Map.merge(%{title: title, workspace_id: ws.id}, attrs))
+    # bd-7mbrlg: `:promote_to_ready` now refuses a gated type with no
+    # acceptance criteria. Nothing here is testing that guard.
+    base = %{title: title, workspace_id: ws.id, acceptance: "- autopilot fixture"}
+    {:ok, created} = Ash.create(Issue, Map.merge(base, attrs))
     {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
     issue
   end
@@ -126,7 +129,12 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
   # actually spend credits on an unrefined ticket.
   test "an unrefined card is never dispatched, however free the fleet is", %{ws: ws} do
     {:ok, unrefined} =
-      Ash.create(Issue, %{title: "not thought through", workspace_id: ws.id, priority: 0})
+      Ash.create(Issue, %{
+        title: "not thought through",
+        workspace_id: ws.id,
+        priority: 0,
+        acceptance: "- autopilot fixture"
+      })
 
     pid = start_autopilot()
     board = Autopilot.board(pid, [])

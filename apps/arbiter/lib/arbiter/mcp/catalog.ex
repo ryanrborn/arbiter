@@ -294,7 +294,9 @@ defmodule Arbiter.MCP.Catalog do
           "and stay there until a human promotes them from the task detail page. " <>
           "Graph-driven dispatch (`task_ready`, workflow admission) ignores `refined`, so a " <>
           "task that is part of a workflow graph still runs; a standalone task filed here " <>
-          "waits for that promotion.",
+          "waits for that promotion. bd-7mbrlg: filing a `bug`/`feature`/`chore` with no " <>
+          "`acceptance` returns a non-blocking `warnings` entry in the response — the task " <>
+          "still gets created, but `task_promote` will later refuse it without ACs or a waiver.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -450,11 +452,20 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Promote a task from Backlog to Ready (set `refined: true`) via the `:promote_to_ready` action. " <>
           "Coordinator only. Idempotent by design — promoting an already-refined task is a no-op success, " <>
-          "not an error.",
+          "not an error. bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused unless " <>
+          "you pass `acceptance_waived` with a reason (`task`/`decision`/`epic` are exempt; D0 work is " <>
+          "auto-waived).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."}
+          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "acceptance_waived" => %{
+            "type" => "string",
+            "description" =>
+              "Reason for promoting a bug/feature/chore with no acceptance criteria. Required " <>
+                "(non-blank) only when the task is a gated type, has blank `acceptance`, and " <>
+                "isn't D0. Persisted onto the task and shown in `task_show`."
+          }
         },
         "required" => ["id"],
         "additionalProperties" => false
