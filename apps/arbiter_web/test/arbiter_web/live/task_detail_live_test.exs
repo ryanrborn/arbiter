@@ -172,6 +172,52 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
   end
 
+  # bd-9so315 — the task page is where the verification evidence lives, and
+  # where the board's "verify" chip sends the coordinator.
+  describe "post-merge verification" do
+    test "a parked task says it is awaiting verification and how to record it", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "doctor probe",
+          workspace_id: ws.id,
+          verify_after_deploy: true
+        })
+
+      {:ok, _} = Ash.update(task, %{}, action: :await_verification)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "awaiting_verification"
+      assert html =~ "arb issue verify"
+    end
+
+    test "a recorded verdict shows the outcome and the evidence", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "capture", workspace_id: ws.id, verify_after_deploy: true})
+
+      {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
+
+      {:ok, _closed} =
+        Arbiter.Tasks.Verification.observed(awaiting, "restarted 14:02; the new path fires")
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "restarted 14:02; the new path fires"
+      assert html =~ "observed"
+    end
+
+    test "an unflagged task shows no verification section", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "ordinary", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ "arb issue verify"
+    end
+  end
+
   describe "Merge section — prior MR history (bd-6h4ia3)" do
     defp create_run(task, mr_ref, started_at) do
       {:ok, run} =
@@ -458,6 +504,39 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert html =~ ~s(class="btn btn-sm btn-ghost" type="button" phx-click="cancel_edit")
       assert html =~ ~s(class="btn btn-sm btn-primary" type="submit")
+    end
+    # bd-9so315: the status select only offers the statuses `:update` accepts,
+    # so a parked task's own status was not among them — the browser would fall
+    # back to the first option and an edit that never meant to touch status
+    # would try an illegal transition and fail the whole save.
+    test "editing a parked task keeps its status instead of silently resetting it", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "parked", workspace_id: ws.id, verify_after_deploy: true})
+
+      {:ok, parked} = Ash.update(task, %{}, action: :await_verification)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{parked.id}")
+      html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+      assert html =~ "awaiting_verification"
+
+      view
+      |> form("#task-edit-form", %{
+        "task" => %{
+          "title" => "parked, retitled",
+          "status" => "awaiting_verification",
+          "priority" => "2",
+          "difficulty" => "2",
+          "issue_type" => "feature"
+        }
+      })
+      |> render_submit()
+
+      reloaded = Ash.get!(Issue, parked.id)
+      assert reloaded.title == "parked, retitled"
+      assert reloaded.status == :awaiting_verification
     end
   end
 

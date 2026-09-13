@@ -117,7 +117,6 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:priority_options, TaskForm.priority_options())
      |> assign(:difficulty_options, TaskForm.difficulty_options())
      |> assign(:issue_type_options, TaskForm.issue_type_options())
-     |> assign(:status_options, TaskForm.editable_status_options())
      |> assign(:provider_options, provider_options())
      |> assign(:run_filter, "all")
      |> assign(:expanded_run, nil)
@@ -1350,6 +1349,44 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
+              <%!-- bd-9so315: a merged-but-unverified task, and the record of
+                    what was (or wasn't) observed once someone looked. Rendered
+                    only for a task the flag applies to — every other task has
+                    nothing to say here. --%>
+              <.panel :if={@task.verify_after_deploy} title="POST-MERGE VERIFICATION">
+                <.data_list class="text-[12px]">
+                  <:item label="Flagged">
+                    <code class="text-xs">verify_after_deploy</code>
+                  </:item>
+                  <:item :if={@task.awaiting_verification_at} label="Parked">
+                    <code class="text-xs">{format_audit_ts(@task.awaiting_verification_at)}</code>
+                  </:item>
+                  <:item :if={@task.verification_outcome} label="Outcome">
+                    <code class="text-xs">{@task.verification_outcome}</code>
+                  </:item>
+                </.data_list>
+
+                <p
+                  :if={present?(@task.verification_evidence)}
+                  class="mt-2 text-[12px] whitespace-pre-wrap text-[var(--text-secondary)]"
+                >
+                  {@task.verification_evidence}
+                </p>
+
+                <div :if={@task.status == :awaiting_verification} class="mt-3 space-y-1">
+                  <p class="text-[12px] text-[var(--text-secondary)]">
+                    Merged, but nothing has run the new code yet. Restart the server, observe
+                    the new path once, then record what you saw:
+                  </p>
+                  <code class="block text-[11px] text-[var(--text-label)]" phx-no-curly-interpolation>
+                    arb issue verify <%= @task_id %> --observed "&lt;evidence&gt;"
+                  </code>
+                  <code class="block text-[11px] text-[var(--text-label)]" phx-no-curly-interpolation>
+                    arb issue verify <%= @task_id %> --failed "&lt;evidence&gt;"
+                  </code>
+                </div>
+              </.panel>
+
               <.panel title="MACHINE STATE">
                 <.data_list class="text-[12px]">
                   <:item :if={@issue_repo} label={String.capitalize(@rig_label)}>
@@ -1507,7 +1544,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               type="select"
               name="task[status]"
               label="Status"
-              options={@status_options}
+              options={TaskForm.editable_status_options(@task.status)}
               value={TaskForm.value(@edit_params, "status", to_string(@task.status))}
             />
             <.input
@@ -1826,6 +1863,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp status_badge_class(:open), do: "badge-success"
   defp status_badge_class(:in_progress), do: "badge-info"
   defp status_badge_class(:closed), do: "badge-ghost"
+  defp status_badge_class(:awaiting_verification), do: "badge-warning"
   defp status_badge_class(_), do: ""
 
   # bd-5lc99r: a string field counts as present only when it is non-nil and not
