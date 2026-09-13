@@ -60,6 +60,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
                            "../../fixtures/review_no_verdict_auth_prose.sh",
                            __DIR__
                          )
+  @scan_reset Path.expand("../../fixtures/review_scan_reset.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
 
@@ -147,6 +148,28 @@ defmodule Arbiter.Worker.ReviewGateTest do
                ReviewGate.recover_verdict_from_scans(scans)
 
       assert findings =~ "missing nil guard"
+    end
+
+    test "when both passes' transcripts parse, the most recent pass wins (not the earliest)" do
+      write_durable_log("recover-both-older", [
+        "VERDICT: REQUEST_CHANGES",
+        "1. stale finding from an earlier pass"
+      ])
+
+      write_durable_log("recover-both-newer", [
+        "VERDICT: REQUEST_CHANGES",
+        "1. current finding from the most recent pass"
+      ])
+
+      scans = [
+        %{run_id: "recover-both-newer", memory: 2, durable: 2},
+        %{run_id: "recover-both-older", memory: 2, durable: 2}
+      ]
+
+      assert {:ok, {:request_changes, findings}, "recover-both-newer"} =
+               ReviewGate.recover_verdict_from_scans(scans)
+
+      assert findings =~ "current finding from the most recent pass"
     end
 
     test "returns :none when no scanned pass's durable transcript has a parseable verdict" do
@@ -1720,6 +1743,88 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert length(rounds) == 1,
              "the recovered verdict must be recorded as a normal round, not discarded"
+    end
+
+    # bd-869mmg round 4: a PRIOR round's stale `:no_verdict` scan must not be
+    # resurrected during a LATER round's escalation. Round 1 pass 1 concedes
+    # :no_verdict (its scan is recorded); round 1's re-prompt returns a real
+    # REQUEST_CHANGES, which feeds the revise loop; round 2 pass 1 and its
+    # re-prompt BOTH concede :no_verdict. Between round 2's final pass
+    # starting and finishing, the test mutates round 1 pass 1's already-closed
+    # durable transcript to hold a (stale) parseable verdict — if
+    # `state.verdict_scans` were not reset at the start of round 2,
+    # `recover_verdict_from_scans/1` would resurrect that round-1 pass's
+    # verdict and dispatch it as round 2's outcome, reviewing code the
+    # implementer already revised past.
+    test "a round's stale no_verdict scan is not recovered during a later round's escalation",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      go_file = Path.join([repo, ".git", "review_scan_reset_go"])
+      on_exit(fn -> File.rm(go_file) end)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 2,
+        worktree_path: repo,
+        review_command: [@scan_reset],
+        revise_command: [@revise_commit],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      round2_reprompt_id = review_id <> "#r2#v2"
+
+      # Wait for round 2's re-prompt pass to start — proof round 1 pass 1
+      # conceded :no_verdict, round 1's re-prompt returned a real
+      # REQUEST_CHANGES that drove a revision, and round 2 pass 1 ALSO
+      # conceded :no_verdict, exactly like the failure scenario.
+      wait_until(
+        fn -> Enum.any?(Ash.read!(Arbiter.Workers.Run), &(&1.task_id == round2_reprompt_id)) end,
+        6_000
+      )
+
+      round1_pass1_run_id =
+        Ash.read!(Arbiter.Workers.Run)
+        |> Enum.find(&(&1.task_id == review_id))
+        |> Map.fetch!(:id)
+
+      # Mutate round 1 pass 1's already-closed durable transcript to hold a
+      # stale-but-parseable verdict — standing in for the same "a verdict is
+      # sitting on disk that the pass's own scan didn't see" surprise that
+      # motivates recovery at all, but from a round that has already been
+      # superseded by a revision.
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(round1_pass1_run_id)
+      Arbiter.Worker.OutputLog.append(handle, "VERDICT: REQUEST_CHANGES")
+      Arbiter.Worker.OutputLog.append(handle, "1. STALE round-1 finding, must not resurface")
+      Arbiter.Worker.OutputLog.close(handle)
+
+      # Release round 2's re-prompt pass, which concedes its own :no_verdict.
+      File.write!(go_file, "go")
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+
+      # Escalated as genuinely inconclusive — the stale round-1 verdict must
+      # NOT have been recovered and dispatched as round 2's outcome.
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      findings = Worker.state(pid).meta.review_gate_findings
+
+      refute findings =~ "STALE round-1 finding",
+             "a previous round's stale scan must not be recovered during a later round's escalation"
     end
 
     # bd-6dxit2: an :no_verdict outcome must say which of the two possible

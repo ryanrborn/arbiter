@@ -543,9 +543,9 @@ defmodule Arbiter.Worker.ReviewGate do
   nothing) must not be the last word — the gate's own re-prompt-and-escalate
   flow previously discarded that pass's transcript entirely once a LATER
   pass's scan also came back empty. `scans` is every pass's `verdict_scan/0`
-  record, most recent first; the earliest pass with a real verdict on disk
-  right now wins. Returns `{:ok, verdict, run_id}` on recovery, `:none`
-  otherwise.
+  record, most recent first; the most recent pass with a real verdict on disk
+  right now wins (the newest pass reviewed the newest code). Returns
+  `{:ok, verdict, run_id}` on recovery, `:none` otherwise.
   """
   @spec recover_verdict_from_scans([verdict_scan()]) ::
           {:ok, verdict(), String.t()} | :none
@@ -1093,66 +1093,64 @@ defmodule Arbiter.Worker.ReviewGate do
   # (`maybe_reprompt/2`'s final concession, via `recover_verdict_from_scans/1`) —
   # both cases need the same criteria/partial-verification/empty-findings
   # guards applied before the outcome is final.
-  defp dispatch_verdict(state, verdict) do
-    case verdict do
-      {:approve, findings} = verdict ->
-        # bd-4yhv4x: an APPROVE on a criteria-bearing task must NOT clean-merge
-        # unless the reviewer actually accounted for every acceptance criterion —
-        # the same fail-closed treatment `partial_verification?` gets. Only gate
-        # when the task HAS acceptance criteria (Option B): a task with no stated
-        # criteria has nothing to break down, so its APPROVE finalizes as before.
-        # Two failure modes are caught, both routed away from a clean merge:
-        #   * the breakdown admits a `[NOT MET]` criterion  → the :unmet_criteria guard
-        #   * NO CRITERIA breakdown at all (a bare holistic APPROVE that judges
-        #     code quality, not criteria satisfaction — the original bug's exact
-        #     shape) → the :missing_criteria guard
-        # Enforcing the breakdown only via prompt text left the gate itself open:
-        # a reviewer that ignored the instruction reproduced occurrences #1/#2.
-        # bd-6r8caj: FIRST, before any criteria question, ask whether this round
-        # even accounted for the findings already open against the work. A
-        # revision round could previously return APPROVE / VERIFICATION: FULL
-        # having never revisited the finding it raised itself one round earlier
-        # (observed on bd-8mtb0q): findings were free prose, so "was F1.1
-        # addressed?" was not a question the gate could ask. Now it is, and an
-        # APPROVE that leaves a Medium-or-higher finding with no disposition —
-        # or marks one [NOT ADDRESSED], or claims [ADDRESSED] against a file no
-        # revision touched — is treated as malformed, exactly like a missing
-        # `VERDICT:` line. Round 1 has nothing open, so the common path is
-        # untouched.
-        gap = approval_gap(state, findings)
+  defp dispatch_verdict(state, {:approve, findings} = verdict) do
+    # bd-4yhv4x: an APPROVE on a criteria-bearing task must NOT clean-merge
+    # unless the reviewer actually accounted for every acceptance criterion —
+    # the same fail-closed treatment `partial_verification?` gets. Only gate
+    # when the task HAS acceptance criteria (Option B): a task with no stated
+    # criteria has nothing to break down, so its APPROVE finalizes as before.
+    # Two failure modes are caught, both routed away from a clean merge:
+    #   * the breakdown admits a `[NOT MET]` criterion  → the :unmet_criteria guard
+    #   * NO CRITERIA breakdown at all (a bare holistic APPROVE that judges
+    #     code quality, not criteria satisfaction — the original bug's exact
+    #     shape) → the :missing_criteria guard
+    # Enforcing the breakdown only via prompt text left the gate itself open:
+    # a reviewer that ignored the instruction reproduced occurrences #1/#2.
+    # bd-6r8caj: FIRST, before any criteria question, ask whether this round
+    # even accounted for the findings already open against the work. A
+    # revision round could previously return APPROVE / VERIFICATION: FULL
+    # having never revisited the finding it raised itself one round earlier
+    # (observed on bd-8mtb0q): findings were free prose, so "was F1.1
+    # addressed?" was not a question the gate could ask. Now it is, and an
+    # APPROVE that leaves a Medium-or-higher finding with no disposition —
+    # or marks one [NOT ADDRESSED], or claims [ADDRESSED] against a file no
+    # revision touched — is treated as malformed, exactly like a missing
+    # `VERDICT:` line. Round 1 has nothing open, so the common path is
+    # untouched.
+    gap = approval_gap(state, findings)
 
-        cond do
-          ReviewFindings.gap?(gap) ->
-            run_verdict_guard(:unaddressed_findings, state, findings, gap)
+    cond do
+      ReviewFindings.gap?(gap) ->
+        run_verdict_guard(:unaddressed_findings, state, findings, gap)
 
-          has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
-            run_verdict_guard(:unmet_criteria, state, findings)
+      has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) ->
+        run_verdict_guard(:unmet_criteria, state, findings)
 
-          has_acceptance_criteria?(state) and not ReviewVerification.criteria_present?(findings) ->
-            run_verdict_guard(:missing_criteria, state, findings)
+      has_acceptance_criteria?(state) and not ReviewVerification.criteria_present?(findings) ->
+        run_verdict_guard(:missing_criteria, state, findings)
 
-          true ->
-            record_round(state, :review, :approve, findings, converged: true)
-            stamp_reviewed_head(state)
-            {:done, finish(state, verdict)}
-        end
+      true ->
+        record_round(state, :review, :approve, findings, converged: true)
+        stamp_reviewed_head(state)
+        {:done, finish(state, verdict)}
+    end
+  end
 
-      {:request_changes, findings} ->
-        # A REQUEST_CHANGES verdict that names no concrete findings is useless: the
-        # implementer has nothing to act on, the gate stalls, and a full review is
-        # wasted (bd-3y2mda). Treat it as malformed and re-prompt for findings
-        # (capped, shares the verdict-retry budget) rather than entering the revise
-        # loop with empty hands.
-        cond do
-          not findings_present?(findings) ->
-            maybe_reprompt(state, :empty_findings)
+  defp dispatch_verdict(state, {:request_changes, findings}) do
+    # A REQUEST_CHANGES verdict that names no concrete findings is useless: the
+    # implementer has nothing to act on, the gate stalls, and a full review is
+    # wasted (bd-3y2mda). Treat it as malformed and re-prompt for findings
+    # (capped, shares the verdict-retry budget) rather than entering the revise
+    # loop with empty hands.
+    cond do
+      not findings_present?(findings) ->
+        maybe_reprompt(state, :empty_findings)
 
-          partial_verification?(findings) ->
-            run_verdict_guard(:partial_verification, state, findings)
+      partial_verification?(findings) ->
+        run_verdict_guard(:partial_verification, state, findings)
 
-          true ->
-            handle_reject(state, findings)
-        end
+      true ->
+        handle_reject(state, findings)
     end
   end
 
@@ -1391,7 +1389,9 @@ defmodule Arbiter.Worker.ReviewGate do
       | round: state.round + 1,
         phase: :reviewing,
         retries_left: state.initial_retries,
-        attempt: 0
+        attempt: 0,
+        verdict_scan: nil,
+        verdict_scans: []
     }
 
     review_id = reviewer_round_id(next.review_id, next.round)
@@ -1705,7 +1705,9 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done,
          finish(
            state,
-           {:no_verdict, "Reviewer produced no usable verdict; re-prompt could not be spawned."}
+           {:no_verdict,
+            "Reviewer produced no usable verdict; re-prompt could not be spawned. " <>
+              transcript_location_note(state)}
          )}
     end
   end
