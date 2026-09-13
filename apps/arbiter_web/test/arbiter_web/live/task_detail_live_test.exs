@@ -505,7 +505,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "clicking it refines the task and the action goes away", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "refine me", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "refine me", workspace_id: ws.id, acceptance: "- it works"})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
@@ -518,7 +519,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "an already-refined task offers no promote action", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "already refined", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "already refined",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
+
       {:ok, _} = Ash.update(task, %{}, action: :promote_to_ready)
 
       {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
@@ -535,10 +542,16 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute html =~ ~s(phx-click="promote_to_ready")
     end
 
-    test "an empty task still promotes — Backlog is not a completeness gate",
+    test "an empty task with no description still promotes — Backlog is not a completeness gate",
          %{conn: conn, ws: ws} do
+      # bd-7mbrlg: acceptance criteria is the one exception (below); an empty
+      # description doesn't gate promotion at all.
       {:ok, task} =
-        Ash.create(Issue, %{title: "no description, no acceptance", workspace_id: ws.id})
+        Ash.create(Issue, %{
+          title: "no description",
+          workspace_id: ws.id,
+          acceptance: "- it works"
+        })
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
@@ -554,6 +567,94 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ ~s(phx-click="promote_to_ready")
+    end
+
+    # bd-7mbrlg — the acceptance-criteria gate and its waiver modal.
+    test "a bug with no acceptance criteria opens the waiver modal instead of promoting",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :bug})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+      assert html =~ "Promote without acceptance criteria"
+      assert has_element?(view, "#task-promote-waiver-form")
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.refined
+    end
+
+    test "submitting the waiver form with a reason promotes and persists the reason",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :feature})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-promote-waiver-form", waiver: %{reason: "spike, no user-facing change"})
+        |> render_submit()
+
+      refute html =~ "Promote without acceptance criteria"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.refined
+      assert reloaded.acceptance_waived == "spike, no user-facing change"
+    end
+
+    test "submitting the waiver form with a blank reason keeps the modal open with an error",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :chore})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-promote-waiver-form", waiver: %{reason: "   "})
+        |> render_submit()
+
+      assert html =~ "reason for waiving"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.refined
+    end
+
+    test "a task/decision/epic with no acceptance criteria promotes directly (exempt)",
+         %{conn: conn, ws: ws} do
+      for type <- [:task, :decision, :epic] do
+        {:ok, task} =
+          Ash.create(Issue, %{title: "exempt #{type}", workspace_id: ws.id, issue_type: type})
+
+        {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+        view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+        {:ok, reloaded} = Ash.get(Issue, task.id)
+        assert reloaded.refined
+      end
+    end
+
+    test "D0 work promotes directly with an auto-waiver, no modal", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "trivial",
+          workspace_id: ws.id,
+          issue_type: :chore,
+          difficulty: 0
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+      refute html =~ "Promote without acceptance criteria"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.refined
+      assert reloaded.acceptance_waived =~ "D0"
     end
   end
 

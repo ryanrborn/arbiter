@@ -66,7 +66,15 @@ defmodule ArbiterWeb.BoardLiveTest do
   end
 
   defp backlog_issue(ws, title, attrs \\ %{}) do
-    {:ok, issue} = Ash.create(Issue, Map.merge(%{title: title, workspace_id: ws.id}, attrs))
+    # bd-7mbrlg: `:promote_to_ready` now refuses a gated type with no
+    # acceptance criteria. Nothing in this file is testing that guard, so the
+    # fixture carries a placeholder AC unless the caller overrides it.
+    {:ok, issue} =
+      Ash.create(
+        Issue,
+        Map.merge(%{title: title, workspace_id: ws.id, acceptance: "- board fixture"}, attrs)
+      )
+
     issue
   end
 

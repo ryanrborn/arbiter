@@ -49,6 +49,12 @@ defmodule Arbiter.Tasks.Issue do
   @issue_types ~w(task bug feature epic chore decision)a
   @tracker_types ~w(none jira shortcut linear github gitlab)a
 
+  # bd-7mbrlg: `task`, `decision`, and `epic` never open a PR, so ReviewGate's
+  # criteria guards (`:unmet_criteria` / `:missing_criteria`) never score them
+  # — no point gating promotion on ACs they can't use. `bug`/`feature`/`chore`
+  # are the reviewable, PR-producing types those guards actually score.
+  @gated_issue_types ~w(bug feature chore)a
+
   sqlite do
     table "issues"
     repo Arbiter.Repo
@@ -344,6 +350,14 @@ defmodule Arbiter.Tasks.Issue do
     update :promote_to_ready do
       require_atomic? false
 
+      # bd-7mbrlg: reason an operator gives to promote a bug/feature/chore
+      # with no acceptance criteria. Required (and persisted to
+      # `acceptance_waived`) only when the issue is a gated type, has no
+      # `acceptance`, and isn't D0 (auto-waived) — see
+      # `Changes.RequireAcceptanceCriteria`.
+      argument :acceptance_waived, :string, allow_nil?: true
+
+      change {Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria, []}
       change set_attribute(:refined, true)
 
       change after_action(fn _, issue, _ ->
@@ -511,6 +525,19 @@ defmodule Arbiter.Tasks.Issue do
       (`arb create`, `task_create`, the REST API, tracker sync, the dashboard
       form) lands in Backlog, and the only way out is the `:promote_to_ready`
       action behind the task detail page's "Move to Ready" button.
+      """
+    end
+
+    attribute :acceptance_waived, :string do
+      public? true
+      constraints trim?: true
+
+      description """
+      Reason an operator gave for promoting a `bug`/`feature`/`chore` to Ready
+      without acceptance criteria (bd-7mbrlg). Set only by `:promote_to_ready`
+      — see `Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria`, which
+      also auto-fills a standard reason for D0 (trivial) work. `nil` means no
+      waiver was ever needed or given.
       """
     end
 
@@ -917,6 +944,16 @@ defmodule Arbiter.Tasks.Issue do
 
   @doc "List of valid tracker_type atoms."
   def tracker_types, do: @tracker_types
+
+  @doc """
+  Issue types gated by bd-7mbrlg's acceptance-criteria-before-Ready rule:
+  `bug`, `feature`, `chore`. `task`, `decision`, and `epic` are exempt — they
+  never open a PR, so ReviewGate's criteria guards never score them.
+  """
+  def gated_issue_types, do: @gated_issue_types
+
+  @doc "Whether `issue_type` is subject to the acceptance-criteria-before-Ready rule."
+  def gated_type?(issue_type), do: issue_type in @gated_issue_types
 
   @doc """
   Returns the list of "ready" issues — issues whose `status == :open` and which

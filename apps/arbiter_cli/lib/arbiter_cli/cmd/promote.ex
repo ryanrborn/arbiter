@@ -1,15 +1,20 @@
 defmodule ArbiterCli.Cmd.Promote do
   @moduledoc """
-  `arb issue promote <id>` — promote a task from Backlog to Ready.
+  `arb issue promote <id> [--waive REASON]` — promote a task from Backlog to Ready.
 
   Wraps `POST /api/issues/:id/promote`, which runs the `:promote_to_ready` action:
   it sets `refined: true`, moving the task from Backlog to Ready. Idempotent —
   promoting an already-refined task is a no-op success, not an error.
+
+  bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused
+  unless `--waive REASON` is given (`task`/`decision`/`epic` are exempt; D0
+  work is auto-waived). The reason is persisted onto the task as
+  `acceptance_waived` and shown in `task show`.
   """
 
   alias ArbiterCli.{Client, Output}
 
-  @switches [json: :boolean]
+  @switches [json: :boolean, waive: :string]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -25,7 +30,13 @@ defmodule ArbiterCli.Cmd.Promote do
           _ -> Output.die("promote takes exactly one positional argument: the issue id")
         end
 
-      case Client.post("/api/issues/" <> id <> "/promote", %{}) do
+      body =
+        case opts[:waive] do
+          reason when is_binary(reason) and reason != "" -> %{"acceptance_waived" => reason}
+          _ -> %{}
+        end
+
+      case Client.post("/api/issues/" <> id <> "/promote", body) do
         {:ok, issue} -> Output.emit_issue(issue, mode)
         {:error, err} -> Output.die(friendly_error(id, err))
       end

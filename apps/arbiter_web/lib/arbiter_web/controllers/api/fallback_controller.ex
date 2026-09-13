@@ -32,13 +32,15 @@ defmodule ArbiterWeb.Api.FallbackController do
       |> put_status(:not_found)
       |> json(%{error: %{type: "not_found", message: "resource not found", details: %{}}})
     else
+      details = ash_invalid_details(err)
+
       conn
       |> put_status(:unprocessable_entity)
       |> json(%{
         error: %{
           type: "validation_error",
-          message: "validation failed",
-          details: ash_invalid_details(err)
+          message: validation_message(details),
+          details: details
         }
       })
     end
@@ -172,6 +174,16 @@ defmodule ArbiterWeb.Api.FallbackController do
   end
 
   defp contains_not_found?(_), do: false
+
+  # A single validation error is common (e.g. bd-7mbrlg's acceptance-criteria
+  # guard) and its message is specific enough to surface directly, sparing
+  # callers (like the CLI) a round-trip through `details.errors` just to show
+  # the operator what actually went wrong. Multiple errors keep the generic
+  # top-level message — `details.errors` still lists every one of them.
+  defp validation_message(%{errors: [%{message: message}]}) when is_binary(message),
+    do: message
+
+  defp validation_message(_), do: "validation failed"
 
   defp ash_invalid_details(%Ash.Error.Invalid{errors: errors}) do
     %{

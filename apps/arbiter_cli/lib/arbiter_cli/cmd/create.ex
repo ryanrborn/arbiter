@@ -226,6 +226,15 @@ defmodule ArbiterCli.Cmd.Create do
           Output.die(err)
       end
 
+    # bd-7mbrlg: non-blocking heads-up — the task was created either way, but
+    # `task_promote` / `arb issue promote` will later refuse it without ACs
+    # or an explicit waiver.
+    if mode == :text do
+      for warning <- issue["warnings"] || [] do
+        IO.puts(:stderr, "arb: warning: #{warning}")
+      end
+    end
+
     if opts[:deps] do
       attach_deps(issue["id"], opts[:deps])
     end

@@ -100,11 +100,28 @@ defmodule Arbiter.MCP.Tools.Task do
       attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
 
       case Ash.create(Issue, attrs) do
-        {:ok, issue} -> {:ok, Tools.serialize_task_summary(issue)}
+        {:ok, issue} -> {:ok, with_ac_warning(Tools.serialize_task_summary(issue), issue)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
   end
+
+  # bd-7mbrlg: non-blocking heads-up at filing time — the task is created
+  # either way, but `task_promote` will later refuse it without `acceptance`
+  # or an explicit `acceptance_waived` reason.
+  defp with_ac_warning(result, %Issue{} = issue) do
+    if Issue.gated_type?(issue.issue_type) and blank?(issue.acceptance) do
+      Map.put(result, :warnings, [
+        "No acceptance criteria set. #{issue.issue_type} tasks need `acceptance` (or an " <>
+          "explicit `acceptance_waived` reason) before they can be promoted to Ready."
+      ])
+    else
+      result
+    end
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(str), do: String.trim(str) == ""
 
   # ---- task_update --------------------------------------------------------
 
@@ -182,7 +199,13 @@ defmodule Arbiter.MCP.Tools.Task do
   def task_promote(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id) do
-      case Ash.update(issue, %{}, action: :promote_to_ready) do
+      promote_args =
+        case Map.get(args, "acceptance_waived") do
+          reason when is_binary(reason) -> %{acceptance_waived: reason}
+          _ -> %{}
+        end
+
+      case Ash.update(issue, promote_args, action: :promote_to_ready) do
         {:ok, promoted} -> {:ok, Tools.serialize_task_summary(promoted)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
