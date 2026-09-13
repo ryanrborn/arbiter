@@ -104,8 +104,6 @@ defmodule Arbiter.Accounts.Census do
   credential row.
   """
 
-  require Logger
-
   alias Arbiter.Tasks.Workspace
 
   @plan_version 1
@@ -126,8 +124,8 @@ defmodule Arbiter.Accounts.Census do
     "ANTHROPIC_API_KEY" => %{provider: "claude", kind: :api_key},
     "OPENAI_API_KEY" => %{provider: "codex", kind: :api_key},
     "CODEX_API_KEY" => %{provider: "codex", kind: :api_key},
-    "GEMINI_API_KEY" => %{provider: "gemini", kind: :api_key},
-    "GOOGLE_GENAI_API_KEY" => %{provider: "gemini", kind: :api_key},
+    "GEMINI_API_KEY" => %{provider: "gemini_cli", kind: :api_key},
+    "GOOGLE_GENAI_API_KEY" => %{provider: "gemini_cli", kind: :api_key},
     "ANTIGRAVITY_API_KEY" => %{provider: "antigravity", kind: :api_key}
   }
 
@@ -605,8 +603,13 @@ defmodule Arbiter.Accounts.Census do
     end
 
     path |> Path.dirname() |> File.mkdir_p!()
-    File.write!(path, Jason.encode!(plan(census), pretty: true) <> "\n")
+
+    # Create empty and narrow the mode *before* the body lands: `File.write!`
+    # alone would create at 0666 &~ umask (usually 0644), leaving a window in
+    # which the plan is world-readable.
+    File.touch!(path)
     File.chmod!(path, 0o600)
+    File.write!(path, Jason.encode!(plan(census), pretty: true) <> "\n")
     :ok
   end
 

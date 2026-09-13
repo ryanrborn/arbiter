@@ -28,6 +28,15 @@ defmodule Mix.Tasks.Arbiter.Accounts.CensusTest do
   @openai_key "sk-proj-9mXvQ2rTzKpLbN4wYhJdCgA6eSuF8oRi"
 
   setup do
+    # `config/test.exs` pins the *primary* Logger level to :warning, which drops
+    # the task's Logger.info before any handler — including `capture_log`'s —
+    # sees it, making the Logger leg of the no-leak assertion vacuous. Raise the
+    # primary level so the line the real install emits (`config/prod.exs` runs at
+    # :info) is actually in the haystack.
+    previous_level = Logger.level()
+    Logger.configure(level: :info)
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+
     dir = Path.join(System.tmp_dir!(), "census-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
@@ -112,6 +121,12 @@ defmodule Mix.Tasks.Arbiter.Accounts.CensusTest do
 
       %{stdout: out, stderr: err, log: log} = census(["--plan", ctx.plan_path])
       plan = File.read!(ctx.plan_path)
+
+      # Guard the guard: if the Logger line is missing the `{"logger", log}` leg
+      # below degrades to `refute String.contains?("", fragment)`, which passes
+      # for every fragment and covers nothing.
+      assert log =~ "Arbiter.Accounts.Census: scanned",
+             "the Logger haystack is empty — the Logger leg of this test covers nothing"
 
       haystacks = [{"stdout", out}, {"stderr", err}, {"logger", log}, {"plan file", plan}]
 

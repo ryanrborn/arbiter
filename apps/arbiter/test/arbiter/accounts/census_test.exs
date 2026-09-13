@@ -41,12 +41,14 @@ defmodule Arbiter.Accounts.CensusTest do
       assert %{provider: "claude", kind: :oauth_token} = allow["CLAUDE_CODE_OAUTH_TOKEN"]
       assert %{provider: "claude", kind: :api_key} = allow["ANTHROPIC_API_KEY"]
       assert %{provider: "codex", kind: :api_key} = allow["OPENAI_API_KEY"]
-      assert %{provider: "gemini", kind: :api_key} = allow["GEMINI_API_KEY"]
+      assert %{provider: "gemini_cli", kind: :api_key} = allow["GEMINI_API_KEY"]
 
-      # Every allowlisted provider is a code `Arbiter.Quota.provider_code/1` speaks.
+      # Every allowlisted provider is a *canonical* `Arbiter.Quota.provider_code/1`
+      # code, not one of its input aliases ("gemini" resolves to "gemini_cli"), so
+      # a plan row joins straight onto the quota tables.
       for {_key, %{provider: provider}} <- allow do
-        assert Arbiter.Quota.provider_code(provider),
-               "unknown provider code #{inspect(provider)} in the census allowlist"
+        assert Arbiter.Quota.provider_code(provider) == provider,
+               "#{inspect(provider)} is an alias, not a canonical quota provider code"
       end
     end
 
