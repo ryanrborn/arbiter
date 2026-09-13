@@ -473,7 +473,7 @@ defmodule Arbiter.Tasks.IssueTest do
 
   describe "enums helpers" do
     test "statuses/0" do
-      assert Issue.statuses() == ~w(open in_progress closed)a
+      assert Issue.statuses() == ~w(open in_progress awaiting_verification closed)a
     end
 
     test "issue_types/0" do

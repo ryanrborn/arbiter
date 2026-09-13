@@ -704,6 +704,114 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  # bd-9so315 — post-merge verification surface.
+  describe "verify_after_deploy flag over MCP" do
+    test "task_create accepts it", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "flagged",
+                 "verify_after_deploy" => true
+               })
+
+      {:ok, created} = Ash.get(Issue, data.id)
+      assert created.verify_after_deploy == true
+    end
+
+    test "task_update sets and clears it", ctx do
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "verify_after_deploy" => true
+               })
+
+      assert Ash.get!(Issue, ctx.task.id).verify_after_deploy == true
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "verify_after_deploy" => false
+               })
+
+      assert Ash.get!(Issue, ctx.task.id).verify_after_deploy == false
+    end
+
+    test "a worker can flag its own task via task_update_progress", ctx do
+      assert {:ok, _} =
+               Tools.task_update_progress(ctx.worker, %{"verify_after_deploy" => true})
+
+      assert Ash.get!(Issue, ctx.task.id).verify_after_deploy == true
+    end
+
+    test "task_show full view reports the flag and the verification state", ctx do
+      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      {:ok, _} = Ash.update(task, %{}, action: :await_verification)
+
+      assert {:ok, data} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert data.verify_after_deploy == true
+      assert data.status == "awaiting_verification"
+      assert is_binary(data.awaiting_verification_at)
+    end
+  end
+
+  describe "task_verify/2" do
+    setup ctx do
+      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
+      {:ok, awaiting: awaiting}
+    end
+
+    test "observed evidence closes the task and persists the evidence", ctx do
+      assert {:ok, data} =
+               Tools.task_verify(ctx.coordinator, %{
+                 "id" => ctx.awaiting.id,
+                 "observed" => "restarted; /api/doctor reports 3 repos"
+               })
+
+      assert data.status == "closed"
+
+      reloaded = Ash.get!(Issue, ctx.awaiting.id)
+      assert reloaded.status == :closed
+      assert reloaded.verification_outcome == :observed
+      assert reloaded.verification_evidence == "restarted; /api/doctor reports 3 repos"
+    end
+
+    test "failed evidence reopens the task and persists the evidence", ctx do
+      assert {:ok, data} =
+               Tools.task_verify(ctx.coordinator, %{
+                 "id" => ctx.awaiting.id,
+                 "failed" => "still reads the deleted key"
+               })
+
+      assert data.status == "open"
+
+      reloaded = Ash.get!(Issue, ctx.awaiting.id)
+      assert reloaded.status == :open
+      assert reloaded.verification_outcome == :failed
+      assert reloaded.verification_evidence == "still reads the deleted key"
+    end
+
+    test "requires exactly one of observed/failed", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.task_verify(ctx.coordinator, %{"id" => ctx.awaiting.id})
+
+      assert {:error, {:invalid, _}} =
+               Tools.task_verify(ctx.coordinator, %{
+                 "id" => ctx.awaiting.id,
+                 "observed" => "a",
+                 "failed" => "b"
+               })
+    end
+
+    test "rejects a task that is not awaiting verification", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "not parked", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.task_verify(ctx.coordinator, %{"id" => other.id, "observed" => "x"})
+
+      assert msg =~ "awaiting"
+    end
+  end
+
   describe "dep_add/2 + dep_remove/2" do
     setup ctx do
       {:ok, other} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})

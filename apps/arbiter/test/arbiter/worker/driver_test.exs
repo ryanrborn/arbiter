@@ -198,6 +198,128 @@ defmodule Arbiter.Worker.DriverTest do
       assert reloaded.status == :closed
     end
 
+    # bd-9so315: the Watchdog completes the worker with `:merged` both when it
+    # observes an MR merged and when it auto-merges itself, and this loop closes
+    # the task ~1s later — long before the MergeQueue's next poll. That made the
+    # Driver a third merge-finalize path that bypassed the verification funnel.
+    test "a verify_after_deploy task parks instead of closing on a :merged completion", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "cd-merged-flagged",
+          workspace_id: ws.id,
+          verify_after_deploy: true
+        })
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true
+        )
+
+      ref = Process.monitor(driver_pid)
+
+      :ok = Worker.advance(worker_pid, :running)
+      :ok = Worker.complete(worker_pid, :merged)
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :awaiting_verification
+      assert %DateTime{} = reloaded.awaiting_verification_at
+
+      assert [escalation] = Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id)
+      assert escalation.subject =~ "awaiting verification"
+
+      # ...and the parked task leaves the state only through a recorded
+      # restart-and-observe verdict, which persists the evidence.
+      {:ok, verified} =
+        Arbiter.Tasks.Verification.record_outcome(
+          reloaded,
+          "observed",
+          "restarted; the merged path runs on the live server"
+        )
+
+      assert verified.status == :closed
+      assert verified.verification_outcome == :observed
+      assert verified.verification_evidence =~ "restarted"
+    end
+
+    test "an unflagged task still closes on a :merged completion", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "cd-merged-plain", workspace_id: ws.id})
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true
+        )
+
+      ref = Process.monitor(driver_pid)
+
+      :ok = Worker.advance(worker_pid, :running)
+      :ok = Worker.complete(worker_pid, :merged)
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :closed
+      assert Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id) == []
+    end
+
+    # The flag is about observing *merged* code on the running server. A worker
+    # that finished without a merge has nothing deployed to observe, so it must
+    # still close rather than strand itself at :awaiting_verification.
+    test "a verify_after_deploy task closes on a non-merge completion", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "cd-done-flagged",
+          workspace_id: ws.id,
+          verify_after_deploy: true
+        })
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true
+        )
+
+      ref = Process.monitor(driver_pid)
+
+      :ok = Worker.advance(worker_pid, :running)
+      :ok = Worker.complete(worker_pid, :claude_done)
+
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :closed
+    end
+
     test "leaves the task :in_progress when the worker transitions to :failed", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "cd-fail", workspace_id: ws.id})
 

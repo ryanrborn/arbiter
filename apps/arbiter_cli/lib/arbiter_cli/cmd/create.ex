@@ -105,6 +105,7 @@ defmodule ArbiterCli.Cmd.Create do
     unclaimed: :boolean,
     parent: :string,
     auto_close: :boolean,
+    verify_after_deploy: :boolean,
     force: :boolean,
     json: :boolean
   ]
@@ -203,6 +204,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("target_branch", opts[:target_branch])
       |> maybe_put("repo", opts[:repo])
       |> maybe_put_flag("auto_close", opts[:auto_close] == true)
+      |> maybe_put_flag("verify_after_deploy", opts[:verify_after_deploy] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
       |> maybe_put_flag("force", force?)
 

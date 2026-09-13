@@ -173,11 +173,12 @@ JSON. `R` = readable, `W` = writable.
 | `task_show` | worker, coordinator | R | `Ash.get(Issue, id)` |
 | `task_list` | coordinator | R | `Ash.read(Issue)` + filters |
 | `task_ready` | coordinator | R | `Issue.ready/1` |
-| `task_update_progress` | worker (own task) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes only |
+| `task_update_progress` | worker (own task) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes / pr_body / `verify_after_deploy` only |
 | `task_create` | coordinator | W | `Ash.create(Issue, …)` |
 | `task_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (status/priority/…) |
 | `task_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
 | `task_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
+| `task_verify` | coordinator | W | `Arbiter.Tasks.Verification.record_outcome/3` — the post-merge restart-and-observe verdict (bd-9so315) |
 | `dep_add` / `dep_remove` | coordinator | W | `Ash.create/destroy(Dependency)` |
 | `convoy_status` | worker (own), coordinator | R | `Ash.get(Convoy, id)` + calcs |
 | `convoy_list` / `convoy_create` / `convoy_add_member` / `convoy_close` | coordinator | R/W | `Convoy` actions / `ConvoyMembership.:add` |
@@ -427,7 +428,7 @@ Each phase is independently shippable.
   (e.g. a worker token calling `task_list`) is rejected with a JSON-RPC error.
 
 ### Phase 2 — mutating tools behind coordinator scope
-- `task_create` / `task_update` / `task_close` / `task_reopen`, `dep_*`,
+- `task_create` / `task_update` / `task_close` / `task_reopen` / `task_verify`, `dep_*`,
   `convoy_*`, the `worker_*` lifecycle family (`worker_dispatch` /
   `worker_resume` / `worker_review` / `worker_stop` / `worker_list`),
   `message_send`, `notify_list`, the `tracker_*` bridge (`tracker_claim` /

@@ -265,6 +265,71 @@ defmodule Arbiter.CircuitBreakerAdoptionTest do
     end
   end
 
+  # bd-9so315 landed its own auto-escalating path (the merged-but-unverified
+  # notice) in the same window this breaker landed in. The coordinator's
+  # integration direction was explicit: route it through the notifier's send
+  # path *with* the breaker, don't bypass it, don't double-wrap it, and make
+  # sure signature normalisation does not collapse two different tasks'
+  # verification notices into one budget.
+  describe "post-merge verification notice (bd-9so315) adoption" do
+    test "one call sends exactly one escalation — the breaker does not double-wrap", %{ws: ws} do
+      CoordinatorNotifier.awaiting_verification(
+        %{task_id: "bd-pmv001", workspace_id: ws.id},
+        "octo/widget#7",
+        DateTime.utc_now()
+      )
+
+      assert [page] = escalations(ws)
+      assert page.subject =~ "bd-pmv001 merged — awaiting verification"
+      assert page.task_ref == "bd-pmv001"
+      assert trip_escalations(ws) == []
+    end
+
+    test "a verification notice repeated past the bound is suppressed, not re-sent", %{ws: ws} do
+      with_bound(:coordinator_escalation, 2)
+
+      for _ <- 1..6 do
+        CoordinatorNotifier.awaiting_verification(
+          %{task_id: "bd-pmv002", workspace_id: ws.id},
+          "octo/widget#8",
+          DateTime.utc_now()
+        )
+      end
+
+      notices =
+        escalations(ws)
+        |> Enum.filter(&(&1.subject =~ "awaiting verification"))
+
+      assert length(notices) == 2, "the notice bypassed the shared breaker"
+      assert [_trip] = trip_escalations(ws)
+    end
+
+    test "two tasks' verification notices keep distinct budgets", %{ws: ws} do
+      with_bound(:coordinator_escalation, 1)
+
+      # Task ids that a naive scrubber would flatten into the same key: the
+      # digits are slug-embedded, so `Signature` must leave them intact.
+      for id <- ["bd-9so315", "bd-9so316", "bd-4fbpto"] do
+        CoordinatorNotifier.awaiting_verification(
+          %{task_id: id, workspace_id: ws.id},
+          "octo/widget#9",
+          DateTime.utc_now()
+        )
+      end
+
+      notices =
+        escalations(ws)
+        |> Enum.filter(&(&1.subject =~ "awaiting verification"))
+        |> Enum.map(& &1.task_ref)
+        |> Enum.sort()
+
+      assert notices == ["bd-4fbpto", "bd-9so315", "bd-9so316"],
+             "signature normalisation collapsed distinct tasks' verification notices"
+
+      assert trip_escalations(ws) == []
+    end
+  end
+
   describe "registry coverage (acceptance 2)" do
     test "every registered kind is actually referenced by its owning module" do
       for %{kind: kind, module: module} <- CircuitBreaker.call_sites() do

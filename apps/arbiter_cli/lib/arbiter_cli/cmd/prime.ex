@@ -18,7 +18,11 @@ defmodule ArbiterCli.Cmd.Prime do
        d. Active workers — task_id, status, current_step, runtime, scoped to
           this workspace.
        e. Ready tasks — `Issue.ready/0` view, scoped to this workspace.
-       f. Coordinator Inbox — unread messages for this workspace's coordinator.
+       f. Awaiting verification — merged tasks flagged `verify_after_deploy`
+          that are parked until someone restarts the server and observes the
+          new path, each with the age of the wait (bd-9so315). Omitted when
+          empty. These are the coordinator's: nothing else will clear them.
+       g. Coordinator Inbox — unread messages for this workspace's coordinator.
           Omitted when empty.
 
   ## Standing Orders are data, not code
@@ -49,6 +53,7 @@ defmodule ArbiterCli.Cmd.Prime do
             "rig_standing_orders": {"<repo>": [...]},  // deprecated alias, dual-emitted
             "workers": [...],
             "ready": [...],
+            "awaiting_verification": [...],
             "coordinator_inbox": [...]
           }
         ]
@@ -96,6 +101,7 @@ defmodule ArbiterCli.Cmd.Prime do
       rig_standing_orders: repo_standing_orders,
       workers: unwrap(ws_section.workers),
       ready: unwrap(ws_section.ready),
+      awaiting_verification: unwrap(ws_section.awaiting_verification),
       coordinator_inbox: unwrap(ws_section.coordinator_inbox)
     }
   end
@@ -139,6 +145,7 @@ defmodule ArbiterCli.Cmd.Prime do
       repo_standing_orders: gather_repo_standing_orders(ws),
       workers: gather_workers(ws_id),
       ready: gather_ready(ws_id),
+      awaiting_verification: gather_awaiting_verification(ws_id),
       coordinator_inbox: gather_coordinator_inbox(ws_id)
     }
   end
@@ -196,6 +203,22 @@ defmodule ArbiterCli.Cmd.Prime do
     end
   end
 
+  # bd-9so315: tasks parked post-merge until someone restarts the server and
+  # observes the new path. Oldest wait first — the one most likely to have been
+  # forgotten leads.
+  defp gather_awaiting_verification(ws_id) do
+    case Client.get("/api/issues", workspace_id: ws_id, status: "awaiting_verification") do
+      {:ok, %{"data" => list}} ->
+        {:ok, Enum.sort_by(list, &(&1["awaiting_verification_at"] || ""))}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, %Client.Error{} = err} ->
+        {:error, err.message}
+    end
+  end
+
   defp gather_coordinator_inbox(ws_id) do
     case Client.get("/api/messages", to_ref: "coordinator", workspace_id: ws_id, unread: "true") do
       {:ok, %{"data" => list}} -> {:ok, Enum.filter(list, &(&1["workspace_id"] == ws_id))}
@@ -230,6 +253,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("")
     emit_ready_section(ws_section.ready, "issue")
     IO.puts("")
+    maybe_emit_awaiting_verification(ws_section.awaiting_verification)
     maybe_emit_coordinator_inbox(ws_section.coordinator_inbox)
   end
 
@@ -392,6 +416,33 @@ defmodule ArbiterCli.Cmd.Prime do
   defp emit_ready_section({:error, msg}, issue) do
     IO.puts("== Ready #{issue}s ==")
     IO.puts("  (error: #{msg})")
+  end
+
+  # Omitted entirely when nothing is parked — the common case, and the section
+  # is only worth the coordinator's attention when it is non-empty.
+  defp maybe_emit_awaiting_verification({:ok, []}), do: :ok
+
+  defp maybe_emit_awaiting_verification({:ok, list}) do
+    IO.puts("== Awaiting verification (#{length(list)}) ==")
+
+    Enum.each(list, fn i ->
+      IO.puts(
+        "  #{i["id"]}  #{truncate(i["title"], 70)}#{age_suffix(i["awaiting_verification_at"])}"
+      )
+    end)
+
+    IO.puts(
+      "  → restart the server, observe each, then: " <>
+        ~s(arb issue verify <id> --observed "<evidence>")
+    )
+
+    IO.puts("")
+  end
+
+  defp maybe_emit_awaiting_verification({:error, msg}) do
+    IO.puts("== Awaiting verification ==")
+    IO.puts("  (error: #{msg})")
+    IO.puts("")
   end
 
   defp truncate(nil, _), do: ""

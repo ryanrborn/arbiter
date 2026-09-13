@@ -97,13 +97,18 @@ defmodule Arbiter.Workflows.PatrolLifecycle do
   end
 
   # Open-ish events on an OPEN item start the repo's patrol; a close nudges the
-  # workspace's patrols to re-check (the idle one reaps itself). The `status !=
-  # :closed` guard matters because a closed fleet-PR task keeps its `pr_ref` (and
-  # a closed engagement its `source_pr`), so a later `:updated` on it — e.g. a
-  # notes edit — would otherwise resurrect a patrol for a repo whose work is
-  # already gone. Other events are no-ops.
+  # workspace's patrols to re-check (the idle one reaps itself). The terminal-ish
+  # status guard matters because a closed fleet-PR task keeps its `pr_ref` (and a
+  # closed engagement its `source_pr`), so a later `:updated` on it — e.g. a notes
+  # edit — would otherwise resurrect a patrol for a repo whose work is already
+  # gone. `:awaiting_verification` is guarded for the same reason: a parked task's
+  # PR is already merged, so its `pr_ref` is exactly as stale as a closed task's,
+  # and every recorded verdict (`:record_verification` broadcasts `:updated` while
+  # the task is still parked) or coordinator notes edit would otherwise spawn a
+  # patrol for a merged PR. Other events are no-ops.
   defp apply_event(kind, event, %Issue{status: status} = issue)
-       when event in [:created, :updated, :reopened] and status != :closed do
+       when event in [:created, :updated, :reopened] and
+              status not in [:closed, :awaiting_verification] do
     case load_workspace(issue.workspace_id) do
       %Workspace{} = ws -> ensure_started(kind, ws, ref_for(kind, issue))
       nil -> :ok
