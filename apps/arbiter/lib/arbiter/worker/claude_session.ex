@@ -564,6 +564,42 @@ defmodule Arbiter.Worker.ClaudeSession do
     |> Map.put(:gemini_pending_lines, lines)
   end
 
+  # bd-869mmg: upstream gemini's OWN stream-json schema (`"type" => "message"`,
+  # not agy's `"event" => "step_update"`) streams assistant text as
+  # `"delta" => true` chunks too, but had NO buffering at all — every chunk
+  # was formatted (and line-split) independently by
+  # `Arbiter.Agents.Gemini.Stream.format_event/1`. A `VERDICT:` sentinel that
+  # lands on a delta boundary (e.g. `"VERDICT: REQUEST_"` / `"CHANGES\n..."`)
+  # was rendered as two broken lines that never share a line with each other,
+  # so `ReviewGate`'s `^VERDICT:` regex could not see it even though the
+  # reviewer plainly emitted it — a real review discarded as
+  # `:review_gate_inconclusive`. A non-delta message (`"delta"` absent/false)
+  # is already a complete, standalone utterance (see the plain-content test
+  # cases), so it flushes immediately rather than waiting on a DONE marker
+  # this schema does not have.
+  defp buffer_gemini_display(
+         %{provider: "gemini"} = session,
+         %{
+           "type" => "message",
+           "role" => "assistant",
+           "content" => content
+         } = event
+       )
+       when is_binary(content) do
+    buf = Map.get(session, :gemini_text_buf, "")
+
+    {lines, remainder} =
+      if event["delta"] do
+        split_display_lines(buf <> content)
+      else
+        flush_display_buffer(buf <> content)
+      end
+
+    session
+    |> Map.put(:gemini_text_buf, remainder)
+    |> Map.put(:gemini_pending_lines, lines)
+  end
+
   defp buffer_gemini_display(%{provider: "gemini"} = session, _event),
     do: Map.put(session, :gemini_pending_lines, [])
 
@@ -943,6 +979,17 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp format_event(%{"event" => "result"} = event, %{provider: "gemini"} = session) do
     flushed = session |> Map.get(:gemini_pending_lines, []) |> Enum.map(&{&1, true})
     flushed ++ Arbiter.Agents.Gemini.Stream.format_event(event)
+  end
+
+  # bd-869mmg: read the lines `buffer_gemini_display/2` reassembled from
+  # upstream gemini's `"delta" => true` chunks instead of re-splitting the raw
+  # (possibly mid-sentinel) chunk here.
+  defp format_event(
+         %{"type" => "message", "role" => "assistant", "content" => content},
+         %{provider: "gemini"} = session
+       )
+       when is_binary(content) do
+    session |> Map.get(:gemini_pending_lines, []) |> Enum.map(&{&1, true})
   end
 
   defp format_event(event, %{provider: "gemini"}),

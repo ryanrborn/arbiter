@@ -871,6 +871,103 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assert status == :completed
     end
 
+    # bd-869mmg: upstream gemini's OWN wire schema (`"type" => "message"`, not
+    # agy's `"event" => "step_update"`) streams assistant text as `"delta" =>
+    # true` chunks too, but — unlike agy's schema, which
+    # `buffer_gemini_display/2` already buffers per-line — had NO buffering at
+    # all: each chunk was formatted (and line-split) independently. A
+    # `VERDICT:` sentinel landing on a delta boundary rendered as two broken
+    # lines that could never match `ReviewGate`'s `^\s*VERDICT:` regex on
+    # either half, so a reviewer that plainly emitted a parseable verdict was
+    # reported as `:review_gate_inconclusive` with zero rounds recorded (the
+    # bd-atyrrq / run 72947341 incident this bug fixes).
+    test "a VERDICT line split across two upstream-gemini message deltas renders as one line" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("gem-sj-verdict-split")
+
+      events = [
+        %{
+          "type" => "message",
+          "role" => "assistant",
+          "content" => "VERDICT: REQUEST_",
+          "delta" => true
+        },
+        %{
+          "type" => "message",
+          "role" => "assistant",
+          "content" => "CHANGES\n\n1. missing nil guard\n",
+          "delta" => true
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert "VERDICT: REQUEST_CHANGES" in lines,
+             "the sentinel must reassemble into one complete line even split across deltas"
+
+      assert {:request_changes, findings} =
+               Arbiter.Worker.ReviewGate.parse_verdict(lines)
+
+      assert findings =~ "missing nil guard"
+    end
+
+    # bd-869mmg: the exact shape of the bd-atyrrq durable transcript — a
+    # `⚙ gemini session started` preamble (its own "init" event, unrelated to
+    # the buffered assistant text), then a VERDICT straddling a delta
+    # boundary, then a duplicated re-emission of the same block. The preamble
+    # and the duplication do not defeat the parser on their own (see
+    # `review_gate_test.exs`); only the delta-splitting did.
+    test "a session-preamble line ahead of a delta-split VERDICT still parses, even repeated" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("gem-sj-verdict-preamble")
+
+      block = fn ->
+        [
+          %{
+            "type" => "message",
+            "role" => "assistant",
+            "content" => "VERDICT: REQUEST_",
+            "delta" => true
+          },
+          %{
+            "type" => "message",
+            "role" => "assistant",
+            "content" => "CHANGES\n\n1. finding\narb done\n",
+            "delta" => true
+          }
+        ]
+      end
+
+      events = [%{"type" => "init", "model" => "gemini-2.5-pro"}] ++ block.() ++ block.()
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert Enum.count(lines, &(&1 == "VERDICT: REQUEST_CHANGES")) == 2
+
+      assert {:request_changes, _findings} =
+               Arbiter.Worker.ReviewGate.parse_verdict(lines)
+    end
+
     test "arb done in a gemini tool result is displayed but does NOT complete" do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("gem-sj-toolresult")
@@ -904,6 +1001,43 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       refute Worker.state(pid).status == :completed
       lines = Worker.state(pid).meta.output_lines
       assert Enum.any?(lines, &String.contains?(&1, "match:"))
+    end
+  end
+
+  describe "claude VERDICT parity (bd-869mmg)" do
+    # Claude's own wire schema (unlike gemini's) delivers assistant text as a
+    # single complete `content` block per event, never `delta: true` chunks —
+    # so the gemini-only buffering added for bd-869mmg must not be needed, and
+    # must not change, this path.
+    test "a VERDICT line in a complete Claude assistant block parses with no buffering involved" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("claude-verdict")
+
+      event = %{
+        "type" => "assistant",
+        "message" => %{
+          "content" => [
+            %{"type" => "text", "text" => "VERDICT: REQUEST_CHANGES\n\n1. missing nil guard"}
+          ]
+        }
+      }
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, [event])
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert "VERDICT: REQUEST_CHANGES" in lines
+
+      assert {:request_changes, findings} =
+               Arbiter.Worker.ReviewGate.parse_verdict(lines)
+
+      assert findings =~ "missing nil guard"
     end
   end
 

@@ -162,6 +162,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewFindings
@@ -1612,13 +1613,36 @@ defmodule Arbiter.Worker.ReviewGate do
      )}
   end
 
+  # bd-869mmg: a genuine `:no_verdict` (both the in-memory buffer AND the
+  # durable transcript fallback in `parse_verdict/3` found nothing parseable —
+  # see the moduledoc above `parse_verdict/3`) must not read the same as "the
+  # reviewer produced nothing." The two prior occurrences (bd-6dxit2, bd-869mmg
+  # itself) were both cases where the reviewer's output WAS received but the
+  # parser missed it, and a human had to go read the raw log by hand to find
+  # that out. Naming the transcript's location here means the NEXT reader goes
+  # straight to the log instead of trusting a message that says "no verdict."
   defp maybe_reprompt(state, _reason) do
     {:done,
      finish(
        state,
        {:no_verdict,
-        "Reviewer produced no parseable VERDICT line, even after a verdict re-prompt."}
+        "Reviewer output was received but no parseable VERDICT line was found in it (checked " <>
+          "both the live capture and the durable transcript), even after a verdict re-prompt. " <>
+          transcript_location_note(state)}
      )}
+  end
+
+  # Best-effort pointer to the durable per-run transcript for this pass, so a
+  # genuine `:no_verdict` names where to look rather than leaving the reader to
+  # assume the reviewer produced nothing at all.
+  defp transcript_location_note(state) do
+    case reviewer_run_id(state) do
+      run_id when is_binary(run_id) and run_id != "" ->
+        "Durable transcript: #{OutputLog.path_for(run_id)}"
+
+      _ ->
+        "No run id could be resolved for this pass, so the durable transcript could not be located."
+    end
   end
 
   # ---- verdict guards (bd-4te55l / bd-6r8caj / bd-4yhv4x) ------------------

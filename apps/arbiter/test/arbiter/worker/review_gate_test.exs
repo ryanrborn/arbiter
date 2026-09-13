@@ -34,6 +34,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   alias Arbiter.Worker.ReviewVerification
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
+  @gemini_duplicate Path.expand("../../fixtures/review_verdict_gemini_duplicate.sh", __DIR__)
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
   @partial_verification Path.expand("../../fixtures/review_partial_verification.sh", __DIR__)
   @unmet_criteria Path.expand("../../fixtures/review_unmet_criteria.sh", __DIR__)
@@ -1533,6 +1534,15 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
+      # bd-869mmg: a genuine :no_verdict must not read as "the reviewer produced
+      # nothing" — it must say the output WAS received but unparseable, and name
+      # where the durable transcript is, so the next reader goes to the log
+      # instead of assuming a broken reviewer (the exact ambiguity that hid the
+      # bd-atyrrq / run 72947341 false negative for weeks).
+      findings = Worker.state(pid).meta.review_gate_findings
+      assert findings =~ "output was received"
+      assert findings =~ "Durable transcript:"
+
       # The re-prompt WAS attempted before escalating — its run row exists.
       reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
       runs = Ash.read!(Arbiter.Workers.Run)
@@ -2093,6 +2103,63 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a re-prompt to have been attempted before proceeding"
+    end
+
+    # bd-869mmg: reproduces the exact shape of the bd-atyrrq / run 72947341
+    # gemini transcript — a `⚙ gemini session started` preamble line, then a
+    # REQUEST_CHANGES verdict, an "arb done" marker, and the IDENTICAL verdict
+    # block repeated (mirroring what a re-emitting reviewer produces) before a
+    # final "arb done". The report was `:review_gate_inconclusive` with ZERO
+    # rounds recorded even though the reviewer plainly emitted a parseable
+    # verdict — twice. `parse_verdict/1` already extracts `VERDICT:
+    # REQUEST_CHANGES` correctly from this exact text (the preamble line and
+    # the duplication do not defeat the `^\s*VERDICT:` regex — verified
+    # directly against the captured transcript), so the gate must record
+    # exactly ONE round for the pass and never report `:no_verdict`.
+    test "a gemini-shaped transcript with a preamble line and a duplicated verdict block still records exactly one round",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@gemini_duplicate],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+
+      # Never reported as inconclusive/no-verdict: the sentinel was there.
+      refute Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+      assert merge_commit_count(repo) == 0
+
+      findings = Worker.state(pid).meta.review_gate_findings
+      assert findings =~ "RefreshProbe"
+
+      require Ash.Query
+
+      rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert length(rounds) == 1,
+             "the duplicated verdict block must not be recorded as two separate rounds"
     end
 
     test "a fully-verified REQUEST_CHANGES (no VERIFICATION: PARTIAL) is honored on the first pass, no re-prompt",
