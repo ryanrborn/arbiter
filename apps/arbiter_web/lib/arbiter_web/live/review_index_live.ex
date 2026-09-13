@@ -480,7 +480,15 @@ defmodule ArbiterWeb.ReviewIndexLive do
               id={"review-detail-#{record.id}"}
             >
               <Data.data_list>
-                <:item label="Findings summary">{record.findings_summary || "—"}</:item>
+                <:item label="Findings summary">
+                  <.markdown
+                    :if={record.findings_summary not in [nil, ""]}
+                    id={"review-findings-md-#{record.id}"}
+                    text={record.findings_summary}
+                    class="markdown-body--compact"
+                  />
+                  <span :if={record.findings_summary in [nil, ""]}>—</span>
+                </:item>
                 <:item label="Model">{format_maybe(record.model)}</:item>
                 <:item label="Tokens in / out">
                   {format_maybe(record.tokens_in)} / {format_maybe(record.tokens_out)}

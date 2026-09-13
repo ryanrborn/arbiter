@@ -1018,7 +1018,7 @@ defmodule ArbiterWeb.TaskDetailLive do
             <%!-- ══ Main column ═════════════════════════════════════════ --%>
             <div class="flex flex-col gap-[var(--space-4)] min-w-0">
               <.panel :if={present?(@task.description)} title="DESCRIPTION">
-                <pre class="whitespace-pre-wrap break-words text-[12px] leading-relaxed font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]">{@task.description}</pre>
+                <.markdown id="task-description-md" text={@task.description} />
               </.panel>
 
               <%!-- Acceptance criteria are real checkboxes, not decoration:
@@ -1059,17 +1059,14 @@ defmodule ArbiterWeb.TaskDetailLive do
                    in `notes` is the deliverable, so it gets its own panel with
                    a placeholder while still blank. --%>
               <.panel :if={@task.issue_type == :task} title="FINDINGS">
-                <pre
-                  :if={present?(@task.notes)}
-                  class="whitespace-pre-wrap break-words text-[12px] leading-relaxed font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]"
-                >{@task.notes}</pre>
+                <.markdown id="task-findings-md" text={@task.notes} />
                 <p :if={!present?(@task.notes)} class="text-[12px] italic text-[var(--text-label)]">
                   No findings recorded yet — the worker writes its results here before completing.
                 </p>
               </.panel>
 
               <.panel :if={@task.issue_type != :task and present?(@task.notes)} title="NOTES">
-                <pre class="whitespace-pre-wrap break-words text-[12px] leading-relaxed font-[family-name:var(--font-mono)] text-[var(--arb-text-body)]">{@task.notes}</pre>
+                <.markdown id="task-notes-md" text={@task.notes} />
               </.panel>
 
               <.panel
@@ -1128,7 +1125,11 @@ defmodule ArbiterWeb.TaskDetailLive do
 
                   <div :if={present?(@task.pr_body)} class="flex flex-col gap-1">
                     <h3 class="text-[11px] font-medium text-[var(--text-label)]">PR description</h3>
-                    <pre class="whitespace-pre-wrap break-words text-[11.5px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]">{@task.pr_body}</pre>
+                    <.markdown
+                      id="task-pr-body-md"
+                      text={@task.pr_body}
+                      class="markdown-body--compact"
+                    />
                   </div>
                 </div>
               </.panel>
@@ -1140,11 +1141,19 @@ defmodule ArbiterWeb.TaskDetailLive do
                 <div class="flex flex-col gap-3">
                   <div :if={present?(@task.qa_notes)} class="flex flex-col gap-1">
                     <h3 class="text-[11px] font-medium text-[var(--text-label)]">QA notes</h3>
-                    <pre class="whitespace-pre-wrap break-words text-[11.5px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]">{@task.qa_notes}</pre>
+                    <.markdown
+                      id="task-qa-notes-md"
+                      text={@task.qa_notes}
+                      class="markdown-body--compact"
+                    />
                   </div>
                   <div :if={present?(@task.deployment_notes)} class="flex flex-col gap-1">
                     <h3 class="text-[11px] font-medium text-[var(--text-label)]">Deployment notes</h3>
-                    <pre class="whitespace-pre-wrap break-words text-[11.5px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]">{@task.deployment_notes}</pre>
+                    <.markdown
+                      id="task-deployment-notes-md"
+                      text={@task.deployment_notes}
+                      class="markdown-body--compact"
+                    />
                   </div>
                 </div>
               </.panel>
