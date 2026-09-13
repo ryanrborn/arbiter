@@ -187,11 +187,12 @@ defmodule Arbiter.Agents.Gemini do
   # equivalent) — see security_enforced?/0.
   defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
-      thinking_flag(opts) ++ output_format_flag()
+      thinking_flag(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
   defp build_argv(:agy, exec, prompt, opts, _policy) do
-    [exec, "-p", prompt] ++ thinking_flag(opts) ++ output_format_flag()
+    [exec, "-p", prompt] ++
+      thinking_flag(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
@@ -212,6 +213,27 @@ defmodule Arbiter.Agents.Gemini do
   # parse — the root cause of every Gemini `usage_events` row carrying zero
   # tokens/cost, since `resolve_executable/0` prefers `agy` over `gemini`.
   defp output_format_flag, do: ["--output-format", "stream-json"]
+
+  # bd-1xss5z: `agy` hard-codes a 5-minute `--print-timeout` on print-mode
+  # turns — a review that reads ~300k tokens of diff/context routinely blows
+  # past that, and agy responds by cutting the turn short and returning
+  # partial output under a `SUCCESS` status (see
+  # `Arbiter.Worker.StopReason`'s `:agent_print_timeout` category and
+  # `Arbiter.Agents.Gemini.Stream`'s docs on agy's wire schema). Threading the
+  # caller's own `:timeout_ms` (ReviewGate resolves it from
+  # `review_gate.timeout_ms`, live, per pass) through as `--print-timeout`
+  # gives agy a budget that actually matches the harness's own — the
+  # alternative is agy timing out silently well inside a longer harness-level
+  # deadline that never gets a chance to fire.
+  #
+  # Upstream `gemini` has no equivalent flag, so this is agy-only; the
+  # `:gemini` branches never call it.
+  defp print_timeout_flag(opts) do
+    case Keyword.get(opts, :timeout_ms) do
+      ms when is_integer(ms) and ms > 0 -> ["--print-timeout", "#{div(ms, 1000)}s"]
+      _ -> []
+    end
+  end
 
   defp model_flag(opts) do
     case resolve_model(opts) do

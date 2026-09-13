@@ -313,6 +313,56 @@ defmodule Arbiter.Agents.GeminiTest do
     |> Enum.at(1)
   end
 
+  describe "default_argv/2 :timeout_ms → --print-timeout (bd-1xss5z)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-print-timeout-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    test "agy branch: :timeout_ms is passed through as --print-timeout in seconds", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", timeout_ms: 1_800_000)
+      assert "--print-timeout" in argv
+      assert chunk_after(argv, "--print-timeout") == "1800s"
+    end
+
+    test "agy branch: no --print-timeout flag when :timeout_ms is absent", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", [])
+      refute "--print-timeout" in argv
+    end
+
+    test "gemini (upstream) branch ignores :timeout_ms — flag is agy-only", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", timeout_ms: 1_800_000)
+      refute "--print-timeout" in argv
+    end
+  end
+
   describe "spawn_env/1" do
     setup do
       on_exit(fn -> Gemini.Config.clear() end)

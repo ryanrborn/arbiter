@@ -253,6 +253,7 @@ defmodule Arbiter.Worker.ReviewGate do
     :gateway_error,
     :spawn_exec_failed,
     :stream_schema_drift,
+    :agent_print_timeout,
     :killed
   ]
 
@@ -1634,14 +1635,21 @@ defmodule Arbiter.Worker.ReviewGate do
   # auth/quota code — including this very module's fixtures. Misclassifying
   # that as an infra failure would skip the verdict re-prompt and fabricate a
   # "re-authenticate" diagnosis for a reviewer that simply omitted its VERDICT
-  # line. So on exit 0 we only trust `:stream_schema_drift`, whose marker is
-  # harness-emitted (unparseable stream schema), not model prose, and so can't
-  # collide with review text. A non-zero exit means the subprocess genuinely
-  # failed, so the full classification applies there.
+  # line. So on exit 0 we only trust categories whose marker is
+  # harness/CLI-emitted rather than model prose, and so can't collide with
+  # review text: `:stream_schema_drift` (unparseable stream schema) and
+  # `:agent_print_timeout` (bd-1xss5z — agy's own fixed print-timeout
+  # wording, which agy reports alongside a clean exit and a "SUCCESS" result
+  # event). A non-zero exit means the subprocess genuinely failed, so the
+  # full classification applies there.
   defp classify_stop(0, lines) do
     case StopReason.classify(0, Enum.reverse(lines)) do
-      %StopReason{category: :stream_schema_drift} = reason -> reason
-      _ -> nil
+      %StopReason{category: category} = reason
+      when category in [:stream_schema_drift, :agent_print_timeout] ->
+        reason
+
+      _ ->
+        nil
     end
   end
 
@@ -2880,9 +2888,19 @@ defmodule Arbiter.Worker.ReviewGate do
         # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
         # the worker OAuth token from this workspace's `worker_env` before
         # falling back to the server env (bd-bw3466).
+        # bd-1xss5z: thread this pass's resolved timeout budget (already
+        # re-resolved live per pass by `launch_worker/5` — see
+        # `resolve_timeout_ms/2`) onto `agent_opts` so an adapter whose CLI
+        # has its own shorter internal turn timeout (agy's 5-minute
+        # `--print-timeout`) can raise it to match. Adapters that don't
+        # recognize `:timeout_ms` just ignore it.
         agent_opts =
           agent_opts_for_role(ws, role_atom, state.task_id) ++
-            [security: SecurityPolicy.resolve(ws, %{}, state.repo), workspace: ws]
+            [
+              security: SecurityPolicy.resolve(ws, %{}, state.repo),
+              workspace: ws,
+              timeout_ms: state.timeout_ms
+            ]
 
         # bd-dzz6ly: same provenance backfill the main dispatch path reports
         # (Arbiter.Worker.Dispatch.build_agent_session_opts/4), so a reviewer
