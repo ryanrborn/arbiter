@@ -96,11 +96,13 @@ defmodule Arbiter.CircuitBreaker do
       module: Arbiter.Workflows.PRPatrol,
       description:
         "Filing a PRPatrol follow-up task for one PR. Bounds the bd-7rxwzc shape: " <>
-          "file → dispatch fails → auto-close → re-file, forever. The default " <>
-          "deliberately equals PRPatrol's own @max_dispatch_attempts, so this is a " <>
-          "backstop for the re-file paths that bound does not count, not a second " <>
-          "(tighter) opinion about the one it does.",
-      limit: 5,
+          "file → dispatch fails → auto-close → re-file, forever. The default sits one " <>
+          "above PRPatrol's own @max_dispatch_attempts (5) so it backstops the re-file " <>
+          "paths that counter does not count — a task closed out-of-band, a worker " <>
+          "reaped as a zombie — without pre-empting the case-specific logic, which " <>
+          "legitimately files one extra follow-up when its give-up escalation fails " <>
+          "to persist.",
+      limit: 6,
       window_ms: 6 * @hour
     },
     %{

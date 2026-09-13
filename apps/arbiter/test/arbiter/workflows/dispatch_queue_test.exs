@@ -16,6 +16,8 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
   alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Workflows.DispatchQueueSupervisor
 
+  require Ash.Query
+
   # Records each drain re-dispatch to the pid stashed in app-env, so the
   # priority-order drain can be asserted without spawning real workers.
   defmodule RecordingDispatcher do
@@ -644,6 +646,71 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       held_item = wait_for_held_item(pid)
       assert held_item.task_id == task.id
+    end
+  end
+
+  describe "shared circuit breaker on repeated identical re-dispatch (bd-5jr49o)" do
+    # "Retryable" only means "a later drain MIGHT succeed" — nothing in
+    # `terminal_dispatch_failure?/1` can tell a quota hold that clears in an
+    # hour from a task that will fail this way forever, so a deterministically
+    # broken intent re-drained on every quota broadcast indefinitely. The shared
+    # breaker supplies the missing bound: after K identical failures the item is
+    # dropped and the coordinator is paged once.
+    test "an identically-failing held intent is dropped after K drains, with one escalation" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      prior_cb = Application.get_env(:arbiter, :circuit_breaker, [])
+
+      Application.put_env(
+        :arbiter,
+        :circuit_breaker,
+        Keyword.put(prior_cb, :dispatch_queue_redispatch, limit: 2, window_ms: 60_000)
+      )
+
+      on_exit(fn -> Application.put_env(:arbiter, :circuit_breaker, prior_cb) end)
+      Arbiter.CircuitBreaker.reset_all()
+      on_exit(&Arbiter.CircuitBreaker.reset_all/0)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      pid = start_queue(ws, dispatcher: FailingDispatcher, auto_subscribe: false)
+
+      task = make_task(ws)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+
+      # Drain repeatedly. Each drain that finds the item re-attempts dispatch;
+      # the breaker allows K re-queues, then the item is dropped for good.
+      Enum.each(1..6, fn _ ->
+        :ok = DispatchQueue.drain(pid)
+        Process.sleep(60)
+      end)
+
+      attempts = drain_attempts(task.id, 0)
+
+      assert attempts == 3,
+             "expected K=2 re-queues plus the attempt that tripped the breaker, got #{attempts}"
+
+      assert DispatchQueue.state(pid).items == []
+
+      trips =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "circuit breaker tripped"))
+
+      assert length(trips) == 1
+      assert hd(trips).body =~ "dispatch_queue_redispatch"
+    end
+  end
+
+  defp drain_attempts(task_id, acc) do
+    receive do
+      {:dispatch_attempt, ^task_id} -> drain_attempts(task_id, acc + 1)
+    after
+      0 -> acc
     end
   end
 
