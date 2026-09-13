@@ -1,4 +1,6 @@
 defmodule Arbiter.Worker.Worktree do
+  require Logger
+
   @moduledoc """
   Thin wrapper around `git worktree` for the Phase 4 worker orchestrator.
 
@@ -96,6 +98,7 @@ defmodule Arbiter.Worker.Worktree do
                  cd: repo_path
                ) do
           :ok = seed_compiled_deps(repo_path, path)
+          :ok = ensure_deps_fetched(path)
           {:ok, path}
         end
       end
@@ -247,6 +250,7 @@ defmodule Arbiter.Worker.Worktree do
          {:ok, _stdout} <-
            run_git(["checkout", "--detach", "--force", "origin/" <> base_branch], cd: path) do
       :ok = seed_compiled_deps(repo_path, path)
+      :ok = ensure_deps_fetched(path)
       {:ok, path}
     end
   end
@@ -259,6 +263,7 @@ defmodule Arbiter.Worker.Worktree do
          :ok <- ensure_origin_ref(repo_path, base_branch),
          {:ok, _stdout} <- add_detached_git(repo_path, path, base_branch) do
       :ok = seed_compiled_deps(repo_path, path)
+      :ok = ensure_deps_fetched(path)
       {:ok, path}
     end
   end
@@ -404,6 +409,7 @@ defmodule Arbiter.Worker.Worktree do
       case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
         {:ok, _stdout} ->
           :ok = seed_compiled_deps(repo_path, path)
+          :ok = ensure_deps_fetched(path)
           {:ok, path}
 
         {:error, _} = err ->
@@ -1114,6 +1120,30 @@ defmodule Arbiter.Worker.Worktree do
         end
       end)
     end
+  end
+
+  # Run `mix deps.get` for Mix projects to ensure any new dependencies added
+  # to the branch are fetched. Non-Mix repos (no mix.exs) skip this step.
+  # Failures are logged but do not fail provisioning (best-effort).
+  @spec ensure_deps_fetched(path()) :: :ok
+  defp ensure_deps_fetched(worktree_path) when is_binary(worktree_path) do
+    mix_exs = Path.join(worktree_path, "mix.exs")
+
+    if File.exists?(mix_exs) do
+      case System.cmd("mix", ["deps.get"], cd: worktree_path, stderr_to_stdout: true) do
+        {_output, 0} ->
+          :ok
+
+        {output, _nonzero} ->
+          Logger.warning("mix deps.get failed in #{worktree_path}: #{String.trim(output)}")
+
+          :ok
+      end
+    else
+      :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   # ---- internals ----------------------------------------------------------
