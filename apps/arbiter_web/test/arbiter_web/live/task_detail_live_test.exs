@@ -1386,4 +1386,141 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
              "filter tabs are out of handoff order: #{inspect(Enum.zip(order, positions))}"
     end
   end
+
+  # bd-db3wxp: markdown-bearing fields render as sanitized HTML via the shared
+  # `<.markdown>` component, not as raw text in a `<pre>`.
+  describe "markdown rendering" do
+    @md """
+    # Heading
+
+    Some **bold** text with a [link](https://example.com).
+
+    - one
+    - two
+
+    A paragraph between the two lists, so neither goes loose.
+
+    - [ ] unchecked
+    - [x] checked
+
+    | a | b |
+    | --- | --- |
+    | 1 | 2 |
+
+    ```elixir
+    IO.puts("hi")
+    ```
+    """
+
+    @xss """
+    <script>alert(1)</script>
+
+    <img src=x onerror=alert(1)>
+
+    [click](javascript:alert(1))
+    """
+
+    test "renders the description as formatted HTML", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "md-desc", description: @md, workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "<h1>Heading</h1>"
+      assert html =~ "<strong>bold</strong>"
+      assert html =~ ~s(href="https://example.com")
+      assert html =~ "<li>one</li>"
+      assert html =~ "<table>"
+      assert html =~ ~s(type="checkbox")
+      assert html =~ "<code"
+      # The old raw-text <pre> treatment is gone.
+      refute html =~ "# Heading"
+    end
+
+    test "renders notes as formatted HTML for a non-task issue", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "md-notes", issue_type: :feature, workspace_id: ws.id})
+
+      {:ok, task} = Ash.update(task, %{notes: @md})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "<h1>Heading</h1>"
+      refute html =~ "# Heading"
+    end
+
+    test "renders findings notes as formatted HTML for a task-type issue", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "md-findings", issue_type: :task, workspace_id: ws.id})
+
+      {:ok, task} = Ash.update(task, %{notes: @md})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "<h1>Heading</h1>"
+    end
+
+    test "renders pr_body, qa_notes and deployment_notes as formatted HTML",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "md-pr", workspace_id: ws.id})
+
+      {:ok, task} =
+        Ash.update(task, %{
+          pr_body: "## PR heading\n\n- bullet\n",
+          qa_notes: "## QA heading\n\n- qa bullet\n",
+          deployment_notes: "## Deploy heading\n\n- deploy bullet\n"
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "<h2>PR heading</h2>"
+      assert html =~ "<h2>QA heading</h2>"
+      assert html =~ "<h2>Deploy heading</h2>"
+      assert html =~ "<li>bullet</li>"
+      refute html =~ "## PR heading"
+    end
+
+    test "strips XSS payloads from every markdown surface", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "md-xss", description: @xss, workspace_id: ws.id})
+
+      {:ok, task} =
+        Ash.update(task, %{
+          notes: @xss,
+          pr_body: @xss,
+          qa_notes: @xss,
+          deployment_notes: @xss
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # Scoped to the markdown containers: the page's own root layout legitimately
+      # carries <script src="/assets/js/app.js"> tags, which a whole-page refute
+      # would trip over.
+      for id <- ~w(task-description-md task-notes-md task-pr-body-md
+                   task-qa-notes-md task-deployment-notes-md) do
+        assert has_element?(view, "##{id}"), "expected a markdown container ##{id}"
+        rendered = view |> element("##{id}") |> render()
+
+        refute rendered =~ "<script"
+        refute rendered =~ "onerror="
+        refute rendered =~ "javascript:"
+      end
+    end
+
+    test "leaves acceptance criteria as the existing checklist renderer",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "md-acceptance",
+          acceptance: "- [ ] first criterion\n- [x] second criterion\n",
+          workspace_id: ws.id
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#criterion-0")
+      assert has_element?(view, "#criterion-1")
+    end
+  end
 end
