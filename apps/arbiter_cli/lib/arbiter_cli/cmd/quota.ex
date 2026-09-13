@@ -6,10 +6,10 @@ defmodule ArbiterCli.Cmd.Quota do
   background probes keep them fresh, so this command never fetches live and
   carries no request-time latency:
 
-  * Claude: the local HTTP proxy captures Anthropic's
-    `anthropic-ratelimit-unified-*` headers off every Claude request and stores
-    the latest snapshot per workspace, plus the secondary `/api/oauth/usage`
-    per-model weekly breakdown and `extra_usage` overage (bd-8tpha6).
+  * Claude: OAuth polling of Anthropic's `/api/oauth/usage` endpoint plus
+    `anthropic-ratelimit-unified-*` headers captured from worker responses.
+    Stores the latest snapshot per workspace, including per-model weekly
+    breakdown and `extra_usage` overage (bd-8tpha6, bd-b0zody).
   * Codex: OpenAI session + weekly windows, refreshed by the quota probe using
     the `codex` CLI's stored token. Shows a short message until a snapshot has
     been captured (i.e. the CLI isn't authenticated on this host).

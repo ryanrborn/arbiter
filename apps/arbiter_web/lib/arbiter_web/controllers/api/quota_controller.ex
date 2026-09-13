@@ -6,18 +6,17 @@ defmodule ArbiterWeb.Api.QuotaController do
   the installation default.
 
   A pure DB read (bd-ajh7bd): every provider is read from its persisted quota
-  table, kept fresh by proxied header capture for Claude and the background
-  `Arbiter.Quota.CloudProbe` (Codex / Gemini CLI / Antigravity, plus
-  Anthropic's own `/api/oauth/usage` poll, which is the primary driver once
-  the fleet goes idle — bd-atyrrq). No provider is fetched live here, so a
-  dashboard/CLI load carries no request-time latency or rate-limit exposure.
+  table, kept fresh by the background `Arbiter.Quota.CloudProbe` polling
+  (`/api/oauth/usage` for Anthropic, and similar endpoints for Codex / Gemini
+  CLI / Antigravity). No provider is fetched live here, so a dashboard/CLI load
+  carries no request-time latency or rate-limit exposure.
 
   `quotas` carries every tracked provider as the uniform view shape (each
   including its own `provider` field) — `claude` is kept as a top-level key too
   for `arb quota` and other existing consumers of the pre-multi-provider shape.
 
-    * `claude` — the latest snapshot the local proxy captured off Claude worker
-      traffic, plus the oauth-usage layer; `null` before the first capture.
+    * `claude` — the latest polled snapshot, including per-model weekly breakdowns
+      and overage spend; `null` before the first poll.
     * `codex` — the persisted OpenAI session/weekly-window snapshot (a distinct
       shape, so it stays a top-level key rather than joining `quotas`); `null`
       (with a `codex_message`) until the Codex probe has stored one.

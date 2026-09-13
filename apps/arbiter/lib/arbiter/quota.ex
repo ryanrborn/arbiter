@@ -2,31 +2,30 @@ defmodule Arbiter.Quota do
   @moduledoc """
   Ash domain + public API for per-workspace Anthropic quota state (bd-5boun6).
 
-  `capture/3` takes `anthropic-ratelimit-unified-*` response headers and
-  upserts an `AnthropicQuota` snapshot for the originating workspace. `get/2` /
-  `serialize/2` read the latest snapshot back for the MCP `quota_get` tool,
+  `get/2` / `serialize/2` read quota snapshots for the MCP `quota_get` tool,
   the `GET /api/quota` endpoint, and `arb quota`.
 
-  ## Two sources write the same row (bd-b0zody)
+  ## Quota source: polling + archived header capture
 
-  `capture/3` used to be fed by a local pass-through proxy that intercepted
-  worker traffic to `api.anthropic.com` — removed in bd-7cvh8z once it became
-  clear header capture only ever sees traffic the fleet is already making, so
-  a quota-held or idle fleet stops refreshing the very figures the gate needs
-  to decide whether to un-hold. `capture_oauth_usage/2` — Anthropic's polled
-  `/api/oauth/usage` snapshot, driven by `Arbiter.Quota.CloudProbe` — writes
-  the **same primary columns** `capture/3` does (`utilization_5h`,
-  `status_5h`, `reset_5h_at`, the 7d trio, `representative_claim`,
-  `overage_status`, `captured_at`), not just the secondary `oauth_*` layer it
-  started as, so `Arbiter.Quota.Gate` works on a fleet that makes no proxied
-  requests at all.
+  The primary source is `capture_oauth_usage/2`, which consumes Anthropic's
+  polled `/api/oauth/usage` endpoint snapshot, driven by `Arbiter.Quota.CloudProbe`.
+  This allows the dispatch gate to work on a fleet that is quota-held or idle,
+  with current data. Per-model weekly breakdowns and account overage spend are
+  available only through this endpoint.
+
+  `capture/3` is now dormant / archival-only (bd-7cvh8z): it consumed
+  `anthropic-ratelimit-unified-*` response headers from worker traffic, but
+  the Anthropic proxy that was the sole caller was deleted once endpoint polling
+  became the unified architecture across all providers. The function remains
+  for compatibility with any offline migration workflows, but produces no
+  in-production quota updates.
 
   Each write stamps `capture_source` (`"headers"` / `"oauth_poll"`, see
   `header_source/0` and `oauth_poll_source/0`) so a row says which one
   produced it — `arb quota` prints it, and
   `Arbiter.Quota.Gate.staleness_threshold_seconds/1` keys the staleness margin
   off it, because the polled source has a far tighter request budget than
-  free header capture does.
+  header capture ever did.
   """
 
   use Ash.Domain
@@ -143,7 +142,7 @@ defmodule Arbiter.Quota do
   The latest persisted quota snapshot for `workspace_id` on `provider`, read
   from that provider's own table (bd-2mpo3f):
 
-    * `:claude` → `AnthropicQuota` (proxy header capture)
+    * `:claude` → `AnthropicQuota` (OAuth polling + header capture from responses)
     * `:codex` → `CodexQuota` (`Arbiter.Quota.CloudProbe` / `Quota.Codex.fetch/2`)
     * `:gemini` / `:antigravity` → `GoogleQuota` (`Arbiter.Quota.CloudCode`)
 
@@ -455,9 +454,9 @@ defmodule Arbiter.Quota do
   API (`Arbiter.Quota.CloudCode`).
 
   Returns `%{gemini: snapshot | nil, antigravity: snapshot | nil}`. Unlike the
-  Anthropic snapshot — a passive DB read of proxy-captured headers — these fetch
-  live from Google, so both providers are queried concurrently and each is
-  bounded by a timeout; a hung or crashed fetch degrades to `nil`.
+  Anthropic snapshot — persisted from OAuth polling + response header capture —
+  these fetch live from Google, so both providers are queried concurrently and
+  each is bounded by a timeout; a hung or crashed fetch degrades to `nil`.
 
   Gated by the `:arbiter, :cloud_code_quota` `:enabled` flag (default on; the
   test env turns it off so `GET /api/quota` stays a pure DB read there). Pass
@@ -572,12 +571,11 @@ defmodule Arbiter.Quota do
 
   # Persist one parsed `/api/oauth/usage` snapshot (bd-b0zody).
   #
-  # The poll is the *primary* quota source now, not just a per-model garnish:
-  # when the body carried an aggregate 5h figure we write the same columns the
-  # proxy's header capture writes (`utilization_5h` / `status_5h` /
+  # The poll is the *primary* quota source: when the body carried an aggregate
+  # 5h figure we write the primary columns (`utilization_5h` / `status_5h` /
   # `reset_5h_at` / the 7d trio / `representative_claim` / `overage_status`)
   # plus a fresh `captured_at`, so `Arbiter.Quota.Gate` gates off the poll
-  # rather than off worker traffic.
+  # rather than depending on worker traffic alone.
   #
   # Two guards keep a thin or broken body from erasing a good row:
   #

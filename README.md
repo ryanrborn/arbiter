@@ -250,13 +250,12 @@ other captured secrets above.
 
 **Precedence when both are set:** a spawn can end up with both
 `CLAUDE_CODE_OAUTH_TOKEN` (install-wide) and `ANTHROPIC_API_KEY` (workspace
-`credentials_ref`/`api_keys` rotation, or the quota-capturing proxy's
-`ANTHROPIC_BASE_URL`) in its environment at once. Which one the `claude` CLI
-honours is decided by the CLI itself, not by Arbiter — if it prefers the OAuth
-token, a workspace that deliberately configured its own key would silently
-authenticate against the install-wide account instead. If a workspace's
-`ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence before relying
-on it, or unset the install-wide token for that install.
+`credentials_ref`/`api_keys` rotation) in its environment at once. Which one
+the `claude` CLI honours is decided by the CLI itself, not by Arbiter — if it
+prefers the OAuth token, a workspace that deliberately configured its own key
+would silently authenticate against the install-wide account instead. If a
+workspace's `ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence
+before relying on it, or unset the install-wide token for that install.
 
 **Redaction:** `Arbiter.Worker.ClaudeSession.start/1` adds
 `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values to the session's
