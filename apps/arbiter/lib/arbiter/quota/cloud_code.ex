@@ -3,10 +3,11 @@ defmodule Arbiter.Quota.CloudCode do
   On-demand quota snapshots for the Google Cloud Code Assist family:
   **Gemini CLI** and **Antigravity** (bd-57ukgb, part of bd-5qe3qs).
 
-  Unlike the Anthropic quota — which the local proxy captures passively from
-  response headers (`Arbiter.Quota.AnthropicQuota`) — neither Gemini CLI nor
-  Antigravity emits usage on ordinary traffic. We query it directly, modeled on
-  9router's `open-sse/services/usage/google.js`, using the same Cloud Code Assist
+  Unlike the Anthropic quota — which is updated via explicit polling of
+  `Arbiter.Quota.OAuthUsage` and header capture from worker responses
+  (`Arbiter.Quota.AnthropicQuota`) — neither Gemini CLI nor Antigravity emits
+  usage on ordinary traffic. We query it directly, modeled on 9router's
+  `open-sse/services/usage/google.js`, using the same Cloud Code Assist
   endpoints the real `gemini /stats` command hits.
 
   ## Credentials (read-only)

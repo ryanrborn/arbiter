@@ -1,26 +1,25 @@
 defmodule Arbiter.Quota.CloudProbe do
   @moduledoc """
-  Periodic refresh probe for the *non-Anthropic* quota providers — Codex,
-  Gemini CLI, and Antigravity (bd-ajh7bd).
+  Periodic refresh probe for all quota providers — Anthropic, Codex, Gemini
+  CLI, and Antigravity (bd-ajh7bd).
 
   ## Motivation
 
-  Claude quota stays fresh on its own timer: this same GenServer also polls
-  Anthropic's `/api/oauth/usage` (bd-b0zody, bd-atyrrq — see
-  `capture_oauth_usage_for_group/2` below), so an idle fleet's snapshot never
-  goes stale for lack of proxied traffic. Codex / Gemini CLI / Antigravity
-  have no such passive signal either — their figures only ever came from a
-  *live fetch on each `GET /api/quota` call*, and (before this change)
-  Gemini/Antigravity were never persisted at all. So the web dashboard, which
-  reads only the persisted quota tables, could never show them, and there was
-  no history to audit.
+  Each provider's quota figures come from endpoints outside Arbiter's control,
+  and each has its own rate limits. Rather than fetching on every `GET /api/quota`
+  call (latency + rate-limit risk) or binding quota state to worker traffic
+  (stale when idle or quota-held), this GenServer polls on a recurring timer.
+  A poll writes a persistent snapshot and broadcasts `{:quota_updated, ws_id,
+  view}` on the `"quota:<ws_id>"` PubSub topic — the same topic the LiveView
+  `:quota` hook subscribes to. The prober becomes the *only* place that calls
+  out to the external providers, so `GET /api/quota` and `arb quota` are pure DB
+  reads (no request-time latency or rate-limit risk).
 
-  This GenServer closes that gap. On a recurring timer it refreshes each
-  provider for every workspace, which upserts the snapshot and broadcasts
-  `{:quota_updated, ws_id, view}` on the `"quota:<ws_id>"` PubSub topic — the
-  same topic the LiveView `:quota` hook subscribes to. The prober becomes the
-  *only* place that calls out to OpenAI/Google, so `GET /api/quota` and
-  `arb quota` are pure DB reads (no request-time latency or rate-limit risk).
+  For Codex / Gemini CLI / Antigravity: their figures only ever came from a live
+  fetch on each `GET /api/quota` call, and (before this change) Gemini/Antigravity
+  were never persisted at all. The web dashboard, which reads only the persisted
+  quota tables, could never show them, and there was no history to audit. This
+  GenServer closes that gap.
 
   ## What a refresh does per workspace
 
@@ -49,9 +48,7 @@ defmodule Arbiter.Quota.CloudProbe do
       bd-4fbpto found that theory backwards: a workspace's `worker_env` token
       is scope/rate-limited for this endpoint (empirically confirmed — see the
       status codes recorded in PR #1607) while the operator's
-      credentials-file token succeeds, so passing the workspace token here was
-      why every poll silently failed once bd-7cvh8z removed the proxy's
-      header-capture fallback. This module no longer resolves or passes a
+      credentials-file token succeeds. This module no longer resolves or passes a
       per-workspace token at all: `Arbiter.Quota.OAuthUsage.fetch/1`'s own
       default (read `.credentials.json`) is always used.
 
