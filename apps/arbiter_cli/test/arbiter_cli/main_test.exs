@@ -12,6 +12,22 @@ defmodule ArbiterCli.MainTest do
       assert code == 0
       assert out =~ "bd-1"
     end
+
+    # bd-9so315: the top-level shortcut, the form the escalation body tells the
+    # coordinator to run.
+    test "arb verify <id> reaches the issue verify endpoint" do
+      stub_post(
+        "/api/issues/bd-1/verify",
+        %{"id" => "bd-1", "title" => "T", "status" => "closed"},
+        200
+      )
+
+      {out, _err, code} =
+        capture(fn -> Main.main(["verify", "bd-1", "--observed", "saw it live"]) end)
+
+      assert code == 0
+      assert out =~ "bd-1"
+    end
   end
 
   describe "global --workspace / -w flag" do

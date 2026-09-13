@@ -129,6 +129,33 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
     end
   end
 
+  describe "Verification.finalize_merged/2" do
+    test "an unflagged task closes, exactly as before the flag existed", %{ws: ws} do
+      issue = task(ws)
+
+      assert {:ok, :closed, closed} = Verification.finalize_merged(issue, close_upstream: false)
+      assert closed.status == :closed
+      assert Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id) == []
+    end
+
+    test "a flagged task parks and escalates exactly once", %{ws: ws} do
+      issue = task(ws, %{verify_after_deploy: true})
+
+      assert {:ok, :awaiting_verification, parked} =
+               Verification.finalize_merged(issue, close_upstream: false, mr_ref: "#1633")
+
+      assert parked.status == :awaiting_verification
+      assert [escalation] = Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id)
+      assert escalation.subject =~ "awaiting verification"
+      assert escalation.body =~ "#1633"
+
+      # A second finalize (a re-tick, a second sweep) must not park again or
+      # page again — the guard refuses and no escalation is sent.
+      assert {:error, _} = Verification.finalize_merged(parked, close_upstream: false)
+      assert length(Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id)) == 1
+    end
+  end
+
   describe "Verification.awaiting/1" do
     test "lists awaiting tasks for a workspace", %{ws: ws} do
       a = task(ws, %{verify_after_deploy: true})
