@@ -445,7 +445,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   idle fleet (bd-atyrrq); a silent, sustained failure here means the dispatch
   gate is running on a snapshot that only gets staler, and a 7d hold — once
   engaged — cannot lift without a fresh polled row (bd-b7umwj). `arb quota`
-  used to be the only way a human would notice (see the bd-4fbpto writeup);
+  used to be the only way a human would notice (see the PR #1607 write-up);
   this is the automated backstop.
 
   `snapshot` carries `:workspace_id` — any workspace touched by the failed

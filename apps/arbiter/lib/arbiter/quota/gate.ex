@@ -305,7 +305,7 @@ defmodule Arbiter.Quota.Gate do
   just isn't the primary source right now) — that distinction is exactly what
   `arb quota` needs to tell "no fresh data from any source" apart from
   "polling is working, just not feeding the gate columns this cycle" (see the
-  bd-4fbpto writeup: silence here read as a total outage for 2.8 hours because
+  PR #1607: silence here read as a total outage for 2.8 hours because
   nothing separated those two cases).
   """
   @spec oauth_poll_fresh?(Arbiter.Quota.AnthropicQuota.t() | nil) :: boolean()

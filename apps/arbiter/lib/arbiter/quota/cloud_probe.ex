@@ -48,7 +48,7 @@ defmodule Arbiter.Quota.CloudProbe do
       theory that workspaces sharing a token could safely share one fetch.
       bd-4fbpto found that theory backwards: a workspace's `worker_env` token
       is scope/rate-limited for this endpoint (empirically confirmed — see the
-      bd-4fbpto writeup for the status codes) while the operator's
+      status codes recorded in PR #1607) while the operator's
       credentials-file token succeeds, so passing the workspace token here was
       why every poll silently failed once bd-7cvh8z removed the proxy's
       header-capture fallback. This module no longer resolves or passes a
@@ -152,7 +152,12 @@ defmodule Arbiter.Quota.CloudProbe do
 
   @impl true
   def handle_call(:state, _from, %State{} = state) do
-    {:reply, %{probe_count: state.probe_count, enabled: state.enabled}, state}
+    {:reply,
+     %{
+       probe_count: state.probe_count,
+       enabled: state.enabled,
+       oauth_consecutive_failures: state.oauth_consecutive_failures
+     }, state}
   end
 
   def handle_call(:probe, _from, %State{} = state) do
@@ -243,8 +248,34 @@ defmodule Arbiter.Quota.CloudProbe do
   # edge-trigger, so a sustained outage produces exactly one mailbox item
   # (bd-4fbpto) rather than one per 5-minute cycle. Resets on the next
   # success, so a later, distinct outage escalates again.
-  defp note_oauth_result(%State{} = state, _workspace_ids, {:ok, _}) do
-    %{state | oauth_consecutive_failures: 0}
+  defp note_oauth_result(%State{} = state, workspace_ids, {:ok, results}) do
+    failed =
+      for {workspace_id, {:error, reason}} <- Enum.zip(workspace_ids, results),
+          do: {workspace_id, reason}
+
+    cond do
+      failed == [] ->
+        %{state | oauth_consecutive_failures: 0}
+
+      failed != [] and length(failed) == length(results) ->
+        # Every per-workspace write failed even though the fetch itself
+        # succeeded (e.g. the DB was locked) — this is the ticket's exact
+        # symptom ("polls every 5 min and writes nothing") wearing a
+        # different cause, so it must count as a failed cycle rather than
+        # reset the counter.
+        Logger.warning(
+          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but every write failed: #{inspect(failed)}"
+        )
+
+        note_oauth_result(state, workspace_ids, {:error, {:all_writes_failed, failed}})
+
+      true ->
+        Logger.warning(
+          "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(failed)}"
+        )
+
+        %{state | oauth_consecutive_failures: 0}
+    end
   end
 
   defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason}) do

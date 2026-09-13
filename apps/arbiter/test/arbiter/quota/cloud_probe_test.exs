@@ -223,10 +223,20 @@ defmodule Arbiter.Quota.CloudProbeTest do
       first = Arbiter.Quota.latest(ws.id)
       assert first.capture_source == "oauth_poll"
 
-      # Force the second cycle's `captured_at` (second-resolution) into a
+      # Backdate the first row's `captured_at` (second-resolution) into a
       # distinct second so "advances" is unambiguous, matching acceptance
-      # criterion 2's "show two consecutive cycles advancing".
-      Process.sleep(1_100)
+      # criterion 2's "show two consecutive cycles advancing" — without
+      # sleeping past a real second boundary (see quota_test.exs for the same
+      # pattern).
+      backdated = DateTime.add(first.captured_at, -2, :second)
+
+      {:ok, _} =
+        Arbiter.Repo.query(
+          "UPDATE anthropic_quotas SET captured_at = ? WHERE workspace_id = ? AND provider = 'claude'",
+          [backdated, ws.id]
+        )
+
+      first = %{first | captured_at: backdated}
 
       stub_utilization.(20)
       CloudProbe.probe(pid)
@@ -237,15 +247,36 @@ defmodule Arbiter.Quota.CloudProbeTest do
     end
 
     # `CloudProbe.probe/1` only blocks for the synchronous fan-out; the
-    # oauth-usage poll itself completes on a spawned Task. Every helper here
-    # has the stub notify the test process the instant the (single, real)
-    # HTTP call lands, anchoring the wait to a real event rather than a blind
-    # sleep; the tiny buffer after it only covers the couple of in-process,
-    # no-I/O steps (the `case` branch's `Logger.warning` + the reply send)
-    # that follow the HTTP response within the same Task.
-    defp await_oauth_cycle do
+    # oauth-usage poll itself completes on a spawned Task, which reports back
+    # to the `CloudProbe` GenServer via `handle_info`. The stub's
+    # `:oauth_call_made` only proves the HTTP call landed, not that the
+    # GenServer has processed the result yet (`Logger.warning` + `send/2`
+    # still have to happen on the Task first) — so after it fires, poll the
+    # GenServer's own state (via a synchronous call, serialized behind
+    # whatever is already in its mailbox) until `oauth_consecutive_failures`
+    # reaches `expected_failures`, rather than guessing a sleep duration.
+    defp await_oauth_cycle(pid, expected_failures) do
       assert_receive :oauth_call_made, 2_000
-      Process.sleep(20)
+      wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_failures == expected_failures end)
+    end
+
+    defp wait_until(fun, timeout_ms \\ 2_000) do
+      deadline = System.monotonic_time(:millisecond) + timeout_ms
+      do_wait_until(fun, deadline)
+    end
+
+    defp do_wait_until(fun, deadline) do
+      cond do
+        fun.() ->
+          :ok
+
+        System.monotonic_time(:millisecond) >= deadline ->
+          flunk("condition not met within #{deadline}ms")
+
+        true ->
+          Process.sleep(5)
+          do_wait_until(fun, deadline)
+      end
     end
 
     test "a failed poll is logged at warning, not swallowed at debug", context do
@@ -269,7 +300,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       log =
         ExUnit.CaptureLog.capture_log([level: :warning], fn ->
           CloudProbe.probe(pid)
-          await_oauth_cycle()
+          await_oauth_cycle(pid, 1)
         end)
 
       assert log =~ "oauth usage refresh"
@@ -296,7 +327,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
         )
 
       ExUnit.CaptureLog.capture_log(fn ->
-        for _ <- 1..3 do
+        for n <- 1..3 do
           # Each cycle must hit the network (and re-trigger the stub's 429) to
           # be an independent, observable failure — without this reset, the
           # 180s cooldown after cycle 1's real 429 would short-circuit cycles
@@ -304,7 +335,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
           # synchronize on.
           Arbiter.Quota.OAuthUsage.reset_cooldown!("solo-token")
           CloudProbe.probe(pid)
-          await_oauth_cycle()
+          await_oauth_cycle(pid, n)
         end
       end)
 
@@ -317,7 +348,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       ExUnit.CaptureLog.capture_log(fn ->
         Arbiter.Quota.OAuthUsage.reset_cooldown!("solo-token")
         CloudProbe.probe(pid)
-        await_oauth_cycle()
+        await_oauth_cycle(pid, 4)
       end)
 
       assert length(Arbiter.Messages.Message.inbox(coordinator)) == 1

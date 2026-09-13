@@ -534,7 +534,7 @@ defmodule Arbiter.Quota do
   token could authenticate this call. bd-4fbpto found that backwards — that
   token is scope/rate-limited for this endpoint and passing it here is why
   every poll silently failed once the header-capture fallback was removed
-  (see the bd-4fbpto writeup for the evidence). `Arbiter.Quota.CloudProbe` no
+  (see the status codes and body shapes recorded in PR #1607). `Arbiter.Quota.CloudProbe` no
   longer resolves or passes a per-workspace token: it calls this once per
   cycle for *every* workspace on the install and lets
   `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
@@ -543,6 +543,15 @@ defmodule Arbiter.Quota do
   `:source_dir`). Returns the list of per-workspace `record_oauth_usage`
   results, in the same order as `workspace_ids`, if the single fetch
   succeeded.
+
+  This unconditionally writes the *same* account's figures to every
+  workspace passed in, which is only correct because this install has
+  exactly one provider account today. `docs/provider-account-design.md`
+  (bd-7df8nh) is the RFC that removes that precondition — once
+  `ProviderAccount` exists, this needs to iterate accounts and fetch/write
+  per account rather than once for the whole fleet (see that doc's §9 and
+  phase P6, which now has to build that iteration from scratch since this
+  ticket deleted bd-5xuneh's per-token grouping rather than re-keying it).
   """
   @spec capture_oauth_usage_for_group([String.t()], keyword()) ::
           {:ok, [{:ok, AnthropicQuota.t()} | {:error, term()}]} | {:error, term()}
