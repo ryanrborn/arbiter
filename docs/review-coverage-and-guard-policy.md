@@ -700,12 +700,14 @@ new path is proven live.
 * **Fixing the verdict parser.** Chain B's parsing defects are real and are not
   addressed here; §4.6 only changes what a parse failure costs. bd-3hb4ih stays
   a parser ticket.
-* **Giving the reviewer a worktree checkout** (bd-199giy, open since
-  2026-08-23). Recommendation 4 of the investigation, a separate ticket, and
-  orthogonal: it changes review *quality*, not review *bookkeeping*.
+* **Giving the reviewer a worktree checkout** (bd-199giy, merged as #1350).
+  The internal ReviewGate reviewer already works from a worktree checkout.
+  Recommendation 4 of the investigation, a separate ticket, and orthogonal:
+  it changes review *quality*, not review *bookkeeping*.
 * **A generic circuit breaker for auto-filing paths.** Recommendation 3. Class F
-  in §5.3 states the policy for the guards in this inventory; the general
-  breaker (bd-1atwts, bd-wtvu9r) is its own work.
+  in §5.3 states the policy for the guards in this inventory; the generic
+  circuit breaker (bd-5jr49o) merged as #1638. (ReviewPatrol-specific breakers
+  bd-1atwts and bd-wtvu9r merged as #1548 and #1572.)
 * **Changing the ReviewGate's round budget, model tier or prompts.**
 * **Webhook-driven merge detection.** Still the right upgrade
   (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1117` (`effective_outcome`)
