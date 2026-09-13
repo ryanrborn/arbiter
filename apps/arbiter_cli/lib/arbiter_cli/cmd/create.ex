@@ -226,14 +226,7 @@ defmodule ArbiterCli.Cmd.Create do
           Output.die(err)
       end
 
-    # bd-7mbrlg: non-blocking heads-up — the task was created either way, but
-    # `task_promote` / `arb issue promote` will later refuse it without ACs
-    # or an explicit waiver.
-    if mode == :text do
-      for warning <- issue["warnings"] || [] do
-        IO.puts(:stderr, "arb: warning: #{warning}")
-      end
-    end
+    print_acceptance_warnings(issue, mode)
 
     if opts[:deps] do
       attach_deps(issue["id"], opts[:deps])
@@ -245,6 +238,17 @@ defmodule ArbiterCli.Cmd.Create do
 
     Output.emit_issue(issue, mode)
   end
+
+  # bd-7mbrlg: non-blocking heads-up — the task was created either way, but
+  # `task_promote` / `arb issue promote` will later refuse it without ACs
+  # or an explicit waiver.
+  defp print_acceptance_warnings(issue, :text) do
+    for warning <- issue["warnings"] || [] do
+      IO.puts(:stderr, "arb: warning: #{warning}")
+    end
+  end
+
+  defp print_acceptance_warnings(_issue, _mode), do: :ok
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, ""), do: map

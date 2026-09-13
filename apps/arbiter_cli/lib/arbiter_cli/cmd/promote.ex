@@ -20,28 +20,34 @@ defmodule ArbiterCli.Cmd.Promote do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-      mode = if opts[:json], do: :json, else: :text
-
-      id =
-        case rest do
-          [id] -> id
-          [] -> Output.die("promote requires an issue id")
-          _ -> Output.die("promote takes exactly one positional argument: the issue id")
-        end
-
-      body =
-        case opts[:waive] do
-          reason when is_binary(reason) and reason != "" -> %{"acceptance_waived" => reason}
-          _ -> %{}
-        end
-
-      case Client.post("/api/issues/" <> id <> "/promote", body) do
-        {:ok, issue} -> Output.emit_issue(issue, mode)
-        {:error, err} -> Output.die(friendly_error(id, err))
-      end
+      do_run(argv)
     end
   end
+
+  defp do_run(argv) do
+    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+    mode = if opts[:json], do: :json, else: :text
+    id = parse_id(rest)
+    body = waive_body(opts[:waive])
+
+    case Client.post("/api/issues/" <> id <> "/promote", body) do
+      {:ok, issue} -> Output.emit_issue(issue, mode)
+      {:error, err} -> Output.die(friendly_error(id, err))
+    end
+  end
+
+  defp parse_id(rest) do
+    case rest do
+      [id] -> id
+      [] -> Output.die("promote requires an issue id")
+      _ -> Output.die("promote takes exactly one positional argument: the issue id")
+    end
+  end
+
+  defp waive_body(reason) when is_binary(reason) and reason != "",
+    do: %{"acceptance_waived" => reason}
+
+  defp waive_body(_), do: %{}
 
   defp friendly_error(_id, err), do: err
 end

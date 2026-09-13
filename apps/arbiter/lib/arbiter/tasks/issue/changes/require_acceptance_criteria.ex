@@ -16,8 +16,8 @@ defmodule Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria do
 
   use Ash.Resource.Change
 
-  alias Ash.Changeset
   alias Arbiter.Tasks.Issue
+  alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do
