@@ -40,7 +40,6 @@ defmodule Arbiter.Tasks.Verification do
   leaves the evidence durable on the task rather than losing what was observed.
   """
 
-  require Ash.Query
   require Logger
 
   alias Arbiter.Tasks.Issue
@@ -112,10 +111,11 @@ defmodule Arbiter.Tasks.Verification do
   `verify_after_deploy: true` — park it at `:awaiting_verification` and notify
   the coordinator exactly once.
 
-  Every path that finalizes a merged PR routes through here (the merge queue's
-  own merge, and `MergedPRFinalizer`'s sweep for a PR merged outside the
-  queue), so the flag cannot be honoured on one path and silently ignored on
-  the other.
+  Every path that finalizes a merged PR routes through here — the merge queue's
+  own merge, `MergedPRFinalizer`'s sweep for a PR merged outside the queue, and
+  `Arbiter.Worker.Driver`'s close of a worker the Watchdog completed with
+  `:merged` — so the flag cannot be honoured on one path and silently ignored
+  on another.
 
   Options:
 
@@ -134,15 +134,26 @@ defmodule Arbiter.Tasks.Verification do
   def finalize_merged(task, opts \\ [])
 
   def finalize_merged(%Issue{verify_after_deploy: true} = task, opts) do
-    if Keyword.get(opts, :close_upstream, true) do
-      # Not deferred: the PR body's `Closes #N` has already closed the upstream
-      # issue on merge, so pushing our own close keeps the local record honest
-      # rather than leaving `Tasks.Claim`'s drift check staring at a mismatch.
-      Arbiter.Trackers.Sync.lifecycle(task, :closed)
-    end
-
+    # The park is attempted FIRST. Only once the local transition has actually
+    # landed do we push the upstream close — otherwise a refused park (the task
+    # raced to `:closed`, a DB error) would leave the tracker issue closed with
+    # nothing local to match it, and a retry would push a second close. This
+    # mirrors the unflagged branch, where `SyncTracker` runs as an after-action
+    # *inside* the transition and so cannot fire without it.
     case Ash.update(task, %{}, action: :await_verification) do
       {:ok, awaiting} ->
+        if Keyword.get(opts, :close_upstream, true) do
+          # Not deferred: the PR body's `Closes #N` has already closed the
+          # upstream issue on merge, so pushing our own close keeps the local
+          # record honest rather than leaving `Tasks.Claim`'s drift check
+          # staring at a mismatch. `close_and_verify/1` is the same
+          # transition-then-verify-then-retry pair `SyncTracker` performs on
+          # the `:close` action (and it carries the same `review_only` guard),
+          # so a flagged task is no less likely than an unflagged one to end
+          # with its tracker issue actually closed.
+          Arbiter.Trackers.Sync.close_and_verify(awaiting)
+        end
+
         Arbiter.Messages.CoordinatorNotifier.awaiting_verification(
           %{task_id: task.id, workspace_id: task.workspace_id},
           Keyword.get(opts, :mr_ref) || task.pr_ref,
@@ -166,38 +177,19 @@ defmodule Arbiter.Tasks.Verification do
   end
 
   @doc """
-  Tasks currently parked at `:awaiting_verification`, oldest wait first.
+  When a parked task's wait started — the `awaiting_verification_at` stamp,
+  falling back to `updated_at` (and then `inserted_at`) for rows that entered
+  the state before the column existed, so an age is always renderable.
 
-  Options: `:workspace_id` to scope to one workspace (omit for every
-  workspace). Returns `[]` rather than raising if the read fails, so a
-  briefing/dashboard surface never dies on it.
+  Accepts an `Issue` struct or any map with those keys, so the board snapshot
+  and any other surface that has already loaded the rows shares one definition
+  of "how long has this been waiting" rather than re-deriving the fallback.
   """
-  @spec awaiting(keyword()) :: [Issue.t()]
-  def awaiting(opts \\ []) do
-    ws_id = Keyword.get(opts, :workspace_id)
-
-    Issue
-    |> Ash.Query.filter(status == :awaiting_verification)
-    |> then(fn q ->
-      if is_binary(ws_id), do: Ash.Query.filter(q, workspace_id == ^ws_id), else: q
-    end)
-    |> Ash.read()
-    |> case do
-      {:ok, issues} -> Enum.sort_by(issues, &wait_started_at/1, {:asc, DateTime})
-      {:error, _} -> []
-    end
+  @spec awaiting_since(Issue.t() | map()) :: DateTime.t() | nil
+  def awaiting_since(issue) do
+    Map.get(issue, :awaiting_verification_at) || Map.get(issue, :updated_at) ||
+      Map.get(issue, :inserted_at)
   end
-
-  @doc """
-  Seconds this task has been awaiting verification, or `nil` when it isn't
-  (or predates the `awaiting_verification_at` stamp).
-  """
-  @spec awaiting_age_seconds(Issue.t(), DateTime.t() | nil) :: non_neg_integer() | nil
-  def awaiting_age_seconds(%Issue{awaiting_verification_at: %DateTime{} = at}, now) do
-    max(DateTime.diff(now || DateTime.utc_now(), at), 0)
-  end
-
-  def awaiting_age_seconds(%Issue{}, _now), do: nil
 
   # ---- internals ---------------------------------------------------------
 
@@ -230,8 +222,4 @@ defmodule Arbiter.Tasks.Verification do
         {:error, {:invalid, err}}
     end
   end
-
-  defp wait_started_at(%Issue{awaiting_verification_at: %DateTime{} = at}), do: at
-  defp wait_started_at(%Issue{updated_at: %DateTime{} = at}), do: at
-  defp wait_started_at(_), do: ~U[1970-01-01 00:00:00Z]
 end

@@ -491,10 +491,11 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   # The parked-at stamp, falling back to `updated_at` for rows that entered the
-  # state before the column existed, so the card still renders an age.
+  # state before the column existed, so the card still renders an age. Shared
+  # with the rest of the verification surface so "how long has this waited" has
+  # exactly one definition.
   defp awaiting_since(issue) do
-    Map.get(issue, :awaiting_verification_at) || Map.get(issue, :updated_at) ||
-      created_at(issue)
+    Arbiter.Tasks.Verification.awaiting_since(issue) || created_at(issue)
   end
 
   defp waiting_cards(workers, issues_by_id, watchdog_live) do

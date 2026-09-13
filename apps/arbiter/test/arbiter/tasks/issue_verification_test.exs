@@ -156,14 +156,18 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
     end
   end
 
-  describe "Verification.awaiting/1" do
-    test "lists awaiting tasks for a workspace", %{ws: ws} do
-      a = task(ws, %{verify_after_deploy: true})
-      _b = task(ws, %{verify_after_deploy: true})
-      {:ok, _} = Ash.update(a, %{}, action: :await_verification)
+  describe "Verification.awaiting_since/1" do
+    test "prefers the parked-at stamp", %{ws: ws} do
+      issue = task(ws, %{verify_after_deploy: true})
+      {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
-      assert [%Issue{id: id}] = Verification.awaiting(workspace_id: ws.id)
-      assert id == a.id
+      assert Verification.awaiting_since(awaiting) == awaiting.awaiting_verification_at
+      refute is_nil(Verification.awaiting_since(awaiting))
+    end
+
+    test "falls back to updated_at for a row parked before the column existed" do
+      at = ~U[2026-09-01 00:00:00Z]
+      assert Verification.awaiting_since(%{updated_at: at}) == at
     end
   end
 end
