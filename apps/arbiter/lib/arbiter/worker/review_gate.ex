@@ -271,6 +271,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:branch, String.t()}
           | {:target_branch, String.t()}
           | {:command, [String.t()] | nil}
+          | {:command_provider, String.t() | nil}
           | {:revise_command, [String.t()] | nil}
           | {:timeout_ms, non_neg_integer()}
           | {:verdict_retries, non_neg_integer()}
@@ -578,6 +579,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # configured — the reviewer then falls back to the local branch diff.
       pr_ref: Keyword.get(opts, :pr_ref),
       command: Keyword.get(opts, :command),
+      # bd-869mmg: test-only escape hatch alongside `:command` — tags the
+      # fixture reviewer argv's output as a specific provider's wire format
+      # (e.g. "gemini") so a fixture emitting real gemini stream-json can
+      # exercise `ClaudeSession`'s provider-specific decode/buffer path
+      # end-to-end, the same way a real workspace-routed reviewer would.
+      command_provider: Keyword.get(opts, :command_provider),
       revise_command: Keyword.get(opts, :revise_command),
       # bd-216r3e: `:timeout_ms` is an explicit OVERRIDE (tests / advanced
       # callers) and is held for the gate's lifetime. With no override the
@@ -2668,7 +2675,15 @@ defmodule Arbiter.Worker.ReviewGate do
   # block. A workspace-less ReviewGate (ad-hoc run) falls back to today's
   # behaviour — `ClaudeSession`'s built-in default argv, no model flag.
   defp build_session_opts(state, pid, _role, _prompt, command) when is_list(command) do
-    {:ok, [owner: pid, worktree_path: state.worktree_path, command: command]}
+    base = [owner: pid, worktree_path: state.worktree_path, command: command]
+
+    opts =
+      case Map.get(state, :command_provider) do
+        provider when is_binary(provider) -> base ++ [provider: provider]
+        _ -> base
+      end
+
+    {:ok, opts}
   end
 
   defp build_session_opts(state, pid, role, prompt, nil) do

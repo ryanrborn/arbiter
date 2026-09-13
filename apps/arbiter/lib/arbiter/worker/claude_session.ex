@@ -570,13 +570,30 @@ defmodule Arbiter.Worker.ClaudeSession do
   # was formatted (and line-split) independently by
   # `Arbiter.Agents.Gemini.Stream.format_event/1`. A `VERDICT:` sentinel that
   # lands on a delta boundary (e.g. `"VERDICT: REQUEST_"` / `"CHANGES\n..."`)
-  # was rendered as two broken lines that never share a line with each other,
-  # so `ReviewGate`'s `^VERDICT:` regex could not see it even though the
-  # reviewer plainly emitted it — a real review discarded as
-  # `:review_gate_inconclusive`. A non-delta message (`"delta"` absent/false)
-  # is already a complete, standalone utterance (see the plain-content test
-  # cases), so it flushes immediately rather than waiting on a DONE marker
-  # this schema does not have.
+  # would render as two broken lines that never share a line with each other,
+  # so `ReviewGate`'s `^VERDICT:` regex could not see it on either half. This
+  # is a real, reproducible gap (see the unit tests below), confirmed
+  # independently of any specific incident. It is NOT confirmed to be the
+  # cause of the bd-atyrrq / run-72947341 incident this bug was filed
+  # against: re-parsing that run's captured durable transcript verbatim with
+  # `ReviewGate.parse_verdict/1` succeeds today with no buffering change at
+  # all (its `VERDICT: REQUEST_CHANGES` line is intact, unsplit, at column 0),
+  # and its preamble/closing lines (bare `⚙ gemini session started`, the
+  # uppercase-status `⚙ gemini session SUCCESS · …` summary) match the `agy`
+  # fork's event schema, not this one — `agy`'s assistant text already had
+  # per-line buffering before this change (`buffer_gemini_display/2`'s
+  # `"event" => "step_update"` clause above, live since bd-2fzwlc). What
+  # actually made ReviewGate report `:no_verdict` for that specific run —
+  # something upstream of parsing, in the live PubSub capture or in
+  # `reviewer_run_id/1`'s durable-transcript lookup (`review_gate.ex:526`) —
+  # could not be reproduced from the artifacts on disk (there is no captured
+  # Ash `Run` row or PubSub timing for that run to inspect). A non-delta
+  # message (`"delta"` absent/false) is already a complete, standalone
+  # utterance (see the plain-content test cases), so it flushes immediately
+  # rather than waiting on a DONE marker this schema does not have; any
+  # leftover buffered text from a *prior* incomplete delta run is flushed as
+  # its own line(s) first, rather than glued onto the new message with no
+  # separator.
   defp buffer_gemini_display(
          %{provider: "gemini"} = session,
          %{
@@ -592,8 +609,26 @@ defmodule Arbiter.Worker.ClaudeSession do
       if event["delta"] do
         split_display_lines(buf <> content)
       else
-        flush_display_buffer(buf <> content)
+        {buf_lines, _} = flush_display_buffer(buf)
+        {content_lines, _} = flush_display_buffer(content)
+        {buf_lines ++ content_lines, ""}
       end
+
+    session
+    |> Map.put(:gemini_text_buf, remainder)
+    |> Map.put(:gemini_pending_lines, lines)
+  end
+
+  # Upstream gemini's own terminal event (as opposed to agy's `"event" =>
+  # "result"` above). Without this clause a trailing buffered chunk (a final
+  # delta with no closing newline) isn't lost — `handle_exit/2` flushes any
+  # leftover `gemini_text_buf` unconditionally when the process exits — but it
+  # renders AFTER the `⚙ gemini session …` summary line instead of before it,
+  # since nothing flushes it at the point the terminal event itself is
+  # processed. Flush here too so the transcript stays in the order the
+  # reviewer actually produced it.
+  defp buffer_gemini_display(%{provider: "gemini"} = session, %{"type" => "result"}) do
+    {lines, remainder} = flush_display_buffer(Map.get(session, :gemini_text_buf, ""))
 
     session
     |> Map.put(:gemini_text_buf, remainder)
@@ -990,6 +1025,14 @@ defmodule Arbiter.Worker.ClaudeSession do
        )
        when is_binary(content) do
     session |> Map.get(:gemini_pending_lines, []) |> Enum.map(&{&1, true})
+  end
+
+  # Upstream gemini's own terminal event — flush whatever `buffer_gemini_display/2`
+  # recovered from a trailing, newline-less delta chunk before appending the
+  # session summary line, mirroring the agy `"event" => "result"` clause above.
+  defp format_event(%{"type" => "result"} = event, %{provider: "gemini"} = session) do
+    flushed = session |> Map.get(:gemini_pending_lines, []) |> Enum.map(&{&1, true})
+    flushed ++ Arbiter.Agents.Gemini.Stream.format_event(event)
   end
 
   defp format_event(event, %{provider: "gemini"}),

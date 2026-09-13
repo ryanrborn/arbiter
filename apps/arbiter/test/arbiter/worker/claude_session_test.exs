@@ -1041,6 +1041,96 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  describe "upstream gemini terminal event flush (bd-869mmg round 2)" do
+    # A trailing delta chunk with no closing newline stays in `gemini_text_buf`
+    # until something flushes it. `handle_exit/2` already flushes any leftover
+    # `gemini_text_buf` unconditionally when the process exits (bd-2fzwlc
+    # round 2), so the content is never actually LOST even without this
+    # clause — but without it, upstream gemini's own `"type" => "result"`
+    # terminal event falls through to the provider catch-all, which clears
+    # `:gemini_pending_lines` without touching `:gemini_text_buf`, so the
+    # trailing line renders AFTER the `⚙ gemini session …` summary instead of
+    # before it — the transcript would show the session's own "done" marker
+    # ahead of content the reviewer wrote before it finished. This clause
+    # keeps `output_lines` in the order the reviewer actually produced it.
+    test "a trailing delta with no closing newline flushes before the session summary line" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("gem-sj-trailing-flush")
+
+      events = [
+        %{
+          "type" => "message",
+          "role" => "assistant",
+          "content" => "1. missing nil guard\n\nVERDICT: REQUEST_CHANGES",
+          "delta" => true
+        },
+        %{"type" => "result", "status" => "success", "stats" => %{}}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      verdict_index = Enum.find_index(lines, &(&1 == "VERDICT: REQUEST_CHANGES"))
+      summary_index = Enum.find_index(lines, &String.starts_with?(&1, "⚙ gemini session"))
+
+      assert verdict_index && summary_index && verdict_index < summary_index,
+             "the trailing delta content must render before the session summary line, not after"
+
+      assert {:request_changes, _findings} = Arbiter.Worker.ReviewGate.parse_verdict(lines)
+    end
+
+    # A fresh non-delta (standalone) message arriving while a PRIOR delta run
+    # is still unflushed must not glue the two together with no separator —
+    # that would corrupt a VERDICT line just as thoroughly as never buffering
+    # at all.
+    test "a stray non-delta message does not glue onto an unflushed prior delta buffer" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("gem-sj-no-glue")
+
+      events = [
+        %{
+          "type" => "message",
+          "role" => "assistant",
+          "content" => "VERDICT: REQUEST_",
+          "delta" => true
+        },
+        %{
+          "type" => "message",
+          "role" => "assistant",
+          "content" => "CHANGES\n\n1. missing nil guard\n",
+          "delta" => false
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      refute Enum.any?(lines, &String.contains?(&1, "REQUEST_CHANGES\n\nCHANGES")),
+             "the stray delta remainder must not be glued onto the next message with no separator"
+
+      assert "VERDICT: REQUEST_" in lines
+      assert "CHANGES" in lines
+    end
+  end
+
   describe "agy wire schema parsing (bd-2fzwlc round 2)" do
     test "arb done split across two agy text_delta chunks still completes" do
       {pid, _task_id} = start_worker()
