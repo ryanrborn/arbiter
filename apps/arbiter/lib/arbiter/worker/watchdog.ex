@@ -1306,12 +1306,7 @@ defmodule Arbiter.Worker.Watchdog do
             )
 
             safe(fn ->
-              Arbiter.Messages.CoordinatorNotifier.auto_merge_stalled(
-                snapshot(state),
-                state.mr_ref,
-                fail_count,
-                reason
-              )
+              escalate_merge_stall(snapshot(state), state.mr_ref, fail_count, reason)
             end)
 
             # The coordinator has been paged — this is no longer the silent
@@ -1912,7 +1907,7 @@ defmodule Arbiter.Worker.Watchdog do
     )
 
     safe(fn ->
-      Arbiter.Messages.CoordinatorNotifier.merge_block_unresolved(
+      escalate_merge_unresolved(
         snapshot(state),
         state.mr_ref,
         reason,
@@ -1921,6 +1916,95 @@ defmodule Arbiter.Worker.Watchdog do
       )
     end)
   end
+
+  @doc """
+  Page the coordinator about a stalled auto-merge, behind the shared circuit
+  breaker (bd-5jr49o).
+
+  The Watchdog deliberately keeps retrying a stalled merge and re-pages every
+  `escalation_cadence/1` polls, so an MR that can never merge pages forever —
+  bd-6bg54c's 303+ retries with an escalation roughly every 30 minutes. The
+  breaker bounds the paging without touching the retry loop: the Watchdog
+  still polls, it just stops shouting about it.
+
+  Keyed on task + MR + block reason. The consecutive-failure count is
+  deliberately NOT part of the key — it changes on every page, which is
+  exactly what stopped a naive dedupe from ever matching.
+
+  Returns `:ok` when the page was attempted, `:suppressed` when the breaker is
+  open. Public only so the adoption test can drive the exact code this module's
+  poll loop runs.
+  """
+  @spec escalate_merge_stall(map(), String.t() | nil, non_neg_integer(), term()) ::
+          :ok | :suppressed
+  def escalate_merge_stall(snapshot, mr_ref, attempts, reason) do
+    guard_merge_escalation(
+      snapshot,
+      [mr_ref, "auto_merge_stalled", describe_for_signature(reason)],
+      "Auto-merge kept failing for this MR and the Watchdog kept paging. The " <>
+        "Watchdog is still polling — merge manually, or fix the block, then reset " <>
+        "the breaker if you want the paging back.",
+      fn ->
+        Arbiter.Messages.CoordinatorNotifier.auto_merge_stalled(
+          snapshot,
+          mr_ref,
+          attempts,
+          reason
+        )
+      end
+    )
+  end
+
+  @doc """
+  Page the coordinator about a block auto-resolve could not clear, behind the
+  shared circuit breaker (bd-5jr49o). See `escalate_merge_stall/4`; same
+  keying, same return contract.
+  """
+  @spec escalate_merge_unresolved(map(), String.t() | nil, atom(), non_neg_integer(), keyword()) ::
+          :ok | :suppressed
+  def escalate_merge_unresolved(snapshot, mr_ref, reason, attempts, opts \\ []) do
+    guard_merge_escalation(
+      snapshot,
+      [mr_ref, "merge_block_unresolved", reason],
+      "Auto-resolve was exhausted on this MR and the block kept re-escalating. " <>
+        "Resolve it manually (or force-merge); the next poll picks it up.",
+      fn ->
+        Arbiter.Messages.CoordinatorNotifier.merge_block_unresolved(
+          snapshot,
+          mr_ref,
+          reason,
+          attempts,
+          opts
+        )
+      end
+    )
+  end
+
+  defp guard_merge_escalation(snapshot, subject, detail, fun) do
+    result =
+      Arbiter.CircuitBreaker.guard(
+        :watchdog_merge_escalation,
+        [Map.get(snapshot, :task_id) | subject],
+        [
+          workspace_id: Map.get(snapshot, :workspace_id),
+          task_ref: Map.get(snapshot, :task_id),
+          detail: detail
+        ],
+        fun
+      )
+
+    case result do
+      {:ok, _} -> :ok
+      {:suppressed, _info} -> :suppressed
+    end
+  end
+
+  # A merger-adapter error is an arbitrary term whose `inspect/1` can carry a
+  # SHA, a timestamp or a request id. Only the coarse shape is stable enough to
+  # key a breaker on; the free-text tail is left to the signature scrubber.
+  defp describe_for_signature(reason) when is_atom(reason), do: reason
+  defp describe_for_signature({tag, _detail}) when is_atom(tag), do: tag
+  defp describe_for_signature(reason), do: inspect(reason)
 
   defp park_heartbeat_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
     case get_in(config, ["merge", "park_heartbeat_polls"]) do

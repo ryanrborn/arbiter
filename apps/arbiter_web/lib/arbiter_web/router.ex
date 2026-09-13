@@ -206,6 +206,10 @@ defmodule ArbiterWeb.Router do
     post("/queue/:task_id/rerun_ci", QueueController, :rerun_ci)
     post("/queue/:task_id/mark_ci_external", QueueController, :mark_ci_external)
 
+    # Shared circuit breaker (bd-5jr49o): inspect and re-arm
+    get("/breakers", BreakerController, :index)
+    post("/breakers/reset", BreakerController, :reset)
+
     # Board scheduler (autopilot) operations
     post("/scheduler/pause", SchedulerController, :pause)
     post("/scheduler/resume", SchedulerController, :resume)
