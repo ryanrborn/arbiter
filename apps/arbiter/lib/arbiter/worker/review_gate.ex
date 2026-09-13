@@ -725,6 +725,15 @@ defmodule Arbiter.Worker.ReviewGate do
       # round completes (and stays nil without a worktree / git), which keeps the
       # untouched-file backstop silent rather than guessing.
       revise_touched_files: nil,
+      # bd-c6tdbu: set only when the round just rejected was an APPROVE turned
+      # down solely by the `:unaddressed_findings` guard (bd-6r8caj's approval
+      # gap) — `%{gap: gap}`. Cleared on every other reject path. If the fix
+      # round this triggers produces NO code change, `finish_revise/1` reads
+      # this back to escalate with a message naming exactly which open
+      # findings blocked the approval, instead of the generic (and
+      # misleading, since there was nothing to fix) commit-gate-no-changes
+      # failure.
+      approval_gap_pending: nil,
       # bd-2eyf9y: whether the CURRENT round's implementer has already been
       # resumed once to commit uncommitted work. Reset to false whenever a
       # round genuinely advances (finish_revise/1's dispatch_next_review/1) so
@@ -1223,8 +1232,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # route on the remaining round budget (escalate if exhausted, else revise).
   defp handle_reject(state, findings) do
     record_round(state, :review, :request_changes, findings, converged: false)
-    route_after_reject(state, findings)
+    route_after_reject(%{state | approval_gap_pending: nil}, findings)
   end
+
+  # bd-c6tdbu: only the `:unaddressed_findings` guard's reject carries the gap
+  # forward — a plain REQUEST_CHANGES or any other guard's reject is not "an
+  # approval this fix round is standing in for", so it clears the flag instead.
+  defp approval_gap_pending_for(%{reason: :unaddressed_findings, gap: gap}), do: %{gap: gap}
+  defp approval_gap_pending_for(_spec), do: nil
 
   # The post-reject routing, shared by a plain REQUEST_CHANGES and the
   # unmet-criteria reject (bd-4yhv4x). With the round budget exhausted, record
@@ -1354,9 +1369,24 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :uncommitted)}
 
       :escalate_no_changes ->
-        {:done, escalate_commit_gate(%{state | head_sha: new_head_sha}, :no_changes)}
+        {:done, escalate_no_changes(%{state | head_sha: new_head_sha})}
     end
   end
+
+  # bd-c6tdbu: a no-op fix round is ambiguous in general (commit_gate_outcome's
+  # existing :no_changes case) UNLESS it was launched only to stand in for an
+  # APPROVE the `:unaddressed_findings` guard rejected (bd-6r8caj). In that
+  # specific case "no changes" does not mean the implementer failed to act —
+  # it means there was nothing to act ON, which is exactly the shape of an
+  # honest APPROVE dispositioning a non-blocking observation `[NOT ADDRESSED]`.
+  # Escalate naming the open findings rather than the generic, misleading
+  # "fix round produced no changes" failure; a human decides, so bd-6r8caj's
+  # protection against silently accepting a real unaddressed finding holds.
+  defp escalate_no_changes(%{approval_gap_pending: %{gap: gap}} = state) when not is_nil(gap) do
+    escalate_commit_gate(state, {:no_changes_after_approval_gap, gap})
+  end
+
+  defp escalate_no_changes(state), do: escalate_commit_gate(state, :no_changes)
 
   # Decide what the commit gate does with this revise round, and what to
   # record on its `Arbiter.ReviewGate.Round` row. HEAD advancing (or being
@@ -1486,6 +1516,23 @@ defmodule Arbiter.Worker.ReviewGate do
         "HEAD did not move and the worktree is clean — the revise round produced no code " <>
         "change. No further review round was dispatched against an identical diff.\n\n" <>
         escalation_payload(state)
+
+    finish(state, {:no_verdict, msg})
+  end
+
+  defp escalate_commit_gate(state, {:no_changes_after_approval_gap, gap}) do
+    findings = ReviewFindings.gap_findings(gap)
+
+    msg =
+      "#{@commit_gate_no_changes_marker} (task #{state.task_id}, round #{state.round}). " <>
+        "The previous round's APPROVE was rejected ONLY because the following open " <>
+        "finding(s) were left undispositioned, marked NOT ADDRESSED, or unproven — and the " <>
+        "fix round that followed made no code change (HEAD did not move, worktree clean):\n\n" <>
+        ReviewFindings.open_findings_block(findings, nil) <>
+        "\nThis may mean the finding(s) genuinely still need a fix, or that the approving " <>
+        "round's own account of them (e.g. a non-blocking observation with no change " <>
+        "requested) was accurate and the approval should not have been rejected. A human " <>
+        "must decide — the approval was NOT auto-accepted.\n\n" <> escalation_payload(state)
 
     finish(state, {:no_verdict, msg})
   end
@@ -1920,6 +1967,7 @@ defmodule Arbiter.Worker.ReviewGate do
     recorded = if spec.record == :banner, do: bannered, else: findings
 
     record_round(state, :review, spec.verdict, recorded, converged: false)
+    state = %{state | approval_gap_pending: approval_gap_pending_for(spec)}
     route_after_reject(state, bannered)
   end
 
@@ -1977,6 +2025,7 @@ defmodule Arbiter.Worker.ReviewGate do
       verdict: :approve,
       record: :raw,
       banner: &ReviewFindings.prepend_disposition_banner(&1, gap),
+      gap: gap,
       label: "unaddressed-findings",
       # The only guard whose two `reviewer for task=...` lines differ: the retry
       # line reports how many findings were skipped, the terminal line names them.
@@ -2053,6 +2102,7 @@ defmodule Arbiter.Worker.ReviewGate do
       verdict: Keyword.fetch!(row, :verdict),
       record: Keyword.fetch!(row, :record),
       banner: Keyword.fetch!(row, :banner),
+      gap: Keyword.get(row, :gap),
       logs: %{
         retry: fn state ->
           "ReviewGate: reviewer for task=#{state.task_id} #{situation}; " <>
