@@ -66,12 +66,26 @@ defmodule Arbiter.Worker.ReviewFindings do
     nitpick: 1,
     trivial: 1,
     info: 1,
-    informational: 1
+    informational: 1,
+    non_blocking: 0
   }
 
   @blocking_rank 3
 
   @severity_pattern ~r/\b(critical|blockers?|high|major|medium|moderate|low|minor|nitpick|nits?|trivial|informational|info)\b/i
+
+  # A section header that declares everything under it a non-blocking aside
+  # rather than a dispositionable finding (bd-c6tdbu / bd-1xss5z): a reviewer
+  # that lists real findings with severities, then a header like "Non-blocking
+  # observations (no change requested):" followed by unlabelled bullets, is
+  # NOT leaving those bullets unlabelled by omission — it is saying, in words,
+  # that they carry no severity because none applies. Treating them as
+  # `:unknown` (fail-closed Medium) turns an honest APPROVE that declines to
+  # call them "addressed" into a rejected approval and a fix round with
+  # nothing to fix (the bd-1xss5z deadlock). The header must occupy its own
+  # line (optionally a markdown heading, optionally trailing `:`) so it can't
+  # match by accident inside a finding's own prose.
+  @non_blocking_header ~r/^\s*\#{0,6}\s*(?:non-?blocking(?:\s+observations?)?|observations?|no\s+changes?\s+requested|no\s+action\s+needed)(?:\s*\([^)]*\))?\s*:?\s*$/i
 
   # A top-level enumerated item: `-`, `*`, or `1.`/`1)` at column 0..3. Deeper
   # indentation is a continuation line of the item above it, not a new finding —
@@ -131,11 +145,11 @@ defmodule Arbiter.Worker.ReviewFindings do
     body
     |> group_items()
     |> Enum.with_index(1)
-    |> Enum.map(fn {text, n} ->
+    |> Enum.map(fn {{text, section}, n} ->
       %{
         id: "F#{round}.#{n}",
         round: round,
-        severity: severity_of(text),
+        severity: severity_of(text, section),
         files: files_in(text),
         text: String.trim(text)
       }
@@ -401,20 +415,41 @@ defmodule Arbiter.Worker.ReviewFindings do
 
   # Group the payload lines into findings: a top-level list item starts a new
   # one; anything else continues the current one. With no list items at all, the
-  # whole body is a single finding (fail-closed).
+  # whole body is a single finding (fail-closed). Each item also carries the
+  # section it fell under (`:blocking` or `:non_blocking`) — a
+  # `@non_blocking_header` line switches the section for every item after it
+  # (and is itself dropped, never becoming a finding or a continuation line).
   defp group_items(lines) do
-    lines
-    |> Enum.reduce([], fn line, acc ->
-      cond do
-        Regex.match?(@item, line) -> [[line] | acc]
-        acc == [] -> [[line]]
-        true -> [[line | hd(acc)] | tl(acc)]
-      end
-    end)
+    {chunks, _section} =
+      Enum.reduce(lines, {[], :blocking}, fn line, {acc, section} ->
+        cond do
+          Regex.match?(@non_blocking_header, line) ->
+            {acc, :non_blocking}
+
+          Regex.match?(@item, line) ->
+            {[{[line], section} | acc], section}
+
+          acc == [] ->
+            {[{[line], section}], section}
+
+          true ->
+            [{chunk, chunk_section} | rest] = acc
+            {[{[line | chunk], chunk_section} | rest], section}
+        end
+      end)
+
+    chunks
     |> Enum.reverse()
-    |> Enum.map(fn chunk -> chunk |> Enum.reverse() |> Enum.join("\n") end)
-    |> Enum.reject(&(String.trim(&1) == ""))
+    |> Enum.map(fn {chunk, section} -> {chunk |> Enum.reverse() |> Enum.join("\n"), section} end)
+    |> Enum.reject(fn {text, _section} -> String.trim(text) == "" end)
   end
+
+  # `:non_blocking` is a declaration, not a label to search for — an item under
+  # a `@non_blocking_header` is never treated as `:unknown`/fail-closed, even
+  # if its own text happens to contain no severity word (the whole point of
+  # the header is that none applies).
+  defp severity_of(_text, :non_blocking), do: :non_blocking
+  defp severity_of(text, :blocking), do: severity_of(text)
 
   defp severity_of(text) do
     case Regex.run(@severity_pattern, text, capture: :all_but_first) do

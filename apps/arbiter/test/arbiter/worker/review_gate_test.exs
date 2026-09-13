@@ -48,6 +48,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @unaddressed Path.expand("../../fixtures/review_unaddressed_finding.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
   @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @revise_commit_once Path.expand("../../fixtures/revise_commit_once.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @revise_dirty Path.expand("../../fixtures/revise_dirty.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
@@ -3251,6 +3252,59 @@ defmodule Arbiter.Worker.ReviewGateTest do
       wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+    end
+
+    # bd-c6tdbu (AC4): the `:unaddressed_findings` guard's rejection of an
+    # APPROVE (exercised above) starts a fix round the same way a plain
+    # REQUEST_CHANGES does. When the implementer genuinely has nothing left to
+    # fix — round 1's finding was already addressed by a real commit, and the
+    # round-2 "fix round" that follows the gap-rejected APPROVE touches
+    # nothing — the commit gate must not strand the run behind the generic,
+    # misleading "fix round produced no changes" escalation. It must instead
+    # name the open finding(s) that blocked the approval, so a human reads the
+    # actual situation (an approved, green PR held up only by a disposition
+    # disagreement) rather than "the implementer failed to act."
+    test "a no-op fix round after an approval-gap rejection escalates naming the open finding, not generically",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 3,
+            worktree_path: repo,
+            review_command: [@unaddressed, "NOT_ADDRESSED"],
+            revise_command: [@revise_commit_once],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.subject =~ "fix round produced no changes"
+
+      assert escalation.body =~ "APPROVE was rejected ONLY because"
+      assert escalation.body =~ "F1.1"
+      assert escalation.body =~ "NOT auto-accepted"
     end
 
     test "rereview_prompt/1 hands the reviewer the open findings, their ids, and the revision diff",
