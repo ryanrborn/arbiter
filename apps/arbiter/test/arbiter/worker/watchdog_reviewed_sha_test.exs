@@ -295,4 +295,133 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
       assert length(StubAutoResumeDispatcher.escalations()) == 1
     end
   end
+
+  # ---- bd-ch9pmk / #1614: the forge's view of the PR lags our own push ------
+
+  describe "a fix round that pushed commits, approved by a later round" do
+    test "waits for the forge to show the pushed head instead of failing the worker" do
+      # The incident (bd-4fbpto / arbiter #1607, 2026-09-13T01:58Z):
+      #
+      #   21:58:11  ReviewGate: stamped reviewed SHA 8e7a69ea (the fix-round head)
+      #   21:58:11  Worker: pushing worktree branch to origin
+      #   21:58:16  Watchdog: reviewed=8e7a69ea head=ad20a410 -> unreviewed_head
+      #
+      # The stamp was RIGHT; the forge's PR resource had simply not caught up
+      # with the push five seconds earlier and still reported the pre-fix-round
+      # head. The guard read that as "the branch advanced past the reviewed
+      # commit" and burned a full premium re-review on already-approved code.
+      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-fix2"})
+
+      StubMerger.queue_get("!rsha7", [
+        # Poll 1: still the pre-fix-round head the round-1 reviewer saw.
+        %{status: :open, approved: true, head_sha: "sha-round1", base_ref: "main"},
+        # Poll 2: the push has surfaced.
+        %{status: :open, approved: true, head_sha: "sha-fix2", base_ref: "main"}
+      ])
+
+      start_watchdog(pid, task.id, "!rsha7", ws,
+        last_reviewed_sha: "sha-fix2",
+        local_head_sha: "sha-fix2"
+      )
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+
+      assert StubMerger.last_merge() == {"!rsha7", "sha-fix2"},
+             "the merge must be pinned to the fix-round head the reviewer approved"
+
+      assert StubAutoResumeDispatcher.resume_count() == 0,
+             "an approved fix round must not pay for a redundant full re-review"
+
+      assert StubMerger.merge_count("!rsha7") == 1
+    end
+
+    test "gives up waiting after the grace and still routes an unreviewed head back to review" do
+      # The lag wait is bounded: a forge that never reports our pushed head
+      # must not park the lane forever.
+      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-never-seen"})
+
+      StubMerger.queue_get("!rsha10", [
+        %{status: :open, approved: true, head_sha: "sha-foreign", base_ref: "main"}
+      ])
+
+      wpid =
+        start_watchdog(pid, task.id, "!rsha10", ws,
+          last_reviewed_sha: "sha-never-seen",
+          local_head_sha: "sha-never-seen"
+        )
+
+      ref = Process.monitor(wpid)
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+
+      assert StubMerger.merge_count("!rsha10") == 0
+      assert StubAutoResumeDispatcher.resume_count() == 1
+    end
+  end
+
+  describe "a commit pushed AFTER the approve round (Cause A)" do
+    test "still trips the guard once the forge has confirmed the approved head" do
+      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-approved"})
+
+      StubMerger.set_diff("!rsha8", "sha-approved", @reviewed_diff)
+      StubMerger.set_diff("!rsha8", "sha-fixpass", @conflict_resolved_diff)
+
+      StubMerger.queue_get("!rsha8", [
+        # Poll 1: exactly the approved head, but CI is still running so the
+        # merge is deferred — the lag latch lifts here.
+        %{
+          status: :open,
+          approved: true,
+          head_sha: "sha-approved",
+          base_ref: "main",
+          pipeline: :running
+        },
+        # Poll 2: a CI fix_pass commit landed after the approval.
+        %{status: :open, approved: true, head_sha: "sha-fixpass", base_ref: "main"}
+      ])
+
+      wpid =
+        start_watchdog(pid, task.id, "!rsha8", ws,
+          last_reviewed_sha: "sha-approved",
+          local_head_sha: "sha-approved"
+        )
+
+      ref = Process.monitor(wpid)
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+
+      assert StubMerger.merge_count("!rsha8") == 0,
+             "a commit nobody reviewed must never be merged"
+
+      assert [args] = StubAutoResumeDispatcher.resumes()
+      assert args.task_id == task.id
+      assert args.mr_ref == "!rsha8"
+    end
+  end
+
+  describe "the failure reason" do
+    test "names the live PR head, not the head read on an earlier poll" do
+      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-reviewed"})
+
+      StubMerger.queue_get("!rsha9", [
+        # The poll that trips the guard.
+        %{status: :open, approved: true, head_sha: "sha-stale", base_ref: "main"},
+        # The head as the forge reports it when the guard re-reads before
+        # failing the worker.
+        %{status: :open, approved: true, head_sha: "sha-live", base_ref: "main"}
+      ])
+
+      start_watchdog(pid, task.id, "!rsha9", ws,
+        last_reviewed_sha: "sha-reviewed",
+        # The forge already showed us our own pushed head, so nothing here is
+        # push lag — the branch really did move.
+        local_head_sha: "sha-stale"
+      )
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      assert Worker.state(pid).meta.failure_reason == {:unreviewed_head, "sha-live"},
+             "the reason must name the head the PR actually sits at"
+
+      assert StubMerger.merge_count("!rsha9") == 0
+    end
+  end
 end

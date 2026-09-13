@@ -83,6 +83,19 @@ defmodule Arbiter.Worker.PushBeforePRTest do
     %{pid: pid, task_id: task_id, repo: repo}
   end
 
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() -> :ok
+      System.monotonic_time(:millisecond) > deadline -> flunk("condition not met within timeout")
+      true -> Process.sleep(10) && do_wait(fun, deadline)
+    end
+  end
+
   defp branch_on_origin(bare, branch) do
     {out, _} = System.cmd("git", ["-C", bare, "branch", "--list", branch], stderr_to_stdout: true)
     String.trim(out) != ""
@@ -243,6 +256,45 @@ defmodule Arbiter.Worker.PushBeforePRTest do
 
       # No crash — open/4 was still called
       assert StubMerger.last_open() != nil
+    end
+  end
+
+  # bd-ch9pmk / #1614. The production call path for the merge guard's
+  # `local_head_sha`: a real worktree, a real push to a real origin, and the
+  # Watchdog `open_mr/5` starts on the other side of it.
+  describe "the Watchdog started after the push" do
+    test "waits for the forge to report the head we pushed before merging anything",
+         %{pid: pid, repo: repo} do
+      {head, 0} =
+        System.cmd("git", ["-C", repo.worktree, "rev-parse", "HEAD"], stderr_to_stdout: true)
+
+      head = String.trim(head)
+      stale = String.duplicate("a", 40)
+
+      StubMerger.next_open_ref("!lag1")
+
+      StubMerger.queue_get("!lag1", [
+        # The forge's PR resource has not caught up with the push yet — this is
+        # the reading that failed an approved fix round in arbiter #1607.
+        %{status: :open, approved: true, head_sha: stale, base_ref: "main"},
+        %{status: :open, approved: true, head_sha: head, base_ref: "main"}
+      ])
+
+      assert {:ok, "!lag1"} =
+               Worker.open_mr(pid, "feature/abc", "Add abc", "body", %{
+                 adapter: StubMerger,
+                 workspace: nil,
+                 strategy: :github,
+                 via_review_gate: true,
+                 auto_merge: true,
+                 interval_ms: 10,
+                 initial_delay_ms: 0
+               })
+
+      wait_until(fn -> StubMerger.merge_count("!lag1") == 1 end)
+
+      assert StubMerger.last_merge() == {"!lag1", head},
+             "the merge must be pinned to the commit this worker actually pushed"
     end
   end
 end

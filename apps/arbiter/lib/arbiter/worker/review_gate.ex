@@ -169,6 +169,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.StopReason
+  alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
 
   # Default ceiling on how long we wait for a reviewer / implementer pass before
@@ -2661,17 +2662,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # Return the FULL HEAD SHA for the worktree at `path`, or nil on any error.
   # Deliberately not the abbreviated form `current_head_sha_in/1` returns: this
   # one is compared against what the forge reports, and forges report 40 hex
-  # characters.
-  defp full_head_sha_in(path) when is_binary(path) do
-    case System.cmd("git", ["-C", path, "rev-parse", "HEAD"], stderr_to_stdout: true) do
-      {sha, 0} -> String.trim(sha)
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
+  # characters — and it is the same value the Watchdog is handed as
+  # `local_head_sha`, so both must come from one implementation (bd-ch9pmk).
+  defp full_head_sha_in(path) when is_binary(path), do: Worktree.head_sha(path)
 
   defp full_head_sha_in(_path), do: nil
 
