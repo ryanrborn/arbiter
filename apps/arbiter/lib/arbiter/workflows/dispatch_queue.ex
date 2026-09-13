@@ -491,7 +491,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
   # The coarse shape of a dispatch failure, stable across attempts. A
   # `StopReason` struct's summary carries elapsed times and window resets, so
   # only its category keys the breaker.
-  defp failure_shape({:auth_check_failed, %{category: category}}), do: [:auth_check_failed, category]
+  defp failure_shape({:auth_check_failed, %{category: category}}),
+    do: [:auth_check_failed, category]
+
   defp failure_shape({tag, %{category: category}}) when is_atom(tag), do: [tag, category]
   defp failure_shape({tag, _detail}) when is_atom(tag), do: [tag]
   defp failure_shape(reason) when is_atom(reason), do: [reason]

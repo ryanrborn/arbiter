@@ -116,7 +116,9 @@ defmodule ArbiterCli.Cmd.Breaker do
     IO.puts("REGISTERED CALL SITES")
 
     Enum.each(body["call_sites"] || [], fn s ->
-      IO.puts("  #{s["kind"]}  (K=#{s["limit"]} / #{div(s["window_ms"], 60_000)}m)  #{s["module"]}")
+      IO.puts(
+        "  #{s["kind"]}  (K=#{s["limit"]} / #{div(s["window_ms"], 60_000)}m)  #{s["module"]}"
+      )
     end)
   end
 

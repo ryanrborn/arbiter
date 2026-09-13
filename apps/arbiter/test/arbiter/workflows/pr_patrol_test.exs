@@ -1716,7 +1716,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
             |> Req.Test.json([%{"number" => 4242, "title" => "loops", "html_url" => "x"}])
 
           conn.request_path == "/repos/owner/breaker-repo/pulls/4242/reviews" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
 
           conn.request_path == "/repos/owner/breaker-repo/pulls/4242/comments" ->
             conn |> Plug.Conn.put_status(200) |> Req.Test.json([])

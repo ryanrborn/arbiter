@@ -102,10 +102,14 @@ defmodule Arbiter.CircuitBreakerTest do
     test "a closed-then-reopened breaker escalates again" do
       t0 = 1_000_000
       for i <- 0..2, do: CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
-      assert {:suppress, %{tripped_now?: true}} = CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 3))
+
+      assert {:suppress, %{tripped_now?: true}} =
+               CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 3))
 
       later = t0 + 500_000
-      for i <- 0..2, do: assert(:allow = CircuitBreaker.check(:test_kind, "s", opts(now: later + i)))
+
+      for i <- 0..2,
+          do: assert(:allow = CircuitBreaker.check(:test_kind, "s", opts(now: later + i)))
 
       assert {:suppress, %{tripped_now?: true}} =
                CircuitBreaker.check(:test_kind, "s", opts(now: later + 3))

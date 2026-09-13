@@ -117,5 +117,7 @@ defmodule ArbiterWeb.Api.BreakerController do
   end
 
   defp iso(nil), do: nil
-  defp iso(ms) when is_integer(ms), do: ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+
+  defp iso(ms) when is_integer(ms),
+    do: ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
 end
