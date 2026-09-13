@@ -19,8 +19,9 @@ defmodule ArbiterCli.Cmd.PrimeTest do
     defp stub_with_awaiting(awaiting) do
       stub_routes([
         {{"get", "/api/workspaces"},
-         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}]},
-          200}},
+         {%{
+            "data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}]
+          }, 200}},
         {{"get", "/api/workers"}, {%{"data" => []}, 200}},
         {{"get", "/api/issues/ready"}, {%{"data" => []}, 200}},
         {{"get", "/api/issues"}, {%{"data" => awaiting}, 200}},

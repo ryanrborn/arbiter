@@ -511,6 +511,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     assert PromptBuilder.conflict_resolve_briefing(t, "feature/x", "main") ==
              Arbiter.Worker.Dispatch.conflict_resolve_briefing(t, "feature/x", "main")
   end
+
   # bd-9so315: the worker is the only party that can see its own diff, so the
   # work prompt has to tell it when to raise the flag.
   describe "post-merge verification doctrine" do
@@ -528,5 +529,4 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       assert prompt =~ "awaiting verification"
     end
   end
-
 end

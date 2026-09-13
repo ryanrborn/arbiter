@@ -272,8 +272,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
     case {observed, failed} do
       {nil, nil} ->
-        {:error,
-         {:invalid, "provide exactly one of: observed (evidence) or failed (evidence)"}}
+        {:error, {:invalid, "provide exactly one of: observed (evidence) or failed (evidence)"}}
 
       {obs, fail} when is_binary(obs) and is_binary(fail) ->
         {:error, {:invalid, "provide only one of: observed or failed, not both"}}

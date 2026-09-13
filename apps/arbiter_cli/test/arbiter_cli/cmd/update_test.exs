@@ -184,6 +184,7 @@ defmodule ArbiterCli.Cmd.UpdateTest do
 
     assert exit_code == 0
   end
+
   # bd-9so315
   describe "--verify-after-deploy" do
     test "sets the flag" do
@@ -206,5 +207,4 @@ defmodule ArbiterCli.Cmd.UpdateTest do
       assert {:ok, %{"verify_after_deploy" => false}} = Jason.decode(out)
     end
   end
-
 end

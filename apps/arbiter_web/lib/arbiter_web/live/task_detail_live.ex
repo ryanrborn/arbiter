@@ -1379,10 +1379,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                     the new path once, then record what you saw:
                   </p>
                   <code class="block text-[11px] text-[var(--text-label)]" phx-no-curly-interpolation>
-                    arb issue verify <%= @task_id %> --observed "&lt;evidence&gt;"
+                    arb issue verify {@task_id} --observed "&lt;evidence&gt;"
                   </code>
                   <code class="block text-[11px] text-[var(--text-label)]" phx-no-curly-interpolation>
-                    arb issue verify <%= @task_id %> --failed "&lt;evidence&gt;"
+                    arb issue verify {@task_id} --failed "&lt;evidence&gt;"
                   </code>
                 </div>
               </.panel>

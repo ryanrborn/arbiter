@@ -467,6 +467,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
       assert err =~ "tracker"
     end
   end
+
   # bd-9so315
   test "--verify-after-deploy sets the flag on create" do
     parent = self()
@@ -492,5 +493,4 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert_receive {:create_body, %{"verify_after_deploy" => true}}
     assert {:ok, %{"verify_after_deploy" => true}} = Jason.decode(out)
   end
-
 end

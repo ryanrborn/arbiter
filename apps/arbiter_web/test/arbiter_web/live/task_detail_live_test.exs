@@ -505,6 +505,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ ~s(class="btn btn-sm btn-ghost" type="button" phx-click="cancel_edit")
       assert html =~ ~s(class="btn btn-sm btn-primary" type="submit")
     end
+
     # bd-9so315: the status select only offers the statuses `:update` accepts,
     # so a parked task's own status was not among them — the browser would fall
     # back to the first option and an edit that never meant to touch status
