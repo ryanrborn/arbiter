@@ -402,11 +402,11 @@
    qa_notes/deployment_notes and review findings summaries.
 
    Deliberately hand-rolled off the existing semantic tokens rather than
-   Tailwind's typography plugin: every colour below resolves through
+   the Tailwind typography plugin: every colour below resolves through
    --text-*/--surface-*/--border-* aliases, which are already redefined per
    theme, so the same rules stay legible in light and dark with no
-   `prose-invert`-style toggle and no second grey scale competing with the
-   dashboard's own. */
+   `prose-invert`-style toggle and no second grey scale competing with
+   the dashboard itself. */
 .markdown-body {
   font-family: var(--font-sans);
   font-size: 12.5px;
