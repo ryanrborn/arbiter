@@ -313,4 +313,39 @@ defmodule ArbiterWeb.ReviewIndexLiveTest do
       assert render(view) =~ "Reviews"
     end
   end
+
+  # bd-db3wxp: the findings summary is worker-authored markdown.
+  describe "findings summary markdown" do
+    test "renders the findings summary as formatted HTML", %{conn: conn, ws: ws} do
+      record =
+        record!(ws, %{
+          pr: "md-findings",
+          findings_summary: "## Findings\n\n- **one** thing\n- another\n"
+        })
+
+      {:ok, view, _html} = live(conn, "/reviews")
+      html = view |> element("#review-row-#{record.id}") |> render_click()
+
+      assert html =~ "<h2>Findings</h2>"
+      assert html =~ "<strong>one</strong>"
+      assert html =~ "<li>another</li>"
+      refute html =~ "## Findings"
+    end
+
+    test "strips XSS payloads from the findings summary", %{conn: conn, ws: ws} do
+      record =
+        record!(ws, %{
+          pr: "md-xss",
+          findings_summary:
+            "<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n[c](javascript:alert(1))\n"
+        })
+
+      {:ok, view, _html} = live(conn, "/reviews")
+      html = view |> element("#review-row-#{record.id}") |> render_click()
+
+      refute html =~ "<script"
+      refute html =~ "onerror="
+      refute html =~ "javascript:"
+    end
+  end
 end
