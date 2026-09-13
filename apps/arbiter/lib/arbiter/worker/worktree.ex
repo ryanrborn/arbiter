@@ -439,6 +439,29 @@ defmodule Arbiter.Worker.Worktree do
   def cleanup(_), do: {:error, :invalid_path}
 
   @doc """
+  Return the FULL 40-character HEAD SHA for the worktree at `path`, or `nil` on
+  any error.
+
+  The full form deliberately, not the abbreviated one: every caller compares it
+  against a SHA a forge reported, and forges report 40 hex characters.
+  """
+  @spec head_sha(path()) :: String.t() | nil
+  def head_sha(path) when is_binary(path) do
+    case run_git(["rev-parse", "HEAD"], cd: path) do
+      {:ok, output} ->
+        case String.trim(output) do
+          "" -> nil
+          sha -> sha
+        end
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  def head_sha(_path), do: nil
+
+  @doc """
   Return the current branch name for the worktree at `path`.
   """
   @spec current_branch(path()) :: {:ok, String.t()} | {:error, error_reason()}
