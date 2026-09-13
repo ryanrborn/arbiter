@@ -165,6 +165,47 @@ defmodule ArbiterCli.Cmd.BreakerTest do
       assert code != 0
       assert err =~ "needs a signature"
     end
+
+    # A flag's *value* is also a non-`--` token, so the old "first non-flag
+    # token" scan read `--workspace ws-1` as a request to reset the signature
+    # "ws-1" and reported "no breaker with signature ws-1" — the wrong problem
+    # (round 3, finding 3).
+    test "a flag value is not mistaken for the signature" do
+      for args <- [
+            ["reset", "--workspace", "ws-1"],
+            ["reset", "--kind", "pr_patrol_follow_up"],
+            ["reset", "--kind", "pr_patrol_follow_up", "--workspace", "ws-1"]
+          ] do
+        {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Breaker.run(args) end)
+
+        assert code != 0, "#{inspect(args)} should have refused, not guessed a signature"
+        assert err =~ "needs a signature"
+      end
+    end
+
+    test "a signature that follows a flag pair is still found" do
+      stub_post("/api/breakers/reset", %{"reset" => 1, "signature" => @signature}, 200)
+
+      {out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Breaker.run(["reset", "--workspace", "ws-1", @signature])
+        end)
+
+      assert code == 0
+      assert out =~ "Closed 1 circuit breaker(s)."
+    end
+
+    test "--all still wins over a trailing positional" do
+      stub_post("/api/breakers/reset", %{"reset" => 2}, 200)
+
+      {out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Breaker.run(["reset", "--all", "--kind", "pr_patrol_follow_up"])
+        end)
+
+      assert code == 0
+      assert out =~ "Closed 2 circuit breaker(s)."
+    end
   end
 
   describe "routing through the real `arb` entry point" do

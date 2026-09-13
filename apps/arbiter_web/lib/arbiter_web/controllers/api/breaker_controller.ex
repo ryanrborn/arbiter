@@ -22,19 +22,21 @@ defmodule ArbiterWeb.Api.BreakerController do
 
   @doc "Live breaker state plus the call-site registry."
   def index(conn, params) do
-    filters =
-      []
-      |> maybe_put(:workspace_id, blank_to_nil(params["workspace"]))
-      |> maybe_put(:kind, resolve_kind(params["kind"]))
-      |> maybe_put(:open_only, params["open_only"] in ["true", true])
+    with {:ok, kind} <- resolve_kind(params["kind"]) do
+      filters =
+        []
+        |> maybe_put(:workspace_id, blank_to_nil(params["workspace"]))
+        |> maybe_put(:kind, kind)
+        |> maybe_put(:open_only, params["open_only"] in ["true", true])
 
-    breakers = CircuitBreaker.list(filters)
+      breakers = CircuitBreaker.list(filters)
 
-    json(conn, %{
-      breakers: Enum.map(breakers, &serialize/1),
-      open_count: Enum.count(breakers, & &1.open?),
-      call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1)
-    })
+      json(conn, %{
+        breakers: Enum.map(breakers, &serialize/1),
+        open_count: Enum.count(breakers, & &1.open?),
+        call_sites: Enum.map(CircuitBreaker.call_sites(), &serialize_site/1)
+      })
+    end
   end
 
   @doc "Close one breaker by signature, or a whole scope with `all`."
@@ -42,13 +44,18 @@ defmodule ArbiterWeb.Api.BreakerController do
     case blank_to_nil(params["signature"]) do
       nil ->
         if params["all"] in ["true", true] do
-          filters =
-            []
-            |> maybe_put(:workspace_id, blank_to_nil(params["workspace"]))
-            |> maybe_put(:kind, resolve_kind(params["kind"]))
+          # `kind` is resolved BEFORE the reset runs: a misspelled kind must
+          # not degrade into "no filter" and re-arm every breaker in the
+          # workspace when the operator asked for one.
+          with {:ok, kind} <- resolve_kind(params["kind"]) do
+            filters =
+              []
+              |> maybe_put(:workspace_id, blank_to_nil(params["workspace"]))
+              |> maybe_put(:kind, kind)
 
-          {:ok, count} = CircuitBreaker.reset_all(filters)
-          json(conn, %{reset: count})
+            {:ok, count} = CircuitBreaker.reset_all(filters)
+            json(conn, %{reset: count})
+          end
         else
           {:error,
            {:invalid_request,
@@ -67,18 +74,22 @@ defmodule ArbiterWeb.Api.BreakerController do
   end
 
   # The registry is a closed set, so a kind name resolves to an existing atom
-  # rather than minting one from user input.
-  defp resolve_kind(nil), do: nil
-  defp resolve_kind(""), do: nil
+  # rather than minting one from user input. Three outcomes, not two: absent
+  # (no filter), known (filter), and unknown — which is an error, mirroring
+  # `Arbiter.MCP.Tools.Breaker.kind_arg/1`, so the two operator surfaces agree.
+  # An empty value is "absent": `?kind=` is what a query string produces for an
+  # unset filter.
+  defp resolve_kind(name) when name in [nil, ""], do: {:ok, nil}
 
   defp resolve_kind(name) when is_binary(name) do
     case Enum.find(CircuitBreaker.call_sites(), &(to_string(&1.kind) == name)) do
-      nil -> nil
-      site -> site.kind
+      nil -> {:error, {:invalid_request, "unknown breaker kind #{inspect(name)}"}}
+      site -> {:ok, site.kind}
     end
   end
 
-  defp resolve_kind(_), do: nil
+  defp resolve_kind(other),
+    do: {:error, {:invalid_request, "kind must be a string, got #{inspect(other)}"}}
 
   defp blank_to_nil(nil), do: nil
   defp blank_to_nil(""), do: nil

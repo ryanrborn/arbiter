@@ -70,7 +70,7 @@ defmodule ArbiterCli.Cmd.Breaker do
           |> put_opt(args, "--workspace", :workspace)
           |> put_opt(args, "--kind", :kind)
 
-        signature = Enum.find(args, &(not String.starts_with?(&1, "--"))) ->
+        signature = positional(args) ->
           %{signature: signature}
 
         true ->
@@ -152,6 +152,18 @@ defmodule ArbiterCli.Cmd.Breaker do
       value -> Map.put(body, key, value)
     end
   end
+
+  # Flags whose *value* is the next token. Those values are not positional
+  # arguments even though they don't start with `--`, so a naive "first
+  # non-flag token" scan would read `arb breaker reset --workspace ws-1` as
+  # a reset of the signature "ws-1".
+  @value_flags ~w(--workspace --kind)
+
+  # The first token that is neither a flag nor a flag's value.
+  defp positional([]), do: nil
+  defp positional([flag, _value | rest]) when flag in @value_flags, do: positional(rest)
+  defp positional(["--" <> _ | rest]), do: positional(rest)
+  defp positional([arg | _rest]), do: arg
 
   defp flag_value(args, flag) do
     case Enum.find_index(args, &(&1 == flag)) do

@@ -162,6 +162,71 @@ defmodule Arbiter.CircuitBreakerTest do
     end
   end
 
+  # `:coordinator_escalation` keys on task + subject, and a closed task's
+  # signature is never checked again — so without a sweep the entry map grows
+  # for the whole uptime of the coordinator and `arb breaker list` reports
+  # every signature ever seen (round 3, finding 4).
+  describe "stale-entry sweep" do
+    test "list/1 drops entries quiet for longer than their own window" do
+      t0 = 1_000_000
+
+      CircuitBreaker.check(:test_kind, "one-shot", opts(now: t0))
+      CircuitBreaker.check(:test_kind, "still live", opts(now: t0 + 59_000))
+
+      # Both present while both are inside their window.
+      assert CircuitBreaker.list(workspace_id: @ws, now: t0 + 59_000) |> length() == 2
+
+      # 60s later the first is stale, the second is not.
+      assert [entry] = CircuitBreaker.list(workspace_id: @ws, now: t0 + 60_001)
+      assert entry.subject == "still live"
+
+      # The sweep is a real state change, not a display filter: a later listing
+      # at a clock that would have shown it no longer can.
+      assert [%{subject: "still live"}] = CircuitBreaker.list(workspace_id: @ws, now: t0 + 59_000)
+    end
+
+    test "a swept entry is one an unswept check/3 would have discarded anyway" do
+      t0 = 1_000_000
+      for i <- 0..3, do: CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
+      assert [%{open?: true}] = CircuitBreaker.list(workspace_id: @ws, now: t0 + 10)
+
+      assert CircuitBreaker.list(workspace_id: @ws, now: t0 + 60_004) == []
+
+      # Same verdict either way: a fresh budget, and a fresh trip escalation.
+      assert :allow = CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 60_004))
+    end
+
+    test "an open breaker held open by a sustained flood is never swept" do
+      t0 = 1_000_000
+      for i <- 0..3, do: CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
+
+      # A trigger every 30s: each refreshes last_at, so the entry stays live.
+      for i <- 1..120 do
+        now = t0 + i * 30_000
+        assert {:suppress, _} = CircuitBreaker.check(:test_kind, "s", opts(now: now))
+        assert [%{open?: true}] = CircuitBreaker.list(workspace_id: @ws, now: now)
+      end
+    end
+
+    test "the periodic sweep message is handled and reschedules itself" do
+      t0 = System.system_time(:millisecond)
+      CircuitBreaker.check(:test_kind, "swept", opts(now: t0 - 120_000))
+      CircuitBreaker.check(:test_kind, "kept", opts(now: t0))
+
+      send(CircuitBreaker, :sweep)
+      # Force a round trip so the cast-like send is processed before we look.
+      _ = :sys.get_state(CircuitBreaker)
+
+      assert [%{subject: "kept"}] = CircuitBreaker.list(workspace_id: @ws, now: t0)
+      assert Process.alive?(Process.whereis(CircuitBreaker))
+    end
+
+    test "an unrecognised message does not kill the breaker" do
+      send(CircuitBreaker, :who_is_this)
+      assert %{entries: _} = :sys.get_state(CircuitBreaker)
+    end
+  end
+
   describe "call_sites/0" do
     test "enumerates every adopted call site with its kind, module and defaults" do
       sites = CircuitBreaker.call_sites()

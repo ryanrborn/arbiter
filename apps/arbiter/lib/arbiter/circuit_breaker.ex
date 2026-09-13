@@ -275,7 +275,13 @@ defmodule Arbiter.CircuitBreaker do
   @doc """
   Live breaker state, newest trigger first.
 
-  Options: `:workspace_id`, `:kind`, `:open_only` to filter.
+  Options: `:workspace_id`, `:kind`, `:open_only` to filter, and `:now` (a
+  millisecond clock override) for tests that want to observe the stale-entry
+  sweep this call performs.
+
+  Entries quiet for longer than their own window are swept before the listing
+  is built, so the operator surface shows live breakers rather than every
+  signature seen since boot.
   """
   @spec list(keyword()) :: [map()]
   def list(opts \\ []) do
@@ -309,7 +315,10 @@ defmodule Arbiter.CircuitBreaker do
   # ---- GenServer ----------------------------------------------------------
 
   @impl true
-  def init(_opts), do: {:ok, %{entries: %{}}}
+  def init(_opts) do
+    schedule_sweep()
+    {:ok, %{entries: %{}}}
+  end
 
   @impl true
   def handle_call({:check, request}, _from, state) do
@@ -318,6 +327,11 @@ defmodule Arbiter.CircuitBreaker do
   end
 
   def handle_call({:list, filters}, _from, state) do
+    # Sweep before listing, so the operator never pages through signatures that
+    # a `check/3` would have discarded anyway (`evaluate/2` drops an expired
+    # entry on sight). Same predicate, so this changes no decision.
+    state = sweep(state, Map.get(filters, :now) || System.system_time(:millisecond))
+
     entries =
       state.entries
       |> Map.values()
@@ -346,6 +360,35 @@ defmodule Arbiter.CircuitBreaker do
       |> Enum.map(& &1.signature)
 
     {:reply, {:ok, length(doomed)}, update_in(state.entries, &Map.drop(&1, doomed))}
+  end
+
+  @impl true
+  def handle_info(:sweep, state) do
+    schedule_sweep()
+    {:noreply, sweep(state, System.system_time(:millisecond))}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  # ---- sweep --------------------------------------------------------------
+
+  # Without this the map grows monotonically for the whole uptime of the
+  # coordinator: `:coordinator_escalation` keys on task + subject, and a closed
+  # task's signature is never checked again, so nothing would ever discard it.
+  @sweep_interval_ms :timer.minutes(5)
+
+  defp schedule_sweep, do: Process.send_after(self(), :sweep, @sweep_interval_ms)
+
+  # An entry quiet for a full window is dead: `evaluate/2` would throw it away
+  # and start fresh on the next trigger, so dropping it here is observationally
+  # equivalent — it only stops it costing memory and cluttering `arb breaker
+  # list` in the meantime.
+  defp sweep(state, now) do
+    update_in(state.entries, fn entries ->
+      Map.reject(entries, fn {_sig, entry} ->
+        expired?(entry, %{now: now, window_ms: entry.window_ms})
+      end)
+    end)
   end
 
   # ---- evaluation ---------------------------------------------------------

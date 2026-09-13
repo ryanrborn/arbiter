@@ -78,4 +78,64 @@ defmodule ArbiterWeb.Api.BreakerControllerTest do
   test "POST /api/breakers/reset on an unknown signature is a 4xx", %{conn: conn} do
     assert conn |> post("/api/breakers/reset", %{"signature" => "nope"}) |> json_response(400)
   end
+
+  # A misspelled kind used to resolve to `nil`, which `maybe_put/3` then dropped
+  # — so "re-arm this one kind" silently re-armed every breaker in the
+  # workspace. The MCP tool rejects the same typo, so both surfaces must.
+  test "POST /api/breakers/reset with an unknown kind errors instead of resetting everything",
+       %{conn: conn, ws: ws} do
+    trip(ws)
+
+    resp =
+      conn
+      |> post("/api/breakers/reset", %{
+        "all" => true,
+        "workspace" => ws.id,
+        "kind" => "pr_patrol_followup"
+      })
+      |> json_response(400)
+
+    assert resp["error"]["type"] == "invalid_request"
+    assert resp["error"]["message"] =~ "unknown breaker kind"
+
+    # And the breaker the operator did not name is still open.
+    assert conn
+           |> get("/api/breakers", %{"workspace" => ws.id})
+           |> json_response(200)
+           |> Map.fetch!("open_count") == 1
+  end
+
+  test "GET /api/breakers with an unknown kind is a 4xx, not an unfiltered listing",
+       %{conn: conn, ws: ws} do
+    trip(ws)
+
+    assert conn
+           |> get("/api/breakers", %{"kind" => "coordinator_escalations"})
+           |> json_response(400)
+  end
+
+  test "GET /api/breakers with a known kind still filters", %{conn: conn, ws: ws} do
+    trip(ws)
+
+    resp =
+      conn
+      |> get("/api/breakers", %{"workspace" => ws.id, "kind" => "coordinator_escalation"})
+      |> json_response(200)
+
+    assert [%{"kind" => "coordinator_escalation"}] = resp["breakers"]
+
+    assert conn
+           |> get("/api/breakers", %{"workspace" => ws.id, "kind" => "pr_patrol_follow_up"})
+           |> json_response(200)
+           |> Map.fetch!("breakers") == []
+  end
+
+  test "GET /api/breakers with an empty kind means no filter", %{conn: conn, ws: ws} do
+    trip(ws)
+
+    resp =
+      conn |> get("/api/breakers", %{"workspace" => ws.id, "kind" => ""}) |> json_response(200)
+
+    assert length(resp["breakers"]) == 1
+  end
 end

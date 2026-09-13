@@ -45,13 +45,19 @@ defmodule Arbiter.Workflows.DispatchQueue do
       instead of requeued:
         - `{:task_closed, _}` — `Dispatch.dispatch/2`'s `ensure_not_closed/1`
         - `{:task_not_found, _}` — `Dispatch.dispatch/2`'s `load_task/1`
-      Every other failure shape is **retryable** and requeues unchanged —
-      quota still held, a live agent session already on the task, a
-      migration/preflight hiccup, a transient exception/exit, or the
-      quota-exhausted pre-flight refusal below (which gets its own backoff,
-      not a drop: it is explicitly exempt from the re-dispatch circuit breaker
-      described in `requeue_or_drop/4`, so a long quota wait can never be
-      mistaken for a runaway).
+      Every other failure shape is **retryable** — quota still held, a live
+      agent session already on the task, a migration/preflight hiccup, a
+      transient exception/exit. Retryable does not mean unbounded: each
+      requeue is recorded against the `:dispatch_queue_redispatch` circuit
+      breaker (bd-5jr49o), and once the same task+failure signature trips it
+      the held intent is dropped with exactly one coordinator page instead of
+      re-draining forever. See `requeue_or_drop/4`.
+
+      The one exemption is a failure that carries a `retry_not_before` —
+      currently the quota-exhausted pre-flight refusal below. That shape
+      already has its own wall-clock backoff, so it bypasses the breaker
+      entirely and requeues unchanged: a long quota wait can never be
+      mistaken for a runaway.
 
   ## A quota-exhausted pre-flight failure is held, not redrained every cycle (bd-8lnnnt)
 
