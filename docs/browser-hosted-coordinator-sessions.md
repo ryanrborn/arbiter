@@ -218,6 +218,21 @@ $ tmux -S $SOCK_B pipe-pane -t coord -O "cat >> transcript.raw"
 bytes captured in 2s: 88                   # live raw byte stream, transcript + tail
 ```
 
+**Observed — a literal attach / detach / restart / reattach cycle.** The capture
+above proves survival; this proves the session is still a usable terminal
+afterwards, with a real tmux client attaching (run from an outer tmux pane, so
+the client has a genuine TTY):
+
+```sh
+tmux -S $SOCK attach -t coord      # attached_clients: 0 -> 1, client renders live ticks
+tmux -S $SOCK detach-client -s coord                      # 1 -> 0
+systemctl --user restart <stand-in-arbiter>               # PTY pid SURVIVED
+tmux -S $SOCK attach -t coord      # 0 -> 1, client renders live ticks 32,33,34
+```
+
+Continuity across the whole cycle: `ticks 1..34, count 34` — no gaps introduced by
+attaching, detaching, restarting, or reattaching.
+
 **Observed — arbiter never returning:**
 
 ```
