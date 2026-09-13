@@ -732,6 +732,34 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert {:ok, []} = Claim.plan(ws)
     end
 
+    # bd-9so315: the sync's close arm reads "the upstream issue is gone, so the
+    # local task should follow". A task parked at :awaiting_verification is a
+    # task whose upstream WAS deliberately closed at merge — closing it here
+    # would skip the verification the flag exists to force.
+    test "a task awaiting post-merge verification is NOT proposed for close", %{github_ws: ws} do
+      task = open_task(ws, "63", %{verify_after_deploy: true})
+      {:ok, _} = Ash.update(task, %{}, action: :await_verification)
+
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/63"} ->
+            Req.Test.json(
+              conn,
+              issue_payload(%{"number" => 63, "state" => "closed", "assignees" => []})
+            )
+        end
+      end)
+
+      assert {:ok, actions} = Claim.plan(ws)
+      refute Enum.any?(actions, &match?({:close, _, _}, &1))
+    end
+
     test "a tracker issue that can't be fetched does NOT propose a close", %{github_ws: ws} do
       _task = open_task(ws, "61")
 
