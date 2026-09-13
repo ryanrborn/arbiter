@@ -422,9 +422,11 @@ defmodule Arbiter.CircuitBreaker do
     }
   end
 
-  # `tripped_at != request.now` in `evaluate/2` distinguishes "tripped on this
-  # very call" from "was already open", so the suppressed counter is only
-  # incremented once per trigger even at identical clock values.
+  # `tripped_now?` comes from the `was_open?` flag `evaluate/2` captures *before*
+  # `record/2` runs, not from a clock comparison: at identical clock values a
+  # `tripped_at == now` test cannot tell "tripped on this very call" from "was
+  # already open", and the suppressed counter must only be incremented once per
+  # trigger.
   defp info(entry, tripped_now?) do
     entry
     |> Map.take([:signature, :workspace_id, :kind, :subject, :count, :suppressed, :limit])
@@ -529,7 +531,10 @@ defmodule Arbiter.CircuitBreaker do
       "No further #{info.kind} action will run for this signature until the breaker",
       "closes — a full window with no further triggers — or you reset it:",
       "",
-      "    arb breaker reset #{info.signature}",
+      # Single-quoted: the signature contains `|` (workspace/kind/subject) and
+      # may contain `::` (structured subject components), so the line has to be
+      # runnable as printed when the coordinator pastes it into a shell.
+      "    arb breaker reset '#{info.signature}'",
       "",
       "This is one escalation for the whole flood, not one per occurrence. If the",
       "underlying condition is real, fix it and reset; if the signature is too",

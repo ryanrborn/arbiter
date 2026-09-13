@@ -97,6 +97,26 @@ defmodule Arbiter.CircuitBreaker.SignatureTest do
       assert norm(["pr", 3282, "attempt 4 at 2026-09-13T04:12:59Z"]) ==
                norm(["pr", 3282, "attempt 19 at 2026-09-12T01:02:03Z"])
     end
+
+    # The escalation tells the operator to run `arb breaker reset '<signature>'`
+    # and `arb breaker list` prints the same string. A control byte would be
+    # invisible in a terminal and would not survive copy/paste (round 2,
+    # finding 2), so every byte of a signature has to be printable.
+    test "the component separator is printable, so the signature can be pasted into a shell" do
+      sig =
+        Signature.signature("ws-1", :preflight_auth_failed, ["bd-pfa001", :quota_exhausted])
+
+      assert String.printable?(sig)
+      assert sig == "ws-1|preflight_auth_failed|bd-pfa001 :: :quota_exhausted"
+      refute String.contains?(sig, <<0x1F>>)
+    end
+
+    # Injectivity across the separator: a literal `::` inside a component is
+    # collapsed by `scrub/1`, so it cannot be mistaken for a component boundary.
+    test "a literal separator inside a component cannot forge a boundary" do
+      refute norm(["a", "b::c"]) == norm(["a::b", "c"])
+      assert norm(["a", "b::c"]) == norm(["a", "b:c"])
+    end
   end
 
   describe "signature/3" do

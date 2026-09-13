@@ -49,7 +49,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
       quota still held, a live agent session already on the task, a
       migration/preflight hiccup, a transient exception/exit, or the
       quota-exhausted pre-flight refusal below (which gets its own backoff,
-      not a drop).
+      not a drop: it is explicitly exempt from the re-dispatch circuit breaker
+      described in `requeue_or_drop/4`, so a long quota wait can never be
+      mistaken for a runaway).
 
   ## A quota-exhausted pre-flight failure is held, not redrained every cycle (bd-8lnnnt)
 
@@ -443,32 +445,51 @@ defmodule Arbiter.Workflows.DispatchQueue do
   #
   # A *retryable* failure that keeps recurring identically is the third case
   # (bd-5jr49o). Retryable means "a later drain might succeed", but nothing in
-  # the classification above can tell a quota hold that will clear in an hour
-  # from a task that will fail this way forever. The shared circuit breaker
-  # supplies the missing bound: once the same task has failed the same way more
-  # than K times inside the window, the item is dropped rather than requeued,
-  # and the coordinator is paged once. Keyed on task + failure shape — the
-  # attempt count and any elapsed time in the reason are scrubbed out of the
-  # signature, so a growing counter cannot defeat the match.
+  # the classification above can tell a task that will fail this way forever
+  # from one that is merely waiting. The shared circuit breaker supplies the
+  # missing bound: once the same task has failed the same way more than K times
+  # inside the window, the item is dropped rather than requeued, and the
+  # coordinator is paged once. Keyed on task + failure shape — the attempt count
+  # and any elapsed time in the reason are scrubbed out of the signature, so a
+  # growing counter cannot defeat the match.
+  #
+  # **Except** when the failure already carries its own bounded hold. A
+  # quota-exhausted pre-flight refusal (bd-8lnnnt) gets a `retry_not_before`
+  # from `PreflightHold`, which is exactly the "waiting, not broken" case the
+  # breaker cannot distinguish by failure shape alone: an exhausted 5h window
+  # with no parseable reset time backs off 30s → … → 15m (capped), so six
+  # attempts land inside ~16 minutes and would trip a 5-per-hour breaker long
+  # before the window actually resets — dropping an intent that was going to
+  # self-heal and turning it into manual work (bd-7qbavq was 12 such failures).
+  # Those items are already rate-limited by the hold and already paged once by
+  # the `:preflight_auth_failed` breaker at the dispatch site, so they requeue
+  # as they did before this change, and never count against the re-dispatch
+  # breaker.
   defp requeue_or_drop(queue, ws_id, item, reason) do
-    cond do
-      terminal_dispatch_failure?(reason) ->
-        Logger.info(
-          "DispatchQueue: dropping held intent for #{item.task_id}, terminal dispatch failure: #{inspect(reason)}"
-        )
+    if terminal_dispatch_failure?(reason) do
+      Logger.info(
+        "DispatchQueue: dropping held intent for #{item.task_id}, terminal dispatch failure: #{inspect(reason)}"
+      )
 
-        :ok
+      :ok
+    else
+      held = hold_item(item, reason)
 
-      redispatch_broken?(ws_id, item, reason) ->
-        Logger.warning(
-          "DispatchQueue: circuit breaker open for #{item.task_id}; dropping held intent " <>
-            "instead of re-draining (last failure: #{inspect(reason)})"
-        )
+      cond do
+        held.retry_not_before != nil ->
+          GenServer.cast(queue, {:requeue, held})
 
-        :ok
+        redispatch_broken?(ws_id, item, reason) ->
+          Logger.warning(
+            "DispatchQueue: circuit breaker open for #{item.task_id}; dropping held intent " <>
+              "instead of re-draining (last failure: #{inspect(reason)})"
+          )
 
-      true ->
-        GenServer.cast(queue, {:requeue, hold_item(item, reason)})
+          :ok
+
+        true ->
+          GenServer.cast(queue, {:requeue, held})
+      end
     end
   end
 

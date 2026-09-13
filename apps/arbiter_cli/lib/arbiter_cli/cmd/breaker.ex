@@ -108,7 +108,10 @@ defmodule ArbiterCli.Cmd.Breaker do
             "#{div(b["window_ms"], 60_000)}m, #{b["suppressed"]} suppressed"
         )
 
-        IO.puts("      #{b["signature"]}")
+        # Quoted so the signature (which contains `|`, and `::` between
+        # structured subject components) can be copied straight into
+        # `arb breaker reset '...'` without the shell re-parsing it.
+        IO.puts("      '#{b["signature"]}'")
       end)
     end
 

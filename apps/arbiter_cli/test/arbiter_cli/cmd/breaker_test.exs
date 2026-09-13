@@ -22,8 +22,17 @@ defmodule ArbiterCli.Cmd.BreakerTest do
     }
   ]
 
+  # Produced by the server rather than hand-written, so this fixture cannot
+  # drift into a shape the system can never emit — the previous literal silently
+  # elided the structured-subject separator (round 2, finding 2).
+  @signature Arbiter.CircuitBreaker.Signature.signature(
+               "ws-1",
+               :pr_patrol_follow_up,
+               ["owner/repo", 4242]
+             )
+
   @open %{
-    "signature" => "ws-1|pr_patrol_follow_up|owner/repo4242",
+    "signature" => @signature,
     "workspace_id" => "ws-1",
     "kind" => "pr_patrol_follow_up",
     "subject" => "owner/repo 4242",
@@ -68,7 +77,12 @@ defmodule ArbiterCli.Cmd.BreakerTest do
       assert out =~ "[OPEN] pr_patrol_follow_up"
       assert out =~ "9/6 in 360m"
       assert out =~ "3 suppressed"
-      assert out =~ "ws-1|pr_patrol_follow_up|owner/repo4242"
+
+      # Printed quoted, and the signature itself is printable end to end: the
+      # operator copies this line into `arb breaker reset '...'`.
+      assert out =~ "'#{@signature}'"
+      assert @signature == "ws-1|pr_patrol_follow_up|owner/repo :: 4242"
+      assert String.printable?(@signature)
     end
 
     test "--json passes the payload through untouched" do

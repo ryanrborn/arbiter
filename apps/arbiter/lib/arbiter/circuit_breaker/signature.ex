@@ -37,7 +37,8 @@ defmodule Arbiter.CircuitBreaker.Signature do
 
   ## Structured subjects
 
-  A subject may be a list (or tuple) of components instead of one string.
+  A subject may be a list (or tuple) of components instead of one string,
+  joined with ` :: `.
   Non-binary components — integers, atoms, `nil` — are **stable**: they are
   rendered verbatim and never scrubbed. That is the escape hatch for a subject
   whose identity IS a number:
@@ -59,11 +60,20 @@ defmodule Arbiter.CircuitBreaker.Signature do
   @decimal ~r/(?<![\w#!.-])\d+\.\d+(?![\w-])/
   @integer ~r/(?<![\w#!.-])\d+(?![\w-])/
   @whitespace ~r/\s+/
+  # Reserved for the structured-subject separator — see `@component_sep`.
+  @repeated_colon ~r/:{2,}/
 
-  # Components of a structured subject are joined on a control character that
-  # cannot occur in a normalised component, so `["a", "b|c"]` can never be
-  # confused with `["a|b", "c"]`.
-  @component_sep "\x1f"
+  # Components of a structured subject are joined on ` :: `. It has to be
+  # printable: the whole signature is quoted verbatim in the trip escalation
+  # and in `arb breaker list`, and an operator copies that line into a shell to
+  # reset the breaker — a control byte is invisible in a terminal and does not
+  # survive selection/paste (round 2, finding 2). Injectivity is preserved by
+  # collapsing any run of colons inside a normalised component (see `scrub/1`),
+  # so the separator provably cannot occur inside a component and `["a", "b::c"]`
+  # can never be confused with `["a::b", "c"]`. (Signatures already contain
+  # spaces — normalised free text keeps them — so the surrounding spaces cost
+  # nothing: every printed signature is quoted either way.)
+  @component_sep " :: "
 
   # How much normalised subject text survives into the readable part of a
   # signature. Anything longer is truncated and disambiguated with a digest of
@@ -115,6 +125,7 @@ defmodule Arbiter.CircuitBreaker.Signature do
     |> String.replace(@decimal, "<n>")
     |> String.replace(@integer, "<n>")
     |> String.replace(@whitespace, " ")
+    |> String.replace(@repeated_colon, ":")
     |> String.trim()
   end
 
