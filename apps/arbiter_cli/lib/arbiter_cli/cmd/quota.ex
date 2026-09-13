@@ -103,31 +103,7 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts("  overage status:        #{q["overage_status"] || "—"}")
 
     captured_at_str = q["captured_at"] || "—"
-
-    stale_indicator =
-      if q["stale"] == true do
-        # bd-b7umwj: staleness is scoped per window, and the two windows go
-        # opposite ways — say which is which rather than the old blanket
-        # "dispatches may be incorrectly held", which was backwards for both.
-        base =
-          " ⚠️ STALE (older than the gate trusts — the 5h gate fails open; a 7d hold stays in force)"
-
-        # bd-4fbpto: that alone can't tell "nothing has worked in a while"
-        # apart from "the poll is fine, it just didn't carry a usable 5h
-        # figure this cycle" — both look identical (STALE, old `captured_at`)
-        # without this. Say which one it is.
-        detail =
-          if q["oauth_poll_fresh"] == true do
-            " — /api/oauth/usage last succeeded #{q["oauth_captured_at"] || "—"}"
-          else
-            " — no fresh data from any source (last success: " <>
-              "#{capture_source_label(q["capture_source"])} at #{captured_at_str})"
-          end
-
-        base <> detail
-      else
-        ""
-      end
+    stale_indicator = stale_indicator(q, captured_at_str)
 
     IO.puts("  captured at:           #{captured_at_str}#{stale_indicator}")
     IO.puts("  source:                #{capture_source_label(q["capture_source"])}")
@@ -144,6 +120,31 @@ defmodule ArbiterCli.Cmd.Quota do
 
     emit_spend(data, "claude")
     emit_oauth_usage(q)
+  end
+
+  # bd-b7umwj: staleness is scoped per window, and the two windows go
+  # opposite ways — say which is which rather than the old blanket
+  # "dispatches may be incorrectly held", which was backwards for both.
+  defp stale_indicator(%{"stale" => true} = q, captured_at_str) do
+    base =
+      " ⚠️ STALE (older than the gate trusts — the 5h gate fails open; a 7d hold stays in force)"
+
+    base <> stale_detail(q, captured_at_str)
+  end
+
+  defp stale_indicator(_q, _captured_at_str), do: ""
+
+  # bd-4fbpto: "STALE" alone can't tell "nothing has worked in a while" apart
+  # from "the poll is fine, it just didn't carry a usable 5h figure this
+  # cycle" — both look identical (STALE, old `captured_at`) without this.
+  # Say which one it is.
+  defp stale_detail(%{"oauth_poll_fresh" => true} = q, _captured_at_str) do
+    " — /api/oauth/usage last succeeded #{q["oauth_captured_at"] || "—"}"
+  end
+
+  defp stale_detail(q, captured_at_str) do
+    " — no fresh data from any source (last success: " <>
+      "#{capture_source_label(q["capture_source"])} at #{captured_at_str})"
   end
 
   # Which window, if any, is currently holding dispatch (bd-1tuxv8). Both the 5h
