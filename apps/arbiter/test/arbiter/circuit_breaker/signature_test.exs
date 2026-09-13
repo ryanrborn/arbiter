@@ -119,6 +119,47 @@ defmodule Arbiter.CircuitBreaker.SignatureTest do
     end
   end
 
+  # `:coordinator_escalation` keys on free-text escalation subject lines, and
+  # `scrub/1` deliberately does not strip punctuation — so a subject like
+  # "auto-merge didn't land" puts a literal apostrophe inside the signature.
+  # Both operator-facing surfaces print it inside `'...'`, which that apostrophe
+  # would otherwise terminate (round 2, observation 2).
+  describe "shell_quote/1" do
+    test "an apostrophe in the signature survives a real shell round-trip" do
+      sig =
+        Signature.signature("ws-1", :coordinator_escalation, ["bd-x1", "auto-merge didn't land"])
+
+      assert String.contains?(sig, "'"), "fixture must actually exercise the apostrophe"
+
+      # Hand the quoted word to a real shell and read back the single argument
+      # it would pass to `arb` — the only assertion that proves runnability.
+      {out, 0} =
+        System.cmd("sh", ["-c", ~s|set -- #{Signature.shell_quote(sig)}; printf '%s' "$1"|])
+
+      assert out == sig
+    end
+
+    test "quotes a plain signature as one word, and is idempotent under re-parse" do
+      sig = Signature.signature("ws-1", :pr_patrol_follow_up, ["owner/repo", 4242])
+
+      assert Signature.shell_quote(sig) == "'" <> sig <> "'"
+
+      {out, 0} =
+        System.cmd("sh", ["-c", ~s|set -- #{Signature.shell_quote(sig)}; printf '%s' "$#"|])
+
+      assert out == "1"
+    end
+
+    test "shell metacharacters in a signature are inert once quoted" do
+      sig = Signature.signature("ws-1", :coordinator_escalation, ["a'b|c $(id) `id` \\d"])
+
+      {out, 0} =
+        System.cmd("sh", ["-c", ~s|set -- #{Signature.shell_quote(sig)}; printf '%s' "$1"|])
+
+      assert out == sig
+    end
+  end
+
   describe "signature/3" do
     test "is a readable, stable string scoped by workspace and kind" do
       sig = Signature.signature("ws-1", :pr_patrol_follow_up, ["repo/x", 12])

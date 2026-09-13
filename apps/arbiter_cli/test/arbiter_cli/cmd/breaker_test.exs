@@ -85,6 +85,46 @@ defmodule ArbiterCli.Cmd.BreakerTest do
       assert String.printable?(@signature)
     end
 
+    # `:coordinator_escalation` keys on free-text escalation subject lines, so a
+    # signature can carry an apostrophe — which would terminate the `'...'` this
+    # command prints for the operator to copy (round 2, observation 2). The CLI
+    # ships as an escript and cannot call the server-side `Signature` at
+    # runtime, so it carries its own quoter; asserting against the real one here
+    # (a test-only umbrella dep) is what keeps the two from drifting.
+    test "an apostrophe in a signature is printed as a runnable shell word" do
+      signature =
+        Arbiter.CircuitBreaker.Signature.signature(
+          "ws-1",
+          :coordinator_escalation,
+          ["bd-x1", "auto-merge didn't land"]
+        )
+
+      assert String.contains?(signature, "'"), "fixture must exercise the apostrophe"
+
+      stub_get("/api/breakers", %{
+        "breakers" => [%{@open | "signature" => signature}],
+        "open_count" => 1,
+        "call_sites" => @call_sites
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Breaker.run(["list"]) end)
+
+      assert code == 0
+      assert out =~ Arbiter.CircuitBreaker.Signature.shell_quote(signature)
+
+      # And the printed word really parses back to the signature under a shell.
+      printed =
+        out
+        |> String.split("\n")
+        |> Enum.map(&String.trim/1)
+        |> Enum.find(&String.starts_with?(&1, "'"))
+
+      {parsed, 0} =
+        System.cmd("sh", ["-c", ~s|set -- #{printed}; printf '%s' "$1"|])
+
+      assert parsed == signature
+    end
+
     test "--json passes the payload through untouched" do
       stub_get("/api/breakers", %{
         "breakers" => [@open],

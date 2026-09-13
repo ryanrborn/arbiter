@@ -109,10 +109,12 @@ defmodule ArbiterCli.Cmd.Breaker do
             "#{div(b["window_ms"], 60_000)}m, #{b["suppressed"]} suppressed"
         )
 
-        # Quoted so the signature (which contains `|`, and `::` between
-        # structured subject components) can be copied straight into
-        # `arb breaker reset '...'` without the shell re-parsing it.
-        IO.puts("      '#{b["signature"]}'")
+        # Shell-quoted so the signature (which contains `|`, `::` between
+        # structured subject components, and possibly an apostrophe — the
+        # `:coordinator_escalation` breaker keys on free-text subject lines) can
+        # be copied straight into `arb breaker reset ...` without the shell
+        # re-parsing it.
+        IO.puts("      #{shell_quote(b["signature"])}")
       end)
     end
 
@@ -125,6 +127,16 @@ defmodule ArbiterCli.Cmd.Breaker do
       )
     end)
   end
+
+  # One POSIX-shell word. Mirrors `Arbiter.CircuitBreaker.Signature.shell_quote/1`
+  # — the escript cannot depend on the server app at runtime, so the two are
+  # kept in step by a test that asserts this output against the real one
+  # (`breaker_test.exs`, "an apostrophe in a signature is printed as a runnable
+  # shell word"). The `'\''` splice closes, escapes and reopens the quote.
+  defp shell_quote(signature) when is_binary(signature),
+    do: "'" <> String.replace(signature, "'", ~S('\'')) <> "'"
+
+  defp shell_quote(other), do: inspect(other)
 
   # `--flag value` → a query param, when present.
   defp put_flag(params, args, flag, key) do

@@ -96,6 +96,23 @@ defmodule Arbiter.CircuitBreaker.Signature do
   end
 
   @doc """
+  The signature as a single POSIX-shell word, safe to paste at a prompt.
+
+  Both operator-facing surfaces — the trip escalation's `arb breaker reset
+  '<sig>'` line and `arb breaker list` — print a signature for a human to copy
+  into a shell, so it has to survive that round trip. A signature routinely
+  contains `|` (the workspace/kind/subject separator) and may contain arbitrary
+  free text: `:coordinator_escalation` keys on escalation subject lines and
+  `scrub/1` deliberately keeps punctuation, so `didn't` reaches this function
+  intact. Single-quoting handles everything except the apostrophe itself, which
+  would close the quote early; the standard `'\''` splice closes, escapes and
+  reopens.
+  """
+  @spec shell_quote(String.t()) :: String.t()
+  def shell_quote(signature) when is_binary(signature),
+    do: "'" <> String.replace(signature, "'", ~S('\'')) <> "'"
+
+  @doc """
   Normalise a subject to its deduplication form. See the module doc for the
   rules; `signature/3` is the usual entry point, this is exposed for tests and
   for callers that want to log what a subject collapsed to.

@@ -9,6 +9,7 @@ defmodule Arbiter.CircuitBreakerTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.CircuitBreaker
+  alias Arbiter.CircuitBreaker.Signature
 
   @ws "ws-cb-test"
 
@@ -213,6 +214,56 @@ defmodule Arbiter.CircuitBreakerTest do
       end
 
       assert [%{count: 1}] = CircuitBreaker.list(workspace_id: @ws)
+    end
+  end
+
+  # The trip page is the one thing the coordinator sees, and the reset command
+  # in it is meant to be copied straight into a shell. `:coordinator_escalation`
+  # keys on free-text escalation subject lines, so an apostrophe can and does
+  # reach the signature (round 2, observation 2).
+  describe "the escalation's reset command" do
+    # Trip a breaker and hand back the body of the single page it sent.
+    defp trip_page(subject) do
+      me = self()
+      escalate_fun = fn mail -> send(me, {:page, mail}) end
+      o = opts(limit: 2, escalate: true, escalate_fun: escalate_fun)
+
+      for _ <- 1..3, do: CircuitBreaker.check(:coordinator_escalation, subject, o)
+
+      assert_received {:page, %{body: body}}
+      body
+    end
+
+    # Parse the printed line with a real `sh` and read back the argument `arb`
+    # would receive — the only assertion that proves the line is runnable.
+    defp reset_arg(body) do
+      line =
+        body
+        |> String.split("\n")
+        |> Enum.map(&String.trim/1)
+        |> Enum.find(&String.starts_with?(&1, "arb breaker reset "))
+
+      assert line, "the escalation body must tell the operator how to reset"
+
+      {out, 0} = System.cmd("sh", ["-c", ~s|set -- #{line}; printf '%s' "$4"|])
+      out
+    end
+
+    test "round-trips a signature containing an apostrophe" do
+      subject = ["bd-cb001", "auto-merge didn't land"]
+      body = trip_page(subject)
+
+      signature = Signature.signature(@ws, :coordinator_escalation, subject)
+      assert String.contains?(signature, "'"), "fixture must exercise the apostrophe"
+
+      assert reset_arg(body) == signature
+    end
+
+    test "round-trips an ordinary structured signature" do
+      subject = ["owner/repo", 4242]
+      body = trip_page(subject)
+
+      assert reset_arg(body) == Signature.signature(@ws, :coordinator_escalation, subject)
     end
   end
 end

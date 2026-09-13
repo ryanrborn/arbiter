@@ -532,10 +532,12 @@ defmodule Arbiter.CircuitBreaker do
       "No further #{info.kind} action will run for this signature until the breaker",
       "closes — a full window with no further triggers — or you reset it:",
       "",
-      # Single-quoted: the signature contains `|` (workspace/kind/subject) and
-      # may contain `::` (structured subject components), so the line has to be
-      # runnable as printed when the coordinator pastes it into a shell.
-      "    arb breaker reset '#{info.signature}'",
+      # Shell-quoted, not merely wrapped in `'...'`: the signature contains `|`
+      # (workspace/kind/subject) and may contain `::` (structured subject
+      # components) *and* an apostrophe — `:coordinator_escalation` keys on
+      # free-text subject lines — so the line has to be runnable as printed when
+      # the coordinator pastes it into a shell.
+      "    arb breaker reset #{Signature.shell_quote(info.signature)}",
       "",
       "This is one escalation for the whole flood, not one per occurrence. If the",
       "underlying condition is real, fix it and reset; if the signature is too",
