@@ -706,7 +706,7 @@ defmodule Arbiter.Accounts.Census do
         end) ++
         [
           "      workspaces (#{length(account.workspaces)}): " <>
-            (account.workspaces |> Enum.map(& &1.name) |> Enum.join(", "))
+            Enum.map_join(account.workspaces, ", ", & &1.name)
         ]
     end)
   end
