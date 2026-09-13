@@ -10,6 +10,26 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
 
   alias Arbiter.Agents.Claude.ConfigDir
 
+  # bd-24qzhd regression guard: every Arbiter worker spawn injects
+  # CLAUDE_CODE_OAUTH_TOKEN, so it is routinely present in the ambient shell
+  # `mix test` runs in (a reviewer hit this on `main` itself). Simulate that
+  # ambient leak for the whole file — if the per-test `setup` below ever
+  # stops clearing the var, the tests in this file fail exactly as they did
+  # before this fix, regardless of which host or branch runs them.
+  setup_all do
+    prev = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+    System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "leaked-ambient-token")
+
+    on_exit(fn ->
+      case prev do
+        nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+        v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
+      end
+    end)
+
+    :ok
+  end
+
   setup do
     # A fake operator config dir (the "source") with the seed files, and a
     # separate target the isolated worker dir is built in. Both under tmp.
@@ -27,10 +47,18 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
     prev_isolate = Application.get_env(:arbiter, :worker_isolate_config)
     prev_dir = Application.get_env(:arbiter, :worker_config_dir)
     prev_src = System.get_env("CLAUDE_CONFIG_DIR")
+    prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
 
     Application.put_env(:arbiter, :worker_isolate_config, true)
     Application.put_env(:arbiter, :worker_config_dir, target)
     System.put_env("CLAUDE_CONFIG_DIR", source)
+    # bd-24qzhd: most tests in this file assert on the no-token seeding path.
+    # Arbiter itself injects CLAUDE_CODE_OAUTH_TOKEN into every worker spawn
+    # env, so it is routinely present in the ambient shell these tests run
+    # in; without clearing it here those tests fail on any host/branch. The
+    # describe blocks below that specifically test the token's presence
+    # re-set it in their own nested setup, which runs after this one.
+    System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
     on_exit(fn ->
       restore_env(:worker_isolate_config, prev_isolate)
@@ -39,6 +67,11 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       case prev_src do
         nil -> System.delete_env("CLAUDE_CONFIG_DIR")
         v -> System.put_env("CLAUDE_CONFIG_DIR", v)
+      end
+
+      case prev_token do
+        nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+        v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
       end
 
       File.rm_rf!(base)
