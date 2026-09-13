@@ -86,6 +86,15 @@ defmodule Arbiter.Worker.StopReason do
       classification — synthesized by the completion path to refuse closing a
       task that produced no deliverable. Remediation: investigate why
       provisioning was skipped, then re-dispatch.
+    * `:agent_print_timeout` — the `agy` (Gemini fork) CLI's own internal
+      print-mode turn timeout fired mid-turn ("print timeout … with turn in
+      progress; returning partial output") and agy returned whatever partial
+      output it had — with a `result.status` of `"SUCCESS"` (bd-1xss5z). A
+      turn that was cut off is not a successful one no matter what agy's own
+      terminal event claims, so this is trusted even on a clean (status 0)
+      exit, the same way `:stream_schema_drift` is: the marker is agy's own
+      fixed harness wording, not model prose that could coincidentally
+      appear in a real review's output.
     * `:spawn_failed` — a step of `Arbiter.Worker.Dispatch.dispatch/2` AFTER
       `start_worker/3` failed (e.g. a transient network/VPN outage during the
       agent subprocess spawn, or a workflow-machine attach failure). Not a
@@ -119,6 +128,7 @@ defmodule Arbiter.Worker.StopReason do
           | :spawn_exec_failed
           | :crashed
           | :stream_schema_drift
+          | :agent_print_timeout
           | :exited_without_done
           | :async_wait_abandoned
           | :stalled
@@ -282,6 +292,12 @@ defmodule Arbiter.Worker.StopReason do
   # status says about the run is not trustworthy.
   @schema_drift_signature ~r/unrecognized[ _]stream[ _]event/i
 
+  # bd-1xss5z: agy's own fixed wording when its `--print-timeout` fires
+  # mid-turn. Matched loosely ("print timeout" ... "returning partial
+  # output", tolerating the reported duration in between) rather than the
+  # exact "5m0s" so a configured non-default timeout still matches.
+  @print_timeout_signature ~r/print[ _]timeout[^\n]*returning[ _]partial[ _]output/i
+
   # bd-8cn795: the Claude CLI's own autocompact-loop detector. Fires when the
   # context refills to the limit within a few turns of the previous compact,
   # several times in a row — a deterministic function of the task's working
@@ -442,6 +458,25 @@ defmodule Arbiter.Worker.StopReason do
           signal: signal
         }
 
+      # Ordered alongside :stream_schema_drift, ahead of :stalled and the
+      # clean-exit clauses: agy reports its own cut-off turn as a clean exit
+      # with a "SUCCESS" result event, so exit status alone can't tell this
+      # apart from a genuine completion — only the harness-emitted marker can.
+      Regex.match?(@print_timeout_signature, haystack) ->
+        %__MODULE__{
+          category: :agent_print_timeout,
+          summary:
+            "agy's own print-mode turn timed out mid-turn and it returned partial output — " <>
+              "the turn was cut off, not completed, even though agy's own terminal event " <>
+              "reports SUCCESS",
+          remediation:
+            "Raise the timeout passed to agy for this run (Gemini adapter's `:timeout_ms` " <>
+              "opt, e.g. `review_gate.timeout_ms` for a reviewer pass) so it covers a full " <>
+              "turn, or reduce what the turn has to read/do.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
       is_nil(exit_status) ->
         %__MODULE__{
           category: :stalled,
@@ -579,6 +614,7 @@ defmodule Arbiter.Worker.StopReason do
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
         :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"
+        :agent_print_timeout -> "agy print-mode turn timed out (partial output only)"
         :exited_without_done -> "exited without completing"
         :async_wait_abandoned -> "abandoned an async wait (background task never drained)"
         :stalled -> "stalled (no output)"
