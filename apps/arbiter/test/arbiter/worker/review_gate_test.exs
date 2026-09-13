@@ -55,6 +55,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
   @session_limit Path.expand("../../fixtures/review_session_limit.sh", __DIR__)
+  @print_timeout Path.expand("../../fixtures/review_print_timeout.sh", __DIR__)
   @long_findings Path.expand("../../fixtures/review_long_findings.sh", __DIR__)
   @no_verdict_auth_prose Path.expand(
                            "../../fixtures/review_no_verdict_auth_prose.sh",
@@ -1208,6 +1209,76 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert "haiku" in args
     end
 
+    # bd-1xss5z: agy hard-codes a 5-minute `--print-timeout` on print-mode
+    # turns, well short of a review that reads a non-trivial diff. The
+    # ReviewGate's own per-pass timeout budget (`review_gate.timeout_ms` /
+    # `review_timeout_ms` meta override) must reach the agy spawn as
+    # `--print-timeout` so agy's own internal wall matches the harness's,
+    # instead of agy silently cutting the turn short well inside a longer
+    # budget that never gets a chance to fire.
+    test "review_gate's resolved timeout_ms reaches the agy reviewer spawn as --print-timeout",
+         %{repo: repo, tmp: tmp} do
+      argv_file = Path.join(tmp, "reviewer-argv.txt")
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "agy")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-gemini-timeout-ws-#{System.unique_integer([:positive])}",
+          prefix: "tg",
+          config: %{
+            "review" => %{"required" => true, "rounds" => 1},
+            "review_agent" => %{"type" => "gemini"}
+          }
+        })
+
+      task = new_task(ws)
+      branch = "feature/rev-print-timeout-argv"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 42_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(
+        fn ->
+          File.exists?(argv_file) and String.contains?(File.read!(argv_file), "--print-timeout")
+        end,
+        6_000
+      )
+
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--print-timeout" in args
+      assert "42s" in args
+    end
+
     # bd-dzz6ly: the reviewer is configured directly (review_agent.config), not
     # routed by Arbiter.Agents.Routing — provenance must say so plainly
     # ("review_agent") rather than claiming a routing policy that never ran.
@@ -1965,6 +2036,58 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "did not expect a re-prompt run row for a quota-exhaustion crash"
+    end
+
+    # bd-1xss5z: agy's own internal --print-timeout fires mid-review and agy
+    # still exits 0 with a terminal "SUCCESS" event — unlike the other
+    # infra-failure fixtures above (which exit non-zero), this is the one
+    # infra failure that must be trusted on a CLEAN exit, the same way
+    # :stream_schema_drift already is. Must escalate as an infra failure (a
+    # reviewer timeout) with no re-prompt spent on it — a fresh session hits
+    # the same 5-minute wall.
+    test "a reviewer whose agy print-timeout fires escalates with the real reason, no re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-print-timeout"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@print_timeout],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation for the task"
+      assert escalation.body =~ "timed out"
+
+      refute escalation.body =~ "no parseable VERDICT line",
+             "a timeout must not be reported as the generic no-parseable-verdict message"
+
+      # No re-prompt run row: a fresh session against the same print-timeout
+      # budget would fail identically, so the gate must not waste an attempt.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "did not expect a re-prompt run row for an agy print-timeout"
     end
 
     # bd-6dxit2: the same condition in the CLI's CURRENT wording — "You've hit
