@@ -3,12 +3,34 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
   bd-9so315, acceptance criterion 6 — the post-merge verification loop observed
   over a **real HTTP listener**, not `Phoenix.ConnTest`.
 
+  ## Status of criterion 6 — settled, and what is still owed
+
   Criterion 6 asks for a restart-and-observe against a running server. The
   production coordinator cannot supply it (it runs pre-migration `main`, and
   restarting it tears down every in-flight worker), and this worker is
-  forbidden from booting a server process of its own. What is reachable, and
-  what this test does, is to stand the real endpoint up on a real socket inside
-  the test VM and drive the whole loop across it:
+  forbidden from booting a server process of its own.
+
+  That impasse was ruled on rather than argued: the **coordinator decision of
+  2026-09-13 22:40Z**, recorded in `bd-9so315`'s task notes, re-specified
+  criterion 6 as **post-merge and coordinator-owned — not a merge gate** (a
+  restart-and-observe can only happen after the merge and the restart, so no
+  pre-merge session can produce it), and accepted **this test as the pre-merge
+  evidence** for it. Criteria 1-5 gate the merge; this file is what stands in
+  for 6 until the deploy.
+
+  So this test does not *satisfy* criterion 6, and is not claimed to. What is
+  still owed, after this branch merges and the coordinator restarts (boot
+  applies migration `20260913120000`), is the 5-step protocol written out in
+  `bd-9so315`'s notes: flag a trivial live task, merge it, confirm it parks at
+  `awaiting_verification` with one escalation and an age in `arb prime`, close
+  it with `arb issue verify <id> --observed "…"`, and record the observation on
+  the task. That observation IS criterion 6; nothing here replaces it.
+
+  ## What this test does cover
+
+  What is reachable pre-merge, and what this test does, is to stand the real
+  endpoint up on a real socket inside the test VM and drive the whole loop
+  across it:
 
     1. a `verify_after_deploy` task is created by `POST /api/issues` over TCP —
        the exact wire request `arb issue create --verify-after-deploy` sends;
