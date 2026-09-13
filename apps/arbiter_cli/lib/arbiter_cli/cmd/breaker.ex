@@ -39,6 +39,7 @@ defmodule ArbiterCli.Cmd.Breaker do
     end
   end
 
+  @spec unknown() :: no_return()
   defp unknown do
     IO.puts(:stderr, "arb: unknown breaker subcommand")
     IO.puts(:stderr, "Run `arb breaker --help` for usage.")
@@ -147,6 +148,7 @@ defmodule ArbiterCli.Cmd.Breaker do
     end
   end
 
+  @spec die({:error, Client.Error.t()}) :: no_return()
   defp die({:error, %Client.Error{kind: :http, body: body}}) when is_map(body) do
     Output.die(get_in(body, ["error", "message"]) || inspect(body))
   end

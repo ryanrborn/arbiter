@@ -321,8 +321,9 @@ defmodule Arbiter.CircuitBreaker do
     entries =
       state.entries
       |> Map.values()
-      |> Enum.filter(&matches?(&1, filters))
-      |> Enum.filter(fn entry -> not Map.get(filters, :open_only, false) or open?(entry) end)
+      |> Enum.filter(fn entry ->
+        matches?(entry, filters) and (not Map.get(filters, :open_only, false) or open?(entry))
+      end)
       |> Enum.sort_by(& &1.last_at, :desc)
       |> Enum.map(&render/1)
 
