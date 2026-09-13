@@ -58,6 +58,17 @@ defmodule Arbiter.CircuitBreaker do
   `arb breaker list` still enumerates every adopted path on a freshly-booted
   server, with live counters for whichever have fired since boot.
 
+  ## What is deliberately NOT on this primitive
+
+  `Arbiter.Workflows.ReviewPatrol` keeps its own breakers (#1548's per-engagement
+  loop signature, #1572's per-finding refutation tracking). Those are not
+  count-in-window suppressors at all: they trip on a *semantic* predicate about
+  one engagement — a repeat verdict on an unchanged SHA, a re-request disputing
+  a standing verdict, blocking findings already answered on lines the push did
+  not touch. There is no K and no window to port, so moving them here would
+  rewrite their behaviour rather than refactor it. They sit alongside this
+  module, not on it.
+
   ## Usage
 
       case CircuitBreaker.check(:pr_patrol_follow_up, [repo, pr_number],
