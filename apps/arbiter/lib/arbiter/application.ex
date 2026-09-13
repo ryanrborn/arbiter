@@ -54,6 +54,10 @@ defmodule Arbiter.Application do
       # (no deps) so every GitHub-calling path can gate through it. See
       # Arbiter.GitHub.Limiter.
       {Task.Supervisor, name: Arbiter.TaskSupervisor},
+      # The shared circuit breaker (bd-5jr49o). Started early and with no deps
+      # so every auto-filing / auto-escalating / auto-redispatching path can
+      # gate through it; callers fail open if it is somehow absent.
+      Arbiter.CircuitBreaker,
       Arbiter.GitHub.Limiter,
       Arbiter.Agents.ProviderPool,
       Arbiter.Agents.CredentialWatchdog,
