@@ -278,21 +278,22 @@ defmodule ArbiterWeb.BoardLive do
   # rather than doing it.
   defp dropped(socket, id, "running", _to), do: assign(socket, :confirm_stop, id)
 
-  # Send back. The parked worker is halted already, so nothing is interrupted
-  # — it is discarded, and the issue goes back to open so the queue owns it
-  # again. Deliberately not `Dispatch.resume/1`: sending work back to Ready
-  # means the scheduler re-decides it on the merits, not that a stale session
-  # picks up where it left off.
-  defp dropped(socket, id, "waiting", "ready"), do: requeue(socket, id, "Sent")
-
-  # Forward, out of Waiting. One gesture, two meanings, because the column
-  # holds two kinds of card and the card — not the drop target — says which:
-  # a *parked* worker is being told "carry on", a worker already sitting on a
-  # merge request is being pulled off it.
-  defp dropped(socket, id, "waiting", "closed") do
-    case waiting_status(socket, id) do
-      :awaiting_review -> pull_from_merge(socket, id)
-      _ -> proceed(socket, id)
+  # bd-9so315: a merged-but-unverified card has no gesture-shaped exit. Both
+  # ways out of the state carry *evidence* — what was seen on the running
+  # server — and a drag carries none, so neither drop may guess. Say what to
+  # run instead, and leave the task where it is.
+  defp dropped(socket, id, "waiting", to) when to in ["ready", "closed"] do
+    if waiting_status(socket, id) == :awaiting_verification do
+      put_flash(
+        socket,
+        :error,
+        "#{id} merged but is awaiting verification — restart the server, observe the " <>
+          "new path, then record what you saw: " <>
+          ~s(`arb issue verify #{id} --observed "<evidence>"` ) <>
+          "(or `--failed \"<evidence>\"` to send it back)."
+      )
+    else
+      dropped_waiting(socket, id, to)
     end
   end
 
@@ -300,6 +301,24 @@ defmodule ArbiterWeb.BoardLive do
   # that implies no action. Silence is the right answer; a flash for every
   # stray drop trains the operator to ignore flashes.
   defp dropped(socket, _id, _from, _to), do: socket
+
+  # Send back. The parked worker is halted already, so nothing is interrupted
+  # — it is discarded, and the issue goes back to open so the queue owns it
+  # again. Deliberately not `Dispatch.resume/1`: sending work back to Ready
+  # means the scheduler re-decides it on the merits, not that a stale session
+  # picks up where it left off.
+  defp dropped_waiting(socket, id, "ready"), do: requeue(socket, id, "Sent")
+
+  # Forward, out of Waiting. One gesture, two meanings, because the column
+  # holds two kinds of card and the card — not the drop target — says which:
+  # a *parked* worker is being told "carry on", a worker already sitting on a
+  # merge request is being pulled off it.
+  defp dropped_waiting(socket, id, "closed") do
+    case waiting_status(socket, id) do
+      :awaiting_review -> pull_from_merge(socket, id)
+      _ -> proceed(socket, id)
+    end
+  end
 
   # Proceed. The answer the worker was parked on is "carry on", so un-park it
   # and let it finish its own way to review and a merge request. The FSM, not
@@ -533,6 +552,7 @@ defmodule ArbiterWeb.BoardLive do
   # about a dead Watchdog — the restart lives on the worker page, so send the
   # operator there instead of to a screen that will only repeat the lie that
   # the MR is being polled.
+  defp card_href("waiting", %{status: :awaiting_verification} = card), do: ~p"/tasks/#{card.id}"
   defp card_href("waiting", %{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
   defp card_href("waiting", %{status: :awaiting_review}), do: ~p"/merge_queue"
   defp card_href("waiting", card), do: ~p"/workers/#{card.id}"
@@ -1125,12 +1145,14 @@ defmodule ArbiterWeb.BoardLive do
   defp waiting_note(%{status: :awaiting_review} = card), do: merge_status_text(card.merger_status)
   defp waiting_note(%{status: :failed}), do: "failed"
   defp waiting_note(%{status: :in_progress}), do: "no live worker"
+  defp waiting_note(%{status: :awaiting_verification}), do: "restart & observe"
   defp waiting_note(_card), do: "parked"
 
   defp waiting_action(%{watchdog_alive: false}), do: "restart watchdog"
   defp waiting_action(%{status: :awaiting_review}), do: "merge queue"
   defp waiting_action(%{status: :failed}), do: "retry"
   defp waiting_action(%{status: :in_progress}), do: "resume"
+  defp waiting_action(%{status: :awaiting_verification}), do: "verify"
   defp waiting_action(_card), do: "answer"
 
   defp merge_activity(%{mr_ref: ref}) when is_binary(ref) and ref != "", do: ref

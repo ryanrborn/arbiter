@@ -14,6 +14,71 @@ defmodule ArbiterCli.Cmd.PrimeTest do
     ])
   end
 
+  # bd-9so315 — tasks parked at awaiting_verification, with age.
+  describe "awaiting-verification section" do
+    defp stub_with_awaiting(awaiting) do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}]},
+          200}},
+        {{"get", "/api/workers"}, {%{"data" => []}, 200}},
+        {{"get", "/api/issues/ready"}, {%{"data" => []}, 200}},
+        {{"get", "/api/issues"}, {%{"data" => awaiting}, 200}},
+        {{"get", "/api/messages"}, {%{"data" => []}, 200}}
+      ])
+    end
+
+    test "lists awaiting-verification tasks with their age" do
+      awaiting_since = DateTime.utc_now() |> DateTime.add(-7200, :second) |> DateTime.to_iso8601()
+
+      stub_with_awaiting([
+        %{
+          "id" => "bd-001",
+          "title" => "doctor probe",
+          "status" => "awaiting_verification",
+          "awaiting_verification_at" => awaiting_since,
+          "workspace_id" => "ws-1"
+        }
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "== Awaiting verification (1) =="
+      assert out =~ "bd-001"
+      assert out =~ "doctor probe"
+      assert out =~ "2h ago"
+    end
+
+    test "omits the section entirely when nothing is awaiting verification" do
+      stub_with_awaiting([])
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      refute out =~ "Awaiting verification"
+    end
+
+    test "--json includes the awaiting-verification list" do
+      awaiting_since = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
+
+      stub_with_awaiting([
+        %{
+          "id" => "bd-002",
+          "title" => "capture path",
+          "status" => "awaiting_verification",
+          "awaiting_verification_at" => awaiting_since,
+          "workspace_id" => "ws-1"
+        }
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
+      assert exit_code == 0
+
+      assert {:ok, decoded} = Jason.decode(out)
+      assert [%{"awaiting_verification" => [%{"id" => "bd-002"}]}] = decoded["workspaces"]
+    end
+  end
+
   describe "text mode" do
     test "prints workspace header, workers, and ready tasks" do
       stub_all(

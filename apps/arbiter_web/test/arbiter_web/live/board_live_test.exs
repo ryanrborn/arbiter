@@ -640,6 +640,42 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
+  # bd-9so315 — a merged-but-unverified task has no worker, so without its own
+  # card it would be invisible on the board: exactly the gap the state exists
+  # to close.
+  describe "the Waiting column lists tasks awaiting verification" do
+    defp awaiting_issue(ws, title) do
+      task = working_issue(ws, title)
+      {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
+      awaiting
+    end
+
+    test "a parked task renders a Waiting card with its age and needs-you", %{conn: conn, ws: ws} do
+      task = awaiting_issue(ws, "doctor probe")
+
+      {:ok, view, html} = live(conn, "/")
+
+      assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
+      assert html =~ "awaiting verification"
+      assert has_element?(view, ~s([id="card-#{task.id}"] [data-needs-you]))
+      # It routes to the task, where the verification evidence lives — not to a
+      # worker page for a worker the merge already tore down.
+      assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/tasks/#{task.id}"]))
+    end
+
+    test "dragging it out points at the verify verb instead of guessing", %{conn: conn, ws: ws} do
+      task = awaiting_issue(ws, "capture path")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      html = drag(view, task.id, "waiting", "closed")
+      assert html =~ "arb issue verify"
+
+      # And the task did not move.
+      assert Ash.get!(Issue, task.id).status == :awaiting_verification
+    end
+  end
+
   describe "drops that mean nothing" do
     test "dropping onto Closed today changes nothing and says nothing", %{conn: conn, ws: ws} do
       task = issue(ws, "not done yet")

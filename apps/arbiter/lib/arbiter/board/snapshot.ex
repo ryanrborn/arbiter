@@ -455,8 +455,46 @@ defmodule Arbiter.Board.Snapshot do
   # The view reads whichever it has instead of branching on which shape
   # produced the card.
   defp waiting(workers, issues, issues_by_id, worked, now, watchdog_live) do
-    (waiting_cards(workers, issues_by_id, watchdog_live) ++ orphaned_cards(issues, worked, now))
+    (waiting_cards(workers, issues_by_id, watchdog_live) ++
+       orphaned_cards(issues, worked, now) ++
+       awaiting_verification_cards(issues))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
+  end
+
+  # bd-9so315: a task merged but parked until someone restarts the server and
+  # observes the new path. It has no worker (the merge tore it down), so it
+  # produces no worker-derived card and would otherwise be invisible — which is
+  # precisely the failure the state exists to fix. It is always `needs_you`:
+  # nothing in the fleet can clear it, only a human observation can.
+  defp awaiting_verification_cards(issues) do
+    issues
+    |> Enum.filter(&(Map.get(&1, :status) == :awaiting_verification))
+    |> Enum.map(fn issue ->
+      %{
+        id: issue.id,
+        title: Map.get(issue, :title),
+        priority: Map.get(issue, :priority),
+        difficulty: Map.get(issue, :difficulty),
+        workspace_id: Map.get(issue, :workspace_id),
+        assignee: Map.get(issue, :assignee),
+        status: :awaiting_verification,
+        reason: "merged — awaiting verification (restart and observe)",
+        mr_ref: Map.get(issue, :pr_ref),
+        merger_url: nil,
+        merger_status: nil,
+        watchdog_alive: nil,
+        needs_you: true,
+        collapsed_note: nil,
+        since: awaiting_since(issue)
+      }
+    end)
+  end
+
+  # The parked-at stamp, falling back to `updated_at` for rows that entered the
+  # state before the column existed, so the card still renders an age.
+  defp awaiting_since(issue) do
+    Map.get(issue, :awaiting_verification_at) || Map.get(issue, :updated_at) ||
+      created_at(issue)
   end
 
   defp waiting_cards(workers, issues_by_id, watchdog_live) do
