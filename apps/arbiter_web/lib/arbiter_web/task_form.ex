@@ -47,9 +47,25 @@ defmodule ArbiterWeb.TaskForm do
   Statuses an operator may set from the edit form. `:closed` is deliberately
   absent — the `:update` action's `GuardStatus` change refuses transitions
   involving `:closed`, which is what the separate close action (with a reason)
-  is for.
+  is for. So is `:awaiting_verification`, whose exits both carry evidence
+  (`arb issue verify`).
+
+  Pass the task's `current` status to keep it selectable when it is one of
+  those non-editable states (bd-9so315): a `<select>` whose value is not among
+  its options falls back to the first one, so an edit that never meant to touch
+  status would submit `open` and fail the whole save on an illegal transition.
+  Re-selecting the current status is a no-op the FSM allows.
   """
-  def editable_status_options, do: [{"open", "open"}, {"in_progress", "in_progress"}]
+  def editable_status_options(current \\ nil) do
+    base = [{"open", "open"}, {"in_progress", "in_progress"}]
+    current = current && to_string(current)
+
+    if is_binary(current) and not List.keymember?(base, current, 0) do
+      base ++ [{current, current}]
+    else
+      base
+    end
+  end
 
   @doc """
   The value to render for `key`, preferring what the operator last submitted.

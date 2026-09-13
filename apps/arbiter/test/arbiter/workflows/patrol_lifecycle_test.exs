@@ -133,6 +133,44 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
       _ = :sys.get_state(name)
       assert PRPatrolSupervisor.whereis(ws.id) == nil
     end
+
+    # bd-9so315 — a parked task's PR is already merged, so its stale `pr_ref` is
+    # exactly as dead as a closed task's. `:record_verification` broadcasts
+    # `:updated` while the task is still `:awaiting_verification`, so without the
+    # guard every recorded verdict (and every coordinator notes edit on a parked
+    # task) would spawn a PRPatrol for the merged PR's repo.
+    test "an :updated event on an awaiting-verification task starts nothing" do
+      {_pid, name} = start_subscriber()
+      ws = github_ws()
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "parked",
+          description: "d",
+          issue_type: :feature,
+          tracker_type: :none,
+          verify_after_deploy: true,
+          workspace_id: ws.id
+        })
+
+      {:ok, task} = Ash.update(task, %{pr_ref: "#9"}, action: :update)
+
+      await(fn -> PRPatrolSupervisor.whereis(ws.id) end)
+
+      {:ok, parked} = Ash.update(task, %{}, action: :await_verification)
+      assert parked.status == :awaiting_verification
+      assert parked.pr_ref == "#9"
+
+      for {_k, pid} <- PRPatrolSupervisor.whereis_all(ws.id),
+          is_pid(pid),
+          do: DynamicSupervisor.terminate_child(PRPatrolSupervisor, pid)
+
+      await(fn -> if PRPatrolSupervisor.whereis(ws.id) == nil, do: :gone end)
+
+      send(name, {:task_lifecycle, :updated, parked})
+      _ = :sys.get_state(name)
+      assert PRPatrolSupervisor.whereis(ws.id) == nil
+    end
   end
 
   describe "fleet-PR lifecycle" do

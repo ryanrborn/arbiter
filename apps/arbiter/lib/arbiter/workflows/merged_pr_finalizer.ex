@@ -16,7 +16,9 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   On each tick the finalizer:
 
     1. Queries `Issue` for tasks in this workspace with `pr_ref != nil` and
-       `status != :closed`.
+       `status != :closed`. A task already parked at `:awaiting_verification`
+       (bd-9so315) is excluded too: its PR *is* merged, so without that the
+       sweep would try to re-finalize it on every tick.
     2. For each, calls `adapter.get(pr_ref)` — the same forge call the Watchdog
        uses — and checks whether `status == :merged`.
     3. If merged, fires `Arbiter.Trackers.Sync.lifecycle(task, :merged)` and
@@ -83,6 +85,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   alias Arbiter.GitHub.Limiter
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Verification
   alias Arbiter.Trackers.Sync
   alias Arbiter.Worker
   require Ash.Query
@@ -269,7 +272,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     |> Ash.Query.filter(
       workspace_id == ^workspace_id and
         not is_nil(pr_ref) and
-        status != :closed
+        status not in [:closed, :awaiting_verification]
     )
     |> Ash.read()
   end
@@ -286,7 +289,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         not is_nil(source_pr) and
         is_nil(pr_ref) and
         review_only != true and
-        status != :closed
+        status not in [:closed, :awaiting_verification]
     )
     |> Ash.read()
   end
@@ -305,7 +308,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         not is_nil(tracker_ref) and
         is_nil(source_pr) and
         is_nil(pr_ref) and
-        status != :closed
+        status not in [:closed, :awaiting_verification]
     )
     |> Ash.read()
   end
@@ -334,9 +337,18 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
     Sync.lifecycle(task, :merged)
 
-    case Ash.update(task, %{close_upstream: true}, action: :close) do
-      {:ok, _} ->
+    # bd-9so315: the same funnel the merge queue uses — closes as before unless
+    # the task carries `verify_after_deploy`, in which case it parks at
+    # `:awaiting_verification` and escalates the restart-and-observe.
+    case Verification.finalize_merged(task, close_upstream: true, mr_ref: task.pr_ref) do
+      {:ok, :closed, _} ->
         Logger.info("MergedPRFinalizer: closed task=#{task.id}")
+
+      {:ok, :awaiting_verification, _} ->
+        Logger.info(
+          "MergedPRFinalizer: task=#{task.id} merged but flagged verify_after_deploy — " <>
+            "parked at :awaiting_verification pending a restart-and-observe result"
+        )
 
       {:error, reason} ->
         Logger.warning("MergedPRFinalizer: failed to close task=#{task.id}: #{inspect(reason)}")

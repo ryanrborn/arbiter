@@ -58,6 +58,12 @@ defmodule ArbiterCli.Cmd.Update do
   the task's single canonical PR with (Summary / Test plan / References). It
   overwrites the field.
 
+  `--verify-after-deploy` / `--no-verify-after-deploy` (bd-9so315) flags the
+  task as one whose only execution context is the long-lived server. When set,
+  merging the task's PR parks it at `awaiting_verification` instead of closing
+  it, and the coordinator restarts and observes the new path before recording
+  the result with `arb issue verify`.
+
   `--resume-review` clears a ReviewPatrol engagement's per-engagement circuit
   breaker (`circuit_breaker_tripped` + `circuit_breaker_reason`, bd-1atwts),
   letting the engagement post again after a coordinator has adjudicated a
@@ -108,6 +114,7 @@ defmodule ArbiterCli.Cmd.Update do
     assignee: :string,
     repo: :string,
     resume_review: :boolean,
+    verify_after_deploy: :boolean,
     json: :boolean
   ]
 
@@ -282,6 +289,7 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("repo", opts[:repo])
       |> maybe_append_notes(opts[:append_notes], existing)
       |> maybe_resume_review(opts[:resume_review])
+      |> put_bool_if("verify_after_deploy", opts[:verify_after_deploy])
 
     if map_size(payload) == 0 do
       Output.die(
@@ -294,6 +302,11 @@ defmodule ArbiterCli.Cmd.Update do
       {:error, err} -> Output.die(err)
     end
   end
+
+  # `--verify-after-deploy` / `--no-verify-after-deploy` — `put_if/3` can't be
+  # reused here: `false` is a meaningful value (clear the flag), not "absent".
+  defp put_bool_if(map, _key, nil), do: map
+  defp put_bool_if(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
 
   defp put_if(map, _key, nil), do: map
   defp put_if(map, _key, ""), do: map

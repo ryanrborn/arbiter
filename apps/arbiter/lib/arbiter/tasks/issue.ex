@@ -12,12 +12,33 @@ defmodule Arbiter.Tasks.Issue do
 
       :open ⇄ :in_progress
        │          │
+       │          ├────► :awaiting_verification ─┬─► :closed
+       │          │                              └─► reopen → :open
        └────►─────┴────► :closed
                           │
                           └ reopen → :open
 
-  Enforced in `:update`, `:close`, `:reopen` actions. You cannot close an already
-  closed issue, and cannot transition out of :closed without an explicit `:reopen`.
+  Enforced in `:update`, `:await_verification`, `:close`, `:reopen` actions. You
+  cannot close an already closed issue, and cannot transition out of :closed
+  without an explicit `:reopen`.
+
+  ## Post-merge verification (bd-9so315)
+
+  A task flagged `verify_after_deploy: true` is one whose only execution context
+  is the long-lived server — env/config plumbing, a doctor probe, a capture
+  path. Merging it proves nothing: the running server still holds the old code.
+  For those, the merge parks the task at `:awaiting_verification` (via
+  `:await_verification`) instead of closing it, and the coordinator records a
+  restart-and-observe result through `Arbiter.Tasks.Verification`:
+
+    * `observed/2` → `verification_outcome: :observed` + evidence, then `:close`.
+    * `failed/2`   → `verification_outcome: :failed` + evidence, then `:reopen`.
+
+  The upstream tracker close is **not** deferred: it still happens at merge
+  time, because the PR body's `Closes #N` keyword closes the upstream issue on
+  merge regardless of what Arbiter does, and leaving the local record claiming
+  otherwise is exactly the drift `Tasks.Claim`'s check exists to catch. A
+  `failed/2` verification reopens the upstream issue along with the task.
 
   ## Rich-content fields
 
@@ -45,7 +66,7 @@ defmodule Arbiter.Tasks.Issue do
 
   require Ash.Query
 
-  @statuses ~w(open in_progress closed)a
+  @statuses ~w(open in_progress awaiting_verification closed)a
   @issue_types ~w(task bug feature epic chore decision)a
   @tracker_types ~w(none jira shortcut linear github gitlab)a
 
@@ -97,6 +118,7 @@ defmodule Arbiter.Tasks.Issue do
         :target_branch,
         :repo,
         :workspace_id,
+        :verify_after_deploy,
         # ReviewPatrol engagement fields (bd-2ovun1): let a review_only
         # engagement be created atomically with its baseline/cursor + automation
         # mode, so ExternalReview doesn't have to create-then-update (which could
@@ -159,6 +181,7 @@ defmodule Arbiter.Tasks.Issue do
         :difficulty,
         :issue_type,
         :auto_close,
+        :verify_after_deploy,
         :assignee,
         :tracker_type,
         :tracker_ref,
@@ -217,6 +240,60 @@ defmodule Arbiter.Tasks.Issue do
       # Propagate title/description changes to the linked external tracker.
       # Best-effort; no-op when neither field changed or no tracker.
       change {Arbiter.Tasks.Issue.Changes.SyncFields, []}
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # bd-9so315 — post-merge verification.
+    #
+    # The merge succeeded but the change's only execution context is the
+    # long-lived server, so nothing has actually run the new code yet. Park the
+    # task here instead of closing it: the worker/worktree teardown still runs
+    # (the work IS done), the coordinator is notified, and the task only leaves
+    # this state through `Arbiter.Tasks.Verification`.
+    update :await_verification do
+      require_atomic? false
+
+      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :await_verification}
+      change set_attribute(:status, :awaiting_verification)
+      change set_attribute(:awaiting_verification_at, &DateTime.utc_now/0)
+
+      # A re-entry (a `failed/2` verification reopened the task, it was worked
+      # again and merged again) must not inherit the previous round's verdict.
+      change set_attribute(:verification_outcome, nil)
+      change set_attribute(:verification_evidence, nil)
+
+      # Same teardown as `:close`: the worker finished and its PR merged, so
+      # leaving the agent + worktree alive for the whole verification window
+      # would pin a slot and leak a checkout. All best-effort.
+      change {Arbiter.Tasks.Issue.Changes.StopWorker, []}
+      change {Arbiter.Tasks.Issue.Changes.CleanupWorktree, []}
+      change {Arbiter.Tasks.Issue.Changes.DropDispatchHold, []}
+
+      change fn changeset, _context ->
+        Ash.Changeset.after_transaction(changeset, fn
+          _changeset, {:ok, issue} ->
+            Arbiter.Tasks.Issue.broadcast_lifecycle(:awaiting_verification, issue)
+            {:ok, issue}
+
+          _changeset, error ->
+            error
+        end)
+      end
+    end
+
+    # Records the restart-and-observe verdict + its evidence. Makes NO status
+    # change of its own — `Arbiter.Tasks.Verification` follows it with `:close`
+    # (observed) or `:reopen` (failed), so the evidence is durable even if the
+    # follow-on transition fails.
+    update :record_verification do
+      require_atomic? false
+      accept [:verification_outcome, :verification_evidence]
+
+      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :record_verification}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -369,7 +446,7 @@ defmodule Arbiter.Tasks.Issue do
 
   @doc false
   def broadcast_lifecycle(event, issue)
-      when event in [:created, :updated, :closed, :reopened] do
+      when event in [:created, :updated, :closed, :reopened, :awaiting_verification] do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, "tasks", {:task_lifecycle, event, issue})
 
     if ws_id = Map.get(issue, :workspace_id) do
@@ -646,6 +723,68 @@ defmodule Arbiter.Tasks.Issue do
 
     attribute :closed_at, :utc_datetime_usec do
       public? true
+    end
+
+    # ---- post-merge verification (bd-9so315) ------------------------------
+
+    attribute :verify_after_deploy, :boolean do
+      allow_nil? false
+      public? true
+      default false
+
+      description """
+      When true, merging this task's PR does NOT close it: the merge parks it
+      at `:awaiting_verification` and notifies the coordinator to restart the
+      server and observe the new path once.
+
+      Set it for any change whose only execution context is the long-lived
+      server — env/config plumbing, a `doctor` probe, a capture/ingest path,
+      anything that "works" in tests but has never run in the live process.
+      That class is the largest source of escaped defects (see the
+      2026-09-13 follow-up-rate investigation): merged, auto-closed, and
+      discovered broken ~8 hours later.
+
+      Settable by the coordinator (`task_create` / `task_update`, `arb issue
+      create/update --verify-after-deploy`) and by a worker on its own task
+      (`task_update_progress`) once it can see that its diff touches such a
+      path.
+      """
+    end
+
+    attribute :awaiting_verification_at, :utc_datetime_usec do
+      allow_nil? true
+      public? false
+
+      description """
+      When the task entered `:awaiting_verification`. The board's Waiting
+      column and `arb prime` render the age of the wait from this. Written by
+      `:await_verification`; left in place afterwards as a record of how long
+      the verification took.
+      """
+    end
+
+    attribute :verification_outcome, :atom do
+      allow_nil? true
+      public? false
+      constraints one_of: [:observed, :failed]
+
+      description """
+      The recorded restart-and-observe verdict: `:observed` (the new path was
+      seen working on the running server → the task closed) or `:failed` (it
+      was not → the task reopened). `nil` before a verdict is recorded, and
+      reset by a fresh `:await_verification`.
+      """
+    end
+
+    attribute :verification_evidence, :string do
+      allow_nil? true
+      public? false
+
+      description """
+      The evidence text the coordinator recorded with the verdict — what was
+      actually observed on the running server. Persisted verbatim so the
+      claim "this is live and working" is auditable rather than remembered.
+      """
     end
 
     attribute :close_upstream_expected, :boolean do

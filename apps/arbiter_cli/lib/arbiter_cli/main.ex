@@ -17,6 +17,9 @@ defmodule ArbiterCli.Main do
                                   [--pr-body text]
       arb issue close     <id> [--reason ...]
       arb issue reopen    <id>
+      arb issue verify    <id> --observed "<evidence>" | --failed "<evidence>"
+                                  record the post-merge restart-and-observe result
+                                  for a task parked at awaiting_verification
       arb issue claim     <ref> [--force] [--repo <repo>]
       arb issue sync      [--dry]
       arb issue ready
@@ -248,6 +251,8 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)
   # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`.
   defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
+  # Top-level shortcut: `arb verify <id>` == `arb issue verify <id>`.
+  defp dispatch_known("verify", args), do: ArbiterCli.Cmd.Issue.run(["verify" | args])
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("init", args), do: ArbiterCli.Cmd.Init.run(args)

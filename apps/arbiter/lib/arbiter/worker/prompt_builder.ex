@@ -290,7 +290,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     create`). The MergeQueue opens the single canonical PR for this task, on
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
-    #{pr_review_instruction(task)}#{pr_body_step(task)}#{completion_notes_step(task)}
+    #{pr_review_instruction(task)}#{verify_after_deploy_step(task)}#{pr_body_step(task)}#{completion_notes_step(task)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{task.id}
@@ -480,6 +480,43 @@ defmodule Arbiter.Worker.PromptBuilder do
     do NOT shell out to the `arb` CLI for this.
 
     Do this before printing `arb done`.
+    """
+  end
+
+  # bd-9so315: the escaped-defect class this addresses is a change whose only
+  # execution context is the long-lived server — merged green, auto-closed,
+  # found broken hours later. Nobody upstream of the worker can see the diff, so
+  # the worker is the only party in a position to raise the flag, and it has to
+  # be told to.
+  defp verify_after_deploy_step(%Issue{verify_after_deploy: true, id: id}) do
+    """
+
+    POST-MERGE VERIFICATION — this task is already flagged
+    `verify_after_deploy`. When its PR merges it will NOT close: it parks at
+    `awaiting verification` until the coordinator restarts the server, observes
+    the new path, and records what they saw (`arb issue verify #{id}
+    --observed "<evidence>"`). Make that observation easy: say in your `notes`
+    or PR body exactly what to look at, and what a working result looks like.
+    """
+  end
+
+  defp verify_after_deploy_step(%Issue{}) do
+    """
+
+    POST-MERGE VERIFICATION — if your diff's only execution context is the
+    long-lived server, flag it. That means anything a green test suite cannot
+    prove is live: env/config plumbing that has to reach a spawned worker,
+    a `doctor`/health probe, a capture or ingest path, code whose first real
+    run is inside the running Phoenix process. Set the flag by calling the
+    `task_update_progress` MCP tool with `verify_after_deploy: true`, and say
+    in your `notes` what to look at after a restart and what a working result
+    looks like.
+
+    The task then parks at `awaiting verification` on merge instead of closing,
+    and the coordinator restarts and observes it once before it closes. If your
+    change genuinely runs under test — a pure function, a LiveView with
+    assertions, a migration — leave it alone; the flag costs a human round trip
+    and is not free.
     """
   end
 

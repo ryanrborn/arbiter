@@ -12,6 +12,10 @@ defmodule ArbiterWeb.Api.IssueController do
     * `PATCH  /api/issues/:id`         — :update
     * `POST   /api/issues/:id/close`   — :close (body: optional `reason`)
     * `POST   /api/issues/:id/reopen`  — :reopen
+    * `POST   /api/issues/:id/promote` — :promote
+    * `POST   /api/issues/:id/verify`  — :verify (body: `outcome` +
+      `evidence`) — records the post-merge restart-and-observe result
+      (bd-9so315)
   """
 
   use ArbiterWeb, :controller
@@ -19,6 +23,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
+  alias Arbiter.Tasks.Verification
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -230,6 +235,54 @@ defmodule ArbiterWeb.Api.IssueController do
          {:ok, promoted} <- Ash.update(issue, promote_args, action: :promote_to_ready) do
       render(conn, :show, issue: promoted)
     end
+  end
+
+  @doc """
+  Record the restart-and-observe result for a task parked at
+  `:awaiting_verification` (bd-9so315).
+
+  Body: `outcome` (`"observed"` | `"failed"`) and `evidence` (free text, what
+  was actually seen on the running server). `observed` closes the task,
+  `failed` reopens it; either way the evidence is persisted.
+
+  The verification errors are rendered here rather than through the fallback
+  controller because they are domain answers ("this task isn't parked",
+  "evidence is required"), not changeset validation — the caller needs the
+  specific sentence, not a generic `validation failed`.
+  """
+  def verify(conn, %{"id" => id} = params) do
+    outcome = params["outcome"]
+    evidence = params["evidence"]
+
+    with {:ok, issue} <- Ash.get(Issue, id) do
+      case Verification.record_outcome(issue, outcome, evidence) do
+        {:ok, updated} -> render(conn, :show, issue: updated)
+        {:error, reason} -> verify_error(conn, reason)
+      end
+    end
+  end
+
+  defp verify_error(conn, :not_awaiting_verification) do
+    unprocessable(
+      conn,
+      "task is not awaiting verification — only a task parked at " <>
+        "awaiting_verification can record a verify result"
+    )
+  end
+
+  defp verify_error(conn, :evidence_required) do
+    unprocessable(conn, "evidence is required: say what you observed on the running server")
+  end
+
+  defp verify_error(conn, {:invalid, message}) when is_binary(message),
+    do: unprocessable(conn, message)
+
+  defp verify_error(conn, {:invalid, err}), do: unprocessable(conn, Exception.message(err))
+
+  defp unprocessable(conn, message) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{error: %{type: "validation_error", message: message, details: %{}}})
   end
 
   # ---- helpers ----

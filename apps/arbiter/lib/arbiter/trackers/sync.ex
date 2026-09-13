@@ -130,6 +130,117 @@ defmodule Arbiter.Trackers.Sync do
     end
   end
 
+  @doc """
+  Close the task's external item **and verify it actually closed** — the exact
+  pair of steps `Arbiter.Tasks.Issue.Changes.SyncTracker` performs on the
+  `:close` action, extracted so every close path gets identical behaviour.
+
+  A close transition reporting `:ok` is not proof the upstream item is closed:
+  a silent provider no-op or a stale read can leave it open. `verify_closed/1`
+  re-fetches and issues a follow-up close when it is.
+
+  Skipped (returns `:ok`) for a task with no tracker, no `tracker_ref`, or
+  `review_only: true` — bd-6xaaam: a review-only task must never transition a
+  tracker issue it does not own.
+
+  Best-effort: always returns `:ok`.
+  """
+  @spec close_and_verify(Issue.t()) :: :ok
+  def close_and_verify(%Issue{} = issue) do
+    cond do
+      issue.tracker_type == :none -> :ok
+      blank?(issue.tracker_ref) -> :ok
+      issue.review_only == true -> :ok
+      true -> do_close_and_verify(issue)
+    end
+  end
+
+  defp do_close_and_verify(issue) do
+    lifecycle(issue, :closed)
+    verify_closed(issue)
+  end
+
+  @doc """
+  Re-fetch the task's external item and, if it is still open after a close
+  transition reported success, issue a follow-up close.
+
+  Best-effort: logs and returns `:ok` on any failure — the local close has
+  already happened and must not be rolled back over a tracker hiccup.
+  """
+  @spec verify_closed(Issue.t()) :: :ok
+  def verify_closed(%Issue{} = issue) do
+    case Trackers.fetch(issue) do
+      {:ok, raw} ->
+        if upstream_closed?(issue.tracker_type, raw) do
+          :ok
+        else
+          Logger.warning(
+            "Trackers.Sync: upstream still open after close transition for task=#{issue.id} " <>
+              "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} — issuing follow-up close"
+          )
+
+          follow_up_close(issue)
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "Trackers.Sync: could not verify closed state for task=#{issue.id} " <>
+            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{inspect(reason)} " <>
+            "— local close still succeeds"
+        )
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Trackers.Sync: error verifying close for task=#{issue.id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "Trackers.Sync: exit verifying close for task=#{issue.id}: #{inspect(reason)}"
+      )
+
+      :ok
+  end
+
+  defp follow_up_close(issue) do
+    case Trackers.transition(issue, :closed) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Trackers.Sync: follow-up close also failed for task=#{issue.id} " <>
+            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  # GitHub issues carry a top-level "state" field.
+  defp upstream_closed?(:github, %{"state" => "closed"}), do: true
+  defp upstream_closed?(:github, _), do: false
+
+  # Jira issues carry fields.status.statusCategory.key; "done" covers all
+  # Done-category statuses (e.g. "Code Merged", "Done", "Closed") without
+  # needing the workspace's status_map config.
+  defp upstream_closed?(:jira, raw) do
+    get_in(raw, ["fields", "status", "statusCategory", "key"]) == "done"
+  end
+
+  # Shortcut stories have a top-level "completed" boolean.
+  defp upstream_closed?(:shortcut, %{"completed" => true}), do: true
+  defp upstream_closed?(:shortcut, _), do: false
+
+  # Unknown tracker type or :none — assume closed to avoid spurious retries.
+  # :none is already gated out by the callers before this is reached.
+  defp upstream_closed?(_, _), do: true
+
   # Bounded retries with backoff for a rate-limited tracker (bd-2wilou): a
   # transient 403/429 used to be treated as a genuine failure and escalated
   # immediately, stranding the transition (a `closed` transition dropped this

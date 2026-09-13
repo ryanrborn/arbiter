@@ -206,6 +206,34 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert refreshed.status == :closed
     end
 
+    # bd-9so315: the finalizer is the *other* merge-close path (a PR merged
+    # outside the queue). If it honoured `verify_after_deploy` on one path and
+    # not the other, a flagged task would still silently close.
+    test "merged PR on a verify_after_deploy task → parked, not closed", %{ws: ws} do
+      task = create_task(ws, "250", verify_after_deploy: true)
+      stub(pr_get_stub(250, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status == :awaiting_verification
+      assert refreshed.closed_at == nil
+    end
+
+    test "a parked task is not swept again on the next tick", %{ws: ws} do
+      task = create_task(ws, "251", verify_after_deploy: true)
+      {:ok, _} = Ash.update(task, %{}, action: :await_verification)
+
+      stub(fn _conn -> raise "adapter should not be called for parked tasks" end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status == :awaiting_verification
+    end
+
     test "already-closed task is not re-processed", %{ws: ws} do
       task = create_task(ws, "201")
       {:ok, _} = Ash.update(task, %{}, action: :close)

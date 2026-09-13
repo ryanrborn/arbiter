@@ -187,7 +187,12 @@ defmodule Arbiter.Workflows.PRPatrol do
       when is_binary(workspace_id) and is_binary(repo) do
     Issue
     |> Ash.Query.filter(
-      status != :closed and not is_nil(pr_ref) and workspace_id == ^workspace_id
+      # bd-9so315: `:awaiting_verification` means the PR already merged — the
+      # task is only still non-closed because a human has to observe the
+      # deploy. Counting it as an open authored PR would keep this repo's
+      # patrol polling a merged PR for the whole verification window.
+      status not in [:closed, :awaiting_verification] and not is_nil(pr_ref) and
+        workspace_id == ^workspace_id
     )
     |> Ash.read!()
     |> Enum.any?(fn %Issue{pr_ref: ref} -> PatrolRepoScope.ref_matches_repo?(ref, repo) end)

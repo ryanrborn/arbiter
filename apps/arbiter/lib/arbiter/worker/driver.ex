@@ -31,7 +31,10 @@ defmodule Arbiter.Worker.Driver do
 
   - On start: schedules the first worker check.
   - On each check: reads worker status:
-    - `:completed` → close the task, optionally cleanup worktree, stop.
+    - `:completed` → finalize the task (a `:merged` completion routes through
+      `Arbiter.Tasks.Verification.finalize_merged/2`, so a `verify_after_deploy`
+      task parks at `:awaiting_verification` rather than closing), optionally
+      cleanup worktree, stop.
     - `:failed` → log, stop (task remains `:in_progress` for inspection).
     - `:idle | :running | :awaiting | :awaiting_review` → schedule next check
       (`:awaiting_review` is the brief window after the worker's `arb done`
@@ -55,6 +58,7 @@ defmodule Arbiter.Worker.Driver do
 
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Verification
   alias Arbiter.Worker
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workflows.Machine
@@ -158,7 +162,11 @@ defmodule Arbiter.Worker.Driver do
         # The Driver must NOT auto-close them — they stay :in_progress so
         # ReviewPatrol can keep engaging on subsequent commits.
         unless live_review_engagement?(worker_state) do
-          close_task(state.task_id, should_close_upstream_for_task(state.task_id, worker_state))
+          finalize_task(
+            state.task_id,
+            should_close_upstream_for_task(state.task_id, worker_state),
+            worker_state
+          )
         end
 
         maybe_cleanup_worktree(state)
@@ -192,7 +200,7 @@ defmodule Arbiter.Worker.Driver do
         # ReviewPatrol can keep engaging on subsequent commits.
         unless live_review_engagement?(worker_state) do
           close_upstream = should_close_upstream_for_task(state.task_id, worker_state)
-          close_task(state.task_id, close_upstream)
+          finalize_task(state.task_id, close_upstream, worker_state)
         end
 
         maybe_cleanup_worktree(state)
@@ -361,6 +369,77 @@ defmodule Arbiter.Worker.Driver do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # bd-9so315: the Driver is the third path that finalizes a merged PR (after
+  # MergeQueue's own merge and MergedPRFinalizer's sweep). The Watchdog calls
+  # `Worker.complete(pid, :merged)` both when it observes an MR merged and when
+  # it performs the auto-merge itself; `complete_now/2` leaves the worker alive
+  # at `:completed` and this loop then closes the task — within ~1s, long
+  # before the MergeQueue's next poll. Closing directly here would silently
+  # skip the `verify_after_deploy` park (and its escalation) for exactly the
+  # tasks the flag exists to protect, so a merge completion goes through the
+  # same `Verification.finalize_merged/2` funnel every other merge path uses.
+  #
+  # A non-merge completion (`:claude_done`, `:workflow_completed`) is not a
+  # deploy and still closes directly — the flag is about observing merged code
+  # on the running server, and parking a task that never merged would strand it.
+  defp finalize_task(task_id, close_upstream, worker_state) do
+    if merge_completion?(worker_state) do
+      finalize_merged_task(task_id, close_upstream, worker_state)
+    else
+      close_task(task_id, close_upstream)
+    end
+  end
+
+  defp merge_completion?(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :result) || Map.get(meta, "result") do
+      :merged -> true
+      "merged" -> true
+      _ -> false
+    end
+  end
+
+  defp merge_completion?(_), do: false
+
+  defp finalize_merged_task(task_id, close_upstream, worker_state) do
+    case Ash.get(Issue, task_id) do
+      # The MergeQueue (or MergedPRFinalizer) may have won the race and already
+      # driven the task to its terminal state. Re-running `finalize_merged/2`
+      # on a parked task is refused by the `:await_verification` guard and on a
+      # closed one by `:close`; both would log a misleading failure, so no-op
+      # explicitly instead.
+      {:ok, %Issue{status: status}} when status in [:closed, :awaiting_verification] ->
+        :ok
+
+      {:ok, task} ->
+        case Verification.finalize_merged(task,
+               close_upstream: close_upstream,
+               mr_ref: Map.get(worker_state, :mr_ref) || task.pr_ref
+             ) do
+          {:ok, :closed, _} ->
+            :ok
+
+          {:ok, :awaiting_verification, _} ->
+            Logger.info(
+              "Worker.Driver: task #{task_id} merged with verify_after_deploy — " <>
+                "parked at :awaiting_verification instead of closing"
+            )
+
+            :ok
+
+          {:error, err} ->
+            Logger.warning(
+              "Worker.Driver: failed to finalize merged task #{task_id}: #{inspect(err)}"
+            )
+
+            :error
+        end
+
+      err ->
+        Logger.warning("Worker.Driver: failed to close task #{task_id}: #{inspect(err)}")
+        :error
+    end
   end
 
   defp close_task(task_id, close_upstream \\ false) do

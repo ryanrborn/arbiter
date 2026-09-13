@@ -341,7 +341,14 @@ defmodule Arbiter.Tasks.Claim do
 
       closes =
         task_by_ref
-        |> Enum.reject(fn {ref, _task} -> Map.has_key?(assigned_by_ref, ref) end)
+        # bd-9so315: a task parked at :awaiting_verification is one whose
+        # upstream issue was deliberately closed at merge — it is absent from
+        # `list_open` for exactly that reason, and closing it here would skip
+        # the restart-and-observe the flag exists to force. It stays in
+        # `task_by_ref` above so the create arm still dedups against it.
+        |> Enum.reject(fn {ref, task} ->
+          Map.has_key?(assigned_by_ref, ref) or task.status == :awaiting_verification
+        end)
         |> Enum.flat_map(fn {ref, task} ->
           case close_reason(adapter, ref, current_user_id) do
             nil -> []

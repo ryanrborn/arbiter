@@ -1917,6 +1917,10 @@ defmodule Arbiter.MCP.Tools do
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),
       auto_close: i.auto_close,
+      verify_after_deploy: i.verify_after_deploy,
+      awaiting_verification_at: iso(i.awaiting_verification_at),
+      verification_outcome: to_str(i.verification_outcome),
+      verification_evidence: i.verification_evidence,
       assignee: i.assignee,
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
@@ -2056,6 +2060,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_update(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_reopen(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_verify(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_promote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task

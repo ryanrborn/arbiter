@@ -807,6 +807,55 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
+  # bd-9so315 — merged-but-unverified tasks are the coordinator's: nothing else
+  # will clear them, so they belong in Waiting alongside the other cards that
+  # need a human.
+  describe "awaiting-verification cards" do
+    test "a parked task appears in Waiting with its age and needs_you" do
+      board =
+        derive(
+          issues: [
+            issue("bd-v", %{
+              status: :awaiting_verification,
+              awaiting_verification_at: @yesterday
+            })
+          ]
+        )
+
+      assert [card] = board.waiting
+      assert card.id == "bd-v"
+      assert card.status == :awaiting_verification
+      assert card.needs_you == true
+      assert card.since == @yesterday
+      assert card.reason =~ "verif"
+    end
+
+    test "falls back to updated_at when the stamp predates the field" do
+      board =
+        derive(
+          issues: [
+            issue("bd-v", %{status: :awaiting_verification, updated_at: @yesterday})
+          ]
+        )
+
+      assert [%{since: @yesterday}] = board.waiting
+    end
+
+    test "an open or closed task produces no awaiting card" do
+      board =
+        derive(issues: [issue("bd-a"), issue("bd-b", %{status: :closed, updated_at: @now})])
+
+      assert board.waiting == []
+    end
+
+    test "a parked task is not also a Ready or Backlog card" do
+      board = derive(issues: [issue("bd-v", %{status: :awaiting_verification})])
+
+      assert ids(board.ready) == []
+      assert ids(board.backlog) == []
+    end
+  end
+
   describe "closed today column" do
     test "keeps only issues closed on the board's current day, newest first" do
       board =

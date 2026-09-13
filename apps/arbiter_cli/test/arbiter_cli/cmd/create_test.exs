@@ -467,4 +467,30 @@ defmodule ArbiterCli.Cmd.CreateTest do
       assert err =~ "tracker"
     end
   end
+
+  # bd-9so315
+  test "--verify-after-deploy sets the flag on create" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:create_body, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"id" => "bd-1", "title" => "T", "verify_after_deploy" => true})
+       end}
+    ])
+
+    {out, err, code} =
+      capture(fn -> Create.run(["T", "--verify-after-deploy", "--json"]) end)
+
+    assert code == 0, err
+    assert_receive {:create_body, %{"verify_after_deploy" => true}}
+    assert {:ok, %{"verify_after_deploy" => true}} = Jason.decode(out)
+  end
 end
