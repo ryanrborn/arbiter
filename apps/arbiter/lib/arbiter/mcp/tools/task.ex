@@ -368,6 +368,7 @@ defmodule Arbiter.MCP.Tools.Task do
       title: i.title,
       description: i.description,
       acceptance: i.acceptance,
+      acceptance_waived: i.acceptance_waived,
       status: Tools.to_str(i.status),
       priority: i.priority,
       difficulty: i.difficulty,

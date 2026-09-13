@@ -599,6 +599,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         |> render_submit()
 
       refute html =~ "Promote without acceptance criteria"
+      assert html =~ "ACCEPTANCE WAIVED"
+      assert html =~ "spike, no user-facing change"
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.refined

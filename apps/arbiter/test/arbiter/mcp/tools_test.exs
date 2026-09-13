@@ -1008,6 +1008,9 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert data.refined == true
       assert data.acceptance_waived == "trivial config bump"
+
+      assert {:ok, shown} = Tools.task_show(ctx.coordinator, %{"id" => task.id})
+      assert shown.acceptance_waived == "trivial config bump"
     end
   end
 

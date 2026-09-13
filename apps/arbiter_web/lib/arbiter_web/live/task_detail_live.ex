@@ -1049,6 +1049,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </ul>
               </.panel>
 
+              <.panel :if={present?(@task.acceptance_waived)} title="ACCEPTANCE WAIVED">
+                <p class="text-[12.5px] leading-snug text-[var(--text-secondary)]">
+                  {@task.acceptance_waived}
+                </p>
+              </.panel>
+
               <%!-- bd-5lc99r: for a `task`-type directive the findings summary
                    in `notes` is the deliverable, so it gets its own panel with
                    a placeholder while still blank. --%>
