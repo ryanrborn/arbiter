@@ -780,12 +780,9 @@ defmodule Arbiter.Worker.Dispatch do
   # out-of-quota Codex or Gemini dispatch is held exactly like an out-of-quota
   # Anthropic one instead of being spawned into a rate-limited CLI.
   #
-  # Fail-open guards: skipped on the drain re-dispatch (`skip_quota_gate: true`),
-  # for a task with no workspace, and — for Claude only — when the Anthropic
-  # proxy is disabled, since that proxy is the sole source of `AnthropicQuota`
-  # rows (e.g. in test). Codex/Google snapshots come from `Quota.CloudProbe`, not
-  # the proxy, so their gating does not depend on that flag. A nil snapshot is
-  # handled inside each gate impl.
+  # Fail-open guards: skipped on the drain re-dispatch (`skip_quota_gate: true`)
+  # and for a task with no workspace. A nil snapshot (e.g., in test where polling
+  # has not run yet) is handled uniformly inside each gate impl.
   defp maybe_quota_gate(%Issue{workspace_id: ws_id} = task, opts) do
     cond do
       Keyword.get(opts, :skip_quota_gate, false) == true ->
