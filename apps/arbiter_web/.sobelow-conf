@@ -6,6 +6,12 @@
 # pipeline now sends a Content-Security-Policy, and the generator's inline
 # theme <script> moved to assets/js/theme.js so `script-src` could stay
 # `'self'`. See ArbiterWeb.Router for the directive-by-directive rationale.
+#
+# The `ignore` list below is still empty, deliberately: the one XSS.Raw
+# finding in the app (ArbiterWeb.CoreComponents.Markdown, the single audited
+# `raw/1` on sanitized markdown) carries an inline `# sobelow_skip` annotation
+# on that module instead, so a new unsanitized `raw/1` anywhere else still
+# fails the scan.
 [
   verbose: false,
   private: false,

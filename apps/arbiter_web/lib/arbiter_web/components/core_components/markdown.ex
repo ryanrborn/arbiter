@@ -92,6 +92,15 @@ defmodule ArbiterWeb.CoreComponents.Markdown do
   on markdown-derived HTML — see the module doc. It is public so it can be
   tested directly, not so it can be called from templates; use `markdown/1`.
   """
+  # Sobelow flags `raw/1` on a variable as XSS.Raw (low confidence), which is
+  # the right default: unescaped HTML built at runtime is how XSS happens.
+  # This is the deliberate, audited exception — the variable below is MDEx
+  # output that has just been through comrak with raw HTML disabled AND the
+  # ammonia sanitizer with a narrowed URL-scheme allowlist (see the moduledoc
+  # and the XSS tests in markdown_test.exs). Annotated on the one function
+  # that earns it rather than added to .sobelow-conf's `ignore` list, so a new
+  # `raw/1` anywhere else in the app still fails the scan.
+  # sobelow_skip ["XSS.Raw"]
   def render_markdown(text) when is_binary(text) do
     case MDEx.to_html(text, extension: @extension, render: @render, sanitize: @sanitize) do
       {:ok, html} ->
