@@ -2678,23 +2678,23 @@ defmodule Arbiter.Worker.Watchdog do
   # stays parked and the coordinator is paged, rather than the worker merging
   # commits nobody reviewed or dying silently.
   defp guarded_merge_decision(state) do
-    case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
-      {:ok, expected_sha} ->
-        {:merge, expected_sha, state}
+    if forge_head_lagging?(state) do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} the PR still reports " <>
+          "head=#{inspect(state.last_head_sha)} but this worker pushed " <>
+          "#{state.local_head_sha}; the forge has not caught up with our own push " <>
+          "(#{state.head_lag_polls + 1}/#{@head_lag_grace_polls} grace polls), waiting"
+      )
 
-      {:error, {:stale_reviewed_sha, reviewed, head}} ->
-        if forge_head_lagging?(state) do
-          Logger.info(
-            "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} the PR still reports " <>
-              "head=#{head} but this worker pushed #{state.local_head_sha}; the forge has not " <>
-              "caught up with our own push " <>
-              "(#{state.head_lag_polls + 1}/#{@head_lag_grace_polls} grace polls), waiting"
-          )
+      {:wait, %{state | head_lag_polls: state.head_lag_polls + 1}}
+    else
+      case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
+        {:ok, expected_sha} ->
+          {:merge, expected_sha, state}
 
-          {:wait, %{state | head_lag_polls: state.head_lag_polls + 1}}
-        else
+        {:error, {:stale_reviewed_sha, reviewed, head}} ->
           reconsider_stale_head(state, reviewed, head)
-        end
+      end
     end
   end
 
@@ -2716,12 +2716,17 @@ defmodule Arbiter.Worker.Watchdog do
   # path — every REQUEST_CHANGES -> fix -> APPROVE cycle ends with a push
   # milliseconds before the Watchdog's first poll.
   #
-  # So the guard refuses to call a head unreviewed until the forge has, at
-  # least once, echoed back the SHA we pushed. That latch lifts permanently on
-  # the first poll that confirms it (`note_local_head_visible/2`), which is why
-  # a commit landing AFTER the approval — a CI `fix_pass`, a human push — still
-  # trips the guard immediately: by then the forge has long since shown us our
-  # own head.
+  # So the Watchdog makes NO merge decision at all until the forge has, at
+  # least once, echoed back the SHA we pushed — it neither merges nor refuses.
+  # Refusing was the reported bug; merging is the worse half of the same
+  # confusion, because with no recorded stamp to fall back on the guard latches
+  # its baseline to the first approved poll's head and would happily merge the
+  # PRE-fix-round commit, dropping the fix the reviewer asked for.
+  #
+  # The latch lifts permanently on the first poll that confirms our head
+  # (`note_local_head_visible/2`), which is why a commit landing AFTER the
+  # approval — a CI `fix_pass`, a human push — still trips the guard
+  # immediately: by then the forge has long since shown us our own head.
   defp forge_head_lagging?(%{local_head_sha: local} = state) when is_binary(local),
     do: not state.forge_saw_local_head? and state.head_lag_polls < @head_lag_grace_polls
 
@@ -3018,21 +3023,32 @@ defmodule Arbiter.Worker.Watchdog do
     head = Map.get(result, :head_sha)
     approved? = effective_outcome(state, result) == :approved
 
-    state =
-      if latch_suspended?(state, head) do
-        # The fleet's own push has not landed yet. Keep the latch off rather
-        # than re-pinning it to the pre-push head, which is what made the
-        # one-shot clear ineffective.
-        %{state | reviewed_sha: nil}
-      else
-        %{
-          state
-          | latch_suspended_at_head: nil,
-            reviewed_sha: Mergers.ReviewedSha.latch(state.reviewed_sha, approved?, head)
-        }
-      end
-
     state = note_local_head_visible(state, head)
+
+    state =
+      cond do
+        latch_suspended?(state, head) ->
+          # The fleet's own push has not landed yet. Keep the latch off rather
+          # than re-pinning it to the pre-push head, which is what made the
+          # one-shot clear ineffective.
+          %{state | reviewed_sha: nil}
+
+        # Same reasoning, for the push this worker made just before the
+        # Watchdog started (bd-ch9pmk / #1614): a head the forge reports before
+        # it has caught up with that push is the PRE-push commit, and latching
+        # the baseline onto it would pin the guard to a commit the fix round
+        # superseded — the lane would then merge the unfixed code, or refuse
+        # the fixed code, depending on which stamp won.
+        forge_head_lagging?(state) ->
+          %{state | reviewed_sha: nil}
+
+        true ->
+          %{
+            state
+            | latch_suspended_at_head: nil,
+              reviewed_sha: Mergers.ReviewedSha.latch(state.reviewed_sha, approved?, head)
+          }
+      end
 
     # An approval lapse ends the episode: drop the memoised recorded SHA so a
     # genuine re-review is picked up on the next approved poll.
