@@ -85,6 +85,21 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            the correct base branch, using the body you author in the next step.
            Opening your own PR creates a duplicate on the wrong base.
 
+           POST-MERGE VERIFICATION — if your diff's only execution context is the
+           long-lived server, flag it. That means anything a green test suite cannot
+           prove is live: env/config plumbing that has to reach a spawned worker,
+           a `doctor`/health probe, a capture or ingest path, code whose first real
+           run is inside the running Phoenix process. Set the flag by calling the
+           `task_update_progress` MCP tool with `verify_after_deploy: true`, and say
+           in your `notes` what to look at after a restart and what a working result
+           looks like.
+
+           The task then parks at `awaiting verification` on merge instead of closing,
+           and the coordinator restarts and observes it once before it closes. If your
+           change genuinely runs under test — a pure function, a LiveView with
+           assertions, a migration — leave it alone; the flag costs a human round trip
+           and is not free.
+
            Author the PR description and persist it on the task — the MergeQueue opens
            the PR with this exact body, so write it as the PR writeup, not a restatement
            of the ticket. Do this AFTER the work is implemented and tested, so it
@@ -496,4 +511,22 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     assert PromptBuilder.conflict_resolve_briefing(t, "feature/x", "main") ==
              Arbiter.Worker.Dispatch.conflict_resolve_briefing(t, "feature/x", "main")
   end
+  # bd-9so315: the worker is the only party that can see its own diff, so the
+  # work prompt has to tell it when to raise the flag.
+  describe "post-merge verification doctrine" do
+    test "the work prompt tells the worker when to set verify_after_deploy" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "verify_after_deploy"
+      assert prompt =~ "task_update_progress"
+      assert prompt =~ "long-lived server"
+    end
+
+    test "an already-flagged task is told it will park for verification" do
+      prompt = PromptBuilder.prompt_for_task(task(%{verify_after_deploy: true}), [])
+
+      assert prompt =~ "awaiting verification"
+    end
+  end
+
 end
