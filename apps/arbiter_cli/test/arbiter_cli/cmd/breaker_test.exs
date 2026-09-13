@@ -113,6 +113,26 @@ defmodule ArbiterCli.Cmd.BreakerTest do
     end
   end
 
+  describe "routing through the real `arb` entry point" do
+    test "`arb breaker list` reaches this command rather than unknown-command" do
+      stub_get("/api/breakers", %{
+        "breakers" => [],
+        "open_count" => 0,
+        "call_sites" => @call_sites
+      })
+
+      {out, err, code} = capture(fn -> ArbiterCli.Main.main(["breaker", "list"]) end)
+
+      assert code == 0
+      refute err =~ "unknown command"
+      assert out =~ "REGISTERED CALL SITES"
+    end
+
+    test "`arb breaker` is a known verb, so it is never suggested away" do
+      assert {:ok, "breaker"} = ArbiterCli.AliasResolver.resolve("breaker")
+    end
+  end
+
   test "an unknown subcommand exits non-zero with a pointer to --help" do
     {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Breaker.run(["frobnicate"]) end)
 

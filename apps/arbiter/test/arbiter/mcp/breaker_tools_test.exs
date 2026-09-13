@@ -119,6 +119,29 @@ defmodule Arbiter.MCP.BreakerToolsTest do
     end
   end
 
+  describe "end-to-end through the catalog dispatch the MCP transport uses" do
+    test "breaker_list then breaker_reset, by name, as a coordinator scope", ctx do
+      assert {:suppress, info} = trip(ctx.ws)
+
+      assert {:ok, listed} = Catalog.call(ctx.coordinator, "breaker_list", %{})
+      assert listed.open_count == 1
+
+      assert {:ok, %{reset: 1}} =
+               Catalog.call(ctx.coordinator, "breaker_reset", %{"signature" => info.signature})
+
+      assert {:ok, %{open_count: 0}} = Catalog.call(ctx.coordinator, "breaker_list", %{})
+    end
+
+    test "a worker scope may not call either tool", ctx do
+      worker = %Scope{tier: :worker, workspace_id: ctx.ws.id, task_id: "bd-1"}
+
+      assert {:rpc_error, _, message} = Catalog.call(worker, "breaker_list", %{})
+      assert message =~ "not permitted for a worker scope"
+
+      assert {:rpc_error, _, _} = Catalog.call(worker, "breaker_reset", %{"all" => true})
+    end
+  end
+
   describe "catalog registration" do
     test "both tools are coordinator-only and invisible to a worker" do
       worker = %Scope{tier: :worker, workspace_id: "w", task_id: "bd-1"}
