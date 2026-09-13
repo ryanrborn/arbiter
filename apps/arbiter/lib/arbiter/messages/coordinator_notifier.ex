@@ -700,6 +700,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   `merged_at` is when the merge landed; the body states whether the **running**
   server booted before that (restart required first) or after (the code is
   already live and can be observed as-is).
+
+  Sent through `escalate_event/3` like every other escalation here, so it
+  passes through the shared `:coordinator_escalation` circuit breaker
+  (bd-5jr49o) exactly once rather than either bypassing it or carrying a second
+  bound of its own. The breaker signature includes the task id, so two tasks
+  parked in the same window never share a budget — see
+  `Arbiter.CircuitBreakerAdoptionTest`.
   """
   @spec awaiting_verification(map(), String.t() | nil, DateTime.t()) :: :ok
   def awaiting_verification(snapshot, mr_ref, merged_at) do
