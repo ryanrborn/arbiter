@@ -82,6 +82,9 @@ defmodule ArbiterCli.Main do
 
       arb quota           [--workspace <id|name>] [--json]
 
+      arb breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
+      arb breaker reset   <signature> | --all [--kind <k>] [--json]
+
       arb install cli     [--json]
       arb install service [--system] [--uninstall] [--json]
 
@@ -239,6 +242,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("queue", args), do: ArbiterCli.Cmd.Queue.run(args)
   defp dispatch_known("scheduler", args), do: ArbiterCli.Cmd.Scheduler.run(args)
   defp dispatch_known("quota", args), do: ArbiterCli.Cmd.Quota.run(args)
+  defp dispatch_known("breaker", args), do: ArbiterCli.Cmd.Breaker.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
   defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)

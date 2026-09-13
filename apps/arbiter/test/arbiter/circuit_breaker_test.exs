@@ -1,0 +1,334 @@
+defmodule Arbiter.CircuitBreakerTest do
+  @moduledoc """
+  Core unit tests for the shared circuit breaker (bd-5jr49o / #1632):
+  trip, suppression, window expiry, reset, and signature normalisation.
+
+  Every test drives the clock explicitly through `now:` rather than sleeping,
+  so window expiry is deterministic.
+  """
+  use ExUnit.Case, async: false
+
+  alias Arbiter.CircuitBreaker
+  alias Arbiter.CircuitBreaker.Signature
+
+  @ws "ws-cb-test"
+
+  setup do
+    CircuitBreaker.reset_all()
+    on_exit(&CircuitBreaker.reset_all/0)
+    :ok
+  end
+
+  defp opts(extra \\ []) do
+    Keyword.merge(
+      [workspace_id: @ws, limit: 3, window_ms: 60_000, escalate: false],
+      extra
+    )
+  end
+
+  describe "check/3 — trip and suppression" do
+    test "allows the first K identical triggers, then suppresses" do
+      for _ <- 1..3 do
+        assert :allow = CircuitBreaker.check(:test_kind, "same subject", opts())
+      end
+
+      assert {:suppress, info} = CircuitBreaker.check(:test_kind, "same subject", opts())
+      assert info.count == 4
+      assert info.limit == 3
+      assert info.window_ms == 60_000
+      assert info.signature =~ "test_kind"
+
+      # and stays suppressed
+      assert {:suppress, _} = CircuitBreaker.check(:test_kind, "same subject", opts())
+    end
+
+    test "reports the trip exactly once, then reports subsequent calls as already-open" do
+      for _ <- 1..3, do: CircuitBreaker.check(:test_kind, "s", opts())
+
+      assert {:suppress, %{tripped_now?: true}} = CircuitBreaker.check(:test_kind, "s", opts())
+      assert {:suppress, %{tripped_now?: false}} = CircuitBreaker.check(:test_kind, "s", opts())
+      assert {:suppress, %{tripped_now?: false}} = CircuitBreaker.check(:test_kind, "s", opts())
+    end
+
+    test "distinct subjects get independent budgets" do
+      for _ <- 1..3, do: assert(:allow = CircuitBreaker.check(:test_kind, "a", opts()))
+      assert {:suppress, _} = CircuitBreaker.check(:test_kind, "a", opts())
+
+      assert :allow = CircuitBreaker.check(:test_kind, "b", opts())
+    end
+
+    test "distinct kinds with the same subject get independent budgets" do
+      for _ <- 1..3, do: assert(:allow = CircuitBreaker.check(:kind_a, "s", opts()))
+      assert {:suppress, _} = CircuitBreaker.check(:kind_a, "s", opts())
+
+      assert :allow = CircuitBreaker.check(:kind_b, "s", opts())
+    end
+
+    test "distinct workspaces with the same kind+subject get independent budgets" do
+      for _ <- 1..3, do: assert(:allow = CircuitBreaker.check(:test_kind, "s", opts()))
+      assert {:suppress, _} = CircuitBreaker.check(:test_kind, "s", opts())
+
+      assert :allow = CircuitBreaker.check(:test_kind, "s", opts(workspace_id: "other-ws"))
+    end
+  end
+
+  describe "window expiry" do
+    test "closes once the window passes with no further triggers" do
+      t0 = 1_000_000
+
+      for i <- 0..2 do
+        assert :allow = CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
+      end
+
+      assert {:suppress, _} = CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 3))
+
+      # Still inside the window: suppressed.
+      assert {:suppress, _} = CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 59_000))
+
+      # Past the window measured from the most recent trigger: closed again.
+      assert :allow = CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 59_000 + 60_001))
+    end
+
+    test "a sustained flood keeps the breaker open (suppressed attempts refresh the window)" do
+      t0 = 1_000_000
+      for i <- 0..2, do: CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
+
+      # One trigger every 30s for an hour: never allowed again.
+      for i <- 1..120 do
+        assert {:suppress, _} =
+                 CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i * 30_000))
+      end
+    end
+
+    test "a closed-then-reopened breaker escalates again" do
+      t0 = 1_000_000
+      for i <- 0..2, do: CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
+
+      assert {:suppress, %{tripped_now?: true}} =
+               CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 3))
+
+      later = t0 + 500_000
+
+      for i <- 0..2,
+          do: assert(:allow = CircuitBreaker.check(:test_kind, "s", opts(now: later + i)))
+
+      assert {:suppress, %{tripped_now?: true}} =
+               CircuitBreaker.check(:test_kind, "s", opts(now: later + 3))
+    end
+  end
+
+  describe "reset" do
+    test "reset/1 by signature reopens the budget" do
+      for _ <- 1..3, do: CircuitBreaker.check(:test_kind, "s", opts())
+      assert {:suppress, info} = CircuitBreaker.check(:test_kind, "s", opts())
+
+      assert :ok = CircuitBreaker.reset(info.signature)
+      assert :allow = CircuitBreaker.check(:test_kind, "s", opts())
+    end
+
+    test "reset/1 on an unknown signature is an error, not a crash" do
+      assert {:error, :not_found} = CircuitBreaker.reset("no-such-signature")
+    end
+
+    test "reset_all/1 scoped to a workspace leaves other workspaces alone" do
+      for _ <- 1..4, do: CircuitBreaker.check(:test_kind, "s", opts())
+      for _ <- 1..4, do: CircuitBreaker.check(:test_kind, "s", opts(workspace_id: "keep-ws"))
+
+      assert {:ok, 1} = CircuitBreaker.reset_all(workspace_id: @ws)
+
+      assert :allow = CircuitBreaker.check(:test_kind, "s", opts())
+      assert {:suppress, _} = CircuitBreaker.check(:test_kind, "s", opts(workspace_id: "keep-ws"))
+    end
+  end
+
+  describe "list/1" do
+    test "returns live breaker state with counts, window and open flag" do
+      for _ <- 1..4, do: CircuitBreaker.check(:test_kind, "subject one", opts())
+
+      assert [entry] = CircuitBreaker.list(workspace_id: @ws)
+      assert entry.kind == :test_kind
+      assert entry.workspace_id == @ws
+      assert entry.count == 4
+      assert entry.limit == 3
+      assert entry.window_ms == 60_000
+      assert entry.open? == true
+      assert entry.suppressed == 1
+      assert entry.subject == "subject one"
+    end
+
+    test "reports a below-limit breaker as closed" do
+      CircuitBreaker.check(:test_kind, "s", opts())
+      assert [%{open?: false, count: 1}] = CircuitBreaker.list(workspace_id: @ws)
+    end
+  end
+
+  # `:coordinator_escalation` keys on task + subject, and a closed task's
+  # signature is never checked again — so without a sweep the entry map grows
+  # for the whole uptime of the coordinator and `arb breaker list` reports
+  # every signature ever seen (round 3, finding 4).
+  describe "stale-entry sweep" do
+    test "list/1 drops entries quiet for longer than their own window" do
+      t0 = 1_000_000
+
+      CircuitBreaker.check(:test_kind, "one-shot", opts(now: t0))
+      CircuitBreaker.check(:test_kind, "still live", opts(now: t0 + 59_000))
+
+      # Both present while both are inside their window.
+      assert CircuitBreaker.list(workspace_id: @ws, now: t0 + 59_000) |> length() == 2
+
+      # 60s later the first is stale, the second is not.
+      assert [entry] = CircuitBreaker.list(workspace_id: @ws, now: t0 + 60_001)
+      assert entry.subject == "still live"
+
+      # The sweep is a real state change, not a display filter: a later listing
+      # at a clock that would have shown it no longer can.
+      assert [%{subject: "still live"}] = CircuitBreaker.list(workspace_id: @ws, now: t0 + 59_000)
+    end
+
+    test "a swept entry is one an unswept check/3 would have discarded anyway" do
+      t0 = 1_000_000
+      for i <- 0..3, do: CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
+      assert [%{open?: true}] = CircuitBreaker.list(workspace_id: @ws, now: t0 + 10)
+
+      assert CircuitBreaker.list(workspace_id: @ws, now: t0 + 60_004) == []
+
+      # Same verdict either way: a fresh budget, and a fresh trip escalation.
+      assert :allow = CircuitBreaker.check(:test_kind, "s", opts(now: t0 + 60_004))
+    end
+
+    test "an open breaker held open by a sustained flood is never swept" do
+      t0 = 1_000_000
+      for i <- 0..3, do: CircuitBreaker.check(:test_kind, "s", opts(now: t0 + i))
+
+      # A trigger every 30s: each refreshes last_at, so the entry stays live.
+      for i <- 1..120 do
+        now = t0 + i * 30_000
+        assert {:suppress, _} = CircuitBreaker.check(:test_kind, "s", opts(now: now))
+        assert [%{open?: true}] = CircuitBreaker.list(workspace_id: @ws, now: now)
+      end
+    end
+
+    test "the periodic sweep message is handled and reschedules itself" do
+      t0 = System.system_time(:millisecond)
+      CircuitBreaker.check(:test_kind, "swept", opts(now: t0 - 120_000))
+      CircuitBreaker.check(:test_kind, "kept", opts(now: t0))
+
+      send(CircuitBreaker, :sweep)
+      # Force a round trip so the cast-like send is processed before we look.
+      _ = :sys.get_state(CircuitBreaker)
+
+      assert [%{subject: "kept"}] = CircuitBreaker.list(workspace_id: @ws, now: t0)
+      assert Process.alive?(Process.whereis(CircuitBreaker))
+    end
+
+    test "an unrecognised message does not kill the breaker" do
+      send(CircuitBreaker, :who_is_this)
+      assert %{entries: _} = :sys.get_state(CircuitBreaker)
+    end
+  end
+
+  describe "call_sites/0" do
+    test "enumerates every adopted call site with its kind, module and defaults" do
+      sites = CircuitBreaker.call_sites()
+      kinds = Enum.map(sites, & &1.kind)
+
+      for kind <- [
+            :pr_patrol_follow_up,
+            :watchdog_merge_escalation,
+            :preflight_auth_failed,
+            :dispatch_queue_redispatch,
+            :coordinator_escalation
+          ] do
+        assert kind in kinds, "expected #{kind} to be a registered breaker call site"
+      end
+
+      for site <- sites do
+        assert is_atom(site.kind)
+        assert is_binary(site.description)
+        assert is_atom(site.module)
+        assert is_integer(site.limit) and site.limit > 0
+        assert is_integer(site.window_ms) and site.window_ms > 0
+      end
+    end
+
+    test "every registered kind resolves its configured limit and window" do
+      for %{kind: kind, limit: limit, window_ms: window_ms} <- CircuitBreaker.call_sites() do
+        assert CircuitBreaker.limit_for(kind) == limit
+        assert CircuitBreaker.window_for(kind) == window_ms
+      end
+    end
+  end
+
+  describe "guard/4" do
+    test "runs the function while closed and skips it once open" do
+      me = self()
+      fun = fn -> send(me, :ran) end
+
+      for _ <- 1..3, do: assert({:ok, _} = CircuitBreaker.guard(:test_kind, "s", opts(), fun))
+      assert_received :ran
+      assert_received :ran
+      assert_received :ran
+
+      assert {:suppressed, _info} = CircuitBreaker.guard(:test_kind, "s", opts(), fun)
+      refute_received :ran
+    end
+
+    test "a raising function does not corrupt the breaker" do
+      assert_raise RuntimeError, fn ->
+        CircuitBreaker.guard(:test_kind, "s", opts(), fn -> raise "boom" end)
+      end
+
+      assert [%{count: 1}] = CircuitBreaker.list(workspace_id: @ws)
+    end
+  end
+
+  # The trip page is the one thing the coordinator sees, and the reset command
+  # in it is meant to be copied straight into a shell. `:coordinator_escalation`
+  # keys on free-text escalation subject lines, so an apostrophe can and does
+  # reach the signature (round 2, observation 2).
+  describe "the escalation's reset command" do
+    # Trip a breaker and hand back the body of the single page it sent.
+    defp trip_page(subject) do
+      me = self()
+      escalate_fun = fn mail -> send(me, {:page, mail}) end
+      o = opts(limit: 2, escalate: true, escalate_fun: escalate_fun)
+
+      for _ <- 1..3, do: CircuitBreaker.check(:coordinator_escalation, subject, o)
+
+      assert_received {:page, %{body: body}}
+      body
+    end
+
+    # Parse the printed line with a real `sh` and read back the argument `arb`
+    # would receive — the only assertion that proves the line is runnable.
+    defp reset_arg(body) do
+      line =
+        body
+        |> String.split("\n")
+        |> Enum.map(&String.trim/1)
+        |> Enum.find(&String.starts_with?(&1, "arb breaker reset "))
+
+      assert line, "the escalation body must tell the operator how to reset"
+
+      {out, 0} = System.cmd("sh", ["-c", ~s|set -- #{line}; printf '%s' "$4"|])
+      out
+    end
+
+    test "round-trips a signature containing an apostrophe" do
+      subject = ["bd-cb001", "auto-merge didn't land"]
+      body = trip_page(subject)
+
+      signature = Signature.signature(@ws, :coordinator_escalation, subject)
+      assert String.contains?(signature, "'"), "fixture must exercise the apostrophe"
+
+      assert reset_arg(body) == signature
+    end
+
+    test "round-trips an ordinary structured signature" do
+      subject = ["owner/repo", 4242]
+      body = trip_page(subject)
+
+      assert reset_arg(body) == Signature.signature(@ws, :coordinator_escalation, subject)
+    end
+  end
+end

@@ -20,7 +20,8 @@ defmodule Arbiter.MCP.CatalogTest do
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox
                        workspace_config_set workspace_config_unset
                        external_review_list external_review_show review_greenlight
-                       loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject)
+                       loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject
+                       breaker_list breaker_reset)
 
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
@@ -31,7 +32,7 @@ defmodule Arbiter.MCP.CatalogTest do
                                 external_review_list skill_create skill_update skill_list skill_get
                                 transcript_capture_stats
                                 loop_pending_list loop_pending_diff loop_pending_apply
-                                loop_pending_reject)
+                                loop_pending_reject breaker_list breaker_reset)
 
   describe "visible/1" do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do

@@ -1673,6 +1673,99 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert length(escalations.()) == final_escalation_count
     end
 
+    # bd-5jr49o: the same replay shape, but bounded by the SHARED circuit breaker
+    # instead of PRPatrol's own per-PR dispatch-failure counter. The production
+    # default for :pr_patrol_follow_up equals @max_dispatch_attempts so the two
+    # bounds agree; this test tightens the breaker so it is unambiguously the
+    # thing that stopped the re-filing, which is what proves the adoption.
+    test "the shared circuit breaker bounds re-filing independently of the dispatch counter",
+         %{ws: _ws} do
+      prior_cb = Application.get_env(:arbiter, :circuit_breaker, [])
+
+      Application.put_env(
+        :arbiter,
+        :circuit_breaker,
+        Keyword.put(prior_cb, :pr_patrol_follow_up, limit: 2, window_ms: 60_000)
+      )
+
+      on_exit(fn -> Application.put_env(:arbiter, :circuit_breaker, prior_cb) end)
+      Arbiter.CircuitBreaker.reset_all()
+      on_exit(&Arbiter.CircuitBreaker.reset_all/0)
+
+      {:ok, breaker_ws} =
+        Ash.create(Workspace, %{
+          name: "pp-breaker-#{System.unique_integer([:positive])}",
+          prefix: "ppb#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "breaker-repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/breaker-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 4242, "title" => "loops", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/breaker-repo/pulls/4242/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/breaker-repo/pulls/4242/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      name = String.to_atom("PRPatrol_breaker_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           repo: "owner/breaker-repo",
+           workspace_id: breaker_ws.id,
+           interval_ms: 60_000,
+           name: name}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+
+      Enum.each(1..8, fn _ ->
+        force_retry_now(pid, 4242)
+        :ok = PRPatrol.tick(name)
+      end)
+
+      filed =
+        Issue
+        |> Ash.Query.filter(source_pr == "4242")
+        |> Ash.read!()
+
+      assert length(filed) == 2,
+             "expected exactly the breaker's K=2 follow-ups across 8 ticks, got #{length(filed)}"
+
+      trips =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(workspace_id == ^breaker_ws.id and kind == :escalation)
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "circuit breaker tripped"))
+
+      assert length(trips) == 1,
+             "expected exactly one breaker-tripped escalation, got #{length(trips)}"
+
+      assert hd(trips).body =~ "pr_patrol_follow_up"
+    end
+
     # If the give-up escalation itself fails to persist on the bounding
     # attempt, the PR must NOT be marked `given_up` — otherwise `backing_off?/2`
     # blocks it unconditionally and the coordinator is never told anything
