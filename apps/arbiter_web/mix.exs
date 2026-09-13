@@ -91,6 +91,9 @@ defmodule ArbiterWeb.MixProject do
       {:gettext, "~> 1.0"},
       {:arbiter, in_umbrella: true},
       {:jason, "~> 1.2"},
+      # Markdown rendering + HTML sanitization in one pass (comrak + ammonia,
+      # shipped as a precompiled Rust NIF — no local toolchain required).
+      {:mdex, "~> 0.13"},
       {:finch, "~> 0.19"},
       {:bandit, "~> 1.5"},
       # finch pins mint "~> 1.8"; force the patched line to clear known CVEs.

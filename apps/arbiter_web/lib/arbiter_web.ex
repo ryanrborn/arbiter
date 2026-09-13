@@ -95,6 +95,10 @@ defmodule ArbiterWeb do
       import ArbiterWeb.CoreComponents.Brandmark
       # Data-display primitives (tags, chips, meter, list/table)
       import ArbiterWeb.CoreComponents.Data
+      # Sanitized markdown rendering (`<.markdown text={...} />`). The only
+      # place in the app that is allowed to `raw/1` markdown-derived HTML —
+      # render markdown through this component, never inline.
+      import ArbiterWeb.CoreComponents.Markdown
       # Design-handoff core primitives (Button, Icon, KeyHint, Toggle, Panel).
       import ArbiterWeb.CoreComponents.Core
       # Design-handoff navigation primitives (TopNav, FilterTabs,
