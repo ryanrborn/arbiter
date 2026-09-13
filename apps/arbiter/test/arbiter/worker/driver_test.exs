@@ -238,6 +238,19 @@ defmodule Arbiter.Worker.DriverTest do
 
       assert [escalation] = Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id)
       assert escalation.subject =~ "awaiting verification"
+
+      # ...and the parked task leaves the state only through a recorded
+      # restart-and-observe verdict, which persists the evidence.
+      {:ok, verified} =
+        Arbiter.Tasks.Verification.record_outcome(
+          reloaded,
+          "observed",
+          "restarted; the merged path runs on the live server"
+        )
+
+      assert verified.status == :closed
+      assert verified.verification_outcome == :observed
+      assert verified.verification_evidence =~ "restarted"
     end
 
     test "an unflagged task still closes on a :merged completion", %{ws: ws} do
