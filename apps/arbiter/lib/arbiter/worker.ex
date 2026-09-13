@@ -4672,6 +4672,7 @@ defmodule Arbiter.Worker do
           target_branch: Map.get(meta, :target_branch, "main")
         ]
         |> maybe_opt(:command, Map.get(meta, :review_command))
+        |> maybe_opt(:command_provider, Map.get(meta, :review_command_provider))
         |> maybe_opt(:revise_command, Map.get(meta, :revise_command))
         |> maybe_opt(:timeout_ms, review_timeout_override(state))
         |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
