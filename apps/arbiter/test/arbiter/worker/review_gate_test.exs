@@ -102,6 +102,73 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  # ---- recover_verdict_from_scans/1 (bd-869mmg round 3) --------------------
+  #
+  # After a verdict re-prompt, the LATEST pass's own scan (memory + its own
+  # durable transcript) can legitimately find nothing — but a genuinely
+  # parseable verdict may still be sitting in an EARLIER pass's durable
+  # transcript (e.g. bd-atyrrq/run 72947341: the first pass's on-disk log
+  # holds `VERDICT: REQUEST_CHANGES` intact, yet the gate discarded it
+  # wholesale once the re-prompt pass also came back empty). Before
+  # conceding `:no_verdict`, the gate must re-read every prior pass's durable
+  # transcript fresh rather than trusting each pass's own already-recorded
+  # scan.
+  describe "recover_verdict_from_scans/1 (bd-869mmg round 3)" do
+    setup do
+      root =
+        Path.join(System.tmp_dir!(), "review_gate_recovery_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(root)
+      Application.put_env(:arbiter, :output_log_root, root)
+      on_exit(fn -> Application.delete_env(:arbiter, :output_log_root) end)
+      %{root: root}
+    end
+
+    defp write_durable_log(run_id, lines) do
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(run_id)
+      Enum.each(lines, &Arbiter.Worker.OutputLog.append(handle, &1))
+      Arbiter.Worker.OutputLog.close(handle)
+    end
+
+    test "recovers a verdict from an earlier pass's durable transcript when the latest pass has none" do
+      write_durable_log("recover-pass-1", [
+        "VERDICT: REQUEST_CHANGES",
+        "1. missing nil guard"
+      ])
+
+      write_durable_log("recover-pass-2", ["re-reviewing, still no verdict from me"])
+
+      scans = [
+        %{run_id: "recover-pass-2", memory: 1, durable: 1},
+        %{run_id: "recover-pass-1", memory: 2, durable: 2}
+      ]
+
+      assert {:ok, {:request_changes, findings}, "recover-pass-1"} =
+               ReviewGate.recover_verdict_from_scans(scans)
+
+      assert findings =~ "missing nil guard"
+    end
+
+    test "returns :none when no scanned pass's durable transcript has a parseable verdict" do
+      write_durable_log("recover-none-1", ["reviewing the diff"])
+      write_durable_log("recover-none-2", ["still reviewing"])
+
+      scans = [
+        %{run_id: "recover-none-2", memory: 1, durable: 1},
+        %{run_id: "recover-none-1", memory: 1, durable: 1}
+      ]
+
+      assert :none = ReviewGate.recover_verdict_from_scans(scans)
+    end
+
+    test "returns :none for an empty or run-id-less scan list" do
+      assert :none = ReviewGate.recover_verdict_from_scans([])
+
+      assert :none =
+               ReviewGate.recover_verdict_from_scans([%{run_id: nil, memory: 0, durable: nil}])
+    end
+  end
+
   # ---- cap/2 truncation (escalation payload safety) ------------------------
 
   describe "cap/2" do
@@ -1542,7 +1609,12 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # bd-atyrrq / run 72947341 false negative for weeks).
       findings = Worker.state(pid).meta.review_gate_findings
       assert findings =~ "output was received"
-      assert findings =~ "Durable transcript:"
+
+      # bd-869mmg round 3: this fixture ran TWO passes (the original + the
+      # re-prompt), so the escalation must name BOTH durable transcripts, not
+      # just the last one — naming only the re-prompt's (empty) transcript
+      # would point the reader away from the pass that might hold the review.
+      assert findings =~ "Durable transcripts checked:"
 
       # bd-869mmg round 2: the claim must be backed by the actual counts the
       # final scan saw, not an unconditional assertion — this fixture's
@@ -1556,6 +1628,98 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a re-prompt to have been attempted before escalating"
+    end
+
+    # bd-869mmg round 3: reproduces the proven mechanism behind the bd-atyrrq /
+    # run 72947341 incident — the FIRST pass's own scan concedes :no_verdict
+    # (for reasons the surviving artifacts can't fully explain), the re-prompt
+    # pass ALSO concedes :no_verdict, and — before this fix — the gate escalated
+    # without ever re-checking the first pass's durable transcript again. Here
+    # the test mutates the first pass's already-closed durable transcript (via
+    # the public `Arbiter.Worker.OutputLog` API, simulating a verdict that was
+    # on disk the whole time) between the two passes, using the
+    # `review_verdict_recovery.sh` fixture's "go file" gate to guarantee the
+    # mutation lands before the final escalation runs. The fix must recover
+    # that verdict and record a normal REQUEST_CHANGES round instead of
+    # escalating as inconclusive.
+    test "a verdict sitting in an earlier pass's durable transcript is recovered instead of discarded",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      recovery_fixture = Path.expand("../../fixtures/review_verdict_recovery.sh", __DIR__)
+      go_file = Path.join([repo, ".git", "review_gate_recovery_go"])
+      on_exit(fn -> File.rm(go_file) end)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [recovery_fixture],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      reprompt_id = review_id <> "#v2"
+
+      # Wait for the re-prompt pass's Run row to exist — proof the first pass
+      # already concluded :no_verdict on its own and the gate moved on, exactly
+      # like the real incident.
+      wait_until(
+        fn -> Enum.any?(Ash.read!(Arbiter.Workers.Run), &(&1.task_id == reprompt_id)) end,
+        4_000
+      )
+
+      first_pass_run_id =
+        Ash.read!(Arbiter.Workers.Run)
+        |> Enum.find(&(&1.task_id == review_id))
+        |> Map.fetch!(:id)
+
+      # Mutate the first pass's already-closed durable transcript to hold a
+      # real, parseable verdict — standing in for a verdict that was on disk
+      # the whole time but never re-checked.
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(first_pass_run_id)
+      Arbiter.Worker.OutputLog.append(handle, "VERDICT: REQUEST_CHANGES")
+      Arbiter.Worker.OutputLog.append(handle, "1. missing nil guard, recovered from disk")
+      Arbiter.Worker.OutputLog.close(handle)
+
+      # Signal the re-prompt pass (waiting on this file) that it may now
+      # concede its own :no_verdict — the mutation above is guaranteed to be
+      # visible to the final escalation by the time it runs.
+      File.write!(go_file, "go")
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+
+      # Recovered as a normal REQUEST_CHANGES, NOT escalated as inconclusive —
+      # the whole point of the fix.
+      refute Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+      assert merge_commit_count(repo) == 0
+
+      findings = Worker.state(pid).meta.review_gate_findings
+      assert findings =~ "recovered from disk"
+
+      require Ash.Query
+
+      rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      assert length(rounds) == 1,
+             "the recovered verdict must be recorded as a normal round, not discarded"
     end
 
     # bd-6dxit2: an :no_verdict outcome must say which of the two possible
