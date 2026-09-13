@@ -673,7 +673,27 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       on_exit(&Arbiter.CircuitBreaker.reset_all/0)
 
       ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
-      pid = start_queue(ws, dispatcher: FailingDispatcher, auto_subscribe: false)
+
+      # NOT `start_queue/2`: its `GenServer.stop/2` teardown is a supervised
+      # `:permanent` child exiting, so `DispatchQueueSupervisor` immediately
+      # restarts a fresh queue — with the REAL dispatcher and auto-subscribe —
+      # against a task this test deliberately leaves held and a sandbox owner
+      # that is already gone. `terminate_child/2` removes the child outright,
+      # which is the same reasoning `Arbiter.DataCase`'s own leaked-child
+      # sweeper documents.
+      {:ok, pid} =
+        DispatchQueueSupervisor.start_dispatch_queue(ws.id,
+          dispatcher: FailingDispatcher,
+          auto_subscribe: false
+        )
+
+      on_exit(fn ->
+        try do
+          DynamicSupervisor.terminate_child(DispatchQueueSupervisor, pid)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
 
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
@@ -681,19 +701,24 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
 
-      # Drain repeatedly. Each drain that finds the item re-attempts dispatch;
-      # the breaker allows K re-queues, then the item is dropped for good.
-      Enum.each(1..6, fn _ ->
+      # K drains, each synchronised on the dispatcher's own signal and on the
+      # item reappearing in the queue — no sleeping, and no drain left in
+      # flight when the next one starts.
+      for _ <- 1..2 do
         :ok = DispatchQueue.drain(pid)
-        Process.sleep(60)
-      end)
+        assert_receive {:dispatch_attempt, _}, 1_000
+        assert wait_for_held_item(pid).task_id == task.id
+      end
 
-      attempts = drain_attempts(task.id, 0)
+      # The K+1-th failure trips the breaker: the item is dropped rather than
+      # requeued, so the queue drains empty and stays that way.
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatch_attempt, _}, 1_000
+      assert wait_for_empty_queue(pid)
 
-      assert attempts == 3,
-             "expected K=2 re-queues plus the attempt that tripped the breaker, got #{attempts}"
-
-      assert DispatchQueue.state(pid).items == []
+      # Nothing left to re-attempt: further drains never reach the dispatcher.
+      :ok = DispatchQueue.drain(pid)
+      refute_receive {:dispatch_attempt, _}, 200
 
       trips =
         Arbiter.Messages.Message
@@ -706,11 +731,17 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
-  defp drain_attempts(task_id, acc) do
-    receive do
-      {:dispatch_attempt, ^task_id} -> drain_attempts(task_id, acc + 1)
-    after
-      0 -> acc
+  defp wait_for_empty_queue(pid, budget_ms \\ 500) do
+    case DispatchQueue.state(pid) do
+      %{items: []} ->
+        true
+
+      _ when budget_ms > 0 ->
+        Process.sleep(10)
+        wait_for_empty_queue(pid, budget_ms - 10)
+
+      _ ->
+        flunk("the dropped intent was still queued after the breaker tripped")
     end
   end
 
