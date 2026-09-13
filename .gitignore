@@ -67,3 +67,8 @@ MORNING-BRIEF.md
 
 # Scratch test files at root — never commit (prevents test.exs scratch scripts).
 /test.exs
+
+# Candidate account plan emitted by `mix arbiter.accounts.census` (bd-1p8n2d).
+# Workspace names, env var names and credential fingerprints — not to be
+# committed by accident.
+accounts.json
