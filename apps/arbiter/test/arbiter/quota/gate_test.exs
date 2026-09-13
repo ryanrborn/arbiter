@@ -89,6 +89,41 @@ defmodule Arbiter.Quota.GateTest do
     end
   end
 
+  # bd-4fbpto: `oauth_captured_at` advances on every successful poll, even a
+  # thin body that never touches the primary columns `stale?/1` looks at — so
+  # this is the signal that says "polling itself is still working" independent
+  # of whether the primary snapshot got refreshed this cycle.
+  describe "Gate.oauth_poll_fresh?/1" do
+    test "nil is never fresh" do
+      refute Gate.oauth_poll_fresh?(nil)
+    end
+
+    test "no oauth_captured_at at all is not fresh" do
+      refute Gate.oauth_poll_fresh?(quota(%{oauth_captured_at: nil}))
+    end
+
+    test "a recent oauth_captured_at is fresh, even with a stale primary snapshot" do
+      recent = DateTime.utc_now() |> DateTime.add(-30, :second)
+      very_old_primary = DateTime.utc_now() |> DateTime.add(-3_600, :second)
+
+      q =
+        quota(%{
+          oauth_captured_at: recent,
+          captured_at: very_old_primary,
+          capture_source: "headers"
+        })
+
+      assert Gate.oauth_poll_fresh?(q)
+      assert Gate.stale?(q)
+    end
+
+    test "an oauth_captured_at older than the polled threshold is not fresh" do
+      very_old = DateTime.utc_now() |> DateTime.add(-700, :second)
+      assert Gate.oauth_poll_fresh?(quota(%{oauth_captured_at: DateTime.utc_now()}))
+      refute Gate.oauth_poll_fresh?(quota(%{oauth_captured_at: very_old}))
+    end
+  end
+
   describe "Workspace.quota_on_exhaustion/1 precedence" do
     test "per-workspace override beats the global default" do
       # global default is :throttle (config.exs); workspace says continue

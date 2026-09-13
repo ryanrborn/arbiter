@@ -40,7 +40,10 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   ## Cadence
 
-  `Arbiter.Quota.CloudProbe` polls this once per distinct OAuth token every
+  `Arbiter.Quota.CloudProbe` polls this once per cycle for the whole install,
+  authenticating with the credentials-file token (bd-4fbpto; before that,
+  bd-5xuneh had it poll once per distinct workspace OAuth token — see
+  PR #1607 for why that token doesn't work against this endpoint), every
   `interval_ms` (default 5 min, matching the endpoint's own account-wide
   budget), and `refresh_and_serialize/2` tops it up on demand when `arb quota`
   / the `quota_get` MCP tool is invoked. The cadence is deliberately *not*

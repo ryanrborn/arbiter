@@ -415,7 +415,7 @@ workspace-scoped. `splits` = part moves, part stays.
 | 7 | `Gate.stale?/1`, `long_window_stale?/1`, staleness threshold | `apps/arbiter/lib/arbiter/quota/gate.ex:215`, `:259`, `:292` | workspace snapshot | **stays** | logic unchanged; the input row becomes the account's |
 | 8 | `Quota.Gate.Continue` / overage decision | `apps/arbiter/lib/arbiter/quota/gate.ex:310` via `Arbiter.Quota.Gate.Continue` | workspace | **moves** | `extra_usage` is an account-level plan feature in the `/api/oauth/usage` body |
 | 9 | `Quota.Overage.windowed_spend/2` | `apps/arbiter/lib/arbiter/quota/overage.ex:36`, sum at `:42` | `by: :workspace` | **splits** | window from the account snapshot; spend sums `by: :provider_account` |
-| 10 | `CloudProbe.default_refresh/1` + `list_workspaces/0` | `apps/arbiter/lib/arbiter/quota/cloud_probe.ex:179`, `:189` | one request **per workspace** | **moves** | iterate accounts; this is bd-5xuneh's grouping promoted (§9) |
+| 10 | `CloudProbe.default_refresh/1` + `list_workspaces/0` | `apps/arbiter/lib/arbiter/quota/cloud_probe.ex:179`, `:189` | one request **per workspace** | **moves** | iterate accounts; bd-4fbpto deleted bd-5xuneh's grouping (the workspace token it grouped on turned out unable to authenticate this endpoint at all), so P6 now builds account iteration fresh rather than re-keying it (§9) |
 | 11 | `RefreshProbe.due_for_probe?/1`, `default_probe/2` | `apps/arbiter/lib/arbiter/quota/refresh_probe.ex:219`, `:256` | per workspace | **moves — if it still exists** | bd-atyrrq deletes it; do **not** re-key it first (§9) |
 | 12 | `OAuthUsage` 429 cooldown key | `apps/arbiter/lib/arbiter/quota/oauth_usage.ex:207` | `phash2(token)` | **moves** | → account id. Closes bd-3x0na3's gap: the limit is per *account*, so two tokens on one account currently get two cooldowns for one shared budget |
 | 13 | `usage_events` table | `apps/arbiter/lib/arbiter/usage/event.ex:50`, `workspace_id` at `:104` | `workspace_id`, non-null `task_id` | **splits** | keep `workspace_id`; **add** `provider_account_id` + `provider_credential_id` (§8) |
@@ -669,22 +669,33 @@ once.**
 | 6 | **bd-7cvh8z** — remove the proxy | Same argument: removes `worker_base_url/1` and the `Dispatch` proxy-opts clause before the re-key has to reason about them. |
 | 7 | **This RFC's phases P0–P12** | The re-key happens once, against a smaller surface than exists today. |
 
-**bd-5xuneh's fingerprint grouping: promoted, not deleted.**
+**bd-5xuneh's fingerprint grouping: deleted by bd-4fbpto, not promoted.**
 
-Its *shape* is right and its *key* is a guess. Today it groups workspaces by
-`ConfigDir.oauth_token/1`
-(`apps/arbiter/lib/arbiter/agents/claude/config_dir.ex:205`), fetches once per
-group, and writes the result to every workspace in it — i.e. it reconstructs the
-account entity at runtime, by inference, every cycle. Under this RFC the
-grouping function survives verbatim and only its key changes: group by
-`provider_account_id` (a join read), and key the 429 cooldown on the account id
-instead of `phash2(token)`
-(`apps/arbiter/lib/arbiter/quota/oauth_usage.ex:207`). That last substitution also
-closes the gap bd-3x0na3 flagged — two distinct tokens on one account currently
-get two independent cooldowns for one shared per-account limit.
+This section originally argued the grouping's *shape* was right and only its
+*key* was a guess — group by `provider_account_id` instead of
+`ConfigDir.oauth_token/1`, keep the fetch-once-per-group code otherwise
+verbatim. bd-4fbpto found that premise wrong, not just imprecise: the
+`worker_env` token bd-5xuneh grouped on cannot authenticate
+`/api/oauth/usage` at all (it 429s distinctly from the credentials-file
+token — see PR #1607 for the status codes), so grouping workspaces by that
+token was never a valid de-duplication of a *shared* fetch — every group was
+going to fail regardless of key. bd-4fbpto deleted the grouping function
+entirely; `CloudProbe` now fetches once per cycle for the whole install using
+the credentials-file token unconditionally, because today's install has
+exactly one account.
 
-So: **keep the code, replace the inference.** Phase P6 is that substitution, and
-it is small precisely because bd-5xuneh did the hard part first.
+That means **P6 is not a re-key of surviving code — it has to build account
+iteration from scratch.** Once `ProviderAccount` exists, P6 iterates accounts
+(not tokens) and, for each, calls `/api/oauth/usage` with that account's
+credential; the workspace-token grouping bd-5xuneh wrote is gone and
+contributes nothing to that loop. Re-keying `OAuthUsage.fetch/1`'s 429
+cooldown (`apps/arbiter/lib/arbiter/quota/oauth_usage.ex:207`, currently
+keyed on `phash2(token)`) to the account id is unaffected by the deletion and
+still belongs in P6 — it closes the gap bd-3x0na3 flagged, where two distinct
+tokens on one account get two independent cooldowns for one shared
+per-account limit.
+
+So: **P6 is now sized like a normal phase, not a small substitution.**
 
 ---
 
@@ -700,7 +711,7 @@ Each phase is sized to be one child ticket.
 | **P3** | Read-path flip behind `:provider_accounts_enabled` — `ConfigDir.oauth_token/1`, `ConfigDir.env/1`, `WorkerEnv.resolve/1` source from the account | P2 | P2 | D3 |
 | **P4** | Destructive step: remove moved keys from `worker_env`; delete `ConfigDir`'s server-env and install-wide-unambiguous fallbacks | P3 | P2 | D2 |
 | **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
-| **P6** | Re-key the probes: `CloudProbe` iterates accounts; `OAuthUsage` cooldown keyed by account (absorbs bd-5xuneh's grouping) | P5 | P2 | D2 |
+| **P6** | Build account iteration in the probes: `CloudProbe` fetches `/api/oauth/usage` once per account (bd-4fbpto deleted bd-5xuneh's per-token grouping; this is new code, not a re-key of it — §9); `OAuthUsage` cooldown keyed by account | P5 | P2 | D2 |
 | **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` | P5 | **P1** | D3 |
 | **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in | P7 | P2 | D3 |
 | **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill | bd-adyhvn, P2 | P2 | D2 |

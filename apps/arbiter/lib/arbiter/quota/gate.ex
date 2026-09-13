@@ -293,6 +293,29 @@ defmodule Arbiter.Quota.Gate do
   defp captured_older_than?(_, _), do: false
 
   @doc """
+  Whether the `/api/oauth/usage` poll itself has succeeded recently — Anthropic
+  only, keyed on `oauth_captured_at` rather than `capture_source` /
+  `captured_at` (bd-4fbpto).
+
+  `oauth_captured_at` advances on **every** successful poll
+  (`Arbiter.Quota.record_oauth_usage/3`'s `secondary` write), even a thin body
+  with no aggregate 5h figure that never touches the primary columns
+  `stale?/1` looks at. So a row can have `stale?/1 == true` (the primary
+  snapshot hasn't moved) while this returns `true` too (the poll is fine, it
+  just isn't the primary source right now) — that distinction is exactly what
+  `arb quota` needs to tell "no fresh data from any source" apart from
+  "polling is working, just not feeding the gate columns this cycle" (see the
+  PR #1607: silence here read as a total outage for 2.8 hours because
+  nothing separated those two cases).
+  """
+  @spec oauth_poll_fresh?(Arbiter.Quota.AnthropicQuota.t() | nil) :: boolean()
+  def oauth_poll_fresh?(nil), do: false
+  def oauth_poll_fresh?(%{oauth_captured_at: nil}), do: false
+
+  def oauth_poll_fresh?(%{oauth_captured_at: %DateTime{} = at}),
+    do: not captured_older_than?(at, staleness_threshold_seconds(@oauth_poll_source))
+
+  @doc """
   The staleness threshold in seconds. A snapshot older than this is treated as
   stale and fails open (no longer trusted for gate decisions).
 
