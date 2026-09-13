@@ -75,6 +75,8 @@ defmodule Arbiter.MCP.Catalog do
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/1` |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/1` |
   | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.paused?/1` |
+  | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
+  | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
   | `repo_show` | coordinator | single repo from `list_repos()` |
   """
@@ -1952,6 +1954,61 @@ defmodule Arbiter.MCP.Catalog do
           "Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.scheduler_status/2
+    },
+
+    # ---- shared circuit breaker (bd-5jr49o) ---------------------------------
+    %{
+      name: "breaker_list",
+      tiers: @coordinator,
+      description:
+        "List shared circuit-breaker state: which auto-filing / auto-escalating / " <>
+          "auto-redispatching signatures have tripped, their trigger counts, bounds and " <>
+          "windows — plus the static registry of every gated call site, which is present " <>
+          "even on a freshly-restarted server. Optional `workspace`, `kind`, `open_only`. " <>
+          "Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "workspace" => %{"type" => "string", "description" => "Workspace id or name."},
+          "kind" => %{
+            "type" => "string",
+            "description" => "Restrict to one registered breaker kind (see `call_sites`)."
+          },
+          "open_only" => %{
+            "type" => "boolean",
+            "description" => "Only breakers that are currently tripped open."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.breaker_list/2
+    },
+    %{
+      name: "breaker_reset",
+      tiers: @coordinator,
+      description:
+        "Close a tripped circuit breaker so the suppressed action can run again. Pass " <>
+          "`signature` (from `breaker_list` or the trip escalation) for one breaker, or " <>
+          "`all: true` with an optional `workspace` / `kind` scope. Fix the underlying " <>
+          "condition first: resetting a breaker whose cause is still live just restarts " <>
+          "the flood. Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "signature" => %{
+            "type" => "string",
+            "description" => "The exact breaker signature to close."
+          },
+          "all" => %{
+            "type" => "boolean",
+            "description" => "Close every breaker matching `workspace` / `kind`."
+          },
+          "workspace" => %{"type" => "string", "description" => "Workspace id or name."},
+          "kind" => %{"type" => "string", "description" => "Restrict `all` to one kind."}
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.breaker_reset/2
     },
 
     # ---- C5: queue resume ---------------------------------------------------

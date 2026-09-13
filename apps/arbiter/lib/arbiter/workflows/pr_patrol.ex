@@ -96,6 +96,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     recheck_stop_message: "last watched item closed",
     gate: :has_open_authored_pr?
 
+  alias Arbiter.CircuitBreaker
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
@@ -352,10 +353,49 @@ defmodule Arbiter.Workflows.PRPatrol do
            Workspace.pr_patrol_our_login(state.workspace)
          ) do
       {reason, extra_protocol} when is_binary(reason) ->
-        task = create_follow_up(mr, state, reason, extra_protocol)
-        {dispatch_follow_up(task, pr_number, state), true}
+        file_follow_up(mr, pr_number, state, reason, extra_protocol)
 
       _ ->
+        {state, false}
+    end
+  end
+
+  # The filing itself, behind the shared circuit breaker (bd-5jr49o).
+  #
+  # `@max_dispatch_attempts` already bounds the *dispatch-failure* re-file loop
+  # that bd-7rxwzc reported. The breaker is the generic backstop underneath it:
+  # it counts follow-ups actually filed for one PR regardless of why the last
+  # one went away, so a re-file driven by anything other than a dispatch failure
+  # — a task closed out-of-band, a worker reaped as a zombie, a future code path
+  # nobody has written yet — is bounded too. Keyed on repo + PR number (both
+  # stable identifiers, never scrubbed), so two different PRs never share a
+  # budget.
+  defp file_follow_up(mr, pr_number, state, reason, extra_protocol) do
+    result =
+      CircuitBreaker.guard(
+        :pr_patrol_follow_up,
+        [state.repo, pr_number],
+        [
+          workspace_id: state.workspace_id,
+          detail:
+            "PRPatrol kept filing follow-up tasks for #{state.repo}##{pr_number}. " <>
+              "Each one was closed or lost before it could finish, so the patrol " <>
+              "filed another. No more will be filed for this PR until the breaker " <>
+              "closes or you reset it."
+        ],
+        fn -> create_follow_up(mr, state, reason, extra_protocol) end
+      )
+
+    case result do
+      {:ok, task} ->
+        {dispatch_follow_up(task, pr_number, state), true}
+
+      {:suppressed, _info} ->
+        Logger.warning(
+          "PRPatrol: circuit breaker open for #{state.repo}##{pr_number}; not filing " <>
+            "another follow-up"
+        )
+
         {state, false}
     end
   end

@@ -68,6 +68,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   require Logger
 
+  alias Arbiter.CircuitBreaker
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -1032,16 +1033,19 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp escalate(event, %{workspace_id: ws_id} = snapshot, %StopReason{} = reason)
        when is_binary(ws_id) do
     {subject, body} = escalation_payload(event, snapshot, reason)
+    task_id = Map.get(snapshot, :task_id)
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
-      from_ref: Map.get(snapshot, :task_id, "system"),
-      workspace_id: ws_id,
-      task_ref: Map.get(snapshot, :task_id),
-      subject: subject,
-      body: body
-    })
+    send_unless_broken(ws_id, task_id, subject, fn ->
+      Message.send_mail(%{
+        kind: :escalation,
+        to_ref: Message.coordinator_ref(),
+        from_ref: task_id || "system",
+        workspace_id: ws_id,
+        task_ref: task_id,
+        subject: subject,
+        body: body
+      })
+    end)
 
     :ok
   rescue
@@ -1076,15 +1080,17 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         :ok
 
       {subject, body} ->
-        Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Message.coordinator_ref(),
-          from_ref: task_id,
-          workspace_id: ws_id,
-          task_ref: Keyword.get(opts, :task_ref, task_id),
-          subject: subject,
-          body: body
-        })
+        send_unless_broken(ws_id, task_id, subject, fn ->
+          Message.send_mail(%{
+            kind: :escalation,
+            to_ref: Message.coordinator_ref(),
+            from_ref: task_id,
+            workspace_id: ws_id,
+            task_ref: Keyword.get(opts, :task_ref, task_id),
+            subject: subject,
+            body: body
+          })
+        end)
 
         :ok
     end
@@ -1097,6 +1103,35 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   defp escalate_event(_label, _snapshot, _opts, _build_fun), do: :ok
+
+  # The last line of defence (bd-5jr49o). Every escalation this module sends —
+  # including the ones that already carry a purpose-built dedupe, and the ones
+  # that don't — passes through the shared circuit breaker, keyed on
+  # workspace + task + normalised subject line.
+  #
+  # The bound here is deliberately loose. Four other call sites (PRPatrol
+  # filing, the Watchdog's merge escalations, the pre-flight refusal, the
+  # DispatchQueue re-drain) have their own tighter breakers in front of this
+  # one; this exists to catch the auto-escalating path nobody has thought about
+  # yet — the next bd-brwx7w — not to second-guess an ordinary busy hour.
+  #
+  # `Arbiter.CircuitBreaker` writes its own trip page straight to
+  # `Message.send_mail/1` rather than back through this module, so a tripped
+  # `:coordinator_escalation` breaker can still announce itself.
+  defp send_unless_broken(ws_id, task_id, subject, fun) do
+    CircuitBreaker.guard(
+      :coordinator_escalation,
+      [task_id, subject],
+      [
+        workspace_id: ws_id,
+        task_ref: task_id,
+        detail:
+          "This escalation repeated past the last-line-of-defence bound. Whatever " <>
+            "raises it has no breaker of its own — that is worth fixing at the source."
+      ],
+      fun
+    )
+  end
 
   defp escalation_payload(:credential_expired, snapshot, %StopReason{} = reason) do
     adapter = Map.get(snapshot, :adapter)

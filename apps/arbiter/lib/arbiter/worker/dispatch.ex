@@ -58,6 +58,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.CircuitBreaker
   alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
@@ -1464,7 +1465,7 @@ defmodule Arbiter.Worker.Dispatch do
     # guard is skipped when the watchdog isn't running (returns false by default).
     if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
       reason = known_expired_stop_reason()
-      CoordinatorNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
+      escalate_preflight_failure(preflight_snapshot(task, opts), reason)
       {:error, {:auth_check_failed, reason}}
     else
       # bd-bw3466: thread the workspace through as well. `Preflight.check/2`
@@ -1491,7 +1492,7 @@ defmodule Arbiter.Worker.Dispatch do
           :ok
 
         {:error, reason} ->
-          CoordinatorNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
+          escalate_preflight_failure(preflight_snapshot(task, opts), reason)
           {:error, {:auth_check_failed, reason}}
       end
     end
@@ -1530,6 +1531,47 @@ defmodule Arbiter.Worker.Dispatch do
   defp preflight_opts(opts) do
     opts
     |> Keyword.take([:probe_command, :probe_env, :timeout_ms, :api_key, :model, :model_tier])
+  end
+
+  @doc """
+  Page the coordinator about a refused pre-flight auth probe, behind the shared
+  circuit breaker (bd-5jr49o).
+
+  Both `run_preflight/2` refusal paths — the CredentialWatchdog's
+  known-expired short circuit and a live `Preflight.check/2` failure — funnel
+  through here, which is the choke point bd-8lnnnt's own fix picked for the
+  same reason: the breaker must be independent of *which* caller retried.
+  `Arbiter.Workflows.DispatchQueue`'s held-intent drain re-runs the doomed
+  probe on `CloudProbe`'s ~5-minute cadence, so one task stuck behind an
+  exhausted 5h window produced 14 identical pages in 75 minutes.
+
+  The breaker is keyed on task + refusal category, NOT on the reason summary,
+  which carries the elapsed time and attempt number. Returns `:ok` when the
+  page was attempted and `:suppressed` when the breaker is open.
+
+  Public only so the adoption test can drive the exact code the call sites run.
+  """
+  @spec escalate_preflight_failure(map(), StopReason.t()) :: :ok | :suppressed
+  def escalate_preflight_failure(snapshot, %StopReason{} = reason) do
+    result =
+      CircuitBreaker.guard(
+        :preflight_auth_failed,
+        [Map.get(snapshot, :task_id), reason.category],
+        [
+          workspace_id: Map.get(snapshot, :workspace_id),
+          task_ref: Map.get(snapshot, :task_id),
+          detail:
+            "Pre-flight auth probe kept refusing dispatch for this task. Only an " <>
+              "operator or the clock can clear it — re-authenticate the agent CLI, or " <>
+              "wait for the usage window to reset."
+        ],
+        fn -> CoordinatorNotifier.preflight_failed(snapshot, reason) end
+      )
+
+    case result do
+      {:ok, _} -> :ok
+      {:suppressed, _info} -> :suppressed
+    end
   end
 
   defp preflight_snapshot(%Issue{id: id, workspace_id: ws_id}, opts) do

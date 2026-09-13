@@ -16,6 +16,8 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
   alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Workflows.DispatchQueueSupervisor
 
+  require Ash.Query
+
   # Records each drain re-dispatch to the pid stashed in app-env, so the
   # priority-order drain can be asserted without spawning real workers.
   defmodule RecordingDispatcher do
@@ -644,6 +646,184 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       held_item = wait_for_held_item(pid)
       assert held_item.task_id == task.id
+    end
+  end
+
+  describe "shared circuit breaker on repeated identical re-dispatch (bd-5jr49o)" do
+    # "Retryable" only means "a later drain MIGHT succeed" — nothing in
+    # `terminal_dispatch_failure?/1` can tell a quota hold that clears in an
+    # hour from a task that will fail this way forever, so a deterministically
+    # broken intent re-drained on every quota broadcast indefinitely. The shared
+    # breaker supplies the missing bound: after K identical failures the item is
+    # dropped and the coordinator is paged once.
+    test "an identically-failing held intent is dropped after K drains, with one escalation" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      prior_cb = Application.get_env(:arbiter, :circuit_breaker, [])
+
+      Application.put_env(
+        :arbiter,
+        :circuit_breaker,
+        Keyword.put(prior_cb, :dispatch_queue_redispatch, limit: 2, window_ms: 60_000)
+      )
+
+      on_exit(fn -> Application.put_env(:arbiter, :circuit_breaker, prior_cb) end)
+      Arbiter.CircuitBreaker.reset_all()
+      on_exit(&Arbiter.CircuitBreaker.reset_all/0)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+
+      # NOT `start_queue/2`: its `GenServer.stop/2` teardown is a supervised
+      # `:permanent` child exiting, so `DispatchQueueSupervisor` immediately
+      # restarts a fresh queue — with the REAL dispatcher and auto-subscribe —
+      # against a task this test deliberately leaves held and a sandbox owner
+      # that is already gone. `terminate_child/2` removes the child outright,
+      # which is the same reasoning `Arbiter.DataCase`'s own leaked-child
+      # sweeper documents.
+      {:ok, pid} =
+        DispatchQueueSupervisor.start_dispatch_queue(ws.id,
+          dispatcher: FailingDispatcher,
+          auto_subscribe: false
+        )
+
+      on_exit(fn ->
+        try do
+          DynamicSupervisor.terminate_child(DispatchQueueSupervisor, pid)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      task = make_task(ws)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+
+      # K drains, each synchronised on the dispatcher's own signal and on the
+      # item reappearing in the queue — no sleeping, and no drain left in
+      # flight when the next one starts.
+      for _ <- 1..2 do
+        :ok = DispatchQueue.drain(pid)
+        assert_receive {:dispatch_attempt, _}, 1_000
+        assert wait_for_held_item(pid).task_id == task.id
+      end
+
+      # The K+1-th failure trips the breaker: the item is dropped rather than
+      # requeued, so the queue drains empty and stays that way.
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatch_attempt, _}, 1_000
+      assert wait_for_empty_queue(pid)
+
+      # Nothing left to re-attempt: further drains never reach the dispatcher.
+      :ok = DispatchQueue.drain(pid)
+      refute_receive {:dispatch_attempt, _}, 200
+
+      trips =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "circuit breaker tripped"))
+
+      assert length(trips) == 1
+      assert hd(trips).body =~ "dispatch_queue_redispatch"
+    end
+
+    # The exemption (round 2, finding 1). A quota-exhausted pre-flight refusal
+    # already carries its own bounded hold from `PreflightHold.retry_not_before/3`
+    # and is already paged once by the `:preflight_auth_failed` breaker, so it
+    # must NOT be counted here: an exhausted 5h window legitimately produces far
+    # more than K attempts before it resets (bd-7qbavq was 12), and dropping the
+    # held intent would strand a task that was going to self-heal the moment the
+    # window rolled.
+    test "a quota-exhausted pre-flight refusal is exempt and keeps its hold past K drains" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      # A reset time already in the past, so each hold has elapsed by the time
+      # the next drain runs — that lets this test perform N real attempts back
+      # to back without sleeping through a real backoff.
+      reset_at = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+      Application.put_env(:arbiter, :test_quota_reset_at, reset_at)
+      on_exit(fn -> Application.delete_env(:arbiter, :test_quota_reset_at) end)
+
+      prior_cb = Application.get_env(:arbiter, :circuit_breaker, [])
+
+      Application.put_env(
+        :arbiter,
+        :circuit_breaker,
+        Keyword.put(prior_cb, :dispatch_queue_redispatch, limit: 2, window_ms: 60_000)
+      )
+
+      on_exit(fn -> Application.put_env(:arbiter, :circuit_breaker, prior_cb) end)
+      Arbiter.CircuitBreaker.reset_all()
+      on_exit(&Arbiter.CircuitBreaker.reset_all/0)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      # Same `terminate_child/2` teardown as the test above: this one also ends
+      # with an item deliberately still held.
+      {:ok, pid} =
+        DispatchQueueSupervisor.start_dispatch_queue(ws.id,
+          dispatcher: QuotaExhaustedDispatcher,
+          auto_subscribe: false
+        )
+
+      on_exit(fn ->
+        try do
+          DynamicSupervisor.terminate_child(DispatchQueueSupervisor, pid)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      task = make_task(ws)
+      task_id = task.id
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task_id, start_driver: false)
+
+      # Fail the gate open (stale snapshot) so the drain actually reaches the
+      # dispatcher and exercises the real pre-flight failure path.
+      past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
+
+      # Five identical quota-exhausted failures — well past the K=2 bound that
+      # would have dropped the item had it been counted.
+      for _ <- 1..5 do
+        :ok = DispatchQueue.drain(pid)
+        assert_receive {:dispatch_attempt, ^task_id}, 1_000
+
+        held = wait_for_held_item(pid)
+        assert held.task_id == task_id
+        assert %DateTime{} = held.retry_not_before
+      end
+
+      # Still queued, still holding — and no breaker page for a condition that
+      # is already paged once elsewhere.
+      assert wait_for_held_item(pid).task_id == task_id
+
+      trips =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "circuit breaker tripped"))
+
+      assert trips == []
+    end
+  end
+
+  defp wait_for_empty_queue(pid, budget_ms \\ 500) do
+    case DispatchQueue.state(pid) do
+      %{items: []} ->
+        true
+
+      _ when budget_ms > 0 ->
+        Process.sleep(10)
+        wait_for_empty_queue(pid, budget_ms - 10)
+
+      _ ->
+        flunk("the dropped intent was still queued after the breaker tripped")
     end
   end
 

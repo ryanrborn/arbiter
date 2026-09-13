@@ -2074,6 +2074,9 @@ defmodule Arbiter.MCP.Tools do
   defdelegate message_send(scope, args), to: Arbiter.MCP.Tools.Messaging
   defdelegate notify_list(scope, args), to: Arbiter.MCP.Tools.Messaging
 
+  defdelegate breaker_list(scope, args), to: Arbiter.MCP.Tools.Breaker
+  defdelegate breaker_reset(scope, args), to: Arbiter.MCP.Tools.Breaker
+
   defdelegate worker_dispatch(scope, args), to: Arbiter.MCP.Tools.Worker
   defdelegate worker_resume(scope, args), to: Arbiter.MCP.Tools.Worker
   defdelegate worker_review(scope, args), to: Arbiter.MCP.Tools.Worker
