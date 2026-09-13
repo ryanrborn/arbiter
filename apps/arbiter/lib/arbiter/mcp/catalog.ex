@@ -26,6 +26,7 @@ defmodule Arbiter.MCP.Catalog do
   | Tool | Tiers | Backs onto |
   |---|---|---|
   | `task_create` | coordinator | `Ash.create(Issue, …)` |
+  | `task_verify` | coordinator | `Arbiter.Tasks.Verification.record_outcome/3` |
   | `task_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `task_close` | coordinator | `Ash.update(issue, …, action: :close)` |
   | `task_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
@@ -137,7 +138,8 @@ defmodule Arbiter.MCP.Catalog do
           "`child_closed`/`child_total` over its `parent_of` children). A worker reads its " <>
           "own task (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
-          "pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, auto_close, timestamps).",
+          "pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, auto_close, " <>
+          "verify_after_deploy + the verification state, timestamps).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -151,7 +153,9 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "When true, return the complete record including notes, qa_notes, " <>
                 "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, " <>
-                "auto_close, and timestamps. Defaults to false (slim payload for workers)."
+                "auto_close, verify_after_deploy, awaiting_verification_at, " <>
+                "verification_outcome, verification_evidence, and timestamps. " <>
+                "Defaults to false (slim payload for workers)."
           }
         },
         "additionalProperties" => false
@@ -255,8 +259,9 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @both,
       description:
         "Record progress / completion notes on a task — `notes`, `qa_notes`, `deployment_notes`, " <>
-          "`pr_body` only (the structured replacement for `arb issue update --qa-notes …`). A " <>
-          "worker may only update its own task and cannot change status or priority.",
+          "`pr_body`, plus the `verify_after_deploy` flag (the structured replacement for " <>
+          "`arb issue update --qa-notes …`). A worker may only update its own task and cannot " <>
+          "change status or priority.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -275,6 +280,15 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "The worker-authored PR/MR description (Summary / Test plan / References) the " <>
                 "MergeQueue opens the task's single canonical PR with."
+          },
+          "verify_after_deploy" => %{
+            "type" => "boolean",
+            "description" =>
+              "Set true when your diff's only execution context is the long-lived server — " <>
+                "env/config plumbing, a doctor/health probe, a capture or ingest path, " <>
+                "anything a green test suite cannot prove is live. The merge then parks the " <>
+                "task at `awaiting_verification` instead of closing it, and the coordinator " <>
+                "restarts and observes the new path once before it closes."
           }
         },
         "additionalProperties" => false
@@ -326,6 +340,17 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "When true, this task auto-closes once all its `parent_of` children are closed " <>
                 "(≥1 child). Default false."
+          },
+          "verify_after_deploy" => %{
+            "type" => "boolean",
+            "description" =>
+              "When true, merging this task's PR does NOT close it: the task parks at " <>
+                "`awaiting_verification` and the coordinator is notified to restart the " <>
+                "server and observe the new path once, then record the result with " <>
+                "`task_verify`. Set it for any change whose only execution context is the " <>
+                "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
+                "path) — the class that merges green and is found broken hours later. " <>
+                "Default false."
           },
           "assignee" => %{"type" => "string"},
           "tracker_type" => %{
@@ -387,6 +412,17 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" => "Auto-close this task when all its `parent_of` children are closed."
           },
+          "verify_after_deploy" => %{
+            "type" => "boolean",
+            "description" =>
+              "When true, merging this task's PR does NOT close it: the task parks at " <>
+                "`awaiting_verification` and the coordinator is notified to restart the " <>
+                "server and observe the new path once, then record the result with " <>
+                "`task_verify`. Set it for any change whose only execution context is the " <>
+                "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
+                "path) — the class that merges green and is found broken hours later. " <>
+                "Default false."
+          },
           "assignee" => %{"type" => "string"},
           "tracker_type" => %{"type" => "string"},
           "tracker_ref" => %{"type" => "string"},
@@ -445,6 +481,37 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_reopen/2
+    },
+    %{
+      name: "task_verify",
+      tiers: @coordinator,
+      description:
+        "Record the restart-and-observe result for a task parked at `awaiting_verification` " <>
+          "(bd-9so315). Pass exactly one of `observed` or `failed`, whose value is the " <>
+          "evidence — what you actually saw on the running server. `observed` closes the " <>
+          "task; `failed` reopens it for another attempt. The evidence is persisted on the " <>
+          "task either way.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "observed" => %{
+            "type" => "string",
+            "description" =>
+              "Evidence that the change is live and working, e.g. \"restarted at 14:02; " <>
+                "GET /api/doctor now reports 3 repos\". Closes the task."
+          },
+          "failed" => %{
+            "type" => "string",
+            "description" =>
+              "Evidence that it is NOT working after the restart. Reopens the task for " <>
+                "another attempt, with the evidence persisted for the next worker."
+          }
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.task_verify/2
     },
     %{
       name: "task_promote",

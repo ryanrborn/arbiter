@@ -2,7 +2,7 @@ defmodule Arbiter.MCP.Tools.Task do
   @moduledoc """
   `Arbiter.MCP.Tools` handlers for reading and mutating tasks: `task_show` /
   `task_ready` / `task_update_progress` / `task_create` / `task_update` /
-  `task_close` / `task_reopen` / `task_sync_upstream_close` / `dep_add` /
+  `task_close` / `task_reopen` / `task_verify` / `task_sync_upstream_close` / `dep_add` /
   `dep_remove`. Split out of `Arbiter.MCP.Tools` (see its moduledoc) — called
   back into for the generic arg/serialization helpers it still owns.
   """
@@ -11,10 +11,19 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.MCP.Tools
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Verification
 
   require Ash.Query
 
   @progress_fields ~w(notes qa_notes deployment_notes pr_body)
+
+  # bd-9so315: the one non-text field a worker may set on its own task. It is a
+  # self-declaration about its own diff ("this only runs inside the long-lived
+  # server"), which the worker is the best-placed party to make and which
+  # nothing else in the pipeline can infer — and unlike status/priority it
+  # cannot reroute or reprioritize work: its only effect is that the task waits
+  # for a human observation before closing.
+  @progress_flags ~w(verify_after_deploy)
 
   # ---- task_show ----------------------------------------------------------
 
@@ -234,6 +243,61 @@ defmodule Arbiter.MCP.Tools.Task do
     end
   end
 
+  # ---- task_verify ---------------------------------------------------------
+
+  @doc """
+  Record the restart-and-observe result for a task parked at
+  `:awaiting_verification` (bd-9so315). Coordinator only.
+
+  Exactly one of `observed` / `failed` must be given, and its value is the
+  evidence — what was actually seen on the running server. `observed` closes
+  the task; `failed` reopens it for another attempt. Either way the evidence is
+  persisted on the task, so the claim is auditable rather than remembered.
+  """
+  @spec task_verify(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_verify(%Scope{} = scope, args) do
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         {:ok, outcome, evidence} <- verify_verdict(args) do
+      case Verification.record_outcome(issue, outcome, evidence) do
+        {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}
+        {:error, reason} -> {:error, {:invalid, verify_error_message(reason)}}
+      end
+    end
+  end
+
+  defp verify_verdict(args) do
+    observed = Tools.fetch_string(args, "observed")
+    failed = Tools.fetch_string(args, "failed")
+
+    case {observed, failed} do
+      {nil, nil} ->
+        {:error,
+         {:invalid, "provide exactly one of: observed (evidence) or failed (evidence)"}}
+
+      {obs, fail} when is_binary(obs) and is_binary(fail) ->
+        {:error, {:invalid, "provide only one of: observed or failed, not both"}}
+
+      {obs, nil} ->
+        {:ok, :observed, obs}
+
+      {nil, fail} ->
+        {:ok, :failed, fail}
+    end
+  end
+
+  defp verify_error_message(:not_awaiting_verification),
+    do:
+      "task is not awaiting verification — only a task parked at " <>
+        "awaiting_verification can record a verify result"
+
+  defp verify_error_message(:evidence_required),
+    do: "evidence text is required: say what you observed on the running server"
+
+  defp verify_error_message({:invalid, %{} = err}), do: Tools.ash_error_message(err)
+  defp verify_error_message({:invalid, msg}) when is_binary(msg), do: msg
+  defp verify_error_message(other), do: inspect(other)
+
   # ---- dep_add ------------------------------------------------------------
 
   @doc """
@@ -289,15 +353,24 @@ defmodule Arbiter.MCP.Tools.Task do
     _ -> issue
   end
 
-  # Keep only the three allowed progress fields; require at least one.
+  # Keep only the allowed progress fields; require at least one.
   defp progress_attrs(args) do
-    attrs =
+    text =
       for field <- @progress_fields, (val = Tools.fetch_string(args, field)) != nil, into: %{} do
         {String.to_existing_atom(field), val}
       end
 
+    flags =
+      for field <- @progress_flags, is_boolean(val = Map.get(args, field)), into: %{} do
+        {String.to_existing_atom(field), val}
+      end
+
+    attrs = Map.merge(text, flags)
+
     if map_size(attrs) == 0 do
-      {:error, {:invalid, "provide at least one of: #{Enum.join(@progress_fields, ", ")}"}}
+      {:error,
+       {:invalid,
+        "provide at least one of: #{Enum.join(@progress_fields ++ @progress_flags, ", ")}"}}
     else
       {:ok, attrs}
     end
@@ -326,6 +399,7 @@ defmodule Arbiter.MCP.Tools.Task do
       {"difficulty", :integer},
       {"issue_type", {:enum, Issue.issue_types()}},
       {"auto_close", :boolean},
+      {"verify_after_deploy", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"assignee", :string},
       {"tracker_ref", :string},
@@ -349,6 +423,7 @@ defmodule Arbiter.MCP.Tools.Task do
       {"difficulty", :integer},
       {"issue_type", {:enum, Issue.issue_types()}},
       {"auto_close", :boolean},
+      {"verify_after_deploy", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"assignee", :string},
       {"tracker_ref", :string},
