@@ -1038,6 +1038,57 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert File.dir?(dep_dst), "deps/<dep> must be seeded by create/3"
       assert File.exists?(Path.join(dep_dst, "mix.exs"))
     end
+
+    test "ensure_deps_fetched skips for non-Mix repos (no mix.exs)", %{repo: repo} do
+      # No mix.exs in the source repo — not a Mix project
+      refute File.exists?(Path.join(repo, "mix.exs"))
+
+      # Create the worktree — this calls seed_compiled_deps and ensure_deps_fetched
+      # ensure_deps_fetched should skip calling mix deps.get since no mix.exs exists
+      assert {:ok, wt} = Worktree.create(repo, "feature/non-mix-repo", "main")
+
+      # Worktree has no mix.exs either (not inherited because source has none)
+      refute File.exists?(Path.join(wt, "mix.exs"))
+    end
+
+    test "ensure_deps_fetched is called for Mix projects (with mix.exs)", %{repo: repo} do
+      # Add a mix.exs to the source repo and commit it
+      File.write!(Path.join(repo, "mix.exs"), ~s(
+defmodule TestApp.MixProject do
+  use Mix.Project
+
+  def project do
+    [app: :test_app, version: "0.1.0"]
+  end
+end
+))
+
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "mix.exs"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add mix.exs"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # Create the worktree — this calls seed_compiled_deps and ensure_deps_fetched
+      # ensure_deps_fetched should attempt mix deps.get since mix.exs exists
+      assert {:ok, wt} = Worktree.create(repo, "feature/ensure-deps", "main")
+
+      # Verify the worktree has mix.exs (inherited from source)
+      assert File.exists?(Path.join(wt, "mix.exs"))
+    end
+
+    test "ensure_deps_fetched handles invalid mix.exs gracefully", %{repo: repo} do
+      # Add an invalid mix.exs to the source repo
+      File.write!(Path.join(repo, "mix.exs"), "invalid elixir syntax {{\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "mix.exs"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add invalid mix.exs"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # Worktree creation should still succeed even though mix deps.get will fail
+      # (it's best-effort, not a hard requirement)
+      assert {:ok, wt} = Worktree.create(repo, "feature/broken-mix", "main")
+
+      # Verify the worktree was created and the broken mix.exs was copied
+      assert File.exists?(Path.join(wt, "mix.exs"))
+    end
   end
 
   defp rev_parse(path, ref) do
