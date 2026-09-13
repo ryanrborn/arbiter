@@ -192,6 +192,45 @@ defmodule Arbiter.CircuitBreakerAdoptionTest do
       assert length(trip_escalations(ws)) == 1
     end
 
+    # The production carrier for round-2 observation 2. `dispatch_stuck/3`
+    # builds its subject from `describe_reason/1`, which passes a binary reason
+    # through verbatim — and transport/git error strings routinely contain an
+    # apostrophe ("couldn't resolve host"). That reaches the signature, which
+    # the trip page prints for the coordinator to paste into a shell.
+    test "the trip page's reset command is runnable when the subject has an apostrophe",
+         %{ws: ws} do
+      with_bound(:coordinator_escalation, 2)
+
+      snapshot = %{task_id: "bd-cn004", workspace_id: ws.id}
+      reason = "couldn't resolve host github.com"
+
+      for i <- 1..5, do: CoordinatorNotifier.dispatch_stuck(snapshot, reason, i)
+
+      assert [trip] = trip_escalations(ws)
+
+      line =
+        trip.body
+        |> String.split("\n")
+        |> Enum.map(&String.trim/1)
+        |> Enum.find(&String.starts_with?(&1, "arb breaker reset "))
+
+      assert line =~ "'", "the signature must be quoted"
+
+      # Parse the persisted line with a real shell and read back the argument
+      # `arb breaker reset` would receive.
+      {signature, 0} = System.cmd("sh", ["-c", ~s|set -- #{line}; printf '%s' "$4"|])
+
+      assert signature =~ "coordinator_escalation"
+
+      assert String.contains?(signature, "couldn't resolve host github.com"),
+             "the apostrophe must survive scrubbing into the signature"
+
+      # And that argument is a key the reset path actually recognises.
+      assert Enum.any?(CircuitBreaker.list(workspace_id: ws.id), &(&1.signature == signature))
+      assert :ok = CircuitBreaker.reset(signature)
+      refute Enum.any?(CircuitBreaker.list(workspace_id: ws.id), &(&1.signature == signature))
+    end
+
     test "the breaker's own trip escalation is never itself suppressed", %{ws: ws} do
       with_bound(:coordinator_escalation, 1)
 
