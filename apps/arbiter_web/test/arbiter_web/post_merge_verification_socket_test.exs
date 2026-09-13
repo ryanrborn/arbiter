@@ -53,11 +53,16 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
   }
 
   setup do
-    port = free_port()
+    # `port: 0` lets the kernel pick a free port and hand it straight to the
+    # listener, then we read the bound port back off Thousand Island. Probing for
+    # a free port first and rebinding it leaves a window in which a sibling VM on
+    # this host can take it (`:eaddrinuse` would raise out of `start_supervised!`).
+    listener =
+      start_supervised!(
+        {Bandit, plug: ArbiterWeb.Endpoint, scheme: :http, ip: {127, 0, 0, 1}, port: 0}
+      )
 
-    start_supervised!(
-      {Bandit, plug: ArbiterWeb.Endpoint, scheme: :http, ip: {127, 0, 0, 1}, port: port}
-    )
+    {:ok, {_address, port}} = ThousandIsland.listener_info(listener)
 
     {:ok, workspace} =
       Ash.create(Workspace, %{
@@ -234,13 +239,6 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
           conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
       end
     end)
-  end
-
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
-    {:ok, port} = :inet.port(socket)
-    :ok = :gen_tcp.close(socket)
-    port
   end
 
   defp indent(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("    " <> &1))
