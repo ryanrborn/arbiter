@@ -42,6 +42,17 @@ defmodule Arbiter.Worker.Watchdog do
   `Arbiter.Mergers.ReviewedSha` records the rest of the reasoning, including
   why "no baseline" merges unguarded rather than refusing.
 
+  And the guard will not call a head unreviewed until it has evidence the
+  forge's view of the branch is current (bd-ch9pmk / #1614). "Current" means
+  the PR has, at least once, reported the `:local_head_sha` this worker pushed
+  to origin moments before the Watchdog started. A hosted forge's PR resource
+  is eventually consistent with the ref it tracks, so the very first poll of an
+  approved fix round routinely reads the *pre*-fix-round head — which is not a
+  branch that advanced past the review, it is a review the forge has not caught
+  up with yet. Waiting for that echo (bounded by `@head_lag_grace_polls`) is
+  what keeps a REQUEST_CHANGES -> fix -> APPROVE cycle from failing the worker
+  and buying a full re-review of code that was just approved.
+
   ## Approval detection lives in one function
 
   `classify/1` maps a `Mergers.get/1` result map to one of `:merged |
@@ -237,6 +248,16 @@ defmodule Arbiter.Worker.Watchdog do
   # for repos that will never produce a check-run.
   @not_started_grace_polls 5
 
+  # bd-ch9pmk / #1614. How many consecutive polls the guard will wait for the
+  # forge's PR resource to catch up with the branch head this worker pushed
+  # moments before the Watchdog started. A hosted forge updates the ref
+  # immediately but its PR object is eventually consistent: in the captured
+  # incident the push was logged at 21:58:11 and the PR still reported the
+  # pre-push head at 21:58:16. Bounded, because a push that never surfaces at
+  # all must fall through to the normal unreviewed-head handling rather than
+  # parking the lane forever.
+  @head_lag_grace_polls 5
+
   # Consecutive auto-resolve attempts (#354, Phase 2a) before the Watchdog stops
   # mechanically resolving a block and escalates to the coordinator with the
   # reason + attempt count. Override via opt `:max_auto_resolve_attempts` or
@@ -347,6 +368,10 @@ defmodule Arbiter.Worker.Watchdog do
       `:approved` and forces auto-merge, so the merge fires on the first poll
       without waiting for a hosted-forge approval the gate never posts.
     * `:interval_ms` (default `#{@default_interval_ms}`)
+    * `:local_head_sha` — the branch head this worker holds locally (the commit
+      it just pushed to origin). Lets the reviewed-SHA guard tell a forge that
+      has not yet caught up with our own push apart from a branch that really
+      advanced past the review. Optional; the guard binds as before without it.
     * `:initial_delay_ms` (default `0` — poll once promptly, then on the interval)
     * `:max_polls` — consecutive `:pending` polls before the Watchdog escalates.
       Default is `#{@default_max_polls_auto}` when `auto_merge: true` (fail
@@ -797,6 +822,19 @@ defmodule Arbiter.Worker.Watchdog do
         # genuine re-review looks like.
         cleared_recorded_sha: nil,
         last_head_sha: nil,
+        # bd-ch9pmk / #1614. `local_head_sha` is the branch head this worker
+        # holds locally — the commit it pushed to origin immediately before
+        # starting this Watchdog, and (on a ReviewGate lane) the commit the
+        # gate's APPROVE stamped. Until a poll has reported that exact SHA as
+        # the PR head, the forge's view of the branch is provably behind ours,
+        # and a mismatch between it and the reviewed stamp is push lag rather
+        # than an unreviewed commit. `forge_saw_local_head?` latches true on
+        # the first poll that confirms it and never drops: after that, every
+        # advance is a genuine one and the guard binds normally (Cause A).
+        # `head_lag_polls` bounds the wait — see `@head_lag_grace_polls`.
+        local_head_sha: normalize_sha(Keyword.get(opts, :local_head_sha)),
+        forge_saw_local_head?: false,
+        head_lag_polls: 0,
         interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
         max_polls: Keyword.get(opts, :max_polls, default_max_polls),
         # The configured ceiling as passed at start (before any indefinite-park
@@ -1222,6 +1260,11 @@ defmodule Arbiter.Worker.Watchdog do
     case guarded_merge_decision(state) do
       {:stale, reviewed, head, state} ->
         resolve_stale_reviewed_head(state, reviewed, head)
+
+      # The forge has not caught up with our own push yet, so it is not yet
+      # possible to say anything true about the head. Keep polling.
+      {:wait, state} ->
+        reschedule(state)
 
       {:merge, expected_sha, state} ->
         apply_guarded_merge(state, expected_sha)
@@ -2635,14 +2678,59 @@ defmodule Arbiter.Worker.Watchdog do
   # stays parked and the coordinator is paged, rather than the worker merging
   # commits nobody reviewed or dying silently.
   defp guarded_merge_decision(state) do
-    case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
-      {:ok, expected_sha} ->
-        {:merge, expected_sha, state}
+    if forge_head_lagging?(state) do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} the PR still reports " <>
+          "head=#{inspect(state.last_head_sha)} but this worker pushed " <>
+          "#{state.local_head_sha}; the forge has not caught up with our own push " <>
+          "(#{state.head_lag_polls + 1}/#{@head_lag_grace_polls} grace polls), waiting"
+      )
 
-      {:error, {:stale_reviewed_sha, reviewed, head}} ->
-        reconsider_stale_head(state, reviewed, head)
+      {:wait, %{state | head_lag_polls: state.head_lag_polls + 1}}
+    else
+      case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
+        {:ok, expected_sha} ->
+          {:merge, expected_sha, state}
+
+        {:error, {:stale_reviewed_sha, reviewed, head}} ->
+          reconsider_stale_head(state, reviewed, head)
+      end
     end
   end
+
+  # bd-ch9pmk / #1614. Is the head this poll reported provably older than what
+  # this worker put on the branch?
+  #
+  # The captured incidents (bd-4fbpto / arbiter #1607, vs-bdrbp0 / vstim !219)
+  # both failed an APPROVED fix round because the guard ran within seconds of
+  # the push that carried the fix-round commits:
+  #
+  #     21:58:11  ReviewGate: stamped reviewed SHA 8e7a69ea on task=bd-4fbpto
+  #     21:58:11  Worker: pushing worktree branch to origin
+  #     21:58:16  Watchdog: reviewed=8e7a69ea head=ad20a410 -> {:unreviewed_head, _}
+  #
+  # The stamp was correct and the reviewer really had reviewed 8e7a69ea; the
+  # PR resource simply still reported the pre-push head. Comparing for equality
+  # cannot tell "the branch advanced past the review" from "the forge has not
+  # noticed the review's own commits yet", and the second one is the common
+  # path — every REQUEST_CHANGES -> fix -> APPROVE cycle ends with a push
+  # milliseconds before the Watchdog's first poll.
+  #
+  # So the Watchdog makes NO merge decision at all until the forge has, at
+  # least once, echoed back the SHA we pushed — it neither merges nor refuses.
+  # Refusing was the reported bug; merging is the worse half of the same
+  # confusion, because with no recorded stamp to fall back on the guard latches
+  # its baseline to the first approved poll's head and would happily merge the
+  # PRE-fix-round commit, dropping the fix the reviewer asked for.
+  #
+  # The latch lifts permanently on the first poll that confirms our head
+  # (`note_local_head_visible/2`), which is why a commit landing AFTER the
+  # approval — a CI `fix_pass`, a human push — still trips the guard
+  # immediately: by then the forge has long since shown us our own head.
+  defp forge_head_lagging?(%{local_head_sha: local} = state) when is_binary(local),
+    do: not state.forge_saw_local_head? and state.head_lag_polls < @head_lag_grace_polls
+
+  defp forge_head_lagging?(_state), do: false
 
   # bd-6bg54c / #1573. A stale baseline used to fall straight through to the
   # generic retry path, which re-attempted the same refused merge every poll
@@ -2675,25 +2763,64 @@ defmodule Arbiter.Worker.Watchdog do
         {:merge, expected_sha, state}
 
       {:error, {:stale_reviewed_sha, reviewed, ^head}} ->
-        if base_merge_only?(state, reviewed, head) do
-          Logger.info(
-            "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{head} differs " <>
-              "from the reviewed commit #{reviewed} only by merges from " <>
-              "#{state.mr_base_ref} — identical net diff against the base, so the review " <>
-              "still covers it; merging pinned to #{head}"
-          )
+        resolve_against_live_head(state, reviewed, head)
+    end
+  end
 
-          {:merge, head, %{state | reviewed_sha: head}}
-        else
-          Logger.warning(
-            "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} " <>
-              "mr=#{state.mr_ref}; branch advanced past the reviewed commit " <>
-              "(reviewed=#{reviewed} head=#{head}) — merging would integrate " <>
-              "commits no reviewer saw"
-          )
+  # bd-ch9pmk / #1614 (AC4). Everything past this point either merges commits
+  # or fails the worker and buys a full re-review, and both decisions — and the
+  # `{:unreviewed_head, sha}` the operator reads afterwards — are only as
+  # truthful as the head they are made against. `last_head_sha` is whatever the
+  # poll that opened this decision saw, which on a hosted forge can already be
+  # seconds stale. Re-read it once, here, so the comparison, the diffs and the
+  # failure reason all name the head the PR actually sits at.
+  defp resolve_against_live_head(state, reviewed, head) do
+    state = refresh_live_head(state)
+    live = state.last_head_sha || head
 
-          {:stale, reviewed, head, state}
+    cond do
+      live == reviewed ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} re-read the PR head and " <>
+            "it now names the reviewed commit #{reviewed} (the poll had seen #{head}); merging"
+        )
+
+        {:merge, live, state}
+
+      base_merge_only?(state, reviewed, live) ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} head #{live} differs " <>
+            "from the reviewed commit #{reviewed} only by merges from " <>
+            "#{state.mr_base_ref} — identical net diff against the base, so the review " <>
+            "still covers it; merging pinned to #{live}"
+        )
+
+        {:merge, live, %{state | reviewed_sha: live}}
+
+      true ->
+        Logger.warning(
+          "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; branch advanced past the reviewed commit " <>
+            "(reviewed=#{reviewed} head=#{live}) — merging would integrate " <>
+            "commits no reviewer saw"
+        )
+
+        {:stale, reviewed, live, state}
+    end
+  end
+
+  # Re-read the PR head from the forge. Keeps the previous reading on any
+  # error: a transient forge failure must not be mistaken for the head moving.
+  defp refresh_live_head(state) do
+    case safe_get(state) do
+      {:ok, result} when is_map(result) ->
+        case Map.get(result, :head_sha) do
+          sha when is_binary(sha) and sha != "" -> note_local_head_visible(state, sha)
+          _ -> state
         end
+
+      _ ->
+        state
     end
   end
 
@@ -2896,21 +3023,32 @@ defmodule Arbiter.Worker.Watchdog do
     head = Map.get(result, :head_sha)
     approved? = effective_outcome(state, result) == :approved
 
-    state =
-      if latch_suspended?(state, head) do
-        # The fleet's own push has not landed yet. Keep the latch off rather
-        # than re-pinning it to the pre-push head, which is what made the
-        # one-shot clear ineffective.
-        %{state | reviewed_sha: nil}
-      else
-        %{
-          state
-          | latch_suspended_at_head: nil,
-            reviewed_sha: Mergers.ReviewedSha.latch(state.reviewed_sha, approved?, head)
-        }
-      end
+    state = note_local_head_visible(state, head)
 
-    state = %{state | last_head_sha: head}
+    state =
+      cond do
+        latch_suspended?(state, head) ->
+          # The fleet's own push has not landed yet. Keep the latch off rather
+          # than re-pinning it to the pre-push head, which is what made the
+          # one-shot clear ineffective.
+          %{state | reviewed_sha: nil}
+
+        # Same reasoning, for the push this worker made just before the
+        # Watchdog started (bd-ch9pmk / #1614): a head the forge reports before
+        # it has caught up with that push is the PRE-push commit, and latching
+        # the baseline onto it would pin the guard to a commit the fix round
+        # superseded — the lane would then merge the unfixed code, or refuse
+        # the fixed code, depending on which stamp won.
+        forge_head_lagging?(state) ->
+          %{state | reviewed_sha: nil}
+
+        true ->
+          %{
+            state
+            | latch_suspended_at_head: nil,
+              reviewed_sha: Mergers.ReviewedSha.latch(state.reviewed_sha, approved?, head)
+          }
+      end
 
     # An approval lapse ends the episode: drop the memoised recorded SHA so a
     # genuine re-review is picked up on the next approved poll.
@@ -2920,6 +3058,23 @@ defmodule Arbiter.Worker.Watchdog do
       %{state | recorded_reviewed_sha: nil, recorded_sha_loaded?: false}
     end
   end
+
+  # Record this poll's head and, if it is the SHA this worker pushed, latch the
+  # fact that the forge's view of the branch has caught up with ours
+  # (bd-ch9pmk / #1614). The latch never drops: once the forge has shown us our
+  # own head, every later divergence is a real one.
+  defp note_local_head_visible(state, head) do
+    state = %{state | last_head_sha: head}
+
+    if is_binary(state.local_head_sha) and head == state.local_head_sha do
+      %{state | forge_saw_local_head?: true, head_lag_polls: 0}
+    else
+      state
+    end
+  end
+
+  defp normalize_sha(sha) when is_binary(sha) and sha != "", do: sha
+  defp normalize_sha(_sha), do: nil
 
   # Is the latch still suspended for this poll's head? A head we cannot read
   # keeps the suspension (we have no evidence the push landed); `:unknown`
