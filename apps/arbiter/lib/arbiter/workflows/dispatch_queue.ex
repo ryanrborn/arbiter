@@ -99,6 +99,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   require Logger
 
+  alias Arbiter.CircuitBreaker
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -404,7 +405,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
   # first. Fire-and-forget under a supervisor; failures are re-queued via cast.
   defp spawn_drain(_state, []), do: :ok
 
-  defp spawn_drain(%State{dispatcher: dispatcher}, items) do
+  defp spawn_drain(%State{dispatcher: dispatcher, workspace_id: ws_id}, items) do
     queue = self()
 
     start_drain_task(fn ->
@@ -414,10 +415,10 @@ defmodule Arbiter.Workflows.DispatchQueue do
             :ok
 
           {:error, reason} ->
-            requeue_or_drop(queue, item, reason)
+            requeue_or_drop(queue, ws_id, item, reason)
 
           other ->
-            requeue_or_drop(queue, item, other)
+            requeue_or_drop(queue, ws_id, item, other)
         end
       end)
     end)
@@ -439,17 +440,62 @@ defmodule Arbiter.Workflows.DispatchQueue do
   # a live agent session already running the task, a migration/preflight
   # hiccup, a transient exception/exit, the quota-exhausted pre-flight
   # refusal `hold_item/2` already gives its own backoff.
-  defp requeue_or_drop(queue, item, reason) do
-    if terminal_dispatch_failure?(reason) do
-      Logger.info(
-        "DispatchQueue: dropping held intent for #{item.task_id}, terminal dispatch failure: #{inspect(reason)}"
-      )
+  #
+  # A *retryable* failure that keeps recurring identically is the third case
+  # (bd-5jr49o). Retryable means "a later drain might succeed", but nothing in
+  # the classification above can tell a quota hold that will clear in an hour
+  # from a task that will fail this way forever. The shared circuit breaker
+  # supplies the missing bound: once the same task has failed the same way more
+  # than K times inside the window, the item is dropped rather than requeued,
+  # and the coordinator is paged once. Keyed on task + failure shape — the
+  # attempt count and any elapsed time in the reason are scrubbed out of the
+  # signature, so a growing counter cannot defeat the match.
+  defp requeue_or_drop(queue, ws_id, item, reason) do
+    cond do
+      terminal_dispatch_failure?(reason) ->
+        Logger.info(
+          "DispatchQueue: dropping held intent for #{item.task_id}, terminal dispatch failure: #{inspect(reason)}"
+        )
 
-      :ok
-    else
-      GenServer.cast(queue, {:requeue, hold_item(item, reason)})
+        :ok
+
+      redispatch_broken?(ws_id, item, reason) ->
+        Logger.warning(
+          "DispatchQueue: circuit breaker open for #{item.task_id}; dropping held intent " <>
+            "instead of re-draining (last failure: #{inspect(reason)})"
+        )
+
+        :ok
+
+      true ->
+        GenServer.cast(queue, {:requeue, hold_item(item, reason)})
     end
   end
+
+  defp redispatch_broken?(ws_id, item, reason) do
+    match?(
+      {:suppress, _},
+      CircuitBreaker.check(
+        :dispatch_queue_redispatch,
+        [item.task_id, failure_shape(reason)],
+        workspace_id: ws_id,
+        task_ref: item.task_id,
+        detail:
+          "This held intent kept failing to dispatch the same way on every drain. " <>
+            "It has been dropped from the queue; re-dispatch it by hand once the " <>
+            "underlying cause is fixed."
+      )
+    )
+  end
+
+  # The coarse shape of a dispatch failure, stable across attempts. A
+  # `StopReason` struct's summary carries elapsed times and window resets, so
+  # only its category keys the breaker.
+  defp failure_shape({:auth_check_failed, %{category: category}}), do: [:auth_check_failed, category]
+  defp failure_shape({tag, %{category: category}}) when is_atom(tag), do: [tag, category]
+  defp failure_shape({tag, _detail}) when is_atom(tag), do: [tag]
+  defp failure_shape(reason) when is_atom(reason), do: [reason]
+  defp failure_shape(reason), do: [inspect(reason)]
 
   defp terminal_dispatch_failure?({:task_closed, _}), do: true
   defp terminal_dispatch_failure?({:task_not_found, _}), do: true
