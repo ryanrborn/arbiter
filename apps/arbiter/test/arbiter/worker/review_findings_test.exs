@@ -102,6 +102,57 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
     end
   end
 
+  describe "extract/2 — non-blocking observations (bd-c6tdbu / bd-1xss5z)" do
+    test "an unlabelled item under a 'Non-blocking observations' header is not fail-closed" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      - **Minor**: rename `x` for clarity (a.ex:1).
+      - **Minor**: extract a helper eventually (b.ex:2).
+      - **Low**: stray whitespace (c.ex:3).
+
+      Non-blocking observations (no change requested):
+      - The retry loop could be simplified, but it's not wrong.
+      - Consider a follow-up for the duplicated setup code.
+      """
+
+      assert [f1, f2, f3, f4, f5] = ReviewFindings.extract(findings, 1)
+      assert f1.severity == :minor
+      assert f2.severity == :minor
+      assert f3.severity == :low
+
+      assert f4.severity == :non_blocking
+      assert f5.severity == :non_blocking
+      refute ReviewFindings.blocking?(f4)
+      refute ReviewFindings.blocking?(f5)
+      assert f4.id == "F1.4"
+      assert f5.id == "F1.5"
+    end
+
+    test "an unlabelled item OUTSIDE any non-blocking header still fails closed at Medium" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      - **Minor**: cosmetic nit (a.ex:1).
+      - this one has no severity label at all (b.ex:2).
+      """
+
+      assert [f1, f2] = ReviewFindings.extract(findings, 1)
+      assert f1.severity == :minor
+      assert f2.severity == :unknown
+      assert ReviewFindings.blocking?(f2)
+    end
+
+    test "a non-blocking section header variant without the parenthetical is recognized" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      Non-blocking observations:
+      - Just a passing thought.
+      """
+
+      assert [f] = ReviewFindings.extract(findings, 1)
+      assert f.severity == :non_blocking
+    end
+  end
+
   describe "dispositions/1" do
     test "parses every disposition status, in either order" do
       text = """
@@ -250,6 +301,81 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
 
     test "no open findings means no gap — a round-1 APPROVE is untouched by this guard" do
       refute ReviewFindings.gap?(ReviewFindings.approval_gap([], "VERDICT: APPROVE", nil))
+    end
+  end
+
+  describe "approval_gap/3 — the bd-1xss5z deadlock shape (bd-c6tdbu)" do
+    test "an honest APPROVE that marks non-blocking observations [NOT ADDRESSED] is not a gap" do
+      round1 =
+        """
+        VERDICT: REQUEST_CHANGES
+        - **Minor**: tighten the error message (a.ex:1).
+        - **Minor**: rename a local var (a.ex:5).
+        - **Low**: stray blank line (b.ex:2).
+
+        Non-blocking observations (no change requested):
+        - The retry loop could be simplified in a follow-up.
+        - Consider extracting the duplicated setup helper.
+        """
+
+      open = ReviewFindings.extract(round1, 1)
+      assert Enum.map(open, & &1.severity) == [:minor, :minor, :low, :non_blocking, :non_blocking]
+
+      # Round 2: the Minor/Low findings need no disposition (below Medium), and
+      # the reviewer honestly declines to call the non-blocking observations
+      # "addressed" — exactly the bd-1xss5z transcript shape.
+      round2 = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [NOT ADDRESSED] F1.4 — logged in round 1 as a non-blocking observation
+        with no change requested, not a defect; recording it honestly rather
+        than laundering it — it does not gate this approval.
+      - [NOT ADDRESSED] F1.5 — also logged in round 1 as a non-blocking
+        observation with no change requested.
+      VERIFICATION: FULL
+      """
+
+      gap = ReviewFindings.approval_gap(open, round2, nil)
+
+      refute ReviewFindings.gap?(gap),
+             "a non-blocking observation marked NOT ADDRESSED must not block the approval"
+    end
+
+    test "bd-6r8caj still holds: a real Medium finding alongside a non-blocking section still gaps" do
+      round1 = """
+      VERDICT: REQUEST_CHANGES
+      - **Medium**: `proxy_5xx?/1` over-matches (a.ex:172).
+
+      Non-blocking observations (no change requested):
+      - Consider a follow-up for the retry loop.
+      """
+
+      open = ReviewFindings.extract(round1, 1)
+      assert Enum.map(open, & &1.severity) == [:medium, :non_blocking]
+
+      # Marks the non-blocking observation honestly, but never disposition the
+      # real Medium finding at all — must still gap.
+      omitted = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [NOT ADDRESSED] F1.2 — logged as a non-blocking observation, no change requested.
+      VERIFICATION: FULL
+      """
+
+      gap = ReviewFindings.approval_gap(open, omitted, nil)
+      assert ["F1.1"] = Enum.map(gap.missing, & &1.id)
+
+      # Or dispositions it but admits it is still open — also must still gap.
+      not_addressed = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [NOT ADDRESSED] F1.1 — still over-matches
+      - [NOT ADDRESSED] F1.2 — logged as a non-blocking observation, no change requested.
+      VERIFICATION: FULL
+      """
+
+      gap2 = ReviewFindings.approval_gap(open, not_addressed, nil)
+      assert ["F1.1"] = Enum.map(gap2.unaddressed, & &1.id)
     end
   end
 
