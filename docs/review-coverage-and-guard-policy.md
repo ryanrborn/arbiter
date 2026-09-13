@@ -6,7 +6,8 @@ no implementation — this PR changes nothing under `apps/*/lib`)
 **Task:** bd-6woz0x · **Tracker:** github:1631
 **Author:** worker
 **Adopted from:** recommendation 2 of the follow-up-rate investigation
-(bd-bc0n3k, `notes/2026-09-13-follow-up-rate-investigation.md` §3.3–3.4, §5),
+(bd-bc0n3k, `admiral:notes/2026-09-13-follow-up-rate-investigation.md` §3.3–3.4,
+§5 — the operator's notes repo, not this one),
 adopted by the operator 2026-09-13.
 **Freeze:** until this design merges, new review/merge-guard bugs route here
 rather than to one-off fixes, unless one is actively stranding work.
@@ -647,7 +648,7 @@ verifies a merged change against it.
 |---|---|---|---|---|---|
 | **P0** | `Arbiter.Reviews.Coverage` resource + migration + `Coverage.record/1`. Table only; nothing reads it | — | P1 | D2 | Table exists; `record/1` is idempotent on `{mr_ref, head_sha, kind}`; unit tests for all three `kind`s |
 | **P1** | Dual-write from every stamping site in §3.3 (ReviewGate, ReviewPatrol, ExternalReview). `last_reviewed_sha` still authoritative | P0 | P1 | D2 | **Restart-and-observe:** after a server restart, one real ReviewGate approval writes exactly one `:reviewed` row whose `head_sha` matches the PR head and whose `net_diff_id` is non-nil; the old stamp still matches |
-| **P2** | `Coverage.decide/3` — the six rules — as a pure function over a coverage list + ctx. No call sites | P0 | D3 | D3 | Property tests for rules 1–6; table tests for §4.1–§4.6, one per walkthrough; `{:unknown, :forge_lagging}` requires ancestry, not just inequality |
+| **P2** | `Coverage.decide/3` — the six rules — as a pure function over a coverage list + ctx. No call sites | P0 | P1 | D3 | Property tests for rules 1–6; table tests for §4.1–§4.6, one per walkthrough; `{:unknown, :forge_lagging}` requires ancestry, not just inequality |
 | **P3** | **Shadow mode.** Watchdog and MergeQueue call `decide/3` alongside the existing guard and log disagreements. Behaviour unchanged | P1, P2 | P1 | D2 | **Restart-and-observe:** disagreement log line appears for a real base-merge PR and names both answers; zero disagreements on the exact-match path over ≥20 merges |
 | **P4** | **Read-path flip** behind `merge.coverage_enabled`. `decide/3` is authoritative; old guard still shadows | P3 proven live | P0 | D3 | **Restart-and-observe:** one fix-round PR and one base-merge PR merge on the first eligible poll with no `{:stale_reviewed_sha, …}` and no `{:unreviewed_head, …}` in the journal |
 | **P5** | Delete the Watchdog latch/suspension/memo/grace machinery (§6.1 rows 2–5) | P4 live ≥7 days, zero disagreements | P1 | D3 | `watchdog.ex` loses ≥250 lines; every deleted-guard test either deletes or re-points at `decide/3`; **restart-and-observe** one full approve→merge cycle |
@@ -695,7 +696,7 @@ Read-only. No code under `apps/*/lib` was changed by this PR.
 * "Patches" counts the distinct `bd-…` tasks named in the comments governing
   that guard, which is a lower bound on how many times it has been revised.
 * Line counts, commit counts, run counts and dollar figures are quoted from
-  bd-bc0n3k's investigation (`notes/2026-09-13-follow-up-rate-investigation.md`
+  bd-bc0n3k's investigation (`admiral:notes/2026-09-13-follow-up-rate-investigation.md`
   §3.1–3.4), which read them from `~/dev/arbiter_dev.sqlite3` in `mode=ro`.
 * `apps/arbiter/test/arbiter/review_coverage_design_test.exs` re-checks every
   anchored `` `path:line` (`symbol`) `` citation in this document on every test
