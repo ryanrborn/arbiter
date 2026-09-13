@@ -74,6 +74,22 @@ defmodule Arbiter.Workflows.Conductor do
     `min(workspace_max_concurrent, system_max_concurrent, quota_headroom)`.
     Available slots = effective cap minus the members currently `:in_progress`.
 
+  ## `refined` / acceptance-criteria exemption (bd-7mbrlg)
+
+  The ready set here is sourced straight from `Issue.ready/0`, which gates on
+  `:depends_on` / `:blocks` and nothing else — it does not check `refined`,
+  and by extension does not run `:promote_to_ready`'s acceptance-criteria
+  guard (bd-7mbrlg: a `bug`/`feature`/`chore` promoted through that action
+  needs `acceptance` or a waiver). This is deliberate, not an oversight:
+  authoring a member into a graph and calling `kickoff/2` is itself the human
+  act of intent that `refined` stands in for elsewhere — an operator who
+  wired the graph has already decided the work is ready to run, the same way
+  `refined: true` records that decision for a standalone Backlog card. Adding
+  a second, redundant gate here would block graph-driven dispatch on a
+  ceremony the graph's own construction already satisfied. If per-member
+  acceptance criteria turn out to matter for graph-driven work too, that is a
+  separate decision — see bd-7mbrlg's PR for the full entry-point survey.
+
   ## Quota gate
 
   Quota is consulted once per drain cycle via the `Arbiter.Workflows.QuotaGate`

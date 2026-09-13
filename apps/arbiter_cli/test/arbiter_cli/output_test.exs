@@ -86,6 +86,26 @@ defmodule ArbiterCli.OutputTest do
       refute Output.format_issue_detail(Map.delete(issue, "repo")) =~ "Repo:"
       refute Output.format_issue_detail(Map.put(issue, "repo", nil)) =~ "Repo:"
     end
+
+    # bd-7mbrlg
+    test "renders the acceptance waiver reason when present" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "status" => "open",
+        "issue_type" => "chore",
+        "acceptance_waived" => "trivial config bump"
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Acceptance waived:"
+      assert out =~ "trivial config bump"
+    end
+
+    test "omits the acceptance waiver line when unset" do
+      issue = %{"id" => "x", "title" => "T", "status" => "open", "issue_type" => "task"}
+      refute Output.format_issue_detail(issue) =~ "Acceptance waived:"
+    end
   end
 
   describe "mode/1" do

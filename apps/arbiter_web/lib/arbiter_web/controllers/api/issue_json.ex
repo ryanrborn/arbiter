@@ -8,6 +8,9 @@ defmodule ArbiterWeb.Api.IssueJSON do
   alias Arbiter.Tasks.Issue
 
   @doc "Renders a single issue."
+  def show(%{issue: issue, warnings: warnings}) when warnings != [],
+    do: Map.put(data(issue), :warnings, warnings)
+
   def show(%{issue: issue}), do: data(issue)
 
   @doc "Renders a list of issues wrapped under :data."
@@ -38,6 +41,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
       repo: issue.repo,
       workspace_id: issue.workspace_id,
       refined: issue.refined,
+      acceptance_waived: issue.acceptance_waived,
       closed_at: iso(issue.closed_at),
       created_at: iso(issue.created_at),
       updated_at: iso(issue.updated_at)

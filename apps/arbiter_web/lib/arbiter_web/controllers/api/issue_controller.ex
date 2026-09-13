@@ -74,7 +74,7 @@ defmodule ArbiterWeb.Api.IssueController do
               nil ->
                 conn
                 |> put_status(:created)
-                |> render(:show, issue: issue)
+                |> render(:show, issue: issue, warnings: ac_warnings(issue))
 
               err ->
                 upstream_failure_response(conn, issue.id, err)
@@ -165,6 +165,22 @@ defmodule ArbiterWeb.Api.IssueController do
   defp tracker_type_str(t) when is_atom(t), do: to_string(t)
   defp tracker_type_str(t), do: t
 
+  # bd-7mbrlg: non-blocking heads-up at filing time — mirrors
+  # `Arbiter.MCP.Tools.Task.with_ac_warning/2`.
+  defp ac_warnings(%Issue{} = issue) do
+    if Issue.gated_type?(issue.issue_type) and blank?(issue.acceptance) do
+      [
+        "No acceptance criteria set. #{issue.issue_type} tasks need `acceptance` (or an " <>
+          "explicit `acceptance_waived` reason) before they can be promoted to Ready."
+      ]
+    else
+      []
+    end
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(str), do: String.trim(str) == ""
+
   def update(conn, %{"id" => id} = params) do
     attrs =
       params
@@ -203,9 +219,15 @@ defmodule ArbiterWeb.Api.IssueController do
     end
   end
 
-  def promote(conn, %{"id" => id}) do
+  def promote(conn, %{"id" => id} = params) do
+    promote_args =
+      case params["acceptance_waived"] do
+        reason when is_binary(reason) -> %{acceptance_waived: reason}
+        _ -> %{}
+      end
+
     with {:ok, issue} <- Ash.get(Issue, id),
-         {:ok, promoted} <- Ash.update(issue, %{}, action: :promote_to_ready) do
+         {:ok, promoted} <- Ash.update(issue, promote_args, action: :promote_to_ready) do
       render(conn, :show, issue: promoted)
     end
   end
