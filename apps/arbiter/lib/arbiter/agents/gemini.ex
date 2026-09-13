@@ -230,7 +230,7 @@ defmodule Arbiter.Agents.Gemini do
   # `:gemini` branches never call it.
   defp print_timeout_flag(opts) do
     case Keyword.get(opts, :timeout_ms) do
-      ms when is_integer(ms) and ms > 0 -> ["--print-timeout", "#{div(ms, 1000)}s"]
+      ms when is_integer(ms) and ms > 0 -> ["--print-timeout", "#{max(div(ms, 1000), 1)}s"]
       _ -> []
     end
   end

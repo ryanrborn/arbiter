@@ -2733,13 +2733,18 @@ defmodule Arbiter.Worker.ReviewGate do
     Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:" <> id)
     attempt = state.attempt + 1
 
+    # bd-216r3e: resolve the budget for THIS pass now, not once at gate init.
+    # A gate can outlive several passes (timeout retry, verdict re-prompt,
+    # every revise round), and an operator who raises `review_gate.timeout_ms`
+    # mid-run must see it applied on the next pass. Resolved BEFORE spawning
+    # (not after) so `build_session_opts/5` — invoked from inside
+    # `spawn_worker/5` — hands the adapter this pass's value instead of the
+    # previous pass's `state.timeout_ms`.
+    timeout_ms = resolve_timeout_ms(state.workspace_id, state.timeout_override_ms)
+    state = %{state | timeout_ms: timeout_ms}
+
     case spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
-        # bd-216r3e: resolve the budget for THIS pass now, not once at gate
-        # init. A gate can outlive several passes (timeout retry, verdict
-        # re-prompt, every revise round), and an operator who raises
-        # `review_gate.timeout_ms` mid-run must see it applied on the next pass.
-        timeout_ms = resolve_timeout_ms(state.workspace_id, state.timeout_override_ms)
         Process.send_after(self(), {:timeout, attempt}, timeout_ms)
 
         {:ok,
@@ -2888,9 +2893,10 @@ defmodule Arbiter.Worker.ReviewGate do
         # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
         # the worker OAuth token from this workspace's `worker_env` before
         # falling back to the server env (bd-bw3466).
-        # bd-1xss5z: thread this pass's resolved timeout budget (already
-        # re-resolved live per pass by `launch_worker/5` — see
-        # `resolve_timeout_ms/2`) onto `agent_opts` so an adapter whose CLI
+        # bd-1xss5z: thread this pass's resolved timeout budget (re-resolved
+        # live per pass by `launch_worker/5`, before it calls `spawn_worker/5`
+        # — see `resolve_timeout_ms/2`) onto `agent_opts` so an adapter whose
+        # CLI
         # has its own shorter internal turn timeout (agy's 5-minute
         # `--print-timeout`) can raise it to match. Adapters that don't
         # recognize `:timeout_ms` just ignore it.
