@@ -2,11 +2,11 @@ defmodule Arbiter.Quota.CodexQuota do
   @moduledoc """
   Per-workspace snapshot of Codex's (OpenAI) rate-limit / quota state (bd-cqfn5i).
 
-  Unlike `Arbiter.Quota.AnthropicQuota`, which is populated *passively* from
-  response headers the local proxy observes, this snapshot is populated
-  *actively* by `Arbiter.Quota.Codex.fetch/2`, which makes one direct GET to
-  OpenAI's usage endpoint using the `codex` CLI's stored OAuth token. See that
-  module for the fetch/parse logic.
+  Unlike `Arbiter.Quota.AnthropicQuota`, which is updated by explicit fetch
+  (`Arbiter.Quota.OAuthUsage`) and header capture from worker responses, this
+  snapshot is populated *actively* by `Arbiter.Quota.Codex.fetch/2`, which makes
+  one direct GET to OpenAI's usage endpoint using the `codex` CLI's stored OAuth
+  token. See that module for the fetch/parse logic.
 
   Codex reports two windows:
 

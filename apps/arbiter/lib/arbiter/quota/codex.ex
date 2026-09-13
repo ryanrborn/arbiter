@@ -3,11 +3,11 @@ defmodule Arbiter.Quota.Codex do
   Direct Codex (OpenAI) quota tracking (bd-cqfn5i), modeled on 9router's
   `open-sse/services/usage/codex.js` (`getCodexUsage`).
 
-  Arbiter has no passive quota signal for Codex the way it does for Claude (the
-  Anthropic proxy scrapes rate-limit headers off worker traffic). Instead this
-  module makes **one direct GET** to OpenAI's usage endpoint using the OAuth
-  token the real `codex` CLI already keeps fresh in `~/.codex/auth.json`, and
-  upserts the result into `Arbiter.Quota.CodexQuota`.
+  Arbiter has no passive quota signal for Codex the way it does for Claude (via
+  `Arbiter.Quota.OAuthUsage` polling and header capture from worker traffic).
+  This module makes **one direct GET** to OpenAI's usage endpoint using the
+  OAuth token the real `codex` CLI already keeps fresh in `~/.codex/auth.json`,
+  and upserts the result into `Arbiter.Quota.CodexQuota`.
 
   ## Credentials — read-only
 

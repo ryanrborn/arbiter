@@ -1,24 +1,21 @@
 defmodule Arbiter.Quota.OAuthUsage do
   @moduledoc """
-  On-demand fetch of Anthropic's undocumented `/api/oauth/usage` endpoint
-  (bd-8tpha6, part of bd-5qe3qs).
+  On-demand fetch of Anthropic's `/api/oauth/usage` endpoint (bd-8tpha6,
+  part of bd-5qe3qs).
 
-  This started as a **secondary, additive** quota source alongside the
-  zero-cost header-capture mechanism in `Arbiter.Quota`
-  (`anthropic-ratelimit-unified-*` response headers, updated on every real
-  proxied request): the headers are aggregate-only (one 5h + one 7d figure),
-  while this endpoint is the only way to get a **per-model** weekly breakdown
-  (`seven_day_sonnet`, `seven_day_opus`, ...) and the account's `extra_usage`
-  overage spend.
+  This is a **primary** quota source. `Arbiter.Quota` writes the parsed
+  aggregate figures (`utilization_5h`, `utilization_7d`, reset times, status
+  flags, etc.) into the columns the dispatch gate reads, so a fleet that is
+  quota-held or idle still has a current snapshot to un-hold on. It is also
+  the only way to get a **per-model** weekly breakdown (`seven_day_sonnet`,
+  `seven_day_opus`, ...) and the account's `extra_usage` overage spend.
 
-  As of bd-b0zody it is a **primary** source too. `Arbiter.Quota` writes the
-  parsed aggregate figures into the columns the dispatch gate reads, so a
-  fleet that is making no proxied traffic (because it is quota-held, or idle)
-  still has a current snapshot to un-hold on. See
-  `Arbiter.Quota.Gate.staleness_threshold_seconds/1` for why a row written
+  See `Arbiter.Quota.Gate.staleness_threshold_seconds/1` for why a row written
   from here gets twice the staleness margin of a header-captured one: this
-  endpoint's budget is roughly one request per 5 minutes, and the 180s
-  cooldown below means a single 429 costs more than one poll.
+  endpoint's budget is roughly one request per 5 minutes per account, and the
+  180s cooldown below means a single 429 costs more than one poll. For
+  rate-limit characteristics and documented behavior, see
+  `docs/oauth-usage-ratelimit.md`.
 
   ## Auth
 
