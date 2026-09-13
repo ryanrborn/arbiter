@@ -126,6 +126,50 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "gating dispatch:       7d — 7d quota 0.96 ≥ 0.90"
     end
 
+    # bd-4fbpto: STALE alone can't distinguish "the poll is fine, it just
+    # didn't land a usable 5h figure this cycle" from "nothing has succeeded
+    # in a while" — this asserts the two now read differently.
+    test "STALE says the poll is still succeeding when oauth_poll_fresh is true" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "stale" => true,
+              "oauth_poll_fresh" => true,
+              "oauth_captured_at" => "2026-06-23T20:24:00Z"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "STALE"
+      assert out =~ "/api/oauth/usage last succeeded 2026-06-23T20:24:00Z"
+      refute out =~ "no fresh data"
+    end
+
+    test "STALE says no fresh data from any source when the poll isn't succeeding either" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "stale" => true,
+              "oauth_poll_fresh" => false,
+              "capture_source" => "headers"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "STALE"
+      assert out =~ "no fresh data from any source"
+      assert out =~ "proxy rate-limit headers"
+      refute out =~ "last succeeded"
+    end
+
     test "no STALE label on a fresh snapshot" do
       stub_get("/api/quota", %{
         "data" => %{"workspace_id" => "ws-1", "claude" => Map.put(@snapshot, "stale", false)}

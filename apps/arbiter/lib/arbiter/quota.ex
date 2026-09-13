@@ -434,6 +434,11 @@ defmodule Arbiter.Quota do
       overage_status: q.overage_status,
       captured_at: iso(q.captured_at),
       stale: Arbiter.Quota.Gate.stale?(q),
+      # bd-4fbpto: `stale` alone can't distinguish "nothing has succeeded in a
+      # while" from "the poll is fine, it just hasn't landed a usable 5h figure
+      # this cycle" — both look identical (STALE, old `captured_at`) without
+      # this. `arb quota` uses it to say which one it is.
+      oauth_poll_fresh: Arbiter.Quota.Gate.oauth_poll_fresh?(q),
       per_model_utilization: q.per_model_utilization || %{},
       extra_usage: q.extra_usage || %{},
       oauth_utilization_5h: q.oauth_utilization_5h,
@@ -517,18 +522,36 @@ defmodule Arbiter.Quota do
   end
 
   @doc """
-  `capture_oauth_usage/2`, but for a *group of workspaces known to share the
-  same OAuth token* (bd-5xuneh). `/api/oauth/usage` is account-wide and
-  rate-limited per account, not per workspace, so fetching it once per
-  workspace in a group burns the shared rate-limit budget for an identical
-  number. This fetches **once** and writes (+ broadcasts) the resulting
-  snapshot to every workspace in `workspace_ids`.
+  `capture_oauth_usage/2`, but for a *group of workspaces* (bd-5xuneh).
+  `/api/oauth/usage` is account-wide and rate-limited per account, not per
+  workspace, so fetching it once per workspace burns the shared rate-limit
+  budget for an identical number. This fetches **once** and writes (+
+  broadcasts) the resulting snapshot to every workspace in `workspace_ids`.
 
-  Callers are responsible for the grouping itself (see
-  `Arbiter.Quota.CloudProbe`, which groups by
-  `Arbiter.Agents.Claude.ConfigDir.oauth_token/1`). Returns the list of
-  per-workspace `record_oauth_usage` results, in the same order as
-  `workspace_ids`, if the single fetch succeeded.
+  bd-5xuneh originally grouped workspaces by
+  `Arbiter.Agents.Claude.ConfigDir.oauth_token/1` and passed the resolved
+  token through `opts`, on the theory that a workspace's own `worker_env`
+  token could authenticate this call. bd-4fbpto found that backwards — that
+  token is scope/rate-limited for this endpoint and passing it here is why
+  every poll silently failed once the header-capture fallback was removed
+  (see the status codes and body shapes recorded in PR #1607). `Arbiter.Quota.CloudProbe` no
+  longer resolves or passes a per-workspace token: it calls this once per
+  cycle for *every* workspace on the install and lets
+  `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
+  `.credentials.json`) authenticate the request — see that module's `opts`
+  for how a caller can still override it (tests do, via `:token` /
+  `:source_dir`). Returns the list of per-workspace `record_oauth_usage`
+  results, in the same order as `workspace_ids`, if the single fetch
+  succeeded.
+
+  This unconditionally writes the *same* account's figures to every
+  workspace passed in, which is only correct because this install has
+  exactly one provider account today. `docs/provider-account-design.md`
+  (bd-7df8nh) is the RFC that removes that precondition — once
+  `ProviderAccount` exists, this needs to iterate accounts and fetch/write
+  per account rather than once for the whole fleet (see that doc's §9 and
+  phase P6, which now has to build that iteration from scratch since this
+  ticket deleted bd-5xuneh's per-token grouping rather than re-keying it).
   """
   @spec capture_oauth_usage_for_group([String.t()], keyword()) ::
           {:ok, [{:ok, AnthropicQuota.t()} | {:error, term()}]} | {:error, term()}

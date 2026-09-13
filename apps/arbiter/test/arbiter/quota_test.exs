@@ -161,6 +161,38 @@ defmodule Arbiter.QuotaTest do
       assert serialized.stale == true
     end
 
+    # bd-4fbpto: `stale` alone can't say whether the /api/oauth/usage poll is
+    # still working — `oauth_poll_fresh` is the independent signal `arb quota`
+    # needs to tell "nothing has succeeded in a while" apart from "the poll
+    # landed, it just didn't carry a usable 5h figure this cycle".
+    test "oauth_poll_fresh reflects oauth_captured_at, independent of the primary snapshot's staleness" do
+      Application.put_env(:arbiter, :quota, staleness_threshold_seconds: 2)
+      on_exit(fn -> restore_test_env() end)
+
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      old_time = DateTime.utc_now() |> DateTime.add(-5, :second)
+
+      {:ok, _} =
+        Arbiter.Repo.query(
+          "UPDATE anthropic_quotas SET captured_at = ?, oauth_captured_at = ? WHERE workspace_id = ? AND provider = 'claude'",
+          [old_time, DateTime.utc_now(), ws.id]
+        )
+
+      serialized = Quota.serialize(ws.id)
+
+      assert serialized.stale == true
+      assert serialized.oauth_poll_fresh == true
+    end
+
+    test "oauth_poll_fresh is false when nothing has ever polled" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      refute Quota.serialize(ws.id).oauth_poll_fresh
+    end
+
     defp restore_test_env do
       Application.put_env(:arbiter, :quota,
         on_exhaustion: :throttle,
