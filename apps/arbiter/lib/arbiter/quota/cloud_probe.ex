@@ -34,14 +34,26 @@ defmodule Arbiter.Quota.CloudProbe do
       bd-8tpha6, *and* the primary gate columns since bd-b0zody). This is the
       only thing that keeps Claude's snapshot current for a fleet making no
       proxied traffic, so it is no longer merely a garnish riding along
-      (best-effort; its own 429 cooldown protects it). Unlike the other three
-      providers, this endpoint is rate-limited **per account, not per
-      workspace/token** (bd-5xuneh), so it is fetched once per distinct OAuth
-      token — see `spawn_oauth_usage_refresh/1` — rather than fanned out per
-      workspace like the rest of this module. Its 5 min cadence is the
-      endpoint's own budget; the gate absorbs a missed poll by trusting a
-      polled row for 600s (`Arbiter.Quota.Gate.staleness_threshold_seconds/1`)
-      rather than by polling harder.
+      (best-effort; its own 429 cooldown protects it). This endpoint is
+      account-wide, and this install has exactly one account credential — the
+      operator's `~/.claude/.credentials.json` — so it is fetched **once per
+      cycle for every workspace**, not fanned out per workspace like the rest
+      of this module. Its 5 min cadence is the endpoint's own budget; the gate
+      absorbs a missed poll by trusting a polled row for 600s
+      (`Arbiter.Quota.Gate.staleness_threshold_seconds/1`) rather than by
+      polling harder.
+
+      bd-5xuneh de-duplicated this call by grouping workspaces on
+      `ConfigDir.oauth_token/1` and passing that token explicitly, on the
+      theory that workspaces sharing a token could safely share one fetch.
+      bd-4fbpto found that theory backwards: a workspace's `worker_env` token
+      is scope/rate-limited for this endpoint (empirically confirmed — see the
+      bd-4fbpto writeup for the status codes) while the operator's
+      credentials-file token succeeds, so passing the workspace token here was
+      why every poll silently failed once bd-7cvh8z removed the proxy's
+      header-capture fallback. This module no longer resolves or passes a
+      per-workspace token at all: `Arbiter.Quota.OAuthUsage.fetch/1`'s own
+      default (read `.credentials.json`) is always used.
 
   The other three providers each degrade to a no-op (no row written, no
   broadcast) when their CLI isn't authenticated on this host, so a logged-out
@@ -68,18 +80,38 @@ defmodule Arbiter.Quota.CloudProbe do
   Pass `:refresh_fun` — a `fn(workspace_id :: String.t()) :: any()` — to
   `start_link/1` to replace the default three-provider refresh. Tests pass a
   stub so there is no dependency on real CLIs or HTTP.
+
+  Pass `:oauth_opts` — a keyword list forwarded verbatim to
+  `Arbiter.Quota.capture_oauth_usage_for_group/2` (and from there to
+  `Arbiter.Quota.OAuthUsage.fetch/1`) — to point the account-wide poll at a
+  fixture `:source_dir` instead of the real `~/.claude/.credentials.json`, or
+  to inject a `:base_url` / `:plug`. Defaults to `[]`.
   """
 
   use GenServer
   require Logger
 
-  alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Messages.CoordinatorNotifier
 
   @default_interval_ms 300_000
 
+  # Consecutive `/api/oauth/usage` poll failures before escalating to the
+  # coordinator mailbox (bd-4fbpto) — three missed cycles (~15 min at the
+  # default cadence) is long enough that a single transient 429 doesn't page
+  # anyone, but short enough that a real outage doesn't sit unnoticed for
+  # hours the way this one did.
+  @oauth_failure_escalation_threshold 3
+
   defmodule State do
     @moduledoc false
-    defstruct [:interval_ms, :refresh_fun, :enabled, probe_count: 0]
+    defstruct [
+      :interval_ms,
+      :refresh_fun,
+      :enabled,
+      :oauth_opts,
+      probe_count: 0,
+      oauth_consecutive_failures: 0
+    ]
   end
 
   # ---- public API --------------------------------------------------------
@@ -110,7 +142,8 @@ defmodule Arbiter.Quota.CloudProbe do
     state = %State{
       enabled: cfg(:enabled, opts, true),
       interval_ms: cfg(:interval_ms, opts, @default_interval_ms),
-      refresh_fun: Keyword.get(opts, :refresh_fun) || (&default_refresh/1)
+      refresh_fun: Keyword.get(opts, :refresh_fun) || (&default_refresh/1),
+      oauth_opts: Keyword.get(opts, :oauth_opts, [])
     }
 
     if state.enabled, do: schedule(self(), state.interval_ms)
@@ -138,6 +171,10 @@ defmodule Arbiter.Quota.CloudProbe do
     {:noreply, new_state}
   end
 
+  def handle_info({:oauth_usage_refresh_result, workspace_ids, result}, %State{} = state) do
+    {:noreply, note_oauth_result(state, workspace_ids, result)}
+  end
+
   def handle_info(_msg, %State{} = state), do: {:noreply, state}
 
   # ---- probe logic -------------------------------------------------------
@@ -149,40 +186,94 @@ defmodule Arbiter.Quota.CloudProbe do
 
     if workspaces != [] do
       Logger.debug("Arbiter.Quota.CloudProbe: refreshing #{length(workspaces)} workspace(s)")
-      spawn_oauth_usage_refresh(workspaces)
+      spawn_oauth_usage_refresh(workspaces, state.oauth_opts)
       Enum.each(workspaces, &spawn_refresh(state.refresh_fun, &1.id))
     end
 
     %{state | probe_count: state.probe_count + 1}
   end
 
-  # `/api/oauth/usage` is account-wide and rate-limited per account, not per
-  # workspace (bd-5xuneh). Group workspaces by their resolved OAuth token
-  # first — workspaces sharing a token (the common case: one account behind
-  # every workspace) fetch once and get the same snapshot written, instead of
-  # each burning the shared rate-limit budget for an identical number.
-  defp spawn_oauth_usage_refresh(workspaces) do
-    workspaces
-    |> Enum.group_by(&ConfigDir.oauth_token/1)
-    |> Enum.each(fn {token, group} ->
-      workspace_ids = Enum.map(group, & &1.id)
-      spawn_task(fn -> call_oauth_usage_refresh(token, workspace_ids) end)
+  # `/api/oauth/usage` is account-wide, and this install has exactly one
+  # account credential — the operator's `~/.claude/.credentials.json` — behind
+  # every workspace, so it is fetched exactly once per cycle for the whole
+  # fleet and the result is written to every workspace (see the moduledoc for
+  # why this no longer groups by, or passes, a per-workspace token — bd-4fbpto).
+  defp spawn_oauth_usage_refresh(workspaces, oauth_opts) do
+    workspace_ids = Enum.map(workspaces, & &1.id)
+    parent = self()
+
+    spawn_task(fn ->
+      result = call_oauth_usage_refresh(workspace_ids, oauth_opts)
+      send(parent, {:oauth_usage_refresh_result, workspace_ids, result})
     end)
   end
 
-  defp call_oauth_usage_refresh(token, workspace_ids) do
-    opts = if token, do: [token: token], else: []
-    Arbiter.Quota.capture_oauth_usage_for_group(workspace_ids, opts)
+  defp call_oauth_usage_refresh(workspace_ids, oauth_opts) do
+    case Arbiter.Quota.capture_oauth_usage_for_group(workspace_ids, oauth_opts) do
+      {:error, reason} = err ->
+        Logger.warning(
+          "Arbiter.Quota.CloudProbe: oauth usage refresh for #{inspect(workspace_ids)} failed: #{inspect(reason)}"
+        )
+
+        err
+
+      ok ->
+        ok
+    end
   rescue
     e ->
-      Logger.debug(
+      reason = {:exception, Exception.message(e)}
+
+      Logger.warning(
         "Arbiter.Quota.CloudProbe: oauth usage refresh for #{inspect(workspace_ids)} raised: #{Exception.message(e)}"
       )
+
+      {:error, reason}
   catch
     :exit, r ->
-      Logger.debug(
+      Logger.warning(
         "Arbiter.Quota.CloudProbe: oauth usage refresh for #{inspect(workspace_ids)} exited: #{inspect(r)}"
       )
+
+      {:error, {:exit, r}}
+  end
+
+  # Tracks consecutive oauth-usage-poll failures and escalates to the
+  # coordinator mailbox the cycle the threshold is first crossed — an
+  # edge-trigger, so a sustained outage produces exactly one mailbox item
+  # (bd-4fbpto) rather than one per 5-minute cycle. Resets on the next
+  # success, so a later, distinct outage escalates again.
+  defp note_oauth_result(%State{} = state, _workspace_ids, {:ok, _}) do
+    %{state | oauth_consecutive_failures: 0}
+  end
+
+  defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason}) do
+    failures = state.oauth_consecutive_failures + 1
+
+    if failures == @oauth_failure_escalation_threshold do
+      escalate_oauth_failure(workspace_ids, failures, reason)
+    end
+
+    %{state | oauth_consecutive_failures: failures}
+  end
+
+  defp note_oauth_result(%State{} = state, _workspace_ids, _other), do: state
+
+  defp escalate_oauth_failure([ws_id | _], failures, reason) when is_binary(ws_id) do
+    safe_escalate(fn ->
+      CoordinatorNotifier.quota_poll_failing(%{workspace_id: ws_id}, failures, reason)
+    end)
+  end
+
+  defp escalate_oauth_failure(_workspace_ids, _failures, _reason), do: :ok
+
+  defp safe_escalate(fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.debug("Arbiter.Quota.CloudProbe: escalation swallowed: #{Exception.message(e)}")
+  catch
+    :exit, _ -> :ok
   end
 
   defp spawn_refresh(refresh_fun, workspace_id) do
@@ -219,8 +310,8 @@ defmodule Arbiter.Quota.CloudProbe do
   # on success and no-ops (no row written) when its credentials aren't
   # present on this host. Anthropic's `/api/oauth/usage` source (per-model
   # weekly + overage + the primary gate columns) is refreshed separately, once
-  # per distinct OAuth token, by `spawn_oauth_usage_refresh/1` — see that
-  # function and bd-5xuneh for why it isn't fanned out per workspace here.
+  # per cycle for the whole fleet, by `spawn_oauth_usage_refresh/2` — see that
+  # function and bd-4fbpto for why it isn't fanned out per workspace here.
   defp default_refresh(workspace_id) do
     Arbiter.Quota.Codex.fetch(workspace_id)
     Arbiter.Quota.CloudCode.refresh(workspace_id, :gemini)

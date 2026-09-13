@@ -433,6 +433,49 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 
   @doc """
+  Escalate a sustained `/api/oauth/usage` polling outage (bd-4fbpto).
+
+  Fired by `Arbiter.Quota.CloudProbe` the cycle its consecutive-failure count
+  first reaches the configured threshold — **edge-triggered**, so a sustained
+  outage produces one mailbox item, not one per 5-minute cycle. The caller is
+  responsible for only calling this once per incident (it resets its own
+  counter on the next success, so a later outage escalates again).
+
+  This poll is the *only* thing that refreshes Claude's quota snapshot for an
+  idle fleet (bd-atyrrq); a silent, sustained failure here means the dispatch
+  gate is running on a snapshot that only gets staler, and a 7d hold — once
+  engaged — cannot lift without a fresh polled row (bd-b7umwj). `arb quota`
+  used to be the only way a human would notice (see the bd-4fbpto writeup);
+  this is the automated backstop.
+
+  `snapshot` carries `:workspace_id` — any workspace touched by the failed
+  poll group is representative, since the poll itself is account-wide, not
+  workspace-scoped. `failures` is the consecutive-failure count; `reason` is
+  whatever `Arbiter.Quota.capture_oauth_usage_for_group/2` (or the rescue/catch
+  around it) returned. Best-effort, returns `:ok`.
+  """
+  @spec quota_poll_failing(map(), pos_integer(), term()) :: :ok
+  def quota_poll_failing(snapshot, failures, reason) do
+    escalate_event("quota_poll_failing/3", snapshot, [task_ref: "system"], fn _task_id ->
+      subject = "Anthropic quota poll failing — #{failures} consecutive cycles"
+
+      body =
+        [
+          "`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll has failed " <>
+            "#{failures} consecutive cycles: #{describe_reason(reason)}.",
+          "The dispatch gate is now running on an aging snapshot. The 5h rule fails " <>
+            "open on age, but a 7d hold cannot lift without a fresh polled snapshot.",
+          "Check `arb quota` for the last successful poll's source and timestamp, and " <>
+            "confirm the account-wide OAuth token this install polls with (the operator's " <>
+            "`~/.claude/.credentials.json`, not a workspace token) is still valid."
+        ]
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
   Escalate a card that Autopilot cannot get out of Ready (bd-a40f4q).
 
   Fired by `Arbiter.Board.Autopilot` when a promoted card's dispatch keeps

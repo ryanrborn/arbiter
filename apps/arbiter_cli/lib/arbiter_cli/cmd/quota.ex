@@ -109,7 +109,22 @@ defmodule ArbiterCli.Cmd.Quota do
         # bd-b7umwj: staleness is scoped per window, and the two windows go
         # opposite ways — say which is which rather than the old blanket
         # "dispatches may be incorrectly held", which was backwards for both.
-        " ⚠️ STALE (older than the gate trusts — the 5h gate fails open; a 7d hold stays in force)"
+        base =
+          " ⚠️ STALE (older than the gate trusts — the 5h gate fails open; a 7d hold stays in force)"
+
+        # bd-4fbpto: that alone can't tell "nothing has worked in a while"
+        # apart from "the poll is fine, it just didn't carry a usable 5h
+        # figure this cycle" — both look identical (STALE, old `captured_at`)
+        # without this. Say which one it is.
+        detail =
+          if q["oauth_poll_fresh"] == true do
+            " — /api/oauth/usage last succeeded #{q["oauth_captured_at"] || "—"}"
+          else
+            " — no fresh data from any source (last success: " <>
+              "#{capture_source_label(q["capture_source"])} at #{captured_at_str})"
+          end
+
+        base <> detail
       else
         ""
       end
