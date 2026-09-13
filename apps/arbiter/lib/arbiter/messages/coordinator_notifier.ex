@@ -684,6 +684,61 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     end)
   end
 
+  @doc """
+  Escalate a merged-but-unverified task (bd-9so315).
+
+  Fired once, by whichever close path merged a task carrying
+  `verify_after_deploy: true`. The change landed, but its only execution
+  context is the long-lived server, so nothing has run the new code yet — this
+  is the notification that turns "merged" into an explicit, assigned
+  restart-and-observe.
+
+  Addressed `:escalation` (`to_ref: "coordinator"`) rather than a broadcast
+  notification: an unobserved deploy is an action item, and the whole failure
+  mode this addresses is a task that closed with nobody looking.
+
+  `merged_at` is when the merge landed; the body states whether the **running**
+  server booted before that (restart required first) or after (the code is
+  already live and can be observed as-is).
+  """
+  @spec awaiting_verification(map(), String.t() | nil, DateTime.t()) :: :ok
+  def awaiting_verification(snapshot, mr_ref, merged_at) do
+    escalate_event("awaiting_verification/3", snapshot, fn task_id ->
+      booted_at = Arbiter.Boot.Time.booted_at()
+      stale? = DateTime.compare(booted_at, merged_at) == :lt
+
+      restart_line =
+        if stale? do
+          "The running server booted before this merge (boot #{iso(booted_at)}, " <>
+            "merge #{iso(merged_at)}), so it is still on the old code — " <>
+            "**restart it first**, then observe."
+        else
+          "The running server booted after this merge (boot #{iso(booted_at)}, " <>
+            "merge #{iso(merged_at)}), so the merged code is already loaded — " <>
+            "observe it directly; no restart needed."
+        end
+
+      body =
+        [
+          "#{title_for(task_id)} merged, but it is flagged `verify_after_deploy` — " <>
+            "its only execution context is the long-lived server, so the merge alone " <>
+            "proves nothing. The task is parked at `awaiting_verification` and will " <>
+            "NOT close until a restart-and-observe result is recorded.",
+          mr_ref && "PR/MR: #{mr_ref}",
+          restart_line,
+          "Record the result:",
+          "  arb issue verify #{task_id} --observed \"<what you saw on the running server>\"",
+          "  arb issue verify #{task_id} --failed   \"<what was still wrong>\"",
+          "`--observed` closes the task and persists the evidence; `--failed` " <>
+            "persists it and reopens the task for another attempt."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+
+      {"#{task_id} merged — awaiting verification (restart and observe)", body}
+    end)
+  end
+
   defp block_subject(task_id, reason), do: "#{task_id} merge blocked — #{block_label(reason)}"
 
   # The dedupe key (bd-brwx7w). Reasons in one family describe the same
@@ -1393,6 +1448,11 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   # The task's human-readable title, falling back to the task id when the Issue
   # row can't be read (e.g. ad-hoc runs, or a workspace with no tracker row).
+  # Second-precision UTC — the restart-vs-merge comparison is an ordering
+  # question, and microseconds only make the escalation body harder to read.
+  defp iso(%DateTime{} = dt),
+    do: dt |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
   defp title_for(task_id) do
     case Ash.get(Issue, task_id) do
       {:ok, %{title: title}} when is_binary(title) and title != "" -> title

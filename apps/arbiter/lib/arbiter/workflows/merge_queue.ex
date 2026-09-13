@@ -216,6 +216,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Mergers
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
   alias Arbiter.Worker.PrimarySync
@@ -1460,9 +1461,27 @@ defmodule Arbiter.Workflows.MergeQueue do
         # upstream-close is correct and should remain.
         close_upstream = task.tracker_type != :jira
 
-        case Ash.update(task, %{close_upstream: close_upstream}, action: :close) do
-          {:ok, _closed} ->
+        # bd-9so315: `finalize_merged/2` closes the task exactly as before
+        # unless it carries `verify_after_deploy`, in which case it parks at
+        # `:awaiting_verification` and escalates the restart-and-observe.
+        result =
+          Verification.finalize_merged(task,
+            close_upstream: close_upstream,
+            mr_ref: item.mr_ref,
+            merged_at: DateTime.utc_now()
+          )
+
+        case result do
+          {:ok, :closed, _closed} ->
             broadcast_merge_queue_event(state, {:task_closed_by_merge_queue, item.task_id})
+
+          {:ok, :awaiting_verification, _awaiting} ->
+            Logger.info(
+              "MergeQueue: task #{item.task_id} merged but flagged verify_after_deploy — " <>
+                "parked at :awaiting_verification pending a restart-and-observe result"
+            )
+
+            broadcast_merge_queue_event(state, {:task_awaiting_verification, item.task_id})
 
           {:error, reason} ->
             Logger.warning("MergeQueue: failed to close task #{item.task_id}: #{inspect(reason)}")
