@@ -166,7 +166,7 @@ inventory cannot silently rot.
 | W4 | Re-read the live head before deciding | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2777` (`resolve_against_live_head`) | bd-ch9pmk AC4: deciding against a head already seconds stale | A forge error keeps the previous reading | Falls through to W5 | 1 |
 | W5 | Content equality (base-merge-only) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2864` (`base_merge_only?`), via `apps/arbiter/lib/arbiter/mergers/net_diff.ex:90` (`equivalent?`) | bd-6bg54c: a merge from base changes the head but not the content | **Fails closed** on any diff-fetch error → a transient forge error becomes a full re-review | Returns false → W6 | 1 |
 | W6 | Unreviewed head → back to review, else page once | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2910` (`resolve_stale_reviewed_head`) | bd-6bg54c: the 303-retry loop | **Fails the worker** with `{:unreviewed_head, head}` and buys a full re-review; when the resume budget is spent, pages and stops | `Worker.fail` + resume, or one escalation | 2 |
-| W7 | Forge atomic precondition (`expected_sha`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1274` (`apply_guarded_merge`) | The residual poll→merge window | A racing push turns into a merge failure | Retry next poll; page at `apps/arbiter/lib/arbiter/worker/watchdog.ex:274` (`default_merge_fail_notify_threshold`), then **`max_polls: :infinity`** and re-page every cadence | 2 |
+| W7 | Forge atomic precondition (`expected_sha`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1274` (`apply_guarded_merge`) | The residual poll→merge window | A racing push turns into a merge failure | **Unbounded retrying.** Retries the merge call every poll; `apps/arbiter/lib/arbiter/worker/watchdog.ex:274` (`default_merge_fail_notify_threshold`) gates only the *page*, after which **`max_polls: :infinity`** and a re-page every cadence — no terminal state | 2 |
 | W8 | Latch suspension for fleet-authored pushes | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3105` (`clear_reviewed_latch`) | Deadlocking the fleet's own rebase/fix-pass against its own guard | The guard is **deliberately** scoped to advances the fleet did not initiate. The consequence is that the CI `fix_pass` path (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1850` (`clear_reviewed_latch`)) re-latches to the fix-pass head and merges content no reviewer saw — a deliberate scoping choice, but the same shape #1498 exists to stop. §4.5 argues it should change | Baseline floats to the new head | 2 |
 | W9 | Baseline tracking per poll | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3022` (`track_reviewed_baseline`) | Losing the baseline across polls | Re-pins to a stale head while suspended | — | 2 |
 | W10 | `via_review_gate` outcome pinning | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1117` (`effective_outcome`) | A gate-approved lane whose forge shows no approval | Approval never lapses ⇒ W3's memo never invalidates (the bd-6bg54c cause-B mechanism) | — | 1 |
@@ -221,7 +221,7 @@ inventory cannot silently rot.
 
 ### 2.6 What the inventory shows
 
-Counting the 47 rows above:
+Counting the 60 rows above:
 
 * **Four independent implementations of "has this commit been reviewed?"** —
   W1–W6, M1–M6, R1, and ExternalReview's baseline write
@@ -231,12 +231,22 @@ Counting the 47 rows above:
 * **One column, two meanings.** `last_reviewed_sha` is simultaneously
   ReviewPatrol's "engagement cursor" (R1) and the merge guard's "authorisation
   baseline" (W3, M2). A patrol tick can move a merge authorisation.
-* **Exactly one guard retries without any bound: M3.** Every other bound exists;
-  they are simply scattered across ten module attributes with no shared
-  vocabulary.
-* **Eleven guards convert a guard decision into a failed run** (G2, G3, G6, G8,
-  G9–G12 terminal arms, G14, G15/G16, W6, W12). That is the mechanism behind all
-  `$325.82`.
+* **Two guards retry without any bound: M3 and W7.** M3 leaves the queue item's
+  status untouched, so the same refused merge is re-attempted every tick. W7's
+  *paging* is bounded (`apps/arbiter/lib/arbiter/worker/watchdog.ex:274`
+  (`default_merge_fail_notify_threshold`), then a cadence) but its *retrying* is
+  not: the error arm of `apply_guarded_merge/2` only increments a counter
+  (`apps/arbiter/lib/arbiter/worker/watchdog.ex:1287` (`merge_fail_count`)) and
+  re-issues the merge call on the next poll, and the paging branch lifts
+  `apps/arbiter/lib/arbiter/worker/watchdog.ex:1331` (`max_polls`) to `:infinity`
+  so the polls never run out. W17 lifts `max_polls` the same way but *is* bounded
+  on attempts (`apps/arbiter/lib/arbiter/worker/watchdog.ex:265`
+  (`default_max_auto_resolve_attempts`)) and merely watches afterwards; that is
+  the class-E shape, and it does not cover W7. Every other bound exists; they are
+  simply scattered across ten module attributes with no shared vocabulary.
+* **Thirteen guards convert a guard decision into a failed run** — G2, G3, G6,
+  G8, the four verdict-guard terminal arms (G9, G10, G11, G12), G14, G15, G16,
+  W6 and W12. That is the mechanism behind all `$325.82`.
 * **One guard trades correctness away on purpose:** W8/M4 suspend the check for
   fleet-authored pushes — deliberately, to stop the fleet deadlocking against its
   own rebase — and the CI `fix_pass` path uses the same exemption, so a
@@ -498,8 +508,11 @@ parsing problem. Class C removes it without touching the parser.
 ### 5.1 The two invariants
 
 **I1 — Nothing retries indefinitely.** Every refusal path has a named bound `N`
-and a terminal state. Today M3 has none; W7 and W17 lift `max_polls` to
-`:infinity` and re-page on a cadence (bounded *paging*, unbounded *retrying*).
+and a terminal state. Today **M3 and W7** have none. Both lift or ignore their
+poll ceiling and re-page on a cadence: bounded *paging*, unbounded *retrying*.
+W17 lifts `max_polls` the same way but is bounded on *attempts*, which is the
+distinction the policy turns on — watching a parked item forever is fine, and is
+class E's terminal state; re-issuing the action forever is not.
 
 **I2 — A guard never strands approved work as a failed run.** When a guard gives
 up, the terminal state is **parked + escalated once**, with the run recorded as
@@ -534,7 +547,7 @@ two is most of chain A.
 
 | Class | Guards | Policy | N | Terminal state |
 |---|---|---|---|---|
-| **A — merge authorisation** | W1–W7, M1–M3, the coverage predicate, `expected_sha` | **Fail closed** with one escalation | `{:unknown, _}` bounded at **5 polls**; `{:uncovered, _}` → **1** review round, then escalate | Parked, coverage gap named, PR mergeable by a human or by `arb review cover` |
+| **A — merge authorisation** | W1–W7, M1–M3, the coverage predicate, `expected_sha` | **Fail closed** with one escalation | *Predicate:* `{:unknown, _}` bounded at **5 polls**; `{:uncovered, _}` → **1** review round. *Merge call* (W7's `expected_sha`, M3's refused merge): **5 consecutive failed merge attempts** | Parked, coverage gap named, PR mergeable by a human or by `arb review cover` |
 | **B — review admissibility** | G1, G2 | **Fail open** with one escalation | **1** | Review proceeds (or is skipped); a git/forge error never strands a completion. G2 changes: an absorbed branch completes with an escalation instead of a `:request_changes` run failure |
 | **C — verdict integrity** | G5–G13 | **Closed on content** (never accept a malformed APPROVE) + **open on liveness** (never fail the run) | **1** re-prompt per guard, **1** escalation | Round recorded honestly (`converged: false`), PR parked, human decides |
 | **D — progress** | G14, G15, G16, C1, C3 | **Fail open** with one escalation | **1** nudge / **cap** rounds, plus C3's identical-findings digest | Parked; never re-dispatch an identical round |
@@ -547,6 +560,18 @@ Why each side:
   (#1498) is a real correctness hole. But it is closed *with a terminal park*,
   not with a retry: the 303-retry loop and the five hand-merges both came from
   treating "refuse" as "try again in a minute".
+
+  Class A carries **two distinct bounds**, because it answers two distinct
+  questions and today only the first is bounded at all. The **coverage
+  predicate** bound (5 polls / 1 review round) governs *"may this head merge?"*.
+  The **merge-call** bound governs *"did the forge accept the merge we were
+  authorised to make?"* — W7's `expected_sha` precondition failing, or M3's
+  refused merge. That path is unbounded today; under the policy it parks after
+  `N = 5` consecutive failures, escalates once, and stops re-issuing the call.
+  The Watchdog may keep *watching* the PR after that (`max_polls: :infinity` is
+  fine for watching, per I1) but must not keep *merging*. `merge_fail_count`
+  already counts exactly the right thing — it just gates the page rather than a
+  terminal state.
 * **B is open** because a git hiccup that blocks a finished, committed piece of
   work costs a whole run and protects nothing — the review is a quality gate,
   not an authorisation gate, and the authorisation gate (A) is still downstream.
@@ -609,7 +634,11 @@ paying for itself in six months.
 
 ### 6.2 Stays, unchanged
 
-* **`expected_sha` on `merge/2`** (W7) — atomicity, not authorisation.
+* **`expected_sha` on `merge/2`** (W7) — the *mechanism* stays: it is atomicity,
+  not authorisation, and the coverage model does not replace it. Its **retry
+  disposition changes** under class A: `merge_fail_count` becomes a terminal
+  bound (park + one escalation at `N = 5`) instead of only a paging threshold.
+  P6 owns that change, alongside M3's.
 * **The four verdict guards** (G9–G12) — they encode real review-quality rules;
   only their *terminal* behaviour changes (class C).
 * **`NetDiff`** — already correct, and the model leans on it harder.
@@ -652,13 +681,13 @@ verifies a merged change against it.
 | **P3** | **Shadow mode.** Watchdog and MergeQueue call `decide/3` alongside the existing guard and log disagreements. Behaviour unchanged | P1, P2 | P1 | D2 | **Restart-and-observe:** disagreement log line appears for a real base-merge PR and names both answers; zero disagreements on the exact-match path over ≥20 merges |
 | **P4** | **Read-path flip** behind `merge.coverage_enabled`. `decide/3` is authoritative; old guard still shadows | P3 proven live | P0 | D3 | **Restart-and-observe:** one fix-round PR and one base-merge PR merge on the first eligible poll with no `{:stale_reviewed_sha, …}` and no `{:unreviewed_head, …}` in the journal |
 | **P5** | Delete the Watchdog latch/suspension/memo/grace machinery (§6.1 rows 2–5) | P4 live ≥7 days, zero disagreements | P1 | D3 | `watchdog.ex` loses ≥250 lines; every deleted-guard test either deletes or re-points at `decide/3`; **restart-and-observe** one full approve→merge cycle |
-| **P6** | Delete the MergeQueue mirror; queue calls `decide/3`; **M3's unbounded retry becomes class A's bound + park** | P5 | P1 | D2 | A stale-coverage item reaches a terminal parked state within N ticks and escalates exactly once; **restart-and-observe** |
+| **P6** | Delete the MergeQueue mirror; queue calls `decide/3`; **bound both unbounded merge-call retries: M3's stale-SHA retry and W7's `merge_fail_count`** become class A's bound + park | P5 | P1 | D2 | A stale-coverage item reaches a terminal parked state within N ticks and escalates exactly once; a Watchdog whose `merge/2` keeps failing parks after 5 consecutive attempts, escalates once, and issues no further merge call (it may keep watching); no class-A row in the registry has an unbounded merge-call path; **restart-and-observe** |
 | **P7** | Post-approval `fix_pass` / conflict-resolver pushes stop suspending the guard; content-equal pushes write `:mechanical`, content-changing ones route to a scoped `S2..S3` re-review (§4.5) | P4 | P0 | D3 | A fix-pass commit is never merged without a coverage row; the re-review is delta-scoped; **restart-and-observe** on a real CI-failure PR |
 | **P8** | `Arbiter.Reviews.GuardRegistry` + the two conformance tests (§5.4) | — (parallel with P0–P2) | P1 | D2 | Every §2 guard has a row; a new refusal path without a row fails the suite; no row has an infinite bound |
 | **P9** | Apply class C to the ReviewGate terminal paths: `:review_gate_inconclusive` and the exhausted verdict guards park + escalate once instead of failing the run | P8 | P0 | D3 | No ReviewGate outcome sets `Run.status = :failed` on a task whose PR is approved; the 4 chain-B shapes each produce exactly one escalation; **restart-and-observe** |
 | **P10** | Apply class E/F audit: bound R2's CI-settle defer; confirm every remaining guard matches its registry row | P8 | P2 | D2 | Registry conformance test green with zero exemptions |
-| **P11** | `arb review cover <task> <sha> --reason` (the `:operator` kind) + `arb review coverage <task>` | P0 | P2 | D1 | Writing a row unblocks a parked class-A guard on the next poll |
-| **P12** | Demote `issues.last_reviewed_sha` to ReviewPatrol's cursor; remove every merge-path read; docs + moduledocs | P6, P7 | P2 | D1 | No merge path references the column; `ReviewedSha` module deleted |
+| **P11** | `arb review cover <task> <sha> --reason` (the `:operator` kind) + `arb review coverage <task>` | P0 | P2 | D1 | **Restart-and-observe:** writing a row for a really-parked PR unblocks its class-A guard on the next poll of the running coordinator |
+| **P12** | Demote `issues.last_reviewed_sha` to ReviewPatrol's cursor; remove every merge-path read; docs + moduledocs; re-anchor this doc's citations and §2's line counts against the post-P5/P6 source | P6, P7 | P2 | D1 | No merge path references the column; `ReviewedSha` module deleted; **restart-and-observe:** after a restart, one full approve→merge cycle completes with no `ReviewedSha` or `last_reviewed_sha` read on the merge path in the journal; `ReviewCoverageDesignTest` green |
 
 P4, P6, P7 and P9 are P0 because they are the ones that stop money burning.
 P5 is deliberately *not* P0: deleting is the last thing that happens, after the
