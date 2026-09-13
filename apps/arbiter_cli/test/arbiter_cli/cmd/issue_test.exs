@@ -42,6 +42,21 @@ defmodule ArbiterCli.Cmd.IssueTest do
       assert out =~ "bd-1"
     end
 
+    # bd-9so315
+    test "verify routes to the verify endpoint" do
+      stub_post(
+        "/api/issues/bd-1/verify",
+        %{"id" => "bd-1", "title" => "T", "status" => "closed"},
+        200
+      )
+
+      {out, _err, code} =
+        capture(fn -> Issue.run(["verify", "bd-1", "--observed", "saw it live"]) end)
+
+      assert code == 0
+      assert out =~ "bd-1"
+    end
+
     test "no subcommand errors with a usage hint" do
       {_out, err, code} = capture(fn -> Issue.run([]) end)
       assert code == 1

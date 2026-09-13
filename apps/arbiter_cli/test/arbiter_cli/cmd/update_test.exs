@@ -184,4 +184,27 @@ defmodule ArbiterCli.Cmd.UpdateTest do
 
     assert exit_code == 0
   end
+  # bd-9so315
+  describe "--verify-after-deploy" do
+    test "sets the flag" do
+      stub_patch("/api/issues/bd-1", %{"id" => "bd-1", "verify_after_deploy" => true})
+
+      {out, _err, code} =
+        capture(fn -> Update.edit_issue(["bd-1", "--verify-after-deploy", "--json"]) end)
+
+      assert code == 0
+      assert {:ok, %{"verify_after_deploy" => true}} = Jason.decode(out)
+    end
+
+    test "--no-verify-after-deploy clears it" do
+      stub_patch("/api/issues/bd-1", %{"id" => "bd-1", "verify_after_deploy" => false})
+
+      {out, _err, code} =
+        capture(fn -> Update.edit_issue(["bd-1", "--no-verify-after-deploy", "--json"]) end)
+
+      assert code == 0
+      assert {:ok, %{"verify_after_deploy" => false}} = Jason.decode(out)
+    end
+  end
+
 end

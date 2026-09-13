@@ -583,6 +583,73 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  # bd-9so315 — post-merge verification over REST (the `arb` CLI's transport).
+  describe "verify_after_deploy over REST" do
+    test "create + patch set the flag and it is rendered", %{conn: conn, ws: ws} do
+      conn1 =
+        post(conn, ~p"/api/issues", %{
+          title: "flagged",
+          workspace_id: ws.id,
+          verify_after_deploy: true
+        })
+
+      body = json_response(conn1, 201)
+      assert body["verify_after_deploy"] == true
+
+      conn2 = patch(conn, ~p"/api/issues/#{body["id"]}", %{verify_after_deploy: false})
+      assert json_response(conn2, 200)["verify_after_deploy"] == false
+    end
+  end
+
+  describe "POST /api/issues/:id/verify" do
+    setup %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "park me", workspace_id: ws.id, verify_after_deploy: true})
+
+      {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
+      {:ok, awaiting: awaiting}
+    end
+
+    test "observed closes the task and persists the evidence", %{conn: conn, awaiting: task} do
+      conn =
+        post(conn, ~p"/api/issues/#{task.id}/verify", %{
+          outcome: "observed",
+          evidence: "restarted; new capture_source path fires"
+        })
+
+      body = json_response(conn, 200)
+      assert body["status"] == "closed"
+      assert body["verification_outcome"] == "observed"
+      assert body["verification_evidence"] == "restarted; new capture_source path fires"
+    end
+
+    test "failed reopens the task and persists the evidence", %{conn: conn, awaiting: task} do
+      conn =
+        post(conn, ~p"/api/issues/#{task.id}/verify", %{
+          outcome: "failed",
+          evidence: "doctor still green with zero repos"
+        })
+
+      body = json_response(conn, 200)
+      assert body["status"] == "open"
+      assert body["verification_outcome"] == "failed"
+      assert body["verification_evidence"] == "doctor still green with zero repos"
+    end
+
+    test "a task that is not awaiting verification is rejected", %{conn: conn, ws: ws} do
+      {:ok, other} = Ash.create(Issue, %{title: "not parked", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues/#{other.id}/verify", %{outcome: "observed", evidence: "x"})
+
+      assert json_response(conn, 422)
+    end
+
+    test "blank evidence is rejected", %{conn: conn, awaiting: task} do
+      conn = post(conn, ~p"/api/issues/#{task.id}/verify", %{outcome: "observed", evidence: "  "})
+      assert json_response(conn, 422)
+    end
+  end
+
   describe "GET /api/issues/ready" do
     test "returns only open issues with no open blockers", %{conn: conn, ws: ws} do
       {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})
