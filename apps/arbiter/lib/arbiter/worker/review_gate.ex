@@ -523,6 +523,22 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp durable_lines(_), do: {:error, :no_run_id}
 
+  # bd-869mmg round 2: the counts a `:no_verdict` outcome saw, captured once at
+  # the point of the failed scan so the eventual escalation message (built
+  # later, possibly after a re-prompt) can report exactly what was checked
+  # instead of re-deriving it (and possibly a different run's counts, or an
+  # unconditional "output was received" that is false when nothing was
+  # captured at all).
+  defp verdict_scan_info(lines, run_id) do
+    durable =
+      case durable_lines(run_id) do
+        {:ok, durable} -> length(durable)
+        {:error, _} -> nil
+      end
+
+    %{run_id: run_id, memory: length(lines), durable: durable}
+  end
+
   # The run row id of the reviewer pass we are finishing — the key the durable
   # transcript is filed under. The reviewer runs as its own worker under a
   # synthetic task id (`<task>#review`, `#r2`, `#v2`), and its Run row is
@@ -533,7 +549,12 @@ defmodule Arbiter.Worker.ReviewGate do
 
     Arbiter.Workers.Run
     |> Ash.Query.filter(task_id == ^id)
-    |> Ash.Query.sort(started_at: :desc)
+    # bd-869mmg round 2: `started_at` alone can tie (two Run rows for
+    # DIFFERENT task_ids inserted in the same millisecond does not matter
+    # here since the filter already narrows to `id`'s own rows, but a
+    # deterministic secondary key means re-running this query never flips
+    # which of two SAME-task_id rows — e.g. a duplicate spawn — is picked).
+    |> Ash.Query.sort(started_at: :desc, inserted_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> case do
@@ -625,6 +646,10 @@ defmodule Arbiter.Worker.ReviewGate do
       reviewer_pid: nil,
       lines: [],
       reported?: false,
+      # bd-869mmg round 2: the run id + line counts a `:no_verdict` scan saw,
+      # set only when a pass actually concedes no parseable verdict — see
+      # `verdict_scan_info/2` and `attempt_finish/2`.
+      verdict_scan: nil,
       # The short HEAD SHA of the branch at the time the current reviewer was
       # spawned. Set by handle_continue(:spawn_reviewer) and updated by
       # finish_revise/1 after each revise round. Used to:
@@ -977,9 +1002,9 @@ defmodule Arbiter.Worker.ReviewGate do
     # conceding and logs the disagreement when there is one, so the escalation
     # blames the right party.
     lines = Enum.reverse(state.lines)
+    run_id = reviewer_run_id(state)
 
-    {verdict, _source} =
-      parse_verdict(lines, reviewer_run_id(state), "reviewer task=#{state.current_id}")
+    {verdict, _source} = parse_verdict(lines, run_id, "reviewer task=#{state.current_id}")
 
     case verdict do
       :no_verdict ->
@@ -993,7 +1018,14 @@ defmodule Arbiter.Worker.ReviewGate do
             {:done, finish(state, {:no_verdict, infra_failure_message(reason)})}
 
           _ ->
-            maybe_reprompt(state, :no_verdict)
+            # bd-869mmg round 2: carry the run id and scanned line counts this
+            # pass already resolved forward onto state, so a final `:no_verdict`
+            # escalation (after the re-prompt budget is spent) reports the same
+            # counts it saw rather than re-querying `reviewer_run_id/1` a second
+            # time (which could resolve a *different* run if another pass's Run
+            # row landed in between) or claiming receipt unconditionally when
+            # nothing was actually captured.
+            maybe_reprompt(%{state | verdict_scan: verdict_scan_info(lines, run_id)}, :no_verdict)
         end
 
       {:approve, findings} = verdict ->
@@ -1629,19 +1661,53 @@ defmodule Arbiter.Worker.ReviewGate do
   # that out. Naming the transcript's location here means the NEXT reader goes
   # straight to the log instead of trusting a message that says "no verdict."
   defp maybe_reprompt(state, _reason) do
-    {:done,
-     finish(
-       state,
-       {:no_verdict,
-        "Reviewer output was received but no parseable VERDICT line was found in it (checked " <>
-          "both the live capture and the durable transcript), even after a verdict re-prompt. " <>
-          transcript_location_note(state)}
-     )}
+    {:done, finish(state, {:no_verdict, no_verdict_scan_message(state)})}
   end
+
+  # bd-869mmg round 2: "output was received" is only true when the scan
+  # actually captured something. Report the real counts either way instead of
+  # asserting receipt unconditionally (finding: several existing paths reach
+  # this with 0 live and 0 durable lines, where the old fixed wording claimed
+  # the opposite of the truth).
+  defp no_verdict_scan_message(%{verdict_scan: %{memory: 0, durable: durable}} = state)
+       when durable in [0, nil] do
+    "Reviewer produced no captured output at all (0 live line(s), " <>
+      durable_count_desc(durable) <>
+      "), even after a verdict re-prompt. " <> transcript_location_note(state)
+  end
+
+  defp no_verdict_scan_message(%{verdict_scan: %{memory: memory, durable: durable}} = state) do
+    "Reviewer output was received (#{memory} live line(s), " <>
+      durable_count_desc(durable) <>
+      ") but no parseable VERDICT line was found in it, even after a verdict re-prompt. " <>
+      transcript_location_note(state)
+  end
+
+  defp no_verdict_scan_message(state) do
+    "Reviewer output was received but no parseable VERDICT line was found in it (checked " <>
+      "both the live capture and the durable transcript), even after a verdict re-prompt. " <>
+      transcript_location_note(state)
+  end
+
+  defp durable_count_desc(nil), do: "durable transcript could not be read"
+  defp durable_count_desc(n), do: "#{n} durable line(s)"
 
   # Best-effort pointer to the durable per-run transcript for this pass, so a
   # genuine `:no_verdict` names where to look rather than leaving the reader to
-  # assume the reviewer produced nothing at all.
+  # assume the reviewer produced nothing at all. Prefers the run id already
+  # resolved (and stashed in `verdict_scan`) by the scan that produced this
+  # escalation, so the path named is provably the transcript that was checked
+  # rather than whatever `reviewer_run_id/1` resolves to NOW (which can differ
+  # if another pass's Run row landed in between).
+  defp transcript_location_note(%{verdict_scan: %{run_id: run_id}})
+       when is_binary(run_id) and run_id != "" do
+    "Durable transcript: #{OutputLog.path_for(run_id)}"
+  end
+
+  defp transcript_location_note(%{verdict_scan: %{run_id: nil}}) do
+    "No run id could be resolved for this pass, so the durable transcript could not be located."
+  end
+
   defp transcript_location_note(state) do
     case reviewer_run_id(state) do
       run_id when is_binary(run_id) and run_id != "" ->
@@ -2201,7 +2267,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     Run
     |> Ash.Query.filter(task_id == ^task_id)
-    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.sort(started_at: :desc, inserted_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> List.first()

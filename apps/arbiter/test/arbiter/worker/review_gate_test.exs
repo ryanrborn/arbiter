@@ -1544,6 +1544,12 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert findings =~ "output was received"
       assert findings =~ "Durable transcript:"
 
+      # bd-869mmg round 2: the claim must be backed by the actual counts the
+      # final scan saw, not an unconditional assertion — this fixture's
+      # re-prompt pass genuinely emits 2 lines, so the message must say so
+      # rather than a generic "checked both" with no numbers.
+      assert findings =~ "live line(s)"
+
       # The re-prompt WAS attempted before escalating — its run row exists.
       reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
       runs = Ash.read!(Arbiter.Workers.Run)

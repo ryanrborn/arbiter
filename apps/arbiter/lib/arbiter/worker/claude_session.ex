@@ -583,11 +583,24 @@ defmodule Arbiter.Worker.ClaudeSession do
   # fork's event schema, not this one — `agy`'s assistant text already had
   # per-line buffering before this change (`buffer_gemini_display/2`'s
   # `"event" => "step_update"` clause above, live since bd-2fzwlc). What
-  # actually made ReviewGate report `:no_verdict` for that specific run —
-  # something upstream of parsing, in the live PubSub capture or in
-  # `reviewer_run_id/1`'s durable-transcript lookup (`review_gate.ex:526`) —
-  # could not be reproduced from the artifacts on disk (there is no captured
-  # Ash `Run` row or PubSub timing for that run to inspect). A non-delta
+  # actually made ReviewGate report `:no_verdict` for that specific run is
+  # still open, and it is NOT a `reviewer_run_id/1` resolution miss: the dev
+  # DB (`worker_runs`) has exactly one row for task_id `bd-atyrrq#review`
+  # (id `72947341-…`, started_at 22:20:47Z) — no tie, no ambiguity — and
+  # `reviewer_run_id/1`'s query resolves it cleanly today. A second row,
+  # `bd-atyrrq#review#v2` (id `f752e0c6-…`, started 22:25:47Z, ~5 min later —
+  # the length of the first pass's own session), is Arbiter's own verdict
+  # re-prompt firing, which means the FIRST pass's parse genuinely returned
+  # `:no_verdict` at the time in production, against a transcript that parses
+  # cleanly today with none of this change's buffering involved. That
+  # re-prompt pass's own durable transcript (`f752e0c6-….log`) then stalled
+  # waiting on a background `mix precommit` task and closed with no verdict
+  # of its own — a second, independent failure, not a repeat of the first.
+  # So the surviving question — why the first pass's parse missed a verdict
+  # that both `parse_verdict/1` and the durable-transcript fallback (live
+  # since bd-6dxit2, 3 days before this incident) handle correctly today —
+  # has no artifact left to answer it: no PubSub timing, and no record of
+  # which coordinator build was actually running that pass. A non-delta
   # message (`"delta"` absent/false) is already a complete, standalone
   # utterance (see the plain-content test cases), so it flushes immediately
   # rather than waiting on a DONE marker this schema does not have; any
