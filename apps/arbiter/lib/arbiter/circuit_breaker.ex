@@ -131,8 +131,11 @@ defmodule Arbiter.CircuitBreaker do
       description:
         "Pre-flight auth-check escalation raised when Agents.Preflight refuses a dispatch. " <>
           "Bounds the bd-8lnnnt shape: 14 identical pages in 75 minutes for one " <>
-          "exhausted usage window.",
-      limit: 3,
+          "exhausted usage window. The default sits well above the retry volume " <>
+          "bd-8lnnnt's own uncleared-page dedupe already absorbs, so this only fires on a " <>
+          "genuine runaway rather than adding a second page to a condition that is " <>
+          "already paged exactly once.",
+      limit: 10,
       window_ms: @hour
     },
     %{
