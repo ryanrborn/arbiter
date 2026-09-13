@@ -321,7 +321,13 @@ defmodule Arbiter.Tasks.IssueTest do
     end
 
     test ":promote_to_ready flips the flag and touches nothing else", %{ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "refine me", workspace_id: ws.id, priority: 1})
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "refine me",
+          workspace_id: ws.id,
+          priority: 1,
+          acceptance: "- it works"
+        })
 
       assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
 
@@ -332,10 +338,108 @@ defmodule Arbiter.Tasks.IssueTest do
     end
 
     test ":promote_to_ready is idempotent — promoting twice is not an error", %{ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "twice", workspace_id: ws.id})
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "twice", workspace_id: ws.id, acceptance: "- done"})
 
       {:ok, once} = Ash.update(issue, %{}, action: :promote_to_ready)
       assert {:ok, twice} = Ash.update(once, %{}, action: :promote_to_ready)
+      assert twice.refined == true
+    end
+  end
+
+  # bd-7mbrlg — the follow-up-rate investigation found 72.5% of issues have no
+  # acceptance criteria, so ReviewGate's `:unmet_criteria` / `:missing_criteria`
+  # guards rarely engage. Require ACs (or an explicit waiver) before a
+  # reviewable issue can leave Backlog.
+  describe ":promote_to_ready requires acceptance criteria (bd-7mbrlg)" do
+    test "refuses a bug/feature/chore with blank acceptance and no waiver", %{ws: ws} do
+      for type <- [:bug, :feature, :chore] do
+        {:ok, issue} =
+          Ash.create(Issue, %{title: "no ACs (#{type})", workspace_id: ws.id, issue_type: type})
+
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.update(issue, %{}, action: :promote_to_ready)
+
+        assert err |> Exception.message() |> String.contains?("acceptance criteria")
+      end
+    end
+
+    test "task/decision/epic promote fine with blank acceptance (exempt)", %{ws: ws} do
+      for type <- [:task, :decision, :epic] do
+        {:ok, issue} =
+          Ash.create(Issue, %{title: "exempt (#{type})", workspace_id: ws.id, issue_type: type})
+
+        assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
+        assert promoted.refined == true
+        assert promoted.acceptance_waived == nil
+      end
+    end
+
+    test "promotes fine once acceptance criteria are present", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "has ACs",
+          workspace_id: ws.id,
+          issue_type: :bug,
+          acceptance: "- the bug is fixed"
+        })
+
+      assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert promoted.refined == true
+      assert promoted.acceptance_waived == nil
+    end
+
+    test "an explicit waiver with a reason allows promotion and is persisted", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "waived", workspace_id: ws.id, issue_type: :feature})
+
+      assert {:ok, promoted} =
+               Ash.update(issue, %{acceptance_waived: "spike, no user-facing behavior"},
+                 action: :promote_to_ready
+               )
+
+      assert promoted.refined == true
+      assert promoted.acceptance_waived == "spike, no user-facing behavior"
+    end
+
+    test "a blank waiver string is rejected same as no waiver", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "blank waiver", workspace_id: ws.id, issue_type: :chore})
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.update(issue, %{acceptance_waived: "   "}, action: :promote_to_ready)
+    end
+
+    test "D0 work is auto-waived with a standard reason", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "trivial",
+          workspace_id: ws.id,
+          issue_type: :chore,
+          difficulty: 0
+        })
+
+      assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert promoted.refined == true
+      assert promoted.acceptance_waived =~ "D0"
+    end
+
+    test "re-promoting an already-refined issue is still idempotent even with no ACs/waiver", %{
+      ws: ws
+    } do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "grandfathered",
+          workspace_id: ws.id,
+          issue_type: :bug,
+          acceptance: "- ok"
+        })
+
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      # Simulate a pre-existing Ready card that predates the rule and has no ACs.
+      {:ok, grandfathered} = Ash.update(refined, %{acceptance: ""})
+
+      assert {:ok, twice} = Ash.update(grandfathered, %{}, action: :promote_to_ready)
       assert twice.refined == true
     end
   end

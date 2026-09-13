@@ -213,6 +213,7 @@ defmodule ArbiterCli.Output do
       {"Findings (notes)", findings},
       {"Description", issue["description"]},
       {"Acceptance", issue["acceptance"]},
+      {"Acceptance waived", issue["acceptance_waived"]},
       {"QA notes", issue["qa_notes"]},
       {"Deployment notes", issue["deployment_notes"]}
     ]
@@ -222,6 +223,7 @@ defmodule ArbiterCli.Output do
     [
       {"Description", issue["description"]},
       {"Acceptance", issue["acceptance"]},
+      {"Acceptance waived", issue["acceptance_waived"]},
       {"Notes", issue["notes"]},
       {"QA notes", issue["qa_notes"]},
       {"Deployment notes", issue["deployment_notes"]}

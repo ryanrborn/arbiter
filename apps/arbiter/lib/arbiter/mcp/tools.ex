@@ -1895,7 +1895,8 @@ defmodule Arbiter.MCP.Tools do
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),
       workspace_id: i.workspace_id,
-      refined: i.refined
+      refined: i.refined,
+      acceptance_waived: i.acceptance_waived
     }
   end
 
@@ -1907,6 +1908,7 @@ defmodule Arbiter.MCP.Tools do
       title: i.title,
       description: i.description,
       acceptance: i.acceptance,
+      acceptance_waived: i.acceptance_waived,
       notes: i.notes,
       qa_notes: i.qa_notes,
       deployment_notes: i.deployment_notes,
