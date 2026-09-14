@@ -99,6 +99,28 @@ defmodule Arbiter.Messages.Message do
   actions do
     defaults [:read, :destroy]
 
+    # bd-cpt2ej: everything addressed to (`to_ref`) *or* about (`task_ref`) one
+    # task, newest first — the task detail page's MESSAGES panel. A named read
+    # action rather than another hand-rolled query so the filter lives on the
+    # resource and the LiveView goes through the domain like every other
+    # caller. Deliberately unfiltered by kind: "about this task" is the whole
+    # predicate, and a caller that wants only the mailbox family already has
+    # `thread/2`. Pure read — nothing here stamps `read_at`/`cleared_at`.
+    read :for_task do
+      argument :ref, :string, allow_nil?: false
+
+      argument :workspace_id, :string do
+        description "Optional workspace scope; nil means every workspace."
+      end
+
+      filter expr(
+               (to_ref == ^arg(:ref) or task_ref == ^arg(:ref)) and
+                 (is_nil(^arg(:workspace_id)) or workspace_id == ^arg(:workspace_id))
+             )
+
+      prepare build(sort: [inserted_at: :desc])
+    end
+
     create :create do
       primary? true
 
@@ -679,6 +701,32 @@ defmodule Arbiter.Messages.Message do
     query =
       case Keyword.get(opts, :workspace_id) do
         ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
+        _ -> query
+      end
+
+    Ash.read!(query)
+  end
+
+  @doc """
+  Every message addressed to (`to_ref`) or about (`task_ref`) `ref`, newest
+  first — the union `thread/2` does not cover, since a direction sent *to* a
+  task carries no `task_ref` of its own.
+
+  Reads through the `:for_task` action. Pure read: viewing a task's messages
+  never stamps `read_at`/`cleared_at`. Options: `workspace_id:` to scope to one
+  workspace, `limit:` to cap the rows returned.
+  """
+  def for_task(ref, opts \\ []) when is_binary(ref) do
+    query =
+      __MODULE__
+      |> Ash.Query.for_read(:for_task, %{
+        ref: ref,
+        workspace_id: Keyword.get(opts, :workspace_id)
+      })
+
+    query =
+      case Keyword.get(opts, :limit) do
+        n when is_integer(n) and n > 0 -> Ash.Query.limit(query, n)
         _ -> query
       end
 
