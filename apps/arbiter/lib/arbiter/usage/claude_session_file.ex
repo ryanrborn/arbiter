@@ -100,8 +100,26 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
     * **`modelUsage[model].costUSD`** breaks the same total down per model and is
       summed by the identical rule into `totals.model_costs`.
 
-  A file with no `cost-state` record in window still reconciles tokens, with
-  `cost_usd: nil` — graceful degradation, unchanged.
+  ### When there is no `cost-state` at all
+
+  Claude Code **2.1.270 stopped writing `cost-state` records**: the live
+  coordinator session carries none where its 2.1.26x predecessor carried 18. A
+  file with no in-window record therefore falls back to pricing its own deduped
+  token buckets through `Arbiter.Usage.ClaudePricing`, and says so —
+  `cost_source: :estimated`, and `cost_note_for/1` returns a note naming the
+  estimate. Precedence never changes: the CLI's number when it exists, the
+  estimate only when it does not, and `cost_usd: nil` (`cost_source: nil`) when
+  the model isn't in the price table either.
+
+  ## Per-day split — `by_day`
+
+  A coordinator session lives for days, so "how much" is only half the answer:
+  a row dated at *read* time files a week of spend on one day and falsifies
+  `arb usage --by day`. Every counted turn is therefore also bucketed by the
+  UTC day of its own `timestamp`, with the file's single authoritative cost
+  apportioned across those buckets by what each day's tokens are worth. The
+  shares sum back to `cost_usd` — this splits the total, it never recomputes
+  it.
 
   ## Forked / rolled-over sessions — use `:session_id`
 
@@ -114,6 +132,8 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   option and is unchanged.
   """
 
+  alias Arbiter.Usage.ClaudePricing
+
   @typedoc """
   Deduped token totals read off a session JSONL. Every token field is a
   non-negative integer (zero when the session produced no `assistant` usage).
@@ -122,10 +142,21 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   (an earlier run's turns in a `--resume`-shared file) — kept for the audit
   trail on the reconciled ledger row.
 
-  `cost_usd` / `model_costs` / `duration_ms` come off the file's `cost-state`
-  records (see the moduledoc) and are `nil` / `%{}` / `nil` when none is in
-  window — a genuine absence, never a fabricated zero. `cost_state_count` is how
-  many such records contributed, for the audit trail.
+  `model_costs` / `duration_ms` come off the file's `cost-state` records (see
+  the moduledoc) and are `%{}` / `nil` when none is in window.
+  `cost_state_count` is how many such records contributed, for the audit trail.
+
+  `cost_usd` is the file's one authoritative dollar figure and `cost_source`
+  says where it came from: `:cost_state` (the CLI's own number, reused
+  verbatim), `:estimated` (`Arbiter.Usage.ClaudePricing`, for the 2.1.270+
+  files that carry no `cost-state`), or `nil` when neither was possible — a
+  genuine absence, never a fabricated zero. `cost_note_for/1` turns that into
+  the note a ledger row should carry.
+
+  `by_day` splits the counted turns into UTC-day buckets, each with its own
+  token buckets, message count, `last_at` (the newest turn timestamp in that
+  day) and its apportioned share of `cost_usd`. It is `%{}` for a file whose
+  turns carry no parseable timestamp at all.
   """
   @type totals :: %{
           tokens_in: non_neg_integer(),
@@ -136,9 +167,25 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
           skipped_before_since: non_neg_integer(),
           model: String.t() | nil,
           cost_usd: float() | nil,
+          cost_source: :cost_state | :estimated | nil,
           model_costs: %{optional(String.t()) => float()},
           duration_ms: non_neg_integer() | nil,
-          cost_state_count: non_neg_integer()
+          cost_state_count: non_neg_integer(),
+          by_day: %{optional(Date.t()) => day_totals()}
+        }
+
+  @typedoc """
+  One UTC day's slice of a session file. `cost_usd` is that day's share of the
+  file's total (see `t:totals/0`), `nil` when the file has no cost at all.
+  """
+  @type day_totals :: %{
+          tokens_in: non_neg_integer(),
+          tokens_out: non_neg_integer(),
+          cache_creation_tokens: non_neg_integer(),
+          cache_read_tokens: non_neg_integer(),
+          message_count: non_neg_integer(),
+          cost_usd: float() | nil,
+          last_at: DateTime.t()
         }
 
   @no_cost_note "cost unavailable: reconciled from the on-disk session JSONL, " <>
@@ -155,6 +202,20 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   """
   @spec no_cost_note() :: String.t()
   def no_cost_note, do: @no_cost_note
+
+  @doc """
+  The `cost_note` a ledger row built from `totals` should carry.
+
+  `nil` when the cost is the CLI's own `cost-state` figure (nothing to explain),
+  `Arbiter.Usage.ClaudePricing.estimated_note/0` when it was derived from the
+  token buckets, and `no_cost_note/0` when there is no cost at all. Shared by
+  every writer so the provenance of a dollar figure — or of its absence — reads
+  the same everywhere.
+  """
+  @spec cost_note_for(totals()) :: String.t() | nil
+  def cost_note_for(%{cost_source: :cost_state}), do: nil
+  def cost_note_for(%{cost_source: :estimated}), do: ClaudePricing.estimated_note()
+  def cost_note_for(_totals), do: @no_cost_note
 
   @doc """
   Derive Claude Code's project-slug from a worker's cwd: replace every
@@ -328,15 +389,19 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   # double count; `cost_segments` keeps the running max per `cost-state`
   # `startTime` (see the moduledoc's cost section) and is folded in at the end.
   defp summarize(io, since, session_id) do
-    {_seen, totals, segments} =
+    acc =
       io
       |> IO.stream(:line)
-      |> Enum.reduce(
-        {MapSet.new(), blank_totals(), %{}},
-        &absorb_line(&1, &2, since, session_id)
-      )
+      |> Enum.reduce(blank_acc(), &absorb_line(&1, &2, since, session_id))
 
-    apply_cost_segments(totals, segments)
+    acc.totals
+    |> apply_cost_segments(acc.segments)
+    |> apply_token_estimate()
+    |> attach_days(acc.days)
+  end
+
+  defp blank_acc do
+    %{seen: MapSet.new(), totals: blank_totals(), segments: %{}, days: %{}, last_ts: nil}
   end
 
   defp blank_totals do
@@ -349,9 +414,11 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       skipped_before_since: 0,
       model: nil,
       cost_usd: nil,
+      cost_source: nil,
       model_costs: %{},
       duration_ms: nil,
-      cost_state_count: 0
+      cost_state_count: 0,
+      by_day: %{}
     }
   end
 
@@ -359,7 +426,10 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
     case decode(line) do
       {:ok, event} ->
         if own_session?(event, session_id) do
-          absorb_event(event, acc, since)
+          # Remember the newest line timestamp *before* absorbing: an
+          # `assistant` line that carries none is dated by the line before it
+          # rather than dropped out of the per-day split.
+          event |> absorb_event(remember_ts(acc, event), since)
         else
           # A copy of another session's line, carried into this file by a
           # rollover/fork. Counting it here bills its spend a second time.
@@ -368,6 +438,13 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
 
       _ ->
         acc
+    end
+  end
+
+  defp remember_ts(acc, event) do
+    case parse_timestamp(Map.get(event, "timestamp")) do
+      {:ok, ts} -> %{acc | last_ts: ts}
+      :error -> acc
     end
   end
 
@@ -385,33 +462,45 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
 
   defp absorb_event(
          %{"type" => "assistant", "message" => %{"id" => id, "usage" => usage} = msg} = event,
-         {seen, totals, segments},
+         acc,
          since
        )
        when is_binary(id) and is_map(usage) do
     cond do
-      MapSet.member?(seen, id) ->
+      MapSet.member?(acc.seen, id) ->
         # Streaming re-emit of an already-seen turn — skip, but still let a
         # later line backfill the model if we haven't seen one yet.
-        {seen, maybe_model(totals, msg), segments}
+        %{acc | totals: maybe_model(acc.totals, msg)}
 
       not in_window?(event, since) ->
         # A turn from an earlier run sharing this file (`--resume` appends).
         # Mark it seen so a re-emit that straddles the cutoff can't sneak the
         # earlier run's tokens in, but count nothing for it.
-        {MapSet.put(seen, id), Map.update!(totals, :skipped_before_since, &(&1 + 1)), segments}
+        %{
+          acc
+          | seen: MapSet.put(acc.seen, id),
+            totals: Map.update!(acc.totals, :skipped_before_since, &(&1 + 1))
+        }
 
       true ->
-        {MapSet.put(seen, id), add_usage(totals, usage, msg), segments}
+        %{
+          acc
+          | seen: MapSet.put(acc.seen, id),
+            totals: add_usage(acc.totals, usage, msg),
+            days: absorb_day(acc.days, usage, acc.last_ts)
+        }
     end
   end
 
-  defp absorb_event(%{"type" => "cost-state"} = event, {seen, totals, segments}, since) do
+  defp absorb_event(%{"type" => "cost-state"} = event, acc, since) do
     if cost_state_in_window?(event, since) do
-      {seen, Map.update!(totals, :cost_state_count, &(&1 + 1)),
-       absorb_cost_state(segments, event)}
+      %{
+        acc
+        | totals: Map.update!(acc.totals, :cost_state_count, &(&1 + 1)),
+          segments: absorb_cost_state(acc.segments, event)
+      }
     else
-      {seen, totals, segments}
+      acc
     end
   end
 
@@ -536,7 +625,8 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   defp merge_model_costs(acc, _usage), do: acc
 
   # Sum the per-segment maxima into the totals. No in-window `cost-state` at all
-  # leaves `cost_usd`/`duration_ms` nil — an honest absence, not a zero.
+  # leaves `cost_usd`/`duration_ms` nil — an honest absence that
+  # `apply_token_estimate/1` then gets a chance to fill in.
   defp apply_cost_segments(totals, segments) when map_size(segments) == 0, do: totals
 
   defp apply_cost_segments(totals, segments) do
@@ -550,9 +640,113 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
     %{
       totals
       | cost_usd: Enum.reduce(values, 0.0, &(&1.cost_usd + &2)),
+        cost_source: :cost_state,
         duration_ms: Enum.reduce(values, 0, &(&1.duration_ms + &2)),
         model_costs: model_costs
     }
+  end
+
+  # ---- token-priced fallback (bd-be804c follow-up) -----------------------
+
+  # Claude Code 2.1.270 writes no `cost-state` record at all, so the branch
+  # above never fires and the row used to land with `cost_usd: nil` next to
+  # six-figure token counts. Price the deduped buckets off
+  # `Arbiter.Usage.ClaudePricing`'s table instead — labelled `:estimated`, so
+  # nothing downstream can mistake it for the CLI's own figure. An unknown
+  # model still yields nil: an honest gap beats an invented rate.
+  defp apply_token_estimate(totals) do
+    if is_number(totals.cost_usd) do
+      totals
+    else
+      buckets =
+        Map.take(totals, [:tokens_in, :tokens_out, :cache_creation_tokens, :cache_read_tokens])
+
+      case ClaudePricing.cost_usd(totals.model, buckets) do
+        nil -> totals
+        cost -> %{totals | cost_usd: cost, cost_source: :estimated}
+      end
+    end
+  end
+
+  # ---- per-UTC-day split (bd-be804c follow-up) ---------------------------
+
+  # One bucket per UTC day, keyed by the turn's own `timestamp`. A turn with no
+  # parseable timestamp is dated by the most recent line before it (the file is
+  # an append log, so that is where it happened); a file with no timestamps at
+  # all yields no buckets and the caller dates the row itself.
+  defp absorb_day(days, _usage, nil), do: days
+
+  defp absorb_day(days, usage, %DateTime{} = at) do
+    day = DateTime.to_date(at)
+    bucket = Map.get(days, day, blank_day(at))
+
+    Map.put(days, day, %{
+      bucket
+      | tokens_in: bucket.tokens_in + int(usage["input_tokens"]),
+        tokens_out: bucket.tokens_out + int(usage["output_tokens"]),
+        cache_creation_tokens:
+          bucket.cache_creation_tokens + int(usage["cache_creation_input_tokens"]),
+        cache_read_tokens: bucket.cache_read_tokens + int(usage["cache_read_input_tokens"]),
+        message_count: bucket.message_count + 1,
+        last_at: later(bucket.last_at, at)
+    })
+  end
+
+  defp blank_day(at) do
+    %{
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+      message_count: 0,
+      cost_usd: nil,
+      last_at: at
+    }
+  end
+
+  defp later(%DateTime{} = a, %DateTime{} = b),
+    do: if(DateTime.compare(b, a) == :gt, do: b, else: a)
+
+  # Apportion the file's ONE authoritative cost figure across the days its
+  # turns fall on. The total is never recomputed — each day gets the share its
+  # own tokens are worth (at list prices when the model is priceable, by raw
+  # token volume when it is not), and the shares sum back to the total.
+  defp attach_days(totals, days) when map_size(days) == 0, do: totals
+
+  defp attach_days(totals, days) do
+    %{totals | by_day: allocate_cost(totals, days)}
+  end
+
+  defp allocate_cost(%{cost_usd: nil}, days), do: days
+
+  defp allocate_cost(%{cost_usd: total} = totals, days) do
+    weights = Map.new(days, fn {day, bucket} -> {day, weight(totals.model, bucket)} end)
+    sum = weights |> Map.values() |> Enum.sum()
+
+    Map.new(days, fn {day, bucket} ->
+      share =
+        if sum > 0 do
+          total * (Map.fetch!(weights, day) / sum)
+        else
+          total / map_size(days)
+        end
+
+      {day, %{bucket | cost_usd: share}}
+    end)
+  end
+
+  # What one day's turns are worth relative to the others: list price when the
+  # model is in the table, raw token volume otherwise (still far better than an
+  # even split across days of wildly different size).
+  defp weight(model, bucket) do
+    case ClaudePricing.cost_usd(model, bucket) do
+      nil ->
+        bucket.tokens_in + bucket.tokens_out + bucket.cache_creation_tokens +
+          bucket.cache_read_tokens
+
+      cost ->
+        cost
+    end
   end
 
   defp float(n) when is_float(n), do: n

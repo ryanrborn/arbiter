@@ -42,11 +42,12 @@ defmodule Arbiter.Worker.DiskUsageReconcileTest do
     File.mkdir_p!(dir)
 
     at = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_iso8601()
+    model = Keyword.get(opts, :model, "claude-opus-4-8")
 
     turns = [
-      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"msg-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
-      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"msg-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
-      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"msg-2","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":2000,"cache_creation_input_tokens":60}}})
+      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"msg-1","model":"#{model}","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
+      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"msg-1","model":"#{model}","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
+      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"msg-2","model":"#{model}","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":2000,"cache_creation_input_tokens":60}}})
     ]
 
     cost_lines =
@@ -115,12 +116,31 @@ defmodule Arbiter.Worker.DiskUsageReconcileTest do
     assert ev.cost_note == nil
   end
 
-  test "a file with no cost-state still reconciles tokens, with a null cost and a reason" do
+  test "a file with no cost-state is priced from its tokens, and says so" do
+    # Claude Code 2.1.270 writes no `cost-state` record at all, which left
+    # every disk-reconciled worker row at `cost_usd: nil`. claude-opus-4-8 at
+    # $5/$25 per MTok (cache write 1.25x, read 0.1x) over the deduped
+    # in=15 out=300 cache_read=3000 cache_creation=110 buckets.
     task_id = "bd-diskcost-none-#{System.unique_integer([:positive])}"
     session_id = "diskcost-none-#{System.unique_integer([:positive])}"
     cwd = tmp_dir!("diskcost-none-cwd")
     config_dir = tmp_dir!("diskcost-none-cfg")
     write_session_jsonl!(config_dir, cwd, session_id, [])
+
+    run_dying_session!(task_id, config_dir, cwd, session_id)
+
+    assert [ev] = events_for(task_id)
+    assert ev.tokens_in == 15
+    assert_in_delta ev.cost_usd, 0.0097625, 0.0000001
+    assert ev.cost_note =~ "estimated from tokens (no cost-state)"
+  end
+
+  test "a file with no cost-state and an unpriceable model still explains its null cost" do
+    task_id = "bd-diskcost-unpriced-#{System.unique_integer([:positive])}"
+    session_id = "diskcost-unpriced-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("diskcost-unpriced-cwd")
+    config_dir = tmp_dir!("diskcost-unpriced-cfg")
+    write_session_jsonl!(config_dir, cwd, session_id, model: "some-other-vendor-model")
 
     run_dying_session!(task_id, config_dir, cwd, session_id)
 

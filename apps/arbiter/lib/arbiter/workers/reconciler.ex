@@ -465,10 +465,12 @@ defmodule Arbiter.Workers.Reconciler do
       cache_creation_tokens: totals.cache_creation_tokens,
       cache_read_tokens: totals.cache_read_tokens,
       # The CLI's own figure, summed per `cost-state` segment and windowed by
-      # `since` — never a locally recomputed price. Nil when the file carried
-      # no in-window `cost-state`, in which case the row says why.
+      # `since` — never a locally recomputed price when one exists. A 2.1.270+
+      # file carries no `cost-state` at all and falls back to a token-priced
+      # estimate; either way `cost_note_for/1` records which it was, and a
+      # model we can't price still lands as an explained null.
       cost_usd: totals.cost_usd,
-      cost_note: if(is_nil(totals.cost_usd), do: ClaudeSessionFile.no_cost_note()),
+      cost_note: ClaudeSessionFile.cost_note_for(totals),
       duration_ms: totals.duration_ms,
       worker_run_id: run.id,
       session_id: run.session_id,
