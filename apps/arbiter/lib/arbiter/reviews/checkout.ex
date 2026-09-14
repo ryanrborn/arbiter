@@ -171,7 +171,7 @@ defmodule Arbiter.Reviews.Checkout do
   end
 
   defp worktree_path(head_sha, prefix) do
-    root = Application.get_env(:arbiter, :worktree_root, "/home/rborn/dev/arbiter-worktrees")
+    root = Arbiter.Config.Paths.worktree_root()
     leaf = "#{prefix}-#{String.slice(head_sha, 0, 12)}-#{System.unique_integer([:positive])}"
     Path.join(root, leaf)
   end

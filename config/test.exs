@@ -125,10 +125,12 @@ config :arbiter, Arbiter.MCP, inject_config: false, sse_max_lifetime_ms: 0
 # per-test with a unique tmp dir.
 config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-logs-test")
 
-# `Arbiter.Worker.Worktree` and `Arbiter.Reviews.Checkout` both fall back to a
-# hardcoded `/home/rborn/dev/arbiter-worktrees` default (the original author's
-# machine) when this is unset. That default isn't writable on any other box,
-# so any test exercising either module (`CheckoutTest`, `ExternalReviewTest`,
+# `Arbiter.Worker.Worktree` and `Arbiter.Reviews.Checkout` both resolve their
+# root via `Arbiter.Config.Paths.worktree_root/0`, whose ultimate fallback is
+# a `$HOME`-relative default that isn't writable/isolated for the test suite.
+# Historically (before that resolver existed) this config key being unset
+# meant a hardcoded fallback path from the original author's machine, and any
+# test exercising either module (`CheckoutTest`, `ExternalReviewTest`,
 # `MergeQueueConflictTest`, ...) failed with `:eacces` — UNLESS it happened to
 # run concurrently with `WorktreeTest`, whose setup/on_exit temporarily points
 # `:worktree_root` at its own tmp dir for the duration of its own tests. That

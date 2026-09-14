@@ -615,6 +615,18 @@ This is the only part of the design that is *about* the guard-begets-guard loop
 rather than about a specific bug, and it is the part most likely to still be
 paying for itself in six months.
 
+**Shipped (P8, bd-2u5qsj/#1647):** `apps/arbiter/lib/arbiter/reviews/guard_registry.ex`
+carries one row per §2 guard — all 60 — with class, finite bound, episode key,
+terminal state and sites. Completeness is enforced by an AST scan
+(`apps/arbiter/test/support/guard_refusal_scan.ex`) rather than a hand-kept list,
+so a refusal path added to any of the six modules fails
+`apps/arbiter/test/arbiter/reviews/guard_registry_test.exs` until it is declared.
+The rows that break this section's policy today — M3's and W7's unbounded merge
+retries, R2's unbounded CI-settle defer, W6's class-A `Worker.fail/2`, and the
+thirteen guards §2.6 counts as failing runs — are recorded in
+`GuardRegistry.known_violations/0`, each naming the phase above that removes it.
+That list is frozen by test: it may shrink, never grow.
+
 ---
 
 ## 6. Consolidation plan

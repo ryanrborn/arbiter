@@ -5,8 +5,8 @@ defmodule Arbiter.Tasks.RepoConfig do
   A `repo_paths` value may be either a bare string path or a map that carries
   an optional `target_branch` alongside the path:
 
-      "server" => "/home/rborn/dev/leotech/server"
-      "server" => %{"path" => "/home/rborn/dev/leotech/server", "target_branch" => "integration/dolphin"}
+      "server" => "/path/to/leotech/server"
+      "server" => %{"path" => "/path/to/leotech/server", "target_branch" => "integration/dolphin"}
 
   Callers should use these functions instead of pattern-matching directly so
   both forms are handled consistently.
