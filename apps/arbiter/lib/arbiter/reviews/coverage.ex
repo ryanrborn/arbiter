@@ -69,6 +69,28 @@ defmodule Arbiter.Reviews.Coverage do
     end
   end
 
+  @doc """
+  Every coverage row recorded for one MR, oldest first.
+
+  The read scope `decide/3` is meant to be handed: §3.2's rules are all
+  statements about *this PR's* coverage set, and `mr_ref` is the only handle
+  every writer in §3.3 shares (`task_id` is the authoring task, which a
+  ReviewPatrol row about an external PR does not have).
+
+  Raises on a read failure — the shadow/guard call sites wrap it, and a caller
+  that wants "no coverage" on a DB error would be answering `:uncovered` to a
+  question it could not read, which is exactly RC2's mistake.
+  """
+  @spec for_mr(String.t() | nil) :: [Entry.t()]
+  def for_mr(mr_ref) when is_binary(mr_ref) and mr_ref != "" do
+    Entry
+    |> Ash.Query.filter(mr_ref == ^mr_ref)
+    |> Ash.Query.sort(covered_at: :asc)
+    |> Ash.read!()
+  end
+
+  def for_mr(_mr_ref), do: []
+
   @typedoc """
   Everything `decide/3` needs to know about the world, injected.
 

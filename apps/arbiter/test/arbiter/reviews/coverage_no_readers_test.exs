@@ -1,16 +1,23 @@
 defmodule Arbiter.Reviews.CoverageNoReadersTest do
   @moduledoc """
-  Acceptance 5 of bd-203cl5 (#1648): P1 wires the **writers** of
-  `review_coverage` and nothing else. No module may read the table for a
-  decision yet — `Coverage.decide/3` (§3.2) exists as of P2 (#1665) but has no
-  call site, and the guard rewrites that consume it are P3/P4. Until they land
-  `issues.last_reviewed_sha` remains the authoritative input to every merge
-  guard.
+  Acceptance 5 of bd-203cl5 (#1648), narrowed by P3 (bd-b0fqcl / #1649).
+
+  P1 wired the **writers** of `review_coverage` and nothing else. P3 adds
+  exactly one reader — `Arbiter.Reviews.CoverageShadow`, which computes
+  `Coverage.decide/3` *beside* the existing guard and only counts and logs the
+  result. `issues.last_reviewed_sha` is still the authoritative input to every
+  merge decision; the read-path flip is P4, behind `merge.coverage_enabled`.
+
+  So the scan below still runs, with the shadow as its one new exemption: the
+  Watchdog and the MergeQueue may reach coverage only *through* the shadow, and
+  neither may call the predicate — or touch the `Entry` resource — itself.
+  That is what keeps "shadow mode" an honest description of what shipped
+  rather than a claim in a PR body.
 
   This is a source scan rather than a prose promise: a reader added by a later
   phase without also landing the predicate fails here, which is exactly the
   "guard-begets-guard" drift the design doc's §5 enforcement exists to stop.
-  Comments are stripped before scanning, so documenting what P3/P4 will add is
+  Comments are stripped before scanning, so documenting what P4 will add is
   still allowed — only real call sites count.
   """
 
@@ -24,9 +31,13 @@ defmodule Arbiter.Reviews.CoverageNoReadersTest do
   #     internal to the writer, not a consumer making a decision.
   #   * `coverage/entry.ex` — the resource module itself.
   #   * `reviews.ex` — the Ash domain, which must name every resource it owns.
+  #   * `reviews/coverage_shadow.ex` — P3's single reader. It calls the
+  #     predicate and names the `Entry` type in its own typespecs, but acts on
+  #     nothing: `observe/1` returns `:ok` for every input.
   @exempt [
     "arbiter/reviews/coverage.ex",
     "arbiter/reviews/coverage/entry.ex",
+    "arbiter/reviews/coverage_shadow.ex",
     "arbiter/reviews.ex"
   ]
 
@@ -34,6 +45,12 @@ defmodule Arbiter.Reviews.CoverageNoReadersTest do
     "arbiter/worker/review_gate.ex",
     "arbiter/workflows/review_patrol.ex",
     "arbiter/reviews/external_review.ex"
+  ]
+
+  # P3's two adopters (§3.4).
+  @merge_paths [
+    "arbiter/worker/watchdog.ex",
+    "arbiter/workflows/merge_queue.ex"
   ]
 
   defp lib_sources do
@@ -62,14 +79,15 @@ defmodule Arbiter.Reviews.CoverageNoReadersTest do
         do: rel
   end
 
-  test "no module calls Coverage.decide/3" do
-    assert offenders(~r/Coverage\.decide\(/) == [],
-           "P3/P4 owns `Coverage.decide/3`; P1 writes only."
+  test "no module outside the shadow calls the coverage predicate" do
+    assert offenders(~r/Coverage\.decide/) == [],
+           "only `Arbiter.Reviews.CoverageShadow` may call `Coverage.decide/3` " <>
+             "or `decide_with_record/3` until P4 flips the read path."
   end
 
-  test "no module outside the writer touches the Coverage.Entry resource" do
+  test "no module outside the writer and the shadow touches the Coverage.Entry resource" do
     assert offenders(~r/Coverage\.Entry/) == [],
-           "Only Arbiter.Reviews.Coverage may touch the Entry resource in P1."
+           "Only Arbiter.Reviews.Coverage may touch the Entry resource."
   end
 
   test "the three P1 sites do call the writer, so the scan above is not vacuous" do
@@ -78,6 +96,15 @@ defmodule Arbiter.Reviews.CoverageNoReadersTest do
     for path <- @sites do
       assert Map.fetch!(sources, path) =~ "Coverage.record",
              "#{path} must write coverage (§3.3)"
+    end
+  end
+
+  test "both merge paths reach coverage through the shadow, so the exemption is not vacuous" do
+    sources = Map.new(lib_sources())
+
+    for path <- @merge_paths do
+      assert code_only(Map.fetch!(sources, path)) =~ "CoverageShadow.observe(",
+             "#{path} must evaluate the coverage predicate in shadow mode (§3.4)"
     end
   end
 end
