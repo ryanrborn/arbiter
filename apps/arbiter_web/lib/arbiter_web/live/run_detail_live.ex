@@ -85,6 +85,7 @@ defmodule ArbiterWeb.RunDetailLive do
                   <code class="font-[family-name:var(--font-mono)] text-[16px] font-normal text-[var(--text-secondary)]">
                     {@run.task_id}
                   </code>
+                  <ArbiterWeb.CoreComponents.Core.copy_id id={@run.task_id} />
                 </h1>
               </div>
 

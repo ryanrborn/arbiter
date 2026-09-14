@@ -497,13 +497,17 @@ defmodule ArbiterWeb.ReviewIndexLive do
                 <:item label="PR">{format_maybe(record.pr)} ({format_maybe(record.pr_ref)})</:item>
               </Data.data_list>
 
-              <div :if={record.engagement_id}>
+              <div :if={record.engagement_id} class="flex items-center gap-1">
                 <.link
                   navigate={~p"/tasks/#{record.engagement_id}"}
                   class="text-[11.5px] hover:underline text-[var(--text-label)]"
                 >
                   linked engagement: {record.engagement_id} →
                 </.link>
+                <Core.copy_id
+                  id={record.engagement_id}
+                  dom_id={"copy-id-review-#{record.id}"}
+                />
               </div>
 
               <div :if={record.status == :failed} class="text-[11.5px]">

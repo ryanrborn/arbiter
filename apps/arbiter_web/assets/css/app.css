@@ -560,3 +560,8 @@
 .markdown-body strong { font-weight: 600; color: var(--text-title) }
 
 /* This file is for your main application CSS */
+
+/* Copy-to-clipboard id button: swap the clipboard icon for a checkmark for
+   ~1.5s after a successful copy (see ArbiterWeb.CoreComponents.Core.copy_id/1). */
+.copy-id-copied .copy-id-icon-idle { display: none }
+.copy-id-copied .copy-id-icon-copied { display: inline-block }
