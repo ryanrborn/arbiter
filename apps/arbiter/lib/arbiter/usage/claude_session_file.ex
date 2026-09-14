@@ -654,12 +654,17 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   # `Arbiter.Usage.ClaudePricing`'s table instead — labelled `:estimated`, so
   # nothing downstream can mistake it for the CLI's own figure. An unknown
   # model still yields nil: an honest gap beats an invented rate.
-  defp apply_token_estimate(%{cost_usd: cost} = totals) when is_number(cost), do: totals
-
   defp apply_token_estimate(totals) do
-    case ClaudePricing.cost_usd(totals.model, totals) do
-      nil -> totals
-      cost -> %{totals | cost_usd: cost, cost_source: :estimated}
+    if is_number(totals.cost_usd) do
+      totals
+    else
+      buckets =
+        Map.take(totals, [:tokens_in, :tokens_out, :cache_creation_tokens, :cache_read_tokens])
+
+      case ClaudePricing.cost_usd(totals.model, buckets) do
+        nil -> totals
+        cost -> %{totals | cost_usd: cost, cost_source: :estimated}
+      end
     end
   end
 
