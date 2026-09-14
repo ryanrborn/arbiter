@@ -358,4 +358,146 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
       assert {:error, :enoent} = SessionFile.read_steps("/nope/does/not/exist.jsonl")
     end
   end
+
+  # ---- cost-state (bd-be804c / RFC phase 6) --------------------------------
+  #
+  # The moduledoc used to claim the on-disk data carries no dollar figure.
+  # That is true of `assistant` lines and false of the file as a whole: the CLI
+  # periodically appends a `cost-state` record with `totalCostUSD` and a
+  # per-model `costUSD` breakdown. These tests pin the reader's contract for it.
+  describe "read_totals/2 cost-state parsing" do
+    @fixture Path.expand(
+               "../../fixtures/claude_sessions/coordinator_session_sample.jsonl",
+               __DIR__
+             )
+
+    test "sums per-process segments of a real (content-stripped) session sample" do
+      # Provenance: a real ~/.claude session JSONL, stripped of every content
+      # field. It holds two CLI processes' cost-state segments (the shape a
+      # `--resume` produces): $10.2622827 then $13.3112036, which are NOT
+      # cumulative across the restart and so must be summed, not maxed.
+      assert {:ok, totals} = SessionFile.read_totals(@fixture)
+
+      assert_in_delta totals.cost_usd, 23.5734863, 0.0000001
+      assert totals.cost_state_count == 3
+      assert totals.model == "claude-sonnet-5"
+      assert totals.tokens_in == 50
+      assert totals.tokens_out == 6664
+      assert totals.cache_read_tokens == 1_883_917
+      assert totals.cache_creation_tokens == 108_526
+      assert totals.message_count == 25
+    end
+
+    test "per-model costUSD is broken out alongside the total" do
+      assert {:ok, totals} = SessionFile.read_totals(@fixture)
+      assert %{"claude-sonnet-5" => model_cost} = totals.model_costs
+      assert_in_delta model_cost, 23.5734863, 0.01
+    end
+
+    test ":since windows cost by the segment's own startTime" do
+      # Segment 1 started 2026-08-31T15:27:00.708Z, segment 2 2026-09-01T02:01:40.812Z.
+      assert {:ok, totals} =
+               SessionFile.read_totals(@fixture, since: ~U[2026-09-01 00:00:00.000000Z])
+
+      assert_in_delta totals.cost_usd, 13.3112036, 0.0000001
+      assert totals.cost_state_count == 1
+    end
+
+    test "a file with no cost-state record reports cost_usd: nil" do
+      dir = tmp_dir()
+      path = write_session!(dir, "/work/tree", "SID")
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert totals.cost_usd == nil
+      assert totals.cost_state_count == 0
+      assert totals.model_costs == %{}
+      # tokens still reconcile — cost is the optional part
+      assert totals.tokens_in == 15
+    end
+
+    test "duration comes off cost-state totalDuration, summed per segment" do
+      dir = tmp_dir()
+      path = Path.join(dir, "durations.jsonl")
+
+      File.write!(
+        path,
+        Enum.join(
+          [
+            ~s({"type":"cost-state","totalCostUSD":1.5,"totalDuration":1000,"startTime":1000000000000,"modelUsage":{}}),
+            ~s({"type":"cost-state","totalCostUSD":2.5,"totalDuration":4000,"startTime":1000000000000,"modelUsage":{}}),
+            ~s({"type":"cost-state","totalCostUSD":0.25,"totalDuration":700,"startTime":1000000009999,"modelUsage":{}})
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert_in_delta totals.cost_usd, 2.75, 0.0000001
+      assert totals.duration_ms == 4700
+    end
+
+    test "a cost-state carrying no startTime still counts once (single segment)" do
+      dir = tmp_dir()
+      path = Path.join(dir, "no_start.jsonl")
+
+      File.write!(
+        path,
+        Enum.join(
+          [
+            ~s({"type":"cost-state","totalCostUSD":3.0,"modelUsage":{"m":{"costUSD":3.0}}}),
+            ~s({"type":"cost-state","totalCostUSD":4.0,"modelUsage":{"m":{"costUSD":4.0}}})
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert_in_delta totals.cost_usd, 4.0, 0.0000001
+      assert %{"m" => 4.0} = totals.model_costs
+    end
+  end
+
+  # A forked / rolled-over session copies the parent's lines into a NEW
+  # <sid>.jsonl, and those copies keep the PARENT's `sessionId`. Counting them
+  # under the child's id double-bills the fleet.
+  describe "read_totals/2 with :session_id (rollover guard)" do
+    test "lines stamped with another session's id are not counted" do
+      dir = tmp_dir()
+      path = Path.join(dir, "forked.jsonl")
+
+      File.write!(
+        path,
+        Enum.join(
+          [
+            ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.100Z","sessionId":"PARENT","message":{"id":"msg-p","model":"m","usage":{"input_tokens":10,"output_tokens":100}}}),
+            ~s({"type":"cost-state","sessionId":"PARENT","totalCostUSD":9.0,"startTime":1000000000000,"modelUsage":{}}),
+            ~s({"type":"assistant","timestamp":"2026-07-01T21:50:00.100Z","sessionId":"CHILD","message":{"id":"msg-c","model":"m","usage":{"input_tokens":3,"output_tokens":7}}}),
+            ~s({"type":"cost-state","sessionId":"CHILD","totalCostUSD":1.25,"startTime":1000000500000,"modelUsage":{}})
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path, session_id: "CHILD")
+      assert totals.tokens_in == 3
+      assert totals.tokens_out == 7
+      assert totals.message_count == 1
+      assert_in_delta totals.cost_usd, 1.25, 0.0000001
+    end
+
+    test "without :session_id every line counts (the worker path is unchanged)" do
+      dir = tmp_dir()
+      path = Path.join(dir, "forked2.jsonl")
+
+      File.write!(
+        path,
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.100Z","sessionId":"PARENT","message":{"id":"msg-p","model":"m","usage":{"input_tokens":10,"output_tokens":100}}}) <>
+          "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert totals.tokens_in == 10
+    end
+  end
+
 end

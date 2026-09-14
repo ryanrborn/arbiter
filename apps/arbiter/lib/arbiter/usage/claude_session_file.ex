@@ -69,13 +69,49 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   chain, and reading a parent with no upper bound would read past its own
   death and file the child's tool calls under the parent's run id.
 
-  ## Cost
+  ## Cost — `cost-state` records (bd-be804c)
 
-  The on-disk `assistant` lines carry token buckets but **no per-turn dollar
-  figure** (that lives only in the `result` event this fallback exists precisely
-  because we're missing). So a reconciled row records deduped token counts with
-  `cost_usd` left `nil` — graceful degradation, tokens are the ask. Computing a
-  dollar cost from a price table is intentionally out of scope here.
+  The `assistant` lines carry token buckets and no dollar figure, and this
+  moduledoc used to stop there ("so a reconciled row records `cost_usd: nil`").
+  That was true of `assistant` lines and **false of the file as a whole**: the
+  CLI periodically appends its own accounting record,
+
+      {"type":"cost-state","sessionId":"…","totalCostUSD":9.777289,
+       "totalAPIDuration":350343,"totalDuration":668525,"startTime":1788556943788,
+       "modelUsage":{"claude-opus-5[1m]":{"inputTokens":1048,…,"costUSD":9.777289}},
+       "hasUnknownModelCost":false}
+
+  so `read_totals/2` reads `totals.cost_usd` straight off it. **The CLI's number
+  is reused verbatim, never recomputed** — it has already applied the
+  cache-write/cache-read price split that a local price table would get wrong.
+
+  Three properties of these records drive the arithmetic, all confirmed against
+  real files:
+
+    * **No `timestamp` field.** They carry `startTime` (epoch ms, the CLI
+      *process* start) instead, which is what `:since` windows them by.
+    * **`totalCostUSD` is cumulative within one CLI process, and resets when a
+      new process opens the same file** (`--resume`). A real session shows
+      `… 47.41 → 6.63 → 121.02 …` — monotone within a `startTime`, restarting
+      across one. So the file total is `sum over startTime segments of
+      max(totalCostUSD)`: max within a segment absorbs the streaming re-emits
+      (consecutive records repeat identical totals), sum across segments keeps a
+      resumed process's spend from erasing its parent's.
+    * **`modelUsage[model].costUSD`** breaks the same total down per model and is
+      summed by the identical rule into `totals.model_costs`.
+
+  A file with no `cost-state` record in window still reconciles tokens, with
+  `cost_usd: nil` — graceful degradation, unchanged.
+
+  ## Forked / rolled-over sessions — use `:session_id`
+
+  Every line also carries the `sessionId` it was written under. A session that
+  rolls over to a **new** id copies the parent's lines into the new
+  `<sid>.jsonl`, and those copies keep the *parent's* `sessionId` — so summing
+  the new file whole would bill the parent's spend twice. Pass `:session_id` and
+  lines stamped with a *different* id are skipped (lines with no `sessionId` at
+  all are kept: they can't be attributed elsewhere). The worker path omits the
+  option and is unchanged.
   """
 
   @typedoc """
@@ -85,6 +121,11 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
   `skipped_before_since` counts distinct turns excluded by the `:since` cutoff
   (an earlier run's turns in a `--resume`-shared file) — kept for the audit
   trail on the reconciled ledger row.
+
+  `cost_usd` / `model_costs` / `duration_ms` come off the file's `cost-state`
+  records (see the moduledoc) and are `nil` / `%{}` / `nil` when none is in
+  window — a genuine absence, never a fabricated zero. `cost_state_count` is how
+  many such records contributed, for the audit trail.
   """
   @type totals :: %{
           tokens_in: non_neg_integer(),
@@ -93,7 +134,11 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
           cache_read_tokens: non_neg_integer(),
           message_count: non_neg_integer(),
           skipped_before_since: non_neg_integer(),
-          model: String.t() | nil
+          model: String.t() | nil,
+          cost_usd: float() | nil,
+          model_costs: %{optional(String.t()) => float()},
+          duration_ms: non_neg_integer() | nil,
+          cost_state_count: non_neg_integer()
         }
 
   @doc """
@@ -142,16 +187,22 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       `timestamp` is older than it are excluded from the sums. Pass the run's
       start so a `--resume`-shared file doesn't bill this run for the previous
       run's turns (see the moduledoc). Defaults to `nil` (whole file).
+      `cost-state` records carry no `timestamp`, so they are windowed by their
+      own `startTime` (the CLI process start) instead.
+    * `:session_id` — only count lines whose `sessionId` matches. Guards a
+      forked / rolled-over file that carries copies of the parent session's
+      lines (see the moduledoc). Defaults to `nil` (count every line).
 
   """
   @spec read_totals(String.t(), keyword()) :: {:ok, totals()} | {:error, term()}
   def read_totals(path, opts \\ []) when is_binary(path) and is_list(opts) do
     since = normalize_since(Keyword.get(opts, :since))
+    session_id = Keyword.get(opts, :session_id)
 
     case File.open(path, [:read, :binary]) do
       {:ok, io} ->
         try do
-          {:ok, summarize(io, since)}
+          {:ok, summarize(io, since, session_id)}
         after
           File.close(io)
         end
@@ -257,13 +308,20 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
 
   # ---- internals ---------------------------------------------------------
 
-  # Fold the file's lines into {seen_message_ids, totals}. `seen` keeps the
-  # first usage per message.id so streaming re-emits don't double count.
-  defp summarize(io, since) do
-    io
-    |> IO.stream(:line)
-    |> Enum.reduce({MapSet.new(), blank_totals()}, &absorb_line(&1, &2, since))
-    |> elem(1)
+  # Fold the file's lines into {seen_message_ids, totals, cost_segments}.
+  # `seen` keeps the first usage per message.id so streaming re-emits don't
+  # double count; `cost_segments` keeps the running max per `cost-state`
+  # `startTime` (see the moduledoc's cost section) and is folded in at the end.
+  defp summarize(io, since, session_id) do
+    {_seen, totals, segments} =
+      io
+      |> IO.stream(:line)
+      |> Enum.reduce(
+        {MapSet.new(), blank_totals(), %{}},
+        &absorb_line(&1, &2, since, session_id)
+      )
+
+    apply_cost_segments(totals, segments)
   end
 
   defp blank_totals do
@@ -274,34 +332,76 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
       cache_read_tokens: 0,
       message_count: 0,
       skipped_before_since: 0,
-      model: nil
+      model: nil,
+      cost_usd: nil,
+      model_costs: %{},
+      duration_ms: nil,
+      cost_state_count: 0
     }
   end
 
-  defp absorb_line(line, {seen, totals} = acc, since) do
+  defp absorb_line(line, acc, since, session_id) do
     case decode(line) do
-      {:ok, %{"type" => "assistant", "message" => %{"id" => id, "usage" => usage} = msg} = event}
-      when is_binary(id) and is_map(usage) ->
-        cond do
-          MapSet.member?(seen, id) ->
-            # Streaming re-emit of an already-seen turn — skip, but still let a
-            # later line backfill the model if we haven't seen one yet.
-            {seen, maybe_model(totals, msg)}
-
-          not in_window?(event, since) ->
-            # A turn from an earlier run sharing this file (`--resume` appends).
-            # Mark it seen so a re-emit that straddles the cutoff can't sneak the
-            # earlier run's tokens in, but count nothing for it.
-            {MapSet.put(seen, id), Map.update!(totals, :skipped_before_since, &(&1 + 1))}
-
-          true ->
-            {MapSet.put(seen, id), add_usage(totals, usage, msg)}
+      {:ok, event} ->
+        if own_session?(event, session_id) do
+          absorb_event(event, acc, since)
+        else
+          # A copy of another session's line, carried into this file by a
+          # rollover/fork. Counting it here bills its spend a second time.
+          acc
         end
 
       _ ->
         acc
     end
   end
+
+  # No `:session_id` filter, or the line carries no `sessionId` to judge it by
+  # (it can't be attributed to any *other* session, so it stays in scope).
+  defp own_session?(_event, nil), do: true
+
+  defp own_session?(event, session_id) when is_binary(session_id) do
+    case Map.get(event, "sessionId") || Map.get(event, "session_id") do
+      nil -> true
+      seen when is_binary(seen) -> seen == session_id
+      _ -> true
+    end
+  end
+
+  defp absorb_event(
+         %{"type" => "assistant", "message" => %{"id" => id, "usage" => usage} = msg} = event,
+         {seen, totals, segments},
+         since
+       )
+       when is_binary(id) and is_map(usage) do
+    cond do
+      MapSet.member?(seen, id) ->
+        # Streaming re-emit of an already-seen turn — skip, but still let a
+        # later line backfill the model if we haven't seen one yet.
+        {seen, maybe_model(totals, msg), segments}
+
+      not in_window?(event, since) ->
+        # A turn from an earlier run sharing this file (`--resume` appends).
+        # Mark it seen so a re-emit that straddles the cutoff can't sneak the
+        # earlier run's tokens in, but count nothing for it.
+        {MapSet.put(seen, id),
+         Map.update!(totals, :skipped_before_since, &(&1 + 1)), segments}
+
+      true ->
+        {MapSet.put(seen, id), add_usage(totals, usage, msg), segments}
+    end
+  end
+
+  defp absorb_event(%{"type" => "cost-state"} = event, {seen, totals, segments}, since) do
+    if cost_state_in_window?(event, since) do
+      {seen, Map.update!(totals, :cost_state_count, &(&1 + 1)),
+       absorb_cost_state(segments, event)}
+    else
+      {seen, totals, segments}
+    end
+  end
+
+  defp absorb_event(_event, acc, _since), do: acc
 
   # No cutoff → everything is in-window. With a cutoff, a line must carry a
   # parseable ISO8601 `timestamp` at or after it; an undated line is treated as
@@ -355,6 +455,91 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
     do: %{totals | model: model}
 
   defp maybe_model(totals, _msg), do: totals
+
+  # ---- cost-state accounting (bd-be804c) ---------------------------------
+
+  # A `cost-state` record has no `timestamp`; it carries `startTime`, the epoch
+  # ms at which *this CLI process* opened the session. That is exactly the right
+  # thing to window on: a segment whose process started before the run's own
+  # start belongs to an earlier run sharing the file via `--resume`.
+  # A record with no usable `startTime` is kept only when no cutoff was given —
+  # the same under-report-rather-than-double-bill rule the token path uses.
+  defp cost_state_in_window?(_event, nil), do: true
+
+  defp cost_state_in_window?(event, %DateTime{} = since) do
+    case segment_started_at(event) do
+      %DateTime{} = at -> DateTime.compare(at, since) != :lt
+      nil -> false
+    end
+  end
+
+  defp segment_started_at(event) do
+    case Map.get(event, "startTime") do
+      ms when is_integer(ms) ->
+        case DateTime.from_unix(ms, :millisecond) do
+          {:ok, dt} -> dt
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # Keep the running MAX per segment. Within one CLI process `totalCostUSD`
+  # only grows (and repeats verbatim on re-emit); across processes it restarts,
+  # which is why segments are summed separately in apply_cost_segments/2.
+  defp absorb_cost_state(segments, event) do
+    key = Map.get(event, "startTime") || :no_start_time
+
+    seg =
+      Map.get(segments, key, %{cost_usd: 0.0, duration_ms: 0, model_costs: %{}})
+
+    Map.put(segments, key, %{
+      cost_usd: max(seg.cost_usd, float(Map.get(event, "totalCostUSD"))),
+      duration_ms: max(seg.duration_ms, non_neg_int(Map.get(event, "totalDuration"))),
+      model_costs: merge_model_costs(seg.model_costs, Map.get(event, "modelUsage"))
+    })
+  end
+
+  defp merge_model_costs(acc, usage) when is_map(usage) do
+    Enum.reduce(usage, acc, fn
+      {model, %{"costUSD" => cost}}, acc when is_binary(model) ->
+        Map.update(acc, model, float(cost), &max(&1, float(cost)))
+
+      _pair, acc ->
+        acc
+    end)
+  end
+
+  defp merge_model_costs(acc, _usage), do: acc
+
+  # Sum the per-segment maxima into the totals. No in-window `cost-state` at all
+  # leaves `cost_usd`/`duration_ms` nil — an honest absence, not a zero.
+  defp apply_cost_segments(totals, segments) when map_size(segments) == 0, do: totals
+
+  defp apply_cost_segments(totals, segments) do
+    values = Map.values(segments)
+
+    model_costs =
+      Enum.reduce(values, %{}, fn seg, acc ->
+        Map.merge(acc, seg.model_costs, fn _model, a, b -> a + b end)
+      end)
+
+    %{
+      totals
+      | cost_usd: Enum.reduce(values, 0.0, &(&1.cost_usd + &2)),
+        duration_ms: Enum.reduce(values, 0, &(&1.duration_ms + &2)),
+        model_costs: model_costs
+    }
+  end
+
+  defp float(n) when is_float(n), do: n
+  defp float(n) when is_integer(n), do: n * 1.0
+  defp float(_), do: 0.0
+
+  defp non_neg_int(n) when is_integer(n) and n >= 0, do: n
+  defp non_neg_int(_), do: 0
 
   defp decode(line) do
     case Jason.decode(String.trim(line)) do
