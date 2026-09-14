@@ -20,6 +20,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
 
   alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.ProcessTeardown
   alias Arbiter.Workflows.MergedPRFinalizer
 
   @registry Arbiter.Workflows.MergedPRFinalizerRegistry
@@ -167,7 +168,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
             "MergedPRFinalizerSupervisor: stopping stale finalizer #{key} (registry scheme changed to single-repo)"
           )
 
-          DynamicSupervisor.terminate_child(__MODULE__, pid)
+          ProcessTeardown.stop_child(__MODULE__, pid)
         end
       end)
     else
@@ -177,7 +178,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
             "MergedPRFinalizerSupervisor: stopping stale finalizer #{workspace_id} (registry scheme changed to multi-repo)"
           )
 
-          DynamicSupervisor.terminate_child(__MODULE__, pid)
+          ProcessTeardown.stop_child(__MODULE__, pid)
 
         _ ->
           :ok

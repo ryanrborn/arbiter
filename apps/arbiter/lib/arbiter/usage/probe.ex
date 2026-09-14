@@ -34,13 +34,12 @@ defmodule Arbiter.Usage.Probe do
   reachable here too — `claude --session-id <uuid>` lets the caller name the
   file in advance, so no glob race.
 
-  It is the wrong answer for *these two* callers, for one reason: **the JSONL
-  carries no cost figure.** `Arbiter.Worker` already says so where it
-  reconciles from disk (`@disk_reconciled_cost_note`, `worker.ex:218`), and
-  `ClaudeSessionFile.read_totals/2` accordingly returns tokens only. The
-  per-session `cost-state` record that does carry `totalCostUSD` is emitted
-  periodically during long sessions; a one-shot `--print` round-trip is over
-  before one is written. Since the whole point of this ticket is that ~$3/day
+  It is the wrong answer for *these two* callers, for one reason: **a one-shot
+  `--print` session's JSONL carries no cost figure.** `ClaudeSessionFile` does
+  read cost since bd-be804c, but only from the periodic `cost-state` record —
+  and a `--print` round-trip is over before one is ever written, so
+  `read_totals/2` comes back with `cost_usd: nil` and the note at
+  `Arbiter.Usage.ClaudeSessionFile.no_cost_note/0`. Since the whole point of this ticket is that ~$3/day
   and ~$2/day of *spend* were invisible, and this repo has no Claude price
   table to derive dollars from tokens (only `Arbiter.Agents.Gemini.Pricing`),
   a JSONL-only probe would have recorded tokens and a "cost unavailable" note

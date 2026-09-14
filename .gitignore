@@ -72,3 +72,7 @@ MORNING-BRIEF.md
 # Workspace names, env var names and credential fingerprints — not to be
 # committed by accident.
 accounts.json
+
+# Default output dir for scripts/build-local-release.sh — drops a multi-tens-
+# of-MB release tarball + escript per run in whatever clone it's pointed at.
+.local-release/

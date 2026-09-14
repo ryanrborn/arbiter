@@ -34,7 +34,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
       for {pid, _} <- Registry.select(@registry, [{{:_, :"$1", :"$2"}, [], [{{:"$1", :"$2"}}]}]),
           is_pid(pid),
           Process.alive?(pid) do
-        DynamicSupervisor.terminate_child(ReviewPatrolSupervisor, pid)
+        Arbiter.ProcessTeardown.stop_child(ReviewPatrolSupervisor, pid)
       end
     end)
 
@@ -602,7 +602,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
         for {_k, pid} <- ReviewPatrolSupervisor.whereis_all(ws.id),
             is_pid(pid),
             Process.alive?(pid),
-            do: DynamicSupervisor.terminate_child(ReviewPatrolSupervisor, pid)
+            do: Arbiter.ProcessTeardown.stop_child(ReviewPatrolSupervisor, pid)
       end)
 
       assert [ws.id] == keys_for_workspace(ws.id)

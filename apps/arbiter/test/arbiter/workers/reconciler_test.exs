@@ -587,4 +587,93 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert escalation != nil
     assert escalation.kind == :escalation
   end
+
+  # bd-be804c: the same file that answers "how many tokens" also carries the
+  # CLI's own `cost-state` record, so a reconciled worker row no longer has to
+  # land with a bare `cost_usd: nil` next to six-figure token counts.
+  test "backfills cost_usd from the session file's cost-state record" do
+    task_id = "bd-cost-#{System.unique_integer([:positive])}"
+    session_id = "cost-sess-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("recon-cost-cwd")
+    config_dir = tmp_dir!("recon-cost-cfg")
+    path = write_session_jsonl!(config_dir, cwd, session_id)
+
+    # Two CLI processes shared the file (`--resume`): $1.25 then $0.75. Both
+    # started after the run below, so both are this run's own spend.
+    start_ms = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_unix(:millisecond)
+
+    File.write!(
+      path,
+      Enum.join(
+        [
+          ~s({"type":"cost-state","totalCostUSD":1.25,"totalDuration":9000,"startTime":#{start_ms},"modelUsage":{"claude-opus-4-8":{"costUSD":1.25}}}),
+          ~s({"type":"cost-state","totalCostUSD":0.75,"totalDuration":3000,"startTime":#{start_ms + 60_000},"modelUsage":{"claude-opus-4-8":{"costUSD":0.75}}})
+        ],
+        "\n"
+      ) <> "\n",
+      [:append]
+    )
+
+    run =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        status: :running,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        output_lines: []
+      })
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert [ev] = usage_events_for(run.id)
+    assert_in_delta ev.cost_usd, 2.0, 0.0000001
+    assert ev.cost_note == nil, "a real cost figure must not carry a 'cost unavailable' note"
+    assert ev.tokens_in == 15
+    assert ev.duration_ms == 12_000
+  end
+
+  test "a cost-state from an earlier run sharing the file is not billed to this run" do
+    task_id = "bd-cost-window-#{System.unique_integer([:positive])}"
+    session_id = "cost-window-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("recon-costw-cwd")
+    config_dir = tmp_dir!("recon-costw-cfg")
+    path = write_session_jsonl!(config_dir, cwd, session_id)
+
+    parent_ms =
+      DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.to_unix(:millisecond)
+
+    own_ms = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_unix(:millisecond)
+
+    File.write!(
+      path,
+      Enum.join(
+        [
+          ~s({"type":"cost-state","totalCostUSD":98.0,"totalDuration":1000,"startTime":#{parent_ms},"modelUsage":{}}),
+          ~s({"type":"cost-state","totalCostUSD":0.5,"totalDuration":1000,"startTime":#{own_ms},"modelUsage":{}})
+        ],
+        "\n"
+      ) <> "\n",
+      [:append]
+    )
+
+    run =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        status: :running,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        output_lines: []
+      })
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert [ev] = usage_events_for(run.id)
+    assert_in_delta ev.cost_usd, 0.5, 0.0000001
+  end
 end
