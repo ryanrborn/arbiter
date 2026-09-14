@@ -36,8 +36,8 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
           {pid, _} <- Registry.select(reg, [{{:_, :"$1", :"$2"}, [], [{{:"$1", :"$2"}}]}]),
           is_pid(pid),
           Process.alive?(pid) do
-        DynamicSupervisor.terminate_child(PRPatrolSupervisor, pid)
-        DynamicSupervisor.terminate_child(ReviewPatrolSupervisor, pid)
+        Arbiter.ProcessTeardown.stop_child(PRPatrolSupervisor, pid)
+        Arbiter.ProcessTeardown.stop_child(ReviewPatrolSupervisor, pid)
       end
     end)
 
@@ -122,7 +122,7 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
       # "no patrol running" before we test the closed-item update.
       for {_k, pid} <- PRPatrolSupervisor.whereis_all(ws.id),
           is_pid(pid),
-          do: DynamicSupervisor.terminate_child(PRPatrolSupervisor, pid)
+          do: Arbiter.ProcessTeardown.stop_child(PRPatrolSupervisor, pid)
 
       await(fn -> if PRPatrolSupervisor.whereis(ws.id) == nil, do: :gone end)
 
@@ -163,7 +163,7 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
 
       for {_k, pid} <- PRPatrolSupervisor.whereis_all(ws.id),
           is_pid(pid),
-          do: DynamicSupervisor.terminate_child(PRPatrolSupervisor, pid)
+          do: Arbiter.ProcessTeardown.stop_child(PRPatrolSupervisor, pid)
 
       await(fn -> if PRPatrolSupervisor.whereis(ws.id) == nil, do: :gone end)
 

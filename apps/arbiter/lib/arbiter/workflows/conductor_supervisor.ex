@@ -20,6 +20,7 @@ defmodule Arbiter.Workflows.ConductorSupervisor do
   not auto-restarted. The durable-restart story is C6.
   """
 
+  alias Arbiter.ProcessTeardown
   alias Arbiter.Workflows.Conductor
 
   @registry Arbiter.Workflows.ConductorRegistry
@@ -82,7 +83,7 @@ defmodule Arbiter.Workflows.ConductorSupervisor do
   def stop_conductor(graph_id) when is_binary(graph_id) do
     case whereis(graph_id) do
       nil -> :ok
-      pid -> DynamicSupervisor.terminate_child(__MODULE__, pid)
+      pid -> ProcessTeardown.stop_child(__MODULE__, pid)
     end
 
     :ok
