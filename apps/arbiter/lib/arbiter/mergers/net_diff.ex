@@ -80,6 +80,67 @@ defmodule Arbiter.Mergers.NetDiff do
   def fingerprint(_diff), do: nil
 
   @doc """
+  Fingerprint a PR's net contribution by asking its merger adapter for the
+  diff (design #1635 §3.3: `net_diff_id` is `fingerprint(base_ref...head_sha)`).
+
+  With both `base` and `head` this is the adapter's three-dot compare of that
+  exact range; with either missing it falls back to the whole-PR diff, which
+  both hosted adapters already serve as `base...head`. Every failure — an
+  adapter that does not implement `get_diff/2`, a wire error, a raise, an exit
+  — resolves to `nil`, the same "could not tell" value `fingerprint/1` returns
+  for an empty diff. A caller that needs a real fingerprint must treat `nil` as
+  a failed computation, never as evidence of equality.
+  """
+  @spec fingerprint_pr(module(), String.t(), String.t() | nil, String.t() | nil) :: t()
+  def fingerprint_pr(adapter, mr_ref, base, head)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :get_diff, 2) do
+      case adapter.get_diff(mr_ref, compare_opts(base, head)) do
+        {:ok, diff} -> fingerprint(diff)
+        _ -> nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  def fingerprint_pr(_adapter, _mr_ref, _base, _head), do: nil
+
+  @doc """
+  Fingerprint a branch's net contribution from a local worktree, by running
+  `git -C <path> diff <range>`.
+
+  `range` is the caller's own diff range (e.g. `"<merge_base>..HEAD"`) so the
+  fingerprint covers exactly what the reviewer was shown. `nil` on any git
+  failure or an empty diff, with the same "could not tell" meaning as
+  `fingerprint_pr/4`.
+  """
+  @spec fingerprint_local(String.t(), String.t()) :: t()
+  def fingerprint_local(worktree_path, range)
+      when is_binary(worktree_path) and is_binary(range) do
+    case System.cmd("git", ["-C", worktree_path, "diff", range], stderr_to_stdout: true) do
+      {out, 0} -> fingerprint(out)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  def fingerprint_local(_worktree_path, _range), do: nil
+
+  # Both endpoints present → a bounded `base...head` compare; otherwise the
+  # adapter's whole-PR diff, which is already the PR's net contribution.
+  defp compare_opts(base, head)
+       when is_binary(base) and is_binary(head) and base != "" and head != "",
+       do: %{base: base, head: head}
+
+  defp compare_opts(_base, _head), do: %{}
+
+  @doc """
   Do two diffs describe the same net contribution?
 
   `false` whenever either side could not be fingerprinted — the caller is about

@@ -42,6 +42,13 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "agent spawn failure: infrastructure, not a refusal of the work"},
     {Arbiter.Worker.ReviewGate, :start_worker_session, 5,
      "agent session failure: infrastructure, not a refusal of the work"},
+    {Arbiter.Worker.ReviewGate, :escalate_coverage_write_failure, 4,
+     "bd-203cl5: pages when an APPROVE's review-coverage row could not be written " <>
+       "(§3.3). It refuses nothing — the approval stands, last_reviewed_sha is " <>
+       "stamped and the merge proceeds — and is bounded by the bd-5jr49o breaker"},
+    {Arbiter.Worker.ReviewGate, :coverage_net_diff_id, 1,
+     "bd-203cl5: computes net_diff_id for the coverage row; its {:error, _} means " <>
+       "'no fingerprint', consumed by the page above, and blocks no merge"},
 
     # --- watchdog.ex ---
     {Arbiter.Worker.Watchdog, :maybe_notify_awaiting_manual_merge, 2,
