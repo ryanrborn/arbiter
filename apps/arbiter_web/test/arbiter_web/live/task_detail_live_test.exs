@@ -3,6 +3,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Dependency, Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
@@ -1643,6 +1644,186 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert has_element?(view, "#criterion-0")
       assert has_element?(view, "#criterion-1")
+    end
+  end
+
+  describe "review-round summary in MERGE & REVIEW (bd-9mqima)" do
+    # The summary is sourced from `Arbiter.ReviewGate.Round` — the authoritative
+    # record of what each reviewer pass actually decided — not from the runs'
+    # exit status, which cannot tell an approval from a rejection.
+    setup %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "reviewed", workspace_id: ws.id, target_branch: "main"})
+
+      {:ok, task: task}
+    end
+
+    defp review_run(task, round) do
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task.id <> "#review",
+          repo: "test/repo",
+          worker_type: :review,
+          status: :completed,
+          started_at: DateTime.add(~U[2026-07-01 10:00:00.000000Z], round, :hour),
+          completed_at: DateTime.add(~U[2026-07-01 10:30:00.000000Z], round, :hour),
+          output_lines: ["round #{round} reviewer transcript"]
+        })
+
+      run
+    end
+
+    defp round!(task, attrs) do
+      {:ok, round} =
+        Ash.create(
+          Round,
+          Map.merge(%{task_id: task.id, role: :review, converged: false}, Map.new(attrs))
+        )
+
+      round
+    end
+
+    test "renders round count and the latest round's verdict", %{conn: conn, task: task} do
+      r1 = review_run(task, 1)
+      r2 = review_run(task, 2)
+
+      round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 3})
+      round!(task, %{round: 1, role: :impl, verdict: nil, findings: "fixed them"})
+      round!(task, %{round: 2, run_id: r2.id, verdict: :approve, converged: true})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#review-round-summary")
+      summary = view |> element("#review-round-summary") |> render()
+
+      assert summary =~ "2 rounds"
+      assert summary =~ "round 2"
+      assert summary =~ "approved"
+    end
+
+    test "a single request_changes round reads honestly, not as an approval",
+         %{conn: conn, task: task} do
+      r1 = review_run(task, 1)
+      round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 2})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      summary = view |> element("#review-round-summary") |> render()
+
+      assert summary =~ "1 round"
+      assert summary =~ "changes requested"
+      refute summary =~ "approved"
+    end
+
+    test "a timed-out round is never shown as approved", %{conn: conn, task: task} do
+      # The reviewing pass exhausted its budget with no verdict. Its own run row
+      # can still be `:completed` — only the round record knows it timed out.
+      r1 = review_run(task, 1)
+      round!(task, %{round: 1, run_id: r1.id, verdict: :timed_out, finding_count: 0})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      summary = view |> element("#review-round-summary") |> render()
+
+      assert summary =~ "timed out"
+      refute summary =~ "approved"
+      refute summary =~ "changes requested"
+    end
+
+    test "a review round with no verdict reads as inconclusive", %{conn: conn, task: task} do
+      r1 = review_run(task, 1)
+      round!(task, %{round: 1, run_id: r1.id, verdict: nil, findings: "no parseable VERDICT"})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      summary = view |> element("#review-round-summary") |> render()
+
+      assert summary =~ "inconclusive"
+      refute summary =~ "approved"
+    end
+
+    test "the verdict comes from the round record, not the run's exit status",
+         %{conn: conn, task: task} do
+      # A reviewer run that exited 0 and completed cleanly, whose verdict was
+      # REQUEST_CHANGES. Reading the run alone would call this a pass.
+      r1 = review_run(task, 1)
+      assert r1.status == :completed
+      round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 1})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      summary = view |> element("#review-round-summary") |> render()
+
+      assert summary =~ "changes requested"
+      refute summary =~ "approved"
+    end
+
+    test "clicking the summary expands the matching run row in RUNS",
+         %{conn: conn, task: task} do
+      r1 = review_run(task, 1)
+      r2 = review_run(task, 2)
+
+      round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 3})
+      round!(task, %{round: 2, run_id: r2.id, verdict: :approve, converged: true})
+
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute html =~ "round 2 reviewer transcript"
+
+      html = view |> element("#review-round-summary") |> render_click()
+
+      # The latest round's own run row, expanded in place — no navigation.
+      assert html =~ "round 2 reviewer transcript"
+      refute html =~ "round 1 reviewer transcript"
+      assert html =~ "Board / Issues /"
+    end
+
+    test "the deep link clears a role filter that would be hiding the row",
+         %{conn: conn, task: task} do
+      r1 = review_run(task, 1)
+      round!(task, %{round: 1, run_id: r1.id, verdict: :approve, converged: true})
+
+      {:ok, _main} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :completed,
+          started_at: ~U[2026-07-01 09:00:00.000000Z],
+          completed_at: ~U[2026-07-01 09:30:00.000000Z],
+          output_lines: ["main transcript"]
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      # Filter the roster to `main` — the reviewer row is no longer rendered.
+      html = view |> element(~s([phx-value-tab="main"])) |> render_click()
+      refute html =~ "round 1 reviewer transcript"
+
+      html = view |> element("#review-round-summary") |> render_click()
+      assert html =~ "round 1 reviewer transcript"
+    end
+
+    test "the panel appears on review activity alone, with no PR or target branch",
+         %{conn: conn, ws: ws} do
+      {:ok, bare} = Ash.create(Issue, %{title: "no pr yet", workspace_id: ws.id})
+      round!(bare, %{round: 1, verdict: :approve, converged: true})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{bare.id}")
+
+      assert has_element?(view, "#panel-merge-review")
+      summary = view |> element("#review-round-summary") |> render()
+      assert summary =~ "approved"
+      # No run on the roster to link to — the line renders, inert.
+      assert summary =~ "disabled"
+    end
+
+    test "no summary renders for a task with no review activity", %{conn: conn, task: task} do
+      _ = review_run(task, 1)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, "#review-round-summary")
     end
   end
 
