@@ -38,22 +38,30 @@ defmodule Arbiter.Test.SandboxMonitorTest do
       SandboxMonitor.track(test_pid, __MODULE__, "log/2 probe")
       on_exit(fn -> SandboxMonitor.untrack(test_pid) end)
 
-      before = SandboxMonitor.incidents()
-      SandboxMonitor.log(%{msg: {:string, @disconnect}}, %{})
-      recorded = SandboxMonitor.incidents() -- before
+      # Filter on a marker rather than subtracting a snapshot: this module is
+      # async: true, so a genuine disconnect logged anywhere in the VM during
+      # the window would otherwise land in the diff and fail the assertion.
+      marker = marker("log")
+      SandboxMonitor.log(%{msg: {:string, @disconnect <> " " <> marker}}, %{})
 
-      assert [{:incident, text, running} = incident] = recorded
+      assert [{:incident, text, running} = incident] = incidents_matching(marker)
       assert text =~ "client #PID<0.2.0> exited"
       assert {_pid, __MODULE__, "log/2 probe", true} = List.keyfind(running, self(), 0)
 
-      # Do not leave a synthetic incident behind: it would fail the real run.
+      # Do not leave a synthetic incident behind: it would be counted in the
+      # end-of-suite report as if it were real.
       SandboxMonitor.forget(incident)
     end
 
     test "ignores ordinary log lines" do
-      before = SandboxMonitor.incidents()
-      SandboxMonitor.log(%{msg: {:string, "Worker.Watchdog: auto-merge failed; will retry"}}, %{})
-      assert SandboxMonitor.incidents() -- before == []
+      marker = marker("ignore")
+
+      SandboxMonitor.log(
+        %{msg: {:string, "Worker.Watchdog: auto-merge failed; will retry #{marker}"}},
+        %{}
+      )
+
+      assert incidents_matching(marker) == []
     end
   end
 
@@ -63,20 +71,26 @@ defmodule Arbiter.Test.SandboxMonitorTest do
     # the monitor would go silently blind and the suite would stay green. This
     # is the one test that goes the whole way through the real logger.
     test "the installed handler receives a real error-level disconnect" do
-      marker = "sandbox-monitor-install-probe-#{System.unique_integer([:positive])}"
+      marker = marker("install")
 
       ExUnit.CaptureLog.capture_log(fn -> Logger.error(@disconnect <> " " <> marker) end)
 
-      assert [{:incident, text, running} = incident] =
-               Enum.filter(SandboxMonitor.incidents(), fn {:incident, text, _running} ->
-                 String.contains?(text, marker)
-               end)
+      assert [{:incident, text, running} = incident] = incidents_matching(marker)
 
       assert text =~ "client #PID<0.2.0> exited"
       assert SandboxMonitor.classify(running) in [:mid_test, :teardown]
 
-      # Do not leave a synthetic incident behind: it would fail the real run.
+      # Do not leave a synthetic incident behind: it would be counted in the
+      # end-of-suite report as if it were real.
       SandboxMonitor.forget(incident)
     end
+  end
+
+  defp marker(label), do: "sandbox-monitor-#{label}-probe-#{System.unique_integer([:positive])}"
+
+  defp incidents_matching(marker) do
+    Enum.filter(SandboxMonitor.incidents(), fn {:incident, text, _running} ->
+      String.contains?(text, marker)
+    end)
   end
 end

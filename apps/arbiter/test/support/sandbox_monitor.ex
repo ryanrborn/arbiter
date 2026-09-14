@@ -176,8 +176,15 @@ defmodule Arbiter.Test.SandboxMonitor do
 
   @doc false
   def report(_results) do
-    incidents = :ets.tab2list(@incidents)
-    :ets.delete_all_objects(@incidents)
+    # Guarded the same way as every other accessor: by the time
+    # `after_suite` runs the table's owner may already be gone, and an
+    # `ArgumentError` raised from in here would be a confusing failure in the
+    # very tool meant to make failures legible.
+    incidents = incidents()
+
+    if :ets.whereis(@incidents) != :undefined do
+      :ets.delete_all_objects(@incidents)
+    end
 
     case incidents do
       [] ->
