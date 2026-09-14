@@ -1,0 +1,25 @@
+# Sobelow configuration for the `arbiter_release_env` app.
+#
+# The umbrella's `mix audit` alias runs `mix sobelow --config` once per child
+# app (Sobelow refuses to scan an umbrella root), so every app carries one of
+# these — see apps/arbiter/.sobelow-conf for the full rationale.
+#
+# This app is a single dependency-free module, `Arbiter.Worker.ReleaseEnv`.
+# Its one `System.cmd/3` is the shared spawn wrapper every BEAM/agent spawn in
+# the umbrella routes through; it carries an inline `# sobelow_skip
+# ["CI.System"]` annotation explaining why the variable command is not
+# user-controlled input, which `skip: true` below honours.
+[
+  verbose: false,
+  private: false,
+  skip: true,
+  # Not a Phoenix app — no router to find.
+  router: :none,
+  exit: :low,
+  format: "txt",
+  out: nil,
+  threshold: :low,
+  ignore: [],
+  ignore_files: [],
+  version: false
+]
