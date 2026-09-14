@@ -154,7 +154,8 @@ defmodule Arbiter.MCP.Catalog do
               "When true, return the complete record including notes, qa_notes, " <>
                 "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, " <>
                 "auto_close, verify_after_deploy, awaiting_verification_at, " <>
-                "verification_outcome, verification_evidence, and timestamps. " <>
+                "verification_outcome, verification_evidence, review_park_reason, " <>
+                "review_parked_at, and timestamps. " <>
                 "Defaults to false (slim payload for workers)."
           }
         },

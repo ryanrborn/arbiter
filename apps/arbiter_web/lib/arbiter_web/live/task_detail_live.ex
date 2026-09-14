@@ -2163,14 +2163,21 @@ defmodule ArbiterWeb.TaskDetailLive do
     lines = run_output_lines(run, live_run_id, live_lines)
 
     cond do
-      run_failed?(run) and run_failure_line(run) != "" -> run_failure_line(run)
-      # bd-8tjcms: `:review_not_started` is not a failure, so `run_failed?/1`
-      # (correctly) says no — but the reason is still the only thing worth
-      # showing in this column: the run itself produced nothing new to count.
-      run.status == :review_not_started and run_failure_line(run) != "" -> run_failure_line(run)
+      outcome_reason?(run) -> run_failure_line(run)
       lines == [] and run.status == :running -> "streaming…"
       true -> "#{length(lines)} lines"
     end
+  end
+
+  # bd-8tjcms `:review_not_started` and bd-9zuvbh `:review_parked` are terminal
+  # NON-failures, so `run_failed?/1` (correctly) says no about both — but the
+  # recorded reason is still the only thing worth showing in this column: the
+  # run itself produced nothing new to count, and "why is this sitting still"
+  # is exactly what an operator is scanning for.
+  @outcome_reason_statuses [:review_not_started, :review_parked]
+
+  defp outcome_reason?(%Run{} = run) do
+    (run_failed?(run) or run.status in @outcome_reason_statuses) and run_failure_line(run) != ""
   end
 
   # The one place that decides where a run's transcript comes from.

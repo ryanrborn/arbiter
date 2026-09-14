@@ -142,6 +142,18 @@ defmodule Arbiter.MCP.ToolsTest do
       refute Map.has_key?(data, :auto_close)
     end
 
+    # bd-9zuvbh: `task_show` is the coordinator's main surface, so the reason a
+    # ReviewGate-parked task is sitting still has to be readable there.
+    test "full: true carries the ReviewGate park", ctx do
+      {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(ctx.task.id, :verdict_guard_exhausted)
+
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+
+      assert data.review_park_reason == "verdict_guard_exhausted"
+      assert is_binary(data.review_parked_at)
+    end
+
     test "full: true returns complete record including review fields", ctx do
       assert {:ok, data} =
                Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})

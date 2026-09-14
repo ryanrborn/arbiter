@@ -301,6 +301,42 @@ defmodule Arbiter.Tasks.Issue do
              end)
     end
 
+    # ---- review-gate park (bd-9zuvbh, design #1635 §5.3 class C) ----------
+    #
+    # A park is a FLAG, not a status transition: the task stays `:in_progress`
+    # so `Tasks.Claim`, the board and the dependency graph keep treating it as
+    # live work, and `Dispatch.resume/2` can re-attach to the parked worker the
+    # moment a human acts. That is the whole difference from `:failed` — the
+    # work is intact and one decision away from merging, so nothing about it
+    # should read as "this run did not happen".
+    update :park_review do
+      require_atomic? false
+      accept [:review_park_reason]
+
+      change set_attribute(:review_parked_at, &DateTime.utc_now/0)
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # The human action half of class C's terminal state: re-running the review
+    # (or any other deliberate clearing) drops the park. `:close` clears it too,
+    # inline, so a parked task that is simply abandoned does not leave a stale
+    # entry in `arb prime`.
+    update :clear_review_park do
+      require_atomic? false
+
+      change set_attribute(:review_park_reason, nil)
+      change set_attribute(:review_parked_at, nil)
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
     update :close do
       require_atomic? false
       argument :reason, :string
@@ -319,6 +355,12 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :close}
       change set_attribute(:status, :closed)
       change set_attribute(:closed_at, &DateTime.utc_now/0)
+
+      # bd-9zuvbh: closing is one of the two human actions that resolve a
+      # ReviewGate park (the other is re-running the review). Clearing it here
+      # keeps `arb prime`'s parked list free of tasks nobody needs to look at.
+      change set_attribute(:review_park_reason, nil)
+      change set_attribute(:review_parked_at, nil)
 
       # bd-bsco7f: persist what this close meant upstream, so the drift check
       # can read the intent instead of guessing it from `pr_ref`. Mirrors the
@@ -787,6 +829,40 @@ defmodule Arbiter.Tasks.Issue do
       """
     end
 
+    # ---- review-gate park (bd-9zuvbh, design #1635 §5.3 class C) ----------
+
+    attribute :review_park_reason, :string do
+      allow_nil? true
+      public? false
+
+      description """
+      Why the ReviewGate parked this task instead of failing its run.
+
+      The gate's terminal no-verdict states — no parseable verdict after the
+      re-prompt, a reviewer timeout, a verdict guard that ran out of
+      re-prompts, a no-op fix round after an approval-gap rejection — are
+      *liveness* failures, not review findings. Class C fails open on them:
+      the run is recorded `:review_parked`, the coordinator is paged once, and
+      the task sits here until a human re-runs the review, merges by hand, or
+      rejects it.
+
+      The park is a flag, not a status: the task stays `:in_progress` so
+      `Tasks.Claim` and the board still see it as live work. Cleared by
+      `Arbiter.Tasks.ReviewPark.clear/2` (a re-run review) and by `:close`.
+      """
+    end
+
+    attribute :review_parked_at, :utc_datetime_usec do
+      allow_nil? true
+      public? false
+
+      description """
+      When the ReviewGate park was stamped. `arb prime` renders the age of the
+      wait from this, oldest first — the park most likely to have been
+      forgotten leads.
+      """
+    end
+
     attribute :close_upstream_expected, :boolean do
       allow_nil? true
       public? false
@@ -1093,6 +1169,31 @@ defmodule Arbiter.Tasks.Issue do
 
   @doc "Whether `issue_type` is subject to the acceptance-criteria-before-Ready rule."
   def gated_type?(issue_type), do: issue_type in @gated_issue_types
+
+  @doc """
+  Every task the ReviewGate has parked (bd-9zuvbh), oldest park first.
+
+  The oldest wait leads for the same reason it does in the post-merge
+  verification list: the park most likely to have been forgotten is the one a
+  human most needs to see. Backs `arb prime`'s REVIEW-PARKED section and
+  `GET /api/issues/review_parked`.
+
+  ## Options
+
+    * `:workspace_id` — restrict to a single workspace. Default: all.
+  """
+  @spec review_parked(keyword()) :: [t()]
+  def review_parked(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    __MODULE__
+    |> Ash.read!()
+    |> Enum.filter(fn i ->
+      is_binary(i.review_park_reason) and i.review_park_reason != "" and
+        (is_nil(workspace_id) or i.workspace_id == workspace_id)
+    end)
+    |> Enum.sort_by(&(&1.review_parked_at || DateTime.utc_now()), {:asc, DateTime})
+  end
 
   @doc """
   Returns the list of "ready" issues — issues whose `status == :open` and which
