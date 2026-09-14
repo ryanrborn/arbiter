@@ -8,9 +8,12 @@ defmodule Arbiter.Repo.Migrations.CreateReviewCoverage do
   `create_provider_accounts` migration: this repo's committed
   `priv/resource_snapshots` have already drifted from several hand-written
   migrations, so codegen tries to "catch up" every drifted resource at
-  once. This migration (and its matching
-  `priv/resource_snapshots/repo/review_coverage` snapshot) were written by
-  hand instead, scoped to the one new table.
+  once. This migration was written by hand instead, scoped to the one new
+  table. Unlike `create_provider_accounts`, no matching
+  `priv/resource_snapshots/repo/review_coverage` snapshot was committed, so
+  the next `mix ash.codegen` run will detect this resource as new and emit
+  another `create table(:review_coverage)` migration; that migration
+  should be a no-op reconciliation (or discarded) rather than applied.
   """
 
   use Ecto.Migration

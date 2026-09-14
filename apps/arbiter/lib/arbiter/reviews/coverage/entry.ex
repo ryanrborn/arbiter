@@ -48,7 +48,6 @@ defmodule Arbiter.Reviews.Coverage.Entry do
     repo Arbiter.Repo
 
     custom_indexes do
-      index [:mr_ref, :head_sha]
       index [:task_id]
     end
   end
