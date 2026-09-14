@@ -155,6 +155,28 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert has_element?(view, ~s(#board-column-closed [id="card-#{task.id}"]))
       refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
     end
+
+    # bd-5l88o5 — every board card carries a copy-id control so an operator
+    # can grab the issue id without leaving the board. The control renders
+    # nested inside the card's `<.link navigate>`, so it relies on the
+    # CopyId hook calling both `e.preventDefault()` (stop the anchor from
+    # navigating) and `e.stopPropagation()` (stop LiveView's click handling
+    # from bubbling) — asserted directly against the compiled hook JS in
+    # core_test.exs. This test only pins the button's presence inside the
+    # card's anchor; it does not exercise the hook itself.
+    test "a card carries a copy-id button naming the issue id, nested inside the card link", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = issue(ws, "collapse duplicate status helpers")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               ~s(div[id="card-#{task.id}"] a button[type="button"][aria-label="Copy issue id #{task.id}"])
+             )
+    end
   end
 
   # bd-b5wyjd — Backlog is where work is born, and the promote button on the

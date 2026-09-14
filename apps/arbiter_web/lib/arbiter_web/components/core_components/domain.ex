@@ -183,6 +183,13 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :id, :string, required: true, doc: ~s(issue id, e.g. "bd-3o8mq1" — always mono)
   attr :title, :string, required: true
 
+  attr :copy_dom_id, :string,
+    default: nil,
+    doc:
+      "override the copy button's element id — required when the same issue id's " <>
+        "card can render more than once on a page (e.g. multiple landed runs for " <>
+        "one task), since the default is derived from `id` alone"
+
   attr :accent, :string,
     values: [nil | ~w(live attention fail info proposal done)],
     default: nil,
@@ -223,12 +230,22 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       {@rest}
     >
       <div class="flex items-center justify-between gap-2">
-        <span class={[
-          "font-medium text-[10.5px] font-[family-name:var(--font-mono)]",
-          @muted && "text-[var(--text-label)]",
-          !@muted && "text-[var(--text-secondary)]"
-        ]}>
-          {@id}
+        <span class="inline-flex items-center gap-0.5">
+          <span class={[
+            "font-medium text-[10.5px] font-[family-name:var(--font-mono)]",
+            @muted && "text-[var(--text-label)]",
+            !@muted && "text-[var(--text-secondary)]"
+          ]}>
+            {@id}
+          </span>
+          <%!-- task_card is rendered inside board_live's whole-card `<.link navigate>`,
+               so this button ends up nested inside an <a> — invalid content model,
+               but browsers render it fine and the CopyId hook's preventDefault +
+               stopPropagation keep the click from also navigating. Restructuring
+               every board card to hoist the control out to a link sibling was
+               judged not worth the churn for a validity nit; keep this comment in
+               sync if that trade-off changes. --%>
+          <ArbiterWeb.CoreComponents.Core.copy_id id={@id} dom_id={@copy_dom_id} />
         </span>
         {render_slot(@status)}
       </div>

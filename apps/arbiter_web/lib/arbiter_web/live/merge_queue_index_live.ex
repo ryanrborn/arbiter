@@ -33,6 +33,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueueSupervisor
+  alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
@@ -238,7 +239,8 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     %{
       id: run.task_id,
       title: run.task_title || run.task_id,
-      footer: landed_footer(run)
+      footer: landed_footer(run),
+      copy_dom_id: "copy-id-landed-#{run.id}"
     }
   end
 
@@ -339,6 +341,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
                     </code>
                     <span class="text-[12px] text-[var(--text-secondary)] truncate">{m.title}</span>
                   </.link>
+                  <Core.copy_id id={m.task_id} />
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0" title="CI / Approval / Mergeable">
                   <span
@@ -404,6 +407,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
               id={t.id}
               title={t.title}
               footer={t.footer}
+              copy_dom_id={t.copy_dom_id}
               muted
             />
           </div>

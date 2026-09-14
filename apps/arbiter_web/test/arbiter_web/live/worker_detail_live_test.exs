@@ -31,6 +31,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ "test/repo"
       assert html =~ "hello"
       assert html =~ "arb done"
+      assert html =~ ~s(aria-label="Copy issue id #{task.id}")
     end
 
     test "tells the user when no worker is registered", %{conn: conn} do

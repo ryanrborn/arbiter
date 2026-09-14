@@ -152,46 +152,49 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
           <ul :if={@workers != []} id="workers" class="flex flex-col gap-3">
             <li :for={p <- @workers} class="flex flex-col">
-              <.link
-                navigate={~p"/workers/#{p.task_id}"}
-                class={[
-                  "flex items-center justify-between gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid",
-                  "border-[var(--border-default)] bg-[var(--arb-panel-alt)] hover:bg-[var(--arb-raised-hover)]",
-                  "transition-colors duration-[var(--dur-hover)] no-underline"
-                ]}
-              >
-                <div class="flex items-center gap-2 min-w-0 flex-1">
-                  <span class="relative flex h-2.5 w-2.5 shrink-0">
+              <div class="flex items-center gap-1">
+                <.link
+                  navigate={~p"/workers/#{p.task_id}"}
+                  class={[
+                    "flex items-center justify-between gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid",
+                    "border-[var(--border-default)] bg-[var(--arb-panel-alt)] hover:bg-[var(--arb-raised-hover)]",
+                    "transition-colors duration-[var(--dur-hover)] no-underline flex-1 min-w-0"
+                  ]}
+                >
+                  <div class="flex items-center gap-2 min-w-0 flex-1">
+                    <span class="relative flex h-2.5 w-2.5 shrink-0">
+                      <span
+                        :if={p.status == :running}
+                        class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--arb-live)] opacity-75"
+                      >
+                      </span>
+                      <span class={[
+                        "relative inline-flex h-2.5 w-2.5 rounded-full",
+                        status_dot_class(p.status)
+                      ]}>
+                      </span>
+                    </span>
+                    <code class="text-[11px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-secondary)] group-hover:text-[var(--text-link)] transition-colors truncate">
+                      {p.task_id}
+                    </code>
+                  </div>
+                  <div class="flex items-center gap-2 flex-none">
                     <span
-                      :if={p.status == :running}
-                      class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--arb-live)] opacity-75"
+                      class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] whitespace-nowrap"
+                      title="Elapsed"
                     >
+                      {humanize_seconds(runtime_seconds(p.started_at, @now))}
                     </span>
                     <span class={[
-                      "relative inline-flex h-2.5 w-2.5 rounded-full",
-                      status_dot_class(p.status)
+                      "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
+                      awaiting_review_status_class(p)
                     ]}>
+                      {awaiting_review_status_label(p)}
                     </span>
-                  </span>
-                  <code class="text-[11px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-secondary)] group-hover:text-[var(--text-link)] transition-colors truncate">
-                    {p.task_id}
-                  </code>
-                </div>
-                <div class="flex items-center gap-2 flex-none">
-                  <span
-                    class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] whitespace-nowrap"
-                    title="Elapsed"
-                  >
-                    {humanize_seconds(runtime_seconds(p.started_at, @now))}
-                  </span>
-                  <span class={[
-                    "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
-                    awaiting_review_status_class(p)
-                  ]}>
-                    {awaiting_review_status_label(p)}
-                  </span>
-                </div>
-              </.link>
+                  </div>
+                </.link>
+                <ArbiterWeb.CoreComponents.Core.copy_id id={p.task_id} class="flex-none" />
+              </div>
               <span class="text-[10.5px] text-[var(--text-label)] px-3 py-1">
                 {p.workspace_name}
               </span>

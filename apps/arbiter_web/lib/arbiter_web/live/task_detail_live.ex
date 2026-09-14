@@ -942,6 +942,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               Board / Issues /
             </.link>
             <code class="text-[var(--text-title)]">{@task_id}</code>
+            <ArbiterWeb.CoreComponents.Core.copy_id id={@task_id} />
             <.status_chip :if={@task} status={@task.status} class="badge-sm" />
           </div>
 
@@ -1222,6 +1223,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                          they explain. --%>
                     <div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border-b border-[var(--border-default)] bg-[var(--arb-panel-alt)] text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
                       <code class="text-[var(--text-secondary)]">{r.task_id}</code>
+                      <ArbiterWeb.CoreComponents.Core.copy_id
+                        id={r.task_id}
+                        dom_id={"copy-id-run-#{r.id}"}
+                      />
                       <span :if={present?(r.repo)}>{r.repo}</span>
                       <span :if={present?(r.model)}>{r.model}</span>
                       <span>{length(lines)} lines</span>
@@ -1836,6 +1841,10 @@ defmodule ArbiterWeb.TaskDetailLive do
           </span>
         </div>
       </.link>
+      <ArbiterWeb.CoreComponents.Core.copy_id
+        id={@other_id}
+        dom_id={"copy-id-dep-#{@direction}-#{@dep.id}"}
+      />
       <span
         :if={@dep.other_issue}
         class={["badge badge-xs shrink-0", status_badge_class(@dep.other_issue.status)]}

@@ -205,6 +205,30 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
       assert html =~ "landed today"
     end
 
+    test "two landed runs for the same task render without a duplicate DOM id",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "landed-twice", workspace_id: ws.id})
+
+      for mr_ref <- ["!42", "!43"] do
+        Ash.create!(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
+          completed_at: DateTime.utc_now(),
+          mr_ref: mr_ref
+        })
+      end
+
+      # `live/2` raises on duplicate DOM ids found while rendering the LiveView.
+      {:ok, _view, html} = live(conn, ~p"/merge_queue?tab=landed")
+
+      assert html =~ ~s(id="merge_queue-landed")
+      assert html =~ task.id
+    end
+
     test "a run completed before today does not show up", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "old-news", workspace_id: ws.id})
 
