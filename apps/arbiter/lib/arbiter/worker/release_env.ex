@@ -11,7 +11,7 @@ defmodule Arbiter.Worker.ReleaseEnv do
   worktree's mise-pinned toolchain. The resulting crash:
 
       Runtime terminating during boot ({'cannot get bootfile',
-        '/home/rborn/.arbiter/releases/v0.1.5/bin/no_dot_erlang.boot'})
+        '/opt/arbiter/releases/v0.1.5/bin/no_dot_erlang.boot'})
 
   is the exact failure bd-4hkzn3 investigates. The ReviewGate degrades to
   static-analysis-only because `mix test` cannot boot.

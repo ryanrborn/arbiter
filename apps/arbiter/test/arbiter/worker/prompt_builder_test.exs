@@ -51,7 +51,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
            You MUST only write files inside this directory. Do NOT use absolute
            paths that point outside it — especially not to the main repo checkout
-           (e.g. /home/ryan/dev/arbiter/...). Writing to the main repo corrupts
+           (e.g. $HOME/dev/arbiter/...). Writing to the main repo corrupts
            Phoenix hot-reload and cascades to kill every other running worker.
            Always use relative paths or paths rooted at /tmp/wt-golden.
 

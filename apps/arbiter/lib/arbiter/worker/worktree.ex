@@ -9,12 +9,14 @@ defmodule Arbiter.Worker.Worktree do
 
   ## Worktree root
 
-  Worktrees are created under a configurable root directory. By default this
-  is `/home/rborn/dev/arbiter-worktrees`; override via:
+  Worktrees are created under a configurable root directory, resolved by
+  `Arbiter.Config.Paths.worktree_root/0` (env var → app config →
+  `$HOME`-relative default). Override via:
 
       config :arbiter, :worktree_root, "/some/other/dir"
 
-  or at runtime with `Application.put_env/3` (tests rely on this).
+  or at runtime with `Application.put_env/3` (tests rely on this), or the
+  `ARBITER_WORKTREE_ROOT` environment variable.
 
   The branch name is mapped to a directory leaf by replacing `/` with `-`,
   so `feature/gte-009-worktree` lives at
@@ -30,8 +32,6 @@ defmodule Arbiter.Worker.Worktree do
     have a consistent shape and we can add metadata later without breaking
     them.
   """
-
-  @default_root "/home/rborn/dev/arbiter-worktrees"
 
   # Mix envs that workers actually use. `test` is the minimum; `dev` is
   # included because some dispatched workers compile in dev mode.
@@ -993,7 +993,7 @@ defmodule Arbiter.Worker.Worktree do
   """
   @spec worktree_path(String.t()) :: path()
   def worktree_path(branch_name) when is_binary(branch_name) do
-    root = Application.get_env(:arbiter, :worktree_root, @default_root)
+    root = Arbiter.Config.Paths.worktree_root()
     leaf = String.replace(branch_name, "/", "-")
     Path.join(root, leaf)
   end
