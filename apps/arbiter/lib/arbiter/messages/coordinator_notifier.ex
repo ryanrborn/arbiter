@@ -288,6 +288,44 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Escalate a failed **review-coverage write** to the coordinator (bd-203cl5 /
+  #1648, design #1635 §3.3).
+
+  Fired by `Arbiter.Worker.ReviewGate` when a clean APPROVE could not record its
+  `review_coverage` row. Unlike the `last_reviewed_sha` stamp beside it, this
+  write is deliberately NOT best-effort: §3.3 argues that a silently-missing
+  coverage row *is* the #1585 stall, so the failure has to be visible while it
+  is still cheap to fix. The gate itself is unaffected — the approval stands and
+  `last_reviewed_sha` (still the authoritative merge-guard input) is stamped as
+  before. Best-effort send, returns `:ok`.
+  """
+  @spec review_coverage_write_failed(map(), String.t() | nil, String.t() | nil, term()) :: :ok
+  def review_coverage_write_failed(snapshot, mr_ref, head_sha, reason) do
+    escalate_event("review_coverage_write_failed/4", snapshot, fn task_id ->
+      subject = "#{task_id} review coverage write failed"
+
+      body =
+        [
+          "A ReviewGate APPROVE for #{title_for(task_id)} could not record its " <>
+            "review-coverage row (design #1635 §3.3).",
+          mr_ref && "PR: #{mr_ref}",
+          head_sha && "Approved head: #{head_sha}",
+          "Error: #{describe_reason(reason)}",
+          "",
+          "The approval itself stands and `last_reviewed_sha` was stamped, so the " <>
+            "merge guard is unaffected today. What is missing is the audit row for " <>
+            "this head. Re-record it by hand with `arb review cover` once the cause " <>
+            "is understood, or the head will read as uncovered when the coverage " <>
+            "predicate goes live."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
   Escalate a stalled auto-merge to the coordinator (bd-6gxosc).
 
   Fired by `Arbiter.Worker.Watchdog` after N consecutive `safe_merge` failures on
