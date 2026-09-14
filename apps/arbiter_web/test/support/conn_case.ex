@@ -75,10 +75,12 @@ defmodule ArbiterWeb.ConnCase do
         :ok
 
       pids ->
-        remaining = deadline - System.monotonic_time(:millisecond)
+        # Each pid re-reads the deadline rather than being handed the budget
+        # that was left when the batch started: `timeout` bounds the whole
+        # drain, so N LiveViews must not cost N x timeout.
+        Enum.each(pids, &await_down(&1, deadline))
 
-        if remaining > 0 do
-          Enum.each(pids, &await_down(&1, remaining))
+        if System.monotonic_time(:millisecond) < deadline do
           await_live_views(test_pid, deadline)
         else
           :ok
@@ -86,13 +88,19 @@ defmodule ArbiterWeb.ConnCase do
     end
   end
 
-  defp await_down(pid, timeout) do
-    ref = Process.monitor(pid)
+  defp await_down(pid, deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      remaining when remaining > 0 ->
+        ref = Process.monitor(pid)
 
-    receive do
-      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
-    after
-      timeout -> Process.demonitor(ref, [:flush])
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          remaining -> Process.demonitor(ref, [:flush])
+        end
+
+      _ ->
+        :ok
     end
   end
 

@@ -88,18 +88,20 @@ defmodule Arbiter.ProcessTeardown do
   # `Task`s are `proc_lib` processes but have no `sys` loop, so `:sys.suspend`
   # on one blocks for the whole timeout and then exits. Skip anything that
   # isn't an OTP behaviour rather than paying that cost.
+  #
+  # The classification has to come from `Process.info(pid, :initial_call)`, the
+  # entry point the VM recorded at spawn: `:gen_server`, `:gen_statem`,
+  # `:gen_event`, `Supervisor`, `DynamicSupervisor` and `Agent` all go through
+  # `:proc_lib.init_p/5`, while a `Task` is `{Task.Supervised, :reply | :noreply,
+  # _}` and a bare `spawn` is its own MFA.
+  #
+  # The `$initial_call` *dictionary* entry looks like it would work and does
+  # not: `Task.Supervised.get_initial_call/1` writes the user's own MFA there,
+  # exactly the shape a `GenServer` gets, so a Task is indistinguishable — and
+  # `Agent` writes an anonymous fun, so it would be misread the other way. It is
+  # also written by the new process itself, which makes reading it a race
+  # against that process's startup.
   defp sys_process?(pid) do
-    case Process.info(pid, :dictionary) do
-      {:dictionary, dict} ->
-        case Keyword.get(dict, :"$initial_call") do
-          nil -> false
-          {Task, _, _} -> false
-          {Task.Supervised, _, _} -> false
-          _ -> true
-        end
-
-      nil ->
-        false
-    end
+    Process.info(pid, :initial_call) == {:initial_call, {:proc_lib, :init_p, 5}}
   end
 end

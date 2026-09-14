@@ -6,6 +6,8 @@ defmodule Arbiter.Test.SandboxMonitorTest do
   """
   use ExUnit.Case, async: true
 
+  require Logger
+
   alias Arbiter.Test.SandboxMonitor
 
   @disconnect ~S|Exqlite.Connection (#PID<0.1.0> ("db_conn_1")) disconnected: | <>
@@ -52,6 +54,29 @@ defmodule Arbiter.Test.SandboxMonitorTest do
       before = SandboxMonitor.incidents()
       SandboxMonitor.log(%{msg: {:string, "Worker.Watchdog: auto-merge failed; will retry"}}, %{})
       assert SandboxMonitor.incidents() -- before == []
+    end
+  end
+
+  describe "install/0" do
+    # Every other test here drives `log/2` directly, so they would all keep
+    # passing if `install/0` never wired the handler into `:logger` at all —
+    # the monitor would go silently blind and the suite would stay green. This
+    # is the one test that goes the whole way through the real logger.
+    test "the installed handler receives a real error-level disconnect" do
+      marker = "sandbox-monitor-install-probe-#{System.unique_integer([:positive])}"
+
+      ExUnit.CaptureLog.capture_log(fn -> Logger.error(@disconnect <> " " <> marker) end)
+
+      assert [{:incident, text, running} = incident] =
+               Enum.filter(SandboxMonitor.incidents(), fn {:incident, text, _running} ->
+                 String.contains?(text, marker)
+               end)
+
+      assert text =~ "client #PID<0.2.0> exited"
+      assert SandboxMonitor.classify(running) in [:mid_test, :teardown]
+
+      # Do not leave a synthetic incident behind: it would fail the real run.
+      SandboxMonitor.forget(incident)
     end
   end
 end
