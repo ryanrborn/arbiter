@@ -179,6 +179,27 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
       assert event.payload["site"] == "watchdog"
     end
 
+    test "the documented SQL readout groups the durable rows by result" do
+      # The query the design doc's §6.3 tells a coordinator to run after a
+      # restart. Asserted here so a payload shape change cannot quietly break
+      # the one readout the post-merge verification depends on.
+      mr_ref = "ryanrborn/arbiter#1649"
+      record_reviewed(mr_ref, sha("a"))
+
+      capture_log(fn ->
+        observe(%{mr_ref: mr_ref, head: sha("a"), old: {:covered, sha("a")}})
+        observe(%{mr_ref: mr_ref, head: sha("z"), old: {:covered, sha("z")}})
+      end)
+
+      %{rows: rows} =
+        Arbiter.Repo.query!("""
+        select json_extract(payload, '$.result') as result, count(*)
+          from events where topic = 'coverage_shadow' group by result
+        """)
+
+      assert Enum.sort(rows) == [["agree", 1], ["disagree", 1]]
+    end
+
     test "a re-poll of the same head does not re-log or double-count the same disagreement" do
       mr_ref = "ryanrborn/arbiter#1649"
       record_reviewed(mr_ref, sha("a"))

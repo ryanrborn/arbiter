@@ -45,6 +45,19 @@ defmodule Arbiter.Reviews.CoverageShadow do
   release mode drops those) naming the site, task, MR, head, both answers and
   the new answer's reason.
 
+  ## What shadow mode costs
+
+  One forge round-trip per guarded-merge decision that reaches §3.2's rule 3 —
+  the three-dot compare `ctx.fetch_diff` performs. Rules 0, 1 and 2 answer
+  without it, so the healthy post-P1 path (a `:reviewed` row exists for the
+  head the forge reports) adds no forge traffic at all. The paths that do pay
+  are the ones where the head already differs from the stamp, which in the
+  Watchdog already fetched two diffs of its own (`base_merge_only?/3`); the
+  MergeQueue's stale-SHA retry (§2.3's M3, unbounded by design until P6) is
+  the one place this is a genuinely new per-tick call. Both adapters route
+  through `Arbiter.GitHub.Limiter`, and the phase is short-lived by
+  construction — P4 replaces the double evaluation with a single one.
+
   ## Rule-3 `:mechanical` rows are NOT written in shadow mode
 
   §3.4 requires an adopter to persist the `:mechanical` row a rule-3 match
