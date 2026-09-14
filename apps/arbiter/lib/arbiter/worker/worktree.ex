@@ -1,6 +1,8 @@
 defmodule Arbiter.Worker.Worktree do
   require Logger
 
+  alias Arbiter.Worker.ReleaseEnv
+
   @moduledoc """
   Thin wrapper around `git worktree` for the Phase 4 worker orchestrator.
 
@@ -1148,12 +1150,21 @@ defmodule Arbiter.Worker.Worktree do
   # Run `mix deps.get` for Mix projects to ensure any new dependencies added
   # to the branch are fetched. Non-Mix repos (no mix.exs) skip this step.
   # Failures are logged but do not fail provisioning (best-effort).
+  #
+  # bd-2oelme: routed through `ReleaseEnv.cmd/3` — under a systemd OTP release
+  # the coordinator's own env carries ROOTDIR/BINDIR/RELEASE_*, and a `mix`
+  # child that inherits them boots against the release's bundled ERTS and dies
+  # with `cannot get bootfile` instead of fetching deps.
+  #
+  # Public (`@doc false`) only so the release-env spawn test can drive this one
+  # spawn without provisioning a real worktree.
+  @doc false
   @spec ensure_deps_fetched(path()) :: :ok
-  defp ensure_deps_fetched(worktree_path) when is_binary(worktree_path) do
+  def ensure_deps_fetched(worktree_path) when is_binary(worktree_path) do
     mix_exs = Path.join(worktree_path, "mix.exs")
 
     if File.exists?(mix_exs) do
-      case System.cmd("mix", ["deps.get"], cd: worktree_path, stderr_to_stdout: true) do
+      case ReleaseEnv.cmd("mix", ["deps.get"], cd: worktree_path, stderr_to_stdout: true) do
         {_output, 0} ->
           :ok
 

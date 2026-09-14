@@ -28,9 +28,31 @@ defmodule Arbiter.Worker.ReleaseEnv do
   so `erl`, `erlc`, and `mix` (found via mise shims) resolve to the
   per-worktree toolchain rather than the release's bundled ERTS.
 
-  Called from `Arbiter.Worker.ClaudeSession.env_pairs/3`, which is the single
-  choke-point for all worker Port.opens (implementer, reviewer, commit-gate
-  nudge, resume continuation).
+  ## The shared helper (bd-2oelme)
+
+  `clean_pairs/0` is the raw material; callers must not splice it in by hand.
+  Every spawn that can start a BEAM (`mix`, `elixir`, `erl`, `iex`) or an agent
+  CLI (`claude`, `agy`, `codex`) — or a `sh -c` that may run one — goes through
+  exactly one of:
+
+    * `cmd/3` — a `System.cmd/3` drop-in that merges the cleanup pairs into
+      the `:env` option (using `nil` to unset, which is what `System.cmd/3`
+      understands).
+    * `port_env/1` — returns `[{name, value | false}]` for `Port.open`'s
+      `{:env, …}` option (`false` unsets, which is what Erlang's port driver
+      understands), with caller pairs appended so they can still override.
+
+  `Arbiter.Worker.ClaudeSession.env_pairs/3` (all worker Port.opens),
+  `Arbiter.Agents.Preflight` (the auth probe), `Arbiter.Worker.Worktree`
+  (`mix deps.get` worktree seeding), `Arbiter.Workflows.CodeReview.Checks`
+  (the ReviewGate reviewer), `Arbiter.Workflows.ReviewReply` (the reply
+  composer) and `Arbiter.Quota.CloudCode` (the `agy` usage probe) are the
+  call sites. `release_env_guard_test.exs` holds the full inventory and fails
+  if a new spawn site appears without being classified.
+
+  Pure-tool spawns (`git`, `gh`, `glab`, `cp`, `kill`, `pgrep`, `diff`) are
+  deliberately left alone: they never read ROOTDIR/BINDIR, and stripping vars
+  from them would only add noise.
   """
 
   # Static release-specific var names, in addition to the RELEASE_* prefix scan.
@@ -49,6 +71,45 @@ defmodule Arbiter.Worker.ReleaseEnv do
   def clean_pairs do
     unset_pairs() ++ cleaned_path_pairs()
   end
+
+  @doc """
+  `System.cmd/3` drop-in that scrubs release vars from the child environment.
+
+  Merges `clean_pairs/0` (translated to `System.cmd/3`'s `nil`-means-unset
+  convention) ahead of any caller-supplied `:env` pairs, so a caller can still
+  override a specific var. All other options are passed through untouched.
+
+  Use this for every `mix` / `elixir` / `erl` / `claude` / `agy` / `codex`
+  spawn, and for any `sh -c` whose script may invoke one.
+  """
+  @spec cmd(binary(), [binary()], keyword()) :: {Collectable.t(), non_neg_integer()}
+  def cmd(command, args, opts \\ []) when is_binary(command) and is_list(args) do
+    System.cmd(command, args, Keyword.put(opts, :env, cmd_env(Keyword.get(opts, :env, []))))
+  end
+
+  @doc """
+  Env pairs for `System.cmd/3`: the release cleanup (as `{name, nil}`) followed
+  by `extra`.
+
+  Only needed when a call site cannot use `cmd/3` directly — prefer `cmd/3`.
+  """
+  @spec cmd_env([{String.t(), String.t() | nil | false}]) :: [{String.t(), String.t() | nil}]
+  def cmd_env(extra \\ []) when is_list(extra) do
+    (clean_pairs() ++ extra)
+    |> Enum.map(fn
+      {name, false} -> {name, nil}
+      pair -> pair
+    end)
+  end
+
+  @doc """
+  Env pairs for `Port.open`'s `{:env, …}` option: the release cleanup (as
+  `{name, false}`) followed by `extra`, which wins on a name collision.
+
+  Returns `extra` unchanged on a dev VM with no release env detected.
+  """
+  @spec port_env([{String.t(), String.t() | false}]) :: [{String.t(), String.t() | false}]
+  def port_env(extra \\ []) when is_list(extra), do: clean_pairs() ++ extra
 
   # -- private ---------------------------------------------------------------
 
