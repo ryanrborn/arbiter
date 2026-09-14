@@ -55,14 +55,18 @@ defmodule Arbiter.Worker.DiskUsageReconcileTest do
           []
 
         cost ->
-          start_ms = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_unix(:millisecond)
+          start_ms =
+            DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_unix(:millisecond)
 
           [
             ~s({"type":"cost-state","totalCostUSD":#{cost},"totalDuration":7000,"startTime":#{start_ms},"modelUsage":{"claude-opus-4-8":{"costUSD":#{cost}}}})
           ]
       end
 
-    File.write!(Path.join(dir, session_id <> ".jsonl"), Enum.join(turns ++ cost_lines, "\n") <> "\n")
+    File.write!(
+      Path.join(dir, session_id <> ".jsonl"),
+      Enum.join(turns ++ cost_lines, "\n") <> "\n"
+    )
   end
 
   # A session that emits only `init` (so the worker learns the session id) and
@@ -133,9 +137,15 @@ defmodule Arbiter.Worker.DiskUsageReconcileTest do
 
   defp do_wait(fun, deadline, step_ms) do
     cond do
-      fun.() -> :ok
-      System.monotonic_time(:millisecond) >= deadline -> flunk("wait_until/3 timed out")
-      true -> (Process.sleep(step_ms); do_wait(fun, deadline, step_ms))
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("wait_until/3 timed out")
+
+      true ->
+        Process.sleep(step_ms)
+        do_wait(fun, deadline, step_ms)
     end
   end
 end

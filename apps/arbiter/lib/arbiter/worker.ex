@@ -213,7 +213,6 @@ defmodule Arbiter.Worker do
   # advances to `:running` on the first step, exactly like `:idle`.
   @live_statuses [:idle, :resuming, :running, :awaiting]
 
-
   # Grace after a subprocess exit before we classify+escalate a stop. This drains
   # any in-flight `arb done` message that the port's exit_status raced ahead of
   # (the done marker is enqueued while processing the data line; the exit_status

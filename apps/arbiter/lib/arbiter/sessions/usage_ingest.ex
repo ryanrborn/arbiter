@@ -173,9 +173,7 @@ defmodule Arbiter.Sessions.UsageIngest do
         write_delta(session_id, totals, path)
 
       {:error, reason} ->
-        Logger.warning(
-          "Sessions.UsageIngest: cannot read #{path}: #{inspect(reason)}"
-        )
+        Logger.warning("Sessions.UsageIngest: cannot read #{path}: #{inspect(reason)}")
 
         {:error, reason}
     end

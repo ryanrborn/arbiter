@@ -500,7 +500,6 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
     end
   end
 
-
   # Claude Code stamps `"model":"<synthetic>"` on locally-generated assistant
   # messages (interrupts, error placeholders). Keeping the first model seen —
   # the rule that is right everywhere else — lands that placeholder on the
@@ -541,5 +540,4 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
       assert totals.model == nil
     end
   end
-
 end

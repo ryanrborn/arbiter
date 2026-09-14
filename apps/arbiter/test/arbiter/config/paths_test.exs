@@ -119,5 +119,4 @@ defmodule Arbiter.Config.PathsTest do
       assert Paths.coordinator_session_dirs() == ["/tmp/a", "/tmp/b"]
     end
   end
-
 end

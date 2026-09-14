@@ -399,8 +399,7 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
         # A turn from an earlier run sharing this file (`--resume` appends).
         # Mark it seen so a re-emit that straddles the cutoff can't sneak the
         # earlier run's tokens in, but count nothing for it.
-        {MapSet.put(seen, id),
-         Map.update!(totals, :skipped_before_since, &(&1 + 1)), segments}
+        {MapSet.put(seen, id), Map.update!(totals, :skipped_before_since, &(&1 + 1)), segments}
 
       true ->
         {MapSet.put(seen, id), add_usage(totals, usage, msg), segments}

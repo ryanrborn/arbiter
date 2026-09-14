@@ -204,7 +204,8 @@ defmodule Arbiter.Sessions.UsageIngestTest do
 
       write!(dir, sid, lines)
 
-      log = capture_log(fn -> assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir]) end)
+      log =
+        capture_log(fn -> assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir]) end)
 
       assert [ev] = rows_for(sid)
       haystack = inspect(Map.from_struct(ev), limit: :infinity, printable_limit: :infinity)

@@ -642,7 +642,9 @@ defmodule Arbiter.Workers.ReconcilerTest do
     config_dir = tmp_dir!("recon-costw-cfg")
     path = write_session_jsonl!(config_dir, cwd, session_id)
 
-    parent_ms = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.to_unix(:millisecond)
+    parent_ms =
+      DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.to_unix(:millisecond)
+
     own_ms = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_unix(:millisecond)
 
     File.write!(
@@ -674,5 +676,4 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert [ev] = usage_events_for(run.id)
     assert_in_delta ev.cost_usd, 0.5, 0.0000001
   end
-
 end
