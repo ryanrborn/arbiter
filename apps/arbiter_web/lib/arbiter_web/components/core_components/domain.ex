@@ -206,6 +206,13 @@ defmodule ArbiterWeb.CoreComponents.Domain do
     default: nil,
     doc: ~s(one mono line of what the agent is doing right now, e.g. "edit · status_helpers.ex")
 
+  attr :activity_href, :string,
+    default: nil,
+    doc:
+      "when set, the activity line becomes its own <.link> to this href (e.g. the " <>
+        "running worker page) instead of plain text — used by the board's Running " <>
+        "column so the activity line and the card body navigate to different places"
+
   attr :footer, :string, default: nil, doc: ~s(right-aligned mono footer, e.g. "w-14 · sonnet")
   attr :muted, :boolean, default: false, doc: "closed/merged treatment"
   attr :class, :any, default: nil
@@ -238,13 +245,11 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           ]}>
             {@id}
           </span>
-          <%!-- task_card is rendered inside board_live's whole-card `<.link navigate>`,
-               so this button ends up nested inside an <a> — invalid content model,
-               but browsers render it fine and the CopyId hook's preventDefault +
-               stopPropagation keep the click from also navigating. Restructuring
-               every board card to hoist the control out to a link sibling was
-               judged not worth the churn for a validity nit; keep this comment in
-               sync if that trade-off changes. --%>
+          <%!-- task_card is rendered inside board_live's whole-card `phx-click`
+               navigation target (a plain element, not an `<a>`), so this button
+               is not nested inside a real link. The CopyId hook's preventDefault
+               + stopPropagation still keep its click from also triggering the
+               card's own navigation. --%>
           <ArbiterWeb.CoreComponents.Core.copy_id id={@id} dom_id={@copy_dom_id} />
         </span>
         {render_slot(@status)}
@@ -258,8 +263,18 @@ defmodule ArbiterWeb.CoreComponents.Domain do
         {@title}
       </span>
 
+      <.link
+        :if={@activity && @activity_href}
+        navigate={@activity_href}
+        class={[
+          "block text-[10.5px] leading-[1.5] font-[family-name:var(--font-mono)] hover:underline",
+          task_card_activity_class(@accent)
+        ]}
+      >
+        {@activity}
+      </.link>
       <span
-        :if={@activity}
+        :if={@activity && !@activity_href}
         class={[
           "text-[10.5px] leading-[1.5] font-[family-name:var(--font-mono)]",
           task_card_activity_class(@accent)
