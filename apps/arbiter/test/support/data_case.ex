@@ -86,6 +86,7 @@ defmodule Arbiter.DataCase do
       drain_task_supervisor(Arbiter.Reviews.TaskSupervisor)
       drain_task_supervisor(Arbiter.Quota.CloudProbeSupervisor)
       drain_task_supervisor(Arbiter.TaskSupervisor)
+      settle_sandbox(pid)
       Ecto.Adapters.SQL.Sandbox.stop_owner(pid)
     end)
 
@@ -147,6 +148,51 @@ defmodule Arbiter.DataCase do
       nil ->
         :ok
     end
+  end
+
+  @doc """
+  Make the sandbox connection finish processing the death of every client this
+  test killed, before the connection is handed to the next test (bd-5scl0c).
+
+  When a process dies while holding a checkout, it does not notify anybody:
+  the BEAM gives its holder ETS table away, and
+  `DBConnection.Ownership.Proxy` turns that `ETS-TRANSFER` into
+  `client #PID<..> exited` and disconnects (`proxy.ex:153`). Erlang orders
+  signals per sender/receiver *pair* only, so observing the client's death
+  elsewhere — e.g. ExUnit waiting on the test supervisor's `:DOWN` before it
+  runs `on_exit` — says nothing about whether the proxy has handled the
+  give-away yet. Left alone, that disconnect regularly landed a few hundred
+  microseconds into the *next* test, which by then owns the connection:
+  measured over 5 full `apps/arbiter_web` runs, 7 disconnects landed mid-test
+  without this barrier and 0 with it.
+
+  One synchronous round-trip fixes the ordering without any waiting: a
+  `gen_server` handles its mailbox in order, so by the time our query comes
+  back, every `ETS-TRANSFER` already queued ahead of it has been processed and
+  the disconnect (if any) has landed here, inside the owning test's teardown,
+  where the connection is about to be handed back anyway.
+
+  Everything is caught: the proxy may *already* have shut down over exactly
+  such a transfer, and a teardown helper must never be the thing that fails a
+  green test.
+  """
+  def settle_sandbox(owner) do
+    # `on_exit` runs in its own process, which owns nothing; in shared mode the
+    # allow is redundant, in `async: true` it is what makes the query legal.
+    # Guarded separately from the query: an allow that fails (the owner may
+    # already be gone) must not skip the round-trip that is the actual barrier.
+    safely(fn -> Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, owner, self()) end)
+    safely(fn -> Arbiter.Repo.query!("SELECT 1") end)
+    :ok
+  end
+
+  defp safely(fun) do
+    fun.()
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   @doc false
