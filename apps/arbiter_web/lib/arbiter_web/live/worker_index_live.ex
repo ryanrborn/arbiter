@@ -151,7 +151,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
           </div>
 
           <ul :if={@workers != []} id="workers" class="flex flex-col gap-3">
-            <li :for={p <- @workers} class="flex flex-col">
+            <li :for={p <- @workers} class="relative flex flex-col">
               <.link
                 navigate={~p"/workers/#{p.task_id}"}
                 class={[
@@ -192,6 +192,10 @@ defmodule ArbiterWeb.WorkerIndexLive do
                   </span>
                 </div>
               </.link>
+              <ArbiterWeb.CoreComponents.Core.copy_id
+                id={p.task_id}
+                class="absolute right-3 top-1/2 -translate-y-1/2 bg-[var(--arb-panel-alt)]"
+              />
               <span class="text-[10.5px] text-[var(--text-label)] px-3 py-1">
                 {p.workspace_name}
               </span>

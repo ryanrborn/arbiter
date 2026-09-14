@@ -183,6 +183,13 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :id, :string, required: true, doc: ~s(issue id, e.g. "bd-3o8mq1" — always mono)
   attr :title, :string, required: true
 
+  attr :copy_dom_id, :string,
+    default: nil,
+    doc:
+      "override the copy button's element id — required when the same issue id's " <>
+        "card can render more than once on a page (e.g. multiple landed runs for " <>
+        "one task), since the default is derived from `id` alone"
+
   attr :accent, :string,
     values: [nil | ~w(live attention fail info proposal done)],
     default: nil,
@@ -231,7 +238,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           ]}>
             {@id}
           </span>
-          <ArbiterWeb.CoreComponents.Core.copy_id id={@id} />
+          <ArbiterWeb.CoreComponents.Core.copy_id id={@id} dom_id={@copy_dom_id} />
         </span>
         {render_slot(@status)}
       </div>

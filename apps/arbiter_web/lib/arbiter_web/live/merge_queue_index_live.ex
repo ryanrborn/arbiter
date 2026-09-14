@@ -239,7 +239,8 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     %{
       id: run.task_id,
       title: run.task_title || run.task_id,
-      footer: landed_footer(run)
+      footer: landed_footer(run),
+      copy_dom_id: "copy-id-landed-#{run.id}"
     }
   end
 
@@ -406,6 +407,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
               id={t.id}
               title={t.title}
               footer={t.footer}
+              copy_dom_id={t.copy_dom_id}
               muted
             />
           </div>

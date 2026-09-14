@@ -258,15 +258,16 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
       html = render_component(&copy_id/1, %{id: "bd-5l88o5"})
       assert html =~ ~s(phx-hook="ArbiterWeb.CoreComponents.Core.CopyId")
 
-      [hook_path] =
-        Path.wildcard(
-          Path.join(
-            Mix.Project.build_path(),
-            "phoenix-colocated/arbiter_web/ArbiterWeb.CoreComponents.Core/*.js"
-          )
+      hook_js =
+        Path.join(
+          Mix.Project.build_path(),
+          "phoenix-colocated/arbiter_web/ArbiterWeb.CoreComponents.Core/*.js"
         )
+        |> Path.wildcard()
+        |> Enum.map(&File.read!/1)
+        |> Enum.find(&(&1 =~ "copy-id-copied"))
 
-      hook_js = File.read!(hook_path)
+      assert hook_js, "expected to find the compiled CopyId hook JS"
 
       assert hook_js =~ "e.stopPropagation()"
       assert hook_js =~ "navigator.clipboard.writeText"
