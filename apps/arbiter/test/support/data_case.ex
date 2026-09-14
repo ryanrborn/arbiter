@@ -36,6 +36,13 @@ defmodule Arbiter.DataCase do
   Sets up the sandbox based on the test tags.
   """
   def setup_sandbox(tags) do
+    # Registered before the sandbox owner so the matching `on_exit` runs last
+    # (`on_exit` is LIFO): a connection killed by the teardown below still
+    # gets attributed to this test. See `Arbiter.Test.SandboxMonitor`.
+    test_pid = self()
+    Arbiter.Test.SandboxMonitor.track(test_pid, tags[:module], tags[:test])
+    on_exit(fn -> Arbiter.Test.SandboxMonitor.untrack(test_pid) end)
+
     pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: not tags[:async])
 
     # A whole family of VM-global `DynamicSupervisor`s (started once at
@@ -116,6 +123,14 @@ defmodule Arbiter.DataCase do
   # `Arbiter.Supervisor`) down with it. `terminate_child/2` removes the
   # child from the supervisor directly, so no restart is ever attempted
   # regardless of the child's `:restart` strategy.
+  #
+  # bd-5scl0c: `terminate_child/2` on its own is still not safe, because it
+  # sends a bare `Process.exit(child, :shutdown)` and none of these children
+  # trap exits — so the signal kills them the instant it arrives, including
+  # mid-query, which drops the whole suite's single sandbox connection out
+  # from under whoever owned it. `Arbiter.ProcessTeardown.stop_child/2`
+  # quiesces the child with `:sys.suspend/2` first; its moduledoc has the
+  # full mechanism.
   defp stop_dynamic_supervisor_children(supervisor) do
     case Process.whereis(supervisor) do
       pid when is_pid(pid) ->
@@ -123,11 +138,7 @@ defmodule Arbiter.DataCase do
         |> DynamicSupervisor.which_children()
         |> Enum.each(fn
           {_, child_pid, _, _} when is_pid(child_pid) ->
-            try do
-              DynamicSupervisor.terminate_child(supervisor, child_pid)
-            catch
-              :exit, _ -> :ok
-            end
+            Arbiter.ProcessTeardown.stop_child(supervisor, child_pid)
 
           _ ->
             :ok
