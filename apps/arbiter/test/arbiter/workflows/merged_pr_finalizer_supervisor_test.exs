@@ -15,7 +15,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisorTest do
       for {pid, _} <- Registry.select(@registry, [{{:_, :"$1", :"$2"}, [], [{{:"$1", :"$2"}}]}]),
           is_pid(pid),
           Process.alive?(pid) do
-        DynamicSupervisor.terminate_child(MergedPRFinalizerSupervisor, pid)
+        Arbiter.ProcessTeardown.stop_child(MergedPRFinalizerSupervisor, pid)
       end
     end)
 
