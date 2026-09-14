@@ -82,6 +82,13 @@ defmodule Arbiter.Worker.ReleaseEnv do
   Use this for every `mix` / `elixir` / `erl` / `claude` / `agy` / `codex`
   spawn, and for any `sh -c` whose script may invoke one.
   """
+  #
+  # `command` is a variable only because this is a shared wrapper — every call
+  # site passes a literal ("mix", "sh", "/bin/sh") or an executable path
+  # Arbiter resolved from its own agent config, never a request or task field.
+  # `System.cmd/3` spawns the executable directly, without a shell, so the
+  # argument list cannot be reinterpreted as syntax.
+  # sobelow_skip ["CI.System"]
   @spec cmd(binary(), [binary()], keyword()) :: {Collectable.t(), non_neg_integer()}
   def cmd(command, args, opts \\ []) when is_binary(command) and is_list(args) do
     System.cmd(command, args, Keyword.put(opts, :env, cmd_env(Keyword.get(opts, :env, []))))
