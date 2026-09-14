@@ -81,8 +81,11 @@ defmodule Arbiter.Reviews.Coverage do
           optional(:local_head_sha) => String.t() | nil,
           optional(:base_ref) => String.t() | nil,
           optional(:ancestor?) => (String.t(), String.t() -> boolean() | {:ok, boolean()}),
-          optional(:fetch_diff) =>
-            (String.t(), String.t() -> {:ok, String.t() | nil} | String.t() | nil | {:error, term()}),
+          optional(:fetch_diff) => (String.t(), String.t() ->
+                                      {:ok, String.t() | nil}
+                                      | String.t()
+                                      | nil
+                                      | {:error, term()}),
           optional(:source) => atom()
         }
 

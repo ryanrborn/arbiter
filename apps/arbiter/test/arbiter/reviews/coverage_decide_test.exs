@@ -607,7 +607,6 @@ defmodule Arbiter.Reviews.CoverageDecideTest do
         end
       end
     end
-
   end
 
   describe "§4 walkthroughs" do
