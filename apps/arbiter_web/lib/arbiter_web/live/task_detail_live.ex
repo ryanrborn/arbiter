@@ -58,6 +58,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   alias Arbiter.Agents
   alias Arbiter.Mergers
+  alias Arbiter.Messages.Message
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Skills.Selection
   alias Arbiter.Tasks.Dependency
@@ -85,6 +86,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   # the same 500-line tail the worker itself caps at.
   @live_line_cap 500
   @version_limit 20
+
+  # The MESSAGES rail is a rail, not an archive: the newest slice is what an
+  # operator reads, and a long-lived task can accumulate hundreds of rows.
+  @message_limit 50
 
   @impl true
   def mount(%{"id" => task_id}, _session, socket) do
@@ -124,6 +129,9 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:live_run_id, nil)
      |> assign(:live_run_topic, nil)
      |> assign(:live_run_lines, [])
+     |> assign(:messages, [])
+     |> assign(:messages_topic, nil)
+     |> assign(:expanded_messages, MapSet.new())
      |> refresh_all()}
   end
 
@@ -167,6 +175,32 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
+  # Messages broadcast on the *workspace* topic (there is no per-task one), so
+  # every message in this issue's workspace lands here. Refetch only when the
+  # row actually concerns this issue — otherwise a chatty workspace would run a
+  # query per unrelated message.
+  def handle_info({:new_message, message}, socket) do
+    if about_this_task?(message, socket.assigns.task_id) do
+      {:noreply, refresh_messages(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # Read/clear state is shown here, so a transition elsewhere (CLI, MCP, the
+  # coordinator drawer) has to repaint these rows too.
+  def handle_info({:message_read, message}, socket) do
+    if about_this_task?(message, socket.assigns.task_id) do
+      {:noreply, refresh_messages(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:mailbox_cleared, _workspace_id}, socket) do
+    {:noreply, refresh_messages(socket)}
+  end
+
   def handle_info(_, socket), do: {:noreply, socket}
 
   # ---- run roster ----
@@ -190,6 +224,24 @@ defmodule ArbiterWeb.TaskDetailLive do
      socket
      |> assign(:expanded_run, expanded)
      |> resync_live_run()}
+  end
+
+  # ---- messages ----
+  #
+  # A long body is clamped to a few lines so one verbose escalation can't push
+  # the rest of the rail off-screen. Expansion is socket-local: it is a
+  # disclosure, never a read acknowledgement.
+  def handle_event("toggle_message", %{"id" => id}, socket) do
+    expanded = socket.assigns.expanded_messages
+
+    expanded =
+      if MapSet.member?(expanded, id) do
+        MapSet.delete(expanded, id)
+      else
+        MapSet.put(expanded, id)
+      end
+
+    {:noreply, assign(socket, :expanded_messages, expanded)}
   end
 
   # ---- acceptance criteria ----
@@ -603,6 +655,8 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> refresh_deps()
     |> refresh_versions()
     |> refresh_skills()
+    |> refresh_messages()
+    |> follow_messages()
   end
 
   defp refresh_task(socket) do
@@ -646,6 +700,63 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   defp refresh_workspace(socket), do: assign(socket, :workspace, nil)
+
+  # ---- messages ----
+  #
+  # Everything addressed to (`to_ref`) or about (`task_ref`) this issue:
+  # coordinator directions to its worker, worker escalations back up, sibling
+  # flags. Until now these only surfaced in the global coordinator drawer (all
+  # issues mixed together) or `arb message inbox`.
+  #
+  # Strictly display: the panel reads through `Message.for_task/2`, which never
+  # stamps `read_at`/`cleared_at`. Opening an issue page must not silently
+  # drain the coordinator's triage queue, so read state is *rendered*, never
+  # changed here.
+  defp refresh_messages(socket) do
+    messages =
+      try do
+        Message.for_task(socket.assigns.task_id, limit: @message_limit)
+      rescue
+        e ->
+          Logger.warning("Failed to load messages for #{socket.assigns.task_id}: #{inspect(e)}")
+          []
+      end
+
+    assign(socket, :messages, messages)
+  end
+
+  # Messages broadcast on `"messages:<workspace_id>"` and nothing finer — there
+  # is no per-task topic, and this ticket is not the place to invent one (see
+  # bd-cpt2ej). So the page follows its issue's workspace feed and filters on
+  # arrival. The workspace id only exists once the issue row has loaded, which
+  # is why this runs from `refresh_all/1` rather than `mount/3`; re-running it
+  # is a no-op unless the issue moved workspace.
+  defp follow_messages(%{assigns: %{task: %Issue{workspace_id: ws_id}}} = socket)
+       when is_binary(ws_id) do
+    topic = Message.topic(ws_id)
+    current = socket.assigns[:messages_topic]
+
+    cond do
+      not connected?(socket) ->
+        socket
+
+      current == topic ->
+        socket
+
+      true ->
+        if current, do: Phoenix.PubSub.unsubscribe(Arbiter.PubSub, current)
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+        assign(socket, :messages_topic, topic)
+    end
+  end
+
+  defp follow_messages(socket), do: socket
+
+  defp about_this_task?(message, task_id) when is_binary(task_id) do
+    Map.get(message, :to_ref) == task_id or Message.task_ref(message) == task_id
+  end
+
+  defp about_this_task?(_message, _task_id), do: false
 
   defp refresh_worker(socket) do
     snap =
@@ -1644,16 +1755,99 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
-              <%!-- MESSAGES placeholder — ticket C wires up
-                   `Arbiter.Messages.Message` scoped to this issue. --%>
+              <%!-- Messages addressed to (`to_ref`) or about (`task_ref`) this
+                   issue: coordinator directions to its worker, worker
+                   escalations back up, sibling flags. Read/clear state is
+                   rendered, never written — see `refresh_messages/1`. --%>
               <.panel
                 id="panel-messages"
                 title="MESSAGES"
+                meta={message_panel_meta(@messages)}
                 class="order-10"
               >
-                <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-envelope">
-                  No messages for this {@issue_label} yet.
-                </ArbiterWeb.CoreComponents.Feedback.empty_state>
+                <div :if={@messages == []} id="messages-empty">
+                  <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-envelope">
+                    No messages for this {@issue_label} yet.
+                  </ArbiterWeb.CoreComponents.Feedback.empty_state>
+                </div>
+
+                <ul :if={@messages != []} id="messages-list" class="flex flex-col gap-2">
+                  <li
+                    :for={m <- @messages}
+                    id={"message-#{m.id}"}
+                    data-role="message-row"
+                    class={[
+                      "rounded-[var(--radius-field)] border border-solid border-[var(--border-default)]",
+                      "border-l-[length:var(--border-accent-width)] px-3 py-2",
+                      "bg-[var(--surface-sunken)]",
+                      message_accent(m.kind)
+                    ]}
+                  >
+                    <div class="flex items-baseline justify-between gap-2">
+                      <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+                        <span
+                          data-kind={m.kind}
+                          class="text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+                        >
+                          {m.kind}
+                        </span>
+                        <span
+                          :if={message_state(m)}
+                          data-role="message-state"
+                          class="text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
+                        >
+                          {message_state(m)}
+                        </span>
+                      </div>
+                      <span
+                        data-role="message-time"
+                        class="shrink-0 text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+                      >
+                        {relative_age(m.inserted_at)}
+                      </span>
+                    </div>
+
+                    <p
+                      :if={present?(m.subject)}
+                      data-role="message-subject"
+                      class="mt-0.5 text-[12.5px] font-medium text-[var(--text-title)]"
+                    >
+                      {m.subject}
+                    </p>
+
+                    <p
+                      data-role="message-parties"
+                      class="mt-0.5 text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
+                    >
+                      {m.from_ref || "?"} → {m.to_ref || "—"}
+                    </p>
+
+                    <div :if={present?(m.body)} class="mt-1.5">
+                      <div class={[
+                        !message_expanded?(@expanded_messages, m.id) &&
+                          long_message_body?(m.body) && "max-h-24 overflow-hidden"
+                      ]}>
+                        <.markdown
+                          id={"message-body-md-#{m.id}"}
+                          text={m.body}
+                          class="markdown-body--compact"
+                        />
+                      </div>
+                      <button
+                        :if={long_message_body?(m.body)}
+                        type="button"
+                        id={"message-toggle-#{m.id}"}
+                        phx-click="toggle_message"
+                        phx-value-id={m.id}
+                        class="mt-1 text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-link)] cursor-pointer hover:underline"
+                      >
+                        {if message_expanded?(@expanded_messages, m.id),
+                          do: "show less",
+                          else: "show more"}
+                      </button>
+                    </div>
+                  </li>
+                </ul>
               </.panel>
 
               <%!-- MACHINE STATE, trimmed: status/priority/type/difficulty
@@ -2353,6 +2547,47 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   defp relative_age(_), do: "—"
+
+  # ---- message display helpers ----
+
+  # Clamp anything past a short preview. Lines, not bytes: a six-line body of
+  # short bullets reads as long in a narrow rail, a single wrapped paragraph
+  # of the same byte count does not — so both measures get a say.
+  @message_preview_lines 6
+  @message_preview_bytes 400
+
+  defp long_message_body?(body) when is_binary(body) do
+    byte_size(body) > @message_preview_bytes or
+      length(String.split(body, "\n")) > @message_preview_lines
+  end
+
+  defp long_message_body?(_), do: false
+
+  defp message_expanded?(expanded, id), do: MapSet.member?(expanded, id)
+
+  # The rail header carries the count, and says so when the cap is what the
+  # operator is seeing rather than the whole history.
+  defp message_panel_meta([]), do: nil
+
+  defp message_panel_meta(messages) when length(messages) < @message_limit,
+    do: "#{length(messages)}"
+
+  defp message_panel_meta(_messages), do: "latest #{@message_limit}"
+
+  # Read/clear state, shown and never set from this page. nil means "nothing
+  # worth a badge" — a read-but-uncleared row is the ordinary case.
+  defp message_state(%{cleared_at: %DateTime{}}), do: "cleared"
+  defp message_state(%{read_at: nil}), do: "unread"
+  defp message_state(_), do: nil
+
+  # Same accent vocabulary the coordinator drawer uses (ArbiterWeb.Layouts),
+  # so a given kind reads the same colour wherever it is rendered.
+  defp message_accent(:escalation), do: "border-l-[color:var(--arb-fail)]"
+  defp message_accent(:failure), do: "border-l-[color:var(--arb-fail)]"
+  defp message_accent(:completion), do: "border-l-[color:var(--arb-live)]"
+  defp message_accent(:direction), do: "border-l-[color:var(--arb-attention)]"
+  defp message_accent(:flag), do: "border-l-[color:var(--arb-attention)]"
+  defp message_accent(_), do: "border-l-[color:var(--arb-info)]"
 
   defp run_role_breakdown([]), do: nil
 

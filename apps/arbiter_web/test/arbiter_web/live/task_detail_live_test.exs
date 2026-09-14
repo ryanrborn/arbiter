@@ -3,6 +3,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Arbiter.Messages.Message
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Dependency, Issue, Workspace}
   alias Arbiter.Worker
@@ -1829,5 +1830,146 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
   defp panel_position(html, id) do
     :binary.match(html, ~s(id="#{id}")) |> elem(0)
+  end
+
+  describe "MESSAGES panel" do
+    test "renders messages addressed to or about the task, newest first, and nothing else", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "messaged", workspace_id: ws.id})
+      {:ok, other} = Ash.create(Issue, %{title: "unrelated", workspace_id: ws.id})
+
+      {:ok, addressed} =
+        Message.send_mail(%{
+          kind: :direction,
+          workspace_id: ws.id,
+          from_ref: "coordinator",
+          to_ref: task.id,
+          subject: "conflict instructions",
+          body: "rebase **onto main**"
+        })
+
+      {:ok, about} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws.id,
+          from_ref: task.id,
+          to_ref: "coordinator",
+          task_ref: task.id,
+          subject: "review rejected",
+          body: "needs a decision"
+        })
+
+      {:ok, unrelated} =
+        Message.send_mail(%{
+          kind: :info,
+          workspace_id: ws.id,
+          from_ref: other.id,
+          to_ref: "coordinator",
+          task_ref: other.id,
+          subject: "not this one",
+          body: "unrelated"
+        })
+
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#panel-messages")
+      assert has_element?(view, "#message-#{addressed.id}")
+      assert has_element?(view, "#message-#{about.id}")
+      refute has_element?(view, "#message-#{unrelated.id}")
+
+      # newest first
+      assert :binary.match(html, "message-#{about.id}") <
+               :binary.match(html, "message-#{addressed.id}")
+
+      # kind, from/to, subject and a relative time all render
+      assert has_element?(view, "#message-#{about.id} [data-kind='escalation']")
+      assert has_element?(view, "#message-#{addressed.id} [data-kind='direction']")
+      assert has_element?(view, "#message-#{addressed.id} [data-role='message-parties']")
+      assert has_element?(view, "#message-#{addressed.id} [data-role='message-time']")
+      assert has_element?(view, "#message-#{addressed.id} [data-role='message-subject']")
+
+      # body goes through the sanitized markdown component
+      assert has_element?(view, "#message-body-md-#{addressed.id} strong")
+    end
+
+    test "viewing the page does not mark a message read or cleared", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "read state", workspace_id: ws.id})
+
+      {:ok, msg} =
+        Message.send_mail(%{
+          kind: :direction,
+          workspace_id: ws.id,
+          from_ref: "coordinator",
+          to_ref: task.id,
+          subject: "do the thing",
+          body: "please"
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      assert has_element?(view, "#message-#{msg.id}")
+
+      {:ok, reloaded} = Ash.get(Message, msg.id)
+      assert reloaded.read_at == nil
+      assert reloaded.cleared_at == nil
+    end
+
+    test "a new message for the task appears live", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "live messages", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      refute has_element?(view, "[data-role='message-row']")
+
+      {:ok, msg} =
+        Message.send_mail(%{
+          kind: :flag,
+          workspace_id: ws.id,
+          from_ref: "bd-sibling",
+          to_ref: task.id,
+          subject: "api shape changed",
+          body: "heads up"
+        })
+
+      assert render(view) =~ "message-#{msg.id}"
+      assert has_element?(view, "#message-#{msg.id}")
+    end
+
+    test "a long body is collapsed until the disclosure is clicked", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "long message", workspace_id: ws.id})
+
+      {:ok, msg} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws.id,
+          from_ref: task.id,
+          to_ref: "coordinator",
+          task_ref: task.id,
+          subject: "findings",
+          body: Enum.map_join(1..20, "\n", &"- finding #{&1}")
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#message-toggle-#{msg.id}", "show more")
+
+      view |> element("#message-toggle-#{msg.id}") |> render_click()
+      assert has_element?(view, "#message-toggle-#{msg.id}", "show less")
+
+      # expanding is a disclosure, not a read acknowledgement
+      {:ok, reloaded} = Ash.get(Message, msg.id)
+      assert reloaded.read_at == nil
+      assert reloaded.cleared_at == nil
+    end
+
+    test "renders an empty state when the task has no messages", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no messages", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#panel-messages")
+      refute has_element?(view, "[data-role='message-row']")
+      assert has_element?(view, "#messages-empty")
+    end
   end
 end
