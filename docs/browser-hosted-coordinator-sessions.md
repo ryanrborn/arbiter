@@ -724,9 +724,8 @@ explained null. This applies to worker reconciliation too: a worker run on
 implementation dated rows `DateTime.utc_now()`. That is within 5 minutes of the
 truth in steady state and badly wrong on the first pass: a session that has
 been appending since 2026-09-04 had its entire history (16 rows, $739.08 on
-the dogfood host) filed
-on the day the sweeper first ran, falsifying the very `--by day` column §7.6
-promises to fix.
+the dogfood host) filed on the day the sweeper first ran, falsifying the very
+`--by day` column §7.6 promises to fix.
 
 `ClaudeSessionFile` now also splits a file into **UTC-day buckets** — per-day
 token counts, per-day message count, the newest turn timestamp in the day, and
