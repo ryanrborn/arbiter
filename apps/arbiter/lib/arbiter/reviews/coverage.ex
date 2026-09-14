@@ -51,19 +51,20 @@ defmodule Arbiter.Reviews.Coverage do
         |> Ash.Changeset.for_create(:record, attrs)
         |> Ash.create()
         |> case do
-          {:ok, entry} ->
-            {:ok, entry}
-
-          {:error, error} ->
-            if unique_conflict?(error) do
-              case fetch_existing(attrs) do
-                {:ok, entry} -> {:ok, entry}
-                :error -> {:error, error}
-              end
-            else
-              {:error, error}
-            end
+          {:ok, entry} -> {:ok, entry}
+          {:error, error} -> retry_on_conflict(error, attrs)
         end
+    end
+  end
+
+  defp retry_on_conflict(error, attrs) do
+    if unique_conflict?(error) do
+      case fetch_existing(attrs) do
+        {:ok, entry} -> {:ok, entry}
+        :error -> {:error, error}
+      end
+    else
+      {:error, error}
     end
   end
 
