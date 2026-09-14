@@ -403,16 +403,38 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
       assert totals.cost_state_count == 1
     end
 
-    test "a file with no cost-state record reports cost_usd: nil" do
+    test "a file with no cost-state record falls back to a token-priced estimate" do
+      # Claude Code 2.1.270 stopped writing `cost-state` at all (bd-be804c
+      # follow-up): every row reconciled off such a file was landing with
+      # `cost_usd: nil`. The deduped buckets are in=15 out=300 cache_read=3000
+      # cache_creation=110 on claude-opus-4-8 ($5/$25 per MTok, write 1.25x,
+      # read 0.1x), i.e. 0.000075 + 0.0075 + 0.0015 + 0.0006875.
       dir = tmp_dir()
       path = write_session!(dir, "/work/tree", "SID")
 
       assert {:ok, totals} = SessionFile.read_totals(path)
-      assert totals.cost_usd == nil
       assert totals.cost_state_count == 0
       assert totals.model_costs == %{}
-      # tokens still reconcile — cost is the optional part
+      assert totals.cost_source == :estimated
+      assert_in_delta totals.cost_usd, 0.0097625, 0.0000001
+      # tokens still reconcile exactly as before
       assert totals.tokens_in == 15
+    end
+
+    test "a file with no cost-state and an unpriceable model still reports nil" do
+      dir = tmp_dir()
+      path = Path.join(dir, "unknown_model.jsonl")
+
+      File.write!(
+        path,
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.100Z","message":{"id":"m-1","model":"some-other-vendor-model","usage":{"input_tokens":10,"output_tokens":100}}}) <>
+          "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert totals.cost_usd == nil
+      assert totals.cost_source == nil
+      assert totals.tokens_out == 100
     end
 
     test "duration comes off cost-state totalDuration, summed per segment" do
@@ -538,6 +560,117 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
 
       assert {:ok, totals} = SessionFile.read_totals(path)
       assert totals.model == nil
+    end
+  end
+
+  # bd-be804c follow-up: the ledger needs to know *when* the spend happened,
+  # not just how much. A single coordinator session runs for days, so a row
+  # dated at ingest time falsifies `arb usage --by day` for every one of them.
+  describe "read_totals/2 :by_day" do
+    @v270 Path.expand(
+            "../../fixtures/claude_sessions/coordinator_session_v2_1_270.jsonl",
+            __DIR__
+          )
+
+    test "splits the deduped turns into UTC-day buckets" do
+      assert {:ok, totals} = SessionFile.read_totals(@v270)
+
+      assert Map.keys(totals.by_day) |> Enum.sort() == [~D[2026-09-13], ~D[2026-09-14]]
+
+      thirteenth = totals.by_day[~D[2026-09-13]]
+      fourteenth = totals.by_day[~D[2026-09-14]]
+
+      # Hand-counted off the fixture (deduped by message.id).
+      assert thirteenth.message_count == 6
+      assert thirteenth.tokens_in == 14
+      assert thirteenth.tokens_out == 3315
+      assert thirteenth.cache_creation_tokens == 5119
+      assert thirteenth.cache_read_tokens == 2_935_357
+
+      assert fourteenth.message_count == 5
+      assert fourteenth.tokens_in == 10
+      assert fourteenth.tokens_out == 7369
+
+      # The buckets partition the file's own totals — nothing lost, nothing
+      # counted twice.
+      assert thirteenth.tokens_out + fourteenth.tokens_out == totals.tokens_out
+      assert thirteenth.message_count + fourteenth.message_count == totals.message_count
+    end
+
+    test "each bucket carries the last turn timestamp in that day" do
+      assert {:ok, totals} = SessionFile.read_totals(@v270)
+
+      assert totals.by_day[~D[2026-09-13]].last_at == ~U[2026-09-13 23:47:06.861Z]
+      assert totals.by_day[~D[2026-09-14]].last_at == ~U[2026-09-14 00:09:30.960Z]
+    end
+
+    test "a v2.1.270 file (no cost-state at all) is still priced, per day" do
+      assert {:ok, totals} = SessionFile.read_totals(@v270)
+
+      assert totals.cost_state_count == 0
+      assert totals.cost_source == :estimated
+      # claude-opus-5 at $5/$25 per MTok, cache write 1.25x, cache read 0.1x.
+      assert_in_delta totals.cost_usd, 3.0781575, 0.0000001
+      assert_in_delta totals.by_day[~D[2026-09-13]].cost_usd, 1.58261725, 0.0000001
+      assert_in_delta totals.by_day[~D[2026-09-14]].cost_usd, 1.49554025, 0.0000001
+    end
+
+    test "the CLI's own cost-state total is split across the days it spans" do
+      # The 2.1.251 sample carries real `cost-state` records ($23.5734863 over
+      # two CLI processes) and turns on two UTC days. The authoritative total
+      # is never recomputed — it is apportioned, and the parts must still sum
+      # to it.
+      fixture =
+        Path.expand("../../fixtures/claude_sessions/coordinator_session_sample.jsonl", __DIR__)
+
+      assert {:ok, totals} = SessionFile.read_totals(fixture)
+      assert totals.cost_source == :cost_state
+      assert_in_delta totals.cost_usd, 23.5734863, 0.0000001
+
+      parts = totals.by_day |> Map.values() |> Enum.map(& &1.cost_usd)
+      assert length(parts) >= 1
+      assert_in_delta Enum.sum(parts), totals.cost_usd, 0.0000001
+    end
+
+    test "an unpriceable model leaves every day's cost nil rather than zero" do
+      dir = tmp_dir()
+      path = Path.join(dir, "unpriceable_days.jsonl")
+
+      File.write!(
+        path,
+        Enum.join(
+          [
+            ~s({"type":"assistant","timestamp":"2026-07-01T23:59:00.000Z","message":{"id":"a","model":"some-other-vendor-model","usage":{"input_tokens":10,"output_tokens":100}}}),
+            ~s({"type":"assistant","timestamp":"2026-07-02T00:01:00.000Z","message":{"id":"b","model":"some-other-vendor-model","usage":{"input_tokens":20,"output_tokens":200}}})
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert Map.keys(totals.by_day) |> Enum.sort() == [~D[2026-07-01], ~D[2026-07-02]]
+      assert Enum.all?(Map.values(totals.by_day), &(&1.cost_usd == nil))
+    end
+
+    test "an undated turn is carried onto the last dated day rather than dropped" do
+      dir = tmp_dir()
+      path = Path.join(dir, "undated.jsonl")
+
+      File.write!(
+        path,
+        Enum.join(
+          [
+            ~s({"type":"assistant","timestamp":"2026-07-01T10:00:00.000Z","message":{"id":"a","model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":100}}}),
+            ~s({"type":"assistant","message":{"id":"b","model":"claude-opus-5","usage":{"input_tokens":20,"output_tokens":200}}})
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert Map.keys(totals.by_day) == [~D[2026-07-01]]
+      assert totals.by_day[~D[2026-07-01]].tokens_out == 300
+      assert totals.by_day[~D[2026-07-01]].message_count == totals.message_count
     end
   end
 end

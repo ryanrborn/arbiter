@@ -1560,22 +1560,28 @@ defmodule Arbiter.Worker do
     |> Map.put(:cache_creation_tokens, totals.cache_creation_tokens)
     |> Map.put(:cache_read_tokens, totals.cache_read_tokens)
     |> maybe_put_model(totals.model)
-    |> maybe_put_cost(totals.cost_usd)
+    |> maybe_put_cost(totals)
     |> Map.put(:raw, reconciled_raw(Map.get(usage, :raw), totals))
   end
 
   # The file's `cost-state` records carry the CLI's own dollar figure
   # (bd-be804c), summed per process segment and windowed by this session's
-  # start. Reuse it verbatim — never recompute a price locally. Only when the
-  # window held no `cost-state` at all does the row fall back to naming why
-  # its cost is null.
-  defp maybe_put_cost(usage, nil),
-    do: maybe_put_cost_note(usage, Arbiter.Usage.ClaudeSessionFile.no_cost_note())
+  # start. Reuse it verbatim — never recompute a price locally. Claude Code
+  # 2.1.270 writes no such record, so a window without one falls back to a
+  # token-priced estimate, and either way the row names where its number came
+  # from (`ClaudeSessionFile.cost_note_for/1` — nil for the CLI's own figure).
+  defp maybe_put_cost(usage, totals) do
+    case {Map.get(usage, :cost_usd), totals.cost_usd} do
+      {existing, _} when is_number(existing) ->
+        usage
 
-  defp maybe_put_cost(usage, cost) when is_float(cost) do
-    case Map.get(usage, :cost_usd) do
-      existing when is_number(existing) -> usage
-      _ -> Map.put(usage, :cost_usd, cost)
+      {_, cost} when is_float(cost) ->
+        usage
+        |> Map.put(:cost_usd, cost)
+        |> maybe_put_cost_note(Arbiter.Usage.ClaudeSessionFile.cost_note_for(totals))
+
+      _ ->
+        maybe_put_cost_note(usage, Arbiter.Usage.ClaudeSessionFile.no_cost_note())
     end
   end
 

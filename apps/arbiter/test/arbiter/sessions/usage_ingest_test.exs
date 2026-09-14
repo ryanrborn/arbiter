@@ -140,15 +140,33 @@ defmodule Arbiter.Sessions.UsageIngestTest do
       assert rows_for(sid) == []
     end
 
-    test "a file without cost-state still records tokens, with a null cost" do
+    test "a file without cost-state is priced from its tokens" do
+      # Claude Code 2.1.270 writes no `cost-state` record at all, which left
+      # every coordinator row at `cost_usd: nil` after the first deploy.
+      # claude-opus-5: 10 in ($5/MTok) + 100 out ($25/MTok).
       dir = tmp_dir!("ingest-nocost")
       sid = "sess-#{System.unique_integer([:positive])}"
       write!(dir, sid, [turn(sid, "m1", now(), 10, 100)])
 
       assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
       assert [ev] = rows_for(sid)
+      assert_in_delta ev.cost_usd, 0.00255, 0.0000001
+      assert ev.cost_note =~ "estimated from tokens (no cost-state)"
+      assert ev.tokens_in == 10
+    end
+
+    test "a file without cost-state on an unpriceable model keeps a null cost" do
+      dir = tmp_dir!("ingest-nocost-unknown")
+      sid = "sess-#{System.unique_integer([:positive])}"
+
+      write!(dir, sid, [
+        ~s({"type":"assistant","timestamp":"#{DateTime.to_iso8601(now())}","sessionId":"#{sid}","message":{"id":"m1","model":"some-other-vendor-model","usage":{"input_tokens":10,"output_tokens":100}}})
+      ])
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+      assert [ev] = rows_for(sid)
       assert ev.cost_usd == nil
-      assert is_binary(ev.cost_note)
+      assert ev.cost_note =~ "no cost-state"
       assert ev.tokens_in == 10
     end
 
@@ -169,7 +187,15 @@ defmodule Arbiter.Sessions.UsageIngestTest do
       prior = Application.get_env(:arbiter, :coordinator_session_dirs)
       Application.put_env(:arbiter, :coordinator_session_dirs, [dir])
 
+      # On the dogfood host ARBITER_COORDINATOR_SESSION_DIRS is really set, and
+      # it outranks the app env — without this the test sweeps the operator's
+      # own ~/.claude transcripts instead of its fixture.
+      prior_env = System.get_env("ARBITER_COORDINATOR_SESSION_DIRS")
+      System.delete_env("ARBITER_COORDINATOR_SESSION_DIRS")
+
       on_exit(fn ->
+        if prior_env, do: System.put_env("ARBITER_COORDINATOR_SESSION_DIRS", prior_env)
+
         if prior,
           do: Application.put_env(:arbiter, :coordinator_session_dirs, prior),
           else: Application.delete_env(:arbiter, :coordinator_session_dirs)
@@ -242,6 +268,168 @@ defmodule Arbiter.Sessions.UsageIngestTest do
 
       {:ok, by_task} = Usage.summarize(by: :task, since: since)
       refute Enum.any?(by_task, &(&1.group == nil or &1.group == sid))
+    end
+  end
+
+  describe "occurred_at" do
+    # The first deploy dated every backfilled row at ingest time, so a session
+    # that had been running for ten days landed as one lump on the ingest day
+    # and `arb usage --by day` was simply wrong. Rows are dated from the
+    # transcript instead, and a delta that spans midnight UTC splits.
+    test "a row is dated from the session's own turn timestamps, not the clock" do
+      dir = tmp_dir!("ingest-when")
+      sid = "sess-when-#{System.unique_integer([:positive])}"
+      at = ~U[2026-09-10 14:22:33.000Z]
+
+      write!(dir, sid, [turn(sid, "m1", at, 10, 100)])
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+      assert [ev] = rows_for(sid)
+      assert DateTime.to_date(ev.occurred_at) == ~D[2026-09-10]
+      assert DateTime.compare(ev.occurred_at, at) == :eq
+    end
+
+    test "a session spanning UTC days writes one row per day" do
+      dir = tmp_dir!("ingest-days")
+      sid = "sess-days-#{System.unique_integer([:positive])}"
+      started = 1_788_000_000_000
+
+      write!(dir, sid, [
+        turn(sid, "m1", ~U[2026-09-10 23:50:00.000Z], 10, 100),
+        turn(sid, "m2", ~U[2026-09-11 00:10:00.000Z], 20, 200),
+        cost_state(sid, 3.0, started)
+      ])
+
+      assert {:ok, %{rows_written: 2}} = UsageIngest.ingest(dirs: [dir])
+
+      rows = rows_for(sid) |> Enum.sort_by(& &1.occurred_at, DateTime)
+      assert [tenth, eleventh] = rows
+      assert DateTime.to_date(tenth.occurred_at) == ~D[2026-09-10]
+      assert DateTime.to_date(eleventh.occurred_at) == ~D[2026-09-11]
+      assert tenth.tokens_out == 100
+      assert eleventh.tokens_out == 200
+
+      # The CLI's own $3.00 is apportioned, never inflated.
+      assert_in_delta tenth.cost_usd + eleventh.cost_usd, 3.0, 0.0000001
+
+      # ...and the whole thing is still idempotent day-by-day.
+      assert {:ok, %{rows_written: 0}} = UsageIngest.ingest(dirs: [dir])
+      assert length(rows_for(sid)) == 2
+    end
+
+    test "an append to an already-billed day bills that day, not today" do
+      dir = tmp_dir!("ingest-days-append")
+      sid = "sess-days-append-#{System.unique_integer([:positive])}"
+
+      write!(dir, sid, [turn(sid, "m1", ~U[2026-09-10 08:00:00.000Z], 10, 100)])
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      write!(dir, sid, [turn(sid, "m2", ~U[2026-09-10 09:00:00.000Z], 5, 50)], [:append])
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      rows = rows_for(sid) |> Enum.sort_by(& &1.occurred_at, DateTime)
+      assert [first, second] = rows
+      assert DateTime.to_date(first.occurred_at) == ~D[2026-09-10]
+      assert DateTime.to_date(second.occurred_at) == ~D[2026-09-10]
+      assert second.tokens_out == 50, "the second row bills the delta for that day only"
+      assert DateTime.compare(second.occurred_at, ~U[2026-09-10 09:00:00.000Z]) == :eq
+    end
+
+    # `totalDuration` is cumulative on disk like every other figure in
+    # `cost-state`. A sweep that re-billed it in full would inflate the
+    # `duration_ms` column of every `Usage.summarize/1` rollup once per cycle —
+    # dozens of times over a busy day on the live host's 5-minute sweeper.
+    test "duration_ms is billed as a delta, not re-billed on every cycle" do
+      dir = tmp_dir!("ingest-duration")
+      sid = "sess-dur-#{System.unique_integer([:positive])}"
+      at = ~U[2026-09-10 08:00:00.000Z]
+
+      # One `startTime` throughout: this is a single CLI process appending to
+      # its own transcript, so both figures below are cumulative, not additive.
+      started = start_ms()
+
+      write!(dir, sid, [turn(sid, "m1", at, 10, 100), cost_state(sid, 2.5, started, 1000)])
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      write!(
+        dir,
+        sid,
+        [
+          turn(sid, "m2", DateTime.add(at, 3600), 5, 50),
+          cost_state(sid, 5.0, started, 2000)
+        ],
+        [:append]
+      )
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      rows = rows_for(sid)
+      assert length(rows) == 2
+
+      assert Enum.sum(Enum.map(rows, &(&1.duration_ms || 0))) == 2000,
+             "the ledger must sum to the file's totalDuration, not a multiple of it"
+
+      assert_in_delta Enum.sum(Enum.map(rows, & &1.cost_usd)), 5.0, 0.0000001
+    end
+
+    # A file with no parseable timestamps is dated `now` and holds the whole
+    # file's cumulative totals, so today's ledger stops being the right
+    # watermark the moment the UTC day rolls over. Its watermark is the whole
+    # session's ledger instead.
+    test "an undated transcript is not re-billed when the UTC day rolls over" do
+      dir = tmp_dir!("ingest-undated")
+      sid = "sess-undated-#{System.unique_integer([:positive])}"
+
+      undated =
+        ~s({"type":"assistant","sessionId":"#{sid}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
+
+      write!(dir, sid, [undated, cost_state(sid, 0.055, start_ms())])
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+      assert [ev] = rows_for(sid)
+
+      # Stand in for the sweeper's next run landing after midnight UTC: the row
+      # it already wrote is no longer filed under `Date.utc_today()`.
+      import Ecto.Query, only: [from: 2]
+
+      {1, _} =
+        Arbiter.Repo.update_all(
+          from(e in Event, where: e.id == ^ev.id),
+          set: [occurred_at: DateTime.add(ev.occurred_at, -1, :day)]
+        )
+
+      assert {:ok, %{rows_written: 0}} = UsageIngest.ingest(dirs: [dir])
+      assert length(rows_for(sid)) == 1
+    end
+
+    test "a real v2.1.270 transcript backfills its two days at their own dates" do
+      fixture =
+        Path.expand(
+          "../../fixtures/claude_sessions/coordinator_session_v2_1_270.jsonl",
+          __DIR__
+        )
+
+      dir = tmp_dir!("ingest-v270")
+      # The file has to keep its own session id: every line is stamped with it,
+      # and the rollover guard drops lines stamped with another session's.
+      sid = "202434c2-72ab-4aff-a715-57375729d810"
+      File.cp!(fixture, Path.join(dir, sid <> ".jsonl"))
+
+      assert {:ok, %{rows_written: 2}} = UsageIngest.ingest(dirs: [dir])
+
+      rows = rows_for(sid) |> Enum.sort_by(& &1.occurred_at, DateTime)
+
+      assert Enum.map(rows, &DateTime.to_date(&1.occurred_at)) == [
+               ~D[2026-09-13],
+               ~D[2026-09-14]
+             ]
+
+      # No `cost-state` anywhere in that file, and yet both rows carry money.
+      assert Enum.all?(rows, &(&1.cost_usd > 0))
+      assert Enum.all?(rows, &(&1.cost_note =~ "estimated from tokens (no cost-state)"))
+      assert_in_delta Enum.sum(Enum.map(rows, & &1.cost_usd)), 3.0781575, 0.0000001
+
+      assert {:ok, %{rows_written: 0}} = UsageIngest.ingest(dirs: [dir])
     end
   end
 end

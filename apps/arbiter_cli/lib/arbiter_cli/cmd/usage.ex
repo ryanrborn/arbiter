@@ -42,6 +42,12 @@ defmodule ArbiterCli.Cmd.Usage do
   coordinator is roughly a quarter of total consumption, so before that landed
   `--by source` was the "whole bill" only in principle. An install that has not
   set `ARBITER_COORDINATOR_SESSION_DIRS` still sees no such rows.
+
+  Those rows are dated from the **session transcript's own timestamps**, one row
+  per session per UTC day, so `--by day` and `--since` place the spend when it
+  happened. The first sweep after enabling the ingest therefore backfills the
+  whole history at its real dates — expect `--since 30d` to jump, and `--since
+  1d` not to.
   """
 
   alias ArbiterCli.{Client, Output}
