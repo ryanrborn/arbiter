@@ -157,14 +157,15 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
 
     # bd-5l88o5 — every board card carries a copy-id control so an operator
-    # can grab the issue id without leaving the board. The control renders
-    # nested inside the card's `<.link navigate>`, so it relies on the
-    # CopyId hook calling both `e.preventDefault()` (stop the anchor from
-    # navigating) and `e.stopPropagation()` (stop LiveView's click handling
-    # from bubbling) — asserted directly against the compiled hook JS in
-    # core_test.exs. This test only pins the button's presence inside the
-    # card's anchor; it does not exercise the hook itself.
-    test "a card carries a copy-id button naming the issue id, nested inside the card link", %{
+    # can grab the issue id without leaving the board. bd-1rreu1 moved card
+    # navigation off a wrapping `<a>` onto a `phx-click={JS.navigate(...)}`
+    # div, so the copy button is no longer nested inside a link at all — it
+    # relies solely on the CopyId hook's `e.preventDefault()` +
+    # `e.stopPropagation()` to keep its click from also bubbling into the
+    # card's own navigation. That hook JS is asserted directly in
+    # core_test.exs; this test only pins the button's presence and that it
+    # is not nested inside any `<a>` (no `<a>`-in-`<a>` regression either).
+    test "a card carries a copy-id button naming the issue id, not nested inside a link", %{
       conn: conn,
       ws: ws
     } do
@@ -174,8 +175,170 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(
                view,
+               ~s(div[id="card-#{task.id}"] button[type="button"][aria-label="Copy issue id #{task.id}"])
+             )
+
+      refute has_element?(
+               view,
                ~s(div[id="card-#{task.id}"] a button[type="button"][aria-label="Copy issue id #{task.id}"])
              )
+    end
+  end
+
+  # bd-1rreu1 — before this, the same click opened a task, a worker, or the
+  # merge queue depending on which column the card sat in. Now the card body
+  # and title always go to the issue's own page, in every column; a column's
+  # contextual destination (the running worker, the merge queue, a dead
+  # watchdog's restart) survives only as an explicit inner link, never as
+  # the whole-card click target. Card navigation moved off a wrapping `<a>`
+  # onto `phx-click={JS.navigate(...)}` so those inner links (activity line,
+  # action chips) can be real `<a>` elements without nesting one `<a>`
+  # inside another.
+  describe "card body navigation always opens the issue" do
+    # The attribute substring selector pins the check to the card wrapper's
+    # own `phx-click` attribute, not any link nested inside it (e.g. the
+    # Running activity line or a Waiting action chip, both of which may
+    # legitimately point elsewhere within the same card).
+    defp card_navigates_to?(view, card_id, href) do
+      has_element?(view, ~s([id="card-#{card_id}"][phx-click*="#{href}"]))
+    end
+
+    test "Backlog card body navigates to the task page", %{conn: conn, ws: ws} do
+      task = backlog_issue(ws, "half an idea")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
+    end
+
+    test "Ready card body navigates to the task page", %{conn: conn, ws: ws} do
+      task = issue(ws, "queued work")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
+    end
+
+    test "Running card body navigates to the task page, not the worker page", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = issue(ws, "in flight")
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
+      refute card_navigates_to?(view, task.id, "/workers/#{task.id}")
+    end
+
+    test "Waiting card body navigates to the task page, not the worker page", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = working_issue(ws, "still in review")
+      merge_worker(ws, task)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
+    end
+
+    test "Closed card body navigates to the task page", %{conn: conn, ws: ws} do
+      task = issue(ws, "already landed")
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
+    end
+
+    test "no board card nests an <a> inside another <a>", %{conn: conn, ws: ws} do
+      running = issue(ws, "running card")
+      {:ok, _pid} = Worker.start(task_id: running.id, repo: "r", workspace_id: ws.id)
+
+      waiting = working_issue(ws, "waiting card")
+      merge_worker(ws, waiting)
+
+      {:ok, view, html} = live(conn, "/")
+
+      refute Regex.match?(~r/<a\b[^>]*>(?:(?!<\/a>).)*<a\b/s, html)
+
+      # The action chips still render real links even though the card
+      # wrapper itself is no longer an `<a>`.
+      assert has_element?(view, ~s([id="card-#{waiting.id}"] a))
+    end
+  end
+
+  describe "Running column: the activity line links to the worker" do
+    test "the activity line is a link to the worker page", %{conn: conn, ws: ws} do
+      task = issue(ws, "in flight")
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               ~s(#board-column-running [id="card-#{task.id}"] a[href="/workers/#{task.id}"])
+             )
+    end
+  end
+
+  describe "Waiting column: the action chip keeps today's contextual destination" do
+    test "awaiting verification points the chip at the task page", %{conn: conn, ws: ws} do
+      task = working_issue(ws, "doctor probe")
+      {:ok, task} = Ash.update(task, %{}, action: :await_verification)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(
+               view,
+               ~s([id="card-#{task.id}"] a[href="/tasks/#{task.id}"])
+             )
+    end
+
+    test "a dead watchdog points the chip at the worker page, not the merge queue", %{
+      conn: conn,
+      ws: ws
+    } do
+      dead = working_issue(ws, "nobody is watching this")
+      {:ok, pid} = Worker.start(task_id: dead.id, repo: "r", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+
+      {:ok, _} =
+        Worker.open_mr(pid, "feature/x", "Integrate x", "", %{
+          adapter: BoardMerger,
+          workspace: nil,
+          auto_merge: false,
+          interval_ms: 600_000,
+          initial_delay_ms: 600_000,
+          watchdog_start_error: true
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s([id="card-#{dead.id}"] a[href="/workers/#{dead.id}"]))
+    end
+
+    test "an open MR under review points the chip at the merge queue", %{conn: conn, ws: ws} do
+      task = working_issue(ws, "under review")
+      merge_worker(ws, task)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/merge_queue"]))
+    end
+
+    test "a parked worker awaiting an answer points the chip at the worker page", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = issue(ws, "needs an answer")
+      parked_worker(ws, task)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/workers/#{task.id}"]))
     end
   end
 

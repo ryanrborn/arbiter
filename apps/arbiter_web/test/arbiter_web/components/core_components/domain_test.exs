@@ -183,6 +183,26 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
       refute html =~ "text-[var(--arb-fail-text)]"
     end
 
+    # bd-1rreu1 — Running cards need the activity line to be its own link to
+    # the worker page, separate from the card body's link to the task.
+    test "activity_href turns the activity line into its own link" do
+      plain = render_component(&task_card/1, id: "bd-1", title: "t", activity: "edit · x.ex")
+
+      assert plain =~ "edit · x.ex"
+      refute plain =~ "<a "
+
+      linked =
+        render_component(&task_card/1,
+          id: "bd-1",
+          title: "t",
+          activity: "edit · x.ex",
+          activity_href: "/workers/bd-1"
+        )
+
+      assert linked =~ ~s(<a href="/workers/bd-1")
+      assert linked =~ "edit · x.ex"
+    end
+
     test "renders priority, type and difficulty through the data primitives" do
       html =
         render_component(&task_card/1,

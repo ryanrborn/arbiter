@@ -543,25 +543,26 @@ defmodule ArbiterWeb.BoardLive do
 
   # ---- card routing ---------------------------------------------------------
 
-  defp card_href("running", card), do: ~p"/workers/#{card.id}"
+  # The card body/title, every column: always the issue's own page. A
+  # `loop-` id is a loop run, not an issue, so it has no task page.
+  defp task_navigate_href(card) do
+    if String.starts_with?(to_string(card.id), "loop-"),
+      do: ~p"/loop",
+      else: ~p"/tasks/#{card.id}"
+  end
 
-  # A card sitting on a merge request is a merge-queue row; anything else in
-  # Waiting is a worker you open and answer.
+  # Waiting's contextual destination — reachable via the action chip, not the
+  # card body. A card sitting on a merge request is a merge-queue row;
+  # anything else in Waiting is a worker you open and answer.
   #
   # bd-8jixav: unless its Watchdog is gone. The merge queue can do nothing
   # about a dead Watchdog — the restart lives on the worker page, so send the
   # operator there instead of to a screen that will only repeat the lie that
   # the MR is being polled.
-  defp card_href("waiting", %{status: :awaiting_verification} = card), do: ~p"/tasks/#{card.id}"
-  defp card_href("waiting", %{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
-  defp card_href("waiting", %{status: :awaiting_review}), do: ~p"/merge_queue"
-  defp card_href("waiting", card), do: ~p"/workers/#{card.id}"
-
-  defp card_href(_column, card) do
-    if String.starts_with?(to_string(card.id), "loop-"),
-      do: ~p"/loop",
-      else: ~p"/tasks/#{card.id}"
-  end
+  defp waiting_action_href(%{status: :awaiting_verification} = card), do: ~p"/tasks/#{card.id}"
+  defp waiting_action_href(%{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
+  defp waiting_action_href(%{status: :awaiting_review}), do: ~p"/merge_queue"
+  defp waiting_action_href(card), do: ~p"/workers/#{card.id}"
 
   # ---- formatting -----------------------------------------------------------
 
@@ -719,19 +720,19 @@ defmodule ArbiterWeb.BoardLive do
                 :for={card <- Enum.take(@backlog, limit(@expanded, "backlog"))}
                 id={"card-#{card.id}"}
                 class="contents"
+                phx-click={JS.navigate(task_navigate_href(card))}
               >
-                <.link navigate={card_href("backlog", card)} class="contents">
-                  <.task_card
-                    id={card.id}
-                    title={card.title || card.id}
-                    priority={card.priority}
-                    type={card.issue_type}
-                    difficulty={card.difficulty}
-                    footer={relative(card.created_at, @now)}
-                    data-card={card.id}
-                    data-column="backlog"
-                  />
-                </.link>
+                <.task_card
+                  id={card.id}
+                  title={card.title || card.id}
+                  priority={card.priority}
+                  type={card.issue_type}
+                  difficulty={card.difficulty}
+                  footer={relative(card.created_at, @now)}
+                  class="cursor-pointer"
+                  data-card={card.id}
+                  data-column="backlog"
+                />
               </div>
 
               <.more
@@ -761,21 +762,21 @@ defmodule ArbiterWeb.BoardLive do
                 :for={entry <- Enum.take(@ready, limit(@expanded, "ready"))}
                 id={"card-#{entry.card.id}"}
                 class="contents"
+                phx-click={JS.navigate(task_navigate_href(entry.card))}
               >
-                <.link navigate={card_href("ready", entry.card)} class="contents">
-                  <.task_card
-                    id={entry.card.id}
-                    title={entry.card.title || entry.card.id}
-                    priority={entry.card.priority}
-                    type={entry.card.issue_type}
-                    difficulty={entry.card.difficulty}
-                    activity={entry.reason}
-                    accent={ready_accent(entry.state)}
-                    draggable="true"
-                    data-card={entry.card.id}
-                    data-column="ready"
-                  />
-                </.link>
+                <.task_card
+                  id={entry.card.id}
+                  title={entry.card.title || entry.card.id}
+                  priority={entry.card.priority}
+                  type={entry.card.issue_type}
+                  difficulty={entry.card.difficulty}
+                  activity={entry.reason}
+                  accent={ready_accent(entry.state)}
+                  draggable="true"
+                  class="cursor-pointer"
+                  data-card={entry.card.id}
+                  data-column="ready"
+                />
               </div>
 
               <.more
@@ -810,26 +811,27 @@ defmodule ArbiterWeb.BoardLive do
                 :for={card <- Enum.take(@running, limit(@expanded, "running"))}
                 id={"card-#{card.id}"}
                 class="contents"
+                phx-click={JS.navigate(task_navigate_href(card))}
               >
-                <.link navigate={card_href("running", card)} class="contents">
-                  <.task_card
-                    id={card.id}
-                    title={card.title || card.id}
-                    accent="live"
-                    activity={card.activity}
-                    difficulty={card.difficulty}
-                    footer={card.step && to_string(card.step)}
-                    draggable="true"
-                    data-card={card.id}
-                    data-column="running"
-                  >
-                    <:status>
-                      <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]">
-                        {elapsed(card.since, @now)}
-                      </span>
-                    </:status>
-                  </.task_card>
-                </.link>
+                <.task_card
+                  id={card.id}
+                  title={card.title || card.id}
+                  accent="live"
+                  activity={card.activity}
+                  activity_href={~p"/workers/#{card.id}"}
+                  difficulty={card.difficulty}
+                  footer={card.step && to_string(card.step)}
+                  draggable="true"
+                  class="cursor-pointer"
+                  data-card={card.id}
+                  data-column="running"
+                >
+                  <:status>
+                    <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]">
+                      {elapsed(card.since, @now)}
+                    </span>
+                  </:status>
+                </.task_card>
               </div>
 
               <.more
@@ -859,6 +861,7 @@ defmodule ArbiterWeb.BoardLive do
                 :for={card <- Enum.take(@waiting, limit(@expanded, "waiting"))}
                 id={"card-#{card.id}"}
                 class="contents"
+                phx-click={JS.navigate(task_navigate_href(card))}
               >
                 <.task_card
                   id={card.id}
@@ -866,6 +869,7 @@ defmodule ArbiterWeb.BoardLive do
                   activity={waiting_activity(card)}
                   footer={waiting_note(card, waiting_activity(card))}
                   draggable="true"
+                  class="cursor-pointer"
                   data-card={card.id}
                   data-column="waiting"
                 >
@@ -885,7 +889,7 @@ defmodule ArbiterWeb.BoardLive do
                     </span>
                   </:status>
                   <:actions>
-                    <.link navigate={card_href("waiting", card)} class="contents">
+                    <.link navigate={waiting_action_href(card)} class="contents">
                       <span class="px-2 py-[2px] rounded-[var(--radius-chip)] text-[10px] font-medium font-[family-name:var(--font-mono)] border border-solid border-[var(--border-strong)] text-[var(--text-link)]">
                         {waiting_action(card)}
                       </span>
@@ -918,17 +922,17 @@ defmodule ArbiterWeb.BoardLive do
                 :for={card <- Enum.take(@closed, limit(@expanded, "closed"))}
                 id={"card-#{card.id}"}
                 class="contents"
+                phx-click={JS.navigate(task_navigate_href(card))}
               >
-                <.link navigate={card_href("closed", card)} class="contents">
-                  <.task_card
-                    id={card.id}
-                    title={card.title || card.id}
-                    muted
-                    footer={"closed #{clock(card.closed_at)}"}
-                    data-card={card.id}
-                    data-column="closed"
-                  />
-                </.link>
+                <.task_card
+                  id={card.id}
+                  title={card.title || card.id}
+                  muted
+                  footer={"closed #{clock(card.closed_at)}"}
+                  class="cursor-pointer"
+                  data-card={card.id}
+                  data-column="closed"
+                />
               </div>
 
               <div
