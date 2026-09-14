@@ -20,8 +20,12 @@ Usage: scripts/build-local-release.sh <clone-path> [output-dir]
 
   <clone-path>   Path to a *separate* git clone of this repo, tracking
                  origin/main. Refuses to run if this resolves to the same
-                 repository as the primary checkout (ARB_PRIMARY_CHECKOUT,
-                 default ~/dev/arbiter) — including a worktree of it.
+                 repository as the primary checkout — including a worktree
+                 of it. The primary checkout is resolved the same way the
+                 server itself resolves it: $ARB_PRIMARY_CHECKOUT override,
+                 else $ARB_HOME, else the path recorded by
+                 `arb install-service` at ~/.config/arbiter/home, else
+                 ~/dev/arbiter.
   [output-dir]   Where to write the release tarball and `arb` escript.
                  Default: <clone-path>/.local-release
 
@@ -58,7 +62,21 @@ if ! git -C "$CLONE_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
-PRIMARY_CHECKOUT_INPUT="${ARB_PRIMARY_CHECKOUT:-$HOME/dev/arbiter}"
+# Resolve "the primary checkout" the same way the server itself does
+# (ArbiterCli.Cmd.Start): ARB_HOME override, else the path recorded by
+# `arb install-service` at ~/.config/arbiter/home, else ~/dev/arbiter.
+# ARB_PRIMARY_CHECKOUT remains available as an explicit override for callers
+# who know better than all of the above.
+CONFIGURED_HOME_FILE="$HOME/.config/arbiter/home"
+if [ -n "${ARB_PRIMARY_CHECKOUT:-}" ]; then
+  PRIMARY_CHECKOUT_INPUT="$ARB_PRIMARY_CHECKOUT"
+elif [ -n "${ARB_HOME:-}" ]; then
+  PRIMARY_CHECKOUT_INPUT="$ARB_HOME"
+elif [ -r "$CONFIGURED_HOME_FILE" ]; then
+  PRIMARY_CHECKOUT_INPUT=$(cat "$CONFIGURED_HOME_FILE")
+else
+  PRIMARY_CHECKOUT_INPUT="$HOME/dev/arbiter"
+fi
 
 # Never build from the primary checkout, and never from a worktree of it
 # either — both share the live server's source tree, and a prod compile
@@ -73,6 +91,8 @@ if [ -d "$PRIMARY_CHECKOUT_INPUT" ] &&
     echo "       Use a separate \`git clone\` instead — never the live checkout." >&2
     exit 1
   fi
+else
+  echo "warning: could not resolve the primary checkout (tried ARB_PRIMARY_CHECKOUT, ARB_HOME, $CONFIGURED_HOME_FILE, $HOME/dev/arbiter) — the live-checkout guard is inactive." >&2
 fi
 
 echo "Building in $CLONE_PATH…"

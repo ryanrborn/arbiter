@@ -155,6 +155,13 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     # deploy must not abandon active workers. Same guards as `arb restart`.
     Restart.guard_worker_session!()
 
+    if opts[:local] && opts[:version] do
+      Output.die(
+        "--version and --local are mutually exclusive",
+        "--local deploys whatever release tree is at that path — there is no tag to select."
+      )
+    end
+
     case opts[:local] do
       nil -> deploy_from_github(opts, mode, force, timeout_ms)
       path -> deploy_from_local(path, mode, force, timeout_ms, opts)
@@ -214,6 +221,11 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       end
 
       unless File.exists?(Path.join(target_dir, "bin/arbiter")) do
+        # Nothing has swapped or pruned yet, but unpack!/install_dir! already
+        # wrote this tree — leaving it behind would waste one of the limited
+        # @retain_prior slots a real rollback candidate would otherwise use.
+        _ = File.rm_rf(target_dir)
+
         Output.die(
           "#{path} does not look like an OTP release",
           "expected #{Path.join(target_dir, "bin/arbiter")} to exist after install."
@@ -278,46 +290,80 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       ReleaseFiles.atomic_symlink_swap!(current_link, target_dir)
       log("Swapped #{current_link} -> #{target_dir}")
 
+      # Bundled once so the post-restart step (split out below to stay under
+      # Credo's complexity threshold) doesn't need a double-digit arity to
+      # carry everything the swap decided forward.
+      ctx = %{
+        mode: mode,
+        tag: tag,
+        releases_dir: releases_dir,
+        target_dir: target_dir,
+        prior_target: prior_target,
+        current_link: current_link,
+        rollback_plan: rollback_plan,
+        timeout_ms: timeout_ms
+      }
+
       case Restart.perform(ReleaseFiles.restart_root(current_link), timeout_ms) do
         {:ok, actions, was_running} ->
-          case verify_deployed_version(tag) do
-            :ok ->
-              pruned = ReleaseFiles.prune_old_releases(releases_dir, target_dir, prior_target)
-
-              Formatter.emit_deployed(
-                mode,
-                tag,
-                ReleaseFiles.prior_basename(prior_target),
-                actions,
-                was_running,
-                pruned
-              )
-
-            {:mismatch, server_vsn} ->
-              outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
-              Formatter.emit_swap_failed(mode, tag, server_vsn, outcome)
-
-            :inconclusive ->
-              # Doctor already confirmed Phoenix is reachable (a fatal check),
-              # so a failure here is a transient /api/version hiccup, not
-              # evidence the swap failed — don't roll back a healthy deploy on
-              # a flaky read of a non-fatal endpoint.
-              pruned = ReleaseFiles.prune_old_releases(releases_dir, target_dir, prior_target)
-
-              Formatter.emit_deployed(
-                mode,
-                tag,
-                ReleaseFiles.prior_basename(prior_target),
-                actions,
-                was_running,
-                pruned
-              )
-          end
+          handle_restart_ok(ctx, actions, was_running)
 
         {:timeout, _actions, _was_running} ->
           outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
           Formatter.emit_rollback(mode, tag, outcome, timeout_ms, pre_deploy_fails)
       end
+    end
+  end
+
+  # Split out of `deploy/6` purely to keep that function's cyclomatic
+  # complexity under the Credo threshold — this is the "restart succeeded,
+  # now decide whether the new release is actually healthy" half of the
+  # deploy, and reads as one contiguous step, so it stays adjacent rather
+  # than being folded into `verify_deployed_version/1`.
+  defp handle_restart_ok(ctx, actions, was_running) do
+    %{
+      mode: mode,
+      tag: tag,
+      releases_dir: releases_dir,
+      target_dir: target_dir,
+      prior_target: prior_target,
+      current_link: current_link,
+      rollback_plan: rollback_plan,
+      timeout_ms: timeout_ms
+    } = ctx
+
+    case verify_deployed_version(tag) do
+      :ok ->
+        pruned = ReleaseFiles.prune_old_releases(releases_dir, target_dir, prior_target)
+
+        Formatter.emit_deployed(
+          mode,
+          tag,
+          ReleaseFiles.prior_basename(prior_target),
+          actions,
+          was_running,
+          pruned
+        )
+
+      {:mismatch, server_vsn} ->
+        outcome = auto_rollback(current_link, rollback_plan, timeout_ms)
+        Formatter.emit_swap_failed(mode, tag, server_vsn, outcome)
+
+      :inconclusive ->
+        # Doctor already confirmed Phoenix is reachable (a fatal check), so a
+        # failure here is a transient /api/version hiccup, not evidence the
+        # swap failed — don't roll back a healthy deploy on a flaky read of a
+        # non-fatal endpoint.
+        pruned = ReleaseFiles.prune_old_releases(releases_dir, target_dir, prior_target)
+
+        Formatter.emit_deployed(
+          mode,
+          tag,
+          ReleaseFiles.prior_basename(prior_target),
+          actions,
+          was_running,
+          pruned
+        )
     end
   end
 
@@ -330,7 +376,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # anything else is a failed swap, and that must roll back.
   # Local builds carry whatever version `mix.exs` derives at build time (the
   # nearest git tag, per its `@version` fallback) — not a version stamped
-  # after the tag we made up in `deploy_from_local/3`. There is nothing
+  # after the tag we made up in `deploy_from_local/5`. There is nothing
   # meaningful to compare, so skip straight to trusting the health check that
   # already gated this call.
   defp verify_deployed_version("local-" <> _), do: :ok

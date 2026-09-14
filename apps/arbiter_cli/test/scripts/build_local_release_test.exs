@@ -78,6 +78,22 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
     assert out =~ "refusing to build from the primary checkout"
   end
 
+  test "refuses to build against the primary checkout resolved from ARB_HOME alone" do
+    primary =
+      init_repo!(
+        Path.join(System.tmp_dir!(), "blr-primary-#{System.unique_integer([:positive])}")
+      )
+
+    on_exit(fn -> File.rm_rf(primary) end)
+
+    # No ARB_PRIMARY_CHECKOUT set — the guard must still fire off of ARB_HOME,
+    # the var the server itself is actually configured with.
+    {out, code} = run([primary], [{"ARB_PRIMARY_CHECKOUT", nil}, {"ARB_HOME", primary}])
+
+    assert code == 1
+    assert out =~ "refusing to build from the primary checkout"
+  end
+
   test "refuses to build against a worktree of the primary checkout" do
     primary =
       init_repo!(
