@@ -6,6 +6,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   import ExUnit.CaptureLog
 
   alias Arbiter.GitHub.Limiter
+  alias Arbiter.Reviews.Coverage
+  alias Arbiter.Reviews.CoverageShadow.Tally
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.TargetBranch
@@ -874,6 +876,89 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       refute_received {:merge_sha, _}
       assert Ash.get!(Issue, task.id).status == :open
+    end
+
+    # bd-b0fqcl / #1649 — P3 shadow mode (design #1635 §3.4/§6.3). The queue
+    # evaluates `Coverage.decide/3` alongside the ReviewedSha guard on every
+    # guarded merge; the ReviewedSha answer is still the one acted on.
+    @tag workspace_config: @ws_github
+    test "the coverage shadow agrees on a covered head, and the merge is unchanged", %{
+      workspace: ws,
+      task: task
+    } do
+      Tally.reset()
+      on_exit(&Tally.reset/0)
+
+      head = String.duplicate("ab", 20)
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: head}, action: :update)
+
+      test_pid = self()
+      sha_stub(70, head, test_pid)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      %{items: [item]} = MergeQueue.state(name)
+
+      {:ok, _} =
+        Coverage.record(%{
+          task_id: task.id,
+          mr_ref: item.mr_ref,
+          head_sha: head,
+          base_ref: "main",
+          net_diff_id: "fp-mq-agree",
+          kind: :reviewed,
+          source: :review_gate
+        })
+
+      log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
+
+      assert_received {:merge_sha, ^head}
+      refute log =~ "DISAGREEMENT"
+
+      assert %{agreements: agreements, disagreements: 0} = Tally.snapshot()
+      assert agreements >= 1
+      assert Tally.snapshot().by_site[:merge_queue] >= 1
+    end
+
+    @tag workspace_config: @ws_github
+    test "a coverage-shadow disagreement is logged and counted but does not stop the merge", %{
+      workspace: ws,
+      task: task
+    } do
+      Tally.reset()
+      on_exit(&Tally.reset/0)
+
+      head = String.duplicate("cd", 20)
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: head}, action: :update)
+
+      test_pid = self()
+      sha_stub(71, head, test_pid)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # No coverage row exists and this stub answers 500 to the compare
+      # endpoint, so `decide/3` stops at rule 4 with {:unknown,
+      # :diff_unavailable} while the ReviewedSha guard says merge. The merge
+      # must still happen.
+      log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
+
+      assert_received {:merge_sha, ^head}
+      assert Ash.get!(Issue, task.id).status == :closed
+
+      lines = for line <- String.split(log, "\n"), line =~ "DISAGREEMENT", do: line
+      assert length(lines) == 1
+      [line] = lines
+      assert line =~ "site=merge_queue"
+      assert line =~ "task=#{task.id}"
+      assert line =~ "head=#{head}"
+      assert line =~ "old=covered"
+      assert line =~ "new=unknown"
+      assert line =~ "new_reason=diff_unavailable"
+
+      assert %{disagreements: 1} = Tally.snapshot()
+      assert Tally.snapshot().by_transition["covered->unknown"] == 1
     end
 
     @tag workspace_config: @ws_github

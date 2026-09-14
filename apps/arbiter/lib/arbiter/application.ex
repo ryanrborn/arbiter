@@ -82,6 +82,12 @@ defmodule Arbiter.Application do
       # :running forever and external_review_list(status: "running") overstates
       # what's actually in flight. See Arbiter.Reviews.StaleReviewReaper.
       Arbiter.Reviews.StaleReviewReaper,
+      # Owns the ETS table backing P3 shadow mode's since-boot counters and
+      # its report-once dedup set (#1635 §6.3). Inert until
+      # `Arbiter.Reviews.CoverageShadow.observe/1` is called from a merge
+      # guard, and never on the merge path itself — every read and write is
+      # a direct public-table operation, not a call into this process.
+      Arbiter.Reviews.CoverageShadow.Tally,
       # Judges any running Stage 3 routing canary and reverts it automatically
       # if first-pass convergence regressed (bd-6edc0u). Inert for every
       # workspace that has not set `loop.autonomous_routing_enabled`, which is

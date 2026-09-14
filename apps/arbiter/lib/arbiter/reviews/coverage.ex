@@ -16,10 +16,14 @@ defmodule Arbiter.Reviews.Coverage do
   `decide/3` (§3.2, P2) is the reader: the six-rule
   `covered | uncovered | unknown` predicate both merge paths will collapse
   to. It is a **pure function** — every git/forge fact it needs arrives
-  through `ctx` — and as of P2 it has no call site outside its tests.
-  Watchdog and MergeQueue adopt it in P3 (shadow) and P4 (flip); until then
-  `issues.last_reviewed_sha` remains the authoritative input to every merge
-  guard, and no production code path reads coverage to make a decision.
+  through `ctx`.
+
+  P3 (#1649) gives it its first call site, `Arbiter.Reviews.CoverageShadow`,
+  which both merge paths call *alongside* their existing guard and which acts
+  on nothing: it counts and logs whether the two predicates agree. So
+  `issues.last_reviewed_sha` is still the authoritative input to every merge
+  decision, and no production code path yet *acts* on coverage. P4 flips the
+  read path behind `merge.coverage_enabled`.
   """
 
   require Ash.Query
@@ -68,6 +72,28 @@ defmodule Arbiter.Reviews.Coverage do
         end
     end
   end
+
+  @doc """
+  Every coverage row recorded for one MR, oldest first.
+
+  The read scope `decide/3` is meant to be handed: §3.2's rules are all
+  statements about *this PR's* coverage set, and `mr_ref` is the only handle
+  every writer in §3.3 shares (`task_id` is the authoring task, which a
+  ReviewPatrol row about an external PR does not have).
+
+  Raises on a read failure — the shadow/guard call sites wrap it, and a caller
+  that wants "no coverage" on a DB error would be answering `:uncovered` to a
+  question it could not read, which is exactly RC2's mistake.
+  """
+  @spec for_mr(String.t() | nil) :: [Entry.t()]
+  def for_mr(mr_ref) when is_binary(mr_ref) and mr_ref != "" do
+    Entry
+    |> Ash.Query.filter(mr_ref == ^mr_ref)
+    |> Ash.Query.sort(covered_at: :asc)
+    |> Ash.read!()
+  end
+
+  def for_mr(_mr_ref), do: []
 
   @typedoc """
   Everything `decide/3` needs to know about the world, injected.
