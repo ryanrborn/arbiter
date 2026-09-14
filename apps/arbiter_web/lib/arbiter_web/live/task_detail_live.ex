@@ -1014,67 +1014,111 @@ defmodule ArbiterWeb.TaskDetailLive do
         </div>
 
         <%= if @task do %>
-          <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-[var(--space-4)] items-start">
-            <%!-- ══ Main column ═════════════════════════════════════════ --%>
-            <div class="flex flex-col gap-[var(--space-4)] min-w-0">
-              <.panel :if={present?(@task.description)} title="DESCRIPTION">
+          <div class="flex flex-col gap-[var(--space-4)] lg:grid lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
+            <%!-- ══ Main column ═════════════════════════════════════════
+                 Narrative order top-to-bottom. `contents` below `lg` folds
+                 this wrapper into the outer flex column so the mobile
+                 `order-*` values (per the design's narrow wireframe) still
+                 apply across both groups; at `lg` it becomes its own flex
+                 column so this group stacks independently of the rail,
+                 using source order directly for the desktop order. --%>
+            <div class="contents lg:flex lg:flex-col lg:gap-[var(--space-4)] lg:min-w-0">
+              <.panel
+                :if={present?(@task.description)}
+                id="panel-description"
+                title="DESCRIPTION"
+                class="order-3"
+              >
                 <.markdown id="task-description-md" text={@task.description} />
               </.panel>
 
               <%!-- Acceptance criteria are real checkboxes, not decoration:
-                   ticking one rewrites the markdown marker on the issue, so
-                   `arb show` and the tracker read the same state back. --%>
+                 ticking one rewrites the markdown marker on the issue, so
+                 `arb show` and the tracker read the same state back. The
+                 #1636 waiver (bd-7mbrlg) is a sub-state of this same panel,
+                 not a separate one, since it only ever applies to the
+                 acceptance gate it waives. --%>
               <.panel
-                :if={@acceptance_items != []}
+                :if={@acceptance_items != [] or present?(@task.acceptance_waived)}
+                id="panel-acceptance"
                 title="ACCEPTANCE"
                 meta={acceptance_meta(@acceptance_items)}
+                class="order-2"
               >
-                <ul class="flex flex-col gap-[7px]">
-                  <li :for={item <- @acceptance_items} class="text-[12.5px] leading-snug">
-                    <ArbiterWeb.CoreComponents.Forms.checkbox
-                      :if={item.checkbox?}
-                      name={"criterion-#{item.index}"}
-                      id={"criterion-#{item.index}"}
-                      label={item.text}
-                      align="start"
-                      checked={item.checked}
-                      class={item.checked && "text-[var(--text-label)]"}
-                      phx-click="toggle_criterion"
-                      phx-value-criterion={item.index}
-                    />
-                    <span :if={!item.checkbox?} class="min-w-0 text-[var(--text-secondary)]">
-                      {item.text}
-                    </span>
-                  </li>
-                </ul>
-              </.panel>
+                <div class="flex flex-col gap-3">
+                  <ul :if={@acceptance_items != []} class="flex flex-col gap-[7px]">
+                    <li :for={item <- @acceptance_items} class="text-[12.5px] leading-snug">
+                      <ArbiterWeb.CoreComponents.Forms.checkbox
+                        :if={item.checkbox?}
+                        name={"criterion-#{item.index}"}
+                        id={"criterion-#{item.index}"}
+                        label={item.text}
+                        align="start"
+                        checked={item.checked}
+                        class={item.checked && "text-[var(--text-label)]"}
+                        phx-click="toggle_criterion"
+                        phx-value-criterion={item.index}
+                      />
+                      <span :if={!item.checkbox?} class="min-w-0 text-[var(--text-secondary)]">
+                        {item.text}
+                      </span>
+                    </li>
+                  </ul>
 
-              <.panel :if={present?(@task.acceptance_waived)} title="ACCEPTANCE WAIVED">
-                <p class="text-[12.5px] leading-snug text-[var(--text-secondary)]">
-                  {@task.acceptance_waived}
-                </p>
+                  <div
+                    :if={present?(@task.acceptance_waived)}
+                    class={[
+                      "flex flex-col gap-1",
+                      @acceptance_items != [] && "border-t border-[var(--border-default)] pt-3"
+                    ]}
+                  >
+                    <h3 class="text-[11px] font-medium text-[var(--text-label)]">
+                      ACCEPTANCE WAIVED
+                    </h3>
+                    <p class="text-[12.5px] leading-snug text-[var(--text-secondary)]">
+                      {@task.acceptance_waived}
+                    </p>
+                  </div>
+                </div>
               </.panel>
 
               <%!-- bd-5lc99r: for a `task`-type directive the findings summary
-                   in `notes` is the deliverable, so it gets its own panel with
-                   a placeholder while still blank. --%>
-              <.panel :if={@task.issue_type == :task} title="FINDINGS">
+                 in `notes` is the deliverable, so it gets its own panel with
+                 a placeholder while still blank. --%>
+              <.panel
+                :if={@task.issue_type == :task}
+                id="panel-findings"
+                title="FINDINGS"
+                class="order-7"
+              >
                 <.markdown id="task-findings-md" text={@task.notes} />
                 <p :if={!present?(@task.notes)} class="text-[12px] italic text-[var(--text-label)]">
                   No findings recorded yet — the worker writes its results here before completing.
                 </p>
               </.panel>
 
-              <.panel :if={@task.issue_type != :task and present?(@task.notes)} title="NOTES">
+              <.panel
+                :if={@task.issue_type != :task and present?(@task.notes)}
+                id="panel-notes"
+                title="NOTES"
+                class="order-7"
+              >
                 <.markdown id="task-notes-md" text={@task.notes} />
               </.panel>
 
+              <%!-- MERGE & REVIEW: PR/MR state plus target branch and body.
+                 Ticket B (review-round summary) adds a compact round-summary
+                 line here ("2 rounds · round 2: approved") that deep-links
+                 into the matching RUNS rows — this is that panel's marked
+                 spot, directly under the PR/target data list. --%>
               <.panel
                 :if={
                   present?(@task.pr_ref) or present?(@task.target_branch) or
                     present?(@task.pr_body) or @prior_mr_refs != []
                 }
-                title="MERGE"
+                id="panel-merge-review"
+                title="MERGE & REVIEW"
+                class="order-4"
               >
                 <div class="flex flex-col gap-3">
                   <.data_list class="text-[12.5px]">
@@ -1099,6 +1143,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                       <code class="text-xs">{@task.target_branch}</code>
                     </:item>
                   </.data_list>
+
+                  <%!-- ticket B (review-round summary) lands here: a compact
+                     "N rounds · round N: <verdict>" line deep-linking into
+                     the matching RUNS rows. --%>
 
                   <div :if={@prior_mr_refs != []} class="flex flex-col gap-1">
                     <h3 class="text-[11px] font-medium text-[var(--text-label)]">Prior MRs</h3>
@@ -1136,7 +1184,9 @@ defmodule ArbiterWeb.TaskDetailLive do
 
               <.panel
                 :if={present?(@task.qa_notes) or present?(@task.deployment_notes)}
+                id="panel-qa-deployment"
                 title="QA & DEPLOYMENT"
+                class="order-8"
               >
                 <div class="flex flex-col gap-3">
                   <div :if={present?(@task.qa_notes)} class="flex flex-col gap-1">
@@ -1166,10 +1216,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                    detail remain only as the cross-issue view and the
                    full-page permalink. --%>
               <.panel
+                id="panel-runs"
                 title="RUNS"
                 meta={runs_meta(@runs, @usage_by_run)}
                 padded={false}
                 body_class="px-[18px] py-[var(--space-4)] flex flex-col gap-[10px]"
+                class="order-9"
               >
                 <:actions>
                   <.link
@@ -1285,10 +1337,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                    `/audit` page lists, filtered to this subject; the header
                    link opens that page with the same filter applied. --%>
               <.panel
+                id="panel-activity"
                 title="ACTIVITY"
                 meta={activity_meta(@versions, @version_total)}
                 padded={false}
                 body_class="px-[18px] py-[var(--space-4)]"
+                class="order-12"
               >
                 <:actions>
                   <.link
@@ -1316,12 +1370,22 @@ defmodule ArbiterWeb.TaskDetailLive do
               </.panel>
             </div>
 
-            <%!-- ══ Right rail ══════════════════════════════════════════ --%>
-            <div class="flex flex-col gap-[var(--space-4)] min-w-0">
+            <%!-- ══ Right rail ══════════════════════════════════════════
+                   State, at-a-glance. Same `contents`-below-`lg` scheme as
+                   the main column: mobile `order-*` per the narrow
+                   wireframe applies across both groups, and at `lg` this
+                   wrapper becomes its own flex column stacking
+                   independently of the main column, in source order. --%>
+            <div class="contents lg:flex lg:flex-col lg:gap-[var(--space-4)] lg:min-w-0">
               <%!-- An issue accumulates runs — a main dispatch, review passes,
                    fix passes — so this block summarises the roster rather
                    than naming the one worker that happens to be attached. --%>
-              <.panel title="CURRENT RUN" meta={run_role_breakdown(@runs)}>
+              <.panel
+                id="panel-current-run"
+                title="CURRENT RUN"
+                meta={run_role_breakdown(@runs)}
+                class="order-1"
+              >
                 <div class="flex flex-col gap-3">
                   <p class="text-[12.5px] text-[var(--text-secondary)]">
                     {run_count_summary(@runs)}
@@ -1367,7 +1431,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                     what was (or wasn't) observed once someone looked. Rendered
                     only for a task the flag applies to — every other task has
                     nothing to say here. --%>
-              <.panel :if={@task.verify_after_deploy} title="POST-MERGE VERIFICATION">
+              <.panel
+                :if={@task.verify_after_deploy}
+                id="panel-verification"
+                title="POST-MERGE VERIFICATION"
+                class="order-6"
+              >
                 <.data_list class="text-[12px]">
                   <:item label="Flagged">
                     <code class="text-xs">verify_after_deploy</code>
@@ -1401,64 +1470,21 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
-              <.panel title="MACHINE STATE">
-                <.data_list class="text-[12px]">
-                  <:item :if={@issue_repo} label={String.capitalize(@rig_label)}>
-                    <code class="text-xs">{@issue_repo}</code>
-                  </:item>
-                  <:item label="Status">
-                    <.status_chip status={@task.status} class="badge-sm" />
-                  </:item>
-                  <:item label="Priority">
-                    <.priority_tag priority={@task.priority} class="badge-sm font-mono" />
-                  </:item>
-                  <:item label="Difficulty">
-                    <code class="text-xs">{difficulty_label(@task.difficulty)}</code>
-                  </:item>
-                  <:item label="Type"><code class="text-xs">{@task.issue_type}</code></:item>
-                  <:item label={String.capitalize(@workspace_label)}>
-                    <span :if={@workspace}>
-                      {@workspace.name} <code class="text-xs">{@workspace.prefix}</code>
-                    </span>
-                    <span :if={!@workspace} class="italic text-[var(--text-label)]">(none)</span>
-                  </:item>
-                  <:item :if={present?(@task.assignee)} label="Assignee">
-                    <code class="text-xs">{@task.assignee}</code>
-                  </:item>
-                  <:item :if={@task.tracker_type != :none} label="Tracker">
-                    <% tracker_url = tracker_url(@workspace, @task.tracker_ref) %>
-                    <a
-                      :if={tracker_url != ""}
-                      href={tracker_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="link link-hover text-xs font-mono text-primary"
-                    >
-                      {@task.tracker_type}:{@task.tracker_ref}
-                    </a>
-                    <code :if={tracker_url == ""} class="text-xs">
-                      {@task.tracker_type}{if present?(@task.tracker_ref),
-                        do: ":" <> @task.tracker_ref}
-                    </code>
-                  </:item>
-                  <:item :if={(@task.child_total || 0) > 0} label="Children">
-                    <code class="text-xs">
-                      {@task.child_closed || 0}/{@task.child_total} closed
-                    </code>
-                  </:item>
-                  <:item label="Created">
-                    <code class="text-xs">{format_audit_ts(@task.created_at)}</code>
-                  </:item>
-                  <:item :if={@task.updated_at} label="Updated">
-                    <code class="text-xs">{format_audit_ts(@task.updated_at)}</code>
-                  </:item>
-                  <:item :if={@task.closed_at} label="Closed">
-                    <code class="text-xs">{format_audit_ts(@task.closed_at)}</code>
-                  </:item>
-                </.data_list>
-              </.panel>
-
-              <.panel title="DEPENDENCIES" meta={dependency_meta(@outbound_deps, @inbound_deps)}>
+              <%!-- RELATIONSHIPS: this issue's graph position — dependency
+                   edges plus parent/child progress (moved out of MACHINE
+                   STATE, design finding #4) — all in one panel. The
+                   `:actions` slot is reserved, empty, for bd-dgh2xv's future
+                   add/remove-dependency affordance. --%>
+              <.panel
+                id="panel-relationships"
+                title="RELATIONSHIPS"
+                meta={relationships_meta(@outbound_deps, @inbound_deps, @task)}
+                class="order-5"
+              >
+                <:actions>
+                  <%!-- bd-dgh2xv: "+ add" affordance for a new Dependency edge
+                       lands here. --%>
+                </:actions>
                 <div class="flex flex-col gap-3">
                   <div class="flex flex-col gap-1.5">
                     <h3 class="text-[11px] font-medium text-[var(--text-label)]">
@@ -1493,12 +1519,88 @@ defmodule ArbiterWeb.TaskDetailLive do
                       </li>
                     </ul>
                   </div>
+
+                  <div
+                    :if={(@task.child_total || 0) > 0}
+                    class="flex flex-col gap-1.5 border-t border-[var(--border-default)] pt-3"
+                  >
+                    <h3 class="text-[11px] font-medium text-[var(--text-label)]">Children</h3>
+                    <code class="text-xs text-[var(--text-secondary)]">
+                      {@task.child_closed || 0}/{@task.child_total} closed
+                    </code>
+                  </div>
                 </div>
+              </.panel>
+
+              <%!-- MESSAGES placeholder — ticket C wires up
+                   `Arbiter.Messages.Message` scoped to this issue. --%>
+              <.panel
+                id="panel-messages"
+                title="MESSAGES"
+                class="order-10"
+              >
+                <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-envelope">
+                  No messages for this {@issue_label} yet.
+                </ArbiterWeb.CoreComponents.Feedback.empty_state>
+              </.panel>
+
+              <%!-- MACHINE STATE, trimmed: status/priority/type/difficulty
+                   already show in the header band (design finding #1), and
+                   child progress now lives in RELATIONSHIPS. --%>
+              <.panel
+                id="panel-machine-state"
+                title="MACHINE STATE"
+                class="order-11"
+              >
+                <.data_list class="text-[12px]">
+                  <:item :if={@issue_repo} label={String.capitalize(@rig_label)}>
+                    <code class="text-xs">{@issue_repo}</code>
+                  </:item>
+                  <:item label={String.capitalize(@workspace_label)}>
+                    <span :if={@workspace}>
+                      {@workspace.name} <code class="text-xs">{@workspace.prefix}</code>
+                    </span>
+                    <span :if={!@workspace} class="italic text-[var(--text-label)]">(none)</span>
+                  </:item>
+                  <:item :if={present?(@task.assignee)} label="Assignee">
+                    <code class="text-xs">{@task.assignee}</code>
+                  </:item>
+                  <:item :if={@task.tracker_type != :none} label="Tracker">
+                    <% tracker_url = tracker_url(@workspace, @task.tracker_ref) %>
+                    <a
+                      :if={tracker_url != ""}
+                      href={tracker_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="link link-hover text-xs font-mono text-primary"
+                    >
+                      {@task.tracker_type}:{@task.tracker_ref}
+                    </a>
+                    <code :if={tracker_url == ""} class="text-xs">
+                      {@task.tracker_type}{if present?(@task.tracker_ref),
+                        do: ":" <> @task.tracker_ref}
+                    </code>
+                  </:item>
+                  <:item label="Created">
+                    <code class="text-xs">{format_audit_ts(@task.created_at)}</code>
+                  </:item>
+                  <:item :if={@task.updated_at} label="Updated">
+                    <code class="text-xs">{format_audit_ts(@task.updated_at)}</code>
+                  </:item>
+                  <:item :if={@task.closed_at} label="Closed">
+                    <code class="text-xs">{format_audit_ts(@task.closed_at)}</code>
+                  </:item>
+                </.data_list>
               </.panel>
 
               <%!-- The post-layering skill set (workspace → repo → issue) a
                    dispatch of this issue would carry right now. --%>
-              <.panel title="SKILLS" meta={"#{length(@skills)} active"}>
+              <.panel
+                id="panel-skills"
+                title="SKILLS"
+                meta={"#{length(@skills)} active"}
+                class="order-13"
+              >
                 <p :if={@skills == []} class="text-[11.5px] italic text-[var(--text-label)]">
                   No skills resolve for this {@issue_label}.
                 </p>
@@ -2173,8 +2275,15 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
-  defp dependency_meta(outbound, inbound),
-    do: "#{length(outbound)} up · #{length(inbound)} down"
+  defp relationships_meta(outbound, inbound, task) do
+    base = "#{length(outbound)} up · #{length(inbound)} down"
+
+    if (task.child_total || 0) > 0 do
+      "#{base} · #{task.child_closed || 0}/#{task.child_total} children"
+    else
+      base
+    end
+  end
 
   # ---- activity stream ----
 
