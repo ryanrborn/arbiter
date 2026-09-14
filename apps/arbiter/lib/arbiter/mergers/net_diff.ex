@@ -134,8 +134,9 @@ defmodule Arbiter.Mergers.NetDiff do
 
   # Both endpoints present → a bounded `base...head` compare; otherwise the
   # adapter's whole-PR diff, which is already the PR's net contribution.
-  defp compare_opts(base, head) when is_binary(base) and is_binary(head) and base != "" and head != "",
-    do: %{base: base, head: head}
+  defp compare_opts(base, head)
+       when is_binary(base) and is_binary(head) and base != "" and head != "",
+       do: %{base: base, head: head}
 
   defp compare_opts(_base, _head), do: %{}
 

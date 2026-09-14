@@ -102,12 +102,19 @@ defmodule Arbiter.Reviews.ExternalReviewCoverageTest do
           json(conn, %{"id" => 99})
 
         conn.method == "POST" and path == "/graphql" ->
-          json(conn, %{"data" => %{"repository" => %{"pullRequest" => %{"reviewThreads" => %{"nodes" => []}}}}})
+          json(conn, %{
+            "data" => %{
+              "repository" => %{"pullRequest" => %{"reviewThreads" => %{"nodes" => []}}}
+            }
+          })
 
         true ->
           conn
           |> Plug.Conn.put_resp_header("content-type", "application/json")
-          |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"}))
+          |> Plug.Conn.resp(
+            404,
+            Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"})
+          )
       end
     end)
   end

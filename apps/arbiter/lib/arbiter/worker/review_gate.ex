@@ -2865,7 +2865,9 @@ defmodule Arbiter.Worker.ReviewGate do
               "certainly systemic (migration not run, table missing) rather than " <>
               "per-approval — check `review_coverage` before clearing."
         ],
-        fn -> CoordinatorNotifier.review_coverage_write_failed(snapshot, mr_ref, head_sha, reason) end
+        fn ->
+          CoordinatorNotifier.review_coverage_write_failed(snapshot, mr_ref, head_sha, reason)
+        end
       )
 
     case result do
