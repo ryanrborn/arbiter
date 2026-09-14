@@ -15,8 +15,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
        command may be spawned. This is deliberately per-*occurrence*, not
        per-file, so a new bypass added to an already-classified file is caught
        too.
-    2. **`Port.open/2` is allowlisted.** A file that opens a port must be
-       declared here and must reference `ReleaseEnv`.
+    2. **`Port.open/2` is allowlisted per occurrence.** A file that opens a
+       port must be declared here *with its exact number of ports*, and must
+       call `ReleaseEnv.port_env/1`, so a second port added to an
+       already-listed file has to be classified too.
     3. **Every spawn site is classified.** A file containing any spawn
        primitive must appear in `@inventory`, so a new one can't land
        unclassified.
@@ -53,12 +55,17 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     dolt kubectl
   )
 
-  # Files that may call `Port.open/2`. Each must route its env through
-  # `ReleaseEnv`.
-  @port_open_allowlist [
-    "apps/arbiter/lib/arbiter/worker/claude_session.ex",
-    "apps/arbiter/lib/arbiter/agents/preflight.ex"
-  ]
+  # Files that may call `Port.open/2`, and how many times. A port child
+  # inherits the release env, so every one of these occurrences must merge
+  # `ReleaseEnv.port_env/1` into its `{:env, …}` option. The count is declared
+  # (rather than just the file) because the env for a port is often assembled
+  # somewhere other than the `Port.open/2` line itself — there is no textual
+  # way to tie a given occurrence to the scrub, so instead adding one forces
+  # this number to change, and with it a fresh look at the new call.
+  @port_open_allowlist %{
+    "apps/arbiter/lib/arbiter/worker/claude_session.ex" => 1,
+    "apps/arbiter/lib/arbiter/agents/preflight.ex" => 1
+  }
 
   # Every file under `apps/*/lib` that contains a subprocess spawn primitive,
   # and why it is (or isn't) scrubbed. Mirrors the table in the bd-2oelme PR.
@@ -233,31 +240,47 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     end
   end
 
-  test "Port.open/2 sites are allowlisted and route their env through ReleaseEnv" do
-    port_files =
+  test "Port.open/2 sites are allowlisted per occurrence and route their env through ReleaseEnv" do
+    counts =
       for {rel, lines} <- source_files(),
-          Enum.any?(lines, fn {line, _n} -> String.contains?(line, "Port.open(") end),
           rel != @release_env_source,
-          do: rel
+          count = port_open_count(lines),
+          count > 0,
+          into: %{},
+          do: {rel, count}
 
-    unexpected = port_files -- @port_open_allowlist
+    mismatched =
+      for rel <- Enum.sort(Map.keys(counts) ++ Map.keys(@port_open_allowlist)) |> Enum.uniq(),
+          found = Map.get(counts, rel, 0),
+          declared = Map.get(@port_open_allowlist, rel, 0),
+          found != declared,
+          do: "#{rel}: #{found} `Port.open/2` call(s), @port_open_allowlist declares #{declared}"
 
-    assert unexpected == [],
+    assert mismatched == [],
            """
-           New `Port.open/2` site(s). A port child inherits the release env, so
-           the spawn must merge `Arbiter.Worker.ReleaseEnv.port_env/1` into its
-           `{:env, …}` option. Add the file to @port_open_allowlist once it does.
+           The `Port.open/2` inventory is out of date. A port child inherits the
+           release env, so every spawn must merge
+           `Arbiter.Worker.ReleaseEnv.port_env/1` into its `{:env, …}` option.
 
-           #{Enum.join(unexpected, "\n")}
+           If you added a port: make it do that, then record the new count in
+           @port_open_allowlist (the count is per-occurrence on purpose — a
+           second port in an already-listed file has to be classified too). If
+           you removed one, drop the count.
+
+           #{Enum.join(mismatched, "\n")}
            """
 
-    for rel <- @port_open_allowlist do
+    for {rel, _count} <- @port_open_allowlist do
       body = File.read!(Path.join(@repo_root, rel))
 
-      assert body =~ "ReleaseEnv",
-             "#{rel} opens a port but no longer references ReleaseEnv — the " <>
-               "release-env scrub was dropped from a spawn path."
+      assert body =~ "ReleaseEnv.port_env(",
+             "#{rel} opens a port but no longer calls ReleaseEnv.port_env/1 — " <>
+               "the release-env scrub was dropped from a spawn path."
     end
+  end
+
+  defp port_open_count(lines) do
+    Enum.reduce(lines, 0, fn {line, _n}, acc -> acc + length(tails(line, "Port.open(")) end)
   end
 
   test "every spawn site in apps/*/lib is classified in @inventory" do
