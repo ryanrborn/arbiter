@@ -3,7 +3,7 @@ defmodule Arbiter.Release do
   Release-time database tasks for the `arbiter` mix release.
 
   Mix (and therefore `mix ecto.migrate`) is not available inside a release, so
-  deployments invoke these via `bin/arbiter eval Arbiter.Release.migrate`.
+  an operator invokes these via `bin/arbiter eval Arbiter.Release.migrate`.
   """
 
   @app :arbiter
@@ -11,11 +11,17 @@ defmodule Arbiter.Release do
   @doc """
   Migrate the database to the latest version.
 
-  Called via `bin/arbiter eval Arbiter.Release.migrate` during release deploy.
-  This is the standard Phoenix mix-release migration entrypoint for deployments
-  that run without Mix (the release is a standalone binary).
+  The standard Phoenix mix-release migration entrypoint for deployments that
+  run without Mix (the release is a standalone binary), invoked as
+  `bin/arbiter eval Arbiter.Release.migrate`.
 
-  For the boot-time automatic migration, see Arbiter.Boot.Migrator.
+  **Only run this with the server stopped.** It opens its own writer against
+  the database, and SQLite allows exactly one; against a live server it races
+  the writer the server holds. `arb server deploy` deliberately does *not* call
+  it for that reason (bd-bksulf) — the ordinary path is `Arbiter.Boot.Migrator`,
+  which migrates synchronously during the new release's boot, before the
+  endpoint opens. Reach for this eval only for a deliberate out-of-band
+  migration with `systemctl --user stop arbiter.service` already done.
   """
   def migrate do
     Application.load(@app)

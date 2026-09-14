@@ -142,6 +142,52 @@ Before restarting:
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
+### Never migrate a live server (SQLite has one writer)
+
+SQLite allows exactly one writer. **Never** run a standalone migrate against a
+running server — not `mix arbiter.migrate`, not
+`bin/arbiter eval Arbiter.Release.migrate`. It races the live writer and fails
+with `queue_timeout`, or worse, half-applies while the old code is serving.
+
+Migration is a **boot** step: `Arbiter.Boot.Migrator` runs pending migrations
+synchronously, before the endpoint opens, gated on the single-instance lock. So
+every restart is also a migration run, and the ordering is always:
+
+    stop the old server  →  new code boots  →  migrate  →  serve
+
+`arb server deploy` (release path) relies on this: it downloads, verifies,
+unpacks, swaps `current`, and restarts — it does **not** migrate itself.
+`arb server migrate` against a live server redirects to a restart for the same
+reason. If you want to migrate by hand, stop the service first
+(`systemctl --user stop arbiter.service`), then run the eval.
+
+### Rollback across a migration
+
+`arb server deploy` auto-rolls back to the prior release when the new one
+doesn't come back green. **That rollback is refused when the deploy crossed a
+migration** — the new release has already applied migrations the prior release
+does not ship, and booting the prior release would run old code against a
+schema it has never seen. When that happens the deploy:
+
+- leaves `current` pointing at the **new** release,
+- prints the names of the crossed migrations, and
+- exits non-zero.
+
+Your options, in preference order:
+
+1. **Fix forward** — deploy a newer release (`arb server deploy`). Almost always
+   the right move.
+2. **Roll the schema back first**, then the code:
+   `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, <version>)"` with
+   the service stopped, then
+   `arb server deploy --version <prior-tag> --force`.
+3. **Accept a mixed-schema rollback** — re-run with
+   `--allow-cross-migration-rollback`. This is an explicit data-safety decision:
+   the prior release will run against a newer schema. Verify it immediately
+   (`arb doctor`, and the pages/flows the new migrations touched).
+
+A deploy that adds no migrations keeps the plain automatic rollback, unchanged.
+
 ### Post-deploy: confirm patrols are lazy (bd-7tr11p acceptance gate)
 
 Patrols exist only while a repo has watched work (an open review engagement or a

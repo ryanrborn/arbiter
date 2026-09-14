@@ -5,10 +5,19 @@ defmodule ArbiterCli.Cmd.Server do
       arb server start    [--timeout SECONDS] [--json]
       arb server restart  [--timeout SECONDS] [--json]
       arb server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+                          [--allow-cross-migration-rollback]
                           deploy from a GitHub Release: download + verify
-                          arbiter-<v>-linux.tar.gz → migrate → atomically swap
-                          the current symlink → restart → health-check, with
+                          arbiter-<v>-linux.tar.gz → atomically swap the
+                          current symlink → restart → health-check, with
                           auto-rollback on failure.
+                          Migrations are NOT run by the deploy: the new
+                          release applies them on its own boot via
+                          Boot.Migrator, after the old server is stopped, so
+                          there is never a second SQLite writer.
+                          A deploy that adds migrations the prior release
+                          lacks therefore refuses to auto-roll back (old code
+                          on a new schema); pass
+                          --allow-cross-migration-rollback to override.
                           Requires `ARB_RELEASE_REPO`. When it isn't set (a
                           dev-mode git-checkout install with no release
                           artifact), this falls back to the git-pull path

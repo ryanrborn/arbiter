@@ -53,33 +53,28 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
 
   # Terminates the VM via `Output.halt/1` on every clause — spelled out so
   # dialyzer does not report it as an accidental "no local return".
-  @spec emit_rollback(:json | :text, String.t(), String.t() | nil, non_neg_integer(), list()) ::
+  @spec emit_rollback(:json | :text, String.t(), rollback_outcome(), non_neg_integer(), list()) ::
           no_return()
-  def emit_rollback(:json, tag, rolled_back, timeout_ms, pre_deploy_fails) do
-    Output.emit_json(%{
+  def emit_rollback(:json, tag, outcome, timeout_ms, pre_deploy_fails) do
+    %{
       version: tag,
       deployed: false,
-      rolled_back: rolled_back != nil,
-      rolled_back_to: rolled_back,
       base_url: Client.base_url(),
       checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
       ok: false,
       timed_out_after_s: div(timeout_ms, 1000),
       pre_existing_blocking_failures: pre_deploy_fails
-    })
+    }
+    |> Map.merge(rollback_payload(outcome))
+    |> Output.emit_json()
 
     Output.halt(1)
   end
 
-  def emit_rollback(:text, tag, rolled_back, timeout_ms, pre_deploy_fails) do
+  def emit_rollback(:text, tag, outcome, timeout_ms, pre_deploy_fails) do
     IO.puts("")
     IO.puts("Release #{tag} did not come back green within #{div(timeout_ms, 1000)}s.")
-
-    if rolled_back do
-      IO.puts("Rolled back to #{rolled_back} and restarted.")
-    else
-      IO.puts("No prior release to roll back to — the stack is down.")
-    end
+    IO.puts(rollback_text(outcome, tag))
 
     if pre_deploy_fails != [] do
       IO.puts("")
@@ -99,24 +94,24 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
 
   # Terminates the VM via `Output.halt/1` on every clause — spelled out so
   # dialyzer does not report it as an accidental "no local return".
-  @spec emit_swap_failed(:json | :text, String.t(), String.t() | nil, String.t() | nil) ::
+  @spec emit_swap_failed(:json | :text, String.t(), String.t() | nil, rollback_outcome()) ::
           no_return()
-  def emit_swap_failed(:json, tag, server_vsn, rolled_back) do
-    Output.emit_json(%{
+  def emit_swap_failed(:json, tag, server_vsn, outcome) do
+    %{
       version: tag,
       deployed: false,
-      rolled_back: rolled_back != nil,
-      rolled_back_to: rolled_back,
       server_version_after_restart: server_vsn,
       base_url: Client.base_url(),
       checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
       ok: false
-    })
+    }
+    |> Map.merge(rollback_payload(outcome))
+    |> Output.emit_json()
 
     Output.halt(1)
   end
 
-  def emit_swap_failed(:text, tag, server_vsn, rolled_back) do
+  def emit_swap_failed(:text, tag, server_vsn, outcome) do
     IO.puts("")
 
     IO.puts(
@@ -124,11 +119,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
         "#{server_vsn} — the swap did not take."
     )
 
-    if rolled_back do
-      IO.puts("Rolled back to #{rolled_back} and restarted.")
-    else
-      IO.puts("No prior release to roll back to — the stack is on an unexpected version.")
-    end
+    IO.puts(rollback_text(outcome, tag))
 
     IO.puts("")
     Doctor.report()
@@ -136,6 +127,83 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     IO.puts("hint: tail #{Start.phoenix_log_path()} for startup output.")
     Output.halt(1)
   end
+
+  # ---- rollback outcome rendering (bd-bksulf) ------------------------------
+
+  @typedoc "What `ReleaseDeploy`'s automatic rollback actually did."
+  @type rollback_outcome ::
+          {:rolled_back | :refused, String.t(), [String.t()]} | {:no_prior, nil, []}
+
+  @spec rollback_payload(rollback_outcome()) :: map()
+  defp rollback_payload({:rolled_back, prior_tag, crossed}) do
+    %{
+      rolled_back: true,
+      rolled_back_to: prior_tag,
+      rollback_refused: false,
+      crossed_migrations: crossed
+    }
+  end
+
+  defp rollback_payload({:refused, _prior_tag, crossed}) do
+    %{
+      rolled_back: false,
+      rolled_back_to: nil,
+      rollback_refused: true,
+      crossed_migrations: crossed
+    }
+  end
+
+  defp rollback_payload({:no_prior, nil, _crossed}) do
+    %{
+      rolled_back: false,
+      rolled_back_to: nil,
+      rollback_refused: false,
+      crossed_migrations: []
+    }
+  end
+
+  @spec rollback_text(rollback_outcome(), String.t()) :: String.t()
+  defp rollback_text({:rolled_back, prior_tag, []}, _tag) do
+    "Rolled back to #{prior_tag} and restarted."
+  end
+
+  defp rollback_text({:rolled_back, prior_tag, crossed}, _tag) do
+    """
+    Rolled back to #{prior_tag} and restarted.
+
+    warning: this rollback crossed #{length(crossed)} migration(s) \
+    (--allow-cross-migration-rollback was passed):
+    #{bullets(crossed)}
+    #{prior_tag} is now running against a newer schema. Verify it, and consider \
+    `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, <version>)"` to step the \
+    schema back down.\
+    """
+  end
+
+  defp rollback_text({:refused, prior_tag, crossed}, tag) do
+    """
+    Refused to roll back to #{prior_tag}: release #{tag} added #{length(crossed)} \
+    migration(s) that #{prior_tag} does not ship, and they have already been applied to \
+    the database by #{tag}'s boot:
+    #{bullets(crossed)}
+    Rolling back now would run #{prior_tag}'s code against a schema it has never seen, so \
+    `current` has been left pointing at #{tag}.
+
+    Your options:
+      * fix forward — deploy a newer release (`arb server deploy`); or
+      * roll the schema back first with \
+    `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, <version>)"`, then \
+    `arb server deploy --version #{prior_tag} --force`; or
+      * accept a mixed-schema rollback: re-run this deploy with \
+    --allow-cross-migration-rollback.\
+    """
+  end
+
+  defp rollback_text({:no_prior, nil, _crossed}, _tag) do
+    "No prior release to roll back to — the stack is down."
+  end
+
+  defp bullets(items), do: Enum.map_join(items, "\n", &("  - " <> &1))
 
   defp action_payload(actions) do
     Enum.map(actions, fn {component, status, detail} ->
