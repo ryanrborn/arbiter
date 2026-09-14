@@ -776,4 +776,87 @@ defmodule Arbiter.Messages.MessageTest do
              )
     end
   end
+
+  describe "for_task/2" do
+    test "returns messages addressed to OR about the task, newest first" do
+      task = "bd-fortask#{System.unique_integer([:positive])}"
+      other = "bd-other#{System.unique_integer([:positive])}"
+
+      {:ok, addressed} =
+        Message.send_mail(%{
+          kind: :direction,
+          workspace_id: @ws,
+          from_ref: "coordinator",
+          to_ref: task,
+          subject: "conflict instructions",
+          body: "rebase onto main"
+        })
+
+      {:ok, about} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: @ws,
+          from_ref: task,
+          to_ref: "coordinator",
+          task_ref: task,
+          subject: "review rejected",
+          body: "needs a decision"
+        })
+
+      {:ok, _unrelated} =
+        Message.send_mail(%{
+          kind: :info,
+          workspace_id: @ws,
+          from_ref: other,
+          to_ref: "coordinator",
+          task_ref: other,
+          subject: "unrelated",
+          body: "nothing to do with it"
+        })
+
+      ids = Message.for_task(task) |> Enum.map(& &1.id)
+
+      assert about.id in ids
+      assert addressed.id in ids
+      assert length(ids) == 2
+      # newest first
+      assert [about.id, addressed.id] == ids
+    end
+
+    test "scopes to a workspace when asked, and honours :limit" do
+      task = "bd-fortask#{System.unique_integer([:positive])}"
+
+      {:ok, _elsewhere} =
+        Message.send_mail(%{
+          kind: :info,
+          workspace_id: "ws-somewhere-else",
+          to_ref: task,
+          body: "other workspace"
+        })
+
+      {:ok, here} =
+        Message.send_mail(%{kind: :info, workspace_id: @ws, to_ref: task, body: "this workspace"})
+
+      assert [%{id: id}] = Message.for_task(task, workspace_id: @ws)
+      assert id == here.id
+
+      assert length(Message.for_task(task)) == 2
+      assert length(Message.for_task(task, limit: 1)) == 1
+    end
+
+    test "does not mark anything read or cleared" do
+      task = "bd-fortask#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{kind: :direction, workspace_id: @ws, to_ref: task, body: "do it"})
+
+      assert [fetched] = Message.for_task(task)
+      assert fetched.read_at == nil
+      assert fetched.cleared_at == nil
+
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.read_at == nil
+      assert reloaded.cleared_at == nil
+    end
+  end
 end
