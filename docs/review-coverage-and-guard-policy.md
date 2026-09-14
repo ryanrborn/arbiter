@@ -364,6 +364,14 @@ case Coverage.decide(coverage, head, ctx) do
 end
 ```
 
+The sketch above elides one thing the implementation makes explicit: a rule-3
+match also *implies a `:mechanical` row*. Adopters (P3/P4) must call
+`Coverage.decide_with_record(coverage, head, ctx)`, which returns
+`{decision, record_or_nil}`, and persist the returned row via `Coverage.record/1`
+— otherwise §4.2's "the next base merge resolves at rule 1" never kicks in and
+every poll re-fingerprints. `Coverage.decide/3` is the convenience form for call
+sites that only want the decision.
+
 `expected_sha` (W7) survives unchanged — the forge's atomic precondition is a
 different guarantee from coverage and closes the residual poll→merge window. The
 model replaces the *authorisation* layer, not the *atomicity* layer.

@@ -2,9 +2,10 @@ defmodule Arbiter.Reviews.CoverageNoReadersTest do
   @moduledoc """
   Acceptance 5 of bd-203cl5 (#1648): P1 wires the **writers** of
   `review_coverage` and nothing else. No module may read the table for a
-  decision yet — `Coverage.decide/3` (§3.2) and the guard rewrites that consume
-  it are P3/P4, and until they land `issues.last_reviewed_sha` remains the
-  authoritative input to every merge guard.
+  decision yet — `Coverage.decide/3` (§3.2) exists as of P2 (#1665) but has no
+  call site, and the guard rewrites that consume it are P3/P4. Until they land
+  `issues.last_reviewed_sha` remains the authoritative input to every merge
+  guard.
 
   This is a source scan rather than a prose promise: a reader added by a later
   phase without also landing the predicate fails here, which is exactly the

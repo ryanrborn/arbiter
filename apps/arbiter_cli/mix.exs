@@ -90,7 +90,11 @@ defmodule ArbiterCli.MixProject do
       # ValidateConfig and friends) so the CLI's config reference can't drift
       # out of sync with the server-side source of truth. Never shipped in
       # the escript build (only: :test).
-      {:arbiter, in_umbrella: true, only: :test}
+      {:arbiter, in_umbrella: true, only: :test},
+      # bd-2oelme: the shared release-env scrub applied by `Start.run_cmd/3`
+      # before every `mix` / `sh` spawn. A runtime dep (unlike :arbiter) —
+      # it is dependency-free, so it costs the escript one beam file.
+      {:arbiter_release_env, in_umbrella: true}
     ]
   end
 end
