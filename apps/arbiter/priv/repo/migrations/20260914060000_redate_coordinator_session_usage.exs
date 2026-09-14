@@ -5,9 +5,9 @@ defmodule Arbiter.Repo.Migrations.RedateCoordinatorSessionUsage do
 
   The first deploy of `Arbiter.Sessions.UsageIngest` stamped every row with
   `occurred_at: DateTime.utc_now()`. On a host whose oldest transcript goes
-  back weeks, that filed *all* of it — 15 rows, ~$739 — on the single day the
-  sweeper first ran, which is exactly the number `arb usage --by day` and
-  `--since 1d` read. Those rows are not repairable in place: one row conflates
+  back weeks, that filed *all* of it — 16 rows, $739.08 on the dogfood host — on
+  the single day the sweeper first ran, which is exactly the column
+  `arb usage --by day` and `--since 1d` read. Those rows are not repairable in place: one row conflates
   many days of spend, and only the transcripts know how it splits.
 
   They don't need repairing, because they are **derived data**. The ingest's
