@@ -695,6 +695,50 @@ encoded in `ClaudeSessionFile`:
 Still open for phase 7: the live HUD tailer (§7.5's "live, approximate" half)
 and `arb usage --by session` / `--session <id>` (§7.6).
 
+### 7.8 Post-deploy corrections — what the live run found (bd-be804c, follow-up)
+
+Phase 6 shipped, the coordinator restarted with
+`ARBITER_COORDINATOR_SESSION_DIRS` set, and the first live sweep exposed two
+defects that no fixture could have predicted. Both are fixed; both changed
+assumptions §7.4 states, so they are recorded here rather than in a commit
+message.
+
+**1. `cost-state` records are gone in Claude Code 2.1.270.** §7.2's sample and
+every fixture came from 2.1.246–2.1.269, which wrote them every few hundred
+lines. The 2.1.270 session that was *live at the time of the deploy* — 3,018
+lines — contains **zero**, so the authoritative-cost path never fired and every
+row landed with `cost_usd: nil`. Six-figure token counts next to no dollars
+read as a broken parser, which is worse than the gap phase 6 set out to close.
+
+The fix keeps §7.4's "reuse the CLI's number, don't recompute" rule as the
+*first* choice and adds a labelled fallback:
+`Arbiter.Usage.ClaudePricing` prices the deduped token buckets at published
+list rates when — and only when — the file carries no `cost-state`.
+`read_totals/2` reports `cost_source: :cost_state | :estimated | nil`, and
+`cost_note_for/1` gives every writer the matching note, so a derived figure is
+never mistaken for the CLI's own. An unpriceable model still yields an
+explained null. This applies to worker reconciliation too: a worker run on
+2.1.270+ now gets a cost instead of a hole.
+
+**2. `occurred_at` must come from the transcript, not the clock.** The first
+implementation dated rows `DateTime.utc_now()`. That is within 5 minutes of the
+truth in steady state and badly wrong on the first pass: a session that has
+been appending since 2026-09-04 had its entire history (15 rows, ~$739) filed
+on the day the sweeper first ran, falsifying the very `--by day` column §7.6
+promises to fix.
+
+`ClaudeSessionFile` now also splits a file into **UTC-day buckets** — per-day
+token counts, per-day message count, the newest turn timestamp in the day, and
+that day's apportioned share of the file's one authoritative cost figure (the
+total is split, never recomputed). `UsageIngest` writes one row per
+(session, day) and dates it at the day's last turn, with the ledger watermark
+now read per day, so a delta spanning midnight becomes two correctly dated rows
+and a re-run still writes nothing. The rows from the mis-dating deploy are
+deleted by
+`priv/repo/migrations/20260914060000_redate_coordinator_session_usage.exs` —
+they are derived data, so the next sweep re-derives them, on the right days and
+with costs.
+
 ## 8. Auth modes and Remote Control (AC 10)
 
 ### 8.1 The two modes both already exist

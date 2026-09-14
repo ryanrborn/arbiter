@@ -21,7 +21,8 @@ defmodule Arbiter.Sessions.UsageIngest do
 
   ## What a row looks like
 
-  One `Usage.Event` per session per ingest cycle that found new spend:
+  One `Usage.Event` per session **per UTC day** per ingest cycle that found new
+  spend on that day:
 
     * `source: :coordinator_session`, `task_id: nil` — this spend belongs to no
       task, which is exactly what that source means. `Arbiter.Usage.summarize/1`
@@ -34,7 +35,19 @@ defmodule Arbiter.Sessions.UsageIngest do
     * `step: :other` — the escape hatch on `Usage.Event`; a coordinator session
       is not work/review/impl.
 
-  ## Idempotency — cumulative minus already-billed
+  ## Dating — the transcript, never the clock
+
+  A coordinator session is not an event, it is a *month*: the live one has been
+  appending since 2026-09-04. Dating its rows at ingest time (as the first
+  deploy of this module did) files weeks of spend on whichever day the sweeper
+  happened to run, and `arb usage --by day` / `--since 1d` read exactly that
+  column. So every row is dated from the session's own turn timestamps:
+  `ClaudeSessionFile` splits the file into UTC-day buckets, each carrying its
+  own token counts, its share of the file's cost, and the newest turn
+  timestamp in that day — which becomes the row's `occurred_at`. A delta that
+  spans midnight writes two rows, not one.
+
+  ## Idempotency — cumulative minus already-billed, per day
 
   Re-running must never double-bill, and the files are append logs that grow
   under us. Rather than trying to remember a byte offset or a last-seen
@@ -42,18 +55,33 @@ defmodule Arbiter.Sessions.UsageIngest do
 
     1. reads the file **whole** into cumulative totals
        (`Arbiter.Usage.ClaudeSessionFile.read_totals/2`, which dedupes streaming
-       re-emits by `message.id` and sums `cost-state` per CLI-process segment);
-    2. sums what this session has **already** been billed, from the ledger;
-    3. writes the difference, and only if some part of it is positive.
+       re-emits by `message.id`, sums `cost-state` per CLI-process segment, and
+       buckets the turns by UTC day);
+    2. sums what this session has **already** been billed **on each day**, from
+       the ledger;
+    3. writes the per-day difference, and only where some part of it is
+       positive.
 
-  An unchanged file therefore produces a zero delta and no row, a file appended
-  between runs produces exactly the appended portion, and a row lost or manually
-  deleted simply gets re-derived on the next pass. The ledger is the watermark,
-  so there is no side-channel state to corrupt.
+  An unchanged file therefore produces zero deltas and no rows, a file appended
+  between runs produces exactly the appended portion charged to the day it
+  happened on, and a row lost or manually deleted simply gets re-derived on the
+  next pass. The ledger is the watermark, so there is no side-channel state to
+  corrupt. (That is also why the rows written by the mis-dating first deploy
+  could simply be deleted — see
+  `priv/repo/migrations/20260914060000_redate_coordinator_session_usage.exs`.)
 
   Negative deltas (a truncated or rewritten file) are clamped to zero rather
   than credited — this is a spend ledger, not a balance sheet, and a negative
   usage row would corrupt every rollup that sums it.
+
+  ## Cost
+
+  `cost_usd` is the CLI's own `cost-state` figure whenever the file has one,
+  apportioned across the day buckets. Claude Code **2.1.270 writes none at
+  all**, so those files fall back to `Arbiter.Usage.ClaudePricing` — the token
+  buckets at published list prices — and the row's `cost_note` says so. A model
+  that isn't in the price table still yields an explained null rather than a
+  guess.
 
   ## Session-id rollover
 
@@ -140,13 +168,14 @@ defmodule Arbiter.Sessions.UsageIngest do
       dirs
       |> Enum.flat_map(&session_files/1)
       |> Enum.reduce(%{files: 0, rows_written: 0, errors: 0}, fn path, acc ->
-        acc = %{acc | files: acc.files + 1}
+        %{rows: rows, errors: errors} = ingest_file(path)
 
-        case ingest_file(path) do
-          {:ok, :written} -> %{acc | rows_written: acc.rows_written + 1}
-          {:ok, :unchanged} -> acc
-          {:error, _reason} -> %{acc | errors: acc.errors + 1}
-        end
+        %{
+          acc
+          | files: acc.files + 1,
+            rows_written: acc.rows_written + rows,
+            errors: acc.errors + errors
+        }
       end)
 
     {:ok, report}
@@ -170,69 +199,115 @@ defmodule Arbiter.Sessions.UsageIngest do
     # read is deliberately cumulative and the ledger provides the watermark.
     case ClaudeSessionFile.read_totals(path, session_id: session_id) do
       {:ok, totals} ->
-        write_delta(session_id, totals, path)
+        write_deltas(session_id, totals, path)
 
       {:error, reason} ->
         Logger.warning("Sessions.UsageIngest: cannot read #{path}: #{inspect(reason)}")
 
-        {:error, reason}
+        %{rows: 0, errors: 1}
     end
   rescue
     e ->
       Logger.warning("Sessions.UsageIngest: #{path} raised: #{Exception.message(e)}")
-      {:error, :raised}
+      %{rows: 0, errors: 1}
   end
 
-  defp write_delta(session_id, totals, path) do
-    billed = already_billed(session_id)
+  # One row per (session, UTC day) that gained spend since the last pass. The
+  # day comes from the transcript's own timestamps, never from the clock — see
+  # the moduledoc's dating section.
+  defp write_deltas(session_id, totals, path) do
+    billed = already_billed_by_day(session_id)
+    note = ClaudeSessionFile.cost_note_for(totals)
 
-    delta = %{
-      tokens_in: clamp(totals.tokens_in - billed.tokens_in),
-      tokens_out: clamp(totals.tokens_out - billed.tokens_out),
-      cache_creation_tokens: clamp(totals.cache_creation_tokens - billed.cache_creation_tokens),
-      cache_read_tokens: clamp(totals.cache_read_tokens - billed.cache_read_tokens),
-      message_count: clamp(totals.message_count - billed.message_count),
-      cost_usd: cost_delta(totals.cost_usd, billed.cost_usd),
-      duration_ms: clamp((totals.duration_ms || 0) - billed.duration_ms)
+    totals
+    |> day_buckets()
+    |> Enum.sort_by(fn {day, _bucket} -> day end, Date)
+    |> Enum.reduce(%{rows: 0, errors: 0}, fn {day, bucket}, acc ->
+      delta = delta_for(bucket, Map.get(billed, day, blank_billed()))
+
+      cond do
+        not new_spend?(delta) ->
+          acc
+
+        match?({:ok, _}, insert_row(session_id, totals, day, bucket, delta, note, path)) ->
+          %{acc | rows: acc.rows + 1}
+
+        true ->
+          %{acc | errors: acc.errors + 1}
+      end
+    end)
+  end
+
+  # `by_day` is empty only for a file whose turns carry no parseable timestamp
+  # at all. Rather than drop that spend, date it now and say so on the row —
+  # the same under-report-never-double-bill instinct applies, and the ledger
+  # arithmetic below is per-day either way.
+  defp day_buckets(%{by_day: by_day}) when map_size(by_day) > 0, do: by_day
+
+  defp day_buckets(totals) do
+    now = DateTime.utc_now()
+
+    %{
+      DateTime.to_date(now) => %{
+        tokens_in: totals.tokens_in,
+        tokens_out: totals.tokens_out,
+        cache_creation_tokens: totals.cache_creation_tokens,
+        cache_read_tokens: totals.cache_read_tokens,
+        message_count: totals.message_count,
+        cost_usd: totals.cost_usd,
+        last_at: now
+      }
     }
-
-    if new_spend?(delta) do
-      insert_row(session_id, totals, delta, path)
-    else
-      {:ok, :unchanged}
-    end
   end
 
-  # Everything this session has already been charged for. Summing the rows is
-  # what makes a re-run a no-op; `occurred_at` plays no part, so a clock jump
-  # can't double-bill.
-  defp already_billed(session_id) do
+  defp delta_for(bucket, billed) do
+    %{
+      tokens_in: clamp(bucket.tokens_in - billed.tokens_in),
+      tokens_out: clamp(bucket.tokens_out - billed.tokens_out),
+      cache_creation_tokens: clamp(bucket.cache_creation_tokens - billed.cache_creation_tokens),
+      cache_read_tokens: clamp(bucket.cache_read_tokens - billed.cache_read_tokens),
+      message_count: clamp(bucket.message_count - billed.message_count),
+      cost_usd: cost_delta(bucket.cost_usd, billed.cost_usd)
+    }
+  end
+
+  # Everything this session has already been charged for, split by the UTC day
+  # the row was filed under. Summing the ledger is what makes a re-run a no-op;
+  # doing it per day is what lets a *dated* row be the watermark for its own
+  # day without an append to today re-billing last week.
+  defp already_billed_by_day(session_id) do
     Event
     |> Ash.Query.filter(session_id == ^session_id and source == :coordinator_session)
     |> Ash.read!()
-    |> Enum.reduce(
-      %{
-        tokens_in: 0,
-        tokens_out: 0,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
-        message_count: 0,
-        cost_usd: 0.0,
-        duration_ms: 0
-      },
-      fn ev, acc ->
-        %{
-          acc
-          | tokens_in: acc.tokens_in + int(ev.tokens_in),
-            tokens_out: acc.tokens_out + int(ev.tokens_out),
-            cache_creation_tokens: acc.cache_creation_tokens + int(ev.cache_creation_tokens),
-            cache_read_tokens: acc.cache_read_tokens + int(ev.cache_read_tokens),
-            message_count: acc.message_count + billed_message_count(ev),
-            cost_usd: acc.cost_usd + flt(ev.cost_usd),
-            duration_ms: acc.duration_ms + int(ev.duration_ms)
-        }
-      end
-    )
+    |> Enum.group_by(&row_day/1)
+    |> Map.new(fn {day, evs} -> {day, Enum.reduce(evs, blank_billed(), &add_billed/2)} end)
+  end
+
+  defp row_day(%Event{occurred_at: %DateTime{} = at}), do: DateTime.to_date(at)
+  defp row_day(%Event{inserted_at: %DateTime{} = at}), do: DateTime.to_date(at)
+  defp row_day(_ev), do: Date.utc_today()
+
+  defp blank_billed do
+    %{
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+      message_count: 0,
+      cost_usd: 0.0
+    }
+  end
+
+  defp add_billed(ev, acc) do
+    %{
+      acc
+      | tokens_in: acc.tokens_in + int(ev.tokens_in),
+        tokens_out: acc.tokens_out + int(ev.tokens_out),
+        cache_creation_tokens: acc.cache_creation_tokens + int(ev.cache_creation_tokens),
+        cache_read_tokens: acc.cache_read_tokens + int(ev.cache_read_tokens),
+        message_count: acc.message_count + billed_message_count(ev),
+        cost_usd: acc.cost_usd + flt(ev.cost_usd)
+    }
   end
 
   # The message count lives in `raw`, the one place an ingest row records its
@@ -245,20 +320,20 @@ defmodule Arbiter.Sessions.UsageIngest do
 
   defp billed_message_count(_ev), do: 0
 
-  # A file with no `cost-state` at all reports nil, which is an absence, not a
-  # zero — keep it nil so the row records the same honest gap the worker path
-  # does rather than claiming this session was free.
+  # A day with no cost at all reports nil, which is an absence, not a zero —
+  # keep it nil so the row records the same honest gap the worker path does
+  # rather than claiming this session was free.
   defp cost_delta(nil, _billed), do: nil
   defp cost_delta(total, billed), do: max(total - billed, 0.0)
 
-  # A cost-only delta counts: `cost-state` records land between turns, so an
-  # otherwise-quiet cycle can still carry real dollars.
+  # A cost-only delta counts: a `cost-state` record can land between turns, so
+  # an otherwise-quiet cycle can still carry real dollars.
   defp new_spend?(delta) do
     delta.tokens_in > 0 or delta.tokens_out > 0 or delta.cache_creation_tokens > 0 or
       delta.cache_read_tokens > 0 or delta.message_count > 0 or (delta.cost_usd || 0.0) > 0.0
   end
 
-  defp insert_row(session_id, totals, delta, path) do
+  defp insert_row(session_id, totals, day, bucket, delta, note, path) do
     attrs = %{
       source: :coordinator_session,
       # Not a missing value: coordinator spend belongs to no task. See
@@ -273,9 +348,11 @@ defmodule Arbiter.Sessions.UsageIngest do
       cache_creation_tokens: delta.cache_creation_tokens,
       cache_read_tokens: delta.cache_read_tokens,
       cost_usd: delta.cost_usd,
-      cost_note: if(is_nil(delta.cost_usd), do: ClaudeSessionFile.no_cost_note()),
-      duration_ms: nonzero(delta.duration_ms),
-      occurred_at: DateTime.utc_now(),
+      cost_note: note,
+      duration_ms: day_duration_ms(totals, bucket),
+      # The newest turn in this day, so `--by day` and `--since` see the spend
+      # where it actually happened rather than where the sweeper found it.
+      occurred_at: bucket.last_at,
       # Counts and provenance only — never a byte of the transcript. See the
       # moduledoc's privacy section.
       raw: %{
@@ -283,20 +360,24 @@ defmodule Arbiter.Sessions.UsageIngest do
           "reconciled_from" => "session_jsonl",
           "via" => "coordinator_session_ingest",
           "message_count" => delta.message_count,
+          "day" => Date.to_iso8601(day),
+          "day_message_count" => bucket.message_count,
           "cumulative_message_count" => totals.message_count,
-          "cost_state_count" => totals.cost_state_count
+          "cost_state_count" => totals.cost_state_count,
+          "cost_source" => to_string(totals.cost_source || "none")
         }
       }
     }
 
     case Ash.create(Event, attrs) do
-      {:ok, _ev} ->
+      {:ok, ev} ->
         Logger.info(
-          "Sessions.UsageIngest: session=#{session_id} +#{delta.message_count} msgs " <>
-            "+#{delta.tokens_in}/#{delta.tokens_out} tokens cost=#{inspect(delta.cost_usd)}"
+          "Sessions.UsageIngest: session=#{session_id} day=#{Date.to_iso8601(day)} " <>
+            "+#{delta.message_count} msgs +#{delta.tokens_in}/#{delta.tokens_out} tokens " <>
+            "cost=#{inspect(delta.cost_usd)}"
         )
 
-        {:ok, :written}
+        {:ok, ev}
 
       {:error, reason} ->
         Logger.warning(
@@ -305,6 +386,15 @@ defmodule Arbiter.Sessions.UsageIngest do
 
         {:error, reason}
     end
+  end
+
+  # `cost-state` reports one duration for the whole file; apportion it by this
+  # day's share of the turns so the per-day rows don't each claim the lot.
+  defp day_duration_ms(%{duration_ms: nil}, _bucket), do: nil
+  defp day_duration_ms(%{message_count: 0}, _bucket), do: nil
+
+  defp day_duration_ms(totals, bucket) do
+    nonzero(round(totals.duration_ms * bucket.message_count / totals.message_count))
   end
 
   defp clamp(n) when is_integer(n), do: max(n, 0)

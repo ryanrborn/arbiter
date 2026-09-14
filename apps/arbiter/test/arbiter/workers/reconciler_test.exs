@@ -198,7 +198,10 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert ev.tokens_out == 300
     assert ev.cache_read_tokens == 3000
     assert ev.cache_creation_tokens == 110
-    assert ev.cost_usd == nil
+    # No `cost-state` in this fixture (as on Claude Code 2.1.270+), so the row
+    # carries the token-priced estimate for claude-opus-4-8 rather than a hole.
+    assert_in_delta ev.cost_usd, 0.0097625, 0.0000001
+    assert ev.cost_note =~ "estimated from tokens (no cost-state)"
     assert ev.provider == "claude"
     assert ev.session_id == session_id
     assert ev.step == :work
