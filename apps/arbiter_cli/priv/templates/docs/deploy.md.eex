@@ -63,6 +63,35 @@ toolchain to *run* it — only to build a release from source.
    if it doesn't come back green. `--git-pull` is the legacy path for a
    deploy without a release tag.
 
+## Deploy from a local build (dogfooding `main`)
+
+Published releases are tagged occasionally; `main` moves faster. To run a
+merge live within minutes instead of waiting for a tag + CI run:
+
+1. **Build in a separate clone** — never the primary checkout this runbook's
+   `<%= @install_path %>` refers to, and never one of its worktrees:
+
+       scripts/build-local-release.sh ~/dev/arbiter-release-build
+
+   This fetches and fast-forwards `main` in that clone, runs `MIX_ENV=prod
+   mix release arbiter`, builds the matching `arb` escript from the same
+   commit (so `arb doctor`'s CLI/server version check passes), and prints:
+
+       TARBALL=/path/to/arbiter-local-<sha>-<timestamp>-linux.tar.gz
+       ESCRIPT=/path/to/arb-local-<sha>-<timestamp>
+
+   It refuses to run against the primary checkout (`$ARB_PRIMARY_CHECKOUT`,
+   default `~/dev/arbiter`) or a worktree of it — a prod compile in place
+   there would race dev-mode hot reload and worker worktree seeding.
+
+2. **Deploy it:** `arb server deploy --local $TARBALL` (or point `--local` at
+   the unpacked `_build/prod/rel/arbiter` directory directly, skipping the
+   tarball). This goes through the exact same unpack → atomic-swap →
+   restart → health-check → auto-rollback → prune path as `--version` — the
+   only difference is where the release tree comes from.
+3. **Reinstall the CLI**, same as the GitHub flow: `\cp -f $ESCRIPT
+   ~/.local/bin/arb` (or wherever `arb` lives on `PATH`).
+
 ## Pre-flight: check for active workers
 
 **Always check for running workers before a restart or deploy** — a restart

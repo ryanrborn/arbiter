@@ -5,6 +5,20 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
 
+  `arb server deploy --local <tarball|dir>` deploys a **locally built**
+  release instead — the tarball or unpacked `_build/prod/rel/arbiter`
+  directory produced by `scripts/build-local-release.sh` from a fast-forwarded
+  `main`. It shares every step below (unpack, atomic swap, restart,
+  health-check, auto-rollback, prune) with the GitHub flow; the only
+  difference is where the release tree comes from, and that a local build has
+  no published tag or checksum to verify against, so it is assigned a
+  synthetic `local-<timestamp>` tag and skips the post-swap version-string
+  comparison (which only makes sense against a version GitHub told us to
+  expect). `--force`, `--timeout`, `--json`, and
+  `--allow-cross-migration-rollback` all work the same with `--local`;
+  `--version` is a GitHub-flow-only option and is ignored when `--local` is
+  given.
+
   This is the production deploy path: the box that runs Arbiter no longer needs
   a source checkout or a Mix/Elixir toolchain — only the prebuilt, self-contained
   OTP release. The legacy `git pull` deploy remains available behind
@@ -109,6 +123,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Cmd.Doctor, Cmd.InstallService, Cmd.Restart, Cmd.Start}
   alias ArbiterCli.Cmd.ReleaseDeploy.{Formatter, Github, ReleaseFiles}
+  alias ArbiterCli.Output
 
   @default_timeout_s 60
 
@@ -117,6 +132,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     timeout: :integer,
     json: :boolean,
     force: :boolean,
+    local: :string,
     allow_cross_migration_rollback: :boolean
   ]
 
@@ -137,15 +153,84 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
     # A worker must never bounce the orchestrating server, and an in-flight
     # deploy must not abandon active workers. Same guards as `arb restart`.
+    Restart.guard_worker_session!()
+
+    case opts[:local] do
+      nil -> deploy_from_github(opts, mode, force, timeout_ms)
+      path -> deploy_from_local(path, mode, force, timeout_ms, opts)
+    end
+  end
+
+  # ---- source: published GitHub release ------------------------------------
+
+  defp deploy_from_github(opts, mode, force, timeout_ms) do
     # Resolve the repo first so a misconfiguration fails fast, before we reach
     # for the (HTTP-backed) active-worker check.
-    Restart.guard_worker_session!()
     repo = Github.release_repo()
     Restart.guard_active_workers!(force)
 
     release = Github.fetch_release(repo, opts[:version])
     tag = Github.release_tag(release)
 
+    populate = fn target_dir ->
+      {tarball_url, sha_url} = Github.release_assets(release, tag)
+
+      log("Downloading #{Github.asset_name(tag)} from #{repo}@#{tag}…")
+      tarball = Github.download_binary(tarball_url)
+      expected_sha = Github.parse_sha256(Github.download_binary(sha_url))
+
+      Github.verify_sha256!(tarball, expected_sha)
+      log("Checksum verified (sha256 #{String.slice(expected_sha, 0, 12)}…).")
+
+      ReleaseFiles.unpack!(tarball, target_dir)
+    end
+
+    deploy(tag, populate, mode, force, timeout_ms, opts)
+  end
+
+  # ---- source: locally-built release (bd-bbgw7k) ----------------------------
+
+  # A locally-built release has no GitHub tag, so it gets a synthetic one:
+  # `local-<timestamp>`, unique per invocation so two local deploys never
+  # collide on the same release directory (and the idempotency short-circuit
+  # below is effectively a no-op for this source — every local deploy is
+  # treated as a new release).
+  defp deploy_from_local(path, mode, force, timeout_ms, opts) do
+    Restart.guard_active_workers!(force)
+
+    unless File.exists?(path) do
+      Output.die("--local path does not exist: #{path}")
+    end
+
+    tag = "local-" <> Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
+
+    populate = fn target_dir ->
+      if File.dir?(path) do
+        log("Installing local release directory #{path}…")
+        ReleaseFiles.install_dir!(path, target_dir)
+      else
+        log("Installing local release tarball #{path}…")
+        ReleaseFiles.unpack!(File.read!(path), target_dir)
+      end
+
+      unless File.exists?(Path.join(target_dir, "bin/arbiter")) do
+        Output.die(
+          "#{path} does not look like an OTP release",
+          "expected #{Path.join(target_dir, "bin/arbiter")} to exist after install."
+        )
+      end
+    end
+
+    deploy(tag, populate, mode, force, timeout_ms, opts)
+  end
+
+  # ---- shared install/swap/rollback path ------------------------------------
+  #
+  # Both sources share every step from here on — the unpack/swap/prune/rollback
+  # machinery has exactly one implementation regardless of where the release
+  # tree came from. `populate.(target_dir)` is the only source-specific step:
+  # it must leave a fully-formed release under `target_dir` (or raise/die).
+  defp deploy(tag, populate, mode, force, timeout_ms, opts) do
     releases_dir = ReleaseFiles.releases_dir()
     target_dir = Path.join(releases_dir, tag)
     current_link = ReleaseFiles.current_link()
@@ -168,16 +253,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         log(preflight_warning(pre_deploy_fails, tag))
       end
 
-      {tarball_url, sha_url} = Github.release_assets(release, tag)
-
-      log("Downloading #{Github.asset_name(tag)} from #{repo}@#{tag}…")
-      tarball = Github.download_binary(tarball_url)
-      expected_sha = Github.parse_sha256(Github.download_binary(sha_url))
-
-      Github.verify_sha256!(tarball, expected_sha)
-      log("Checksum verified (sha256 #{String.slice(expected_sha, 0, 12)}…).")
-
-      ReleaseFiles.unpack!(tarball, target_dir)
+      populate.(target_dir)
 
       # Refresh the PATH in arbiter.env from the deploying shell before
       # restarting the service. The EnvironmentFile= directive loads this file,
@@ -252,6 +328,13 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # check); but here, right after a swap we just performed ourselves, we know
   # exactly which version *should* be running — so a server that reports
   # anything else is a failed swap, and that must roll back.
+  # Local builds carry whatever version `mix.exs` derives at build time (the
+  # nearest git tag, per its `@version` fallback) — not a version stamped
+  # after the tag we made up in `deploy_from_local/3`. There is nothing
+  # meaningful to compare, so skip straight to trusting the health check that
+  # already gated this call.
+  defp verify_deployed_version("local-" <> _), do: :ok
+
   defp verify_deployed_version(tag) do
     expected_vsn = String.trim_leading(tag, "v")
 

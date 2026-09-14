@@ -85,6 +85,32 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles do
     end
   end
 
+  # Install an already-built release *directory* (e.g. `_build/prod/rel/arbiter`
+  # from a local `mix release`) into `target_dir`, for `arb server deploy
+  # --local <dir>`. Unlike `unpack!/2` there is no archive to strip a
+  # top-level component from — `source_dir` itself is the release root, so its
+  # contents are copied as-is.
+  @spec install_dir!(String.t(), String.t()) :: :ok
+  def install_dir!(source_dir, target_dir) do
+    _ = File.rm_rf(target_dir)
+    File.mkdir_p!(Path.dirname(target_dir))
+
+    Start.log_text("Copying local release directory #{source_dir} -> #{target_dir}…")
+
+    case File.cp_r(source_dir, target_dir) do
+      {:ok, _files} ->
+        :ok
+
+      {:error, reason, file} ->
+        _ = File.rm_rf(target_dir)
+
+        Output.die(
+          "failed to copy local release directory",
+          "#{inspect(reason)}: #{file}"
+        )
+    end
+  end
+
   # ---- migration-set introspection (bd-bksulf) -----------------------------
   #
   # `arb server deploy` deliberately does **not** run migrations itself — see
