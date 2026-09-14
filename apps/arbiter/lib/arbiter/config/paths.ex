@@ -30,6 +30,42 @@ defmodule Arbiter.Config.Paths do
     resolve("ARBITER_OUTPUT_LOG_ROOT", :output_log_root, "~/dev/arbiter-worker-logs")
   end
 
+  @doc """
+  Directories holding Claude Code session JSONLs that belong to the
+  **coordinator**, swept by `Arbiter.Sessions.UsageIngest` (bd-be804c).
+
+  Each entry is a `<config_dir>/projects/<project-slug>` directory — i.e. the
+  directory the `<session-id>.jsonl` files live in, not the config dir above
+  them. On the dogfood host that is
+  `~/.claude/projects/-home-ryan-dev-admiral`.
+
+  Same resolution order as the roots above, except the **default is `[]`**:
+  metering someone's `~/.claude` is opt-in. A wrong guess here would either
+  silently meter nothing or, worse, bill an unrelated project's sessions to
+  the fleet, so an install that wants coordinator metering names its
+  directories explicitly.
+
+  `ARBITER_COORDINATOR_SESSION_DIRS` takes a `:`- or `,`-separated list;
+  application config takes a list or a single string. Blank entries are
+  dropped (an empty segment would otherwise expand to the cwd) and `~` is
+  expanded.
+  """
+  @spec coordinator_session_dirs() :: [String.t()]
+  def coordinator_session_dirs do
+    raw =
+      System.get_env("ARBITER_COORDINATOR_SESSION_DIRS") ||
+        Application.get_env(:arbiter, :coordinator_session_dirs) ||
+        []
+
+    raw
+    |> List.wrap()
+    |> Enum.flat_map(&String.split(&1, [":", ","]))
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
+
   defp resolve(env_var, config_key, default) do
     System.get_env(env_var) ||
       Application.get_env(:arbiter, config_key) ||
