@@ -46,9 +46,12 @@ defmodule ArbiterReleaseEnv.MixProject do
 
   defp deps do
     [
-      # Static analysis only. No runtime deps, by design (see @moduledoc).
+      # Static analysis only. No runtime deps, by design (see the note above
+      # `project/0`). Mirrors the sibling apps so `mix audit`'s per-app
+      # `credo` / `sobelow` / `dialyzer` passes resolve here too.
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false}
     ]
   end
 end
