@@ -2894,7 +2894,19 @@ defmodule Arbiter.Worker do
             park_rejected(state, :request_changes, findings)
 
           :no_verdict ->
-            park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
+            # bd-9zuvbh: the coordinator-dispatched `worker_review` twin of the
+            # ReviewGate's own inconclusive terminal. Same shape, same reason
+            # atom (`:review_gate_inconclusive`), same truth — no verdict was
+            # produced, so nobody has found a problem with the work — so it
+            # parks rather than minting another failed run. Left un-parked it
+            # would keep producing exactly the outcome this phase is quantified
+            # on, muddying the cost accounting the park is meant to stop.
+            park_rejected(
+              state,
+              :no_verdict,
+              "Reviewer produced no parseable VERDICT line.",
+              :inconclusive
+            )
         end
     end
   end
@@ -4819,8 +4831,10 @@ defmodule Arbiter.Worker do
   # twin (VERDICT line + top finding) so `worker_runs` alone answers "why did
   # this fail" without a second review_gate_rounds_list call.
   # `park_reason` (bd-9zuvbh) is nil for an ordinary rejection — a reviewer that
-  # really did request changes, or the coordinator-dispatched `worker_review`
-  # path — and a `Arbiter.Tasks.ReviewPark` reason atom for a class-C terminal.
+  # really did request changes, on either the ReviewGate or the
+  # coordinator-dispatched `worker_review` path — and a `Arbiter.Tasks.ReviewPark`
+  # reason atom for a class-C terminal, including `worker_review`'s own
+  # no-verdict arm.
   # The two differ in exactly three places, all of them below: which escalation
   # goes out, whether the task carries a park flag, and whether another fix
   # round is dispatched.
@@ -5408,14 +5422,21 @@ defmodule Arbiter.Worker do
 
   defp review_park_body(%State{task_id: task_id} = state, reason, findings) do
     """
-    The review gate for #{task_id} reached a terminal state with no verdict it     could act on: #{Arbiter.Tasks.ReviewPark.explain(reason)}.
+    The review gate for #{task_id} reached a terminal state with no verdict it
+    could act on: #{Arbiter.Tasks.ReviewPark.explain(reason)}.
 
-    The run was NOT failed. The work is committed and the branch is pushed     (#{mergeable_branch(state.meta) || "branch unknown"}); the run is recorded     `review_parked` and the task is parked with reason `#{reason}`. Nothing was     merged and no APPROVE was accepted — the content side of the guard is still     closed.
+    The run was NOT failed. The work is committed and the branch is pushed
+    (#{mergeable_branch(state.meta) || "branch unknown"}); the run is recorded
+    `review_parked` and the task is parked with reason `#{reason}`. Nothing was
+    merged and no APPROVE was accepted — the content side of the guard is
+    still closed.
 
     A human decides what happens next. Any one of these clears the park:
 
-      * re-run the review (`arb worker resume #{task_id}`) — the gate starts     fresh and the park clears on its own;
-      * merge it by hand, if the diff is fine and only the gate's bookkeeping     was not;
+      * re-run the review (`arb worker resume #{task_id}`) — the gate starts
+        fresh and the park clears on its own;
+      * merge it by hand, if the diff is fine and only the gate's bookkeeping
+        was not;
       * reject it (`arb issue close #{task_id}`), which also clears the park.
 
     Full round history: `review_gate_rounds_list` for #{task_id}.

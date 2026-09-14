@@ -332,6 +332,38 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
     end
   end
 
+  describe "the park row is the episode claim" do
+    # Round 1 review finding: `park/2` computed the `:already_parked` claim but
+    # still ran `:park_review`, whose `set_attribute(:review_parked_at, …)` reset
+    # the wait clock. `arb prime` sorts parks oldest-first so the one most likely
+    # to have been forgotten leads — a gate that re-parks for the same reason
+    # would have kept pushing itself back to the bottom of that list.
+    test "a re-park for the same reason keeps the original wait clock", %{ws: ws} do
+      task = new_task(ws)
+
+      assert {:ok, :claimed, first} = Arbiter.Tasks.ReviewPark.park(task.id, :inconclusive)
+      assert %DateTime{} = first.review_parked_at
+
+      assert {:ok, :already_parked, again} =
+               Arbiter.Tasks.ReviewPark.park(task.id, :inconclusive)
+
+      assert again.review_parked_at == first.review_parked_at
+      assert reload(task).review_parked_at == first.review_parked_at
+    end
+
+    test "a different reason is a new episode and re-stamps the clock", %{ws: ws} do
+      task = new_task(ws)
+
+      assert {:ok, :claimed, first} = Arbiter.Tasks.ReviewPark.park(task.id, :inconclusive)
+
+      assert {:ok, :claimed, second} =
+               Arbiter.Tasks.ReviewPark.park(task.id, :verdict_guard_exhausted)
+
+      assert second.review_park_reason == "verdict_guard_exhausted"
+      assert DateTime.compare(second.review_parked_at, first.review_parked_at) != :lt
+    end
+  end
+
   test ":review_parked is a valid run status" do
     assert :review_parked in Run.statuses()
   end

@@ -164,12 +164,20 @@ defmodule Arbiter.Tasks.ReviewPark do
     stamped = Atom.to_string(reason)
 
     with {:ok, task} <- Ash.get(Issue, task_id) do
-      claim =
-        if Map.get(task, :review_park_reason) == stamped, do: :already_parked, else: :claimed
-
-      case Ash.update(task, %{review_park_reason: stamped}, action: :park_review) do
-        {:ok, parked} -> {:ok, claim, parked}
-        {:error, _} = err -> err
+      if Map.get(task, :review_park_reason) == stamped do
+        # Same episode: answer the claim WITHOUT re-running `:park_review`. The
+        # action stamps `review_parked_at` unconditionally, and re-stamping it
+        # would reset the wait clock `arb prime` sorts on (oldest first) — so a
+        # gate that re-parks for the same reason would keep resetting itself to
+        # the bottom of the list and the park most likely to have been forgotten
+        # would never surface. Nothing else about the row changes here, so
+        # there is nothing to write.
+        {:ok, :already_parked, task}
+      else
+        case Ash.update(task, %{review_park_reason: stamped}, action: :park_review) do
+          {:ok, parked} -> {:ok, :claimed, parked}
+          {:error, _} = err -> err
+        end
       end
     end
   rescue

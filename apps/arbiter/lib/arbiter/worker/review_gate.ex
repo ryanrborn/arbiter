@@ -845,9 +845,18 @@ defmodule Arbiter.Worker.ReviewGate do
                   "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
                 )
 
+                # bd-9zuvbh: a reviewer that could not be spawned (quota gate
+                # refusal, no outpost, an adapter error out of
+                # `start_worker_session/4`) is the SAME liveness failure as one
+                # whose session dies a step later — no verdict was produced and
+                # nobody has found a problem with the work. It parks as
+                # `:reviewer_failed` rather than failing the run, which also
+                # matters on a revise round: a round-2 spawn failure must not
+                # fail a run whose round-1 work was fine.
                 escalate_pre_review(
                   state,
-                  "ReviewGate could not spawn a reviewer: #{inspect(reason)}"
+                  "ReviewGate could not spawn a reviewer: #{inspect(reason)}",
+                  :reviewer_failed
                 )
             end
         end
@@ -2318,12 +2327,22 @@ defmodule Arbiter.Worker.ReviewGate do
   # sources findings only from `Round`, not `notes`) sees nothing on a
   # re-dispatched fix-pass — a real data-loss regression, not just a dangling
   # pointer.
-  # bd-9zuvbh: `park_reason` is nil for the pre-review escalations that are
-  # honest failures — a branch with no commits on it, a reviewer that could not
-  # be spawned, a branch conflict — and `:empty_diff` for G2, where the target
-  # has simply already absorbed the commits. The work in that last case is fine
-  # by definition, so §5.3's class-B rule applies: complete with one escalation
-  # rather than a `:request_changes` run failure.
+  # bd-9zuvbh: `park_reason` says which half of §5.3 the escalation falls under.
+  #
+  #   * nil — deliberately still a `:request_changes` run failure, because the
+  #     pre-review condition is ACTIONABLE BY THE IMPLEMENTER and the honest
+  #     answer is "this branch is not reviewable as it stands": a branch that
+  #     conflicts with its target (someone must resolve it) and a branch with no
+  #     commits on it (there is nothing to review). Neither is a liveness
+  #     failure of the review — the work itself is what is missing or broken —
+  #     so class C does not apply and these keep failing the run on purpose.
+  #   * `:empty_diff` — G2, where the target has simply already absorbed the
+  #     commits. The work is fine by definition, so §5.3's class-B rule applies:
+  #     complete with one escalation rather than a run failure.
+  #   * `:reviewer_failed` — the reviewer could not be spawned at all. No
+  #     verdict, nothing for an implementer to fix, work nobody has faulted:
+  #     class C parks it, exactly as a reviewer session that dies one step later
+  #     is parked.
   defp escalate_pre_review(state, reason, park_reason \\ nil)
 
   defp escalate_pre_review(state, reason, nil) do

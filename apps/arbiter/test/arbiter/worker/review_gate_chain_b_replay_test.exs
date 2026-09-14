@@ -250,6 +250,23 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     assert escalation.body =~ "NOT auto-accepted"
   end
 
+  # Round 1 review finding: a reviewer that could never be SPAWNED (quota gate
+  # refusal, no outpost, an adapter error out of `start_worker_session/4`) is the
+  # same no-verdict liveness failure as a reviewer session that dies one step
+  # later — and it fires on every revise round's re-review too, so leaving it
+  # failing would let a round-2 spawn failure kill a run whose round-1 work was
+  # fine. It parks as `:reviewer_failed`.
+  test "a reviewer that cannot be spawned parks instead of failing the run",
+       %{repo: repo, ws: ws} do
+    task = new_task(ws)
+
+    run_gate(task, repo, %{
+      review_command: [Path.join(repo, "no-such-reviewer-executable")]
+    })
+
+    assert_parked(task, ws, repo, :reviewer_failed)
+  end
+
   # AC4's other half: re-running the review is one of the two human actions that
   # resolve a park, and it has to clear it *when the gate starts* — not when the
   # next verdict lands — or `arb prime` keeps showing a park somebody is already
