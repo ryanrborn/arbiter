@@ -64,4 +64,43 @@ defmodule ArbiterWeb.ConnCaseDrainTest do
       1_000 -> flunk("stand-in LiveView never started")
     end
   end
+
+  describe "sandbox containment invariant (bd-5scl0c)" do
+    @test_root Path.expand("..", __DIR__)
+
+    # A LiveView channel outlives the test that mounted it by a few
+    # microseconds, so it can still be holding a checkout on the single shared
+    # sandbox connection when it is killed. `drain_live_views/2` keeps that
+    # inside the owning test's teardown, but the reason it is *contained*
+    # rather than merely usually-fine is structural: every module that mounts a
+    # LiveView runs `async: false`, so there is no concurrently running test to
+    # lose the connection out from under.
+    #
+    # That invariant is load-bearing and invisible — adding `async: true` to a
+    # LiveView test would silently turn the residual teardown disconnects back
+    # into the cross-test cascade this task removed, and the suite would still
+    # be green the day it happened. Assert it.
+    test "no async: true ConnCase module mounts a LiveView" do
+      offenders =
+        for path <- Path.wildcard(Path.join(@test_root, "**/*_test.exs")),
+            path != __ENV__.file,
+            source = File.read!(path),
+            source =~ ~r/use\s+ArbiterWeb\.ConnCase,\s*async:\s*true/,
+            source =~ ~r/\blive(_isolated)?\(/,
+            do: Path.relative_to(path, @test_root)
+
+      assert offenders == [],
+             """
+             These modules mount a LiveView and run async: true:
+
+             #{Enum.map_join(offenders, "\n", &("  " <> &1))}
+
+             A LiveView channel is killed a few microseconds after the test
+             that mounted it exits, while it may still hold the single shared
+             sandbox connection. With a concurrently running test, that drops
+             the connection out from under it (bd-5scl0c). Either run the
+             module async: false, or stop mounting a LiveView in it.
+             """
+    end
+  end
 end
