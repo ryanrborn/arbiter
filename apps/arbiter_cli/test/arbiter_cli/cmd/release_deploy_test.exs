@@ -12,6 +12,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
   @repo "acme/arbiter"
   @vsn "v2026.7.0"
 
+  # Every real arbiter release ships migrations, and an empty set now means
+  # "detection broke" (bd-bksulf round 2), so the default fixtures ship one.
+  @m_base "20250101000000_create_base"
+
   setup do
     home = Path.join(System.tmp_dir!(), "arb-rel-#{System.unique_integer([:positive])}")
     File.mkdir_p!(home)
@@ -40,7 +44,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
   # A real, compressed OTP-release-shaped tarball with the single top-level
   # `arbiter/` dir the release workflow produces. Returned as raw bytes.
-  defp release_tarball(tag, migrations \\ []) do
+  defp release_tarball(tag, migrations \\ [@m_base]) do
     path =
       Path.join(System.tmp_dir!(), "rel-#{tag}-#{System.unique_integer([:positive])}.tar.gz")
 
@@ -156,7 +160,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
   end
 
-  defp seed_release(home, tag, migrations \\ []) do
+  defp seed_release(home, tag, migrations \\ [@m_base]) do
     dir = Path.join([home, "releases", tag])
     File.mkdir_p!(Path.join(dir, "bin"))
     File.write!(Path.join(dir, "bin/arbiter"), "old")
@@ -521,6 +525,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # The migrations are named, so the operator knows what is stranded.
       assert out =~ @m_a
       assert out =~ @m_b
+      # The release booted (Boot.Migrator runs before the endpoint opens), it
+      # just never went green — so the schema really did move.
+      assert out =~ "already been applied to the database"
       assert out =~ "--allow-cross-migration-rollback"
       refute out =~ "Rolled back to #{prior_tag}"
 
@@ -603,6 +610,12 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert out =~ @m_a
       refute out =~ "Rolled back to #{prior_tag}"
 
+      # The swap did not take, so the new release never booted and its
+      # migrations may never have run. Refuse anyway (we cannot prove the
+      # rollback is safe), but do not assert a schema change as fact.
+      refute out =~ "already been applied to the database"
+      assert out =~ "cannot be determined from here"
+
       assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
       assert Path.basename(link_target) == @vsn
     end
@@ -645,6 +658,109 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       assert payload["rollback_refused"] == false
       assert payload["crossed_migrations"] == []
       assert payload["rolled_back_to"] == prior_tag
+      assert payload["migrations_detected"] == true
+    end
+  end
+
+  # ---- detection must fail closed (bd-bksulf review round 1, finding 2) ----
+
+  describe "migration detection failure" do
+    @m_old "20260101000000_create_things"
+
+    test "a release whose migrations cannot be found refuses to auto-roll back", %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag, [@m_old])
+      point_current(home, prior)
+
+      # The new release ships nothing at lib/*/priv/repo/migrations — the shape
+      # a relocated `priv/` would produce. An arbiter release always ships
+      # migrations, so this is broken detection, not a migration-free deploy,
+      # and it must not silently re-arm the rollback.
+      tarball = release_tarball(@vsn, [])
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1"]) end)
+
+      assert code == 1
+      assert out =~ "Refused to roll back"
+      assert out =~ "no migrations could be found in release #{@vsn}"
+      assert out =~ "--allow-cross-migration-rollback"
+      refute out =~ "Rolled back to #{prior_tag}"
+
+      # current stays on the new release rather than putting the prior release
+      # on a schema we cannot vouch for.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == @vsn
+    end
+
+    test "--json distinguishes 'nothing crossed' from 'detection failed'", %{home: home} do
+      prior = seed_release(home, "v0.0.2", [@m_old])
+      point_current(home, prior)
+
+      tarball = release_tarball(@vsn, [])
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--timeout", "1", "--json"]) end)
+
+      assert code == 1
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["rolled_back"] == false
+      assert payload["rollback_refused"] == true
+      assert payload["crossed_migrations"] == []
+      # …and the empty list above is explained, not mistaken for "safe".
+      assert payload["migrations_detected"] == false
+    end
+
+    test "--allow-cross-migration-rollback still overrides a detection failure", %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag, [@m_old])
+      point_current(home, prior)
+
+      tarball = release_tarball(@vsn, [])
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, sha, workspaces: @empty)
+      stub_cmds()
+
+      {out, _err, code} =
+        capture(fn ->
+          ReleaseDeploy.run(["--timeout", "1", "--allow-cross-migration-rollback"])
+        end)
+
+      assert code == 1
+      assert out =~ "Rolled back to #{prior_tag}"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == prior_tag
+    end
+
+    test "warns up-front that migration detection came back empty" do
+      plan = %{
+        prior_target: "/rel/v0.0.2",
+        crossed: [],
+        detected: false,
+        allow_crossed: false
+      }
+
+      notice = ReleaseDeploy.migration_notice(plan, @vsn)
+
+      assert notice =~ "found no migrations packaged in release #{@vsn}"
+      assert notice =~ "lib/*/priv/repo/migrations/*.exs"
+      assert notice =~ "Automatic rollback is therefore disabled for this deploy."
+    end
+
+    test "no notice at all when detection worked and nothing crossed" do
+      plan = %{
+        prior_target: "/rel/v0.0.2",
+        crossed: [],
+        detected: true,
+        allow_crossed: false
+      }
+
+      assert ReleaseDeploy.migration_notice(plan, @vsn) == nil
     end
   end
 

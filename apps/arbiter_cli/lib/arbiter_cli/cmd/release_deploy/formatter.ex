@@ -4,7 +4,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
   deployed, timed-out rollback, and post-restart version-mismatch rollback.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Start, Output}
+  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.ReleaseDeploy.ReleaseFiles, Cmd.Start, Output}
 
   def emit_already_current(:json, tag) do
     Output.emit_json(%{
@@ -74,7 +74,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
   def emit_rollback(:text, tag, outcome, timeout_ms, pre_deploy_fails) do
     IO.puts("")
     IO.puts("Release #{tag} did not come back green within #{div(timeout_ms, 1000)}s.")
-    IO.puts(rollback_text(outcome, tag))
+    IO.puts(rollback_text(outcome, tag, :green_timeout))
 
     if pre_deploy_fails != [] do
       IO.puts("")
@@ -119,7 +119,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
         "#{server_vsn} — the swap did not take."
     )
 
-    IO.puts(rollback_text(outcome, tag))
+    IO.puts(rollback_text(outcome, tag, :version_mismatch))
 
     IO.puts("")
     Doctor.report()
@@ -132,7 +132,17 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
 
   @typedoc "What `ReleaseDeploy`'s automatic rollback actually did."
   @type rollback_outcome ::
-          {:rolled_back | :refused, String.t(), [String.t()]} | {:no_prior, nil, []}
+          {:rolled_back | :refused | :undetected, String.t(), [String.t()]}
+          | {:no_prior, nil, []}
+
+  @typedoc """
+  Which failure brought us here — it decides what we may claim about the
+  database. `:green_timeout` means the new release booted but never went green,
+  so its boot migrator did run. `:version_mismatch` means `/api/version` still
+  reports the old version, i.e. the new release probably never booted at all,
+  so its migrations may never have been applied (bd-bksulf review round 1).
+  """
+  @type failure_context :: :green_timeout | :version_mismatch
 
   @spec rollback_payload(rollback_outcome()) :: map()
   defp rollback_payload({:rolled_back, prior_tag, crossed}) do
@@ -140,7 +150,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
       rolled_back: true,
       rolled_back_to: prior_tag,
       rollback_refused: false,
-      crossed_migrations: crossed
+      crossed_migrations: crossed,
+      migrations_detected: true
     }
   end
 
@@ -149,7 +160,21 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
       rolled_back: false,
       rolled_back_to: nil,
       rollback_refused: true,
-      crossed_migrations: crossed
+      crossed_migrations: crossed,
+      migrations_detected: true
+    }
+  end
+
+  # Detection itself failed: `crossed_migrations` is empty because we could not
+  # read the new release's migrations, NOT because nothing crossed. Machine
+  # consumers must be able to tell those apart, hence `migrations_detected`.
+  defp rollback_payload({:undetected, _prior_tag, _crossed}) do
+    %{
+      rolled_back: false,
+      rolled_back_to: nil,
+      rollback_refused: true,
+      crossed_migrations: [],
+      migrations_detected: false
     }
   end
 
@@ -158,16 +183,17 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
       rolled_back: false,
       rolled_back_to: nil,
       rollback_refused: false,
-      crossed_migrations: []
+      crossed_migrations: [],
+      migrations_detected: true
     }
   end
 
-  @spec rollback_text(rollback_outcome(), String.t()) :: String.t()
-  defp rollback_text({:rolled_back, prior_tag, []}, _tag) do
+  @spec rollback_text(rollback_outcome(), String.t(), failure_context()) :: String.t()
+  defp rollback_text({:rolled_back, prior_tag, []}, _tag, _context) do
     "Rolled back to #{prior_tag} and restarted."
   end
 
-  defp rollback_text({:rolled_back, prior_tag, crossed}, _tag) do
+  defp rollback_text({:rolled_back, prior_tag, crossed}, _tag, _context) do
     """
     Rolled back to #{prior_tag} and restarted.
 
@@ -180,14 +206,13 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     """
   end
 
-  defp rollback_text({:refused, prior_tag, crossed}, tag) do
+  defp rollback_text({:refused, prior_tag, crossed}, tag, context) do
     """
     Refused to roll back to #{prior_tag}: release #{tag} added #{length(crossed)} \
-    migration(s) that #{prior_tag} does not ship, and they have already been applied to \
-    the database by #{tag}'s boot:
+    migration(s) that #{prior_tag} does not ship#{applied_clause(context, tag)}:
     #{bullets(crossed)}
-    Rolling back now would run #{prior_tag}'s code against a schema it has never seen, so \
-    `current` has been left pointing at #{tag}.
+    Rolling back now risks running #{prior_tag}'s code against a schema it has never seen, \
+    so `current` has been left pointing at #{tag}.
 
     Your options:
       * fix forward — deploy a newer release (`arb server deploy`); or
@@ -199,9 +224,41 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.Formatter do
     """
   end
 
-  defp rollback_text({:no_prior, nil, _crossed}, _tag) do
+  defp rollback_text({:undetected, prior_tag, _crossed}, tag, _context) do
+    """
+    Refused to roll back to #{prior_tag}: no migrations could be found in release #{tag} \
+    (looked under #{Enum.join(ReleaseFiles.migration_globs(), " and ")}), so this deploy \
+    cannot be shown to be migration-free. An arbiter release always ships migrations — an \
+    empty set means the packaging layout moved and the cross-migration check is blind, not \
+    that there is nothing to strand.
+
+    `current` has been left pointing at #{tag}.
+
+    Your options:
+      * fix forward — deploy a newer release (`arb server deploy`); or
+      * compare the two releases' priv/repo/migrations by hand, then roll back \
+    explicitly with `arb server deploy --version #{prior_tag} --force`; or
+      * accept the risk: re-run this deploy with --allow-cross-migration-rollback.\
+    """
+  end
+
+  defp rollback_text({:no_prior, nil, _crossed}, _tag, _context) do
     "No prior release to roll back to — the stack is down."
   end
+
+  # What we may honestly say about whether the crossed migrations ran. On a
+  # green-wait timeout the new release booted (Boot.Migrator runs before the
+  # endpoint opens), so they did. On a version mismatch the new release never
+  # took, so they probably did not — refuse anyway, but don't assert a fact we
+  # cannot see from here.
+  @spec applied_clause(failure_context(), String.t()) :: String.t()
+  defp applied_clause(:green_timeout, tag),
+    do: ", and they have already been applied to the database by #{tag}'s boot"
+
+  defp applied_clause(:version_mismatch, tag),
+    do:
+      ". The swap did not take, so whether #{tag}'s boot applied them cannot be " <>
+        "determined from here — check the schema before assuming either way"
 
   defp bullets(items), do: Enum.map_join(items, "\n", &("  - " <> &1))
 

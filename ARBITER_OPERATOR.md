@@ -193,6 +193,21 @@ Your options, in preference order:
 
 A deploy that adds no migrations keeps the plain automatic rollback, unchanged.
 
+**"No migrations found" is treated as a broken check, not a safe deploy.** The
+comparison reads the new release's `priv/repo/migrations` off disk. An arbiter
+release always ships migrations, so an empty result means the release layout
+moved and the check is blind. The deploy then refuses the automatic rollback
+exactly as if a migration had been crossed (`--json` marks it
+`migrations_detected: false`, with an empty `crossed_migrations`), and
+`--allow-cross-migration-rollback` is again the explicit override. If you see
+this, compare the two releases' migration directories by hand before deciding.
+
+**A refusal after a failed swap is less certain than one after a timeout.** If
+`/api/version` still reports the old release, the new one never booted, so its
+migrations were probably never applied — the message says so rather than
+asserting the schema moved. Check the schema before choosing between fixing
+forward and rolling back.
+
 ### Post-deploy: confirm patrols are lazy (bd-7tr11p acceptance gate)
 
 Patrols exist only while a repo has watched work (an open review engagement or a

@@ -202,7 +202,19 @@ release adds any:
 - `--allow-cross-migration-rollback` overrides the refusal, rolling back anyway
   with a loud warning that the prior release is now on a newer schema.
 
-A deploy that adds no migrations keeps the automatic rollback unchanged.
+A deploy that adds no migrations keeps the automatic rollback unchanged — but
+only when detection actually worked. Because an arbiter release always ships
+migrations, an *empty* migration set from the new release tree means the globs
+no longer match the packaging layout, not that the deploy is migration-free.
+That case fails closed: the deploy warns up-front, refuses the automatic
+rollback the same way a crossed migration does, and reports
+`migrations_detected: false` in `--json` so the empty `crossed_migrations` list
+can't be mistaken for "safe". `--allow-cross-migration-rollback` overrides it.
+
+When the refusal comes from a **failed swap** (`/api/version` still reports the
+old release) rather than a green-wait timeout, the message says the new
+release's migrations *may* have been applied rather than claiming they were —
+a release that never booted never ran its boot migrator.
 
 ### Remote `arb` — access Arbiter over VPN
 

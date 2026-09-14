@@ -194,8 +194,9 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       rollback_plan =
         rollback_plan(target_dir, prior_target, opts[:allow_cross_migration_rollback] || false)
 
-      if rollback_plan.crossed != [] do
-        log(cross_migration_notice(rollback_plan, tag))
+      case migration_notice(rollback_plan, tag) do
+        nil -> :ok
+        notice -> log(notice)
       end
 
       ReleaseFiles.atomic_symlink_swap!(current_link, target_dir)
@@ -303,11 +304,17 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     * `:crossed` — migrations the new release ships that `prior_target` does
       not, i.e. the ones a rollback would strand. Always `[]` when
       `prior_target` is `nil`.
+    * `:detected` — we actually found migrations packaged in the new release
+      tree. An arbiter release always ships some (72 and counting), so an empty
+      set means the detection globs no longer match the release layout, not
+      that the deploy is migration-free. `crossed: []` is only trustworthy when
+      this is true.
     * `:allow_crossed` — the operator passed `--allow-cross-migration-rollback`.
   """
   @type rollback_plan :: %{
           prior_target: String.t() | nil,
           crossed: [String.t()],
+          detected: boolean(),
           allow_crossed: boolean()
         }
 
@@ -316,8 +323,39 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     %{
       prior_target: prior_target,
       crossed: ReleaseFiles.crossed_migrations(target_dir, prior_target),
+      detected: ReleaseFiles.migrations(target_dir) != %{},
       allow_crossed: allow_crossed
     }
+  end
+
+  @doc false
+  # The pre-swap notice for this plan, or nil when there is nothing to say.
+  # Public for the same reason as `cross_migration_notice/2`.
+  @spec migration_notice(rollback_plan(), String.t()) :: String.t() | nil
+  def migration_notice(%{crossed: crossed} = plan, tag) when crossed != [],
+    do: cross_migration_notice(plan, tag)
+
+  def migration_notice(%{detected: false} = plan, tag),
+    do: undetected_migrations_notice(plan, tag)
+
+  def migration_notice(_plan, _tag), do: nil
+
+  @doc false
+  @spec undetected_migrations_notice(rollback_plan(), String.t()) :: String.t()
+  def undetected_migrations_notice(%{allow_crossed: allow_crossed}, tag) do
+    head =
+      "warning: found no migrations packaged in release #{tag} " <>
+        "(#{Enum.join(ReleaseFiles.migration_globs(), ", ")}). An arbiter release always " <>
+        "ships migrations, so this almost certainly means the release layout moved and " <>
+        "cross-migration detection is broken — not that this deploy is migration-free."
+
+    if allow_crossed do
+      head <>
+        " --allow-cross-migration-rollback was passed, so a health-check failure will still " <>
+        "roll back, possibly onto a migrated schema."
+    else
+      head <> " Automatic rollback is therefore disabled for this deploy."
+    end
   end
 
   @doc false
@@ -350,20 +388,25 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   #     `current` was deliberately left on the new release (bd-bksulf). Booting
   #     `prior_tag` now would run its code against a schema it has never seen,
   #     which is a data-safety decision an operator has to make explicitly.
+  #   * `{:undetected, prior_tag, []}` — we could not read the new release's
+  #     migrations at all, so the rollback cannot be *proven* safe. Fails closed
+  #     the same way as `:refused`, because a detection glob that stopped
+  #     matching reports "nothing crossed" for every deploy forever.
   @spec auto_rollback(String.t(), rollback_plan(), non_neg_integer()) ::
-          {:rolled_back | :refused, String.t(), [String.t()]} | {:no_prior, nil, []}
+          {:rolled_back | :refused | :undetected, String.t(), [String.t()]}
+          | {:no_prior, nil, []}
   defp auto_rollback(_current_link, %{prior_target: nil}, _timeout_ms), do: {:no_prior, nil, []}
 
   defp auto_rollback(current_link, plan, timeout_ms) do
     %{prior_target: prior_target, crossed: crossed, allow_crossed: allow_crossed} = plan
     prior_tag = Path.basename(prior_target)
 
-    cond do
-      crossed == [] ->
+    case {rollback_decision(plan), allow_crossed} do
+      {:safe, _} ->
         perform_rollback(current_link, prior_target, timeout_ms)
         {:rolled_back, prior_tag, []}
 
-      allow_crossed ->
+      {:crossed, true} ->
         log(
           "Health check failed and this deploy crossed #{length(crossed)} migration(s) — " <>
             "rolling back anyway because --allow-cross-migration-rollback was passed."
@@ -372,15 +415,46 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
         perform_rollback(current_link, prior_target, timeout_ms)
         {:rolled_back, prior_tag, crossed}
 
-      true ->
+      {:crossed, false} ->
         log(
           "Health check failed, but this deploy crossed #{length(crossed)} migration(s) — " <>
             "refusing to roll back to #{prior_tag} automatically."
         )
 
         {:refused, prior_tag, crossed}
+
+      {:undetected, true} ->
+        log(
+          "Health check failed and the new release's migrations could not be read — " <>
+            "rolling back anyway because --allow-cross-migration-rollback was passed."
+        )
+
+        perform_rollback(current_link, prior_target, timeout_ms)
+        {:rolled_back, prior_tag, []}
+
+      {:undetected, false} ->
+        log(
+          "Health check failed, but the new release's migrations could not be read — " <>
+            "refusing to roll back to #{prior_tag} automatically (cannot prove the " <>
+            "rollback would not strand a migration)."
+        )
+
+        {:undetected, prior_tag, []}
     end
   end
+
+  # What the automatic rollback is allowed to do, from the plan alone:
+  #
+  #   * `:safe` — the prior release ships every migration the new one does.
+  #   * `:crossed` — the new release adds migrations the prior lacks.
+  #   * `:undetected` — the new release's migration set came back empty, which
+  #     for arbiter means detection broke. Never report that as `:safe`: a
+  #     silent detection failure re-arms exactly the mixed-schema rollback this
+  #     guard exists to prevent.
+  @spec rollback_decision(rollback_plan()) :: :safe | :crossed | :undetected
+  defp rollback_decision(%{crossed: [], detected: true}), do: :safe
+  defp rollback_decision(%{crossed: []}), do: :undetected
+  defp rollback_decision(_plan), do: :crossed
 
   defp perform_rollback(current_link, prior_target, timeout_ms) do
     log("Health check failed — rolling back to #{Path.basename(prior_target)}…")

@@ -106,10 +106,19 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles do
   @migration_globs ["lib/*/priv/repo/migrations/*.exs", "priv/repo/migrations/*.exs"]
 
   @doc """
+  The globs `migrations/1` searches, for error messages that need to name where
+  detection looked.
+  """
+  @spec migration_globs() :: [String.t()]
+  def migration_globs, do: @migration_globs
+
+  @doc """
   The migrations packaged into the unpacked release at `release_dir`, as a map
   of `version => name` (e.g. `%{"20260913201720" => "20260913201720_add_x"}`).
 
-  Empty for `nil` (no prior release) or a directory that ships none.
+  Empty for `nil` (no prior release) or a directory that ships none. For the
+  *new* release an empty result is treated as a detection failure rather than
+  "no migrations" — see `ReleaseDeploy`'s `rollback_decision/1`.
   """
   @spec migrations(String.t() | nil) :: %{optional(String.t()) => String.t()}
   def migrations(nil), do: %{}
