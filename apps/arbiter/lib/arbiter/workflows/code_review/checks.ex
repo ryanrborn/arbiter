@@ -67,6 +67,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.Security
+  alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Workflows.ReviewPatrol.ThreadMemory
 
   require Logger
@@ -307,7 +308,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
       # The raw `output` rides back to `invoke_reviewer/2` as a trailing
       # element on both branches so it can be persisted as the review's
       # durable transcript (bd-7efini) before being reduced to text + usage.
-      case System.cmd("sh", ["-c", shell], opts) do
+      case ReleaseEnv.cmd("sh", ["-c", shell], opts) do
         {output, 0} ->
           {:ok, text, usage} = extract_text_and_usage(output)
           {:ok, text, usage, output}
@@ -327,19 +328,11 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   defp review_workspace(%{workspace: %Arbiter.Tasks.Workspace{} = ws}), do: ws
   defp review_workspace(_state), do: nil
 
-  # Env pairs for the claude subprocess: release-var cleanup (converts false →
-  # nil for System.cmd compatibility) + isolated CLAUDE_CONFIG_DIR.
-  defp build_invoke_env(workspace) do
-    release_clean =
-      Arbiter.Worker.ReleaseEnv.clean_pairs()
-      |> Enum.map(fn
-        {k, false} -> {k, nil}
-        pair -> pair
-      end)
-
-    config_dir = ConfigDir.env(workspace)
-    release_clean ++ config_dir
-  end
+  # Env pairs for the claude subprocess: just the isolated CLAUDE_CONFIG_DIR.
+  # bd-2oelme: the release-var cleanup used to be hand-rolled here; it now
+  # comes from `ReleaseEnv.cmd/3`, the single shared helper every BEAM/agent
+  # spawn routes through, so this site can't drift from the others.
+  defp build_invoke_env(workspace), do: ConfigDir.env(workspace)
 
   # POSIX single-quote escaping: wraps s in single quotes and escapes any
   # embedded single quote as '\''. Safe for arbitrary printable characters.

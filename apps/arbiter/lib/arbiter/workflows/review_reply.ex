@@ -63,6 +63,7 @@ defmodule Arbiter.Workflows.ReviewReply do
   alias Arbiter.Agents.Claude, as: ClaudeAdapter
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Mergers
+  alias Arbiter.Worker.ReleaseEnv
 
   require Logger
 
@@ -282,9 +283,12 @@ defmodule Arbiter.Workflows.ReviewReply do
   # `argv` comes from `ClaudeAdapter.build_argv/3` above, built from `path`
   # (resolved from Arbiter's own agent config, never a request field), so
   # there's no shell-injection surface here.
+  #
+  # bd-2oelme: routed through `ReleaseEnv.cmd/3` so the CLI child doesn't
+  # inherit the release's ROOTDIR/BINDIR/RELEASE_*.
   # sobelow_skip ["CI.System"]
   defp run_claude([cmd | args] = argv) do
-    case System.cmd(cmd, args) do
+    case ReleaseEnv.cmd(cmd, args) do
       {output, 0} -> {:ok, output}
       {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
     end

@@ -48,6 +48,7 @@ defmodule Arbiter.Agents.Preflight do
   require Logger
 
   alias Arbiter.Usage
+  alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.StopReason
 
   @default_timeout_ms 30_000
@@ -231,8 +232,17 @@ defmodule Arbiter.Agents.Preflight do
     end
   end
 
-  defp env_opt([]), do: []
-  defp env_opt(pairs), do: [{:env, env_charlists(pairs)}]
+  # bd-2oelme: the probe is a `claude --print` round-trip, so it must not
+  # inherit the release's ROOTDIR/BINDIR/RELEASE_* (the `cannot get bootfile`
+  # signature of bd-4hkzn3 for any BEAM the CLI's own hooks might start). The
+  # scrub is applied here rather than at the two `env` sources so it covers
+  # both the adapter's `spawn_env/1` and a caller-supplied `:probe_env`.
+  defp env_opt(pairs) do
+    case ReleaseEnv.port_env(pairs) do
+      [] -> []
+      merged -> [{:env, env_charlists(merged)}]
+    end
+  end
 
   defp env_charlists(pairs) do
     Enum.map(pairs, fn

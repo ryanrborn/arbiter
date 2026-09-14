@@ -63,6 +63,9 @@ defmodule Arbiter.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
+      # The shared release-env scrub (bd-2oelme). Its own umbrella app so the
+      # `arb` escript can apply the same helper without depending on :arbiter.
+      {:arbiter_release_env, in_umbrella: true},
       {:sourceror, "~> 1.8", only: [:dev, :test]},
       # Static analysis / security scanning. Also declared at the umbrella
       # root, which owns the shared PLT config — see the root mix.exs and the

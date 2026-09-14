@@ -115,6 +115,7 @@ defmodule Arbiter.Quota.CloudCode do
   require Logger
 
   alias Arbiter.Quota.GoogleQuota
+  alias Arbiter.Worker.ReleaseEnv
 
   # ---- endpoints (verified against 9router registry/gemini-cli.js)
   @gemini_quota_url "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
@@ -689,7 +690,7 @@ defmodule Arbiter.Quota.CloudCode do
     task =
       Task.async(fn ->
         try do
-          System.cmd("/bin/sh", [
+          ReleaseEnv.cmd("/bin/sh", [
             "-c",
             ~s(exec timeout -k 1 #{timeout_s} "$0" #{Enum.join(@agy_usage_args, " ")} >"$1" 2>/dev/null </dev/null),
             path,
