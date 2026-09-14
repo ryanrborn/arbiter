@@ -407,9 +407,10 @@ defmodule Arbiter.Workers.Reconciler do
   # Best-effort on-disk usage backfill for a just-reconciled orphan. Only fires
   # when the run recorded a `session_id` + `config_dir` (Claude runs past their
   # `init` event) AND no `Arbiter.Usage.Event` already exists for the run — so a
-  # run whose stdout path DID land a row is never double-counted. Cost stays nil
-  # (the JSONL carries no dollar figure). Any failure logs and is swallowed:
-  # backfilling the ledger must never break the boot-time sweep.
+  # run whose stdout path DID land a row is never double-counted. Cost comes off
+  # the file's own `cost-state` records when it has any (bd-be804c), and stays
+  # nil when it doesn't. Any failure logs and is swallowed: backfilling the
+  # ledger must never break the boot-time sweep.
   #
   # `since: run.started_at` is load-bearing, not decoration: a session-level
   # resume (`Dispatch.resume_session/2`) opens a NEW run row but re-spawns with
@@ -463,7 +464,12 @@ defmodule Arbiter.Workers.Reconciler do
       tokens_out: totals.tokens_out,
       cache_creation_tokens: totals.cache_creation_tokens,
       cache_read_tokens: totals.cache_read_tokens,
-      cost_usd: nil,
+      # The CLI's own figure, summed per `cost-state` segment and windowed by
+      # `since` — never a locally recomputed price. Nil when the file carried
+      # no in-window `cost-state`, in which case the row says why.
+      cost_usd: totals.cost_usd,
+      cost_note: if(is_nil(totals.cost_usd), do: ClaudeSessionFile.no_cost_note()),
+      duration_ms: totals.duration_ms,
       worker_run_id: run.id,
       session_id: run.session_id,
       occurred_at: DateTime.utc_now(),
@@ -472,7 +478,8 @@ defmodule Arbiter.Workers.Reconciler do
           "reconciled_from" => "session_jsonl",
           "via" => "reconciler",
           "message_count" => totals.message_count,
-          "skipped_before_since" => totals.skipped_before_since
+          "skipped_before_since" => totals.skipped_before_since,
+          "cost_state_count" => totals.cost_state_count
         }
       }
     }

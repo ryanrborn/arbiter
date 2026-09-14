@@ -141,6 +141,21 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
           cost_state_count: non_neg_integer()
         }
 
+  @no_cost_note "cost unavailable: reconciled from the on-disk session JSONL, " <>
+                  "which recorded no cost-state entry inside this run's window"
+
+  @doc """
+  The canonical `cost_note` for a ledger row reconciled from a session JSONL
+  that carried no in-window `cost-state` record.
+
+  Shared by `Arbiter.Worker` and `Arbiter.Workers.Reconciler` so a null cost on
+  a disk-reconciled row always reads as the same explained limitation. Before
+  bd-be804c this said the file "carries no cost figure" at all, which was only
+  ever true of its `assistant` lines.
+  """
+  @spec no_cost_note() :: String.t()
+  def no_cost_note, do: @no_cost_note
+
   @doc """
   Derive Claude Code's project-slug from a worker's cwd: replace every
   character that is not `[A-Za-z0-9]` with `-`. The leading `/` of an absolute
