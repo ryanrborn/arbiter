@@ -34,6 +34,7 @@ defmodule ArbiterCli.Cmd.Start do
       (Docker, project root) was missing.
   """
 
+  alias Arbiter.Worker.ReleaseEnv
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Restart}
   alias ArbiterCli.Output
 
@@ -416,9 +417,19 @@ defmodule ArbiterCli.Cmd.Start do
   # / `:bd2_sleep` seams, so one test stub covers both commands.
 
   @doc false
-  # External command execution. Defaults to System.cmd/3; tests stub it to
-  # record invocations and flip a fake "now reachable" signal without shelling
-  # out. Returns `{output_binary, exit_status}`.
+  # External command execution, and the *only* spawn point in arbiter_cli —
+  # `arb migrate`, `arb install-cli`, `arb update`, `arb restart` and
+  # `arb install-service` all funnel through here, and three of those run
+  # `mix`. Tests stub it to record invocations and flip a fake "now reachable"
+  # signal without shelling out. Returns `{output_binary, exit_status}`.
+  #
+  # bd-2oelme: the real spawn goes through `Arbiter.Worker.ReleaseEnv.cmd/3`
+  # (the shared helper in :arbiter_release_env, which both this escript and
+  # the server depend on) so a `mix` / `sh` child never inherits
+  # ROOTDIR/BINDIR/RELEASE_* from an OTP-release parent and dies with
+  # `cannot get bootfile`. The scrub is a no-op when those vars are absent,
+  # which is the normal case for `arb` run from a developer shell.
+  #
   # `cmd` is a literal at every call site ("mix", "git", "systemctl"); the
   # variable exists only so tests can swap the runner through the process
   # dictionary. `System.cmd/3` spawns the executable directly, without a
@@ -427,7 +438,7 @@ defmodule ArbiterCli.Cmd.Start do
   def run_cmd(cmd, args, opts) do
     case Process.get(:bd2_cmd_runner) do
       fun when is_function(fun, 3) -> fun.(cmd, args, opts)
-      _ -> System.cmd(cmd, args, opts)
+      _ -> ReleaseEnv.cmd(cmd, args, opts)
     end
   end
 

@@ -3,16 +3,24 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
   bd-2oelme: a missed subprocess spawn only fails in release mode, which dev CI
   never exercises — so the inventory is asserted in a test instead.
 
-  Three rules, all evaluated against the source of `apps/*/lib`:
+  Four rules, all evaluated against the source of `apps/*/lib`:
 
-    1. **Literal BEAM/agent commands must not call `System.cmd/3` directly.**
-       `System.cmd("mix", …)`, `System.cmd("sh", …)`, `System.cmd("claude", …)`
-       and friends must go through `Arbiter.Worker.ReleaseEnv.cmd/3`.
+    1. **Every spawned command is a literal drawn from the pure-tool
+       allowlist.** `System.cmd/3`, `System.shell/1` and `:os.cmd/1` may only
+       run a command that is spelled out as a literal string *and* appears in
+       `@pure_tool_commands` (`git`, `gh`, `kill`, `diff`, …). Anything else —
+       a BEAM/agent CLI (`mix`, `elixir`, `claude`, `arb`, …), a shell, or a
+       command held in a variable — must go through
+       `Arbiter.Worker.ReleaseEnv.cmd/3`, which is the only place an arbitrary
+       command may be spawned. This is deliberately per-*occurrence*, not
+       per-file, so a new bypass added to an already-classified file is caught
+       too.
     2. **`Port.open/2` is allowlisted.** A file that opens a port must be
        declared here and must reference `ReleaseEnv`.
     3. **Every spawn site is classified.** A file containing any spawn
        primitive must appear in `@inventory`, so a new one can't land
        unclassified.
+    4. **`:scrubbed` files really do reference `ReleaseEnv`.**
 
   When you add a spawn site, add its file to `@inventory` with the right
   classification — that is the whole maintenance cost.
@@ -21,13 +29,28 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
 
   @repo_root Path.expand("../../../../..", __DIR__)
 
+  @release_env_source "apps/arbiter_release_env/lib/arbiter/worker/release_env.ex"
+
   # Commands that boot a BEAM or an agent CLI, plus the shells that may invoke
-  # one. A `System.cmd/3` with any of these as a *literal* first argument is a
-  # bug: it must be `ReleaseEnv.cmd/3`.
+  # one. Spawning any of these outside `ReleaseEnv.cmd/3` is a bug. `arb` is on
+  # the list because it is an escript — i.e. a BEAM start (see the ReleaseEnv
+  # moduledoc). This list exists to give rule 1 a *specific* error message; the
+  # rule itself rejects anything not in @pure_tool_commands, so a BEAM command
+  # missing from this list is still caught.
   @beam_or_agent_commands ~w(
-    mix elixir elixirc iex erl erlc escript
+    mix elixir elixirc iex erl erlc escript arb
     claude agy codex gemini
     sh bash zsh /bin/sh /bin/bash env
+  )
+
+  # Commands that never read ROOTDIR/BINDIR/RELEASE_* and so may be spawned
+  # directly. This is the allowlist rule 1 enforces: adding a command here is
+  # the explicit act of classifying it as release-env-safe.
+  @pure_tool_commands ~w(
+    git gh glab
+    cp diff kill pgrep lsof ss
+    systemctl loginctl
+    dolt kubectl
   )
 
   # Files that may call `Port.open/2`. Each must route its env through
@@ -45,12 +68,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
   #   :scrubbed — routes at least one BEAM/agent spawn through `ReleaseEnv`.
   #   :pure_tool — only spawns tools that never read ROOTDIR/BINDIR
   #               (git, gh, cp, kill, pgrep, diff, dolt, …).
-  #   :cli_escript — `arbiter_cli`; the `arb` escript is never a child of the
-  #               release VM (see the moduledoc note below), and the app has no
-  #               runtime dependency on `:arbiter`, so `ReleaseEnv` is not
-  #               reachable from it.
   @inventory %{
-    "apps/arbiter/lib/arbiter/worker/release_env.ex" => :helper,
+    @release_env_source => :helper,
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/worker/worktree.ex" => :scrubbed,
@@ -75,21 +94,18 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/workflows/merge_queue/conflict_resolver.ex" => :pure_tool,
     "apps/arbiter/lib/mix/tasks/arbiter.import_from_dolt.ex" => :pure_tool,
     "apps/arbiter_web/lib/arbiter_web/application.ex" => :pure_tool,
-    "apps/arbiter_cli/lib/arbiter_cli/version.ex" => :cli_escript,
-    "apps/arbiter_cli/lib/arbiter_cli/cmd/init.ex" => :cli_escript,
-    "apps/arbiter_cli/lib/arbiter_cli/cmd/start.ex" => :cli_escript
+    "apps/arbiter_cli/lib/arbiter_cli/version.ex" => :pure_tool,
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/init.ex" => :pure_tool,
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/start.ex" => :scrubbed
   }
 
-  # `ReleaseEnv.cmd(` counts: a site that has already been routed through the
-  # helper is still a spawn site, and must stay in the inventory.
-  @spawn_primitives [
-    "System.cmd(",
-    "System.shell(",
-    "Port.open(",
-    ":os.cmd(",
-    "MuonTrap",
-    "ReleaseEnv.cmd("
-  ]
+  # Spawn primitives that run a command of their own choosing. Rule 1 inspects
+  # the command each one is given.
+  @raw_spawn_primitives ["System.cmd(", "System.shell(", ":os.cmd(", "MuonTrap.cmd("]
+
+  # `ReleaseEnv.cmd(` counts for the inventory: a site that has already been
+  # routed through the helper is still a spawn site, and must stay classified.
+  @spawn_primitives @raw_spawn_primitives ++ ["Port.open(", "ReleaseEnv.cmd("]
 
   # ---- source scanning ------------------------------------------------------
 
@@ -122,34 +138,106 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     end)
   end
 
+  # Every raw-spawn occurrence in `lines`, as {line_no, primitive, command}
+  # where `command` is `{:literal, "git"}` or `:dynamic`.
+  #
+  # The command is whatever follows the opening paren; `mix format` often puts
+  # it on the next line for a multi-line call, so an empty tail continues onto
+  # the following non-blank code line.
+  defp raw_spawns(lines) do
+    for {{line, n}, idx} <- Enum.with_index(lines),
+        primitive <- @raw_spawn_primitives,
+        tail <- tails(line, primitive) do
+      tail =
+        case String.trim(tail) do
+          "" -> next_code_line(lines, idx + 1)
+          other -> other
+        end
+
+      {n, primitive, command_token(primitive, tail)}
+    end
+  end
+
+  # Every occurrence of `primitive` on one line, as the text following it — all
+  # of them, so a second spawn tucked onto the same line can't hide behind the
+  # first.
+  defp tails(line, primitive) do
+    case String.split(line, primitive) do
+      [_] -> []
+      [_ | rest] -> rest
+    end
+  end
+
+  defp next_code_line(lines, idx) do
+    lines
+    |> Enum.drop(idx)
+    |> Enum.map(fn {line, _n} -> String.trim(line) end)
+    |> Enum.find("", &(&1 != ""))
+  end
+
+  # A command is only "known" if it is spelled out as a string (or charlist)
+  # literal. Anything else is `:dynamic` and must go through the helper.
+  # `System.shell/1` takes a whole script run by `sh -c`, so it is never OK.
+  defp command_token("System.shell(", _tail), do: :shell
+  defp command_token(_primitive, <<?", rest::binary>>), do: literal_until_quote(rest)
+  defp command_token(_primitive, "~c\"" <> rest), do: literal_until_quote(rest)
+  defp command_token(_primitive, _tail), do: :dynamic
+
+  defp literal_until_quote(rest) do
+    case String.split(rest, "\"", parts: 2) do
+      [value, _] -> {:literal, value}
+      _ -> :dynamic
+    end
+  end
+
   # ---- rules ----------------------------------------------------------------
 
-  test "no BEAM or agent CLI is spawned via a bare System.cmd/3" do
+  test "every directly spawned command is a literal pure tool" do
     offenders =
       for {rel, lines} <- source_files(),
-          rel != "apps/arbiter/lib/arbiter/worker/release_env.ex",
-          {line, n} <- lines,
-          cmd <- @beam_or_agent_commands,
-          String.contains?(line, ~s|System.cmd("#{cmd}"|),
-          do: "#{rel}:#{n}: #{String.trim(line)}"
+          rel != @release_env_source,
+          {n, primitive, command} <- raw_spawns(lines),
+          reason = offence(command),
+          do: "#{rel}:#{n}: #{primitive}… — #{reason}"
 
     assert offenders == [],
            """
-           These sites spawn a BEAM or agent CLI without the release-env scrub.
+           These sites spawn a command without the release-env scrub.
+
            Use `Arbiter.Worker.ReleaseEnv.cmd/3` instead of `System.cmd/3` — a
            child that inherits ROOTDIR/BINDIR/RELEASE_* from the systemd OTP
            release boots against the release's ERTS and dies with
-           `cannot get bootfile` (bd-4hkzn3 / bd-2oelme).
+           `cannot get bootfile` (bd-4hkzn3 / bd-2oelme). `ReleaseEnv.cmd/3` is
+           the only call that may take a non-literal command.
+
+           If the command really is a release-env-safe tool, add it to
+           @pure_tool_commands — that is how a tool gets classified.
 
            #{Enum.join(offenders, "\n")}
            """
+  end
+
+  defp offence(:shell),
+    do: "System.shell/1 runs the script through a shell, which may start a BEAM"
+
+  defp offence(:dynamic),
+    do: "command is not a literal, so it cannot be shown to be a pure tool"
+
+  defp offence({:literal, cmd}) do
+    base = cmd |> Path.basename() |> String.trim()
+
+    cond do
+      base in @pure_tool_commands -> nil
+      cmd in @beam_or_agent_commands -> "#{cmd} starts a BEAM or an agent CLI"
+      true -> "#{cmd} is not in @pure_tool_commands"
+    end
   end
 
   test "Port.open/2 sites are allowlisted and route their env through ReleaseEnv" do
     port_files =
       for {rel, lines} <- source_files(),
           Enum.any?(lines, fn {line, _n} -> String.contains?(line, "Port.open(") end),
-          rel != "apps/arbiter/lib/arbiter/worker/release_env.ex",
+          rel != @release_env_source,
           do: rel
 
     unexpected = port_files -- @port_open_allowlist
@@ -202,5 +290,30 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
       assert body =~ "ReleaseEnv",
              "#{rel} is classified :scrubbed but does not reference ReleaseEnv."
     end
+  end
+
+  test "the shared helper is the only module allowed to spawn an arbitrary command" do
+    helper = File.read!(Path.join(@repo_root, @release_env_source))
+
+    assert helper =~ "def cmd(command, args, opts",
+           "#{@release_env_source} no longer defines the shared cmd/3 wrapper."
+
+    # `clean_pairs/0` is raw material; splicing it in by hand at a call site is
+    # exactly the per-site copy this ticket removed.
+    hand_rolled =
+      for {rel, lines} <- source_files(),
+          rel != @release_env_source,
+          {line, n} <- lines,
+          String.contains?(line, "clean_pairs("),
+          do: "#{rel}:#{n}: #{String.trim(line)}"
+
+    assert hand_rolled == [],
+           """
+           `ReleaseEnv.clean_pairs/0` is called outside the helper. Use
+           `ReleaseEnv.cmd/3` or `ReleaseEnv.port_env/1` so there is exactly
+           one implementation of the scrub.
+
+           #{Enum.join(hand_rolled, "\n")}
+           """
   end
 end

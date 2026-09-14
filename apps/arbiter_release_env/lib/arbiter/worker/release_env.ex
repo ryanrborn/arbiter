@@ -46,9 +46,20 @@ defmodule Arbiter.Worker.ReleaseEnv do
   `Arbiter.Agents.Preflight` (the auth probe), `Arbiter.Worker.Worktree`
   (`mix deps.get` worktree seeding), `Arbiter.Workflows.CodeReview.Checks`
   (the ReviewGate reviewer), `Arbiter.Workflows.ReviewReply` (the reply
-  composer) and `Arbiter.Quota.CloudCode` (the `agy` usage probe) are the
-  call sites. `release_env_guard_test.exs` holds the full inventory and fails
-  if a new spawn site appears without being classified.
+  composer), `Arbiter.Quota.CloudCode` (the `agy` usage probe) and
+  `ArbiterCli.Cmd.Start.run_cmd/3` (the `arb` escript's single spawn point,
+  which runs `mix compile` / `mix arbiter.migrate` / `mix escript.build` /
+  `sh -c "nohup mix phx.server …"`) are the call sites.
+  `release_env_guard_test.exs` holds the full inventory and fails if a new
+  spawn site appears without being classified.
+
+  ## Why this is its own umbrella app
+
+  `:arbiter_cli` builds the `arb` escript and cannot depend on `:arbiter` at
+  runtime (it pulls it in `only: :test`; see apps/arbiter_cli/mix.exs), but it
+  spawns `mix` too. Living in `:arbiter_release_env` — a dependency-free app
+  both `:arbiter` and `:arbiter_cli` depend on — is what lets criterion 2 of
+  bd-2oelme ("one shared helper, no per-site copies") hold across both.
 
   Pure-tool spawns (`git`, `gh`, `glab`, `cp`, `kill`, `pgrep`, `diff`) are
   deliberately left alone: they never read ROOTDIR/BINDIR, and stripping vars
