@@ -58,6 +58,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   alias Arbiter.Agents
   alias Arbiter.Mergers
+  alias Arbiter.ReviewGate.Round
   alias Arbiter.Skills.Selection
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -145,7 +146,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   def handle_info({:worker_lifecycle, _event, %{task_id: worker_task_id}}, socket)
       when is_binary(worker_task_id) do
     if ReviewGate.base_task_id(worker_task_id) == socket.assigns.task_id do
-      {:noreply, socket |> refresh_worker() |> refresh_runs()}
+      {:noreply, socket |> refresh_worker() |> refresh_runs() |> refresh_review_rounds()}
     else
       {:noreply, socket}
     end
@@ -598,6 +599,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> refresh_workspace()
     |> refresh_worker()
     |> refresh_runs()
+    |> refresh_review_rounds()
     |> refresh_deps()
     |> refresh_versions()
     |> refresh_skills()
@@ -913,6 +915,82 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> Enum.reject(&(&1 == current_pr_ref))
   end
 
+  # ---- review-round summary (bd-9mqima) ----
+  #
+  # "Did review pass?" is answered by `Arbiter.ReviewGate.Round`, the durable
+  # record ReviewGate writes per pass — NOT by aggregating `@runs` by role.
+  # A reviewing pass that issued REQUEST_CHANGES exits 0 and records
+  # `status: :completed` exactly like one that approved, so the run rows can
+  # only ever count passes; and a pass that exhausted its budget without a
+  # verdict is written as a synthetic `verdict: :timed_out` round the run row
+  # knows nothing about. Reading runs here would render "approved" over a
+  # rejection, which is the one mistake this line must never make.
+  defp refresh_review_rounds(socket) do
+    rounds =
+      try do
+        Round
+        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
+        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        |> Ash.read!()
+      rescue
+        e ->
+          Logger.warning("Failed to load review-gate rounds: #{inspect(e)}")
+          []
+      end
+
+    assign(socket, :review_summary, review_summary(rounds, socket.assigns[:runs] || []))
+  end
+
+  # nil means "no ReviewGate activity" — the panel renders no summary line at
+  # all rather than an empty or speculative one.
+  defp review_summary([], _runs), do: nil
+
+  defp review_summary(rounds, runs) do
+    # Rows arrive sorted (round asc, inserted_at asc), so the last `:review`
+    # row IS the latest reviewer pass. `:impl` rows are revise passes within a
+    # round and never carry a verdict, so they are not candidates.
+    latest = rounds |> Enum.filter(&(&1.role == :review)) |> List.last()
+    highest = rounds |> Enum.map(& &1.round) |> Enum.max()
+
+    # A round whose reviewer pass left no row (or left one with no verdict) is
+    # inconclusive, not approved — the gate reached a terminal it could not act
+    # on. Saying so is the honest reading; `nil` flows through to that label.
+    verdict = latest && latest.verdict
+    run_id = latest && latest.run_id
+
+    %{
+      count: highest,
+      round: (latest && latest.round) || highest,
+      verdict: verdict,
+      label: review_verdict_label(verdict),
+      # Only offer the deep link when the round's own run is actually on this
+      # page's roster — `run_id` is best-effort and can be nil or aged out.
+      run_id: if(run_id && Enum.any?(runs, &(&1.id == run_id)), do: run_id)
+    }
+  end
+
+  defp review_round_noun(1), do: "round"
+  defp review_round_noun(_), do: "rounds"
+
+  defp review_verdict_label(:approve), do: "approved"
+  defp review_verdict_label(:request_changes), do: "changes requested"
+  defp review_verdict_label(:timed_out), do: "timed out"
+  defp review_verdict_label(_), do: "inconclusive"
+
+  defp review_verdict_color(:approve), do: "var(--arb-live)"
+  defp review_verdict_color(:request_changes), do: "var(--arb-fail-text)"
+  defp review_verdict_color(_), do: "var(--arb-attention)"
+
+  # Deep-link into RUNS through the panel's own existing events, so there is no
+  # new client JS: clear any role filter that would be hiding the row, then
+  # toggle it open.
+  defp review_summary_click(%{run_id: nil}), do: nil
+
+  defp review_summary_click(%{run_id: run_id}) do
+    JS.push("filter_runs", value: %{tab: "all"})
+    |> JS.push("toggle_run", value: %{run: run_id})
+  end
+
   # ---- render ----
 
   @impl true
@@ -1114,7 +1192,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               <.panel
                 :if={
                   present?(@task.pr_ref) or present?(@task.target_branch) or
-                    present?(@task.pr_body) or @prior_mr_refs != []
+                    present?(@task.pr_body) or @prior_mr_refs != [] or @review_summary != nil
                 }
                 id="panel-merge-review"
                 title="MERGE & REVIEW"
@@ -1144,9 +1222,43 @@ defmodule ArbiterWeb.TaskDetailLive do
                     </:item>
                   </.data_list>
 
-                  <%!-- ticket B (review-round summary) lands here: a compact
-                     "N rounds · round N: <verdict>" line deep-linking into
-                     the matching RUNS rows. --%>
+                  <%!-- Review-round summary (bd-9mqima). Sourced from
+                     `review_gate_rounds` — the round record is the only place
+                     the reviewer's actual verdict survives; the reviewer run's
+                     own exit status cannot tell an APPROVE from a
+                     REQUEST_CHANGES. Clicking deep-links into the RUNS row for
+                     that exact pass via the panel's existing events. --%>
+                  <div :if={@review_summary} class="flex flex-col gap-1">
+                    <h3 class="text-[11px] font-medium text-[var(--text-label)]">Review</h3>
+                    <button
+                      id="review-round-summary"
+                      type="button"
+                      phx-click={review_summary_click(@review_summary)}
+                      disabled={@review_summary.run_id == nil}
+                      title={
+                        if(@review_summary.run_id,
+                          do: "Open this round's reviewer run in RUNS",
+                          else: "The run for this round is no longer on this issue's roster"
+                        )
+                      }
+                      class={[
+                        "self-start inline-flex items-center gap-1.5 text-[12.5px]",
+                        "font-[family-name:var(--font-mono)] text-left",
+                        @review_summary.run_id && "cursor-pointer hover:underline"
+                      ]}
+                    >
+                      <span class="text-[var(--text-secondary)]">
+                        {@review_summary.count} {review_round_noun(@review_summary.count)}
+                      </span>
+                      <span class="text-[var(--text-label)]">·</span>
+                      <span class="text-[var(--text-secondary)]">
+                        round {@review_summary.round}:
+                      </span>
+                      <span style={"color: #{review_verdict_color(@review_summary.verdict)}"}>
+                        {@review_summary.label}
+                      </span>
+                    </button>
+                  </div>
 
                   <div :if={@prior_mr_refs != []} class="flex flex-col gap-1">
                     <h3 class="text-[11px] font-medium text-[var(--text-label)]">Prior MRs</h3>
