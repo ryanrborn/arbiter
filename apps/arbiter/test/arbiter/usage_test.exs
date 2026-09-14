@@ -594,23 +594,26 @@ defmodule Arbiter.UsageTest do
         end)
 
       # Tokens reconciled from disk (deduped and bounded to this session's own
-      # window — the pre-spawn `m-0` turn is another run's and stays out), cost
-      # intentionally left nil.
+      # window — the pre-spawn `m-0` turn is another run's and stays out). The
+      # file carries no `cost-state` record, so the cost is the token-priced
+      # estimate for claude-opus-4-8 ($5/$25 per MTok, cache write 1.25x,
+      # read 0.1x) rather than the nil it used to be.
       assert ev.tokens_in == 1500
       assert ev.tokens_out == 600
       assert ev.cache_creation_tokens == 50
       assert ev.cache_read_tokens == 100
-      assert ev.cost_usd == nil
+      assert_in_delta ev.cost_usd, 0.0228625, 0.0000001
       assert ev.model == "claude-opus-4-8"
       assert ev.provider == "claude"
       assert ev.session_id == session_id
       assert ev.step == :work
 
       # bd-2aslx6 (#1428): a row with real token counts and a silently-nil
-      # `cost_usd` reads as a cost-capture bug. The JSONL carries no dollar
-      # figure, so say so on the row itself — same affordance the Gemini
-      # adapter already uses for its own unpriceable runs.
+      # `cost_usd` reads as a cost-capture bug — and so does a bare dollar
+      # figure whose provenance nobody can check. Either way the row says where
+      # its number came from (or why there isn't one).
       assert ev.cost_note =~ "session JSONL"
+      assert ev.cost_note =~ "estimated from tokens (no cost-state)"
     end
 
     test "a second session with no init of its own never borrows the first session's file" do
