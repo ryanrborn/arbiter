@@ -55,6 +55,45 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.ReleaseFilesTest do
     end
   end
 
+  describe "install_dir!/2" do
+    test "copies a release directory's contents into target_dir, leaving the source intact" do
+      source = release_dir("v1.0.0", ["20260101000000_create_things"])
+      File.mkdir_p!(Path.join(source, "bin"))
+      File.write!(Path.join(source, "bin/arbiter"), "#!/bin/sh\necho hi\n")
+
+      target =
+        Path.join(System.tmp_dir!(), "relfiles-install-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf(target) end)
+
+      assert :ok = ReleaseFiles.install_dir!(source, target)
+
+      assert File.exists?(Path.join(target, "bin/arbiter"))
+
+      assert ReleaseFiles.migrations(target) == %{
+               "20260101000000" => "20260101000000_create_things"
+             }
+
+      # Source untouched — this is a copy, not a move.
+      assert File.exists?(Path.join(source, "bin/arbiter"))
+    end
+
+    test "replaces an existing target_dir rather than merging into it" do
+      source = release_dir("v1.0.0", ["20260101000000_create_things"])
+
+      target =
+        Path.join(System.tmp_dir!(), "relfiles-install-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(target)
+      File.write!(Path.join(target, "stale_marker"), "old")
+      on_exit(fn -> File.rm_rf(target) end)
+
+      assert :ok = ReleaseFiles.install_dir!(source, target)
+
+      refute File.exists?(Path.join(target, "stale_marker"))
+    end
+  end
+
   describe "crossed_migrations/2" do
     test "names the migrations present in the new release but not the prior one" do
       prior = release_dir("v1.0.0", ["20260101000000_create_things"])
