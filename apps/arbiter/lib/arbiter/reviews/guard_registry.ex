@@ -1223,7 +1223,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
   @spec ids() :: [atom()]
   def ids, do: Enum.map(@guards, & &1.id)
 
-  @doc "Every §2 inventory id (`\"G1\"`, `\"W7\"`, …) that has a row."
+  @doc "Every §2 inventory id (like `G1` or `W7`) that has a row."
   @spec doc_refs() :: [String.t()]
   def doc_refs, do: Enum.map(@guards, & &1.doc_ref)
 
