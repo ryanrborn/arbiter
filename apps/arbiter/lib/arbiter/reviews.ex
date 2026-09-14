@@ -33,5 +33,6 @@ defmodule Arbiter.Reviews do
 
   resources do
     resource Arbiter.Reviews.Record
+    resource Arbiter.Reviews.Coverage.Entry
   end
 end
