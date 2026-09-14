@@ -44,10 +44,15 @@ defmodule Arbiter.ProcessTeardown do
   def stop_child(supervisor, pid, timeout \\ @default_timeout) when is_pid(pid) do
     quiesce(pid, timeout)
 
-    DynamicSupervisor.terminate_child(supervisor, pid)
-    :ok
+    case DynamicSupervisor.terminate_child(supervisor, pid) do
+      :ok -> :ok
+      # Not this supervisor's child after all. A suspended GenServer answers no
+      # calls at all, so leaving it that way would silently time out every
+      # caller for the rest of the run — put it back.
+      {:error, _} -> resume(pid)
+    end
   catch
-    :exit, _ -> :ok
+    :exit, _ -> resume(pid)
   end
 
   @doc """
@@ -62,6 +67,13 @@ defmodule Arbiter.ProcessTeardown do
       :sys.suspend(pid, timeout)
     end
 
+    :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp resume(pid) do
+    if Process.alive?(pid), do: :sys.resume(pid, @default_timeout)
     :ok
   catch
     :exit, _ -> :ok
