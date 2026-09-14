@@ -62,7 +62,7 @@ defmodule Arbiter.Events do
   | `external_review` | An ExternalReview lifecycle transition (running/completed/failed) |
   | `loop_proposal`  | A loop-engineering proposal is recorded / reinforced / promoted / applied / rejected (opt-in only) |
   | `quota_gate_bypass` | A quota gate is bypassed via explicit override (force_quota) |
-  | `coverage_shadow` | P3 shadow mode: `Coverage.decide/3` and the `last_reviewed_sha` merge guard were compared on a guarded-merge decision (opt-in only) |
+  | `coverage_shadow` | P3 shadow mode: the review-coverage predicate and the `last_reviewed_sha` merge guard were compared on a guarded-merge decision (opt-in only) |
 
   ## Broadcast hooks
 
