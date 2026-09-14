@@ -49,6 +49,21 @@ defmodule Arbiter.Config.PathsTest do
 
       assert Paths.worktree_root() == Path.expand("~/dev/arbiter-worktrees")
     end
+
+    test "raises a named-env-var error instead of crashing on a missing HOME" do
+      System.delete_env("ARBITER_WORKTREE_ROOT")
+      Application.delete_env(:arbiter, :worktree_root)
+      prior_home = System.get_env("HOME")
+      System.delete_env("HOME")
+
+      try do
+        assert_raise RuntimeError, ~r/ARBITER_WORKTREE_ROOT/, fn ->
+          Paths.worktree_root()
+        end
+      after
+        restore_env("HOME", prior_home)
+      end
+    end
   end
 
   describe "output_log_root/0" do
