@@ -23,9 +23,15 @@ defmodule ArbiterCli.Cmd.Update do
     4. **Report the short log** of the commits that arrived
        (`git log --oneline old..new`). If nothing arrived, say "already up to
        date" and exit — there's no new code to load.
-    5. **Run database migrations** as an explicit step via `mix arbiter.migrate`,
-       reporting how many migrations were applied (or 0 if the schema was already
-       current). Migrations must succeed before proceeding.
+    5. **Apply database migrations — never against a live server.** SQLite has a
+       single writer, so a standalone `mix arbiter.migrate` run while the old
+       server is still serving contends with it and fails with `queue_timeout`
+       (bd-bksulf). When the server is reachable we skip the standalone step
+       entirely: the restart in step 7 boots `Boot.Migrator`, which applies
+       pending migrations synchronously before the endpoint opens, so the
+       ordering is always stop -> migrate -> serve. Only when the server is
+       already down (nothing holding the writer) do we run `mix arbiter.migrate`
+       here and report how many migrations it applied.
     6. **Rebuild and install the CLI escript** if `apps/arbiter_cli` changed
        in the pulled commits. Detects changes via `git diff --name-only`, builds
        via `mix escript.build`, and installs to `~/.local/bin/arb`, making it
@@ -88,7 +94,7 @@ defmodule ArbiterCli.Cmd.Update do
   """
 
   alias ArbiterCli.ArgParser
-  alias ArbiterCli.{Client, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
   alias ArbiterCli.Cmd.Update.{Formatter, Git}
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
@@ -195,13 +201,30 @@ defmodule ArbiterCli.Cmd.Update do
       commits = Git.short_log(root, before_sha, after_sha)
       Start.log_text("Pulled #{length(commits)} new commit(s); deploying…")
 
-      # Run migrations as an explicit step
-      migration_result = Migrate.run(root)
-
+      # Migrations, ordered so they never run against a live server.
+      #
+      # SQLite takes a single writer. `mix arbiter.migrate` opens its own
+      # connection, so running it here while the old server is still serving
+      # races the live writer and dies with `queue_timeout` — the exact failure
+      # `arb server migrate` already sidesteps, and the one the release deploy
+      # path was fixed for in bd-bksulf. When the server is up we defer to the
+      # restart below: `Boot.Migrator` is the first supervised child and applies
+      # pending migrations synchronously before the endpoint opens, so the new
+      # code never serves an unmigrated schema. Only a server that is already
+      # down (no competing connection) gets the standalone migrate.
       migrations_applied =
-        case migration_result do
-          {:ok, count} -> count
-          {:error, err} -> Output.die("Database migration failed", err)
+        if Doctor.reachable?() do
+          Start.log_text(
+            "Server is running — not migrating against it. The restart below applies " <>
+              "pending migrations on boot (Boot.Migrator), before the endpoint opens."
+          )
+
+          :on_boot
+        else
+          case Migrate.run(root) do
+            {:ok, count} -> count
+            {:error, err} -> Output.die("Database migration failed", err)
+          end
         end
 
       # Check if CLI changed and rebuild/install if needed

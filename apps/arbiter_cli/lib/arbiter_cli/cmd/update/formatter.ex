@@ -44,7 +44,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
       cli_built: cli_built
     } = deploy
 
-    Output.emit_json(%{
+    %{
       branch: integration_branch,
       pulled: true,
       up_to_date: false,
@@ -54,12 +54,13 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
       new_sha: after_sha,
       commits: commits,
       actions: action_payload(actions),
-      migrations_applied: migrations_applied,
       cli_rebuilt: cli_built,
       base_url: Client.base_url(),
       checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
       ok: Doctor.green?()
-    })
+    }
+    |> Map.merge(migrations_payload(migrations_applied))
+    |> Output.emit_json()
   end
 
   def emit_deployed(:text, deploy) do
@@ -75,11 +76,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
     print_commits(commits)
     IO.puts("")
 
-    if migrations_applied > 0 do
-      IO.puts("Applied #{migrations_applied} migration(s)")
-    else
-      IO.puts("Database schema already current (no migrations to apply)")
-    end
+    print_migrations(migrations_applied)
 
     if cli_built do
       IO.puts("Rebuilt and installed CLI escript")
@@ -112,7 +109,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
       cli_built: cli_built
     } = deploy
 
-    Output.emit_json(%{
+    %{
       branch: integration_branch,
       pulled: true,
       up_to_date: false,
@@ -121,13 +118,14 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
       new_sha: after_sha,
       commits: commits,
       actions: action_payload(actions),
-      migrations_applied: migrations_applied,
       cli_rebuilt: cli_built,
       base_url: Client.base_url(),
       checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
       ok: false,
       timed_out_after_s: div(timeout_ms, 1000)
-    })
+    }
+    |> Map.merge(migrations_payload(migrations_applied))
+    |> Output.emit_json()
 
     Output.halt(1)
   end
@@ -146,11 +144,7 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
     print_commits(commits)
     IO.puts("")
 
-    if migrations_applied > 0 do
-      IO.puts("Applied #{migrations_applied} migration(s)")
-    else
-      IO.puts("Database schema already current (no migrations to apply)")
-    end
+    print_migrations(migrations_applied)
 
     if cli_built do
       IO.puts("Rebuilt and installed CLI escript")
@@ -165,6 +159,28 @@ defmodule ArbiterCli.Cmd.Update.Formatter do
     IO.puts("hint: tail #{Start.phoenix_log_path()} for Phoenix startup output.")
     Output.halt(1)
   end
+
+  # `migrations_applied` is a count when `arb update` migrated the database
+  # itself (server was down), or `:on_boot` when it deliberately left the work
+  # to the restart's `Boot.Migrator` because the old server still held the
+  # single SQLite writer (bd-bksulf).
+  defp print_migrations(:on_boot),
+    do:
+      IO.puts(
+        "Migrations applied by the restart (Boot.Migrator runs on boot, " <>
+          "before the endpoint opens)"
+      )
+
+  defp print_migrations(0),
+    do: IO.puts("Database schema already current (no migrations to apply)")
+
+  defp print_migrations(count), do: IO.puts("Applied #{count} migration(s)")
+
+  defp migrations_payload(:on_boot),
+    do: %{migrations_applied: nil, migrations_applied_on_boot: true}
+
+  defp migrations_payload(count),
+    do: %{migrations_applied: count, migrations_applied_on_boot: false}
 
   defp print_commits(commits) do
     Enum.each(commits, fn %{sha: sha, subject: subject} ->
