@@ -200,7 +200,10 @@ defmodule Arbiter.Reviews.CoverageShadow do
 
     if old_class == new_class do
       Tally.bump(:agreements)
-      once(obs, transition, fn -> persist(obs, "agree", old_class, old_detail, new_class, new_detail) end)
+
+      once(obs, transition, fn ->
+        persist(obs, "agree", old_class, old_detail, new_class, new_detail)
+      end)
     else
       Tally.bump(:disagreements)
       Tally.bump({:transition, transition})

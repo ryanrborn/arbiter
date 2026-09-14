@@ -16,10 +16,14 @@ defmodule Arbiter.Reviews.Coverage do
   `decide/3` (§3.2, P2) is the reader: the six-rule
   `covered | uncovered | unknown` predicate both merge paths will collapse
   to. It is a **pure function** — every git/forge fact it needs arrives
-  through `ctx` — and as of P2 it has no call site outside its tests.
-  Watchdog and MergeQueue adopt it in P3 (shadow) and P4 (flip); until then
-  `issues.last_reviewed_sha` remains the authoritative input to every merge
-  guard, and no production code path reads coverage to make a decision.
+  through `ctx`.
+
+  P3 (#1649) gives it its first call site, `Arbiter.Reviews.CoverageShadow`,
+  which both merge paths call *alongside* their existing guard and which acts
+  on nothing: it counts and logs whether the two predicates agree. So
+  `issues.last_reviewed_sha` is still the authoritative input to every merge
+  decision, and no production code path yet *acts* on coverage. P4 flips the
+  read path behind `merge.coverage_enabled`.
   """
 
   require Ash.Query

@@ -684,6 +684,43 @@ an explicit predecessor that is **proven live**, not merely merged:
    — a week of zero disagreements on non-`:mechanical` paths is the gate for P4.
 4. Only then delete the latch machinery (P5), then the MergeQueue mirror (P6).
 
+**Reading P3's counter (bd-b0fqcl / #1649).** Step 3's "a log line when the two
+disagree" is not enough on its own — the coordinator's journal-grep habits
+break in release mode, where `:debug` is dropped and the journal is rotated.
+So shadow mode keeps a **durable** counter as well.
+`Arbiter.Reviews.CoverageShadow`
+(`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:118` (`observe`)) is
+called from both merge paths —
+`apps/arbiter/lib/arbiter/worker/watchdog.ex:2806`
+(`observe_coverage_shadow`) and
+`apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1356`
+(`observe_coverage_shadow`) — and, per distinct
+`{site, mr_ref, head, old->new}` observation, logs one `:warning` line naming
+both answers and writes one `Arbiter.Events` row on topic `coverage_shadow`.
+`apps/arbiter/lib/arbiter/reviews/coverage_shadow/tally.ex:102` (`snapshot`)
+carries the since-boot counts, including the re-polls the event log collapses.
+
+After a restart, the gate for P4 reads as one query against the install's
+SQLite file:
+
+```sql
+select json_extract(payload, '$.result') as result, count(*)
+  from events where topic = 'coverage_shadow' group by result;
+```
+
+`agree` ≥ 20 with no `disagree` row is step 3's "week of zero disagreements".
+`Arbiter.Reviews.CoverageShadow.report/0` answers the same question from
+`iex`, and `GET /events?subscribe=coverage_shadow&since=0` streams the rows.
+
+Two known, *declared* gaps in P3's evidence, both of which P4 must close before
+it flips: no `:ancestor?` probe is injected (no adapter exposes one), so rule 2
+is unreachable and a forge-lag poll counts as a `covered->unknown` or
+`unknown->uncovered` disagreement; and a merge with no review baseline at all
+(`ReviewedSha.check(nil, _)` — the `Direct` strategy) counts as
+`covered->unknown`. The tally's per-transition breakdown is what keeps those
+separable from a real `covered->uncovered` disagreement, which is the one that
+would block P4.
+
 ---
 
 ## 7. Phase table
