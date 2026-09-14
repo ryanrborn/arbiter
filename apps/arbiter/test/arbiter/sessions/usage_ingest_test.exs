@@ -344,7 +344,11 @@ defmodule Arbiter.Sessions.UsageIngestTest do
       sid = "sess-dur-#{System.unique_integer([:positive])}"
       at = ~U[2026-09-10 08:00:00.000Z]
 
-      write!(dir, sid, [turn(sid, "m1", at, 10, 100), cost_state(sid, 2.5, start_ms(), 1000)])
+      # One `startTime` throughout: this is a single CLI process appending to
+      # its own transcript, so both figures below are cumulative, not additive.
+      started = start_ms()
+
+      write!(dir, sid, [turn(sid, "m1", at, 10, 100), cost_state(sid, 2.5, started, 1000)])
       assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
 
       write!(
@@ -352,7 +356,7 @@ defmodule Arbiter.Sessions.UsageIngestTest do
         sid,
         [
           turn(sid, "m2", DateTime.add(at, 3600), 5, 50),
-          cost_state(sid, 5.0, start_ms(), 2000)
+          cost_state(sid, 5.0, started, 2000)
         ],
         [:append]
       )
