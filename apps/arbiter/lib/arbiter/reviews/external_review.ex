@@ -66,7 +66,8 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   alias Arbiter.Mergers
   alias Arbiter.Mergers.Github.RepoResolver
-  alias Arbiter.Reviews.{Checkout, PrState, Record}
+  alias Arbiter.Mergers.NetDiff
+  alias Arbiter.Reviews.{Checkout, Coverage, PrState, Record}
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.CodeReview
@@ -601,7 +602,9 @@ defmodule Arbiter.Reviews.ExternalReview do
     pr_author =
       if is_nil(ReviewAutomation.normalize(explicit)) &&
            is_nil(ReviewAutomation.repo_override_mode(config, repo_name)) do
-        {_head_sha, author} = fetch_pr_baseline(Map.get(prepared, :adapter), prepared.mr_ref)
+        {_head_sha, author, _base_ref} =
+          fetch_pr_baseline(Map.get(prepared, :adapter), prepared.mr_ref)
+
         author
       end
 
@@ -1356,7 +1359,7 @@ defmodule Arbiter.Reviews.ExternalReview do
        ) do
     # Baseline captured at review time: PR head SHA (so only later commits
     # trigger a re-review) + the PR author (for automation-mode resolution).
-    {head_sha, pr_author} = fetch_pr_baseline(adapter, mr_ref)
+    {head_sha, pr_author, base_ref} = fetch_pr_baseline(adapter, mr_ref)
     watermark = fetch_comment_watermark(adapter, mr_ref)
     mode = resolve_automation(opts, prepared.workspace, pr_author, Map.get(prepared, :repo_name))
 
@@ -1366,6 +1369,8 @@ defmodule Arbiter.Reviews.ExternalReview do
           "ExternalReview: opened review engagement #{issue.id} for #{mr_ref} " <>
             "(mode #{mode}, baseline #{head_sha || "-"}, cursor #{watermark || "-"})"
         )
+
+        record_review_coverage(prepared, issue, head_sha, base_ref, verdict)
 
         %{id: issue.id, created: true}
 
@@ -1563,14 +1568,72 @@ defmodule Arbiter.Reviews.ExternalReview do
   # PR head SHA + author at review time, via the adapter's get/1. Best-effort:
   # {nil, nil} when the adapter can't answer (the engagement still forms; the
   # first ReviewPatrol tick records the head as a first sighting).
+  # bd-203cl5 / #1648 (design #1635 §3.3, the ExternalReview row of the stamping
+  # table): the engagement baseline that already pins `last_reviewed_sha` to the
+  # PR head also records an append-only `review_coverage` row for that head —
+  # but ONLY when the verdict this pass reached was an approval.
+  #
+  # §3.1 defines `:reviewed` as "an approving round covered this commit". A
+  # first pass that requested changes did the opposite: it says the head is not
+  # acceptable, so writing coverage for it would tell P7's predicate that a head
+  # the fleet rejected is covered. The cursor is written either way (it means
+  # "we have looked at this commit", not "we approved it"), which is why the two
+  # writes are separate.
+  #
+  # Best-effort — ExternalReview reviews PRs the fleet does not merge, so unlike
+  # the ReviewGate's own coverage write a missing row here cannot become the
+  # #1585 merge stall.
+  defp record_review_coverage(prepared, %Issue{} = engagement, head_sha, base_ref, verdict) do
+    adapter = Map.get(prepared, :adapter)
+    mr_ref = Map.get(prepared, :mr_ref)
+
+    with true <- verdict == :approve,
+         true <- is_binary(head_sha) and is_binary(base_ref) and is_binary(mr_ref),
+         net_diff_id when is_binary(net_diff_id) <-
+           NetDiff.fingerprint_pr(adapter, mr_ref, base_ref, head_sha) do
+      Coverage.record(%{
+        task_id: Coverage.authoring_task_id(mr_ref, engagement.workspace_id, engagement.id),
+        mr_ref: mr_ref,
+        head_sha: head_sha,
+        base_ref: base_ref,
+        net_diff_id: net_diff_id,
+        kind: :reviewed,
+        source: :external_review
+      })
+      |> case do
+        {:ok, _entry} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "ExternalReview: coverage write failed for #{mr_ref} on #{head_sha}: " <>
+              inspect(reason)
+          )
+
+          :ok
+      end
+    else
+      _ -> :ok
+    end
+  rescue
+    e ->
+      Logger.warning("ExternalReview: coverage write raised: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   defp fetch_pr_baseline(adapter, mr_ref) do
     if function_exported?(adapter, :get, 1) do
       case safe_call(fn -> adapter.get(mr_ref) end) do
-        {:ok, %{} = pr} -> {Map.get(pr, :head_sha), Map.get(pr, :author)}
-        _ -> {nil, nil}
+        {:ok, %{} = pr} ->
+          {Map.get(pr, :head_sha), Map.get(pr, :author), Map.get(pr, :base_ref)}
+
+        _ ->
+          {nil, nil, nil}
       end
     else
-      {nil, nil}
+      {nil, nil, nil}
     end
   end
 

@@ -8,17 +8,25 @@ defmodule Arbiter.Reviews.Coverage do
   call site in §3.3 can call it unconditionally without first checking
   whether coverage already exists.
 
+  P1 (#1648) wires the three **review** sites of §3.3's stamping table to
+  `record/1` — `Arbiter.Worker.ReviewGate`'s clean approve,
+  `Arbiter.Workflows.ReviewPatrol`'s post-review and
+  `Arbiter.Reviews.ExternalReview`'s baseline.
+
   `decide/3` (§3.2, P2) is the reader: the six-rule
   `covered | uncovered | unknown` predicate both merge paths will collapse
   to. It is a **pure function** — every git/forge fact it needs arrives
   through `ctx` — and as of P2 it has no call site outside its tests.
-  Watchdog and MergeQueue adopt it in P3 (shadow) and P4 (flip).
+  Watchdog and MergeQueue adopt it in P3 (shadow) and P4 (flip); until then
+  `issues.last_reviewed_sha` remains the authoritative input to every merge
+  guard, and no production code path reads coverage to make a decision.
   """
 
   require Ash.Query
 
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Reviews.Coverage.Entry
+  alias Arbiter.Tasks.Issue
 
   @type attrs :: %{
           required(:task_id) => String.t(),
@@ -316,4 +324,37 @@ defmodule Arbiter.Reviews.Coverage do
     do: :mr_ref in fields and :head_sha in fields and :kind in fields
 
   defp conflict?(_), do: false
+
+  @doc """
+  The **authoring** task id for a coverage row about `mr_ref`, per §3.1
+  ("`task_id` — the authoring task (not the reviewer/watchdog task)").
+
+  A review engagement (`review_only: true`) is the *reviewer's* task, not the
+  author's, so the reviewing sites cannot use their own id. When the fleet
+  authored the PR there is a real task carrying it as `pr_ref`; that id is the
+  answer. For a genuinely external PR — the common ReviewPatrol /
+  ExternalReview case — no such task exists and `fallback` (the engagement) is
+  used, which is the only durable handle we have on that review.
+
+  Never raises: a failed read resolves to `fallback`, so a transient DB blip
+  costs a less-precise `task_id`, not a lost coverage row.
+  """
+  @spec authoring_task_id(String.t() | nil, String.t() | nil, String.t()) :: String.t()
+  def authoring_task_id(mr_ref, workspace_id, fallback)
+      when is_binary(mr_ref) and mr_ref != "" and is_binary(workspace_id) do
+    Issue
+    |> Ash.Query.filter(
+      pr_ref == ^mr_ref and workspace_id == ^workspace_id and review_only != true
+    )
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Issue{id: id} | _] -> id
+      _ -> fallback
+    end
+  rescue
+    _ -> fallback
+  end
+
+  def authoring_task_id(_mr_ref, _workspace_id, fallback), do: fallback
 end

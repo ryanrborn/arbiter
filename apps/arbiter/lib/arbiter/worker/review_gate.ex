@@ -156,7 +156,11 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.CircuitBreaker
+  alias Arbiter.Mergers.NetDiff
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.ReviewGate.Round
+  alias Arbiter.Reviews.Coverage
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event, as: UsageEvent
@@ -1143,6 +1147,7 @@ defmodule Arbiter.Worker.ReviewGate do
       true ->
         record_round(state, :review, :approve, findings, converged: true)
         stamp_reviewed_head(state)
+        record_review_coverage(state)
         {:done, finish(state, verdict)}
     end
   end
@@ -2760,6 +2765,155 @@ defmodule Arbiter.Worker.ReviewGate do
     :exit, reason ->
       Logger.warning("ReviewGate: reviewed-SHA stamp exited: #{inspect(reason)}")
       :ok
+  end
+
+  # bd-203cl5 / #1648 (design #1635 §3.3, the ReviewGate row of the stamping
+  # table): alongside the `last_reviewed_sha` stamp above, record an append-only
+  # `review_coverage` row naming the exact head this round approved.
+  #
+  # `last_reviewed_sha` stays authoritative — nothing reads coverage yet (that
+  # is P3/P4's `Coverage.decide/3`). What this buys today is the audit trail
+  # §3.3 argues the scalar stamp cannot be: one row per approving round, with
+  # the round number and the net-diff fingerprint of what was approved, so a
+  # later head can be compared for content equality instead of SHA equality.
+  #
+  # **This write is deliberately NOT best-effort.** The stamp above swallows its
+  # failures because a missing stamp only makes the guard more conservative; a
+  # missing coverage row is the opposite — §3.3: "a silently-missing row *is*
+  # the #1585 stall". So every way this can fail (no ids, an unfingerprintable
+  # diff, a rejected insert, a raise, an exit) pages the coordinator once
+  # through the shared bd-5jr49o breaker. It still never crashes the gate: the
+  # approval has already been recorded and stamped by the time we get here.
+  defp record_review_coverage(state) do
+    task_id = Map.get(state, :task_id)
+    mr_ref = coverage_mr_ref(state)
+    head_sha = full_head_sha_in(Map.get(state, :worktree_path))
+    base_ref = Map.get(state, :target_branch)
+
+    with {:ok, task_id} <- present(task_id, :no_task_id),
+         {:ok, mr_ref} <- present(mr_ref, :no_mr_ref),
+         {:ok, head_sha} <- present(head_sha, :no_head_sha),
+         {:ok, base_ref} <- present(base_ref, :no_base_ref),
+         {:ok, net_diff_id} <- coverage_net_diff_id(state) do
+      coverage_writer().(%{
+        task_id: task_id,
+        mr_ref: mr_ref,
+        head_sha: head_sha,
+        base_ref: base_ref,
+        net_diff_id: net_diff_id,
+        kind: :reviewed,
+        source: :review_gate,
+        round: Map.get(state, :round)
+      })
+      |> case do
+        {:ok, _entry} ->
+          Logger.debug(
+            "ReviewGate: recorded review coverage for task=#{task_id} head=#{head_sha}"
+          )
+
+          :ok
+
+        {:error, reason} ->
+          coverage_failed(state, mr_ref, head_sha, reason)
+      end
+    else
+      {:error, reason} -> coverage_failed(state, mr_ref, head_sha, reason)
+    end
+  rescue
+    e -> coverage_failed(state, coverage_mr_ref(state), nil, e)
+  catch
+    :exit, reason -> coverage_failed(state, coverage_mr_ref(state), nil, {:exit, reason})
+  end
+
+  defp coverage_failed(state, mr_ref, head_sha, reason) do
+    Logger.warning(
+      "ReviewGate: review-coverage write failed for task=#{Map.get(state, :task_id)}: " <>
+        inspect(reason)
+    )
+
+    _ =
+      escalate_coverage_write_failure(
+        %{task_id: Map.get(state, :task_id), workspace_id: Map.get(state, :workspace_id)},
+        mr_ref,
+        head_sha,
+        reason
+      )
+
+    :ok
+  end
+
+  @doc """
+  Page the coordinator once because a clean APPROVE could not record its
+  review-coverage row (design #1635 §3.3).
+
+  Public so the bd-5jr49o breaker adoption can be exercised directly — the
+  gate's own path reaches it through `record_review_coverage/1`. Returns `:ok`
+  when the page was sent and `:suppressed` when the breaker held it back.
+  """
+  @spec escalate_coverage_write_failure(map(), String.t() | nil, String.t() | nil, term()) ::
+          :ok | :suppressed
+  def escalate_coverage_write_failure(snapshot, mr_ref, head_sha, reason) do
+    result =
+      CircuitBreaker.guard(
+        :review_coverage_write_failed,
+        [Map.get(snapshot, :task_id), mr_ref],
+        [
+          workspace_id: Map.get(snapshot, :workspace_id),
+          task_ref: Map.get(snapshot, :task_id),
+          detail:
+            "Review-coverage writes keep failing for this task's PR. This is almost " <>
+              "certainly systemic (migration not run, table missing) rather than " <>
+              "per-approval — check `review_coverage` before clearing."
+        ],
+        fn ->
+          CoordinatorNotifier.review_coverage_write_failed(snapshot, mr_ref, head_sha, reason)
+        end
+      )
+
+    case result do
+      {:ok, _} -> :ok
+      {:suppressed, _info} -> :suppressed
+    end
+  end
+
+  # The PR this coverage is about. The gate's `pr_ref` is the same opaque ref
+  # the Watchdog and MergeQueue key their merge guards on, so a row recorded
+  # here is findable by the reader P3/P4 adds. A gate that ran before the PR was
+  # opened has no such ref; the branch is then the only stable handle on the
+  # work, and is used rather than dropping the row.
+  defp coverage_mr_ref(state) do
+    case Map.get(state, :pr_ref) do
+      ref when is_binary(ref) and ref != "" -> ref
+      _ -> Map.get(state, :branch)
+    end
+  end
+
+  # `NetDiff.fingerprint(base_ref...head_sha)` for what the reviewer was shown:
+  # the gate already diffs `diff_range/1` (the merge-base when known) for the
+  # reviewer prompt, so fingerprinting the same range means the row describes
+  # exactly the content that was approved. `nil` is a failure, never a value —
+  # see `NetDiff.fingerprint/1` on why an empty diff must not compare equal.
+  defp coverage_net_diff_id(%{worktree_path: wt} = state) when is_binary(wt) do
+    case NetDiff.fingerprint_local(wt, diff_range(state)) do
+      id when is_binary(id) -> {:ok, id}
+      nil -> {:error, :no_net_diff}
+    end
+  end
+
+  defp coverage_net_diff_id(_state), do: {:error, :no_worktree}
+
+  defp present(value, _tag) when is_binary(value) and value != "", do: {:ok, value}
+  defp present(_value, tag), do: {:error, tag}
+
+  # The coverage writer, overridable for tests that need `record/1` to fail on
+  # demand (there is no other way to exercise the escalation path, and §3.3
+  # makes that path load-bearing). Production always resolves to
+  # `Coverage.record/1`.
+  defp coverage_writer do
+    case Application.get_env(:arbiter, :review_coverage_writer) do
+      fun when is_function(fun, 1) -> fun
+      _ -> &Coverage.record/1
+    end
   end
 
   # ---- worker spawning ---------------------------------------------------
