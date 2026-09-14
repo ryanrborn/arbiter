@@ -720,9 +720,10 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
 
     Map.new(days, fn {day, bucket} ->
       share =
-        cond do
-          sum > 0 -> total * (Map.fetch!(weights, day) / sum)
-          true -> total / map_size(days)
+        if sum > 0 do
+          total * (Map.fetch!(weights, day) / sum)
+        else
+          total / map_size(days)
         end
 
       {day, %{bucket | cost_usd: share}}
