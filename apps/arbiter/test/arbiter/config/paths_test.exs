@@ -11,12 +11,16 @@ defmodule Arbiter.Config.PathsTest do
     prior_env_log = System.get_env("ARBITER_OUTPUT_LOG_ROOT")
     prior_cfg_wt = Application.get_env(:arbiter, :worktree_root)
     prior_cfg_log = Application.get_env(:arbiter, :output_log_root)
+    prior_env_sess = System.get_env("ARBITER_COORDINATOR_SESSION_DIRS")
+    prior_cfg_sess = Application.get_env(:arbiter, :coordinator_session_dirs)
 
     on_exit(fn ->
       restore_env("ARBITER_WORKTREE_ROOT", prior_env_wt)
       restore_env("ARBITER_OUTPUT_LOG_ROOT", prior_env_log)
+      restore_env("ARBITER_COORDINATOR_SESSION_DIRS", prior_env_sess)
       restore_cfg(:worktree_root, prior_cfg_wt)
       restore_cfg(:output_log_root, prior_cfg_log)
+      restore_cfg(:coordinator_session_dirs, prior_cfg_sess)
     end)
 
     :ok
@@ -88,4 +92,32 @@ defmodule Arbiter.Config.PathsTest do
       assert Paths.output_log_root() == Path.expand("~/dev/arbiter-worker-logs")
     end
   end
+
+  describe "coordinator_session_dirs/0" do
+    test "defaults to none — metering is opt-in, never a guessed home directory" do
+      System.delete_env("ARBITER_COORDINATOR_SESSION_DIRS")
+      Application.delete_env(:arbiter, :coordinator_session_dirs)
+      assert Paths.coordinator_session_dirs() == []
+    end
+
+    test "the env var takes a colon- or comma-separated list, ~ expanded" do
+      System.put_env("ARBITER_COORDINATOR_SESSION_DIRS", "/tmp/a:/tmp/b,/tmp/c")
+      assert Paths.coordinator_session_dirs() == ["/tmp/a", "/tmp/b", "/tmp/c"]
+    end
+
+    test "application config accepts a list or a single string" do
+      System.delete_env("ARBITER_COORDINATOR_SESSION_DIRS")
+      Application.put_env(:arbiter, :coordinator_session_dirs, ["/tmp/x", "/tmp/y"])
+      assert Paths.coordinator_session_dirs() == ["/tmp/x", "/tmp/y"]
+
+      Application.put_env(:arbiter, :coordinator_session_dirs, "/tmp/z")
+      assert Paths.coordinator_session_dirs() == ["/tmp/z"]
+    end
+
+    test "blank entries are dropped rather than becoming the cwd" do
+      System.put_env("ARBITER_COORDINATOR_SESSION_DIRS", "/tmp/a::,  ,/tmp/b")
+      assert Paths.coordinator_session_dirs() == ["/tmp/a", "/tmp/b"]
+    end
+  end
+
 end
