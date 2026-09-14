@@ -158,7 +158,12 @@ every restart is also a migration run, and the ordering is always:
 `arb server deploy` (release path) relies on this: it downloads, verifies,
 unpacks, swaps `current`, and restarts — it does **not** migrate itself.
 `arb server migrate` against a live server redirects to a restart for the same
-reason. If you want to migrate by hand, stop the service first
+reason. The dev-mode path (`arb server deploy --git-pull`, which a bare
+`arb server deploy` also falls back to when `ARB_RELEASE_REPO` is unset) follows
+the same rule: it pulls, rebuilds the CLI if it changed, and restarts, letting
+`Boot.Migrator` apply the pulled migrations on boot. It runs a standalone
+`mix arbiter.migrate` only when the server is already down — no live writer to
+race. If you want to migrate by hand, stop the service first
 (`systemctl --user stop arbiter.service`), then run the eval.
 
 ### Rollback across a migration

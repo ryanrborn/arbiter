@@ -180,7 +180,10 @@ lock so only one node ever migrates. The real ordering is therefore:
     stop the old server  →  new release boots  →  migrate  →  serve
 
 — one writer at every instant, and the same path `arb restart`,
-`arb server migrate` and dev `mix phx.server` already take.
+`arb server migrate` and dev `mix phx.server` already take. The dev-mode
+fallback (`arb server deploy --git-pull`) obeys the same ordering: with the
+server up it pulls and restarts, and the pulled migrations are applied by that
+boot; it only migrates standalone when the server is already down.
 
 **Auto-rollback stops at a schema change.** Re-pointing `current` back at the
 prior release after the new one has migrated would run old code against a

@@ -24,12 +24,17 @@ defmodule ArbiterCli.Cmd.Server do
                           below automatically, rather than dead-ending on
                           "ARB_RELEASE_REPO is not set".
       arb server deploy --git-pull [--timeout SECONDS] [--json] [--force]
-                          dev-runtime path: git pull --ff-only main → migrate →
-                          rebuild CLI if changed → restart Phoenix.
+                          dev-runtime path: git pull --ff-only main → rebuild
+                          CLI if changed → restart Phoenix.
                           Use this after a `git pull` that brought in new
                           migrations; it applies them and reloads the server in
-                          one step. Also used automatically by a bare
-                          `arb server deploy` when `ARB_RELEASE_REPO` is unset.
+                          one step. Like the release path, it never migrates
+                          against the live server: when the server is up the
+                          restart's Boot.Migrator applies pending migrations on
+                          boot, before the endpoint opens. Only a server that is
+                          already down gets a standalone `mix arbiter.migrate`.
+                          Also used automatically by a bare `arb server deploy`
+                          when `ARB_RELEASE_REPO` is unset.
       arb server migrate  [--timeout SECONDS] [--json] [--force]
                           apply pending database migrations.
                           When the server is running: restarts it so
@@ -52,7 +57,7 @@ defmodule ArbiterCli.Cmd.Server do
 
   **Correct fix:**
 
-      arb server deploy --git-pull   # pull → migrate → restart (one step)
+      arb server deploy --git-pull   # pull → restart (migrates on boot)
 
   or, if you already pulled manually:
 
@@ -60,10 +65,12 @@ defmodule ArbiterCli.Cmd.Server do
       # — or —
       arb restart                    # same effect; Boot.Migrator runs on every boot
 
-  **Do NOT run `arb server migrate` while the server is live** without the
-  restart path — `mix arbiter.migrate` competes for the single SQLite writer
-  connection and fails with `queue_timeout`. `arb server migrate` now detects
-  a running server and redirects to restart automatically.
+  **Never run a standalone `mix arbiter.migrate` against a live server** —
+  it competes for the single SQLite writer connection and fails with
+  `queue_timeout`. Every deploy verb here enforces that: `arb server migrate`
+  detects a running server and redirects to restart, and both deploy paths
+  (release and `--git-pull`) leave pending migrations to `Boot.Migrator` on the
+  next boot, after the old server is stopped.
   """
 
   alias ArbiterCli.{Cmd, Cmd.Doctor, Cmd.Restart, Cmd.Start, Output}
@@ -113,7 +120,7 @@ defmodule ArbiterCli.Cmd.Server do
         Start.log_text(
           "ARB_RELEASE_REPO is not set — this looks like a dev-mode (git-checkout) " <>
             "install. Falling back to the git-pull deploy path " <>
-            "(pull -> migrate -> rebuild CLI escript if changed -> restart)."
+            "(pull -> rebuild CLI escript if changed -> restart, which migrates on boot)."
         )
 
         Cmd.Update.deploy(argv)
