@@ -223,12 +223,15 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       {@rest}
     >
       <div class="flex items-center justify-between gap-2">
-        <span class={[
-          "font-medium text-[10.5px] font-[family-name:var(--font-mono)]",
-          @muted && "text-[var(--text-label)]",
-          !@muted && "text-[var(--text-secondary)]"
-        ]}>
-          {@id}
+        <span class="inline-flex items-center gap-0.5">
+          <span class={[
+            "font-medium text-[10.5px] font-[family-name:var(--font-mono)]",
+            @muted && "text-[var(--text-label)]",
+            !@muted && "text-[var(--text-secondary)]"
+          ]}>
+            {@id}
+          </span>
+          <ArbiterWeb.CoreComponents.Core.copy_id id={@id} />
         </span>
         {render_slot(@status)}
       </div>

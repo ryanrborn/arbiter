@@ -899,6 +899,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "Board / Issues /"
       assert html =~ task.id
       assert html =~ "Back to board"
+      assert html =~ ~s(aria-label="Copy issue id #{task.id}")
     end
 
     test "acceptance criteria render as one real checkbox per line",

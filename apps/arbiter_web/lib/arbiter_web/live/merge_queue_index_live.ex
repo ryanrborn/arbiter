@@ -33,6 +33,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueueSupervisor
+  alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Navigation
@@ -339,6 +340,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
                     </code>
                     <span class="text-[12px] text-[var(--text-secondary)] truncate">{m.title}</span>
                   </.link>
+                  <Core.copy_id id={m.task_id} />
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0" title="CI / Approval / Mergeable">
                   <span

@@ -177,6 +177,108 @@ defmodule ArbiterWeb.CoreComponents.Core do
   end
 
   @doc """
+  A copy-to-clipboard affordance for a task/issue id — the only place an id's
+  copy behavior is implemented; every renderer of an id reaches for this
+  instead of hand-rolling `phx-click`/JS.
+
+  ## Examples
+
+      <.copy_id id={@task.id} />
+      <span class="font-mono">{@task.id}</span> <.copy_id id={@task.id} class="ml-1" />
+
+  A `<button type="button">` so it never submits a surrounding `<.form>`, and
+  its hook calls `stopPropagation` so tapping it inside a clickable board
+  card or table row copies the id instead of also navigating. Uses
+  `navigator.clipboard.writeText/1` when available, falling back to a
+  hidden-textarea `execCommand("copy")` otherwise, and swaps to a checkmark
+  for ~1.5s as "Copied" feedback.
+  """
+  attr :id, :string, required: true, doc: ~s(the issue id to copy, e.g. "bd-5l88o5")
+
+  attr :dom_id, :string,
+    default: nil,
+    doc:
+      "override the element id — required when the same issue id's copy control " <>
+        "can appear more than once in the same page (e.g. a page header plus a " <>
+        "detail panel), since the default is derived from `id` alone"
+
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  def copy_id(assigns) do
+    ~H"""
+    <button
+      type="button"
+      id={@dom_id || "copy-id-#{@id}"}
+      phx-hook=".CopyId"
+      data-copy-value={@id}
+      aria-label={"Copy issue id #{@id}"}
+      class={[
+        "copy-id-btn inline-flex items-center justify-center rounded-[4px] p-[3px]",
+        "text-[var(--text-label)] hover:text-[var(--text-title)] hover:bg-[var(--arb-panel-alt)]",
+        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2",
+        "focus-visible:outline-[var(--accent-primary)]",
+        "transition-colors duration-[var(--dur-hover)]",
+        @class
+      ]}
+      {@rest}
+    >
+      <.icon name="hero-clipboard-document-micro" class="copy-id-icon-idle" />
+      <.icon
+        name="hero-check-micro"
+        class="copy-id-icon-copied hidden"
+        color="var(--arb-live)"
+      />
+    </button>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyId">
+      export default {
+        mounted() {
+          this.timer = null
+          this.el.addEventListener("click", (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            this.copy(this.el.dataset.copyValue)
+          })
+        },
+        destroyed() {
+          clearTimeout(this.timer)
+        },
+        copy(value) {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(value).then(
+              () => this.showCopied(),
+              () => this.fallbackCopy(value)
+            )
+          } else {
+            this.fallbackCopy(value)
+          }
+        },
+        fallbackCopy(value) {
+          const ta = document.createElement("textarea")
+          ta.value = value
+          ta.setAttribute("readonly", "")
+          ta.style.position = "absolute"
+          ta.style.left = "-9999px"
+          document.body.appendChild(ta)
+          ta.select()
+          try {
+            document.execCommand("copy")
+          } finally {
+            document.body.removeChild(ta)
+          }
+          this.showCopied()
+        },
+        showCopied() {
+          clearTimeout(this.timer)
+          this.el.classList.add("copy-id-copied")
+          this.timer = setTimeout(() => this.el.classList.remove("copy-id-copied"), 1500)
+        }
+      }
+    </script>
+    """
+  end
+
+  @doc """
   A settings switch. Used on workspace config, where every toggle states its
   consequence rather than hiding it in a tooltip.
 

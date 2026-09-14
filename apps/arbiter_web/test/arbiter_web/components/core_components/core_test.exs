@@ -245,6 +245,41 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
     end
   end
 
+  describe "copy_id/1" do
+    test "renders a keyboard-focusable button naming the id in its aria-label" do
+      html = render_component(&copy_id/1, %{id: "bd-5l88o5"})
+
+      assert html =~ ~s(type="button")
+      assert html =~ ~s(aria-label="Copy issue id bd-5l88o5")
+      assert html =~ ~s(data-copy-value="bd-5l88o5")
+    end
+
+    test "wires the colocated CopyId hook and the hook stops click propagation, using the clipboard API with a fallback" do
+      html = render_component(&copy_id/1, %{id: "bd-5l88o5"})
+      assert html =~ ~s(phx-hook="ArbiterWeb.CoreComponents.Core.CopyId")
+
+      [hook_path] =
+        Path.wildcard(
+          Path.join(
+            Mix.Project.build_path(),
+            "phoenix-colocated/arbiter_web/ArbiterWeb.CoreComponents.Core/*.js"
+          )
+        )
+
+      hook_js = File.read!(hook_path)
+
+      assert hook_js =~ "e.stopPropagation()"
+      assert hook_js =~ "navigator.clipboard.writeText"
+      assert hook_js =~ "execCommand(\"copy\")"
+    end
+
+    test "gives each instance a unique DOM id derived from the issue id" do
+      html = render_component(&copy_id/1, %{id: "bd-5l88o5"})
+
+      assert html =~ ~s(id="copy-id-bd-5l88o5")
+    end
+  end
+
   test "primitives compose: a panel of buttons, an icon, and toggles renders end to end" do
     assigns = %{}
 

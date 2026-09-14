@@ -153,6 +153,7 @@ defmodule ArbiterWeb.TaskIndexLive do
                   {b.title}
                 </span>
               </.link>
+              <ArbiterWeb.CoreComponents.Core.copy_id id={b.id} />
               <.status_chip status={b.status} />
             </li>
           </ul>

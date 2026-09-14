@@ -767,6 +767,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
               <span class="font-medium text-[12px] text-[var(--text-title)] font-[family-name:var(--font-mono)]">
                 {@task_id}
               </span>
+              <Core.copy_id id={@task_id} />
               <.status_chip status={@snapshot.status} />
               <span
                 :if={@snapshot.started_at}
@@ -829,6 +830,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 <.data_list class="text-xs">
                   <:item label="task">
                     <code class="font-mono text-xs">{@task_id}</code>
+                    <Core.copy_id id={@task_id} dom_id={"copy-id-worker-detail-#{@task_id}"} />
                   </:item>
                   <:item label="repo">
                     <code class="font-mono text-xs">{dash_if_nil(@snapshot.repo)}</code>
