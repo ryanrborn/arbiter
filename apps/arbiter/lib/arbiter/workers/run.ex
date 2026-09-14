@@ -45,7 +45,17 @@ defmodule Arbiter.Workers.Run do
   # the worker's in-memory FSM status stays `:failed` because that is the
   # terminal state `Dispatch.resume/2` and the Watchdog's bounded auto-resume
   # both require.
-  @statuses ~w(running completed failed review_not_started)a
+  # bd-9zuvbh / P9: `:review_parked` is the class-C terminal (design #1635
+  # §5.3). The run reached `arb done`, its branch is pushed and its PR open —
+  # what gave out is the *review gate*: no parseable verdict, a reviewer
+  # timeout, or a verdict guard that refused an APPROVE and ran out of
+  # re-prompts. None of that is evidence the work failed, and recording it as
+  # `:failed` is what made `:review_gate_inconclusive` cost 52 runs / $226.97 in
+  # 31 days. The task is parked (`issues.review_park_reason`) and the
+  # coordinator paged once instead. Same shape as `:review_not_started`: only
+  # the durable row diverges, the worker's FSM status stays `:failed` because
+  # that is the terminal state `Dispatch.resume/2` re-attaches from.
+  @statuses ~w(running completed failed review_not_started review_parked)a
 
   # The kind of worker that produced this run. A task can be worked by more
   # than one worker over its life: the `:main` worker that authors the change,

@@ -371,6 +371,39 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert StubMerger.merge_count("pr-55") == 0
     end
 
+    # bd-9zuvbh / P9, round 1 review finding 5. The FSM status above stays
+    # `:failed` (`Dispatch.resume/2` re-attaches from it), but the DURABLE
+    # record must not be another `:review_gate_inconclusive` failed run: this is
+    # the coordinator-dispatched twin of the ReviewGate's inconclusive terminal,
+    # and no verdict means nobody has found a problem with the work.
+    test "parks the run and the task instead of recording another failed run" do
+      ws = new_workspace()
+      task = new_task(ws)
+
+      pid = start_reviewer(task, ["some output but no verdict line"])
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      run =
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+        |> List.first()
+
+      assert run.status == :review_parked
+
+      {:ok, parked} = Ash.get(Issue, task.id)
+      assert parked.review_park_reason == "inconclusive"
+      assert parked.status == :in_progress
+
+      assert [escalation] =
+               "admiral"
+               |> Message.inbox(workspace_id: ws.id)
+               |> Enum.filter(&(&1.directive_ref == task.id and &1.kind == :escalation))
+
+      assert escalation.subject =~ "parked"
+    end
+
     # bd-6dxit2: `meta[:output_lines]` is capped at 1000 lines by ClaudeSession,
     # so a reviewer that prints VERDICT: and then keeps producing findings loses
     # its own sentinel to eviction and gets reported INCONCLUSIVE with a

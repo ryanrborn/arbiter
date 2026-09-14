@@ -530,13 +530,19 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
       failing =
         for row <- GuardRegistry.guards(), row.terminal == :failed_run, do: row.doc_ref
 
-      # §2.6's thirteen, plus C2 — the conversion point all thirteen route
-      # through. §2.6 counts C2 as the mechanism ("this is *where*
-      # `:review_gate_inconclusive` becomes a failed run") rather than as a
-      # fourteenth guard; the registry needs a row for it either way, because P9
-      # changes that row's behaviour.
+      # P9 (bd-9zuvbh) took ten of §2.6's thirteen: every class-C ReviewGate
+      # terminal now parks. What is left is
+      #
+      #   G14 — a genuine REQUEST_CHANGES at the round cap, which P9's AC1
+      #         explicitly leaves alone (the guard-rejected half of G14 parks);
+      #   C2  — the same arm, seen from the conversion point it routes through;
+      #   W6  — P4's read-path flip;
+      #   W12 — P10's class-E audit.
+      #
+      # Shrinking this list is the point of the phase table; growing it is a
+      # regression, which is why the set is asserted exactly.
       assert Enum.sort(failing) ==
-               Enum.sort(~w(G2 G3 G6 G8 G9 G10 G11 G12 G14 G15 G16 W6 W12 C2)),
+               Enum.sort(~w(G14 W6 W12 C2)),
              "the set of guards that convert a guard decision into a failed run changed: " <>
                inspect(Enum.sort(failing))
     end
