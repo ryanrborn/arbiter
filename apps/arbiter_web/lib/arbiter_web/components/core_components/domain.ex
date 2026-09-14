@@ -238,6 +238,13 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           ]}>
             {@id}
           </span>
+          <%!-- task_card is rendered inside board_live's whole-card `<.link navigate>`,
+               so this button ends up nested inside an <a> — invalid content model,
+               but browsers render it fine and the CopyId hook's preventDefault +
+               stopPropagation keep the click from also navigating. Restructuring
+               every board card to hoist the control out to a link sibling was
+               judged not worth the churn for a validity nit; keep this comment in
+               sync if that trade-off changes. --%>
           <ArbiterWeb.CoreComponents.Core.copy_id id={@id} dom_id={@copy_dom_id} />
         </span>
         {render_slot(@status)}

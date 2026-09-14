@@ -269,6 +269,7 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
 
       assert hook_js, "expected to find the compiled CopyId hook JS"
 
+      assert hook_js =~ "e.preventDefault()"
       assert hook_js =~ "e.stopPropagation()"
       assert hook_js =~ "navigator.clipboard.writeText"
       assert hook_js =~ "execCommand(\"copy\")"
