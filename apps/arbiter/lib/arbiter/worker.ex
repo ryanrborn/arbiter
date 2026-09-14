@@ -801,7 +801,13 @@ defmodule Arbiter.Worker do
       inspection / re-dispatch).
     * `{:no_verdict, reason}` → an inconclusive review; treated like a rejection
       (escalate, do not merge) since the safe default is never to merge unreviewed
-      work.
+      work. Since bd-9zuvbh this is a **park**, not a failed run — see below.
+    * `{:parked, reason, findings}` → guard class C's terminal state (bd-9zuvbh,
+      design #1635 §5.3). The gate reached a terminal state with no verdict it
+      could act on. Nothing merges and no APPROVE is accepted — the content half
+      of the guard is still closed — but the run is recorded `:review_parked`
+      rather than `:failed`, the task carries `review_park_reason`, and the
+      coordinator is paged exactly once for the episode.
   """
   @spec review_gate_verdict(
           ref(),
@@ -1326,6 +1332,19 @@ defmodule Arbiter.Worker do
          meta: %{failure_reason: {:awaiting_review_timeout, _}}
        }),
        do: :review_not_started
+
+  # bd-9zuvbh / P9. Same divergence, same reasoning, one guard class over: a run
+  # the ReviewGate PARKED (class C — no parseable verdict, a reviewer timeout, a
+  # verdict guard out of re-prompts, a no-op fix round after an approval-gap
+  # rejection) reached `arb done`, exited 0 and pushed its branch. What gave out
+  # is the review gate, and "the reviewer could not be understood" is not
+  # "the implementation failed". `%State{}.status` stays `:failed` for the same
+  # reason as above — `Dispatch.resume/2` re-attaches from it — and
+  # `failure_reason` is still written, so nothing is lost by recording the row
+  # honestly.
+  defp run_status(%State{status: :failed, meta: %{review_park_reason: reason}})
+       when not is_nil(reason),
+       do: :review_parked
 
   defp run_status(%State{status: status}), do: status
 
@@ -2124,7 +2143,7 @@ defmodule Arbiter.Worker do
 
   # bd-a9zb7w: decide (and, if warranted, dispatch) the implementer fix round for
   # a ReviewGate rejection this worker just parked on. Posted to self by
-  # `park_rejected/3` so it lands after that call's reply, with `status` already
+  # `park_rejected/4` so it lands after that call's reply, with `status` already
   # `:failed`. Never crashes the worker: the whole decision is best-effort.
   def handle_info({:__review_gate_fix_round__, verdict, findings}, %State{} = state) do
     maybe_dispatch_fix_round(state, verdict, findings)
@@ -2820,7 +2839,7 @@ defmodule Arbiter.Worker do
   #
   # REQUEST_CHANGES / :no_verdict → fail the worker (not complete it) so the
   # Driver does NOT close the task. The task stays :in_progress for the
-  # coordinator to dispatch a fix-pass. Mirrors park_rejected/3 from the full
+  # coordinator to dispatch a fix-pass. Mirrors park_rejected/4 from the full
   # review_gate path.
   #
   # bd-btcyn6: when no VERDICT sentinel is found in stdout (e.g. the reviewer
@@ -4700,6 +4719,12 @@ defmodule Arbiter.Worker do
 
       case Arbiter.Worker.ReviewGate.start(opts) do
         {:ok, pid} ->
+          # bd-9zuvbh: a fresh gate IS the "re-run the review" human action that
+          # resolves a class-C park. Clear it here rather than when the new
+          # verdict lands, so `arb prime` stops showing a park the moment
+          # somebody is actually acting on it.
+          Arbiter.Tasks.ReviewPark.clear(state.task_id, :review_rerun)
+
           {:ok, Process.monitor(pid)}
 
         {:error, reason} ->
@@ -4739,13 +4764,50 @@ defmodule Arbiter.Worker do
     park_rejected(state, :request_changes, findings)
   end
 
+  # bd-9zuvbh / P9 — guard class C (design #1635 §5.3). The gate reached a
+  # terminal state without a reviewer verdict it could act on: no parseable
+  # VERDICT after the re-prompt, a reviewing-pass timeout, a verdict guard whose
+  # re-prompt budget is spent, a no-op fix round after an approval-gap
+  # rejection. None of those is evidence the WORK failed, and recording them as
+  # `Run.status = :failed` is what made `:review_gate_inconclusive` alone cost 52
+  # runs / $226.97 in 31 days on work that was fine.
+  #
+  # Content stays fail-closed — nothing here merges, and the guard's refusal to
+  # accept the APPROVE stands. Only liveness opens: the task parks with a named
+  # reason, the coordinator is paged once for the episode, and the run row is
+  # written `:review_parked` instead of `:failed`.
+  defp apply_review_gate_verdict(%State{} = state, {:parked, reason, findings}) do
+    park_rejected(state, park_verdict_for(reason), findings, reason)
+  end
+
+  # A `:no_verdict` verdict is the same class-C terminal reached by a gate that
+  # does not name its reason (an older gate, or the ReviewGate process dying
+  # before it reported). It parks too: AC1 admits no ReviewGate outcome that
+  # fails a run on a no-verdict result.
   defp apply_review_gate_verdict(%State{} = state, {:no_verdict, findings}) do
-    park_rejected(state, :no_verdict, findings)
+    park_rejected(state, :no_verdict, findings, :inconclusive)
   end
 
   defp apply_review_gate_verdict(%State{} = state, :no_verdict) do
-    park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
+    park_rejected(
+      state,
+      :no_verdict,
+      "Reviewer produced no parseable VERDICT line.",
+      :inconclusive
+    )
   end
+
+  # What the parked outcome is RECORDED as. The park changes the run's status
+  # and the task's flag; it deliberately does not rewrite the gate's own verdict
+  # bookkeeping, because `meta.failure_reason` is still pattern-matched
+  # literally by Loop.FailureClassifier / Loop.Corpus.rejected?/1 / Loop.Analysis
+  # and the round rows must keep saying what the gate actually decided. A guard
+  # that refused an APPROVE, and an already-absorbed branch, both record the
+  # REQUEST_CHANGES shape they record today; everything else is inconclusive.
+  defp park_verdict_for(reason) when reason in [:verdict_guard_exhausted, :empty_diff],
+    do: :request_changes
+
+  defp park_verdict_for(_reason), do: :no_verdict
 
   # Reject path: record findings, escalate to the coordinator, and park the worker
   # at :failed WITHOUT merging. failure_reason stays a short atom (still pattern-
@@ -4756,15 +4818,29 @@ defmodule Arbiter.Worker do
   # (bd-dp7hiw). bd-2ddf2x adds `failure_summary`, a bounded human-readable
   # twin (VERDICT line + top finding) so `worker_runs` alone answers "why did
   # this fail" without a second review_gate_rounds_list call.
-  defp park_rejected(%State{} = state, verdict, findings) do
+  # `park_reason` (bd-9zuvbh) is nil for an ordinary rejection — a reviewer that
+  # really did request changes, or the coordinator-dispatched `worker_review`
+  # path — and a `Arbiter.Tasks.ReviewPark` reason atom for a class-C terminal.
+  # The two differ in exactly three places, all of them below: which escalation
+  # goes out, whether the task carries a park flag, and whether another fix
+  # round is dispatched.
+  defp park_rejected(state, verdict, findings, park_reason \\ nil)
+
+  defp park_rejected(%State{} = state, verdict, findings, park_reason) do
     record_review_gate_outcome(state, verdict, findings)
-    escalate_review_gate(state, verdict, findings)
+
+    if park_reason do
+      park_review_gate(state, park_reason, findings)
+    else
+      escalate_review_gate(state, verdict, findings)
+    end
 
     meta =
       state.meta
       |> Map.put(:review_gate_verdict, verdict)
       |> Map.put(:review_gate_findings, findings)
       |> Map.put(:failure_summary, review_gate_failure_summary(verdict, findings))
+      |> put_park_reason(park_reason)
 
     failed = fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
 
@@ -4775,15 +4851,23 @@ defmodule Arbiter.Worker do
     # pre-reply `:awaiting_review_gate` status and deadlock stopping ourselves.
     # By the time this message is handled the caller's reply has been sent and
     # `status` is `:failed`.
-    send(self(), {:__review_gate_fix_round__, verdict, findings})
+    #
+    # bd-9zuvbh: a PARKED outcome schedules nothing. The gate has already spent
+    # its rounds; the whole point of the park is that a human decides next, and
+    # bd-c6tdbu is precisely the shape where the extra fix round found nothing
+    # to fix and cost a run. Class D's "never re-dispatch an identical round".
+    if is_nil(park_reason), do: send(self(), {:__review_gate_fix_round__, verdict, findings})
 
     failed
   end
 
+  defp put_park_reason(meta, nil), do: Map.delete(meta, :review_park_reason)
+  defp put_park_reason(meta, reason), do: Map.put(meta, :review_park_reason, reason)
+
   defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
   defp fail_reason_for(_), do: :review_gate_rejected
 
-  # The two terminal reasons `park_rejected/3` can stamp. A run parked for one of
+  # The two terminal reasons `park_rejected/4` can stamp. A run parked for one of
   # these is terminal *only* because of the review gate — so a later round of the
   # same gate is entitled to overturn it (bd-3wumco).
   @review_gate_failure_reasons [:review_gate_rejected, :review_gate_inconclusive]
@@ -4973,14 +5057,19 @@ defmodule Arbiter.Worker do
         "#{inspect(prior)}; reconciling the run forward and resuming the merge handoff"
     )
 
+    # bd-9zuvbh: a later round approving is the third way out of a class-C park,
+    # and the only one the fleet takes by itself. Drop the flag here or an
+    # approved, merged task keeps showing up in `arb prime`'s parked list.
+    Arbiter.Tasks.ReviewPark.clear(state.task_id, :review_approved)
+
     # The rejection's own meta (`review_gate_verdict` / `review_gate_findings`,
-    # written by park_rejected/3) is overwritten rather than dropped: the gate
+    # written by park_rejected/4) is overwritten rather than dropped: the gate
     # still has a verdict on record for this task, it is just the approving one
     # now. Leaving the old pair in place made `worker show` read as a rejection
     # on a task that had merged.
     meta =
       state.meta
-      |> Map.drop([:failure_reason, :failure_summary, :stop_reason])
+      |> Map.drop([:failure_reason, :failure_summary, :stop_reason, :review_park_reason])
       |> Map.put(:review_gate_verdict, :approve)
       |> Map.put(:review_gate_findings, findings)
       |> Map.put(:review_gate_reconciled_from, prior)
@@ -5227,6 +5316,115 @@ defmodule Arbiter.Worker do
   end
 
   defp escalate_review_gate(_state, _verdict, _findings), do: :ok
+
+  # ---- bd-9zuvbh: guard class C's terminal state ---------------------------
+  #
+  # Park the task, then page the coordinator ONCE for the episode. The park row
+  # is the claim (invariant I3): `ReviewPark.park/2` answers `:already_parked`
+  # when the same reason is already on file, so a gate that re-reports the same
+  # terminal — a retried report, a reconciled worker that parks again — pages
+  # nothing. A DIFFERENT reason, or a park a human cleared and the gate then
+  # re-reached, is a new episode and does page.
+  #
+  # Never raises: this is the worker's terminal path and a mail/DB failure must
+  # leave the park attempt behind rather than crash the teardown.
+  defp park_review_gate(%State{task_id: task_id} = state, reason, findings) do
+    case Arbiter.Tasks.ReviewPark.park(task_id, reason) do
+      {:ok, :claimed, _issue} ->
+        escalate_review_park(state, reason, findings)
+
+      {:ok, :already_parked, _issue} ->
+        Logger.info(
+          "Worker: ReviewGate park for task=#{task_id} (#{reason}) is already claimed; " <>
+            "not paging the coordinator again"
+        )
+
+        :ok
+
+      {:error, err} ->
+        # The park could not be written — page anyway. A silent terminal is the
+        # failure mode this whole phase exists to remove, so an unrecorded park
+        # must still reach a human.
+        Logger.warning(
+          "Worker: could not park task=#{task_id} for ReviewGate reason #{inspect(reason)}: " <>
+            "#{inspect(err)}"
+        )
+
+        escalate_review_park(state, reason, findings)
+    end
+  end
+
+  # The single page a parked episode is entitled to. It names the reason, says
+  # in plain words that the run was NOT failed and the work is intact, and lists
+  # the three things a human can actually do — the remediation chain-B's four
+  # incidents never got.
+  #
+  # Routed through the shared circuit breaker (bd-5jr49o / #1638) rather than
+  # straight to `send_mail/1`: the park claim above already bounds this to one
+  # page per episode, and the breaker is the backstop for the case where the
+  # claim itself is the thing misbehaving.
+  defp escalate_review_park(
+         %State{workspace_id: ws_id, task_id: task_id} = state,
+         reason,
+         findings
+       )
+       when is_binary(ws_id) do
+    subject = "ReviewGate parked #{task_id} — #{Arbiter.Tasks.ReviewPark.subject_phrase(reason)}"
+
+    Arbiter.CircuitBreaker.guard(
+      :coordinator_escalation,
+      [task_id, subject],
+      [
+        workspace_id: ws_id,
+        task_ref: task_id,
+        detail:
+          "A ReviewGate park re-paged past its bound. The park row is supposed to " <>
+            "claim the episode exactly once — if this trips, the claim is not holding."
+      ],
+      fn ->
+        Arbiter.Messages.Message.send_mail(%{
+          kind: :escalation,
+          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+          from_ref: task_id,
+          workspace_id: ws_id,
+          task_ref: task_id,
+          subject: subject,
+          body: review_park_body(state, reason, findings)
+        })
+
+        Arbiter.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
+        :ok
+      end
+    )
+
+    :ok
+  rescue
+    e -> log_review_gate_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_review_park(_state, _reason, _findings), do: :ok
+
+  defp review_park_body(%State{task_id: task_id} = state, reason, findings) do
+    """
+    The review gate for #{task_id} reached a terminal state with no verdict it     could act on: #{Arbiter.Tasks.ReviewPark.explain(reason)}.
+
+    The run was NOT failed. The work is committed and the branch is pushed     (#{mergeable_branch(state.meta) || "branch unknown"}); the run is recorded     `review_parked` and the task is parked with reason `#{reason}`. Nothing was     merged and no APPROVE was accepted — the content side of the guard is still     closed.
+
+    A human decides what happens next. Any one of these clears the park:
+
+      * re-run the review (`arb worker resume #{task_id}`) — the gate starts     fresh and the park clears on its own;
+      * merge it by hand, if the diff is fine and only the gate's bookkeeping     was not;
+      * reject it (`arb issue close #{task_id}`), which also clears the park.
+
+    Full round history: `review_gate_rounds_list` for #{task_id}.
+
+    ---
+
+    #{findings}
+    """
+  end
 
   # bd-2eyf9y: a `:no_verdict` escalation is either the generic "reviewer
   # produced nothing actionable" case or one of the ReviewGate revise-round

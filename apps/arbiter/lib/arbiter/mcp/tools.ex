@@ -1921,6 +1921,11 @@ defmodule Arbiter.MCP.Tools do
       awaiting_verification_at: iso(i.awaiting_verification_at),
       verification_outcome: to_str(i.verification_outcome),
       verification_evidence: i.verification_evidence,
+      # bd-9zuvbh: the ReviewGate park (class C). `task_show` is the
+      # coordinator's main surface, so the reason a finished task is sitting
+      # still has to be readable there and not only in `arb prime`.
+      review_park_reason: i.review_park_reason,
+      review_parked_at: iso(i.review_parked_at),
       assignee: i.assignee,
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,

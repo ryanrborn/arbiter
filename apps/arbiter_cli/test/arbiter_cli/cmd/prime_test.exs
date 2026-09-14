@@ -80,6 +80,76 @@ defmodule ArbiterCli.Cmd.PrimeTest do
     end
   end
 
+  # bd-9zuvbh — tasks the ReviewGate parked (class C), with the reason and age.
+  describe "review-parked section" do
+    defp stub_with_parked(parked) do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}]
+          }, 200}},
+        {{"get", "/api/workers"}, {%{"data" => []}, 200}},
+        {{"get", "/api/issues/ready"}, {%{"data" => []}, 200}},
+        {{"get", "/api/issues"}, {%{"data" => []}, 200}},
+        {{"get", "/api/issues/review_parked"}, {%{"data" => parked}, 200}},
+        {{"get", "/api/messages"}, {%{"data" => []}, 200}}
+      ])
+    end
+
+    test "lists review-parked tasks with their reason and age" do
+      parked_since = DateTime.utc_now() |> DateTime.add(-7200, :second) |> DateTime.to_iso8601()
+
+      stub_with_parked([
+        %{
+          "id" => "bd-010",
+          "title" => "guard class C",
+          "status" => "in_progress",
+          "review_park_reason" => "inconclusive",
+          "review_parked_at" => parked_since,
+          "workspace_id" => "ws-1"
+        }
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "== Review parked (1) =="
+      assert out =~ "bd-010"
+      assert out =~ "guard class C"
+      assert out =~ "inconclusive"
+      assert out =~ "2h ago"
+    end
+
+    test "omits the section entirely when nothing is parked" do
+      stub_with_parked([])
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      refute out =~ "Review parked"
+    end
+
+    test "--json includes the review-parked list" do
+      parked_since = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
+
+      stub_with_parked([
+        %{
+          "id" => "bd-011",
+          "title" => "verdict guard",
+          "status" => "in_progress",
+          "review_park_reason" => "verdict_guard_exhausted",
+          "review_parked_at" => parked_since,
+          "workspace_id" => "ws-1"
+        }
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
+      assert exit_code == 0
+
+      assert {:ok, decoded} = Jason.decode(out)
+      assert [%{"review_parked" => [%{"id" => "bd-011"}]}] = decoded["workspaces"]
+    end
+  end
+
   describe "text mode" do
     test "prints workspace header, workers, and ready tasks" do
       stub_all(

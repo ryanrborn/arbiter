@@ -22,7 +22,12 @@ defmodule ArbiterCli.Cmd.Prime do
           that are parked until someone restarts the server and observes the
           new path, each with the age of the wait (bd-9so315). Omitted when
           empty. These are the coordinator's: nothing else will clear them.
-       g. Coordinator Inbox — unread messages for this workspace's coordinator.
+       g. Review parked — tasks the ReviewGate parked (bd-9zuvbh): a terminal
+          no-verdict state that used to fail the run. Each row names the park
+          reason and the age of the wait. The run was NOT failed and the branch
+          is intact — a human re-runs the review, merges by hand, or closes it,
+          and any of those clears the park. Omitted when empty.
+       h. Coordinator Inbox — unread messages for this workspace's coordinator.
           Omitted when empty.
 
   ## Standing Orders are data, not code
@@ -102,6 +107,7 @@ defmodule ArbiterCli.Cmd.Prime do
       workers: unwrap(ws_section.workers),
       ready: unwrap(ws_section.ready),
       awaiting_verification: unwrap(ws_section.awaiting_verification),
+      review_parked: unwrap(ws_section.review_parked),
       coordinator_inbox: unwrap(ws_section.coordinator_inbox)
     }
   end
@@ -146,6 +152,7 @@ defmodule ArbiterCli.Cmd.Prime do
       workers: gather_workers(ws_id),
       ready: gather_ready(ws_id),
       awaiting_verification: gather_awaiting_verification(ws_id),
+      review_parked: gather_review_parked(ws_id),
       coordinator_inbox: gather_coordinator_inbox(ws_id)
     }
   end
@@ -219,6 +226,17 @@ defmodule ArbiterCli.Cmd.Prime do
     end
   end
 
+  # bd-9zuvbh: tasks the ReviewGate parked (class C) — a terminal no-verdict
+  # state that used to fail the run. Ordered oldest-park-first by the API, so
+  # the one most likely to have been forgotten leads.
+  defp gather_review_parked(ws_id) do
+    case Client.get("/api/issues/review_parked", workspace_id: ws_id) do
+      {:ok, %{"data" => list}} -> {:ok, list}
+      {:ok, _} -> {:ok, []}
+      {:error, %Client.Error{} = err} -> {:error, err.message}
+    end
+  end
+
   defp gather_coordinator_inbox(ws_id) do
     case Client.get("/api/messages", to_ref: "coordinator", workspace_id: ws_id, unread: "true") do
       {:ok, %{"data" => list}} -> {:ok, Enum.filter(list, &(&1["workspace_id"] == ws_id))}
@@ -254,6 +272,7 @@ defmodule ArbiterCli.Cmd.Prime do
     emit_ready_section(ws_section.ready, "issue")
     IO.puts("")
     maybe_emit_awaiting_verification(ws_section.awaiting_verification)
+    maybe_emit_review_parked(ws_section.review_parked)
     maybe_emit_coordinator_inbox(ws_section.coordinator_inbox)
   end
 
@@ -441,6 +460,36 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp maybe_emit_awaiting_verification({:error, msg}) do
     IO.puts("== Awaiting verification ==")
+    IO.puts("  (error: #{msg})")
+    IO.puts("")
+  end
+
+  # Omitted when nothing is parked — the healthy case. When it is non-empty it
+  # is the most actionable thing on the page: each row is a finished piece of
+  # work sitting one human decision from merging.
+  defp maybe_emit_review_parked({:ok, []}), do: :ok
+
+  defp maybe_emit_review_parked({:ok, list}) do
+    IO.puts("== Review parked (#{length(list)}) ==")
+
+    Enum.each(list, fn i ->
+      reason = i["review_park_reason"] || "unknown"
+
+      IO.puts(
+        "  #{i["id"]}  [#{reason}]  #{truncate(i["title"], 60)}#{age_suffix(i["review_parked_at"])}"
+      )
+    end)
+
+    IO.puts(
+      "  → the run was NOT failed; the branch is intact. Re-run the review " <>
+        "(arb worker resume <id>), merge by hand, or close it."
+    )
+
+    IO.puts("")
+  end
+
+  defp maybe_emit_review_parked({:error, msg}) do
+    IO.puts("== Review parked ==")
     IO.puts("  (error: #{msg})")
     IO.puts("")
   end

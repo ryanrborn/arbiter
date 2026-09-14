@@ -224,7 +224,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       terminal: :proceeds,
       sites: [
         {ReviewGate, :reviewer_commit_check, 1},
-        {ReviewGate, :escalate_pre_review, 2},
+        {ReviewGate, :escalate_pre_review, 3},
         {ReviewGate, :handle_continue, 2},
         {ReviewGate, :spawn_reviewer_after_update, 1}
       ],
@@ -242,10 +242,10 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:evaluations, 1},
       episode: {:task, :review_id, :round},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :empty_diff_guard, 1},
-        {ReviewGate, :escalate_pre_review, 2}
+        {ReviewGate, :escalate_pre_review, 3}
       ],
       anchors: ["empty_diff_guard"],
       summary: "base_sha == head_sha — the target already absorbed the commits"
@@ -262,7 +262,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "no-verdict family.",
       bound: {:retries, {:config, :default_timeout_retries}},
       episode: {:task, :review_id, :attempt},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :handle_info, 2},
         {ReviewGate, :escalate_timeout, 1}
@@ -309,7 +309,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:retries, {:config, :default_verdict_retries}},
       episode: {:task, :review_id, :attempt},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [{ReviewGate, :maybe_reprompt, 2}],
       anchors: ["@default_verdict_retries"],
       summary: "one re-prompt when no verdict could be parsed"
@@ -333,7 +333,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:retries, {:config, :default_verdict_retries}},
       episode: {:task, :review_id, :attempt},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [{ReviewGate, :findings_present?, 1}],
       anchors: ["findings_present?", "@default_verdict_retries"],
       summary: "REQUEST_CHANGES with no actionable findings shares G6's budget"
@@ -345,7 +345,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:retries, 1},
       episode: {:task, :review_id, :round},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :verdict_guard_spec, 2},
         {ReviewGate, :run_verdict_guard, 4}
@@ -360,7 +360,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:retries, 1},
       episode: {:task, :review_id, :round},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :verdict_guard_spec, 2},
         {ReviewGate, :run_verdict_guard, 4}
@@ -375,7 +375,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:retries, 1},
       episode: {:task, :review_id, :round},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :verdict_guard_spec, 2},
         {ReviewGate, :run_verdict_guard, 4}
@@ -390,7 +390,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:retries, 1},
       episode: {:task, :review_id, :round},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :verdict_guard_spec, 2},
         {ReviewGate, :run_verdict_guard, 4}
@@ -424,9 +424,18 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:rounds, {:config, :default_rounds}},
       episode: {:task, :review_id, :round},
       terminal: :failed_run,
-      sites: [{ReviewGate, :do_route_after_reject, 2}],
+      sites: [
+        {ReviewGate, :do_route_after_reject, 2},
+        {ReviewGate, :terminal_reject_verdict, 1}
+      ],
       anchors: ["@default_rounds", "@rounds_by_difficulty"],
-      summary: "review<->revise round budget, capped per difficulty"
+      summary: "review<->revise round budget, capped per difficulty",
+      policy_note:
+        "P9 split this arm. A verdict guard that refused an APPROVE and reached " <>
+          "the cap now parks (`terminal_reject_verdict/1` -> class C); what still " <>
+          "reaches `:failed_run` is a reviewer that really said REQUEST_CHANGES for " <>
+          "every round, which §5.3 would also park (class D) and P9's AC1 " <>
+          "deliberately left alone. The remaining half is recorded below."
     },
     %{
       id: :commit_gate_head_unchanged,
@@ -435,7 +444,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:retries, 1},
       episode: {:task, :review_id, :round},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :commit_gate_outcome, 2},
         {ReviewGate, :finish_revise, 1},
@@ -451,7 +460,7 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:escalations, 1},
       episode: {:task, :review_id, :round},
-      terminal: :failed_run,
+      terminal: :parked,
       sites: [
         {ReviewGate, :escalate_commit_gate, 2},
         {ReviewGate, :escalate_no_changes, 1}
@@ -867,13 +876,22 @@ defmodule Arbiter.Reviews.GuardRegistry do
       episode: {:task, :review_id},
       terminal: :failed_run,
       sites: [
-        {Worker, :park_rejected, 3},
+        {Worker, :park_rejected, 4},
         {Worker, :fail_reason_for, 1},
         {Worker, :escalate_review_gate, 3},
+        {Worker, :park_review_gate, 3},
+        {Worker, :escalate_review_park, 3},
         {Worker, :fail_now, 2}
       ],
-      anchors: [":review_gate_inconclusive", "fail_reason_for"],
-      summary: "every gate outcome becomes Run.status = :failed here"
+      anchors: [":review_gate_inconclusive", "fail_reason_for", ":review_parked"],
+      summary: "the single point a gate outcome becomes a failed run — or, since P9, a park",
+      policy_note:
+        "P9 (bd-9zuvbh) split this. `park_rejected/4` now takes a park reason: " <>
+          "with one it writes `Run.status = :review_parked`, stamps " <>
+          "`issues.review_park_reason` and pages once via `park_review_gate/3`; " <>
+          "without one it is the pre-P9 path. Every class-C terminal passes a " <>
+          "reason, so the `:failed_run` recorded here is now reachable only from a " <>
+          "genuine REQUEST_CHANGES — see G14."
     },
     %{
       id: :fix_round_budget,
@@ -1123,80 +1141,26 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "rule. P4 removes both together."
     },
     %{
-      id: :empty_diff_range,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "§5.3: an absorbed branch must complete with one escalation, not a failed run."
-    },
-    %{
-      id: :reviewing_timeout,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "Timeout -> :review_gate_inconclusive -> failed run. P9 parks and escalates once."
-    },
-    %{
-      id: :verdict_reprompt_budget,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "A spent re-prompt budget fails the run; class C must fail open on liveness."
-    },
-    %{
-      id: :empty_findings,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "Shares G6's budget and G6's run failure."
-    },
-    %{
-      id: :partial_verification,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "fail_closed/3's terminal arm reaches a failed run via C2."
-    },
-    %{
-      id: :unaddressed_findings,
-      violation: :fails_run,
-      removed_by: :p9,
-      note:
-        "bd-c6tdbu: an honest APPROVE was rejected and the forced fix round had nothing to fix."
-    },
-    %{
-      id: :unmet_criteria,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "fail_closed/3's terminal arm reaches a failed run via C2."
-    },
-    %{
-      id: :missing_criteria,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "fail_closed/3's terminal arm reaches a failed run via C2."
-    },
-    %{
       id: :round_budget,
       violation: :fails_run,
-      removed_by: :p9,
-      note: "An exhausted round budget escalates with the transcript and fails the run."
-    },
-    %{
-      id: :commit_gate_head_unchanged,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "A rebuttal-only round is treated as failure after one nudge."
-    },
-    %{
-      id: :commit_gate_escalation,
-      violation: :fails_run,
-      removed_by: :p9,
-      note: "All three shapes report :no_verdict, which C2 records as :review_gate_inconclusive."
+      removed_by: :p10,
+      note:
+        "P9 removed half of this: a verdict guard that refused an APPROVE and hit " <>
+          "the cap now parks. What is left is a reviewer that really said " <>
+          "REQUEST_CHANGES for every round — P9's AC1 states explicitly that this " <>
+          "still behaves as today, so §5.3's class-D park for G14 moves to P10's " <>
+          "class audit rather than being claimed here."
     },
     %{
       id: :rejection_parking,
       violation: :fails_run,
-      removed_by: :p9,
+      removed_by: :p10,
       note:
-        "§2.4 C2 is the single conversion point: `fail_reason_for/1` turns every " <>
-          "gate outcome into Run.status = :failed. P9's AC is that no ReviewGate " <>
-          "outcome sets it on a task whose PR is approved."
+        "P9 met its AC here: no ReviewGate outcome with an approving or no-verdict " <>
+          "result reaches Run.status = :failed any more — `park_rejected/4` writes " <>
+          "`:review_parked` for every class-C terminal. The row keeps the entry " <>
+          "because the one arm P9 deliberately left (a genuine REQUEST_CHANGES at " <>
+          "G14's round cap) still routes through this same conversion point."
     },
     %{
       id: :poll_ceiling,
