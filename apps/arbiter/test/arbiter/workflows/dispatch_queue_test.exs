@@ -125,7 +125,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
   defp start_queue(ws, opts) do
     {:ok, pid} = DispatchQueueSupervisor.start_dispatch_queue(ws.id, opts)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    on_exit(fn -> Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)
     pid
   end
 
@@ -164,7 +164,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       assert DispatchQueue.held?(ws.id, task.id)
 
       if pid = DispatchQueueSupervisor.whereis(ws.id) do
-        on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+        on_exit(fn -> Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)
       end
     end
   end
@@ -288,7 +288,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       assert DispatchQueue.held?(ws.id, task.id)
 
       if pid = DispatchQueueSupervisor.whereis(ws.id) do
-        on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+        on_exit(fn -> Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)
       end
     end
 
@@ -533,7 +533,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       assert result.task.status == :in_progress
 
       if pid = DispatchQueueSupervisor.whereis(ws.id) do
-        on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+        on_exit(fn -> Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)
       end
     end
   end
@@ -563,7 +563,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       refute DispatchQueue.held?(ws.id, task.id)
 
       if pid = DispatchQueueSupervisor.whereis(ws.id) do
-        on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+        on_exit(fn -> Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)
       end
     end
 

@@ -18,9 +18,9 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
   require Logger
 
-  alias Arbiter.ProcessTeardown
   alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.ProcessTeardown
   alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.{PatrolRepoScope, ReviewPatrol}
 
