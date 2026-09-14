@@ -56,6 +56,19 @@ defmodule ArbiterWeb.Api.IssueController do
     render(conn, :index, issues: issues)
   end
 
+  # bd-9zuvbh: every task the ReviewGate parked. A park is a flag, not a status,
+  # so this cannot be expressed as `?status=`; it gets its own route the way
+  # `ready` does.
+  def review_parked(conn, params) do
+    opts =
+      case params["workspace_id"] do
+        ws when is_binary(ws) and ws != "" -> [workspace_id: ws]
+        _ -> []
+      end
+
+    render(conn, :index, issues: Issue.review_parked(opts))
+  end
+
   def show(conn, %{"id" => id}) do
     case Ash.get(Issue, id, load: [:child_total, :child_closed]) do
       {:ok, issue} -> render(conn, :show, issue: issue)

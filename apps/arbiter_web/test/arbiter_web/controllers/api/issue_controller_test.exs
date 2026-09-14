@@ -674,4 +674,36 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       refute blocked.id in ids
     end
   end
+
+  # bd-9zuvbh — the ReviewGate park has to be visible to a human, or class C's
+  # terminal state is just a quieter way of losing the work.
+  describe "GET /api/issues/review_parked" do
+    test "returns parked tasks with their reason, oldest first", %{conn: conn, ws: ws} do
+      {:ok, plain} = Ash.create(Issue, %{title: "not parked", workspace_id: ws.id})
+
+      {:ok, older} = Ash.create(Issue, %{title: "older park", workspace_id: ws.id})
+      {:ok, newer} = Ash.create(Issue, %{title: "newer park", workspace_id: ws.id})
+
+      {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(older.id, :inconclusive)
+      {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(newer.id, :reviewer_timeout)
+
+      conn = get(conn, ~p"/api/issues/review_parked")
+      assert %{"data" => list} = json_response(conn, 200)
+
+      ids = Enum.map(list, & &1["id"])
+      assert [older.id, newer.id] == Enum.filter(ids, &(&1 in [older.id, newer.id]))
+      refute plain.id in ids
+
+      assert Enum.find(list, &(&1["id"] == older.id))["review_park_reason"] == "inconclusive"
+      assert Enum.find(list, &(&1["id"] == newer.id))["review_park_reason"] == "reviewer_timeout"
+      assert Enum.find(list, &(&1["id"] == newer.id))["review_parked_at"]
+    end
+
+    test "an unparked issue reports the field as null", %{conn: conn, ws: ws} do
+      {:ok, plain} = Ash.create(Issue, %{title: "plain", workspace_id: ws.id})
+
+      conn = get(conn, ~p"/api/issues/#{plain.id}")
+      assert %{"review_park_reason" => nil, "review_parked_at" => nil} = json_response(conn, 200)
+    end
+  end
 end

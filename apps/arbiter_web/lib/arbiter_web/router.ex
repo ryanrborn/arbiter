@@ -103,6 +103,8 @@ defmodule ArbiterWeb.Router do
 
     # Issues
     get("/issues/ready", IssueController, :ready)
+    # bd-9zuvbh: tasks the ReviewGate parked (class C), oldest park first.
+    get("/issues/review_parked", IssueController, :review_parked)
     get("/issues", IssueController, :index)
     post("/issues", IssueController, :create)
     get("/issues/:id", IssueController, :show)
