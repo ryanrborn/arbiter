@@ -67,9 +67,7 @@ defmodule Arbiter.Worker.OutputLog do
 
   @doc "Root directory for per-run transcript files."
   @spec root() :: String.t()
-  def root, do: Application.get_env(:arbiter, :output_log_root, default_root())
-
-  defp default_root, do: Path.expand("~/dev/arbiter-worker-logs")
+  def root, do: Arbiter.Config.Paths.output_log_root()
 
   @doc "Absolute path of the transcript file for `run_id`."
   @spec path_for(String.t()) :: String.t()

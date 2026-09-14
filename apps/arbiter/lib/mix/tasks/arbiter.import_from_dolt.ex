@@ -9,14 +9,14 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   ## Usage
 
       mix arbiter.import_from_dolt \\
-          --hq-path /home/rborn/dev/gt/.dolt-data/hq \\
-          --server-path /home/rborn/dev/gt/.dolt-data/server
+          --hq-path /path/to/gt/.dolt-data/hq \\
+          --server-path /path/to/gt/.dolt-data/server
 
   Additional `--path NAME=DIR` flags can be passed for other Dolt DBs:
 
       mix arbiter.import_from_dolt \\
-          --hq-path /home/rborn/dev/gt/.dolt-data/hq \\
-          --path access_control=/home/rborn/dev/gt/.dolt-data/access_control
+          --hq-path /path/to/gt/.dolt-data/hq \\
+          --path access_control=/path/to/gt/.dolt-data/access_control
 
   ## What gets imported
 
