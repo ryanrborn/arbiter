@@ -33,7 +33,13 @@ defmodule Arbiter.ProcessTeardown do
   than left running: that is the pre-existing behaviour, not a regression.
   """
 
-  @default_timeout 2_000
+  # A sandboxed SQLite query is sub-millisecond, so this only has to cover the
+  # tail of a callback that is already running one. It is deliberately not
+  # generous: a child still inside a callback after this long is blocked on
+  # something other than the DB (a `GenServer.call` to a process that just went
+  # away, a shell-out), and making every teardown wait on that stalls the suite
+  # far more than the rare abrupt kill costs.
+  @default_timeout 500
 
   @doc """
   Quiesce `pid` and remove it from `supervisor`.
