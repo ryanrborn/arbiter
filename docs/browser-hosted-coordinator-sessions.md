@@ -659,6 +659,42 @@ list at `:13` and a `session` filter alongside `source:` at `:98`.
 With that, the §1 table closes: the $325.78 session appears in `arb usage --by
 session` and in the `--by day` totals it currently falsifies.
 
+### 7.7 Status — phase 6 shipped (bd-be804c, #1651)
+
+Items 1–3 of §7.4 and the "authoritative" half of §7.5 are implemented and
+metering today's **CLI** coordinator, ahead of the session lifecycle, transport
+and UI phases. What shipped:
+
+  * `Arbiter.Usage.ClaudeSessionFile` parses `cost-state`, so `read_totals/2`
+    now returns `cost_usd` / `model_costs` / `duration_ms` alongside the token
+    buckets. Both worker reconciliation paths (`Arbiter.Worker`'s in-process
+    fallback and `Arbiter.Workers.Reconciler`'s boot sweep) write a real dollar
+    figure instead of `nil`.
+  * `Arbiter.Sessions.UsageIngest` sweeps the directories named by
+    `ARBITER_COORDINATOR_SESSION_DIRS` every 5 minutes and writes
+    `source: :coordinator_session` rows. Default is empty — metering someone's
+    `~/.claude` is opt-in.
+  * `usage_events.session_id` is indexed, so §7.6's `--by session` is cheap
+    when phase 7 adds it.
+
+Three things the implementation found that §7.2's sample does not show, all now
+encoded in `ClaudeSessionFile`:
+
+  1. **`cost-state` carries no `timestamp`.** It has `startTime` (epoch ms, the
+     CLI *process* start), which is what `:since` windows it by.
+  2. **`totalCostUSD` is not monotonic across a file.** It is cumulative within
+     one CLI process and **restarts at zero when a new process opens the same
+     file** — a real session reads `… 47.41 → 6.63 → 121.02 …`. The file total is
+     therefore `sum over startTime segments of max(totalCostUSD)`; maxing the
+     whole file would have silently dropped every pre-resume segment.
+  3. **Rollover needs a per-line guard, not just `:since`.** A session that rolls
+     onto a new id copies the parent's lines into the new file, and the copies
+     keep the *parent's* `sessionId`. `read_totals/2` takes `:session_id` and
+     skips lines stamped with a different one.
+
+Still open for phase 7: the live HUD tailer (§7.5's "live, approximate" half)
+and `arb usage --by session` / `--session <id>` (§7.6).
+
 ## 8. Auth modes and Remote Control (AC 10)
 
 ### 8.1 The two modes both already exist

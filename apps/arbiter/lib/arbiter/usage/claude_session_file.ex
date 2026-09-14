@@ -466,8 +466,15 @@ defmodule Arbiter.Usage.ClaudeSessionFile do
     |> maybe_model(msg)
   end
 
-  defp maybe_model(%{model: nil} = totals, %{"model" => model}) when is_binary(model),
-    do: %{totals | model: model}
+  # `<synthetic>` is Claude Code's placeholder on locally-generated assistant
+  # messages (interrupts, error stand-ins) — it names no model, and letting it
+  # win the keep-first race stamps it on the ledger row. Observed on a real
+  # coordinator session whose $52.77 was filed under `model=<synthetic>`.
+  @synthetic_model "<synthetic>"
+
+  defp maybe_model(%{model: nil} = totals, %{"model" => model})
+       when is_binary(model) and model != @synthetic_model,
+       do: %{totals | model: model}
 
   defp maybe_model(totals, _msg), do: totals
 

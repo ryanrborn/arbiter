@@ -500,4 +500,46 @@ defmodule Arbiter.Usage.ClaudeSessionFileTest do
     end
   end
 
+
+  # Claude Code stamps `"model":"<synthetic>"` on locally-generated assistant
+  # messages (interrupts, error placeholders). Keeping the first model seen —
+  # the rule that is right everywhere else — lands that placeholder on the
+  # ledger row whenever such a message opens a session. Observed on a real
+  # coordinator session, which reported `model=<synthetic>` for $52.77 of spend.
+  describe "read_totals/2 model selection" do
+    test "skips the <synthetic> placeholder in favour of a real model id" do
+      dir = tmp_dir()
+      path = Path.join(dir, "synthetic.jsonl")
+
+      File.write!(
+        path,
+        Enum.join(
+          [
+            ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.100Z","message":{"id":"m1","model":"<synthetic>","usage":{"input_tokens":1,"output_tokens":2}}}),
+            ~s({"type":"assistant","timestamp":"2026-07-01T20:51:00.100Z","message":{"id":"m2","model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":2}}})
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert totals.model == "claude-sonnet-5"
+      assert totals.message_count == 2, "the synthetic turn's tokens still count"
+    end
+
+    test "a file with only synthetic turns reports no model rather than the placeholder" do
+      dir = tmp_dir()
+      path = Path.join(dir, "all_synthetic.jsonl")
+
+      File.write!(
+        path,
+        ~s({"type":"assistant","timestamp":"2026-07-01T20:50:00.100Z","message":{"id":"m1","model":"<synthetic>","usage":{"input_tokens":1,"output_tokens":2}}}) <>
+          "\n"
+      )
+
+      assert {:ok, totals} = SessionFile.read_totals(path)
+      assert totals.model == nil
+    end
+  end
+
 end
