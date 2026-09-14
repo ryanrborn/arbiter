@@ -27,15 +27,21 @@ defmodule ArbiterCli.Cmd.Usage do
 
   ## Not all spend belongs to a task (bd-adyhvn)
 
-  Quota refresh probes, the per-dispatch auth pre-flight, and (soon)
-  coordinator / terminal sessions spend real plan quota with no task attached.
-  They carry `source` instead, and `--by task` deliberately **excludes** them
-  rather than inventing a phantom task id. `--by day`, `--by workspace` and
-  `--by source` all count them, so:
+  Quota refresh probes, the per-dispatch auth pre-flight, and the coordinator's
+  own Claude Code sessions spend real plan quota with no task attached. They
+  carry `source` instead, and `--by task` deliberately **excludes** them rather
+  than inventing a phantom task id. `--by day`, `--by workspace` and `--by
+  source` all count them, so:
 
       arb usage --by source --since 7d
 
   is the one rollup that shows the whole bill.
+
+  `coordinator_session` rows arrive from `Arbiter.Sessions.UsageIngest`
+  (bd-be804c), which meters the coordinator's session JSONLs on a timer. The
+  coordinator is roughly a quarter of total consumption, so before that landed
+  `--by source` was the "whole bill" only in principle. An install that has not
+  set `ARBITER_COORDINATOR_SESSION_DIRS` still sees no such rows.
   """
 
   alias ArbiterCli.{Client, Output}

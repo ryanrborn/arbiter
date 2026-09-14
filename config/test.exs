@@ -168,6 +168,11 @@ config :arbiter, :loop_canary_ticker, enabled: false
 # `Arbiter.Events.Retention.sweep/1` synchronously.
 config :arbiter, :events_retention, enabled: false
 
+# bd-be804c: no background sweep of anyone's ~/.claude in the suite — the tests
+# drive `Arbiter.Sessions.UsageIngest.ingest/1` synchronously against fixtures.
+config :arbiter, :coordinator_session_ingest, enabled: false
+config :arbiter, :coordinator_session_dirs, []
+
 # Disable the Codex / Gemini CLI / Antigravity refresh probe in test — there are
 # no real CLIs or endpoints to hit. Tests that exercise the prober inject a
 # :refresh_fun stub and enable explicitly.

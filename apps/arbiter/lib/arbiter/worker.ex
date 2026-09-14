@@ -213,10 +213,6 @@ defmodule Arbiter.Worker do
   # advances to `:running` on the first step, exactly like `:idle`.
   @live_statuses [:idle, :resuming, :running, :awaiting]
 
-  # bd-2aslx6: stamped on a usage row whose tokens came from the on-disk session
-  # JSONL (the killed/crashed-session fallback), which records no dollar figure.
-  @disk_reconciled_cost_note "cost unavailable: tokens reconciled from the on-disk session JSONL, which carries no cost figure"
-
   # Grace after a subprocess exit before we classify+escalate a stop. This drains
   # any in-flight `arb done` message that the port's exit_status raced ahead of
   # (the done marker is enqueued while processing the data line; the exit_status
@@ -1497,8 +1493,9 @@ defmodule Arbiter.Worker do
   # survives the death. Reconcile the missing tokens from that file
   # (`Arbiter.Usage.ClaudeSessionFile`, deduped by message.id). Strictly
   # additive: we only reach for disk when stdout gave us no `tokens_in`, and
-  # only for Claude sessions. Cost stays nil (the file carries no dollar
-  # figure) — tokens are the ask.
+  # only for Claude sessions. Cost comes from the file's own `cost-state`
+  # records when it has any (bd-be804c) and stays nil, with a note, when it
+  # doesn't — tokens were always the ask, dollars are the bonus.
   defp maybe_reconcile_usage_from_disk(usage, session, %State{} = state) do
     provider =
       Map.get(session, :provider) ||
@@ -1554,9 +1551,8 @@ defmodule Arbiter.Worker do
   end
 
   # Overlay deduped on-disk token totals onto the (token-less) usage map. Model
-  # is only backfilled if the stream never reported one; cost stays nil — the
-  # JSONL carries no dollar figure. `raw` is tagged so the ledger row is
-  # auditable as disk-reconciled.
+  # and cost are only backfilled if the stream never reported them. `raw` is
+  # tagged so the ledger row is auditable as disk-reconciled.
   defp merge_disk_totals(usage, totals) do
     usage
     |> Map.put(:tokens_in, totals.tokens_in)
@@ -1564,8 +1560,23 @@ defmodule Arbiter.Worker do
     |> Map.put(:cache_creation_tokens, totals.cache_creation_tokens)
     |> Map.put(:cache_read_tokens, totals.cache_read_tokens)
     |> maybe_put_model(totals.model)
-    |> maybe_put_cost_note(@disk_reconciled_cost_note)
+    |> maybe_put_cost(totals.cost_usd)
     |> Map.put(:raw, reconciled_raw(Map.get(usage, :raw), totals))
+  end
+
+  # The file's `cost-state` records carry the CLI's own dollar figure
+  # (bd-be804c), summed per process segment and windowed by this session's
+  # start. Reuse it verbatim — never recompute a price locally. Only when the
+  # window held no `cost-state` at all does the row fall back to naming why
+  # its cost is null.
+  defp maybe_put_cost(usage, nil),
+    do: maybe_put_cost_note(usage, Arbiter.Usage.ClaudeSessionFile.no_cost_note())
+
+  defp maybe_put_cost(usage, cost) when is_float(cost) do
+    case Map.get(usage, :cost_usd) do
+      existing when is_number(existing) -> usage
+      _ -> Map.put(usage, :cost_usd, cost)
+    end
   end
 
   # bd-2aslx6 (#1428): a ledger row carrying six-figure token counts next to a
@@ -1595,7 +1606,8 @@ defmodule Arbiter.Worker do
     Map.put(base, "arb_usage_source", %{
       "reconciled_from" => "session_jsonl",
       "message_count" => totals.message_count,
-      "skipped_before_since" => totals.skipped_before_since
+      "skipped_before_since" => totals.skipped_before_since,
+      "cost_state_count" => totals.cost_state_count
     })
   end
 

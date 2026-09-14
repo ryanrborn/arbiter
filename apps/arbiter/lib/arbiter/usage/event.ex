@@ -77,6 +77,11 @@ defmodule Arbiter.Usage.Event do
       index [:task_id, :occurred_at]
       index [:base_task_id, :occurred_at]
       index [:source, :occurred_at]
+      # bd-be804c: the ingest's idempotency lookup ("what have I already billed
+      # this session?") runs once per session file per cycle, and `--by session`
+      # groups on it. `task_id` is nil for session rows, so this is the only key
+      # they have.
+      index [:session_id]
     end
   end
 
