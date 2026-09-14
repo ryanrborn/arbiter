@@ -91,7 +91,7 @@ entire agent spend spent on the gate misfiring.
 ### 1.1 The two root causes, stated precisely
 
 **RC1 — "the reviewed SHA" is a single value.** `issues.last_reviewed_sha`
-(`apps/arbiter/lib/arbiter/tasks/issue.ex:806` (`last_reviewed_sha`)) is one
+(`apps/arbiter/lib/arbiter/tasks/issue.ex:909` (`last_reviewed_sha`)) is one
 nullable string, written by whichever of four unrelated writers ran last. There
 is no record of *which* commits an approval covered, so every consumer
 reconstructs one — badly, and differently. `Arbiter.Mergers.ReviewedSha` invents
@@ -138,23 +138,23 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| G1 | Pre-spawn commit check — branch has commits ahead of target | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2638` (`reviewer_commit_check`) | bd-1mksks: reviewing an empty branch, reviewer reports "no work" | Git hiccup reads as "no commits" | **Fails open** (git errors → proceed); genuine `{:ok, false}` → `escalate_pre_review` | 2 (bd-1mksks, bd-ofql8k) |
-| G2 | Empty diff-range guard (`base_sha == head_sha`) | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2682` (`empty_diff_guard`) | bd-31bh37: target already absorbed the commits; bogus REQUEST_CHANGES | A legitimately-absorbed branch escalates instead of completing | Escalates as `:request_changes` (`apps/arbiter/lib/arbiter/worker/review_gate.ex:2237` (`escalate_pre_review`)) — **fails the run** | 1 |
-| G3 | Reviewing-pass timeout, with one fresh-mind retry | `apps/arbiter/lib/arbiter/worker/review_gate.ex:987` (`timeout_retries_left`), bound `apps/arbiter/lib/arbiter/worker/review_gate.ex:190` (`default_timeout_retries`) | bd-78vg4v: transient hung session | A slow-but-working review is killed and re-paid | Retry once, then `escalate_timeout` → `{:no_verdict, …}` → **failed run** `:review_gate_inconclusive` | 2 |
-| G4 | Timeout → `:no_verdict`, not `:request_changes` | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2263` (`escalate_timeout`) | bd-216r3e: synthetic single-finding REQUEST_CHANGES → self-sustaining re-dispatch loop | — (this one is a *fix* to a prior misfire) | Records `verdict: :timed_out`, reports `:no_verdict` | 1 |
+| G1 | Pre-spawn commit check — branch has commits ahead of target | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2728` (`reviewer_commit_check`) | bd-1mksks: reviewing an empty branch, reviewer reports "no work" | Git hiccup reads as "no commits" | **Fails open** (git errors → proceed); genuine `{:ok, false}` → `escalate_pre_review` | 2 (bd-1mksks, bd-ofql8k) |
+| G2 | Empty diff-range guard (`base_sha == head_sha`) | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2772` (`empty_diff_guard`) | bd-31bh37: target already absorbed the commits; bogus REQUEST_CHANGES | A legitimately-absorbed branch escalates instead of completing | Escalates via `apps/arbiter/lib/arbiter/worker/review_gate.ex:2315` (`escalate_pre_review`) — since P9, **parks** `:empty_diff`, one escalation, run recorded `review_parked` | 1 |
+| G3 | Reviewing-pass timeout, with one fresh-mind retry | `apps/arbiter/lib/arbiter/worker/review_gate.ex:987` (`timeout_retries_left`), bound `apps/arbiter/lib/arbiter/worker/review_gate.ex:190` (`default_timeout_retries`) | bd-78vg4v: transient hung session | A slow-but-working review is killed and re-paid | Retry once, then `escalate_timeout` → since P9, **parks** `:reviewer_timeout` (was a **failed run** `:review_gate_inconclusive`) | 2 |
+| G4 | Timeout → `:no_verdict`, not `:request_changes` | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2349` (`escalate_timeout`) | bd-216r3e: synthetic single-finding REQUEST_CHANGES → self-sustaining re-dispatch loop | — (this one is a *fix* to a prior misfire) | Records `verdict: :timed_out`, reports `:no_verdict` | 1 |
 | G5 | Verdict parse — `VERDICT:` line, memory then durable transcript | `apps/arbiter/lib/arbiter/worker/review_gate.ex:478` (`parse_verdict`), regex `apps/arbiter/lib/arbiter/worker/review_gate.ex:261` (`verdict_approve`) | bd-6dxit2: a dropped PubSub line reads as "reviewer said nothing" | A real verdict in an unrecognised shape → `:no_verdict` | `maybe_reprompt` | **Chain B: 4–5** |
-| G6 | Verdict re-prompt budget | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1728` (`maybe_reprompt`), bound `apps/arbiter/lib/arbiter/worker/review_gate.ex:181` (`default_verdict_retries`) | bd-8v8ays: malformed verdict wastes a whole review | Two passes paid, still no verdict | **Failed run** `:review_gate_inconclusive` | 3 |
+| G6 | Verdict re-prompt budget | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1794` (`maybe_reprompt`), bound `apps/arbiter/lib/arbiter/worker/review_gate.ex:181` (`default_verdict_retries`) | bd-8v8ays: malformed verdict wastes a whole review | Two passes paid, still no verdict | Since P9, **parks** `:inconclusive` (was a **failed run** `:review_gate_inconclusive`) | 3 |
 | G7 | Last-ditch transcript recovery before conceding | `apps/arbiter/lib/arbiter/worker/review_gate.ex:554` (`recover_verdict_from_scans`) | bd-869mmg/bd-atyrrq: a real review discarded as inconclusive | — | Re-dispatches the recovered verdict | 1 |
-| G8 | Empty-findings guard on REQUEST_CHANGES | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1189` (`findings_present?`) | bd-3y2mda: revise loop entered with nothing to act on | A terse-but-real finding under 16 chars | Shares G6's budget; then **failed run** | 2 |
-| G9 | Verdict guard: partial verification | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2001` (`verdict_guard_spec`) | bd-4te55l: `VERIFICATION: PARTIAL` findings taken at face value | Honest disclosure is punished with an extra round | Re-prompt ×1, then fail-closed behind a banner | 1 |
-| G10 | Verdict guard: unaddressed findings | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2020` (`unaddressed_findings`) | bd-6r8caj: APPROVE that never revisits its own open finding | **bd-c6tdbu**: a non-blocking observation parsed as a Medium finding → honest APPROVE rejected, forced fix round had nothing to fix → **failed run** | Re-prompt ×1, then `fail_closed` | **3** |
-| G11 | Verdict guard: unmet criteria | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2046` (`unmet_criteria`) | bd-4yhv4x: APPROVE with a `[NOT MET]` criterion | A criterion the reviewer mis-parsed blocks a good PR | Re-prompt ×1, then `fail_closed` | 1 |
-| G12 | Verdict guard: missing criteria breakdown | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2070` (`missing_criteria`) | bd-4yhv4x occurrences #1/#2: bare holistic APPROVE | Reviewer omits the breakdown on a trivially-correct diff | Re-prompt ×1, then `fail_closed` | 1 |
-| G13 | Shared guard dispatcher + terminal handling | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1929` (`run_verdict_guard`), `apps/arbiter/lib/arbiter/worker/review_gate.ex:1965` (`fail_closed`), registry `apps/arbiter/lib/arbiter/worker/review_gate.ex:1912` (`verdict_guards`) | Four guards drifting apart | — | — | — |
-| G14 | Round budget exhausted | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1267` (`do_route_after_reject`) | Unbounded review↔revise ping-pong | A converging task one round short escalates | Escalate with transcript → **failed run** | 2 |
-| G15 | Commit gate: HEAD unchanged after a fix round | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1396` (`commit_gate_outcome`) | bd-2eyf9y: re-reviewing an identical diff | A legitimate rebuttal-only round is treated as failure | Nudge ×1, then `escalate_commit_gate` → `{:no_verdict, …}` → **failed run** | 2 |
-| G16 | Commit-gate escalations (3 shapes) | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1502` (`escalate_commit_gate`), `apps/arbiter/lib/arbiter/worker/review_gate.ex:1385` (`escalate_no_changes`) | bd-c6tdbu: the "no changes" message was misleading after an approval-gap reject | — | `:review_gate_inconclusive` | 2 |
-| G17 | Reviewed-SHA stamp on APPROVE | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2736` (`stamp_reviewed_head`) | bd-6bg54c cause B: guard could never learn a later round approved a newer head | Best-effort; a failed write silently leaves the *old, conservative* value — which is precisely the #1585 stall | Logs and continues | 1 |
+| G8 | Empty-findings guard on REQUEST_CHANGES | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1189` (`findings_present?`) | bd-3y2mda: revise loop entered with nothing to act on | A terse-but-real finding under 16 chars | Shares G6's budget; then, since P9, **parks** `:inconclusive` (was a **failed run**) | 2 |
+| G9 | Verdict guard: partial verification | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2001` (`verdict_guard_spec`) | bd-4te55l: `VERIFICATION: PARTIAL` findings taken at face value | Honest disclosure is punished with an extra round | Re-prompt ×1, then fail-closed behind a banner; since P9 the terminal **parks** `:verdict_guard_exhausted` rather than failing the run (content stays closed — nothing merges) | 1 |
+| G10 | Verdict guard: unaddressed findings | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2020` (`unaddressed_findings`) | bd-6r8caj: APPROVE that never revisits its own open finding | **bd-c6tdbu**: a non-blocking observation parsed as a Medium finding → honest APPROVE rejected, forced fix round had nothing to fix → **failed run** | Re-prompt ×1, then `fail_closed` → since P9 **parks** `:verdict_guard_exhausted` (content stays closed) | **3** |
+| G11 | Verdict guard: unmet criteria | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2116` (`unmet_criteria`) | bd-4yhv4x: APPROVE with a `[NOT MET]` criterion | A criterion the reviewer mis-parsed blocks a good PR | Re-prompt ×1, then `fail_closed` → since P9 **parks** `:verdict_guard_exhausted` (content stays closed) | 1 |
+| G12 | Verdict guard: missing criteria breakdown | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2140` (`missing_criteria`) | bd-4yhv4x occurrences #1/#2: bare holistic APPROVE | Reviewer omits the breakdown on a trivially-correct diff | Re-prompt ×1, then `fail_closed` → since P9 **parks** `:verdict_guard_exhausted` (content stays closed) | 1 |
+| G13 | Shared guard dispatcher + terminal handling | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1929` (`run_verdict_guard`), `apps/arbiter/lib/arbiter/worker/review_gate.ex:2046` (`fail_closed`), registry `apps/arbiter/lib/arbiter/worker/review_gate.ex:1978` (`verdict_guards`) | Four guards drifting apart | — | — | — |
+| G14 | Round budget exhausted | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1267` (`do_route_after_reject`) | Unbounded review↔revise ping-pong | A converging task one round short escalates | Escalate with transcript → **failed run**. P9 left this one deliberately: a reviewer that really said REQUEST_CHANGES every round is an honest rejection, so only the verdict-guard arm that routes here now parks | 2 |
+| G15 | Commit gate: HEAD unchanged after a fix round | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1396` (`commit_gate_outcome`) | bd-2eyf9y: re-reviewing an identical diff | A legitimate rebuttal-only round is treated as failure | Nudge ×1, then `escalate_commit_gate` → since P9, **parks** `:commit_gate_no_changes` / `:commit_gate_uncommitted` (was a **failed run**) | 2 |
+| G16 | Commit-gate escalations (3 shapes) | `apps/arbiter/lib/arbiter/worker/review_gate.ex:1502` (`escalate_commit_gate`), `apps/arbiter/lib/arbiter/worker/review_gate.ex:1385` (`escalate_no_changes`) | bd-c6tdbu: the "no changes" message was misleading after an approval-gap reject | — | Since P9, **parks** (`:commit_gate_*` / `:no_changes_after_approval_gap`); was a **failed run** `:review_gate_inconclusive` | 2 |
+| G17 | Reviewed-SHA stamp on APPROVE | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2826` (`stamp_reviewed_head`) | bd-6bg54c cause B: guard could never learn a later round approved a newer head | Best-effort; a failed write silently leaves the *old, conservative* value — which is precisely the #1585 stall | Logs and continues | 1 |
 
 ### 2.2 `apps/arbiter/lib/arbiter/worker/watchdog.ex` — the merge guard
 
@@ -197,8 +197,8 @@ inventory cannot silently rot.
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
 | C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3094` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
-| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:4741` (`park_rejected`) | — | Converts every gate outcome into `Run.status = :failed` (`apps/arbiter/lib/arbiter/worker.ex:4765` (`fail_reason_for`)) — this is *where* `:review_gate_inconclusive` becomes a failed run | `fail_now` | 2 |
-| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:4789` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
+| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:4741` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it writes `Run.status = :review_parked` and pages once; without one (a genuine REQUEST_CHANGES only) it is the pre-P9 `Run.status = :failed` via `apps/arbiter/lib/arbiter/worker.ex:4861` (`fail_reason_for`) | `fail_now` | 2 |
+| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:4885` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
 | C4 | `{:awaiting_review_timeout, N}` → `review_not_started` | `apps/arbiter/lib/arbiter/worker.ex:1330` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Terminal non-failure status | 1 |
 
 ### 2.5 ReviewPatrol and PRPatrol
@@ -244,9 +244,14 @@ Counting the 60 rows above:
   (`default_max_auto_resolve_attempts`)) and merely watches afterwards; that is
   the class-E shape, and it does not cover W7. Every other bound exists; they are
   simply scattered across ten module attributes with no shared vocabulary.
-* **Thirteen guards convert a guard decision into a failed run** — G2, G3, G6,
-  G8, the four verdict-guard terminal arms (G9, G10, G11, G12), G14, G15, G16,
-  W6 and W12. That is the mechanism behind all `$325.82`.
+* **Four guards convert a guard decision into a failed run** — G14's
+  genuine-REQUEST_CHANGES-at-the-round-cap arm, C2 (the conversion point G14
+  routes through), W6 and W12. It was thirteen; P9 (bd-9zuvbh) took ten of them
+  — G2, G3, G6, G8, the four verdict-guard terminal arms (G9, G10, G11, G12),
+  G15 and G16 — and made them **park** instead, which is the mechanism that was
+  behind most of the `$325.82`. The content side of all ten is unchanged: a
+  malformed or guard-rejected APPROVE still never merges. The remaining four are
+  P10's class-audit inventory.
 * **One guard trades correctness away on purpose:** W8/M4 suspend the check for
   fleet-authored pushes — deliberately, to stop the fleet deadlocking against its
   own rebase — and the CI `fix_pass` path uses the same exemption, so a
@@ -342,7 +347,7 @@ below calls it and nothing writes coverage any other way:
 
 | Site | Today | Becomes |
 |---|---|---|
-| ReviewGate clean approve | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2736` (`stamp_reviewed_head`) writes `last_reviewed_sha` | `Coverage.record(kind: :reviewed, round: state.round, net_diff_id: …)` — **and the write is no longer best-effort**: a failed write must page, because a silently-missing row *is* the #1585 stall |
+| ReviewGate clean approve | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2826` (`stamp_reviewed_head`) writes `last_reviewed_sha` | `Coverage.record(kind: :reviewed, round: state.round, net_diff_id: …)` — **and the write is no longer best-effort**: a failed write must page, because a silently-missing row *is* the #1585 stall |
 | ReviewGate verdict guards | — | nothing (a `fail_closed` is a reject) |
 | ReviewPatrol post-review | `last_reviewed_sha: head` on the engagement | `Coverage.record(kind: :reviewed, source: :review_patrol)` on the **authoring task**, plus the engagement cursor as today |
 | ExternalReview baseline | `apps/arbiter/lib/arbiter/reviews/external_review.ex:1418` (`last_reviewed_sha`) | `Coverage.record(kind: :reviewed, source: :external_review)` when the external verdict is an approval; cursor only otherwise |
@@ -499,6 +504,18 @@ The point of the table: chain B's four links all end in the same place — a
 **failed run on work that was fine** — and that ending is a policy choice, not a
 parsing problem. Class C removes it without touching the parser.
 
+**Shipped (P9, bd-9zuvbh/#1650):** every class-C terminal in
+`worker/review_gate.ex` now reports `{:parked, reason, findings}` instead of a
+verdict the author fails the run on. `Arbiter.Worker.park_rejected/4` writes
+`Run.status = :review_parked` (a terminal non-failure, the `:review_not_started`
+shape), stamps `issues.review_park_reason` via `Arbiter.Tasks.ReviewPark`, and
+pages the coordinator **once** — the park row itself is the episode claim, so a
+re-report of the same reason is silent. The four shapes above are replayed one
+test each in
+`apps/arbiter/test/arbiter/worker/review_gate_chain_b_replay_test.exs`. Content
+is untouched: a malformed or guard-rejected APPROVE is still never accepted and
+still never merges.
+
 ### 4.7 The five current failure reasons, mapped
 
 | Reason | Runs / cost | Under the model |
@@ -569,6 +586,8 @@ Why each side:
   not with a retry: the 303-retry loop and the five hand-merges both came from
   treating "refuse" as "try again in a minute".
 
+  (Class C landed in P9; see the note at the end of §4.6.)
+
   Class A carries **two distinct bounds**, because it answers two distinct
   questions and today only the first is bounded at all. The **coverage
   predicate** bound (5 polls / 1 review round) governs *"may this head merge?"*.
@@ -597,7 +616,7 @@ Why each side:
 ### 5.4 The registry — what makes the freeze enforceable
 
 A policy in a doc does not stop the next guard. The mechanism is one list,
-modelled on `apps/arbiter/lib/arbiter/worker/review_gate.ex:1912`
+modelled on `apps/arbiter/lib/arbiter/worker/review_gate.ex:1978`
 (`verdict_guards`), which already proves the pattern works for four guards:
 
 ```elixir
@@ -631,9 +650,11 @@ so a refusal path added to any of the six modules fails
 `apps/arbiter/test/arbiter/reviews/guard_registry_test.exs` until it is declared.
 The rows that break this section's policy today — M3's and W7's unbounded merge
 retries, R2's unbounded CI-settle defer, W6's class-A `Worker.fail/2`, and the
-thirteen guards §2.6 counts as failing runs — are recorded in
+guards §2.6 counts as failing runs — are recorded in
 `GuardRegistry.known_violations/0`, each naming the phase above that removes it.
-That list is frozen by test: it may shrink, never grow.
+That list is frozen by test: it may shrink, never grow. **P9 shrank it by ten**
+(G2, G3, G6, G8, G9–G12, G15, G16 now declare `terminal: :parked`); the four
+`:failed_run` rows left are G14, C2, W6 and W12.
 
 ---
 
@@ -741,8 +762,8 @@ verifies a merged change against it.
 | **P6** | Delete the MergeQueue mirror; queue calls `decide/3`; **bound both unbounded merge-call retries: M3's stale-SHA retry and W7's `merge_fail_count`** become class A's bound + park | P5 | P1 | D2 | A stale-coverage item reaches a terminal parked state within N ticks and escalates exactly once; a Watchdog whose `merge/2` keeps failing parks after 5 consecutive attempts, escalates once, and issues no further merge call (it may keep watching); no class-A row in the registry has an unbounded merge-call path; **restart-and-observe** |
 | **P7** | Post-approval `fix_pass` / conflict-resolver pushes stop suspending the guard; content-equal pushes write `:mechanical`, content-changing ones route to a scoped `S2..S3` re-review (§4.5) | P4 | P0 | D3 | A fix-pass commit is never merged without a coverage row; the re-review is delta-scoped; **restart-and-observe** on a real CI-failure PR |
 | **P8** | `Arbiter.Reviews.GuardRegistry` + the two conformance tests (§5.4) | — (parallel with P0–P2) | P1 | D2 | Every §2 guard has a row; a new refusal path without a row fails the suite; no row has an infinite bound |
-| **P9** | Apply class C to the ReviewGate terminal paths: `:review_gate_inconclusive` and the exhausted verdict guards park + escalate once instead of failing the run | P8 | P0 | D3 | No ReviewGate outcome sets `Run.status = :failed` on a task whose PR is approved; the 4 chain-B shapes each produce exactly one escalation; **restart-and-observe** |
-| **P10** | Apply class E/F audit: bound R2's CI-settle defer; confirm every remaining guard matches its registry row | P8 | P2 | D2 | Registry conformance test green with zero exemptions |
+| **P9** ✅ | Apply class C to the ReviewGate terminal paths: `:review_gate_inconclusive` and the exhausted verdict guards park + escalate once instead of failing the run | P8 | P0 | D3 | No ReviewGate outcome sets `Run.status = :failed` on a task whose PR is approved; the 4 chain-B shapes each produce exactly one escalation; **restart-and-observe** |
+| **P10** | Apply class E/F audit: bound R2's CI-settle defer; confirm every remaining guard matches its registry row. P9 also hands it the one arm it deliberately left: **G14/C2's genuine REQUEST_CHANGES at the round cap**, which §5.3 would park as class D and P9's AC1 kept failing | P8 | P2 | D2 | Registry conformance test green with zero exemptions |
 | **P11** | `arb review cover <task> <sha> --reason` (the `:operator` kind) + `arb review coverage <task>` | P0 | P2 | D1 | **Restart-and-observe:** writing a row for a really-parked PR unblocks its class-A guard on the next poll of the running coordinator |
 | **P12** | Demote `issues.last_reviewed_sha` to ReviewPatrol's cursor; remove every merge-path read; docs + moduledocs; re-anchor this doc's citations and §2's line counts against the post-P5/P6 source | P6, P7 | P2 | D1 | No merge path references the column; `ReviewedSha` module deleted; **restart-and-observe:** after a restart, one full approve→merge cycle completes with no `ReviewedSha` or `last_reviewed_sha` read on the merge path in the journal; `ReviewCoverageDesignTest` green |
 

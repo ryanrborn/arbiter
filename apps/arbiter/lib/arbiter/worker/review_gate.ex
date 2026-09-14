@@ -266,7 +266,25 @@ defmodule Arbiter.Worker.ReviewGate do
   @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
 
   @type verdict ::
-          {:approve, String.t()} | {:request_changes, String.t()} | :no_verdict
+          {:approve, String.t()}
+          | {:request_changes, String.t()}
+          | {:parked, park_reason(), String.t()}
+          | :no_verdict
+
+  @typedoc """
+  bd-9zuvbh: why a class-C terminal parked rather than failed the run. Mirrors
+  `Arbiter.Tasks.ReviewPark.reason/0`; the author maps each onto the park it
+  stamps on the task.
+  """
+  @type park_reason ::
+          :inconclusive
+          | :reviewer_failed
+          | :reviewer_timeout
+          | :verdict_guard_exhausted
+          | :no_changes_after_approval_gap
+          | :commit_gate_no_changes
+          | :commit_gate_uncommitted
+          | :empty_diff
 
   @type opt ::
           {:author, pid()}
@@ -738,6 +756,15 @@ defmodule Arbiter.Worker.ReviewGate do
       # misleading, since there was nothing to fix) commit-gate-no-changes
       # failure.
       approval_gap_pending: nil,
+      # bd-9zuvbh: which verdict guard (G9-G12) turned this round's verdict
+      # down, when the reject currently being routed came from `fail_closed/3`
+      # rather than from a reviewer that really said REQUEST_CHANGES. Only
+      # `do_route_after_reject/2`'s round-cap arm reads it, and only to decide
+      # which terminal it reports: a guard-rejected APPROVE at the cap parks
+      # (class C — the reviewer approved, a guard did not agree, and a human
+      # decides), while a genuine REQUEST_CHANGES at the cap still fails the run
+      # exactly as before. Cleared on every path that is not a guard reject.
+      guard_rejected: nil,
       # bd-2eyf9y: whether the CURRENT round's implementer has already been
       # resumed once to commit uncommitted work. Reset to false whenever a
       # round genuinely advances (finish_revise/1's dispatch_next_review/1) so
@@ -800,7 +827,7 @@ defmodule Arbiter.Worker.ReviewGate do
               "ReviewGate: empty diff range detected for task=#{state.task_id}: #{reason}"
             )
 
-            escalate_pre_review(state, reason)
+            escalate_pre_review(state, reason, :empty_diff)
 
           :ok ->
             case launch_worker(
@@ -818,9 +845,18 @@ defmodule Arbiter.Worker.ReviewGate do
                   "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
                 )
 
+                # bd-9zuvbh: a reviewer that could not be spawned (quota gate
+                # refusal, no outpost, an adapter error out of
+                # `start_worker_session/4`) is the SAME liveness failure as one
+                # whose session dies a step later — no verdict was produced and
+                # nobody has found a problem with the work. It parks as
+                # `:reviewer_failed` rather than failing the run, which also
+                # matters on a revise round: a round-2 spawn failure must not
+                # fail a run whose round-1 work was fine.
                 escalate_pre_review(
                   state,
-                  "ReviewGate could not spawn a reviewer: #{inspect(reason)}"
+                  "ReviewGate could not spawn a reviewer: #{inspect(reason)}",
+                  :reviewer_failed
                 )
             end
         end
@@ -1080,7 +1116,11 @@ defmodule Arbiter.Worker.ReviewGate do
                 "failure (#{category}); escalating without a re-prompt"
             )
 
-            {:done, finish(state, {:no_verdict, infra_failure_message(reason)})}
+            {:done,
+             finish(
+               state,
+               {:parked, infra_park_reason(category), infra_failure_message(reason)}
+             )}
 
           _ ->
             # bd-869mmg round 2/3: carry the run id and scanned line counts this
@@ -1237,7 +1277,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # route on the remaining round budget (escalate if exhausted, else revise).
   defp handle_reject(state, findings) do
     record_round(state, :review, :request_changes, findings, converged: false)
-    route_after_reject(%{state | approval_gap_pending: nil}, findings)
+    route_after_reject(%{state | approval_gap_pending: nil, guard_rejected: nil}, findings)
   end
 
   # bd-c6tdbu: only the `:unaddressed_findings` guard's reject carries the gap
@@ -1277,12 +1317,27 @@ defmodule Arbiter.Worker.ReviewGate do
       "ReviewGate: task=#{state.task_id} not converged after #{max} round(s); escalating with transcript"
     )
 
-    {:done, finish(state, {:request_changes, escalation_payload(state)})}
+    {:done, finish(state, terminal_reject_verdict(state))}
   end
 
   defp do_route_after_reject(state, findings) do
     enter_revise(state, findings)
   end
+
+  # What the round cap reports. bd-9zuvbh splits the two things that reach it:
+  #
+  #   * a reviewer that really said REQUEST_CHANGES for `max_rounds` rounds —
+  #     the work did not converge, the run failed, and that is honest. Unchanged.
+  #   * a verdict guard (G9–G12) that refused the reviewer's APPROVE and ran out
+  #     of re-prompts — bd-c6tdbu's shape, where an honest APPROVE was rejected
+  #     over a non-blocking observation and the run died on work that was fine.
+  #     Class C parks that: the APPROVE is still NOT accepted (content stays
+  #     fail-closed) but the run is not failed either.
+  defp terminal_reject_verdict(%{guard_rejected: guard} = state) when not is_nil(guard) do
+    {:parked, :verdict_guard_exhausted, escalation_payload(state)}
+  end
+
+  defp terminal_reject_verdict(state), do: {:request_changes, escalation_payload(state)}
 
   # Stage 2: post the reviewer's findings to the implementer over the mailbox,
   # then spawn a fresh implementer worker (same branch/worktree) to fix or rebut
@@ -1309,7 +1364,10 @@ defmodule Arbiter.Worker.ReviewGate do
           "ReviewGate: task=#{state.task_id} round #{state.round} requested changes; revising"
         )
 
-        {:revise, state}
+        # The round is genuinely under way now, so the guard provenance has done
+        # its job: only the terminal arms read it, and from here the next
+        # terminal belongs to the round that follows, not to this reject.
+        {:revise, %{state | guard_rejected: nil}}
 
       {:error, reason} ->
         state =
@@ -1320,7 +1378,11 @@ defmodule Arbiter.Worker.ReviewGate do
             "The implementer worker could not be spawned: #{inspect(reason)}"
           )
 
-        {:done, finish(state, {:request_changes, escalation_payload(state)})}
+        # bd-9zuvbh: an implementer that could not be spawned is a liveness
+        # failure, and when the reject it was standing in for came from a
+        # verdict guard the PR still has a reviewer's APPROVE on it. Same split
+        # as the round cap: park that, fail a genuine REQUEST_CHANGES.
+        {:done, finish(state, terminal_reject_verdict(state))}
     end
   end
 
@@ -1497,13 +1559,19 @@ defmodule Arbiter.Worker.ReviewGate do
     """
   end
 
-  # bd-2eyf9y: both escalations report `{:no_verdict, message}` — same
-  # protocol as `escalate_timeout/1` — so `park_rejected/3` files them as
+  # bd-2eyf9y: all three escalations report the same shape as
+  # `escalate_timeout/1`, so `park_rejected/4` files them as
   # `:review_gate_inconclusive` and `maybe_dispatch_fix_round/3` does NOT
   # auto-redispatch a fresh fix round against them (that dispatcher only acts
-  # on `:request_changes`). The message starts with the module's marker
-  # sentence so `Worker.escalate_review_gate/3` can give each a subject
-  # distinct from the generic "review inconclusive" wording.
+  # on `:request_changes`).
+  #
+  # bd-9zuvbh: that shape is now `{:parked, reason, message}` rather than
+  # `{:no_verdict, message}`. The reason is what gives each one its own mail
+  # subject — the distinction bd-2eyf9y originally carried in the message's
+  # leading marker sentence, which the author had to string-match to recover.
+  # The markers stay (the escalation body still opens with them, and
+  # `Worker.review_gate_escalation_subject/3` still reads them on the
+  # pre-P9 `:no_verdict` path) but nothing has to infer the reason any more.
   defp escalate_commit_gate(state, :uncommitted) do
     msg =
       "#{@commit_gate_uncommitted_marker} (task #{state.task_id}, round #{state.round}). " <>
@@ -1512,7 +1580,7 @@ defmodule Arbiter.Worker.ReviewGate do
         "re-reviewer would see the same diff as last round, so no further review round " <>
         "was dispatched.\n\n" <> escalation_payload(state)
 
-    finish(state, {:no_verdict, msg})
+    finish(state, {:parked, :commit_gate_uncommitted, msg})
   end
 
   defp escalate_commit_gate(state, :no_changes) do
@@ -1522,7 +1590,7 @@ defmodule Arbiter.Worker.ReviewGate do
         "change. No further review round was dispatched against an identical diff.\n\n" <>
         escalation_payload(state)
 
-    finish(state, {:no_verdict, msg})
+    finish(state, {:parked, :commit_gate_no_changes, msg})
   end
 
   defp escalate_commit_gate(state, {:no_changes_after_approval_gap, gap}) do
@@ -1539,7 +1607,7 @@ defmodule Arbiter.Worker.ReviewGate do
         "requested) was accurate and the approval should not have been rejected. A human " <>
         "must decide — the approval was NOT auto-accepted.\n\n" <> escalation_payload(state)
 
-    finish(state, {:no_verdict, msg})
+    finish(state, {:parked, :no_changes_after_approval_gap, msg})
   end
 
   @doc """
@@ -1717,6 +1785,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # names the real cause and remediation instead of the generic "no parseable
   # VERDICT line" message, which gave no signal that re-authenticating (or
   # waiting out a rate limit) would fix it.
+  # bd-9zuvbh: which park an infra failure stamps. The distinction is not
+  # cosmetic — bd-1xss5z was agy's own `--print-timeout` firing mid-review, and
+  # "the reviewer ran out of time" is a different operator action (raise the
+  # budget, shrink the review) from "the reviewer's session broke" (credentials,
+  # quota, a dead gateway).
+  defp infra_park_reason(:agent_print_timeout), do: :reviewer_timeout
+  defp infra_park_reason(_category), do: :reviewer_failed
+
   defp infra_failure_message(%StopReason{} = reason) do
     "Reviewer subprocess failed: #{reason.summary}. #{reason.remediation}"
   end
@@ -1972,7 +2048,17 @@ defmodule Arbiter.Worker.ReviewGate do
     recorded = if spec.record == :banner, do: bannered, else: findings
 
     record_round(state, :review, spec.verdict, recorded, converged: false)
-    state = %{state | approval_gap_pending: approval_gap_pending_for(spec)}
+
+    state = %{
+      state
+      | approval_gap_pending: approval_gap_pending_for(spec),
+        # bd-9zuvbh: remember that THIS reject came from a guard, not from a
+        # reviewer. `do_route_after_reject/2` needs it to tell an exhausted
+        # verdict guard (class C: park) from a genuine REQUEST_CHANGES at the
+        # round cap (still a failed run, per P9's AC1).
+        guard_rejected: spec.reason
+    }
+
     route_after_reject(state, bannered)
   end
 
@@ -2220,11 +2306,13 @@ defmodule Arbiter.Worker.ReviewGate do
     )
   end
 
+  defp verdict_label({:parked, reason, _findings}), do: "PARKED(#{reason})"
   defp verdict_label({label, _findings}), do: label |> Atom.to_string() |> String.upcase()
   defp verdict_label(label) when is_atom(label), do: label |> Atom.to_string() |> String.upcase()
 
   defp normalize_verdict({:approve, _} = v), do: v
   defp normalize_verdict({:request_changes, _} = v), do: v
+  defp normalize_verdict({:parked, _reason, _findings} = v), do: v
 
   defp normalize_verdict(:no_verdict),
     do: {:no_verdict, "Reviewer produced no parseable VERDICT line."}
@@ -2239,9 +2327,33 @@ defmodule Arbiter.Worker.ReviewGate do
   # sources findings only from `Round`, not `notes`) sees nothing on a
   # re-dispatched fix-pass — a real data-loss regression, not just a dangling
   # pointer.
-  defp escalate_pre_review(state, reason) do
+  # bd-9zuvbh: `park_reason` says which half of §5.3 the escalation falls under.
+  #
+  #   * nil — deliberately still a `:request_changes` run failure, because the
+  #     pre-review condition is ACTIONABLE BY THE IMPLEMENTER and the honest
+  #     answer is "this branch is not reviewable as it stands": a branch that
+  #     conflicts with its target (someone must resolve it) and a branch with no
+  #     commits on it (there is nothing to review). Neither is a liveness
+  #     failure of the review — the work itself is what is missing or broken —
+  #     so class C does not apply and these keep failing the run on purpose.
+  #   * `:empty_diff` — G2, where the target has simply already absorbed the
+  #     commits. The work is fine by definition, so §5.3's class-B rule applies:
+  #     complete with one escalation rather than a run failure.
+  #   * `:reviewer_failed` — the reviewer could not be spawned at all. No
+  #     verdict, nothing for an implementer to fix, work nobody has faulted:
+  #     class C parks it, exactly as a reviewer session that dies one step later
+  #     is parked.
+  defp escalate_pre_review(state, reason, park_reason \\ nil)
+
+  defp escalate_pre_review(state, reason, nil) do
     record_round(state, :review, :request_changes, reason, converged: false)
     report(state, {:request_changes, reason})
+    {:stop, :normal, %{state | reported?: true}}
+  end
+
+  defp escalate_pre_review(state, reason, park_reason) do
+    record_round(state, :review, :request_changes, reason, converged: false)
+    report(state, {:parked, park_reason, reason})
     {:stop, :normal, %{state | reported?: true}}
   end
 
@@ -2276,7 +2388,11 @@ defmodule Arbiter.Worker.ReviewGate do
     # of indistinguishable from a reviewer that really did request changes.
     record_round(state, :review, :timed_out, payload, converged: false)
 
-    report(state, {:no_verdict, payload})
+    # bd-9zuvbh: a timeout is a liveness failure of the REVIEW, never of the
+    # work. Class C parks it: the author records the run `:review_parked`, pages
+    # the coordinator once naming the budget that ran out, and leaves the branch
+    # exactly where it is for a human to re-run, merge or reject.
+    report(state, {:parked, :reviewer_timeout, payload})
     {:stop, :normal, %{state | reported?: true}}
   end
 
