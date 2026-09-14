@@ -160,6 +160,62 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
   end
 
+  # Stubs the local-API routes a deploy's doctor/restart checks hit,
+  # regardless of source (GitHub or `--local`). No GitHub routes here — the
+  # `--local` flow never touches the Releases API.
+  defp stub_local_apis(opts \\ []) do
+    workspaces = Keyword.get(opts, :workspaces, @green)
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {workspaces, 200}},
+      {{"get", "/api/repos"},
+       {%{"data" => [%{"name" => "tonic", "source" => "leotech", "path" => "/srv/tonic"}]}, 200}},
+      {{"get", "/api/workers"}, {@no_workers, 200}}
+    ])
+  end
+
+  # A real, compressed OTP-release-shaped tarball with no leading top-level
+  # directory — matching exactly what `.github/workflows/release.yml` packages
+  # (`tar -czf … -C _build/prod/rel/arbiter .`), for `--local <tarball>`.
+  defp flat_release_tarball(marker \\ "local") do
+    path =
+      Path.join(System.tmp_dir!(), "local-rel-#{System.unique_integer([:positive])}.tar.gz")
+
+    {:ok, tar} = :erl_tar.open(String.to_charlist(path), [:write, :compressed])
+    :ok = :erl_tar.add(tar, "#!/bin/sh\necho arbiter #{marker}\n", ~c"bin/arbiter", [])
+
+    :ok =
+      :erl_tar.add(
+        tar,
+        "defmodule M do end",
+        ~c"lib/arbiter-0.0.0/priv/repo/migrations/#{@m_base}.exs",
+        []
+      )
+
+    :ok = :erl_tar.close(tar)
+
+    bytes = File.read!(path)
+    File.rm(path)
+    bytes
+  end
+
+  # An already-unpacked local release *directory* (e.g. `_build/prod/rel/arbiter`),
+  # for `--local <dir>`.
+  defp local_release_dir(marker \\ "local", migrations \\ [@m_base]) do
+    dir = Path.join(System.tmp_dir!(), "local-rel-dir-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(dir, "bin"))
+    File.write!(Path.join(dir, "bin/arbiter"), "#!/bin/sh\necho arbiter #{marker}\n")
+
+    migrations_dir = Path.join(dir, "lib/arbiter-0.0.0/priv/repo/migrations")
+    File.mkdir_p!(migrations_dir)
+
+    Enum.each(migrations, fn name ->
+      File.write!(Path.join(migrations_dir, name <> ".exs"), "defmodule M do end")
+    end)
+
+    dir
+  end
+
   defp seed_release(home, tag, migrations \\ [@m_base]) do
     dir = Path.join([home, "releases", tag])
     File.mkdir_p!(Path.join(dir, "bin"))
@@ -285,6 +341,155 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # Never touched migrate or restart.
       refute_received {:cmd, _bin, ["eval", "Arbiter.Release.migrate"]}
       refute_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+    end
+  end
+
+  # ---- --local -------------------------------------------------------------
+
+  describe "arb server deploy --local" do
+    test "installs a local tarball through the same unpack/swap/restart path", %{home: home} do
+      tarball_bytes = flat_release_tarball()
+      path = Path.join(System.tmp_dir!(), "local-#{System.unique_integer([:positive])}.tar.gz")
+      File.write!(path, tarball_bytes)
+      on_exit(fn -> File.rm(path) end)
+
+      stub_local_apis()
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--local", path]) end)
+
+      assert code == 0
+      assert out =~ "Deployed release local-"
+      assert out =~ "Arbiter restarted"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) |> String.starts_with?("local-")
+      assert File.exists?(Path.join(link_target, "bin/arbiter"))
+
+      # Shares the install machinery with the GitHub flow — no separate swap.
+      assert_received {:cmd, "systemctl", ["--user", "restart", "arbiter.service"]}
+    end
+
+    test "installs a local release directory (no tarball)", %{home: home} do
+      dir = local_release_dir()
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      stub_local_apis()
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--local", dir]) end)
+
+      assert code == 0
+      assert out =~ "Deployed release local-"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert File.exists?(Path.join(link_target, "bin/arbiter"))
+      # The source directory is untouched (copied, not moved).
+      assert File.exists?(Path.join(dir, "bin/arbiter"))
+    end
+
+    test "does not require ARB_RELEASE_REPO to be set" do
+      System.delete_env("ARB_RELEASE_REPO")
+      dir = local_release_dir()
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      stub_local_apis()
+      stub_cmds()
+
+      {_out, _err, code} = capture(fn -> ReleaseDeploy.run(["--local", dir]) end)
+
+      assert code == 0
+    end
+
+    test "failed health check rolls back to the prior release", %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag)
+      point_current(home, prior)
+
+      dir = local_release_dir()
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      # Empty workspace list → doctor never goes green → health check times out.
+      stub_local_apis(workspaces: @empty)
+      stub_cmds()
+
+      {out, _err, code} =
+        capture(fn -> ReleaseDeploy.run(["--local", dir, "--timeout", "1"]) end)
+
+      assert code == 1
+      assert out =~ "did not come back green"
+      assert out =~ "Rolled back to #{prior_tag}"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == prior_tag
+    end
+
+    test "--allow-cross-migration-rollback is honored for a local deploy", %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag, [@m_base])
+      point_current(home, prior)
+
+      dir = local_release_dir("local", [@m_base, "20260202000000_add_thing"])
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      stub_local_apis(workspaces: @empty)
+      stub_cmds()
+
+      {out, _err, code} =
+        capture(fn ->
+          ReleaseDeploy.run([
+            "--local",
+            dir,
+            "--timeout",
+            "1",
+            "--allow-cross-migration-rollback"
+          ])
+        end)
+
+      assert code == 1
+
+      assert out =~
+               "this rollback crossed 1 migration(s) (--allow-cross-migration-rollback was passed)"
+
+      assert out =~ "Rolled back to #{prior_tag}"
+
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == prior_tag
+    end
+
+    test "without the override, a crossed-migration local deploy refuses to roll back", %{
+      home: home
+    } do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag, [@m_base])
+      point_current(home, prior)
+
+      dir = local_release_dir("local", [@m_base, "20260202000000_add_thing"])
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      stub_local_apis(workspaces: @empty)
+      stub_cmds()
+
+      {out, _err, code} =
+        capture(fn -> ReleaseDeploy.run(["--local", dir, "--timeout", "1"]) end)
+
+      assert code == 1
+      assert out =~ "Refused to roll back to #{prior_tag}"
+
+      # current still points at the (unhealthy) new local release.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      refute Path.basename(link_target) == prior_tag
+    end
+
+    test "a nonexistent --local path aborts with a clear error" do
+      stub_local_apis()
+      stub_cmds()
+
+      {_out, err, code} =
+        capture(fn -> ReleaseDeploy.run(["--local", "/no/such/path"]) end)
+
+      assert code == 1
+      assert err =~ "/no/such/path"
     end
   end
 
