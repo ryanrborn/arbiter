@@ -120,6 +120,24 @@ defmodule Arbiter.Umbrella.MixProject do
       # run `mix setup` in all child apps
       setup: ["cmd mix setup"],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      # bd-2oelme: `:arbiter`'s "test" alias runs `ecto.create`/`ecto.migrate`
+      # against the shared, pool_size: 1 sandboxed `Arbiter.Repo` (see
+      # config/test.exs). `Ecto.Migrator.with_repo/3` hangs forever on its
+      # connection checkout — shed only after ~45s per DBConnection's
+      # queue_target/queue_interval — if ANY other umbrella child app has
+      # already recursed through `Mix.Project.in_project/4` in this same VM
+      # first (reproduced with `:arbiter_release_env`, whose test suite
+      # doesn't touch Ecto at all — the mere prior recursion is enough).
+      # `:arbiter` used to always run first because it sorted first
+      # alphabetically with no in-umbrella deps forcing otherwise; adding
+      # `:arbiter_release_env` (which `:arbiter` now depends on) changed the
+      # topological recursion order and put something ahead of it for the
+      # first time. Pin `:arbiter` to run first explicitly rather than rely
+      # on incidental ordering again.
+      test: [
+        "do --app arbiter test",
+        "do --app arbiter_cli --app arbiter_release_env --app arbiter_web test"
+      ],
       # Static analysis + security scan. Mirrors the `mix audit` alias the
       # sibling codebases (tonic, vstim) run. Ordered cheapest-first so a
       # formatting slip fails in seconds rather than after dialyzer's PLT work.
@@ -142,8 +160,8 @@ defmodule Arbiter.Umbrella.MixProject do
         # Sobelow refuses to scan an umbrella root ("each application should
         # be scanned separately"), so it runs once per app against that app's
         # own .sobelow-conf. `cmd` shells out rather than invoking the Mix
-        # task three times, because Mix runs a given task once per session and
-        # the 2nd and 3rd invocations would silently no-op.
+        # task once per app, because Mix runs a given task once per session and
+        # every invocation after the first would silently no-op.
         "cmd mix sobelow --config",
         "dialyzer"
       ]

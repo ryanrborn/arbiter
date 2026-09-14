@@ -148,6 +148,18 @@ defmodule Arbiter.CircuitBreaker do
       window_ms: @hour
     },
     %{
+      kind: :review_coverage_write_failed,
+      module: Arbiter.Worker.ReviewGate,
+      description:
+        "ReviewGate page raised when a clean APPROVE cannot record its review-coverage " <>
+          "row (design #1635 §3.3, bd-203cl5). That write is deliberately not " <>
+          "best-effort, so the failure has to be visible; the bound stops a systemic " <>
+          "cause — a migration not run, the table gone — from paging once per approval " <>
+          "across the whole fleet. Tight, because a healthy fleet never fires it at all.",
+      limit: 3,
+      window_ms: 6 * @hour
+    },
+    %{
       kind: :coordinator_escalation,
       module: Arbiter.Messages.CoordinatorNotifier,
       description:

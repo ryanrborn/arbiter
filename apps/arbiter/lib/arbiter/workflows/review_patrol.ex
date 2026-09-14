@@ -335,7 +335,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.Agents
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.Mergers.NetDiff
   alias Arbiter.Messages.Message
+  alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
@@ -1066,7 +1068,12 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       # Anchor inline comments to the new head commit (skips an extra PR fetch
       # in the adapter and pins each comment to the commit we're reviewing).
       commit_id: pr.head_sha,
-      task: %{id: engagement.id, title: engagement.title}
+      task: %{id: engagement.id, title: engagement.title},
+      # bd-203cl5: the PR's target branch, carried down to the coverage write
+      # (`record_review_coverage/4`) so it does not have to re-fetch the PR just
+      # to learn what its net diff is taken against. Adapter calls ignore keys
+      # they don't know, so this rides along harmlessly.
+      pr_base_ref: pr.base_ref
     }
 
     case fetch_new_diff(adapter, engagement.source_pr, opts) do
@@ -1467,6 +1474,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         # which the circuit breaker's same-SHA check keys directly on.
         verdict = if Map.get(final, :verdict_posted, true), do: Map.get(final, :verdict)
         persist_rereview(engagement, head, posted, verdict)
+        record_review_coverage(engagement, head, {adapter, opts}, Map.get(final, :verdict))
         if verdict, do: write_rereview_record(engagement, :auto, posted, verdict, final)
 
         Logger.info(
@@ -1522,6 +1530,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
         report_to_coordinator(engagement, head, proposed, verdict)
         persist_rereview(engagement, head, findings)
+        record_review_coverage(engagement, head, {adapter, opts}, verdict)
         write_rereview_record(engagement, :report_only, findings, verdict, final)
 
         Logger.info(
@@ -1660,6 +1669,86 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp maybe_put_last_verdict(attrs, verdict, head) do
     attrs |> Map.put(:last_verdict, verdict) |> Map.put(:last_verdict_sha, head)
   end
+
+  # bd-203cl5 / #1648 (design #1635 §3.3, the ReviewPatrol row of the stamping
+  # table): after a re-review, record an append-only `review_coverage` row for
+  # the head that was just reviewed.
+  #
+  # This is a DUAL write, deliberately separate from `persist_rereview/4`: the
+  # engagement cursor is unchanged by P1, and keeping the two apart means a
+  # coverage failure can never cost us the cursor advance (which would re-review
+  # the same push every tick — the bd-4po0nv shape).
+  #
+  # `base_ref` rides in on the adapter opts (`gate_on_relevance/5`), so this
+  # costs exactly one extra forge call — the full `base_ref...head` compare the
+  # fingerprint is taken over. Without a `base_ref` the row is skipped rather
+  # than written against a guessed basis.
+  #
+  # `task_id` is the AUTHORING task, per §3.1 — the engagement is the
+  # *reviewer's* task. For an external contributor's PR there is no fleet task,
+  # and the engagement is the only durable handle on the review, so it is the
+  # fallback (see `Coverage.authoring_task_id/3`).
+  #
+  # A round that requested changes records nothing. §3.1 defines `:reviewed` as
+  # "an approving round covered this commit"; a rejecting round is the opposite
+  # claim, and writing one would tell P7's predicate that a head nobody
+  # approved is covered.
+  #
+  # Best-effort, unlike the ReviewGate's own coverage write: ReviewPatrol
+  # reviews PRs the fleet does not merge, so a missing row here cannot become
+  # the #1585 stall that makes the gate's write load-bearing.
+  defp record_review_coverage(_engagement, _head, _ctx, :request_changes), do: :ok
+
+  defp record_review_coverage(
+         %Issue{source_pr: mr_ref} = engagement,
+         head,
+         {adapter, opts},
+         _verdict
+       )
+       when is_binary(mr_ref) and is_binary(head) do
+    base_ref = Map.get(opts, :pr_base_ref)
+
+    case NetDiff.fingerprint_pr(adapter, mr_ref, base_ref, head) do
+      net_diff_id when is_binary(net_diff_id) and is_binary(base_ref) ->
+        Coverage.record(%{
+          task_id: Coverage.authoring_task_id(mr_ref, engagement.workspace_id, engagement.id),
+          mr_ref: mr_ref,
+          head_sha: head,
+          base_ref: base_ref,
+          net_diff_id: net_diff_id,
+          kind: :reviewed,
+          source: :review_patrol
+        })
+        |> case do
+          {:ok, _entry} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "ReviewPatrol: coverage write failed for engagement #{engagement.id} " <>
+                "on #{head}: #{inspect(reason)}"
+            )
+
+            :ok
+        end
+
+      _ ->
+        Logger.warning(
+          "ReviewPatrol: no net-diff fingerprint for engagement #{engagement.id} on " <>
+            "#{head}; skipping the coverage row rather than recording an unverifiable one"
+        )
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning("ReviewPatrol: coverage write raised: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp record_review_coverage(_engagement, _head, _ctx, _verdict), do: :ok
 
   defp advance_cursor(%Issue{} = engagement, head) do
     update_engagement(engagement, %{

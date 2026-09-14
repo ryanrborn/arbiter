@@ -1419,15 +1419,16 @@ defmodule Arbiter.Worker.ClaudeSession do
         _ -> ConfigDir.env(Arbiter.Worker.WorkerEnv.workspace_for(task_id))
       end
 
-    release_clean = Arbiter.Worker.ReleaseEnv.clean_pairs()
     dev_server_clean = Arbiter.Worker.DevServerEnv.pairs(task_id)
 
     case task_id do
       id when is_binary(id) and id != "" ->
-        release_clean ++ dev_server_clean ++ worker_env ++ base ++ [{"ARB_WORKER_BEAD_ID", id}]
+        Arbiter.Worker.ReleaseEnv.port_env(
+          dev_server_clean ++ worker_env ++ base ++ [{"ARB_WORKER_BEAD_ID", id}]
+        )
 
       _ ->
-        release_clean ++ base
+        Arbiter.Worker.ReleaseEnv.port_env(base)
     end
   end
 end
