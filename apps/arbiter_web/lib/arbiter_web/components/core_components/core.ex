@@ -369,6 +369,7 @@ defmodule ArbiterWeb.CoreComponents.Core do
   One step of separation is enough: a card on a panel is `--surface-card`,
   and you never stack three surfaces.
   """
+  attr :id, :string, default: nil
   attr :title, :string, default: nil
 
   attr :meta, :string,
@@ -385,11 +386,14 @@ defmodule ArbiterWeb.CoreComponents.Core do
 
   def panel(assigns) do
     ~H"""
-    <section class={[
-      "border rounded-[var(--radius-panel)] border-[var(--border-default)] overflow-hidden",
-      panel_surface_class(@surface),
-      @class
-    ]}>
+    <section
+      id={@id}
+      class={[
+        "border rounded-[var(--radius-panel)] border-[var(--border-default)] overflow-hidden",
+        panel_surface_class(@surface),
+        @class
+      ]}
+    >
       <header
         :if={@title || @actions != []}
         class="flex items-center justify-between gap-3 px-[18px] py-[12px] border-b border-[var(--border-default)]"

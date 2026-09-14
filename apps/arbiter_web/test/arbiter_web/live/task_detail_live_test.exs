@@ -926,6 +926,70 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.acceptance == "- [x] first criterion\n- [x] second criterion"
     end
+
+    # bd-a39f4o §3 IA: the waiver is a sub-state of ACCEPTANCE, not its own
+    # panel, so it must render inside #panel-acceptance and there must be no
+    # separate waiver panel id.
+    test "the acceptance waiver renders inside the acceptance panel, not a separate panel",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "waived", workspace_id: ws.id, issue_type: :bug})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-promote-waiver-form",
+          waiver: %{reason: "spike, no user-facing change"}
+        )
+        |> render_submit()
+
+      refute html =~ ~s(id="panel-acceptance-waived")
+      acceptance_panel = view |> element("#panel-acceptance") |> render()
+      assert acceptance_panel =~ "ACCEPTANCE WAIVED"
+      assert acceptance_panel =~ "spike, no user-facing change"
+    end
+
+    # bd-a39f4o acceptance #1: desktop panel order matches the bd-3uhith IA
+    # exactly. Assert via the ids present on each `.panel`, in source order.
+    test "desktop panel order follows the redesigned information architecture",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "everything",
+          description: "the description",
+          acceptance: "- [ ] one",
+          notes: "some findings",
+          qa_notes: "qa'd",
+          issue_type: :task,
+          target_branch: "main",
+          workspace_id: ws.id
+        })
+
+      {:ok, task} = Ash.update(task, %{verify_after_deploy: true})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      main_ids = ~w(
+        panel-description panel-acceptance panel-findings panel-merge-review
+        panel-qa-deployment panel-runs panel-activity
+      )
+
+      rail_ids = ~w(
+        panel-current-run panel-verification panel-relationships panel-messages
+        panel-machine-state panel-skills
+      )
+
+      assert Enum.all?(main_ids, &(html =~ ~s(id="#{&1}")))
+      assert Enum.all?(rail_ids, &(html =~ ~s(id="#{&1}")))
+
+      positions_main = Enum.map(main_ids, &panel_position(html, &1))
+      assert positions_main == Enum.sort(positions_main)
+
+      positions_rail = Enum.map(rail_ids, &panel_position(html, &1))
+      assert positions_rail == Enum.sort(positions_rail)
+    end
   end
 
   describe "run roster (absorbs the run index)" do
@@ -1199,7 +1263,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "2 runs on this issue"
     end
 
-    test "machine state, dependencies and skills each render in the rail",
+    test "machine state, relationships and skills each render in the rail",
          %{conn: conn, ws: ws} do
       {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})
 
@@ -1226,11 +1290,68 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "ada"
       assert html =~ "#591"
 
-      assert html =~ "DEPENDENCIES"
+      assert html =~ "RELATIONSHIPS"
       assert html =~ "blocks"
       assert html =~ blocker.id
 
       assert html =~ "SKILLS"
+    end
+
+    # bd-a39f4o: Messages is a placeholder panel on this ticket — ticket C
+    # fills it with real `Arbiter.Messages.Message` data.
+    test "the messages panel renders an empty state placeholder", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "messageless", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      messages_panel = view |> element("#panel-messages") |> render()
+      assert messages_panel =~ "MESSAGES"
+    end
+
+    # bd-a39f4o: status/priority/type/difficulty are already in the header
+    # band, so Machine State must not repeat them (design finding #1).
+    test "machine state no longer repeats the header's status/priority/type/difficulty chips",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "trimmed",
+          workspace_id: ws.id,
+          priority: 1,
+          issue_type: :bug
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      machine_state = view |> element("#panel-machine-state") |> render()
+
+      refute machine_state =~ "Status"
+      refute machine_state =~ "Priority"
+      refute machine_state =~ "Difficulty"
+      refute machine_state =~ ">Type<"
+    end
+
+    # bd-a39f4o: parent/child progress moves out of Machine State and into
+    # Relationships, alongside the dependency edges (design finding #4).
+    test "relationships panel shows child progress instead of machine state",
+         %{conn: conn, ws: ws} do
+      {:ok, parent} = Ash.create(Issue, %{title: "parent", workspace_id: ws.id})
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ws.id})
+      {:ok, _} = Ash.update(child, %{}, action: :close)
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: parent.id,
+          to_issue_id: child.id,
+          type: :parent_of
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+
+      relationships = view |> element("#panel-relationships") |> render()
+      assert relationships =~ "1/1 closed"
+
+      machine_state = view |> element("#panel-machine-state") |> render()
+      refute machine_state =~ "Children"
     end
 
     test "machine state names the repo the issue runs against", %{conn: conn, ws: ws} do
@@ -1523,5 +1644,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#criterion-0")
       assert has_element?(view, "#criterion-1")
     end
+  end
+
+  defp panel_position(html, id) do
+    :binary.match(html, ~s(id="#{id}")) |> elem(0)
   end
 end
