@@ -288,7 +288,11 @@ defmodule Arbiter.Reviews.CoverageDecideTest do
         entry(%{
           head_sha: sha("a"),
           net_diff_id: @fp_a,
-          covered_at: ~U[2026-01-01 00:00:00.000000Z]
+          # Later day-of-month than `later`, deliberately: a `DateTime`-struct
+          # sort key compares map keys alphabetically, so `day` outranks
+          # `month` and `year`. These two dates are the minimal fixture that
+          # tells real chronology apart from that ordering.
+          covered_at: ~U[2026-01-02 00:00:00.000000Z]
         })
 
       later =
@@ -297,9 +301,6 @@ defmodule Arbiter.Reviews.CoverageDecideTest do
           net_diff_id: @fp_a,
           kind: :mechanical,
           derived_from: original.id,
-          # Deliberately across a month boundary: a `DateTime`-struct sort key
-          # compares `day` before `month`, so a same-month fixture would pass
-          # against a broken comparator.
           covered_at: ~U[2026-02-01 00:00:00.000000Z]
         })
 
