@@ -36,6 +36,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     untracked = Keyword.get(opts, :untracked, false)
     pull = Keyword.get(opts, :pull, {"Updating aaaaaaa..bbbbbbb\n", 0})
     changed = Keyword.get(opts, :changed, true)
+    migrations = Keyword.get(opts, :migrations, 0)
     test_pid = self()
 
     Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
@@ -67,7 +68,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
           {"", 0}
 
         {"mix", ["arbiter.migrate"]} ->
-          {~s({"migrations_applied":0,"status":"ok"}), 0}
+          {~s({"migrations_applied":#{migrations},"status":"ok"}), 0}
 
         # ---- reused restart lifecycle ----
         # Simulate no systemd service installed — restart falls back to sh.
@@ -89,6 +90,15 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
           {"", 0}
       end
     end)
+  end
+
+  # Every {:cmd, _, _} recorded so far, in invocation order.
+  defp drain_cmds(acc \\ []) do
+    receive do
+      {:cmd, cmd, args} -> drain_cmds([{cmd, args} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   describe "deploy (no issue id)" do
@@ -352,6 +362,106 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
       assert out =~ "bd-001"
       # No git/restart machinery was touched for an issue edit.
       refute_received {:cmd, "git", _}
+    end
+  end
+
+  # ---- migration ordering (bd-bksulf) --------------------------------------
+
+  describe "migration ordering" do
+    test "never migrates against the live server: no standalone mix arbiter.migrate" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      stub_deploy(changed: true)
+
+      {out, _err, code} = capture(fn -> Update.run([]) end)
+
+      assert code == 0
+
+      cmds = drain_cmds()
+
+      # Acceptance 1: the old server is up (doctor is green before the pull),
+      # so nothing opens a second SQLite writer against it.
+      refute {"mix", ["arbiter.migrate"]} in cmds
+
+      # Ordering is stop -> (boot migrate) -> start: the SIGTERM precedes the
+      # fresh `mix phx.server`, and Boot.Migrator runs inside that boot.
+      kill_at = Enum.find_index(cmds, fn {cmd, _args} -> cmd == "kill" end)
+
+      start_at =
+        Enum.find_index(cmds, fn {cmd, args} ->
+          cmd == "sh" and match?(["-c", _], args) and hd(tl(args)) =~ "phx.server"
+        end)
+
+      assert is_integer(kill_at), "expected the old server to be SIGTERMed"
+      assert is_integer(start_at), "expected a fresh server start"
+      assert kill_at < start_at, "the old server must be stopped before the new one starts"
+
+      # `Start.log_text/1` is suppressed under the test seams, so the rendered
+      # summary is where the deferral shows up.
+      assert out =~ "Migrations applied by the restart"
+    end
+
+    test "--json reports that migrations were left to the boot migrator" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      stub_deploy(changed: true)
+
+      {out, _err, code} = capture(fn -> Update.run(["--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["migrations_applied_on_boot"] == true
+      assert payload["migrations_applied"] == nil
+    end
+
+    test "a server that is already down still gets the standalone migrate" do
+      # Doctor is red at the preflight (nothing is holding the SQLite writer),
+      # so migrating standalone is safe — and still happens before the start.
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+      stub_deploy(changed: true, migrations: 2)
+
+      # Flip the API green once the fresh server boots so the deploy completes.
+      runner = Process.get(:bd2_cmd_runner)
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
+        result = runner.(cmd, args, opts)
+
+        if cmd == "sh" do
+          stub_routes([
+            {{"get", "/api/workspaces"}, {@green, 200}},
+            {{"get", "/api/workers"}, {@no_workers, 200}}
+          ])
+        end
+
+        result
+      end)
+
+      {out, _err, code} = capture(fn -> Update.run([]) end)
+
+      assert code == 0
+
+      cmds = drain_cmds()
+      assert {"mix", ["arbiter.migrate"]} in cmds
+
+      migrate_at =
+        Enum.find_index(cmds, fn {cmd, args} -> {cmd, args} == {"mix", ["arbiter.migrate"]} end)
+
+      start_at =
+        Enum.find_index(cmds, fn {cmd, args} ->
+          cmd == "sh" and match?(["-c", _], args) and hd(tl(args)) =~ "phx.server"
+        end)
+
+      assert is_integer(start_at)
+      assert migrate_at < start_at, "migrations must be applied before the server starts"
+
+      assert out =~ "Applied 2 migration(s)"
     end
   end
 end

@@ -85,33 +85,76 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy.ReleaseFiles do
     end
   end
 
-  @spec run_migrations!(String.t()) :: :ok
-  def run_migrations!(target_dir) do
-    bin = Path.join(target_dir, "bin/arbiter")
-    Start.log_text("Running migrations (bin/arbiter eval Arbiter.Release.migrate)…")
+  # ---- migration-set introspection (bd-bksulf) -----------------------------
+  #
+  # `arb server deploy` deliberately does **not** run migrations itself — see
+  # the "Migration ordering" section of `ArbiterCli.Cmd.ReleaseDeploy`. It does
+  # need to know, before it swaps `current`, whether the release it is about to
+  # deploy carries migrations the release it would roll *back* to has never
+  # seen, because that rollback would leave old code on a newer schema.
+  #
+  # The answer is read straight off the two unpacked release trees: a mix
+  # release copies each app's `priv/` to `lib/<app>-<vsn>/priv`, so the
+  # migrations that release would apply at boot are exactly the `.exs` files
+  # under `lib/*/priv/repo/migrations/`. That is a pure filesystem comparison —
+  # no database connection, and therefore no second reader or writer against
+  # the live SQLite file.
 
-    case Start.run_cmd(bin, ["eval", "Arbiter.Release.migrate"], stderr_to_stdout: true) do
-      {_out, 0} ->
-        :ok
+  # Globs tried, in order, to locate a release tree's packaged migrations. The
+  # second is defensive: it covers a tarball that ships `priv/` at the release
+  # root rather than under `lib/<app>-<vsn>/`.
+  @migration_globs ["lib/*/priv/repo/migrations/*.exs", "priv/repo/migrations/*.exs"]
 
-      {out, code} ->
-        # Migration failed *before* we swapped the symlink — the live server is
-        # untouched, so just abort.
-        _ = File.rm_rf(target_dir)
+  @doc """
+  The globs `migrations/1` searches, for error messages that need to name where
+  detection looked.
+  """
+  @spec migration_globs() :: [String.t()]
+  def migration_globs, do: @migration_globs
 
-        Output.die(
-          "database migration failed (exit #{code})",
-          "The live release was not changed. Output:\n" <> String.trim_trailing(out)
-        )
-    end
-  rescue
-    e in ErlangError ->
-      _ = File.rm_rf(target_dir)
+  @doc """
+  The migrations packaged into the unpacked release at `release_dir`, as a map
+  of `version => name` (e.g. `%{"20260913201720" => "20260913201720_add_x"}`).
 
-      Output.die(
-        "could not run #{Path.join(target_dir, "bin/arbiter")}: #{inspect(e.original)}",
-        "Is the unpacked release executable on this platform?"
-      )
+  Empty for `nil` (no prior release) or a directory that ships none. For the
+  *new* release an empty result is treated as a detection failure rather than
+  "no migrations" — see `ReleaseDeploy`'s `rollback_decision/1`.
+  """
+  @spec migrations(String.t() | nil) :: %{optional(String.t()) => String.t()}
+  def migrations(nil), do: %{}
+
+  def migrations(release_dir) do
+    @migration_globs
+    |> Enum.flat_map(&Path.wildcard(Path.join(release_dir, &1)))
+    |> Enum.map(&Path.basename(&1, ".exs"))
+    |> Enum.flat_map(fn name ->
+      case Regex.run(~r/^(\d+)_/, name) do
+        [_, version] -> [{version, name}]
+        _ -> []
+      end
+    end)
+    |> Map.new()
+  end
+
+  @doc """
+  Names of the migrations `new_dir` would apply that `prior_dir` does not ship,
+  sorted by version (i.e. the migrations a rollback from `new_dir` to
+  `prior_dir` would strand).
+
+  Empty when `prior_dir` is `nil` — there is no release to roll back to, so no
+  rollback can cross anything.
+  """
+  @spec crossed_migrations(String.t(), String.t() | nil) :: [String.t()]
+  def crossed_migrations(_new_dir, nil), do: []
+
+  def crossed_migrations(new_dir, prior_dir) do
+    prior_versions = prior_dir |> migrations() |> Map.keys() |> MapSet.new()
+
+    new_dir
+    |> migrations()
+    |> Enum.reject(fn {version, _name} -> MapSet.member?(prior_versions, version) end)
+    |> Enum.sort_by(fn {version, _name} -> version end)
+    |> Enum.map(fn {_version, name} -> name end)
   end
 
   # Atomically point `link_path` at `target` by creating a temp symlink and

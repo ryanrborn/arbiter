@@ -17,6 +17,22 @@ defmodule Arbiter.Boot.MigratorTest do
       assert spec.type == :worker
       assert {Arbiter.Boot.Migrator, :start_link, [[]]} = spec.start
     end
+
+    test "is a blocking child, not a Task — so migrations finish before anything serves" do
+      # bd-bksulf: `arb server deploy` no longer evals Arbiter.Release.migrate
+      # against the still-running old server. It relies on this child instead:
+      # a supervisor starts each child by *calling* its start function and
+      # waiting, so a synchronous worker here blocks Arbiter.Application.start/2
+      # until the schema is at head — and `:arbiter_web` (which depends on
+      # `:arbiter`) only starts, and only binds the endpoint's port, after that
+      # returns. A `Task` child would merely be spawned, letting the endpoint
+      # serve against a half-migrated schema.
+      spec = Migrator.child_spec([])
+
+      assert {module, :start_link, _args} = spec.start
+      refute module == Task
+      assert spec.type == :worker
+    end
   end
 
   describe "start_link/1 gating" do
