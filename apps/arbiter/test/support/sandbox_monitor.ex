@@ -26,20 +26,28 @@ defmodule Arbiter.Test.SandboxMonitor do
     sites routinely swallow into a misleading `:not_found` (e.g.
     `Arbiter.MCP.Tools.fetch_graph/2` turns it into "graph ... not found"), and
     `async: false` tests take every other process in the VM with them because
-    shared mode reverts to `:manual`. This is a real bug in whatever killed the
-    process; it **fails the run**.
+    shared mode reverts to `:manual`. This is the class that produced the CI
+    cascade.
 
   * **teardown** — the process died after its test's process had already
     exited, e.g. `Phoenix.LiveViewTest` killing a LiveView that still had a
     queued PubSub echo to handle when the test ended (ExUnit exits the test
     process with `:shutdown`, and `Phoenix.LiveView.Channel` does not trap
-    exits). The owner is the test that just finished and is about to be torn
-    down anyway, so no test observes the loss. It is still reported, because a
-    dropped connection is never free — the pool has to reconnect — but it does
-    not fail the run.
+    exits). The owner is the test that just finished and is about to hand the
+    connection back anyway, so no test observes the loss.
 
-  The discriminator is simply whether any test process registered with
-  `track/3` was still alive when the disconnect fired.
+  The discriminator is whether any test process registered with `track/3` was
+  still alive when the disconnect fired.
+
+  ## Why this reports rather than fails
+
+  The report is deliberately not a gate. The disconnect is logged several
+  asynchronous message hops after the process actually died — pool, proxy,
+  connection — so a kill that happened squarely inside a test's teardown can
+  still be logged a few microseconds into the next test and look "mid-test".
+  Failing on that would trade one CI flake for another, which is exactly what
+  bd-5scl0c set out to remove. Read the report; the fix belongs in whatever
+  kills the process.
   """
 
   @handler_id :arbiter_sandbox_monitor
@@ -182,13 +190,6 @@ defmodule Arbiter.Test.SandboxMonitor do
           end)
 
         IO.puts(:stderr, format_report(mid_test, teardown))
-
-        if mid_test != [] do
-          System.at_exit(fn
-            0 -> exit({:shutdown, 1})
-            _ -> :ok
-          end)
-        end
     end
   end
 
@@ -207,7 +208,7 @@ defmodule Arbiter.Test.SandboxMonitor do
     stopped with `Process.exit/2` or `DynamicSupervisor.terminate_child/2`
     must be quiesced first; `Arbiter.ProcessTeardown.stop_child/3` does
     that with `:sys.suspend/2`.
-    #{section("MID-TEST (fails the run) — a live test lost its connection", mid_test)}#{section("TEARDOWN (reported only) — the owning test had already exited", teardown)}
+    #{section("MID-TEST — a live test lost its connection; fix this", mid_test)}#{section("TEARDOWN — the owning test had already exited", teardown)}
     ===============================================================
     """
   end

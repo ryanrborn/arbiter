@@ -24,7 +24,7 @@ defmodule Arbiter.Test.SandboxMonitorTest do
       assert SandboxMonitor.classify([]) == :teardown
     end
 
-    test "one live test among exited ones is enough to fail the run" do
+    test "one live test among exited ones is enough to call it mid-test" do
       running = [{self(), A, "gone", false}, {self(), B, "live", true}]
       assert SandboxMonitor.classify(running) == :mid_test
     end
@@ -32,8 +32,9 @@ defmodule Arbiter.Test.SandboxMonitorTest do
 
   describe "log/2" do
     test "records a client-exited disconnect, with the tests registered at that moment" do
-      SandboxMonitor.track(self(), __MODULE__, "log/2 probe")
-      on_exit(fn -> SandboxMonitor.untrack(self()) end)
+      test_pid = self()
+      SandboxMonitor.track(test_pid, __MODULE__, "log/2 probe")
+      on_exit(fn -> SandboxMonitor.untrack(test_pid) end)
 
       before = SandboxMonitor.incidents()
       SandboxMonitor.log(%{msg: {:string, @disconnect}}, %{})

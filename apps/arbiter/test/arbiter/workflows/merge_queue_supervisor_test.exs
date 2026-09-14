@@ -16,7 +16,7 @@ defmodule Arbiter.Workflows.MergeQueueSupervisorTest do
     Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, self(), pid)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: DynamicSupervisor.terminate_child(MergeQueueSupervisor, pid)
+      if Process.alive?(pid), do: Arbiter.ProcessTeardown.stop_child(MergeQueueSupervisor, pid)
     end)
 
     pid
@@ -79,7 +79,7 @@ defmodule Arbiter.Workflows.MergeQueueSupervisorTest do
 
       on_exit(fn ->
         for pid <- [pid_a, pid_b], is_pid(pid) and Process.alive?(pid) do
-          DynamicSupervisor.terminate_child(MergeQueueSupervisor, pid)
+          Arbiter.ProcessTeardown.stop_child(MergeQueueSupervisor, pid)
         end
       end)
     end
@@ -102,7 +102,7 @@ defmodule Arbiter.Workflows.MergeQueueSupervisorTest do
       assert is_pid(pid) and Process.alive?(pid)
 
       on_exit(fn ->
-        if Process.alive?(pid), do: DynamicSupervisor.terminate_child(MergeQueueSupervisor, pid)
+        if Process.alive?(pid), do: Arbiter.ProcessTeardown.stop_child(MergeQueueSupervisor, pid)
       end)
     end
 

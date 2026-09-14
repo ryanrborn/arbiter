@@ -689,7 +689,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       on_exit(fn ->
         try do
-          DynamicSupervisor.terminate_child(DispatchQueueSupervisor, pid)
+          Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
         catch
           :exit, _ -> :ok
         end
@@ -773,7 +773,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       on_exit(fn ->
         try do
-          DynamicSupervisor.terminate_child(DispatchQueueSupervisor, pid)
+          Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
         catch
           :exit, _ -> :ok
         end
