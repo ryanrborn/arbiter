@@ -335,6 +335,69 @@ defmodule Arbiter.Sessions.UsageIngestTest do
       assert DateTime.compare(second.occurred_at, ~U[2026-09-10 09:00:00.000Z]) == :eq
     end
 
+    # `totalDuration` is cumulative on disk like every other figure in
+    # `cost-state`. A sweep that re-billed it in full would inflate the
+    # `duration_ms` column of every `Usage.summarize/1` rollup once per cycle —
+    # dozens of times over a busy day on the live host's 5-minute sweeper.
+    test "duration_ms is billed as a delta, not re-billed on every cycle" do
+      dir = tmp_dir!("ingest-duration")
+      sid = "sess-dur-#{System.unique_integer([:positive])}"
+      at = ~U[2026-09-10 08:00:00.000Z]
+
+      write!(dir, sid, [turn(sid, "m1", at, 10, 100), cost_state(sid, 2.5, start_ms(), 1000)])
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      write!(
+        dir,
+        sid,
+        [
+          turn(sid, "m2", DateTime.add(at, 3600), 5, 50),
+          cost_state(sid, 5.0, start_ms(), 2000)
+        ],
+        [:append]
+      )
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+
+      rows = rows_for(sid)
+      assert length(rows) == 2
+
+      assert Enum.sum(Enum.map(rows, &(&1.duration_ms || 0))) == 2000,
+             "the ledger must sum to the file's totalDuration, not a multiple of it"
+
+      assert_in_delta Enum.sum(Enum.map(rows, & &1.cost_usd)), 5.0, 0.0000001
+    end
+
+    # A file with no parseable timestamps is dated `now` and holds the whole
+    # file's cumulative totals, so today's ledger stops being the right
+    # watermark the moment the UTC day rolls over. Its watermark is the whole
+    # session's ledger instead.
+    test "an undated transcript is not re-billed when the UTC day rolls over" do
+      dir = tmp_dir!("ingest-undated")
+      sid = "sess-undated-#{System.unique_integer([:positive])}"
+
+      undated =
+        ~s({"type":"assistant","sessionId":"#{sid}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
+
+      write!(dir, sid, [undated, cost_state(sid, 0.055, start_ms())])
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [dir])
+      assert [ev] = rows_for(sid)
+
+      # Stand in for the sweeper's next run landing after midnight UTC: the row
+      # it already wrote is no longer filed under `Date.utc_today()`.
+      import Ecto.Query, only: [from: 2]
+
+      {1, _} =
+        Arbiter.Repo.update_all(
+          from(e in Event, where: e.id == ^ev.id),
+          set: [occurred_at: DateTime.add(ev.occurred_at, -1, :day)]
+        )
+
+      assert {:ok, %{rows_written: 0}} = UsageIngest.ingest(dirs: [dir])
+      assert length(rows_for(sid)) == 1
+    end
+
     test "a real v2.1.270 transcript backfills its two days at their own dates" do
       fixture =
         Path.expand(

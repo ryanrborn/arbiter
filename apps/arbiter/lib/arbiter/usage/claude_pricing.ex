@@ -45,6 +45,13 @@ defmodule Arbiter.Usage.ClaudePricing do
     * **Long-TTL cache writes.** A 1-hour-TTL write costs 2× input, not 1.25×;
       the buckets don't distinguish them, so a session leaning on the 1h TTL is
       under-priced.
+    * **Fast mode not modelled.** Claude Code exposes a fast-mode toggle; Opus 5
+      in fast mode bills at $10/$50 per MTok, double the table's rate. The
+      transcript doesn't record the speed, so a fast-mode session is priced at
+      the standard rate and reads ~2× low.
+    * **Mythos 5.1's cache-read rate is assumed, not published.** It is priced
+      as its Fable 5.1 sibling, including the $0.25/MTok cache read; whether
+      Mythos shares that rate is documented upstream as open.
     * **List prices.** No account-level discount, batch discount or promotional
       credit is modelled.
 
@@ -65,7 +72,10 @@ defmodule Arbiter.Usage.ClaudePricing do
   # input/output are the published rates; cache_write/cache_read are derived
   # from input unless the model publishes its own (see `expand/1`).
   @opus %{input: 5.0, output: 25.0}
-  # The Fable / Mythos tier reads cache at 0.025× input, not the usual 0.1×.
+  # Fable 5.1 reads cache at 0.025× input, not the usual 0.1×. Mythos 5.1 is
+  # the same tier at the same per-token price and is priced from this entry,
+  # but whether it shares the cache-read rate is open upstream — see the
+  # moduledoc's approximations.
   @fable_5_1 %{input: 10.0, output: 50.0, cache_read: 0.25}
   @fable_5 %{input: 10.0, output: 50.0}
 

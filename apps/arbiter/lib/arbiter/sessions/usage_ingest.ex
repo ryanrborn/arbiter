@@ -223,19 +223,46 @@ defmodule Arbiter.Sessions.UsageIngest do
     |> day_buckets()
     |> Enum.sort_by(fn {day, _bucket} -> day end, Date)
     |> Enum.reduce(%{rows: 0, errors: 0}, fn {day, bucket}, acc ->
-      delta = delta_for(bucket, Map.get(billed, day, blank_billed()))
+      already = billed_for(totals, billed, day)
+      delta = delta_for(bucket, already)
 
       cond do
         not new_spend?(delta) ->
           acc
 
-        match?({:ok, _}, insert_row(session_id, totals, day, bucket, delta, note, path)) ->
+        match?({:ok, _}, insert_row(session_id, totals, day, bucket, delta, already, note, path)) ->
           %{acc | rows: acc.rows + 1}
 
         true ->
           %{acc | errors: acc.errors + 1}
       end
     end)
+  end
+
+  # A *dated* bucket is its own watermark: the ledger rows filed under that day
+  # are exactly what it has been billed for, which is what lets an append to
+  # today leave last week's rows alone. An *undated* bucket is a different
+  # animal — `day_buckets/1` keys the whole file's cumulative totals on today,
+  # so today's ledger stops being the right comparand the moment the UTC day
+  # rolls over and the slate looks empty again. Compare that one against the
+  # whole session's ledger instead.
+  defp billed_for(%{by_day: by_day}, billed, day) when map_size(by_day) > 0,
+    do: Map.get(billed, day, blank_billed())
+
+  defp billed_for(_totals, billed, _day),
+    do: billed |> Map.values() |> Enum.reduce(blank_billed(), &merge_billed/2)
+
+  defp merge_billed(a, acc) do
+    %{
+      acc
+      | tokens_in: acc.tokens_in + a.tokens_in,
+        tokens_out: acc.tokens_out + a.tokens_out,
+        cache_creation_tokens: acc.cache_creation_tokens + a.cache_creation_tokens,
+        cache_read_tokens: acc.cache_read_tokens + a.cache_read_tokens,
+        message_count: acc.message_count + a.message_count,
+        cost_usd: acc.cost_usd + a.cost_usd,
+        duration_ms: acc.duration_ms + a.duration_ms
+    }
   end
 
   # `by_day` is empty only for a file whose turns carry no parseable timestamp
@@ -294,7 +321,8 @@ defmodule Arbiter.Sessions.UsageIngest do
       cache_creation_tokens: 0,
       cache_read_tokens: 0,
       message_count: 0,
-      cost_usd: 0.0
+      cost_usd: 0.0,
+      duration_ms: 0
     }
   end
 
@@ -306,7 +334,8 @@ defmodule Arbiter.Sessions.UsageIngest do
         cache_creation_tokens: acc.cache_creation_tokens + int(ev.cache_creation_tokens),
         cache_read_tokens: acc.cache_read_tokens + int(ev.cache_read_tokens),
         message_count: acc.message_count + billed_message_count(ev),
-        cost_usd: acc.cost_usd + flt(ev.cost_usd)
+        cost_usd: acc.cost_usd + flt(ev.cost_usd),
+        duration_ms: acc.duration_ms + int(ev.duration_ms)
     }
   end
 
@@ -333,7 +362,7 @@ defmodule Arbiter.Sessions.UsageIngest do
       delta.cache_read_tokens > 0 or delta.message_count > 0 or (delta.cost_usd || 0.0) > 0.0
   end
 
-  defp insert_row(session_id, totals, day, bucket, delta, note, path) do
+  defp insert_row(session_id, totals, day, bucket, delta, billed, note, path) do
     attrs = %{
       source: :coordinator_session,
       # Not a missing value: coordinator spend belongs to no task. See
@@ -349,7 +378,7 @@ defmodule Arbiter.Sessions.UsageIngest do
       cache_read_tokens: delta.cache_read_tokens,
       cost_usd: delta.cost_usd,
       cost_note: note,
-      duration_ms: day_duration_ms(totals, bucket),
+      duration_ms: duration_delta(totals, bucket, billed),
       # The newest turn in this day, so `--by day` and `--since` see the spend
       # where it actually happened rather than where the sweeper found it.
       occurred_at: bucket.last_at,
@@ -385,6 +414,17 @@ defmodule Arbiter.Sessions.UsageIngest do
         )
 
         {:error, reason}
+    end
+  end
+
+  # Duration is cumulative on disk, so it needs the same watermark treatment as
+  # tokens: write only what this day has gained since the last pass. Without it
+  # every sweep re-bills the whole day and `Usage.summarize/1` — which sums the
+  # column into every rollup — inflates monotonically.
+  defp duration_delta(totals, bucket, billed) do
+    case day_duration_ms(totals, bucket) do
+      nil -> nil
+      ms -> nonzero(clamp(ms - billed.duration_ms))
     end
   end
 
