@@ -214,6 +214,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers
+  alias Arbiter.Reviews.CoverageShadow
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Verification
@@ -1325,7 +1326,10 @@ defmodule Arbiter.Workflows.MergeQueue do
   # baseline, and otherwise hand that baseline to the forge as an atomic
   # precondition so the residual poll→merge window closes too.
   defp merge_guarded(state, item) do
-    case Mergers.ReviewedSha.check(item_reviewed_sha(item), Map.get(item, :last_head_sha)) do
+    decision = Mergers.ReviewedSha.check(item_reviewed_sha(item), Map.get(item, :last_head_sha))
+    observe_coverage_shadow(state, item, decision)
+
+    case decision do
       {:ok, expected_sha} ->
         state.adapter.merge(item.mr_ref, expected_sha)
 
@@ -1338,6 +1342,46 @@ defmodule Arbiter.Workflows.MergeQueue do
         err
     end
   end
+
+  # bd-b0fqcl / #1649 — P3 shadow mode (design #1635 §3.4/§6.3), the queue's
+  # half. `decision` above is still the one acted on; this only records whether
+  # `Arbiter.Reviews.Coverage.decide/3` would have said the same thing, so P4
+  # has evidence before it flips the read path over.
+  #
+  # `CoverageShadow.observe/1` returns `:ok` for every input and rescues
+  # everything it calls, including the `ctx` lookups — a forge error inside the
+  # shadow's diff fetch must not touch an item the queue has already decided
+  # about. As in the Watchdog, no `:ancestor?` probe is supplied, so rule 2 is
+  # unreachable and the gap is counted rather than hidden.
+  defp observe_coverage_shadow(%State{} = state, item, decision) do
+    base = Map.get(item, :base) || state.base
+
+    CoverageShadow.observe(%{
+      site: :merge_queue,
+      task_id: item.task_id,
+      mr_ref: item.mr_ref,
+      workspace_id: state.workspace_id,
+      head: Map.get(item, :last_head_sha),
+      old: coverage_shadow_answer(decision),
+      ctx: fn ->
+        %{
+          base_ref: base,
+          fetch_diff: fn diff_base, head ->
+            state.adapter.get_diff(item.mr_ref, %{base: diff_base, head: head})
+          end,
+          source: :watchdog
+        }
+      end
+    })
+  end
+
+  # §3.4's answer shapes, as `ReviewedSha.check/2` already produces them. The
+  # queue has no "wait" outcome of its own — its stale path re-attempts on the
+  # next tick — so only two of the three ever appear here.
+  defp coverage_shadow_answer({:ok, expected_sha}), do: {:covered, expected_sha}
+
+  defp coverage_shadow_answer({:error, {:stale_reviewed_sha, reviewed, _head}}),
+    do: {:uncovered, {:stale_reviewed_sha, reviewed}}
 
   # The task's recorded review baseline wins over the queue's own latch, exactly
   # as in the Watchdog — except while the latch is suspended (the queue's own

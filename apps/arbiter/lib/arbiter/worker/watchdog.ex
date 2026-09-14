@@ -219,6 +219,7 @@ defmodule Arbiter.Worker.Watchdog do
   require Logger
 
   alias Arbiter.Mergers
+  alias Arbiter.Reviews.CoverageShadow
   alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: PRegistry
 
@@ -2762,24 +2763,77 @@ defmodule Arbiter.Worker.Watchdog do
   # stays parked and the coordinator is paged, rather than the worker merging
   # commits nobody reviewed or dying silently.
   defp guarded_merge_decision(state) do
-    if forge_head_lagging?(state) do
-      Logger.info(
-        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} the PR still reports " <>
-          "head=#{inspect(state.last_head_sha)} but this worker pushed " <>
-          "#{state.local_head_sha}; the forge has not caught up with our own push " <>
-          "(#{state.head_lag_polls + 1}/#{@head_lag_grace_polls} grace polls), waiting"
-      )
+    decision =
+      if forge_head_lagging?(state) do
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} the PR still reports " <>
+            "head=#{inspect(state.last_head_sha)} but this worker pushed " <>
+            "#{state.local_head_sha}; the forge has not caught up with our own push " <>
+            "(#{state.head_lag_polls + 1}/#{@head_lag_grace_polls} grace polls), waiting"
+        )
 
-      {:wait, %{state | head_lag_polls: state.head_lag_polls + 1}}
-    else
-      case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
-        {:ok, expected_sha} ->
-          {:merge, expected_sha, state}
+        {:wait, %{state | head_lag_polls: state.head_lag_polls + 1}}
+      else
+        case Mergers.ReviewedSha.check(reviewed_sha(state), state.last_head_sha) do
+          {:ok, expected_sha} ->
+            {:merge, expected_sha, state}
 
-        {:error, {:stale_reviewed_sha, reviewed, head}} ->
-          reconsider_stale_head(state, reviewed, head)
+          {:error, {:stale_reviewed_sha, reviewed, head}} ->
+            reconsider_stale_head(state, reviewed, head)
+        end
       end
-    end
+
+    observe_coverage_shadow(decision)
+    decision
+  end
+
+  # bd-b0fqcl / #1649 — P3 shadow mode (design #1635 §3.4/§6.3). Run
+  # `Arbiter.Reviews.Coverage.decide/3` over the same head the decision above
+  # was made on, and record whether the two agree.
+  #
+  # This is evidence gathering, nothing more. `CoverageShadow.observe/1`
+  # returns `:ok` for every input it can be given and rescues everything it
+  # calls, so the value returned to `do_apply_approved_auto_merge/1` is the one
+  # `decide_guarded_merge/1` produced, unmodified — P4 is where the coverage
+  # answer starts being acted on.
+  #
+  # Note what the ctx does NOT carry: an `:ancestor?` probe. No adapter exposes
+  # one and the Watchdog has no local checkout to ask, so rule 2 is unreachable
+  # here and a forge-lag `{:wait, …}` poll registers as an `unknown->uncovered`
+  # disagreement. That is a real, declared gap in the evidence rather than a
+  # hidden one: P4 must supply the probe before it flips, and the tally's
+  # per-transition breakdown is what makes the gap countable.
+  defp observe_coverage_shadow(decision) do
+    {old, head, state} = coverage_shadow_inputs(decision)
+
+    CoverageShadow.observe(%{
+      site: :watchdog,
+      task_id: state.task_id,
+      mr_ref: state.mr_ref,
+      workspace_id: workspace_id(state),
+      head: head,
+      old: old,
+      ctx: fn -> coverage_shadow_ctx(state) end
+    })
+  end
+
+  # §3.4's three answer shapes, as the existing guard already produces them.
+  defp coverage_shadow_inputs({:merge, expected_sha, state}),
+    do: {{:covered, expected_sha}, state.last_head_sha, state}
+
+  defp coverage_shadow_inputs({:wait, state}),
+    do: {{:unknown, :forge_lagging}, state.last_head_sha, state}
+
+  defp coverage_shadow_inputs({:stale, reviewed, head, state}),
+    do: {{:uncovered, {:stale_reviewed_sha, reviewed}}, head, state}
+
+  defp coverage_shadow_ctx(state) do
+    %{
+      local_head_sha: state.local_head_sha,
+      base_ref: state.mr_base_ref,
+      fetch_diff: fn base, head -> safe_get_diff(state, base, head) end,
+      source: :watchdog
+    }
   end
 
   # bd-ch9pmk / #1614. Is the head this poll reported provably older than what
