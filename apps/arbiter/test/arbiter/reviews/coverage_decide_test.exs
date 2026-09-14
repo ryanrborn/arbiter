@@ -297,7 +297,10 @@ defmodule Arbiter.Reviews.CoverageDecideTest do
           net_diff_id: @fp_a,
           kind: :mechanical,
           derived_from: original.id,
-          covered_at: ~U[2026-01-02 00:00:00.000000Z]
+          # Deliberately across a month boundary: a `DateTime`-struct sort key
+          # compares `day` before `month`, so a same-month fixture would pass
+          # against a broken comparator.
+          covered_at: ~U[2026-02-01 00:00:00.000000Z]
         })
 
       ctx = ctx(%{fetch_diff: fn _base, _head -> {:ok, @diff_a_after_base_merge} end})

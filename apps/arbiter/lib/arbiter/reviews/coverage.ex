@@ -242,13 +242,20 @@ defmodule Arbiter.Reviews.Coverage do
   end
 
   # Oldest first, so `derived_from` chains back to the review round rather
-  # than to whichever mechanical row happened to be handed to us first.
+  # than to whichever mechanical row happened to be handed to us first. The
+  # key is an integer, not the `DateTime` struct: Erlang term ordering compares
+  # maps by key name (`day` before `month` before `year`), which scrambles
+  # chronology across month boundaries.
   defp match_fingerprint(coverage, fingerprint) do
     coverage
     |> Enum.filter(&(&1.net_diff_id == fingerprint))
-    |> Enum.sort_by(&{&1.covered_at || ~U[9999-01-01 00:00:00.000000Z], &1.id})
+    |> Enum.sort_by(&{covered_at_key(&1.covered_at), &1.id})
     |> List.first()
   end
+
+  defp covered_at_key(%DateTime{} = covered_at), do: DateTime.to_unix(covered_at, :microsecond)
+  # An undated row sorts last, so any dated row wins the chain.
+  defp covered_at_key(_covered_at), do: :infinity
 
   defp mechanical_row(%Entry{} = matched, head, fingerprint, ctx) do
     %{
