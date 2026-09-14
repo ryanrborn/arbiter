@@ -165,7 +165,56 @@ Production runs are self-contained OTP releases unpacked under `~/.arbiter/relea
 arb server deploy --version v1.2.3
 ```
 
-This downloads the release tarball + checksum from GitHub Releases (`ARB_RELEASE_REPO`), verifies the SHA-256, unpacks it, runs migrations, atomically swaps `current`, restarts the service, and health-checks it — auto-rolling back to the last-known-good release if it doesn't come back green. In a dev checkout with no `ARB_RELEASE_REPO` set, `arb server deploy` falls back to a `git pull --ff-only` + rebuild path instead.
+This downloads the release tarball + checksum from GitHub Releases (`ARB_RELEASE_REPO`), verifies the SHA-256, unpacks it, atomically swaps `current`, restarts the service, and health-checks it — auto-rolling back to the last-known-good release if it doesn't come back green. In a dev checkout with no `ARB_RELEASE_REPO` set, `arb server deploy` falls back to a `git pull --ff-only` + rebuild path instead.
+
+#### Migration ordering, and rollback across a migration
+
+**The deploy does not run migrations.** SQLite allows exactly one writer, so a
+`bin/arbiter eval Arbiter.Release.migrate` from the new release while the old
+server is still serving would be a second writer racing the live one. Instead
+the new release migrates during its **own boot**: `Arbiter.Boot.Migrator` is a
+synchronous supervision-tree child that brings the schema to head before
+`ArbiterWeb.Endpoint` binds its port, gated on the single-instance advisory
+lock so only one node ever migrates. The real ordering is therefore:
+
+    stop the old server  →  new release boots  →  migrate  →  serve
+
+— one writer at every instant, and the same path `arb restart`,
+`arb server migrate` and dev `mix phx.server` already take. The dev-mode
+fallback (`arb server deploy --git-pull`) obeys the same ordering: with the
+server up it pulls and restarts, and the pulled migrations are applied by that
+boot; it only migrates standalone when the server is already down.
+
+**Auto-rollback stops at a schema change.** Re-pointing `current` back at the
+prior release after the new one has migrated would run old code against a
+schema it has never seen. Before swapping the symlink, the deploy compares the
+migrations packaged into the new release tree
+(`lib/<app>-<vsn>/priv/repo/migrations`) against those in the release it would
+roll back to — a pure filesystem comparison, no database connection. If the new
+release adds any:
+
+- it says so up-front, naming them, and notes that automatic rollback is disabled;
+- on a health-check failure it **refuses** to roll back, leaves `current` on the
+  new release, names the crossed migrations, and exits non-zero with the
+  operator's options (fix forward, or roll the schema back first with
+  `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, <version>)"` and then
+  `arb server deploy --version <prior> --force`);
+- `--allow-cross-migration-rollback` overrides the refusal, rolling back anyway
+  with a loud warning that the prior release is now on a newer schema.
+
+A deploy that adds no migrations keeps the automatic rollback unchanged — but
+only when detection actually worked. Because an arbiter release always ships
+migrations, an *empty* migration set from the new release tree means the globs
+no longer match the packaging layout, not that the deploy is migration-free.
+That case fails closed: the deploy warns up-front, refuses the automatic
+rollback the same way a crossed migration does, and reports
+`migrations_detected: false` in `--json` so the empty `crossed_migrations` list
+can't be mistaken for "safe". `--allow-cross-migration-rollback` overrides it.
+
+When the refusal comes from a **failed swap** (`/api/version` still reports the
+old release) rather than a green-wait timeout, the message says the new
+release's migrations *may* have been applied rather than claiming they were —
+a release that never booted never ran its boot migrator.
 
 ### Remote `arb` — access Arbiter over VPN
 
@@ -354,7 +403,7 @@ commands you'll reach for most.
 | `arb worker review <task-id>` | Dispatch a review-only worker against a task |
 | `arb message inbox` | Read (and mark read) the coordinator's escalation mailbox |
 | `arb server start` | Boot the stack (no-op if already up) |
-| `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases (auto-rollback on failure) |
+| `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases (auto-rollback on failure, refused across a migration) |
 | `arb server doctor` | Health-check the server and database |
 | `arb config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
 | `arb mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |

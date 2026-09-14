@@ -91,6 +91,13 @@ defmodule Arbiter.Application do
       # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
       # grow without bound. See `Arbiter.Events.Retention` for config.
       Arbiter.Events.Retention,
+      # Meters the coordinator's OWN Claude Code sessions (bd-be804c) by
+      # sweeping the session JSONLs the CLI writes to disk, and writing the
+      # per-session delta as `source: :coordinator_session`. Inert until an
+      # install names its session directories
+      # (`ARBITER_COORDINATOR_SESSION_DIRS`), and inert in test. See
+      # `Arbiter.Sessions.UsageIngest`.
+      Arbiter.Sessions.UsageIngest,
       # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
       # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
       # it starts without error but never reaches the MCP server — so a worker

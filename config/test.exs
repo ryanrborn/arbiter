@@ -125,10 +125,12 @@ config :arbiter, Arbiter.MCP, inject_config: false, sse_max_lifetime_ms: 0
 # per-test with a unique tmp dir.
 config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-logs-test")
 
-# `Arbiter.Worker.Worktree` and `Arbiter.Reviews.Checkout` both fall back to a
-# hardcoded `/home/rborn/dev/arbiter-worktrees` default (the original author's
-# machine) when this is unset. That default isn't writable on any other box,
-# so any test exercising either module (`CheckoutTest`, `ExternalReviewTest`,
+# `Arbiter.Worker.Worktree` and `Arbiter.Reviews.Checkout` both resolve their
+# root via `Arbiter.Config.Paths.worktree_root/0`, whose ultimate fallback is
+# a `$HOME`-relative default that isn't writable/isolated for the test suite.
+# Historically (before that resolver existed) this config key being unset
+# meant a hardcoded fallback path from the original author's machine, and any
+# test exercising either module (`CheckoutTest`, `ExternalReviewTest`,
 # `MergeQueueConflictTest`, ...) failed with `:eacces` — UNLESS it happened to
 # run concurrently with `WorktreeTest`, whose setup/on_exit temporarily points
 # `:worktree_root` at its own tmp dir for the duration of its own tests. That
@@ -165,6 +167,11 @@ config :arbiter, :loop_canary_ticker, enabled: false
 # delete rows on a timer off the sandbox connection. Tests drive
 # `Arbiter.Events.Retention.sweep/1` synchronously.
 config :arbiter, :events_retention, enabled: false
+
+# bd-be804c: no background sweep of anyone's ~/.claude in the suite — the tests
+# drive `Arbiter.Sessions.UsageIngest.ingest/1` synchronously against fixtures.
+config :arbiter, :coordinator_session_ingest, enabled: false
+config :arbiter, :coordinator_session_dirs, []
 
 # Disable the Codex / Gemini CLI / Antigravity refresh probe in test — there are
 # no real CLIs or endpoints to hit. Tests that exercise the prober inject a
