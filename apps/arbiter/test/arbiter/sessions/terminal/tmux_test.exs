@@ -95,6 +95,13 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
       SessionRunnerStub.script(fn "tmux", _args, _opts -> {"no server running", 1} end)
       assert :ok = Tmux.stop_stream(session, opts())
     end
+
+    test "swallows tmux's stderr rather than printing it", %{session: session} do
+      assert :ok = Tmux.stop_stream(session, opts())
+
+      {"tmux", _args, run_opts} = List.last(SessionRunnerStub.calls("tmux"))
+      assert Keyword.get(run_opts, :stderr_to_stdout) == true
+    end
   end
 
   describe "streaming?/2" do

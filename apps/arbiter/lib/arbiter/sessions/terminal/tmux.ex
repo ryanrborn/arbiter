@@ -66,7 +66,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   @impl true
   def stop_stream(%Session{} = session, opts \\ []) do
     # A bare `pipe-pane` closes the current pipe (it does not open a new one).
-    _ = run(base(session) ++ ["pipe-pane", "-t", Naming.tmux_session()], opts)
+    _ = run_quiet(base(session) ++ ["pipe-pane", "-t", Naming.tmux_session()], opts)
     :ok
   end
 
@@ -99,7 +99,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
           ["send-keys", "-t", Naming.tmux_session(), "-H"] ++
           for(<<byte <- chunk>>, do: Base.encode16(<<byte>>, case: :lower))
 
-      case run(args, opts) do
+      case run_quiet(args, opts) do
         {_out, 0} -> {:cont, :ok}
         {out, status} -> {:halt, {:error, {:tmux_failed, status, String.trim(out)}}}
       end
@@ -121,7 +121,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
           Integer.to_string(rows)
         ]
 
-    case run(args, opts) do
+    case run_quiet(args, opts) do
       {_out, 0} -> :ok
       {out, status} -> {:error, {:tmux_failed, status, String.trim(out)}}
     end
@@ -142,7 +142,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   def alive?(%Session{} = session, opts \\ []) do
     match?(
       {_out, 0},
-      run(base(session) ++ ["has-session", "-t", Naming.tmux_session()], opts)
+      run_quiet(base(session) ++ ["has-session", "-t", Naming.tmux_session()], opts)
     )
   end
 
@@ -160,7 +160,15 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
       @default_snapshot_lines
   end
 
+  # `capture-pane -p` writes the pane's *contents* to stdout, so those calls
+  # must not fold stderr in. Everywhere the output is discarded or only the
+  # exit status matters, stderr is captured instead — otherwise a best-effort
+  # teardown against an already-dead server prints "no server running" onto
+  # the operator's (and the suite's) console.
   defp run(args, opts), do: Sessions.runner(opts).run("tmux", args, [])
+
+  defp run_quiet(args, opts),
+    do: Sessions.runner(opts).run("tmux", args, stderr_to_stdout: true)
 
   defp parse_geometry(out) do
     case String.split(String.trim_trailing(out, "\n"), "\t", parts: 3) do
