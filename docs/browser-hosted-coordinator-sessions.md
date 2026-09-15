@@ -1201,6 +1201,31 @@ run `--print`, which never hits these gates, so `ConfigDir` does not seed them
 today. It writes `settings.json` (`:443`) but not `.claude.json`. **Extend
 `ConfigDir` with an interactive-session variant.**
 
+#### 9.2.1 Two more gates, found on the first real launch (bd-5xlkkj)
+
+Phase 5's post-merge live check watched a freshly provisioned session on the
+real host (Claude Code 2.1.272). The three gates above were correctly
+pre-answered — and the session still stopped twice:
+
+| Gate | Key | Where |
+|---|---|---|
+| "New MCP server found in this project: arbiter" | `enabledMcpjsonServers: ["arbiter"]` | `<config>/settings.json` **and** `<config>/.claude.json` `projects.<cwd>` |
+| "WARNING: Claude Code running in Bypass Permissions mode" | *none* — the session runs in `auto` mode instead | `<config>/settings.json` `permissions.defaultMode` |
+
+Both gates only fire once the first three are answered, which is why the spike
+never reached them. The MCP one is a plain omission. The bypass warning was a
+consequence of the session inheriting `Arbiter.Agents.SecurityPolicy.default/0`
+— the **headless worker's** posture, which is `bypassPermissions` because a
+`--print` run freezes on a permission prompt nobody can answer. A session has
+somebody at the keyboard, so `auto` is both the correct posture and one that
+costs no acceptance screen. Sessions now resolve
+`SecurityPolicy.interactive_session/0`, which also stops denying `Monitor` /
+`ScheduleWakeup` — a coordinator session needs `Monitor` for the `/events`
+stream (`docs/monitoring.md`), and the deny only ever made sense for `--print`
+(bd-d534xo). Everything else in the worker baseline stays, including
+`gh pr create` / `glab mr create`: the MergeQueue still owns PR creation
+(bd-53xrmi).
+
 ### 9.3 MCP wiring — per-session, revocable
 
 Reuse `Arbiter.MCP.AgentConfig.Claude.write_mcp_config/2`, which writes `.mcp.json`
@@ -1351,7 +1376,9 @@ Layered, because no single one of these is sufficient:
 3. **Deny-write on the primary checkout.** `ConfigDir.default_settings_json/0`
    (`:443`) already renders hardened settings from `Arbiter.Agents.Claude.Security`;
    extend that policy with a deny rule for writes under the primary `ARB_HOME`
-   checkout. Cheap, and catches the accident case.
+   checkout. Cheap, and catches the accident case. As shipped this lives in
+   `Arbiter.Agents.Claude.ConfigDir.Interactive.settings/1`, over the
+   interactive profile rather than the worker one (§9.2.1).
 4. **Generated `CLAUDE.md` states it** (§9.1). Belt and braces — the dispatched-
    worker prompt already carries this warning and it demonstrably helps.
 
