@@ -69,6 +69,7 @@ defmodule Arbiter.Usage.Estimate do
   alias Arbiter.Usage.Event
 
   require Ash.Query
+  require Logger
 
   @window_days 60
   @half_life_days 30
@@ -154,6 +155,10 @@ defmodule Arbiter.Usage.Estimate do
   `for_issue/2` in the wire shape the MCP `task_show` response and
   `arb issue show` render: `%{range: [p25, p75], median:, p90:, n:, basis:,
   fallback_level:}`, or `nil` when there is not enough history.
+
+  Unlike `for_issue/2` this never raises. It decorates read surfaces that have
+  their own job to do — `task_show`, `GET /api/issues/:id` — and a ledger
+  query that blows up must cost the caller its estimate, not its task.
   """
   @spec payload(Issue.t() | String.t(), keyword()) :: map() | nil
   def payload(issue_or_id, opts \\ []) do
@@ -171,6 +176,10 @@ defmodule Arbiter.Usage.Estimate do
           fallback_level: est.fallback_level
         }
     end
+  rescue
+    error ->
+      Logger.warning("Usage.Estimate.payload failed: #{Exception.message(error)}")
+      nil
   end
 
   defp resolve_sample(opts) do

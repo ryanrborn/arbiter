@@ -183,6 +183,7 @@ defmodule ArbiterWeb.Router do
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)
     get("/usage/events", UsageController, :events)
+    get("/usage/calibration", UsageController, :calibration)
 
     # External review audit records (bd-31fh9e)
     get("/external_reviews", ExternalReviewController, :index)
