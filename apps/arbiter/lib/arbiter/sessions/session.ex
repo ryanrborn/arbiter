@@ -25,9 +25,23 @@ defmodule Arbiter.Sessions.Session do
     * `scope_unit` / `tmux_socket` — the OS handles, derived from `id` at create
       time and never accepted from a caller. Stored rather than only computed so
       a row remains self-describing if the naming scheme ever changes under it.
-    * `config_dir` — the session's `CLAUDE_CONFIG_DIR` (§9.1). Nullable: phase 1
-      launches with no provisioning, phase 3 fills it in.
-    * `cwd` — the agent's working directory.
+    * `root_dir` / `config_dir` / `cwd` — the §9.1 scaffold: the session's own
+      directory, its `CLAUDE_CONFIG_DIR`, and the agent's working directory.
+      Like `scope_unit` / `tmux_socket` these are **derived from the id** at
+      create time (`Arbiter.Sessions.Layout`) rather than accepted, which is
+      §10.2 layer 1 — "scaffold, never point at a checkout" (decision 4) — made
+      structural: a caller cannot aim a session at the live source tree because
+      it cannot choose the path at all. `config_dir` stays nullable for the
+      phase-1 rows that predate provisioning.
+    * `can_dispatch` — whether this session's MCP token may dispatch workers.
+      Defaults **off** (§10.1 dispatch recursion); switching it on is a
+      deliberate pre-launch choice.
+    * `mcp_token_revoked_at` — when the session's MCP token stopped verifying.
+      Scope tokens are stateless signed blobs with no revocation table, so the
+      row *is* the revocation handle (§9.3): `Arbiter.MCP.Scope.from_token/1`
+      reads this column for any token carrying a `session_id` claim. Ending a
+      session — killed, failed launch, or the sweep finding the scope gone —
+      sets it.
     * `provider_session_id` — the **current** provider-side session id, i.e. the
       basename of the JSONL the CLI is appending to. Nullable at launch (the CLI
       picks it), and **updated on rollover**: a long session that hits
@@ -62,6 +76,7 @@ defmodule Arbiter.Sessions.Session do
     domain: Arbiter.Sessions,
     data_layer: AshSqlite.DataLayer
 
+  alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Naming
 
   @providers ~w(claude_code)a
@@ -108,12 +123,16 @@ defmodule Arbiter.Sessions.Session do
         :cwd,
         :provider_session_id,
         :auth_mode,
-        :remote_control
+        :remote_control,
+        :can_dispatch
       ]
 
-      # The OS handles are a function of the id, so they are computed here
-      # rather than accepted — a caller cannot point a row at somebody else's
-      # scope or socket.
+      # The OS handles and the §9.1 scaffold paths are both functions of the
+      # id, so they are computed here rather than accepted — a caller cannot
+      # point a row at somebody else's scope or socket, nor at an existing
+      # checkout (§10.2 layer 1). An explicitly passed `cwd`/`config_dir` still
+      # wins, which is what keeps the phase-1 lifecycle tests (and any future
+      # adopt-an-external-dir path) working.
       change fn changeset, _context ->
         id = Ash.Changeset.get_attribute(changeset, :id) || Ash.UUID.generate()
 
@@ -123,6 +142,9 @@ defmodule Arbiter.Sessions.Session do
             |> Ash.Changeset.force_change_attribute(:id, id)
             |> Ash.Changeset.force_change_attribute(:scope_unit, Naming.scope_unit(id))
             |> Ash.Changeset.force_change_attribute(:tmux_socket, socket)
+            |> Ash.Changeset.force_change_attribute(:root_dir, Layout.session_dir(id))
+            |> default_attribute(:cwd, fn -> Layout.workspace_dir(id) end)
+            |> default_attribute(:config_dir, fn -> Layout.config_dir(id) end)
 
           {:error, :no_runtime_dir} ->
             Ash.Changeset.add_error(changeset,
@@ -152,9 +174,49 @@ defmodule Arbiter.Sessions.Session do
       change fn changeset, _context ->
         # Idempotent: re-ending an already-ended row keeps the first timestamp,
         # so a sweep that runs twice does not rewrite history.
-        case Ash.Changeset.get_data(changeset, :ended_at) do
-          nil -> Ash.Changeset.force_change_attribute(changeset, :ended_at, DateTime.utc_now())
-          _ -> changeset
+        changeset =
+          case Ash.Changeset.get_data(changeset, :ended_at) do
+            nil -> Ash.Changeset.force_change_attribute(changeset, :ended_at, DateTime.utc_now())
+            _ -> changeset
+          end
+
+        # §9.3: ending a session revokes its MCP token, whatever ended it.
+        # Same idempotence — the first revocation timestamp is the true one.
+        case Ash.Changeset.get_data(changeset, :mcp_token_revoked_at) do
+          nil ->
+            Ash.Changeset.force_change_attribute(
+              changeset,
+              :mcp_token_revoked_at,
+              DateTime.utc_now()
+            )
+
+          _ ->
+            changeset
+        end
+      end
+    end
+
+    update :revoke_mcp_token do
+      description """
+      Revoke the session's MCP token without ending the session (§9.3) — the
+      leaked-token path, where the session itself is fine. A relaunch mints a
+      fresh token; this one never verifies again.
+      """
+
+      accept []
+      require_atomic? false
+
+      change fn changeset, _context ->
+        case Ash.Changeset.get_data(changeset, :mcp_token_revoked_at) do
+          nil ->
+            Ash.Changeset.force_change_attribute(
+              changeset,
+              :mcp_token_revoked_at,
+              DateTime.utc_now()
+            )
+
+          _ ->
+            changeset
         end
       end
     end
@@ -203,10 +265,16 @@ defmodule Arbiter.Sessions.Session do
       description "$XDG_RUNTIME_DIR/arbiter/session-<id>.sock."
     end
 
+    attribute :root_dir, :string do
+      public? true
+      constraints max_length: 512, trim?: true
+      description "The session's own scaffold directory, <sessions_root>/<id> (§9.1)."
+    end
+
     attribute :config_dir, :string do
       public? true
       constraints max_length: 512, trim?: true
-      description "CLAUDE_CONFIG_DIR for the session (§9.1); nil until phase 3."
+      description "CLAUDE_CONFIG_DIR for the session (§9.1)."
     end
 
     attribute :cwd, :string do
@@ -234,6 +302,18 @@ defmodule Arbiter.Sessions.Session do
       default false
     end
 
+    attribute :can_dispatch, :boolean do
+      allow_nil? false
+      public? true
+      default false
+      description "Whether the session's MCP token may dispatch workers (§10.1). Off by default."
+    end
+
+    attribute :mcp_token_revoked_at, :utc_datetime_usec do
+      public? true
+      description "When the session's MCP token was revoked; nil while it is live (§9.3)."
+    end
+
     attribute :started_at, :utc_datetime_usec do
       allow_nil? false
       public? true
@@ -258,5 +338,16 @@ defmodule Arbiter.Sessions.Session do
 
     create_timestamp :inserted_at
     update_timestamp :updated_at
+  end
+
+  # Force `attribute` to `fun.()` unless the caller supplied a non-blank value.
+  defp default_attribute(changeset, attribute, fun) do
+    case Ash.Changeset.get_attribute(changeset, attribute) do
+      value when is_binary(value) and value != "" ->
+        changeset
+
+      _ ->
+        Ash.Changeset.force_change_attribute(changeset, attribute, fun.())
+    end
   end
 end

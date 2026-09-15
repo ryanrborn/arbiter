@@ -101,6 +101,22 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
       assert json_response(conn, 401)["error"]["type"] == "unauthorized"
     end
+
+    # bd-aprlbb / RFC §9.3. The unit tests prove `Scope.from_token/1` returns
+    # `{:error, :revoked}`; this proves the transport actually 401s on it, which
+    # is the property "killing a session revokes its token" cashes out to.
+    test "a live session's token works, and stops working the moment it is killed", ctx do
+      session = Arbiter.Test.SessionEnv.launch_session!()
+      token = Arbiter.Sessions.mint_mcp_token(session)
+
+      assert json_response(rpc(ctx.conn, token, req("tools/list")), 200)["result"]["tools"] != nil
+
+      {:ok, _} = Arbiter.Sessions.kill(session.id, runner: Arbiter.Test.SessionRunnerStub)
+
+      conn = rpc(build_conn(), token, req("tools/list"))
+      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
+      assert json_response(conn, 401)["error"]["message"] =~ "revoked"
+    end
   end
 
   describe "tools/list" do
