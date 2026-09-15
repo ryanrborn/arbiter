@@ -5,9 +5,9 @@ defmodule Arbiter.Sessions.Layout do
 
       <sessions_root>/<session-id>/
         workspace/            # cwd for the agent; git worktrees created here
+          .mcp.json           # per-session scope token (§9.3) — must sit in the cwd
         config/               # CLAUDE_CONFIG_DIR (isolated, per session)
         CLAUDE.md             # generated: role, workspace binding, guardrails
-        .mcp.json             # per-session scope token (§9.3)
         memory/
           shared/             # read-only mounted layers (§9.4; phase 12 fills)
           candidates/         # per-session write space (§9.4)
@@ -53,9 +53,21 @@ defmodule Arbiter.Sessions.Layout do
   @spec instructions_path(String.t()) :: String.t()
   def instructions_path(id), do: Path.join(session_dir(id), "CLAUDE.md")
 
-  @doc "The per-session `.mcp.json` (§9.3). Written mode 0600 — it holds a bearer token."
+  @doc """
+  The per-session `.mcp.json` (§9.3). Written mode 0600 — it holds a bearer token.
+
+  It lives in the **agent's cwd**, not at the session root: Claude Code
+  auto-loads `.mcp.json` from the working directory only
+  (`Arbiter.MCP.AgentConfig.Claude`), and `launch.sh` `cd`s into `workspace/`
+  before `exec`ing the agent. A copy one level up is a copy the session never
+  reads, so the RFC's §9.1 tree draws it here.
+
+  For a session with an overridden `cwd`, `Arbiter.Sessions.Provisioning`
+  writes it beside that cwd instead — the invariant is "next to the agent",
+  not "at this literal path".
+  """
   @spec mcp_config_path(String.t()) :: String.t()
-  def mcp_config_path(id), do: Path.join(session_dir(id), ".mcp.json")
+  def mcp_config_path(id), do: Path.join(workspace_dir(id), ".mcp.json")
 
   @doc "Memory mount root (§9.4)."
   @spec memory_dir(String.t()) :: String.t()

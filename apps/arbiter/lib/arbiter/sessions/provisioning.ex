@@ -13,7 +13,8 @@ defmodule Arbiter.Sessions.Provisioning do
       mode's credential posture
       (`Arbiter.Agents.Claude.ConfigDir.Interactive`);
     * `.mcp.json` carrying a per-session, revocable coordinator token
-      (§9.3), written mode `0600`;
+      (§9.3), written mode `0600` **into the session's cwd**, which is the
+      only place Claude Code loads it from;
     * a generated `CLAUDE.md` (`Arbiter.Sessions.Instructions`);
     * `memory/shared` + `memory/candidates` — §9.4's **mount points only**.
       Phase 12 mounts the layers and implements promotion; creating the
@@ -105,7 +106,7 @@ defmodule Arbiter.Sessions.Provisioning do
          :ok <- write_instructions(session, paths, opts),
          :ok <- seed_config_dir(session, config_dir, cwd, opts),
          :ok <- write_auth_env(session, paths, opts),
-         {:ok, mcp_config} <- write_mcp_config(session, paths, opts),
+         {:ok, mcp_config} <- write_mcp_config(session, cwd, opts),
          :ok <- write_launch_script(session, paths, config_dir, opts) do
       {:ok,
        %{
@@ -258,7 +259,14 @@ defmodule Arbiter.Sessions.Provisioning do
     end
   end
 
-  defp write_mcp_config(session, paths, opts) do
+  # Written into the session's **cwd**, not the session root: Claude Code
+  # auto-loads `.mcp.json` from the working directory only
+  # (`Arbiter.MCP.AgentConfig.Claude`), and `launch.sh` cd's into that cwd
+  # before exec'ing the agent. One directory out and the session starts with no
+  # Arbiter MCP server at all.
+  defp write_mcp_config(session, cwd, opts) do
+    path = Path.join(cwd, ClaudeMCP.filename())
+
     if Keyword.get(opts, :mcp, MCP.enabled?()) do
       # Narrowed on purpose: `opts` here is the whole `launch/1` keyword list
       # (`:runner`, `:cwd`, `:cols`, an OAuth token…), and `MCP.mint/2` forwards
@@ -267,19 +275,24 @@ defmodule Arbiter.Sessions.Provisioning do
       token =
         mint_token(session, Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth]))
 
-      with :ok <-
-             ClaudeMCP.write_mcp_config(paths.root,
+      # Same discipline as `write_secret/2`: the file exists at 0600 *before*
+      # the adapter writes a live bearer token into it, so it is never briefly
+      # readable at the default umask. `File.write/2` truncates an existing file
+      # without touching its mode, so the adapter's own write inherits 0600.
+      with :ok <- touch_secret(path),
+           :ok <-
+             ClaudeMCP.write_mcp_config(cwd,
                mcp_url: MCP.server_url(),
                scope_token: token,
                server_name: MCP.server_name()
-             ),
-           :ok <- chmod(paths.mcp_config, @secret_file_mode) do
-        {:ok, paths.mcp_config}
+             ) do
+        {:ok, path}
       else
-        {:error, reason} -> {:error, {:write_failed, paths.mcp_config, reason}}
+        {:error, {:write_failed, _, _} = reason} -> {:error, reason}
+        {:error, reason} -> {:error, {:write_failed, path, reason}}
       end
     else
-      _ = File.rm(paths.mcp_config)
+      _ = File.rm(path)
       {:ok, nil}
     end
   end
@@ -345,13 +358,20 @@ defmodule Arbiter.Sessions.Provisioning do
   end
 
   defp write_secret(path, contents) do
-    # Create the file empty at 0600 *before* writing the secret into it, so the
-    # token is never briefly readable at the default umask.
-    with :ok <- File.write(path, ""),
-         :ok <- chmod(path, @secret_file_mode),
+    with :ok <- touch_secret(path),
          :ok <- File.write(path, contents) do
       :ok
     else
+      {:error, {:write_failed, _, _} = reason} -> {:error, reason}
+      {:error, reason} -> {:error, {:write_failed, path, reason}}
+    end
+  end
+
+  # Create the file empty at 0600 *before* anything writes a secret into it, so
+  # the secret is never briefly readable at the default umask.
+  defp touch_secret(path) do
+    case File.write(path, "") do
+      :ok -> chmod(path, @secret_file_mode)
       {:error, reason} -> {:error, {:write_failed, path, reason}}
     end
   end

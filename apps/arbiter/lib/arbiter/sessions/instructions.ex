@@ -39,7 +39,11 @@ defmodule Arbiter.Sessions.Instructions do
   @spec render(Session.t(), keyword()) :: String.t()
   def render(%Session{} = session, opts \\ []) do
     id = session.id
-    paths = Layout.paths(id)
+    # The row's cwd wins where it is set — the agent is told where it actually
+    # is, and where its `.mcp.json` actually sits (it lives in the cwd; see
+    # `Arbiter.Sessions.Layout.mcp_config_path/1`).
+    cwd = session.cwd || Layout.workspace_dir(id)
+    mcp_config = Path.join(cwd, ".mcp.json")
     can_dispatch = Keyword.get(opts, :can_dispatch, session.can_dispatch)
     server = Keyword.get(opts, :mcp_server_name, "arbiter")
 
@@ -58,15 +62,15 @@ defmodule Arbiter.Sessions.Instructions do
 
     #{workspace_section(session)}
 
-    Your working directory is `#{paths.workspace}`. It is a fresh, empty
-    directory that Arbiter created for this session — deliberately **not** a
-    checkout of anything.
+    Your working directory is `#{cwd}`. It is a fresh directory that Arbiter
+    created for this session — deliberately **not** a checkout of anything. The
+    only thing in it is the `.mcp.json` below.
 
     #{checkout_section(Keyword.get(opts, :primary_checkout, default_checkout()))}
 
     ## Talking to Arbiter
 
-    `#{paths.mcp_config}` registers the Arbiter MCP server (`#{server}`) with a
+    `#{mcp_config}` registers the Arbiter MCP server (`#{server}`) with a
     bearer token minted for **this session only**. It is revoked the moment the
     session ends or is killed, so a copy of it is worth nothing afterwards —
     but it is a live credential while you run: never paste it into a file, a

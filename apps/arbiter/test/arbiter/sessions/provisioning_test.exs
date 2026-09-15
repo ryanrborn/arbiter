@@ -120,6 +120,39 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       assert {:ok, %{mode: mode}} = File.stat(Layout.mcp_config_path(session.id))
       assert Bitwise.band(mode, 0o077) == 0
     end
+
+    # Claude Code auto-loads `.mcp.json` from the working directory and nowhere
+    # else, and `launch.sh` cd's into the session cwd before exec'ing the agent.
+    # So this is asserted against `session.cwd`, not a literal path: a config one
+    # directory out is a config the session never reads, and the session would
+    # start with no Arbiter MCP server registered at all.
+    test "sits in the session's cwd — the only place Claude Code loads it from" do
+      session = launch!()
+      in_cwd = Path.join(session.cwd, ".mcp.json")
+
+      assert File.regular?(in_cwd)
+      assert Layout.mcp_config_path(session.id) == in_cwd
+
+      assert File.read!(Layout.launch_script_path(session.id)) =~
+               "cd '#{Path.dirname(in_cwd)}'"
+
+      refute File.exists?(Path.join(Layout.session_dir(session.id), ".mcp.json")),
+             "a copy at the session root is a copy the agent never reads"
+    end
+
+    test "follows an overridden cwd", %{root: root} do
+      cwd = Path.join(root, "elsewhere")
+      File.mkdir_p!(cwd)
+
+      session = launch!(cwd: cwd)
+
+      assert session.cwd == cwd
+      assert File.regular?(Path.join(cwd, ".mcp.json"))
+      assert File.read!(Layout.launch_script_path(session.id)) =~ "cd '#{cwd}'"
+      # And the generated instructions point the agent at the file that exists.
+      assert session.id |> Layout.instructions_path() |> File.read!() =~
+               Path.join(cwd, ".mcp.json")
+    end
   end
 
   describe "auth modes (§8.1–§8.2, AC 4)" do

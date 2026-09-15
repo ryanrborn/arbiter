@@ -876,13 +876,13 @@ token does not carry it.
 ```
 <sessions_root>/<session-id>/
   workspace/            # cwd for the agent; git worktrees created here
+    .mcp.json           #   per-session scope token (§9.3) — lives in the cwd
   config/               # CLAUDE_CONFIG_DIR  (isolated, per session)
     .claude.json        #   pre-seeded: onboarding + trust (§9.2)
     settings.json       #   ConfigDir.default_settings_json/0 (:443)
     .credentials.json   #   mode B only — copied, never symlinked
     projects/…/<sid>.jsonl   # the metering + transcript source (§7, §11)
   CLAUDE.md             # generated: role, workspace binding, guardrails
-  .mcp.json             # per-session scope token (§9.3)
   memory/               # mounted layers + candidate space (§9.4)
   transcript/           # raw PTY byte stream (§11)
 ```
@@ -910,6 +910,13 @@ today. It writes `settings.json` (`:443`) but not `.claude.json`. **Extend
 Reuse `Arbiter.MCP.AgentConfig.Claude.write_mcp_config/2`, which writes `.mcp.json`
 with `"type" => "http"` pointing at the loopback MCP endpoint
 (`apps/arbiter/lib/arbiter/mcp/agent_config/claude.ex:48`). Unchanged.
+
+**It goes in the session's cwd** (`workspace/`), not at the session root. Claude
+Code auto-loads `.mcp.json` from the working directory only, and `launch.sh`
+`cd`s into `workspace/` before `exec`ing the agent — a copy one level up is a
+copy the session never reads, and the session would start with no Arbiter MCP
+server registered at all. This corrects an earlier draft of the §9.1 tree above,
+which drew it at the session root.
 
 The token should be **per session and revocable**, not a shared coordinator token:
 the session row is the natural revocation handle (killing a session revokes its
@@ -967,7 +974,7 @@ launch and ends the row rather than starting a pane that would hang.
 |---|---|
 | 9.1 layout | `Arbiter.Sessions.Layout` (pure paths) + `Arbiter.Sessions.Provisioning` (creation) |
 | 9.2 onboarding gates | `Arbiter.Agents.Claude.ConfigDir.Interactive` — merges into `.claude.json` rather than overwriting it, so Claude Code's own state (incl. `bridgeOauth*`) survives a re-provision |
-| 9.3 MCP | `Arbiter.MCP.Scope.mint_session/2`; `.mcp.json` written mode `0600` via the existing `AgentConfig.Claude.write_mcp_config/2` |
+| 9.3 MCP | `Arbiter.MCP.Scope.mint_session/2`; `.mcp.json` written mode `0600` into the session **cwd** via the existing `AgentConfig.Claude.write_mcp_config/2` |
 | 9.4 memory | mount points only (`memory/shared`, `memory/candidates`), plus the read-only doctrine in the generated `CLAUDE.md`. No promotion — phase 12 |
 | generated instructions | `Arbiter.Sessions.Instructions` |
 

@@ -1,5 +1,11 @@
 System.delete_env("ARBITER_WORKTREE_ROOT")
 System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
+# bd-aprlbb: same reason as the two above — `Arbiter.Config.Paths.resolve/3` is
+# env-first, so an exported ARBITER_SESSIONS_ROOT would beat both `config/test.exs`
+# and `Arbiter.Test.SessionEnv`'s `put_env`, and the suite would provision real
+# session scaffolds into the operator's configured root (which SessionEnv's
+# `on_exit`, cleaning only its own tmp dir, would then never remove).
+System.delete_env("ARBITER_SESSIONS_ROOT")
 
 # bd-bpt0ag: `:live_systemd` tests spawn REAL systemd user scopes and tmux
 # servers on whatever host runs them, so they are opt-in rather than part of
