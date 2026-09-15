@@ -2272,6 +2272,17 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
                "#children-ready-#{blocked.id} [data-role='sibling-depends-on-marker']",
                blocker.id
              )
+
+      # A closed sibling is satisfied ordering history, not a live
+      # constraint — its marker is dropped (design bd-2s901b §3).
+      {:ok, _} = Ash.update(blocker, %{}, action: :close)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      refute has_element?(
+               view,
+               "#children-ready-#{blocked.id} [data-role='sibling-depends-on-marker']"
+             )
     end
 
     test "Closed collapses by default past 5 children", %{conn: conn, ws: ws} do
@@ -2338,10 +2349,6 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       conn: conn,
       ws: ws
     } do
-      alias Arbiter.Test.StubMerger
-
-      StubMerger.reset()
-
       {:ok, epic} =
         Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
 
@@ -2355,15 +2362,19 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert has_element?(view, "#children-running-#{child.id}")
 
-      StubMerger.next_open_ref("!bd-1273p2")
+      # `Worker.await/2` is a worker-only transition (:running -> :awaiting):
+      # it never writes the child's Issue row, so no `:task_lifecycle` fires —
+      # only the "workers" PubSub topic does. This isolates the mini-board's
+      # `epic_child?` refresh path (task_detail_live.ex) from the pre-existing
+      # `:task_lifecycle` catch-all, which would repaint the board anyway and
+      # mask a regression in the worker-only path.
+      :ok = Worker.await(pid, :manual_pause)
 
-      {:ok, "!bd-1273p2"} =
-        Worker.open_mr(pid, "feature/x", "Add x", "desc", %{
-          adapter: StubMerger,
-          workspace: nil,
-          interval_ms: 1_000_000,
-          initial_delay_ms: 1_000_000
-        })
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "workers",
+        {:worker_lifecycle, :updated, %{task_id: child.id}}
+      )
 
       assert has_element?(view, "#children-waiting-#{child.id}")
       refute has_element?(view, "#children-running-#{child.id}")
