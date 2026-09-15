@@ -140,6 +140,7 @@ defmodule ArbiterCli.Cmd.Usage do
           workspace: :string,
           step: :string,
           source: :string,
+          session: :string,
           since: :string,
           limit: :integer
         ]
@@ -151,6 +152,7 @@ defmodule ArbiterCli.Cmd.Usage do
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
       |> maybe_put(:step, Keyword.get(opts, :step))
       |> maybe_put(:source, Keyword.get(opts, :source))
+      |> maybe_put(:session_id, Keyword.get(opts, :session))
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
       |> maybe_put(:limit, Keyword.get(opts, :limit) || @default_event_limit)
 

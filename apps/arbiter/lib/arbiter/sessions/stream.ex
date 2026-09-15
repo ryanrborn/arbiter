@@ -101,27 +101,46 @@ defmodule Arbiter.Sessions.Stream do
   least one client is attached, it re-reads the session's on-disk JSONL with
   `Arbiter.Usage.ClaudeSessionFile.read_totals/2` — the same reconciliation
   arithmetic `Arbiter.Sessions.UsageIngest` already uses, reused rather than
-  reimplemented — and publishes the *delta* since the previous tick as a
-  `usage` event on `Arbiter.Sessions.usage_topic/1`. `ArbiterWeb.SessionChannel`
+  reimplemented — and publishes the file's *cumulative* totals as a `usage`
+  event on `Arbiter.Sessions.usage_topic/1`. `ArbiterWeb.SessionChannel`
   subscribes to that topic independently of this reader's own `subs` (it is
-  PubSub, not a direct send), so multiple attached tabs share one tailer.
+  PubSub, not a direct send), so multiple attached tabs share one tailer —
+  and, because the payload is always the file's running total rather than a
+  delta since some reader-private baseline, a tab that attaches midway
+  through the session's life (or reattaches after the reader restarted) shows
+  the correct number on the very next tick instead of resuming from zero.
 
-  Token counts in the payload are deltas — "what changed since the last
-  push" — but `cost_usd` is the file's latest cumulative figure: `cost-state`
-  records are periodic (often absent entirely on 2.1.270+, see
-  `ClaudeSessionFile`'s moduledoc), so there is rarely a *new* dollar amount
-  to diff, only the most recently known total. `estimated` mirrors
-  `totals.cost_source != :cost_state` — true whenever that total came from
-  `Arbiter.Usage.ClaudePricing`'s token-based estimate rather than the CLI's
-  own accounting, which is the HUD's "estimated" marker (AC 1).
+  `estimated` mirrors `totals.cost_source == :estimated` — true only when the
+  figure came from `Arbiter.Usage.ClaudePricing`'s token-based estimate. A
+  file with no cost at all (`cost_source: nil`, e.g. an unpriced model) is
+  reported with `cost_usd: nil` and `estimated: false` — a missing number is
+  not the same claim as an estimated one.
 
-  This reads `session.config_dir` / `session.provider_session_id` as they
-  were at the reader's own start (or last resume) rather than re-fetching the
-  row every tick — cheap, and consistent with every other use of
-  `state.session` in this module. A mid-session provider-id rollover (§7.5's
-  "wrinkle") is therefore a gap the *authoritative* reconciliation
-  (`Arbiter.Sessions.UsageIngest`) closes on its own sweep; the live HUD is
-  documented as "cheap, approximate" for exactly this reason.
+  Reading and JSON-decoding a whole session transcript is not free, so two
+  guards keep this timer from competing with the 25ms PTY poll and the
+  synchronous `attach`/`send_input`/`snapshot` calls this same GenServer must
+  keep answering: a tick is skipped entirely when the file's `{size, mtime}`
+  is unchanged since the last read, and the read that does happen runs in a
+  short-lived `Task` (`Arbiter.TaskSupervisor`) rather than inline, with the
+  reader tracking one in-flight ref so a slow read is never started twice
+  concurrently.
+
+  `session.provider_session_id` is nullable at launch (the CLI picks it, not
+  Arbiter — see `Arbiter.Sessions.Session`'s moduledoc). Until it is known,
+  the reader discovers it itself: the newest `*.jsonl` under
+  `session.config_dir/projects/*/`, by mtime, is assumed to be the file the
+  CLI is currently appending to. The discovered id is persisted back onto the
+  row with `Arbiter.Sessions.record_provider_session/2` (best-effort — a
+  failure to persist is not fatal to the tick, since the id is still used to
+  read *this* tick's totals) so later ticks, and the authoritative
+  `Arbiter.Sessions.UsageIngest` sweep, pick it up too. The same discovery
+  path also closes the §7.5 rollover wrinkle: a tick that finds its
+  previously-known id no longer resolves a file re-discovers rather than
+  going dark.
+
+  This reads `session.config_dir` as it was at the reader's own start (or
+  last resume) rather than re-fetching the row every tick — cheap, and
+  consistent with every other use of `state.session` in this module.
   """
 
   use GenServer
@@ -148,16 +167,6 @@ defmodule Arbiter.Sessions.Stream do
     usage_poll_interval_ms: 2_000,
     linger_ms: 5_000
   ]
-
-  # The zero-baseline a fresh reader diffs its first usage poll against —
-  # nothing has been shown yet, so the first tick's delta is the file's
-  # whole in-window total.
-  @blank_usage_totals %{
-    tokens_in: 0,
-    tokens_out: 0,
-    cache_creation_tokens: 0,
-    cache_read_tokens: 0
-  }
 
   # Rounds `attach/2` will re-resolve the reader over before giving up. Three
   # is generous: the window it covers is the registry's handling of one
@@ -362,7 +371,8 @@ defmodule Arbiter.Sessions.Stream do
       open_error: nil,
       linger_timer: nil,
       last_turn_touch_ms: nil,
-      usage_last: @blank_usage_totals
+      usage_task_ref: nil,
+      usage_file_stat: nil
     }
 
     {:ok, state, {:continue, :open}}
@@ -521,6 +531,28 @@ defmodule Arbiter.Sessions.Stream do
     else
       {:noreply, %{state | linger_timer: nil}}
     end
+  end
+
+  # The in-flight usage-read Task, landing. Matched (and demonitored) before
+  # the subscriber `:DOWN` clause below, which would otherwise also match this
+  # shape.
+  def handle_info({ref, result}, %{usage_task_ref: ref} = state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | usage_task_ref: nil}
+
+    case result do
+      {:ok, totals} ->
+        publish_usage(state, totals)
+        {:noreply, state}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{usage_task_ref: ref} = state)
+      when is_reference(ref) do
+    {:noreply, %{state | usage_task_ref: nil}}
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
@@ -849,43 +881,118 @@ defmodule Arbiter.Sessions.Stream do
   # session nothing is attached to.
   defp poll_usage(%{subs: subs} = state) when map_size(subs) == 0, do: state
 
+  # A previous tick's read is still in flight — never start a second one
+  # concurrently (the file only grows every ~2s; there is nothing new to read
+  # before the first one lands).
+  defp poll_usage(%{usage_task_ref: ref} = state) when is_reference(ref), do: state
+
   defp poll_usage(%{session: session} = state) do
-    with provider_session_id when is_binary(provider_session_id) <-
-           session.provider_session_id,
-         {:ok, path} <- ClaudeSessionFile.locate(session.config_dir, provider_session_id),
-         {:ok, totals} <-
-           ClaudeSessionFile.read_totals(path, session_id: provider_session_id) do
-      publish_usage_delta(state, totals)
-      %{state | usage_last: usage_snapshot(totals)}
-    else
-      _ -> state
+    case usage_source(session) do
+      {:ok, provider_session_id, path, session} ->
+        maybe_read_usage(%{state | session: session}, path, provider_session_id)
+
+      :not_found ->
+        state
     end
   end
 
-  defp publish_usage_delta(state, totals) do
-    last = state.usage_last
-
-    Sessions.broadcast_usage(state.id, %{
-      tokens_in: usage_delta(totals.tokens_in, last.tokens_in),
-      tokens_out: usage_delta(totals.tokens_out, last.tokens_out),
-      cache_creation: usage_delta(totals.cache_creation_tokens, last.cache_creation_tokens),
-      cache_read: usage_delta(totals.cache_read_tokens, last.cache_read_tokens),
-      cost_usd: totals.cost_usd,
-      model: totals.model,
-      estimated: totals.cost_source != :cost_state
-    })
+  # `session.provider_session_id` resolves to a file: use it. If it no longer
+  # does (a rollover moved the CLI onto a new id since the reader last saw
+  # this row), fall through to discovery rather than going dark — the §7.5
+  # "wrinkle" this closes for free.
+  defp usage_source(%{provider_session_id: id} = session) when is_binary(id) and id != "" do
+    case ClaudeSessionFile.locate(session.config_dir, id) do
+      {:ok, path} -> {:ok, id, path, session}
+      :not_found -> discover_usage_source(session)
+    end
   end
 
-  defp usage_delta(now, prev) when is_integer(now) and is_integer(prev), do: max(now - prev, 0)
-  defp usage_delta(_now, _prev), do: 0
+  defp usage_source(session), do: discover_usage_source(session)
 
-  defp usage_snapshot(totals) do
-    %{
+  # `provider_session_id` is nullable at launch (the CLI picks it) and stale
+  # after a rollover. Either way, assume the newest `*.jsonl` under the
+  # session's own config dir is the file the CLI is currently appending to,
+  # and persist the discovery back onto the row (best-effort: a failed write
+  # doesn't stop this tick from using the id it just found).
+  defp discover_usage_source(session) do
+    case discover_provider_session_file(session.config_dir) do
+      {:ok, provider_session_id, path} ->
+        {:ok, provider_session_id, path, persist_provider_session(session, provider_session_id)}
+
+      :not_found ->
+        :not_found
+    end
+  end
+
+  defp discover_provider_session_file(config_dir)
+       when is_binary(config_dir) and config_dir != "" do
+    case Path.wildcard(Path.join([config_dir, "projects", "*", "*.jsonl"])) do
+      [] ->
+        :not_found
+
+      paths ->
+        path = Enum.max_by(paths, &jsonl_mtime/1)
+        {:ok, Path.basename(path, ".jsonl"), path}
+    end
+  end
+
+  defp discover_provider_session_file(_config_dir), do: :not_found
+
+  defp jsonl_mtime(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %{mtime: mtime}} -> mtime
+      _ -> 0
+    end
+  end
+
+  defp persist_provider_session(session, provider_session_id) do
+    case Sessions.record_provider_session(session, provider_session_id) do
+      {:ok, updated} -> updated
+      _ -> session
+    end
+  rescue
+    _ -> session
+  end
+
+  # Skip the (relatively expensive) full parse when the file hasn't changed
+  # since the last read, and run the read that does happen off the GenServer
+  # in a short-lived Task so decoding a multi-MB transcript never blocks the
+  # 25ms PTY poll or a synchronous `attach`/`send_input`/`snapshot` call.
+  defp maybe_read_usage(state, path, provider_session_id) do
+    case file_stat_key(path) do
+      nil ->
+        state
+
+      stat when stat == state.usage_file_stat ->
+        state
+
+      stat ->
+        %Task{ref: ref} =
+          Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn ->
+            ClaudeSessionFile.read_totals(path, session_id: provider_session_id)
+          end)
+
+        %{state | usage_task_ref: ref, usage_file_stat: stat}
+    end
+  end
+
+  defp file_stat_key(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %{size: size, mtime: mtime}} -> {size, mtime}
+      _ -> nil
+    end
+  end
+
+  defp publish_usage(state, totals) do
+    Sessions.broadcast_usage(state.id, %{
       tokens_in: totals.tokens_in,
       tokens_out: totals.tokens_out,
-      cache_creation_tokens: totals.cache_creation_tokens,
-      cache_read_tokens: totals.cache_read_tokens
-    }
+      cache_creation: totals.cache_creation_tokens,
+      cache_read: totals.cache_read_tokens,
+      cost_usd: totals.cost_usd,
+      model: totals.model,
+      estimated: totals.cost_source == :estimated
+    })
   end
 
   # -- misc -------------------------------------------------------------------

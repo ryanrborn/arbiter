@@ -235,6 +235,23 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert out =~ "session=sess-abc123"
       assert out =~ "source=coordinator_session"
     end
+
+    test "`arb usage events --session <id>` also passes the session filter through" do
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["session_id"] == "sess-abc123"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["events", "--session", "sess-abc123"]) end)
+
+      assert code == 0
+      assert out =~ "(no usage events)"
+    end
   end
 
   describe "arb usage events" do

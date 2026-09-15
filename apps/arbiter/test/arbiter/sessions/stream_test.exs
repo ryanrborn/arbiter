@@ -703,7 +703,7 @@ defmodule Arbiter.Sessions.StreamTest do
       assert payload.estimated == true
     end
 
-    test "a second tick reports only what changed, not the cumulative total", %{
+    test "a second tick reports the file's cumulative totals, not just what changed", %{
       id: id,
       opts: opts,
       tmp_dir: tmp_dir
@@ -728,9 +728,32 @@ defmodule Arbiter.Sessions.StreamTest do
         [:append]
       )
 
+      # Cumulative, not a delta: a client attaching only in time for this
+      # second push must still see the session's whole-life totals.
       assert_receive {:session_usage, ^id, second}, 1_000
-      assert second.tokens_in == 30
-      assert second.tokens_out == 10
+      assert second.tokens_in == 130
+      assert second.tokens_out == 60
+    end
+
+    test "discovers the provider session id from disk when the row has none", %{
+      id: id,
+      opts: opts,
+      tmp_dir: tmp_dir
+    } do
+      provider_session_id = "prov-#{id}"
+      {session, path} = usage_session(id, tmp_dir, provider_session_id)
+      session = %{session | provider_session_id: nil}
+
+      write_jsonl(path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:00.000Z","sessionId":"#{provider_session_id}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50}}})
+      ])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(id))
+      {:ok, _attached} = attach(session, opts, usage_poll_interval_ms: 5)
+
+      assert_receive {:session_usage, ^id, payload}, 1_000
+      assert payload.tokens_in == 100
+      assert payload.tokens_out == 50
     end
 
     test "nothing is published while no client is attached", %{

@@ -370,8 +370,6 @@ defmodule ArbiterWeb.SessionLive do
           mounted() {
             this.statusEl = document.getElementById("terminal-status")
             this.state = "connecting"
-            this.tokensIn = 0
-            this.tokensOut = 0
 
             this.terminal = createSessionTerminal(this.el, {
               sessionId: this.el.dataset.sessionId,
@@ -438,19 +436,22 @@ defmodule ArbiterWeb.SessionLive do
               `${meta.cols}x${meta.rows}` + (clients > 1 ? ` · ${clients} clients` : "")
           },
 
-          // Each `usage` event carries token *deltas* and the file's latest
-          // known cost (§7.5, phase 7) — the tokens accumulate client-side
-          // across the pane's lifetime, the cost is just the newest figure.
+          // Each `usage` event carries the file's *cumulative* tokens and
+          // latest known cost (§7.5, phase 7) — assigned, not accumulated,
+          // so a tab that (re)attaches mid-session shows the right number on
+          // its very next tick instead of resuming from zero or double
+          // counting against a reader that restarted.
           setUsage(payload) {
             if (!this.statusEl || !payload) return
             const slot = this.statusEl.querySelector('[data-role="usage"]')
             if (!slot) return
 
-            this.tokensIn = (this.tokensIn || 0) + (payload.tokens_in || 0)
-            this.tokensOut = (this.tokensOut || 0) + (payload.tokens_out || 0)
+            const tokensIn = payload.tokens_in || 0
+            const tokensOut = payload.tokens_out || 0
 
-            const tokens = `${formatTokens(this.tokensIn)} in / ${formatTokens(this.tokensOut)} out`
-            const cost = typeof payload.cost_usd === "number" ? `$${payload.cost_usd.toFixed(2)}` : "$?"
+            const tokens = `${formatTokens(tokensIn)} in / ${formatTokens(tokensOut)} out`
+            const cost =
+              typeof payload.cost_usd === "number" ? `$${payload.cost_usd.toFixed(2)}` : "cost unavailable"
             const marker = payload.estimated ? " (estimated)" : ""
 
             slot.textContent = `${tokens} · ${cost}${marker}`
