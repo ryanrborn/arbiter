@@ -732,7 +732,11 @@ defmodule ArbiterWeb.BoardLive do
                   class="cursor-pointer"
                   data-card={card.id}
                   data-column="backlog"
-                />
+                >
+                  <:parent :if={card.parent}>
+                    <.parent_link parent={card.parent} mode="compact" />
+                  </:parent>
+                </.task_card>
               </div>
 
               <.more
@@ -776,7 +780,11 @@ defmodule ArbiterWeb.BoardLive do
                   class="cursor-pointer"
                   data-card={entry.card.id}
                   data-column="ready"
-                />
+                >
+                  <:parent :if={entry.card.parent}>
+                    <.parent_link parent={entry.card.parent} mode="compact" />
+                  </:parent>
+                </.task_card>
               </div>
 
               <.more
@@ -826,6 +834,9 @@ defmodule ArbiterWeb.BoardLive do
                   data-card={card.id}
                   data-column="running"
                 >
+                  <:parent :if={card.parent}>
+                    <.parent_link parent={card.parent} mode="compact" />
+                  </:parent>
                   <:status>
                     <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]">
                       {elapsed(card.since, @now)}
@@ -873,6 +884,9 @@ defmodule ArbiterWeb.BoardLive do
                   data-card={card.id}
                   data-column="waiting"
                 >
+                  <:parent :if={card.parent}>
+                    <.parent_link parent={card.parent} mode="compact" />
+                  </:parent>
                   <:status>
                     <span class="flex items-center gap-1.5">
                       <span
@@ -932,7 +946,11 @@ defmodule ArbiterWeb.BoardLive do
                   class="cursor-pointer"
                   data-card={card.id}
                   data-column="closed"
-                />
+                >
+                  <:parent :if={card.parent}>
+                    <.parent_link parent={card.parent} mode="compact" />
+                  </:parent>
+                </.task_card>
               </div>
 
               <div

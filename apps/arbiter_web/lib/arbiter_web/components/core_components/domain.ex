@@ -221,6 +221,12 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   slot :status, doc: "top-right slot — normally a status chip or an elapsed/waiting time"
   slot :actions, doc: "row of inline action chips"
 
+  slot :parent,
+    doc:
+      "a line under the title for what this card belongs to — the board fills " <>
+        "it with `<.parent_link mode=\"compact\">`, the `↳ bd-epic` chip that " <>
+        "replaced epic cards on the board (bd-38of5i)"
+
   def task_card(assigns) do
     assigns = assign(assigns, :hue, task_card_hue(assigns.accent))
 
@@ -262,6 +268,10 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       ]}>
         {@title}
       </span>
+
+      <div :if={@parent != []} class="flex flex-wrap items-center gap-1">
+        {render_slot(@parent)}
+      </div>
 
       <.link
         :if={@activity && @activity_href}

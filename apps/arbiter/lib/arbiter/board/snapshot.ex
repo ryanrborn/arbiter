@@ -34,7 +34,9 @@ defmodule Arbiter.Board.Snapshot do
       seeing.
     * **Closed · last 24h** — issues closed in the last 24 hours (rolling window,
       keyed on `closed_at`). The day's evidence of progress, and the only column
-      with no action on it.
+      with no action on it. Epics are excluded here as they are everywhere
+      else (bd-38of5i): the evidence of a day's progress is the children that
+      closed, not the container that closed because they did.
 
   ## Backlog, and why refinement is not a status
 
@@ -114,7 +116,10 @@ defmodule Arbiter.Board.Snapshot do
   @auto_resolving_block_reasons [:behind_base, :ci_failed]
 
   # Board-level dispatch is per-issue, so containers never queue: an epic is a
-  # rollup of children, not something a worker can be handed.
+  # rollup of children, not something a worker can be handed. bd-38of5i
+  # extended the same exclusion to Closed-today, the one column they still
+  # leaked into; epics now live on `/epics` and reach the board only as the
+  # `↳` chip a child card carries.
   @non_dispatchable_types [:epic]
 
   @default_system_max 16
@@ -155,15 +160,18 @@ defmodule Arbiter.Board.Snapshot do
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
-    issues = Map.get(input, :issues) || []
-    workers = Map.get(input, :workers) || []
-    blocked_by = Map.get(input, :blocked_by) || %{}
-    changed = Map.get(input, :changed_files) || %{}
+    issues = Map.get(input, :issues, [])
+    workers = Map.get(input, :workers, [])
+    blocked_by = Map.get(input, :blocked_by, %{})
+    changed = Map.get(input, :changed_files, %{})
     now = Map.get(input, :now) || DateTime.utc_now()
-    slots_total = Map.get(input, :slots_total) || 0
-    quota = Map.get(input, :quota) || :ok
+    slots_total = Map.get(input, :slots_total, 0)
+    quota = Map.get(input, :quota, :ok)
     paused? = Map.get(input, :paused) == true
-    ready_order = Map.get(input, :ready_order) || []
+    ready_order = Map.get(input, :ready_order, [])
+    # bd-38of5i: `{parent_id, child_id}` pairs from the `:parent_of` edges. An
+    # *input*, like `:blocked_by` — the pure half never goes looking for rows.
+    parent_of = Map.get(input, :parent_of, [])
     # bd-8jixav: which tasks have a live Watchdog. A Registry read, so it is an
     # *input* here rather than something `derive/1` goes and looks up — the
     # pure half stays pure and a caller that can't answer passes nothing, which
@@ -171,6 +179,7 @@ defmodule Arbiter.Board.Snapshot do
     watchdog_live = Map.get(input, :watchdog_live)
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
+    parents = parent_refs(parent_of, issues_by_id)
 
     {authors, gate_workers} =
       Enum.split_with(workers, &(worker_role(&1) not in [:reviewer, :implementer]))
@@ -195,11 +204,12 @@ defmodule Arbiter.Board.Snapshot do
       })
 
     %{
-      backlog: backlog_cards(issues, worked),
-      ready: plan.entries,
-      running: running,
-      waiting: waiting(authors, issues, issues_by_id, worked, now, watchdog_live),
-      closed_today: closed_today_cards(issues, now),
+      backlog: with_parents(backlog_cards(issues, worked), parents),
+      ready: with_parents_in_entries(plan.entries, parents),
+      running: with_parents(running, parents),
+      waiting:
+        with_parents(waiting(authors, issues, issues_by_id, worked, now, watchdog_live), parents),
+      closed_today: with_parents(closed_today_cards(issues, now), parents),
       promote: plan.promote,
       slots_total: slots_total,
       slots_free: slots_free,
@@ -230,10 +240,16 @@ defmodule Arbiter.Board.Snapshot do
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
     workspace_id = Keyword.get(opts, :workspace_id) || default_workspace_id()
 
+    # One read of the dependency rows feeds both derived inputs — the gating
+    # blockers and (bd-38of5i) the `parent_of` pairs. Skipped entirely when the
+    # caller supplied both, which is how the pure tests stay repo-free.
+    deps = dependency_rows(opts)
+
     derive(%{
       issues: issues,
       workers: workers,
-      blocked_by: Keyword.get_lazy(opts, :blocked_by, fn -> load_blockers(issues) end),
+      blocked_by: Keyword.get_lazy(opts, :blocked_by, fn -> blockers_from(deps, issues) end),
+      parent_of: Keyword.get_lazy(opts, :parent_of, fn -> parent_of_from(deps) end),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
       slots_total: Keyword.get(opts, :slots_total) || effective_max_concurrent(workspace_id),
@@ -640,12 +656,90 @@ defmodule Arbiter.Board.Snapshot do
     end
   end
 
+  # ---- parent refs (bd-38of5i) ---------------------------------------------
+  #
+  # Design bd-2s901b §4: epics are gone from every column, so a child card is
+  # the only place on the board an epic stays discoverable. Every card carries
+  # a ref to its parent — id, title and the parent's own child progress —
+  # which the view renders as a compact `↳ bd-epic` chip.
+  #
+  # Counts are derived from the edges and the issues already in hand rather
+  # than from `Issue`'s `child_total` / `child_closed` calculations: the board
+  # has read every issue anyway, and a pure `derive/1` must not go to a repo.
+
+  defp with_parents(cards, parents) do
+    Enum.map(cards, &Map.put(&1, :parent, Map.get(parents, &1.id)))
+  end
+
+  # A Ready entry wraps its card; the ref belongs on the card, where every
+  # other column's ref lives, so the view reads one key everywhere.
+  defp with_parents_in_entries(entries, parents) do
+    Enum.map(entries, fn entry ->
+      %{entry | card: Map.put(entry.card, :parent, Map.get(parents, entry.card.id))}
+    end)
+  end
+
+  defp parent_refs([], _issues_by_id), do: %{}
+
+  defp parent_refs(parent_of, issues_by_id) do
+    pairs = Enum.uniq(parent_of)
+    children_by_parent = Enum.group_by(pairs, &elem(&1, 0), &elem(&1, 1))
+
+    pairs
+    |> Enum.group_by(&elem(&1, 1), &elem(&1, 0))
+    |> Enum.reduce(%{}, fn {child_id, parent_ids}, acc ->
+      case pick_parent(parent_ids, issues_by_id) do
+        # A dangling edge (the parent is not among the issues the board read)
+        # is not a chip: better none than one linking to a blank title.
+        nil -> acc
+        parent -> Map.put(acc, child_id, parent_ref(parent, children_by_parent, issues_by_id))
+      end
+    end)
+  end
+
+  # One card has room for one chip. Multiple `parent_of` parents are unusual
+  # but legal, so it takes the most recently updated one — the same tie-break
+  # the detail page's banner stacks by, so the two surfaces agree on which
+  # parent leads.
+  defp pick_parent(parent_ids, issues_by_id) do
+    parent_ids
+    |> Enum.sort()
+    |> Enum.map(&Map.get(issues_by_id, &1))
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      parents -> Enum.max_by(parents, &parent_recency/1, DateTime)
+    end
+  end
+
+  defp parent_recency(issue), do: Map.get(issue, :updated_at) || created_at(issue)
+
+  defp parent_ref(parent, children_by_parent, issues_by_id) do
+    children = children_by_parent |> Map.get(parent.id, []) |> Enum.uniq()
+
+    %{
+      id: parent.id,
+      title: Map.get(parent, :title),
+      issue_type: Map.get(parent, :issue_type),
+      child_total: length(children),
+      child_closed: Enum.count(children, &child_closed?(&1, issues_by_id))
+    }
+  end
+
+  defp child_closed?(child_id, issues_by_id) do
+    case Map.get(issues_by_id, child_id) do
+      nil -> false
+      issue -> Map.get(issue, :status) == :closed
+    end
+  end
+
   defp closed_today_cards(issues, now) do
     twenty_four_hours_ago = DateTime.add(now, -24, :hour)
 
     issues
     |> Enum.filter(fn issue ->
       issue.status == :closed and
+        Map.get(issue, :issue_type) not in @non_dispatchable_types and
         closed_within_24h?(
           Map.get(issue, :closed_at),
           Map.get(issue, :updated_at),
@@ -830,16 +924,32 @@ defmodule Arbiter.Board.Snapshot do
     :exit, _ -> []
   end
 
+  defp dependency_rows(opts) do
+    if Keyword.has_key?(opts, :blocked_by) and Keyword.has_key?(opts, :parent_of) do
+      []
+    else
+      Ash.read!(Arbiter.Tasks.Dependency)
+    end
+  rescue
+    _ -> []
+  end
+
+  # bd-38of5i: `{parent_id, child_id}` for every `:parent_of` row. The board
+  # reads every issue anyway, so `derive/1` turns these into per-card refs
+  # (title + child progress) without a second query.
+  defp parent_of_from(deps) do
+    for %{type: :parent_of} = dep <- deps, do: {dep.from_issue_id, dep.to_issue_id}
+  end
+
   # Open gating blockers per issue: `:depends_on` targets and `:blocks` sources
   # that are not themselves closed. Mirrors `Arbiter.Tasks.Issue.ready/0`'s
   # gating rule, but keeps the blocked issues instead of dropping them — the
   # board shows *why* a card can't go, which means it has to show the card.
-  defp load_blockers(issues) do
+  defp blockers_from(deps, issues) do
     open_ids = for i <- issues, i.status == :open, into: MapSet.new(), do: i.id
     closed = for i <- issues, i.status == :closed, into: MapSet.new(), do: i.id
 
-    Arbiter.Tasks.Dependency
-    |> Ash.read!()
+    deps
     |> Enum.flat_map(fn dep ->
       case dep.type do
         :depends_on -> [{dep.from_issue_id, dep.to_issue_id}]

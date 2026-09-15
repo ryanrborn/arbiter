@@ -156,6 +156,49 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
     end
 
+    # bd-38of5i (design bd-2s901b §4): Closed-today was the one column an epic
+    # could still reach. It is a rollup of the children below it, not a piece
+    # of work that landed.
+    test "an epic closed today does not appear in the Closed column", %{conn: conn, ws: ws} do
+      epic = issue(ws, "wave one", %{issue_type: :epic})
+      task = issue(ws, "an actual change")
+      {:ok, _} = Ash.update(epic, %{}, action: :close)
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s(#board-column-closed [id="card-#{task.id}"]))
+      refute has_element?(view, ~s([id="card-#{epic.id}"]))
+    end
+
+    # The board's whole replacement for the epic cards it no longer shows.
+    test "a card whose issue has a parent shows a ↳ chip linking to the parent", %{
+      conn: conn,
+      ws: ws
+    } do
+      epic = issue(ws, "browser coordinator sessions", %{issue_type: :epic})
+      task = issue(ws, "the terminal channel")
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(epic.id, task.id, :parent_of)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      chip = ~s([id="card-#{task.id}"] [data-role="parent-chip"])
+
+      assert has_element?(view, chip)
+      assert has_element?(view, ~s(#{chip}[href="/tasks/#{epic.id}"]))
+      # Title and progress ride in the tooltip: the card has no room for them.
+      assert render(view) =~ ~s(title="browser coordinator sessions — 0/1 closed")
+    end
+
+    test "a card whose issue has no parent shows no chip", %{conn: conn, ws: ws} do
+      task = issue(ws, "an orphan of no epic")
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s([id="card-#{task.id}"]))
+      refute has_element?(view, ~s([id="card-#{task.id}"] [data-role="parent-chip"]))
+    end
+
     # bd-5l88o5 — every board card carries a copy-id control so an operator
     # can grab the issue id without leaving the board. bd-1rreu1 moved card
     # navigation off a wrapping `<a>` onto a `phx-click={JS.navigate(...)}`
