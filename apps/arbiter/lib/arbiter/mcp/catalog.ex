@@ -143,7 +143,7 @@ defmodule Arbiter.MCP.Catalog do
           "carries `estimate`: what comparable closed tasks actually cost, as " <>
           "`{range: [p25, p75], median, p90, n, basis, fallback_level}` over a 60-day " <>
           "window. `basis` names the group the numbers came from " <>
-          "(\"difficulty+type\" / \"difficulty\" / \"global\" / \"unrated_as_d2\") and " <>
+          "(`difficulty+type` / `difficulty` / `global` / `unrated_as_d2`) and " <>
           "`fallback_level` how coarse it is (0 = finest) — treat a coarse, small-`n` " <>
           "range as a hint, not a budget. Null when the ledger is too thin to say; " <>
           "worker spend only, excluding coordinator-session overhead.",
