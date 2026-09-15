@@ -180,7 +180,7 @@ defmodule ArbiterCli.Output do
         {"Type", issue["issue_type"]},
         {"Backlog", backlog_label(issue)},
         {"Progress", child_progress_label(issue)},
-        {"Cost rollup", epic_rollup_label(issue["epic_rollup"])},
+        {"Rollup", epic_rollup_label(issue["epic_rollup"])},
         {"Auto-close", auto_close_label(issue)},
         {"Assignee", issue["assignee"]},
         {"Workspace", issue["workspace_id"]},

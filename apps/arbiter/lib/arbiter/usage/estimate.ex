@@ -268,15 +268,19 @@ defmodule Arbiter.Usage.Estimate do
       |> Enum.reduce(0.0, fn %{issue: i}, acc -> acc + Map.get(spend_by_id, i.id, 0.0) end)
       |> money()
 
-    opts_with_sample = Keyword.put_new_lazy(opts, :sample, fn -> resolve_sample(opts) end)
-
     {to_go_low, to_go_high, unestimated} =
-      dispatchable
-      |> Enum.map(fn %{issue: i} -> for_issue(i, opts_with_sample) end)
-      |> Enum.reduce({0.0, 0.0, 0}, fn
-        :insufficient_data, {lo, hi, n} -> {lo, hi, n + 1}
-        est, {lo, hi, n} -> {lo + est.p25, hi + est.p75, n}
-      end)
+      if dispatchable == [] do
+        {0.0, 0.0, 0}
+      else
+        opts_with_sample = Keyword.put_new_lazy(opts, :sample, fn -> resolve_sample(opts) end)
+
+        dispatchable
+        |> Enum.map(fn %{issue: i} -> for_issue(i, opts_with_sample) end)
+        |> Enum.reduce({0.0, 0.0, 0}, fn
+          :insufficient_data, {lo, hi, n} -> {lo, hi, n + 1}
+          est, {lo, hi, n} -> {lo + est.p25, hi + est.p75, n}
+        end)
+      end
 
     %{
       spent: spent,

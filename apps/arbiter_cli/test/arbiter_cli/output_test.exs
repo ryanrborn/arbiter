@@ -99,8 +99,8 @@ defmodule ArbiterCli.OutputTest do
       }
 
       out = Output.format_issue_detail(issue)
-      assert out =~ "Cost rollup:"
-      assert out =~ "$20.00 spent"
+      assert out =~ "Rollup:"
+      assert out =~ "Rollup:     $20.00 spent"
       assert out =~ "~$6.00–$16.00 to go"
       assert out =~ "closed=2"
       assert out =~ "dispatchable=2"
@@ -110,7 +110,7 @@ defmodule ArbiterCli.OutputTest do
 
     test "omits the cost rollup line when there is no epic rollup" do
       issue = %{"id" => "x", "title" => "T", "epic_rollup" => nil}
-      refute Output.format_issue_detail(issue) =~ "Cost rollup:"
+      refute Output.format_issue_detail(issue) =~ "Rollup:"
     end
 
     test "renders tracker label only when tracker is meaningful" do

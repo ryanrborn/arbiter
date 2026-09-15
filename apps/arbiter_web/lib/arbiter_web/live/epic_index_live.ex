@@ -129,6 +129,7 @@ defmodule ArbiterWeb.EpicIndexLive do
 
     rollups = Tasks.epic_rollups(epics)
     workspaces = Map.new(socket.assigns.workspaces, &{&1.id, &1})
+    sample = Arbiter.Usage.Estimate.sample()
 
     rows =
       epics
@@ -136,7 +137,7 @@ defmodule ArbiterWeb.EpicIndexLive do
         %{
           epic: e,
           rollup: Map.fetch!(rollups, e.id),
-          cost_rollup: Usage.epic_cost_rollup(e),
+          cost_rollup: Usage.epic_cost_rollup(e, sample: sample),
           workspace_name: workspace_name(workspaces, e.workspace_id)
         }
       end)
