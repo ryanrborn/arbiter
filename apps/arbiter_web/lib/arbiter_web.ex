@@ -139,6 +139,9 @@ defmodule ArbiterWeb do
       import ArbiterWeb.CoreComponents.Domain, except: [index_header: 1]
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
+      # One `parent_of` edge at two sizes: the board card's `↳ bd-epic` chip
+      # and the child detail page's "Part of …" banner (bd-38of5i).
+      import ArbiterWeb.ParentLink
       # Label pluralization (plural/1, cap_plural/1)
       import ArbiterWeb.Labels
 
