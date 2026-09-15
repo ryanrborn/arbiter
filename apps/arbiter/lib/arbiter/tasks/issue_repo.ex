@@ -109,7 +109,10 @@ defmodule Arbiter.Tasks.IssueRepo do
   Human-readable rendering of a `resolve/2` error, used verbatim as the
   validation message on the `:repo` field.
   """
-  @spec describe_error({:repo_required, [String.t()]} | {:repo_not_configured, String.t(), [String.t()]}) ::
+  @spec describe_error(
+          {:repo_required, [String.t()]}
+          | {:repo_not_configured, String.t(), [String.t()]}
+        ) ::
           String.t()
   def describe_error({:repo_required, repos}) do
     "repo is required: this workspace configures more than one repo and has no " <>

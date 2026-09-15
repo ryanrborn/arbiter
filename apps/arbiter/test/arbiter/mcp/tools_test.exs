@@ -690,7 +690,9 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.task_create(coordinator, %{"title" => "a directive", "issue_type" => "task"})
 
       assert {:ok, graph} =
-               Tools.graph_create(coordinator, %{"name" => "g-#{System.unique_integer([:positive])}"})
+               Tools.graph_create(coordinator, %{
+                 "name" => "g-#{System.unique_integer([:positive])}"
+               })
 
       assert {:ok, _} =
                Tools.graph_add_directive(coordinator, %{

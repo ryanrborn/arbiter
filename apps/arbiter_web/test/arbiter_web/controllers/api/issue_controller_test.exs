@@ -413,7 +413,8 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
 
     test "422s with the configured keys when nothing resolves", %{conn: conn} do
-      ws = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+      ws =
+        repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
 
       conn = post(conn, ~p"/api/issues", %{title: "ambiguous", workspace_id: ws.id})
 

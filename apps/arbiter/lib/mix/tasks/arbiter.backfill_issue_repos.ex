@@ -16,6 +16,14 @@ defmodule Mix.Tasks.Arbiter.BackfillIssueRepos do
   Idempotent: only null-repo rows are ever selected, so a second run is a
   no-op. See `Arbiter.Tasks.RepoBackfill` for why this is a mix task rather
   than a data migration.
+
+  ## It starts the Repo, not the application
+
+  Deliberately no `Mix.Task.run("app.start")`: booting the full application
+  next to a live coordinator would start a second endpoint on the same port,
+  a second Autopilot and a second set of patrols against the same database.
+  Like `mix arbiter.migrate`, this starts only what it needs — the Ecto repo —
+  so it is safe to run whether or not the server is up.
   """
 
   use Mix.Task
@@ -28,7 +36,7 @@ defmodule Mix.Tasks.Arbiter.BackfillIssueRepos do
   def run(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
 
-    Mix.Task.run("app.start")
+    start_repo!()
 
     plan = RepoBackfill.plan()
 
@@ -38,6 +46,19 @@ defmodule Mix.Tasks.Arbiter.BackfillIssueRepos do
     else
       emit(plan, :dry_run)
       Mix.shell().info("\nDry-run only. Re-run with --apply to write these repos.")
+    end
+  end
+
+  # No-op when the repo is already running (an attached node / an iex session
+  # that started the app), so this is safe to call either way.
+  defp start_repo! do
+    Mix.Task.run("app.config")
+    {:ok, _} = Application.ensure_all_started(:ash)
+    {:ok, _} = Application.ensure_all_started(:ash_sqlite)
+
+    case Arbiter.Repo.start_link(pool_size: 1) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
     end
   end
 
