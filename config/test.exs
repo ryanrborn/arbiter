@@ -212,3 +212,12 @@ config :arbiter, :credential_watchdog, enabled: false
 # a test that resumes the scheduler is exercising the switch, not asking for a
 # real worker to be spawned fifteen seconds later.
 config :arbiter, :board_autopilot, enabled: false, interval_ms: :never
+
+# Coordinator sessions (bd-bpt0ag). The session socket directory is derived
+# from `XDG_RUNTIME_DIR`, which is a real tmpfs on the dogfood host — point it
+# at a scratch path under test so nothing in the suite can create a socket
+# beside a live session's. Tests that assert on paths override this per test
+# with their own `tmp_dir`.
+config :arbiter,
+       :sessions_runtime_dir,
+       Path.join(System.tmp_dir!(), "arbiter-test-sessions-runtime")
