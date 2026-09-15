@@ -314,6 +314,8 @@ defmodule ArbiterWeb.Layouts do
   # queue" to Loop, "Audit log" to Audit; About drops out of the nav (it's
   # still reachable at ~p"/about" directly). Reviews (bd-amtjxk) sits between
   # Usage and Audit — cross-cutting operator visibility, like both neighbors.
+  # Sessions (bd-c76fu9) sits after Loop: like Workers it is a list of live
+  # things Arbiter is running, but it is the operator's own, not the fleet's.
   defp nav_items do
     [
       %{label: "Board", href: ~p"/"},
@@ -323,6 +325,7 @@ defmodule ArbiterWeb.Layouts do
       %{label: cap_plural("workspace"), href: ~p"/workspaces"},
       %{label: cap_plural("skill"), href: ~p"/skills"},
       %{label: "Loop", href: ~p"/loop"},
+      %{label: cap_plural("session"), href: ~p"/sessions"},
       %{label: "Usage", href: ~p"/usage"},
       %{label: "Reviews", href: ~p"/reviews"},
       %{label: "Audit", href: ~p"/audit"}

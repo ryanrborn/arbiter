@@ -154,6 +154,15 @@
   --arb-done-wash: oklch(94% 0.006 258);
   --arb-done-edge: oklch(88% 0.008 258);
 
+  /* --- browser terminal (bd-c76fu9, RFC 6.3) --- */
+  /* Spelled in hex rather than aliased to the --arb-* tokens: xterm parses its
+     theme with its own colour reader, which understands hex and rgb() but not
+     the oklch() the design tokens are written in. */
+  --arb-term-bg: #ffffff;
+  --arb-term-fg: #1f2430;
+  --arb-term-cursor: #4d7c0f;
+  --arb-term-selection: #94a3b855;
+
   /* --- semantic aliases --- */
   --surface-page: var(--arb-canvas);
   --surface-chrome: var(--arb-chrome);
@@ -317,6 +326,11 @@
     --arb-done-wash: oklch(30% 0.014 258);
     --arb-done-edge: oklch(36% 0.014 258);
 
+    --arb-term-bg: #16181d;
+    --arb-term-fg: #d6dae2;
+    --arb-term-cursor: #a3e635;
+    --arb-term-selection: #33415580;
+
     --text-link-hover: oklch(88% 0.11 215);
     --focus-ring: oklch(84% 0.19 130 / 0.25);
   }
@@ -368,6 +382,11 @@
   --arb-done: oklch(45% 0.014 258);
   --arb-done-wash: oklch(30% 0.014 258);
   --arb-done-edge: oklch(36% 0.014 258);
+
+  --arb-term-bg: #16181d;
+  --arb-term-fg: #d6dae2;
+  --arb-term-cursor: #a3e635;
+  --arb-term-selection: #33415580;
 
   --text-link-hover: oklch(88% 0.11 215);
   --focus-ring: oklch(84% 0.19 130 / 0.25);

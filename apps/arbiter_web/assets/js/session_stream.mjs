@@ -92,6 +92,7 @@ export class SessionStream {
     this.finished = false
 
     this._lastSeq = null
+    this._status = null
     this._stdinSeq = 0
     this._pendingResize = null
     this._pushedGeometry = null
@@ -104,7 +105,7 @@ export class SessionStream {
   }
 
   connect() {
-    this._emit("status", "connecting")
+    this._setStatus("connecting")
 
     this.socket.onError((err) => this._emit("error", { code: "socket_error", detail: err }))
     this.socket.onClose((event) => this._onSocketClose(event))
@@ -128,7 +129,7 @@ export class SessionStream {
     // Channel errors are the rejoin path, not a failure: the socket is down
     // and phoenix.js will re-run the params closure when it comes back.
     this.channel.onError(() => {
-      if (!this.finished) this._emit("status", "reconnecting")
+      if (!this.finished) this._setStatus("reconnecting")
     })
 
     this.channel
@@ -136,7 +137,7 @@ export class SessionStream {
       .receive("ok", (reply) => {
         this.joins += 1
         if (this.joins > 1) this.reconnects += 1
-        this._emit("status", "live")
+        this._setStatus("live")
         this._emit("joined", reply)
       })
       .receive("error", (err) => this._emit("error", err))
@@ -266,7 +267,7 @@ export class SessionStream {
   _onSocketClose(event) {
     if (this.finished) return
 
-    this._emit("status", "reconnecting")
+    this._setStatus("reconnecting")
 
     // phoenix.js deliberately does not reconnect after a 1000 (normal
     // closure), and a graceful `systemctl --user restart arbiter` produces
@@ -299,8 +300,17 @@ export class SessionStream {
       this._resizeTimer = null
     }
 
-    if (status) this._emit("status", status)
+    if (status) this._setStatus(status)
     if (this.socket) this.socket.disconnect()
+  }
+
+  // A drop raises both `socket.onClose` and `channel.onError`, and a rejoin
+  // can raise `status("live")` more than once. The sink is a UI: it wants
+  // transitions, not every notification that produced one.
+  _setStatus(status) {
+    if (this._status === status) return
+    this._status = status
+    this._emit("status", status)
   }
 
   _emit(name, ...args) {
