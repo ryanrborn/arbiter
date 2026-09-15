@@ -205,6 +205,13 @@ defmodule ArbiterCli.ConfigSchema do
                           alongside the workspace-global ones. Manage with
                           `arb workspace standing-order add --repo <name>`.
 
+    default_repo  (string)
+      One of the `repo_paths` keys. The repo a new issue is assigned when it
+      names none and the workspace has more than one repo (bd-9dwbvt), and the
+      repo dispatch falls back to for an otherwise ambiguous run (bd-5pctey).
+      Unnecessary in a single-repo workspace. Without it, a multi-repo
+      workspace REFUSES to create an issue that names no repo.
+
     pr_patrol  (map)
       author_logins        list of forge logins — when non-empty, PRPatrol only
                            files follow-ups for PRs authored by one of these logins

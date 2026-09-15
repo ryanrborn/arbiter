@@ -2079,7 +2079,8 @@ defmodule Arbiter.Worker.DispatchTest do
           config: %{"repo_paths" => %{"per-ws/repo" => repo}}
         })
 
-      {:ok, task} = Ash.create(Issue, %{title: "per-ws", workspace_id: ws_local.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "per-ws", workspace_id: ws_local.id, repo: "per-ws/repo"})
 
       # `per-ws/repo` is NOT in Application env — only in this workspace's
       # config. Dispatch must still find it.
@@ -2114,7 +2115,8 @@ defmodule Arbiter.Worker.DispatchTest do
           }
         })
 
-      {:ok, task} = Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id, repo: "bb/repo"})
 
       {:ok, result} = Dispatch.dispatch(task.id, repo: "bb/repo", start_driver: false)
 
@@ -2247,6 +2249,7 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{
           title: "per-task target",
           workspace_id: ws_local.id,
+          repo: "pb/repo",
           target_branch: "dolphin"
         })
 
@@ -2280,7 +2283,8 @@ defmodule Arbiter.Worker.DispatchTest do
           }
         })
 
-      {:ok, task} = Ash.create(Issue, %{title: "repo default", workspace_id: ws_local.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "repo default", workspace_id: ws_local.id, repo: "rd/repo"})
 
       {:ok, result} = Dispatch.dispatch(task.id, repo: "rd/repo", start_driver: false)
 
@@ -3384,7 +3388,7 @@ defmodule Arbiter.Worker.DispatchTest do
     test "0 repos: start_claude: true with no repo and empty :repo_paths fails loudly",
          %{ws: ws} do
       Application.delete_env(:arbiter, @env_key)
-      {:ok, task} = Ash.create(Issue, %{title: "no repos", workspace_id: ws.id})
+      task = issue_without_repo!(%{title: "no repos", workspace_id: ws.id})
 
       assert {:error, :no_repo_configured} =
                Dispatch.dispatch(task.id,
@@ -3403,7 +3407,7 @@ defmodule Arbiter.Worker.DispatchTest do
     test "1 repo: start_claude: true with no repo auto-selects the sole configured repo",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"sole/repo" => repo})
-      {:ok, task} = Ash.create(Issue, %{title: "auto-select", workspace_id: ws.id})
+      task = issue_without_repo!(%{title: "auto-select", workspace_id: ws.id})
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
@@ -3421,7 +3425,7 @@ defmodule Arbiter.Worker.DispatchTest do
     test "multi-repo: start_claude: true with no repo and multiple :repo_paths fails loudly",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
-      {:ok, task} = Ash.create(Issue, %{title: "multi repos", workspace_id: ws.id})
+      task = issue_without_repo!(%{title: "multi repos", workspace_id: ws.id})
 
       assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(task.id,
@@ -3444,7 +3448,7 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
       {:ok, ws} = Ash.update(ws, %{config: %{"default_repo" => "repo/b"}}, action: :update)
-      {:ok, task} = Ash.create(Issue, %{title: "multi repos with default", workspace_id: ws.id})
+      task = issue_without_repo!(%{title: "multi repos with default", workspace_id: ws.id})
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
@@ -3465,8 +3469,7 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, ws} =
         Ash.update(ws, %{config: %{"default_repo" => "repo/nonexistent"}}, action: :update)
 
-      {:ok, task} =
-        Ash.create(Issue, %{title: "multi repos with bad default", workspace_id: ws.id})
+      task = issue_without_repo!(%{title: "multi repos with bad default", workspace_id: ws.id})
 
       assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(task.id,
@@ -3484,7 +3487,7 @@ defmodule Arbiter.Worker.DispatchTest do
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
       {:ok, ws} = Ash.update(ws, %{config: %{"default_repo" => "repo/b"}}, action: :update)
-      {:ok, task} = Ash.create(Issue, %{title: "explicit beats default", workspace_id: ws.id})
+      task = issue_without_repo!(%{title: "explicit beats default", workspace_id: ws.id})
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
@@ -3655,7 +3658,11 @@ defmodule Arbiter.Worker.DispatchTest do
     test "an issue repo that no longer resolves fails loudly rather than picking another",
          %{ws: ws} do
       {:ok, task} =
-        Ash.create(Issue, %{title: "stale repo", workspace_id: ws.id, repo: "org/gone"})
+        Ash.create(Issue, %{title: "stale repo", workspace_id: ws.id, repo: "org/alpha"})
+
+      # The repo went away *after* the issue was filed — bd-9dwbvt refuses an
+      # unconfigured repo at create time, so this is the only way in.
+      {:ok, task} = Ash.update(task, %{repo: "org/gone"})
 
       assert {:error, {:repo_not_found, "org/gone"}} =
                Dispatch.dispatch(task.id,
@@ -3670,7 +3677,7 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     test "an issue with no repo still falls through to the ambiguous-repo error", %{ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "no issue repo", workspace_id: ws.id})
+      task = issue_without_repo!(%{title: "no issue repo", workspace_id: ws.id})
 
       assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(task.id,

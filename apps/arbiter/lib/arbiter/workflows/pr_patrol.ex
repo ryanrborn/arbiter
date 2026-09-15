@@ -100,6 +100,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
@@ -392,6 +393,14 @@ defmodule Arbiter.Workflows.PRPatrol do
       )
 
     case result do
+      # bd-9dwbvt: the create refused (a repo it could not resolve in a
+      # multi-repo workspace). Nothing was filed, so there is nothing to
+      # dispatch — log and move on rather than crashing the patrol GenServer
+      # mid-tick. The breaker budget is spent either way, which is the
+      # conservative direction for a repeatedly-failing PR.
+      {:ok, nil} ->
+        {state, false}
+
       {:ok, task} ->
         {dispatch_follow_up(task, pr_number, state), true}
 
@@ -857,8 +866,8 @@ defmodule Arbiter.Workflows.PRPatrol do
       #{extra_protocol}
       """
 
-    {:ok, task} =
-      Ash.create(Issue, %{
+    attrs =
+      %{
         title: issue_title,
         description: description,
         # bd-6v2my2: :task, NOT a reviewable type. A follow-up's deliverable is
@@ -883,9 +892,26 @@ defmodule Arbiter.Workflows.PRPatrol do
         # dedup instead — see the module's Dedup section (bd-ci2jl2).
         tracker_type: :none,
         source_pr: to_string(number),
-        workspace_id: state.workspace_id
-      })
+        workspace_id: state.workspace_id,
+        # bd-9dwbvt: a follow-up belongs to the PR's repo. `state.repo` is the
+        # forge slug the patrol runs against; `configured_key/2` maps it back
+        # onto the `repo_paths` key the issue must persist (the leotech shape
+        # where key "client" ≠ slug "leotech/verus-client"). `nil` when it maps
+        # to nothing, which leaves the create to resolve a repo the usual way.
+        repo: IssueRepo.configured_key(state.workspace_id, state.repo)
+      }
 
-    task
+    case Ash.create(Issue, attrs) do
+      {:ok, task} ->
+        task
+
+      {:error, error} ->
+        Logger.warning(
+          "PRPatrol: could not file a follow-up for #{state.repo}##{number}: " <>
+            "#{Exception.message(error)}"
+        )
+
+        nil
+    end
   end
 end

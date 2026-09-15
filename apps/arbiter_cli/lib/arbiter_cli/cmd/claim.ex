@@ -23,8 +23,13 @@ defmodule ArbiterCli.Cmd.Claim do
                    budget routed to workers. **Default when unspecified**:
                    the task is created with no difficulty set; routing
                    treats an unset difficulty as D2 at dispatch time.
-    --repo <repo>  Repo the claimed task belongs to. Persisted on the task
-                   and also printed as a tip for a later `arb dispatch`.
+    --repo <repo>  Repo the claimed task belongs to, as a configured
+                   `repo_paths` key. Persisted on the task and also printed
+                   as a tip for a later `arb dispatch`. Usually unnecessary
+                   (bd-9dwbvt): the claim fills it in from the workspace's
+                   only repo, else its `default_repo`. A multi-repo
+                   workspace with no `default_repo` REFUSES the claim until
+                   you pass one of its configured keys.
     --json         Emit JSON instead of human-readable text.
   """
 

@@ -70,6 +70,35 @@ of six questions before being cut off, which is why the tier now sits behind a
 level nothing rates automatically: trackers, story-point buckets and the
 autonomous loop all stop at D4.
 
+### Repo is required on every issue (bd-9dwbvt)
+
+Every issue carries a repo from the moment it is created. You rarely type it:
+creation resolves one in this order:
+
+```
+explicit --repo  →  the workspace's only repo  →  the workspace's default_repo
+```
+
+- Single-repo workspace: nothing to do, it fills itself in.
+- Multi-repo workspace **with** `default_repo`: nothing to do.
+- Multi-repo workspace **without** `default_repo`: creation is **refused**
+  with an error listing the configured `repo_paths` keys. Pass `--repo <key>`,
+  or set the default once: `arb config set default_repo <key>`.
+- A `--repo` that is not a configured `repo_paths` key is rejected at create
+  time rather than persisted for dispatch to fail on later.
+- A workspace with no `repo_paths` at all still creates issues with a null
+  repo — there is nothing to resolve against.
+
+This applies to every creation path: `arb create` / `arb issue create`,
+`task_create`, `arb claim` / `tracker_claim`, `arb sync` / `tracker_sync`
+auto-claim, the dashboard create form, and worker-filed follow-ups. Epics,
+decisions and `task`-type issues are not exempt.
+
+Issues filed before this are backfilled with
+`mix arbiter.backfill_issue_repos` (dry-run by default, `--apply` to write;
+re-running it is a no-op). It prints, per workspace, how many rows it set and
+how many it left null.
+
 ## 4. File Issues Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.

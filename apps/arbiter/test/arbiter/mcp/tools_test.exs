@@ -634,6 +634,78 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  # bd-9dwbvt: the MCP creation path's slice of "every issue carries a repo".
+  describe "task_create/2 — repo resolution (bd-9dwbvt)" do
+    defp repo_ws!(config) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "mcp-repo-#{System.unique_integer([:positive])}",
+          prefix: "mcr",
+          config: config
+        })
+
+      {ws, %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}}
+    end
+
+    test "auto-fills the workspace's only repo" do
+      {_ws, coordinator} = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:ok, data} = Tools.task_create(coordinator, %{"title" => "sole repo"})
+      assert Ash.get!(Issue, data.id).repo == "tonic"
+    end
+
+    test "falls back to the workspace default_repo" do
+      {_ws, coordinator} =
+        repo_ws!(%{
+          "repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          "default_repo" => "tonic"
+        })
+
+      assert {:ok, data} = Tools.task_create(coordinator, %{"title" => "defaulted"})
+      assert Ash.get!(Issue, data.id).repo == "tonic"
+    end
+
+    test "refuses with the configured keys when nothing resolves" do
+      {_ws, coordinator} =
+        repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+
+      assert {:error, {:invalid, msg}} = Tools.task_create(coordinator, %{"title" => "ambiguous"})
+      assert msg =~ "tonic"
+      assert msg =~ "tonic_device"
+    end
+
+    test "rejects a repo that is not a configured repo_paths key" do
+      {_ws, coordinator} = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.task_create(coordinator, %{"title" => "typo", "repo" => "tonc"})
+
+      assert msg =~ "tonc"
+    end
+
+    test "a directive filed for a graph gets a repo like any other issue" do
+      {ws, coordinator} = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:ok, data} =
+               Tools.task_create(coordinator, %{"title" => "a directive", "issue_type" => "task"})
+
+      assert {:ok, graph} =
+               Tools.graph_create(coordinator, %{
+                 "name" => "g-#{System.unique_integer([:positive])}"
+               })
+
+      assert {:ok, _} =
+               Tools.graph_add_directive(coordinator, %{
+                 "graph_id" => graph.id,
+                 "issue_id" => data.id
+               })
+
+      directive = Ash.get!(Issue, data.id)
+      assert directive.repo == "tonic"
+      assert directive.workspace_id == ws.id
+    end
+  end
+
   describe "task_update/2" do
     test "a coordinator updates fields on a task in its workspace", ctx do
       assert {:ok, data} =
