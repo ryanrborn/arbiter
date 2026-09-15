@@ -820,11 +820,26 @@ CHECK fit-proposes-a-geometry: PASS — 112x19 (term 112x19)
 CHECK narrow-floor-is-at-least-80-cols: PASS — cols=89 at 640px
 CHECK selection: PASS — selected 31 chars
 CHECK ctrl-shift-c-copies-the-selection: PASS — clipboard = "hello red\n🚀ok\n…"
-CHECK ctrl-shift-v-pastes-as-stdin: PASS — stdin = "pasted-from-the-clipboard"
+CHECK ctrl-shift-v-pastes-as-stdin: PASS — stdin = "pasted-from-the-clipboard\rsecond line\rthird line\r"
+CHECK paste-is-sent-once: PASS — stdin frames = 1
+CHECK bracketed-paste-is-wrapped-when-the-app-asks: PASS — stdin = "\u001b[200~pasted-from-the-cl"…"e\r\u001b[201~"
 CHECK plain-ctrl-c-is-still-sigint: PASS — stdin bytes = [3]
+CHECK theme-follows-the-dashboard-toggle: PASS — #ffffff -> #16181d
 CHECK frame-round-trip: PASS — seq=8589934592 bytes=255,0,27
 RESULT: PASS
 ```
+
+**Paste goes through `Terminal.paste()`, never around it.** The first
+implementation sent the clipboard string straight down the stdin path, which
+passed a single-line probe and would have failed every real paste: xterm is
+what normalizes `\r\n`/`\n` to `\r` (a raw-mode TUI reads CR as Enter and does
+nothing with LF) and what wraps the text in `ESC[200~`/`ESC[201~` when the app
+has enabled bracketed paste, so a pasted multi-line prompt is inserted as one
+block rather than submitted line by line. The handler also has to
+`preventDefault()`: Chrome and Firefox bind `Ctrl+Shift+V` themselves and will
+otherwise deliver the same text a second time through the helper textarea.
+The clipboard the probe reads is multi-line for exactly this reason, and it
+counts the frames.
 
 Resume is proved separately and end-to-end by
 `ArbiterWeb.SessionTransportSocketTest`, which takes the listener *and* the
