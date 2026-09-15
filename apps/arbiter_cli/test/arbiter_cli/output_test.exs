@@ -51,6 +51,37 @@ defmodule ArbiterCli.OutputTest do
       refute out =~ "Notes:"
     end
 
+    # bd-3j4ch4 AC5: the cost estimate renders in the header, as a range with
+    # its basis, so a coarse estimate can't be mistaken for a precise one.
+    test "renders the cost estimate range, basis and sample size" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "estimate" => %{
+          "range" => [3.0, 8.0],
+          "median" => 5.0,
+          "p90" => 9.0,
+          "n" => 10,
+          "basis" => "difficulty+type",
+          "fallback_level" => 0
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Estimate:"
+      assert out =~ "$3.00"
+      assert out =~ "$8.00"
+      assert out =~ "median $5.00"
+      assert out =~ "p90 $9.00"
+      assert out =~ "difficulty+type"
+      assert out =~ "n=10"
+    end
+
+    test "omits the estimate line when there is no estimate" do
+      issue = %{"id" => "x", "title" => "T", "estimate" => nil}
+      refute Output.format_issue_detail(issue) =~ "Estimate:"
+    end
+
     test "renders tracker label only when tracker is meaningful" do
       issue = %{"id" => "x", "title" => "T", "tracker_type" => "jira", "tracker_ref" => "VR-1"}
       assert Output.format_issue_detail(issue) =~ "Tracker:"

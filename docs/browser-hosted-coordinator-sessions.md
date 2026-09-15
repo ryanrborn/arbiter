@@ -862,6 +862,8 @@ session), linked from the global nav between Loop and Usage.
 | 6.3 interaction | copy/paste, scrollback 5000, the narrow-width floor and the fit debounce, all in `session_terminal.mjs` |
 | the hook | `.SessionTerminal`, colocated in `ArbiterWeb.SessionLive` |
 | the protocol | `assets/js/session_stream.mjs` — DOM-free on purpose (below) |
+| the fit | `assets/js/session_fit.mjs` — DOM-free, replaces `addon-fit` (bd-3r2otb) |
+| copy/paste | `assets/js/session_keys.mjs` — DOM-free (bd-3r2otb) |
 | page chrome | `ArbiterWeb.SessionIndexLive`, `ArbiterWeb.SessionLive` |
 
 **The canvas addon pins the terminal version.** Upstream shipped
@@ -872,7 +874,7 @@ last release is still `0.7.0` (2024-04-05), declaring
 `terminal._core`, so running it against a major version it was never built for
 risks throwing out of `loadAddon` and leaving no terminal at all. §6.2 chose
 canvas on failure-mode grounds that have not changed, so the vendored set is
-the 5.x line: `xterm@5.5.0` + `addon-canvas@0.7.0` + `addon-fit@0.10.0`. That
+the 5.x line: `xterm@5.5.0` + `addon-canvas@0.7.0`. That
 line publishes only the UMD/CJS build (the `.mjs` bundles first appear in 6.0.0
 and in 5.6.0 *betas*); esbuild consumes it and emits ESM, so nothing downstream
 can tell. Revisit when upstream ships a canvas addon for 6.x.

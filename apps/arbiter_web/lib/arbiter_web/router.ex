@@ -76,6 +76,8 @@ defmodule ArbiterWeb.Router do
       # detail pages. Literal segments are declared before the dynamic
       # `:task_id`/`:id` catch-alls so e.g. `/workers/history` isn't claimed
       # as a worker detail.
+      live("/epics", EpicIndexLive)
+
       live("/tasks", TaskIndexLive)
       live("/tasks/new", TaskNewLive)
       live("/tasks/:id", TaskDetailLive)
@@ -183,6 +185,7 @@ defmodule ArbiterWeb.Router do
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)
     get("/usage/events", UsageController, :events)
+    get("/usage/calibration", UsageController, :calibration)
 
     # External review audit records (bd-31fh9e)
     get("/external_reviews", ExternalReviewController, :index)
