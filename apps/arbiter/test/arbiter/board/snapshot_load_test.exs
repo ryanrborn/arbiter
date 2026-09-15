@@ -120,6 +120,7 @@ defmodule Arbiter.Board.SnapshotLoadTest do
       refute epic.id in closed_ids
     end
   end
+
   # bd-8j9i9p (design bd-9jj5lf §3): `load/1` is where the ledger question is
   # actually asked. `derive/1`'s own tests cover the flag's shape; these cover
   # that the real read reaches the right answer.

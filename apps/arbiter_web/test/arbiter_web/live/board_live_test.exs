@@ -1026,6 +1026,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "xl:w-auto"
     end
   end
+
   # bd-8j9i9p (design bd-9jj5lf §3): an open card whose worker spend has passed
   # its estimate group's p90 carries the same kind of flag `needs_you` does —
   # the board is read from across a room, and "this one is burning money" is a
@@ -1035,7 +1036,8 @@ defmodule ArbiterWeb.BoardLiveTest do
       # n=10 closed D2 features costing $1..$10 → p90 $9.
       Enum.each(1..10, fn n ->
         {:ok, closed} =
-          Ash.update(backlog_issue(ws, "history #{n}", %{difficulty: 2, issue_type: :feature}),
+          Ash.update(
+            backlog_issue(ws, "history #{n}", %{difficulty: 2, issue_type: :feature}),
             %{close_upstream: false},
             action: :close
           )

@@ -212,7 +212,10 @@ defmodule Arbiter.Board.Snapshot do
     %{
       backlog:
         backlog_cards(issues, worked) |> with_parents(parents) |> with_over_budget(over_budget),
-      ready: plan.entries |> with_parents_in_entries(parents) |> with_over_budget_in_entries(over_budget),
+      ready:
+        plan.entries
+        |> with_parents_in_entries(parents)
+        |> with_over_budget_in_entries(over_budget),
       running: running |> with_parents(parents) |> with_over_budget(over_budget),
       waiting:
         authors
@@ -269,7 +272,8 @@ defmodule Arbiter.Board.Snapshot do
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
       ready_order: Keyword.get(opts, :ready_order, []),
-      watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> load_watchdog_live(workers) end),
+      watchdog_live:
+        Keyword.get_lazy(opts, :watchdog_live, fn -> load_watchdog_live(workers) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
   end

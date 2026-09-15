@@ -127,9 +127,7 @@ defmodule Arbiter.Usage.Budget do
     Enum.reduce(ids, false, fn id, acc ->
       prefix = id <> "#%"
 
-      Ash.Expr.expr(
-        ^acc or base_task_id == ^id or task_id == ^id or like(task_id, ^prefix)
-      )
+      Ash.Expr.expr(^acc or base_task_id == ^id or task_id == ^id or like(task_id, ^prefix))
     end)
   end
 
