@@ -358,6 +358,49 @@ in precisely the scenario this path exists for.
 
 Third door, for when the operator is off the LAN entirely: Remote Control (§8).
 
+### 4.8 Status — phase 1 shipped (bd-bpt0ag, #1682)
+
+The session lifecycle core is implemented and the §4.1 mechanism is now
+measured from inside `arbiter.service` itself, not just from a stand-in:
+
+```
+spawner (BEAM)   …/user@1000.service/app.slice/arbiter.service
+tmux (pid …)     …/user@1000.service/app.slice/arb-session-<uuid>.scope
+```
+
+A **sibling** under `app.slice`, exactly as §4.1 predicts. That reading is
+produced by `apps/arbiter/test/integration/session_scope_test.exs`, which is
+tagged `:live_systemd` and excluded from the default suite — run it with
+`mix test --include live_systemd`.
+
+What shipped:
+
+  * `sessions` table + `Arbiter.Sessions.Session`, field-for-field with §7.4
+    item 4. `usage_events.session_id` joins to `provider_session_id` by string,
+    so the rows phase 6's ingest has been writing since bd-be804c attach to a
+    session row as soon as one exists.
+  * `Arbiter.Sessions.launch/1` running §4.3's command shape verbatim, plus
+    `list/0`, `get/1`, `kill/2`. Control operations shell out through
+    `Arbiter.Sessions.Runner` (a behaviour, so tests drive a scripted
+    `systemctl`/`tmux`) and its one real implementation goes through
+    `ReleaseEnv.cmd/3`, so the release-env scrub happens once at the scope
+    boundary and is inherited by the tmux server and every pane.
+  * `Arbiter.Sessions.Adoption.sweep/1` as a primary-gated boot task — §4.6
+    item 1. Phase 1 deliberately stops short of §4.6's "no matching row →
+    kill": an unrecognised live scope is reported in `:orphans` and logged,
+    never stopped, because the sweep's model of the host is by definition
+    already wrong in that case. Reaping stays phase 10.
+  * §10.1's self-kill refusal, enforced in `kill/2`, and the restart
+    rate-limit decision as a pure predicate (`Arbiter.Sessions.Guards`)
+    waiting for whichever phase adds the restart endpoint.
+  * `Arbiter.Sessions.Provider` keeps the payload provider-agnostic. Its
+    Claude Code adapter launches a **shell** for now: §9.2's three interactive
+    gates mean an unprovisioned `claude` would hang forever in a detached
+    pane. Phase 3 swaps the payload, nothing else.
+
+Not done here, and not attempted: transport, UI, provisioning, Remote
+Control, and the §4.6 idle deadline / dead-man's switch.
+
 ## 5. Transport and protocol (research task 2)
 
 ### 5.1 Channel, not LiveView hook-only
