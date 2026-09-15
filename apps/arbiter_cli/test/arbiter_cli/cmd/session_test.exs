@@ -131,7 +131,10 @@ defmodule ArbiterCli.Cmd.SessionTest do
       assert err =~ Path.join([runtime_dir, "arbiter", "session-abc.sock"])
     end
 
-    test "dies with a hint when tmux is not on PATH", %{runtime_dir: runtime_dir, fake_bin: fake_bin} do
+    test "dies with a hint when tmux is not on PATH", %{
+      runtime_dir: runtime_dir,
+      fake_bin: fake_bin
+    } do
       socket = Path.join([runtime_dir, "arbiter", "session-abc.sock"])
       File.write!(socket, "")
 
