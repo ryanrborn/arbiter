@@ -7,8 +7,9 @@ defmodule Arbiter.Tasks.DependencyGraph do
   that need it agree on one implementation:
 
     * `Conductor.validate_acyclic/1` — over a *graph's members only*, at kickoff.
-    * `Arbiter.Tasks.Dependencies.add/4` — over the **global** edge set, on every
-      gating-edge write, so a cycle can never be persisted in the first place.
+    * `Arbiter.Tasks.Dependencies.add/4` — via `candidate_cycle/2`, over the
+      **global** edge set, on every gating-edge write, so a cycle can never be
+      persisted in the first place.
 
   ## Gating edges
 
@@ -88,16 +89,15 @@ defmodule Arbiter.Tasks.DependencyGraph do
   Look for a cycle among `vertices` given normalised `edges`.
 
   Returns `:ok`, or `{:error, {:cyclic, cycle}}` where `cycle` is the closed
-  walk (first id repeated at the end) naming the offenders.
+  walk (first id repeated at the end) naming the offenders. Vertices are probed
+  in sorted order for determinism.
 
-  Vertices are probed in sorted order for determinism. `opts[:start_with]`
-  moves the given ids to the front of that probe order, so a caller testing a
-  *candidate* edge gets the cycle reported from its own endpoint rather than
-  from whichever id happens to sort first.
+  This asks the *whole-graph* question ("is anything in here cyclic?"), which is
+  what `Conductor.validate_acyclic/1` wants at kickoff. A write path testing one
+  candidate edge wants `candidate_cycle/2` instead — see its note.
   """
-  @spec detect_cycle([String.t()], [edge()], keyword()) ::
-          :ok | {:error, {:cyclic, [String.t()]}}
-  def detect_cycle(vertices, edges, opts \\ []) do
+  @spec detect_cycle([String.t()], [edge()]) :: :ok | {:error, {:cyclic, [String.t()]}}
+  def detect_cycle(vertices, edges) do
     graph = :digraph.new()
 
     try do
@@ -105,7 +105,7 @@ defmodule Arbiter.Tasks.DependencyGraph do
       Enum.each(edges, fn {a, b} -> :digraph.add_edge(graph, a, b) end)
 
       vertices
-      |> probe_order(Keyword.get(opts, :start_with, []))
+      |> Enum.sort()
       |> Enum.find_value(fn vertex ->
         case :digraph.get_short_cycle(graph, vertex) do
           false -> nil
@@ -122,19 +122,46 @@ defmodule Arbiter.Tasks.DependencyGraph do
   end
 
   @doc """
+  The cycle a candidate `{dependent, dependency}` edge would close, if any.
+
+  Asks the narrow question a write path actually needs: **does a path already
+  run from the candidate's `dependency` back to its `dependent`?** If it does,
+  adding the edge closes that path into a cycle and the closed walk is returned,
+  starting and ending at `dependent`. If it does not, the edge is safe.
+
+  Deliberately *not* `detect_cycle/2` over `[candidate | existing]`: that answers
+  "is there a cycle anywhere", so one legacy cyclic pair — writable before this
+  facade existed, and still reachable from seeds — would reject every unrelated
+  gating write fleet-wide and name a cycle the operator never touched.
+
+  `edges` must be the **existing** edges only; the candidate is not added.
+  """
+  @spec candidate_cycle(edge(), [edge()]) :: :ok | {:error, {:cyclic, [String.t()]}}
+  def candidate_cycle({dependent, dependency}, edges) do
+    graph = :digraph.new()
+
+    try do
+      :digraph.add_vertex(graph, dependent)
+      :digraph.add_vertex(graph, dependency)
+
+      Enum.each(edges, fn {a, b} ->
+        :digraph.add_vertex(graph, a)
+        :digraph.add_vertex(graph, b)
+        :digraph.add_edge(graph, a, b)
+      end)
+
+      case :digraph.get_path(graph, dependency, dependent) do
+        false -> :ok
+        path -> {:error, {:cyclic, [dependent | path]}}
+      end
+    after
+      :digraph.delete(graph)
+    end
+  end
+
+  @doc """
   Render a closed walk as `bd-a → bd-b → bd-a`.
   """
   @spec format_cycle([String.t()]) :: String.t()
   def format_cycle(cycle) when is_list(cycle), do: Enum.join(cycle, " → ")
-
-  # Preferred vertices first (deduplicated, order preserved), then the rest
-  # sorted so the result is stable across runs.
-  defp probe_order(vertices, []), do: Enum.sort(vertices)
-
-  defp probe_order(vertices, preferred) do
-    vertex_set = MapSet.new(vertices)
-    first = preferred |> Enum.uniq() |> Enum.filter(&MapSet.member?(vertex_set, &1))
-    rest = vertices |> Enum.sort() |> Enum.reject(&(&1 in first))
-    first ++ rest
-  end
 end

@@ -177,6 +177,35 @@ defmodule Arbiter.Tasks.DependenciesTest do
       assert {:ok, _} = Dependencies.add(b.id, a.id, :conflicts_with)
     end
 
+    test "an unrelated pre-existing cycle does not block a new edge", %{ws: ws, a: a, b: b} do
+      # A legacy cyclic pair, writable before this facade existed (the REST path
+      # had no validation) and still reachable from seeds. It must not veto an
+      # edge that touches neither of its endpoints, nor be named in any error.
+      _ = edge(a, b, :depends_on)
+      _ = edge(b, a, :depends_on)
+
+      {:ok, p} = Ash.create(Issue, %{title: "issue P", workspace_id: ws.id})
+      {:ok, q} = Ash.create(Issue, %{title: "issue Q", workspace_id: ws.id})
+
+      assert {:ok, dep} = Dependencies.add(p.id, q.id, :depends_on)
+      assert dep.from_issue_id == p.id
+      refute Dependencies.would_cycle?(p.id, q.id, :depends_on)
+    end
+
+    test "names only the candidate's own cycle when another exists", ctx do
+      %{ws: ws, a: a, b: b, c: c} = ctx
+      _ = edge(a, b, :depends_on)
+      _ = edge(b, a, :depends_on)
+
+      {:ok, p} = Ash.create(Issue, %{title: "issue P", workspace_id: ws.id})
+      _ = edge(c, p, :depends_on)
+
+      assert {:error, {:cyclic, msg}} = Dependencies.add(p.id, c.id, :depends_on)
+      assert msg =~ "#{p.id} → #{c.id} → #{p.id}"
+      refute msg =~ a.id
+      refute msg =~ b.id
+    end
+
     test "the check is global — it sees edges outside any graph", %{a: a, b: b, c: c} do
       _ = edge(a, b, :depends_on)
       _ = edge(b, c, :depends_on)

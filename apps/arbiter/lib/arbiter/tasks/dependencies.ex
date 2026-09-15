@@ -274,11 +274,11 @@ defmodule Arbiter.Tasks.Dependencies do
   defp acyclic(from_id, to_id, type) do
     if DependencyGraph.gating?(type) do
       candidate = DependencyGraph.normalize({type, from_id, to_id})
-      edges = [candidate | DependencyGraph.gating_edges(:all)]
-      vertices = edges |> Enum.flat_map(&Tuple.to_list/1) |> Enum.uniq()
-      {dependent, _dependency} = candidate
 
-      case DependencyGraph.detect_cycle(vertices, edges, start_with: [dependent]) do
+      # Only the candidate's own reachability, not "is anything cyclic": a
+      # legacy cyclic pair elsewhere in the ledger must not veto an unrelated
+      # edge, nor be named in its error.
+      case DependencyGraph.candidate_cycle(candidate, DependencyGraph.gating_edges(:all)) do
         :ok ->
           :ok
 
