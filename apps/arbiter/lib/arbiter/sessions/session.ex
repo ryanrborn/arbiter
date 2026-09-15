@@ -182,15 +182,33 @@ defmodule Arbiter.Sessions.Session do
         # Idempotent: re-ending an already-ended row (e.g. an exit racing an
         # operator's Kill) keeps the first `ended_at` *and* `end_reason` — the
         # second caller's reason must not overwrite the true one.
-        case Ash.Changeset.get_data(changeset, :ended_at) do
+        #
+        # `ended_at` and `mcp_token_revoked_at` are guarded *independently*
+        # (bd-bsdeb2 finding 2): coupling them under one `ended_at == nil`
+        # branch meant a second end (or a row somehow ended without a prior
+        # revocation) would stomp the original revocation timestamp, and a
+        # row with `ended_at` set but `mcp_token_revoked_at` nil could never
+        # be repaired.
+        changeset =
+          case Ash.Changeset.get_data(changeset, :ended_at) do
+            nil ->
+              Ash.Changeset.force_change_attribute(changeset, :ended_at, DateTime.utc_now())
+
+            _ ->
+              original_reason = Ash.Changeset.get_data(changeset, :end_reason)
+              Ash.Changeset.force_change_attribute(changeset, :end_reason, original_reason)
+          end
+
+        case Ash.Changeset.get_data(changeset, :mcp_token_revoked_at) do
           nil ->
-            changeset
-            |> Ash.Changeset.force_change_attribute(:ended_at, DateTime.utc_now())
-            |> Ash.Changeset.force_change_attribute(:mcp_token_revoked_at, DateTime.utc_now())
+            Ash.Changeset.force_change_attribute(
+              changeset,
+              :mcp_token_revoked_at,
+              DateTime.utc_now()
+            )
 
           _ ->
-            original_reason = Ash.Changeset.get_data(changeset, :end_reason)
-            Ash.Changeset.force_change_attribute(changeset, :end_reason, original_reason)
+            changeset
         end
       end
     end

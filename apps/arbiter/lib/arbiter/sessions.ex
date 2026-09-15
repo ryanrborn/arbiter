@@ -265,7 +265,18 @@ defmodule Arbiter.Sessions do
   """
   @spec mark_ended(Session.t(), String.t()) :: {:ok, Session.t()} | {:error, term()}
   def mark_ended(%Session{} = session, reason) when is_binary(reason) do
-    with {:ok, ended} <- Ash.update(session, %{end_reason: reason}, action: :mark_ended) do
+    # bd-bsdeb2: the caller's struct can be stale (e.g. the Stream's copy from
+    # `init/1`, never refreshed). Re-read the persisted row first so the
+    # idempotence guard in the `:mark_ended` action sees the *real* `ended_at`
+    # — otherwise a stale "still running" struct lets a loser (an exit racing
+    # an operator's Kill) overwrite the winner's `end_reason`/`ended_at`.
+    current =
+      case get(session.id) do
+        {:ok, fresh} -> fresh
+        {:error, :not_found} -> session
+      end
+
+    with {:ok, ended} <- Ash.update(current, %{end_reason: reason}, action: :mark_ended) do
       Phoenix.PubSub.broadcast(Arbiter.PubSub, lifecycle_topic(), {:session_ended, ended.id})
       {:ok, ended}
     end

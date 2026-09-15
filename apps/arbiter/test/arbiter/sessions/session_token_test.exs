@@ -112,6 +112,25 @@ defmodule Arbiter.Sessions.SessionTokenTest do
       assert {:error, :revoked} = Scope.from_token(token)
     end
 
+    test "a Kill winning against a stale in-memory struct's later exit keeps the kill (bd-bsdeb2 finding 1)" do
+      # Regression for the real ordering: `Arbiter.Sessions.Stream` holds a
+      # `session` struct captured at `init/1` and never refreshes it, so the
+      # second `mark_ended/2` call it makes is *always* against a stale
+      # "still running" struct, not the just-ended row. `mark_ended/2` must
+      # re-read the persisted row itself rather than trust its argument.
+      session = launch!()
+
+      {:ok, killed} = Sessions.kill(session.id, runner: SessionRunnerStub)
+      assert killed.end_reason == "killed"
+
+      # The Stream's stale pre-kill struct, exactly as it would call in.
+      {:ok, exited_again} = Sessions.mark_ended(session, "exited")
+
+      assert exited_again.end_reason == "killed"
+      assert DateTime.compare(exited_again.ended_at, killed.ended_at) == :eq
+      assert DateTime.compare(exited_again.mcp_token_revoked_at, killed.mcp_token_revoked_at) == :eq
+    end
+
     test "a token naming a session with no row is revoked, not accepted" do
       token = Scope.mint_session(Ash.UUID.generate())
       assert {:error, :revoked} = Scope.from_token(token)
