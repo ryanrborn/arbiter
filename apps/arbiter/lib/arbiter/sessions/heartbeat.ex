@@ -93,8 +93,14 @@ defmodule Arbiter.Sessions.Heartbeat do
 
   defp cfg_opt(key, opts, default) do
     case Keyword.fetch(opts, key) do
-      {:ok, val} -> val
-      :error -> get_in(Application.get_env(:arbiter, :sessions_heartbeat, []), [key]) || default
+      {:ok, val} ->
+        val
+
+      :error ->
+        case get_in(Application.get_env(:arbiter, :sessions_heartbeat, []), [key]) do
+          nil -> default
+          val -> val
+        end
     end
   end
 end

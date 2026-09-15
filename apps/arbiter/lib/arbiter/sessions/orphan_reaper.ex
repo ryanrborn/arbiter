@@ -19,6 +19,12 @@ defmodule Arbiter.Sessions.OrphanReaper do
   `Arbiter.Sessions.Adoption`'s own orphan log line already hands the operator
   — an immediate, deliberate kill outside this policy entirely.
 
+  A grace-expired orphan is also held off, and re-checked next sweep, if
+  `tmux list-clients` reports an attached client on its socket — the same
+  "stale heartbeat AND zero clients" discipline the dead-man's switch uses,
+  so an operator actively working in a session whose row was genuinely lost
+  is never killed just because the clock ran out.
+
   `decide/4` is the whole policy, kept pure so it can be asserted directly
   against fakes without a systemd user manager or a tmux server in sight; the
   GenServer around it only adds the periodic sweep and the exact-name kill.
@@ -81,9 +87,27 @@ defmodule Arbiter.Sessions.OrphanReaper do
            launch_grace_ms: @launch_grace_ms
          ) do
       {:ok, result} ->
-        {to_kill, updated_seen} = decide(seen, result.orphans, now, grace_ms)
-        Enum.each(to_kill, &kill_orphan(&1, runner))
-        {%{orphans: result.orphans, killed: to_kill}, updated_seen}
+        {to_kill, decided_seen} = decide(seen, result.orphans, now, grace_ms)
+
+        {killed, updated_seen} =
+          Enum.reduce(to_kill, {[], decided_seen}, fn orphan, {killed_acc, seen_acc} ->
+            if attached_client?(orphan, runner) do
+              Logger.warning(
+                "Arbiter.Sessions.OrphanReaper holding off on an orphan past its grace " <>
+                  "window because a tmux client is attached: " <>
+                  "session_id=#{inspect(orphan.session_id)}"
+              )
+
+              key = orphan_key(orphan)
+              first_seen = Map.get(seen, key, now)
+              {killed_acc, Map.put(seen_acc, key, first_seen)}
+            else
+              kill_orphan(orphan, runner)
+              {[orphan | killed_acc], seen_acc}
+            end
+          end)
+
+        {%{orphans: result.orphans, killed: Enum.reverse(killed)}, updated_seen}
 
       {:error, reason} ->
         Logger.warning("Arbiter.Sessions.OrphanReaper sweep skipped: #{inspect(reason)}")
@@ -136,6 +160,20 @@ defmodule Arbiter.Sessions.OrphanReaper do
 
   defp orphan_key(%{unit: unit}) when is_binary(unit), do: {:unit, unit}
   defp orphan_key(%{socket: socket}) when is_binary(socket), do: {:socket, socket}
+
+  # A grace-expired orphan is still held off if a tmux client is attached —
+  # the grace window is purely time-based, so this is the only thing that
+  # keeps an operator working in a session whose row was genuinely lost from
+  # being killed out from under them, consistent with the watchdog's own
+  # "stale heartbeat AND zero clients" rule.
+  defp attached_client?(%{socket: nil}, _runner), do: false
+
+  defp attached_client?(%{socket: socket}, runner) do
+    case run(runner, "tmux", ["-S", socket, "list-clients", "-t", Naming.tmux_session()]) do
+      {output, 0} -> String.trim(output) != ""
+      {_output, _status} -> false
+    end
+  end
 
   # Exact-name kill only, never a pattern match — the same discipline
   # `Arbiter.Sessions.kill/2` uses for a session it actually has a row for.

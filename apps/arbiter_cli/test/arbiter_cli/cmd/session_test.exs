@@ -130,6 +130,20 @@ defmodule ArbiterCli.Cmd.SessionTest do
       assert code == 1
       assert err =~ Path.join([runtime_dir, "arbiter", "session-abc.sock"])
     end
+
+    test "dies with a hint when tmux is not on PATH", %{runtime_dir: runtime_dir, fake_bin: fake_bin} do
+      socket = Path.join([runtime_dir, "arbiter", "session-abc.sock"])
+      File.write!(socket, "")
+
+      # Point PATH at a directory that has no `tmux`, so the socket-exists
+      # check passes but `System.find_executable("tmux")` must fail.
+      System.put_env("PATH", fake_bin)
+
+      {_out, err, code} = capture(fn -> Session.run(["attach", "abc"]) end)
+
+      assert code == 1
+      assert err =~ "tmux not found on PATH"
+    end
   end
 
   describe "arb session --help" do

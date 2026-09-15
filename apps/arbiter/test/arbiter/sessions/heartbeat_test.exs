@@ -47,6 +47,22 @@ defmodule Arbiter.Sessions.HeartbeatTest do
     assert {:ok, _, _} = DateTime.from_iso8601(File.read!(path))
   end
 
+  test "an application-config `enabled: false` is honored, not overridden by the default" do
+    previous = Application.get_env(:arbiter, :sessions_heartbeat)
+    Application.put_env(:arbiter, :sessions_heartbeat, enabled: false)
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:arbiter, :sessions_heartbeat, previous)
+      else
+        Application.delete_env(:arbiter, :sessions_heartbeat)
+      end
+    end)
+
+    {:ok, pid} = Heartbeat.start_link(name: nil)
+    assert %{enabled: false} = :sys.get_state(pid)
+  end
+
   test "touch/0 is a no-op, not a crash, with no runtime dir" do
     Application.delete_env(:arbiter, :sessions_runtime_dir)
     previous_env = System.get_env("XDG_RUNTIME_DIR")

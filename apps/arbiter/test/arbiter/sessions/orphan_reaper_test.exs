@@ -138,6 +138,51 @@ defmodule Arbiter.Sessions.OrphanReaperTest do
              end)
     end
 
+    test "a grace-expired orphan with an attached tmux client is held off, not killed" do
+      {:ok, runtime} = Application.fetch_env(:arbiter, :sessions_runtime_dir)
+      socket = Path.join(runtime, "arbiter/session-orphan-2.sock")
+      File.write!(socket, "")
+
+      SessionRunnerStub.script(fn
+        "systemctl", ["--user", "list-units" | _], _opts ->
+          {"", 0}
+
+        "tmux", ["-S", ^socket, "has-session" | _], _opts ->
+          {"", 0}
+
+        "tmux", ["-S", ^socket, "list-clients" | _], _opts ->
+          {"/dev/pts/3: coord [80x24]\n", 0}
+
+        _cmd, _args, _opts ->
+          {"", 0}
+      end)
+
+      now = DateTime.utc_now()
+
+      {_first, seen} =
+        with_log(fn ->
+          OrphanReaper.sweep_once(%{}, runner: SessionRunnerStub, grace_ms: 3600_000, now: now)
+        end)
+        |> elem(0)
+
+      later = DateTime.add(now, 61, :minute)
+
+      {result, seen_after} =
+        with_log(fn ->
+          OrphanReaper.sweep_once(seen, runner: SessionRunnerStub, grace_ms: 3600_000, now: later)
+        end)
+        |> elem(0)
+
+      assert result.killed == []
+      assert [%{socket: ^socket}] = result.orphans
+      # Held off, not dropped — it is re-checked on the next sweep.
+      assert map_size(seen_after) == 1
+
+      refute Enum.any?(SessionRunnerStub.calls("tmux"), fn {_cmd, args, _} ->
+               "kill-session" in args
+             end)
+    end
+
     test "an enumeration failure touches no watched state" do
       SessionRunnerStub.script(fn
         "systemctl", _args, _opts -> {"Failed to connect to bus", 1}
