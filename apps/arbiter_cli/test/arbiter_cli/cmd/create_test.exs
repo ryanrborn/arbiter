@@ -26,6 +26,12 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert out =~ "--repo"
     assert out =~ "default_repo"
     refute out =~ "Optional, and unnecessary in a single-repo workspace"
+
+    # The remediation the operator reads when creation is refused has to name a
+    # command that exists: config writes are `arb config set`, not a
+    # (nonexistent) `arb workspace config set`.
+    assert out =~ "arb config set default_repo"
+    refute out =~ "arb workspace config set"
   end
 
   test "--parent attaches the new issue to the parent task via a parent_of edge" do

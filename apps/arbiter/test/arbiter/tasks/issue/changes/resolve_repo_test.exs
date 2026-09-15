@@ -109,6 +109,19 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepoTest do
 
       assert issue.repo == "verus-server"
     end
+
+    test "keeps the named key when two keys alias the same checkout" do
+      ws =
+        ws!(%{
+          "repo_paths" => %{"tonic" => "/srv/x", "tonic-alias" => "/srv/x"},
+          "default_repo" => "tonic"
+        })
+
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "aliased", workspace_id: ws.id, repo: "tonic-alias"})
+
+      assert issue.repo == "tonic-alias"
+    end
   end
 
   describe "explicit repo validation" do

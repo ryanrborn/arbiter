@@ -151,24 +151,20 @@ defmodule Arbiter.Tasks.IssueRepo do
     end
   end
 
-  # `RepoConfig.find_entry/2` does the loose matching (exact, then
-  # separator/case-normalized, then `<owner>/<name>` suffix). It returns the
-  # *entry*, so map back to the key it came from — the issue must persist the
-  # key dispatch will look up, not the caller's spelling of it.
+  # `RepoConfig.find_key/2` does the loose matching (exact, then
+  # separator/case-normalized, then `<owner>/<name>` suffix) and returns the
+  # key it matched — the issue must persist the key dispatch will look up, not
+  # the caller's spelling of it. Matching on keys rather than mapping an entry
+  # back to a key by value keeps two keys that alias the same checkout
+  # (`%{"tonic" => "/srv/x", "tonic-alias" => "/srv/x"}`) distinct.
   defp canonical_key(repo_maps, repo) do
-    Enum.find_value(repo_maps, &key_from_entry(&1, repo)) || slug_key(repo_maps, repo)
+    Enum.find_value(repo_maps, &configured_key(&1, repo)) || slug_key(repo_maps, repo)
   end
 
-  defp key_from_entry(map, repo) do
-    case RepoConfig.find_entry(map, repo) do
-      nil ->
-        nil
+  defp configured_key(map, repo) do
+    key = RepoConfig.find_key(map, repo)
 
-      entry ->
-        Enum.find_value(map, fn {k, v} ->
-          if v == entry and RepoConfig.repo_path_from_config(v) != nil, do: k
-        end)
-    end
+    if key && RepoConfig.repo_path_from_config(Map.get(map, key)) != nil, do: key
   end
 
   # Reverse slug resolution, the same miss-path fallback

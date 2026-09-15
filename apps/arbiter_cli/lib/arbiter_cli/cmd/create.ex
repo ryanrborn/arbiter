@@ -52,7 +52,7 @@ defmodule ArbiterCli.Cmd.Create do
   set, you never have to pass it. In a multi-repo workspace with no
   `default_repo`, creation is **refused** with an error listing the
   configured repo keys — pass one of them, or set `default_repo` on the
-  workspace (`arb workspace config set default_repo <key>`). A `--repo` that
+  workspace (`arb config set default_repo <key> [--workspace W]`). A `--repo` that
   is not a configured key is rejected outright rather than persisted for
   dispatch to fail on later.
 

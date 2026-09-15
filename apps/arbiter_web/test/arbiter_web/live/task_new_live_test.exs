@@ -176,15 +176,14 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
 
-    html =
-      view
-      |> form("#task-new-form", %{
-        "task" => %{"title" => "no-repo-picked", "workspace_id" => ws.id, "repo" => ""}
-      })
-      |> render_submit()
+    view
+    |> form("#task-new-form", %{
+      "task" => %{"title" => "no-repo-picked", "workspace_id" => ws.id, "repo" => ""}
+    })
+    |> render_submit()
 
-    # start_async resolves after the submit; re-render to read the error.
-    html = if html =~ "org/beta", do: html, else: render(view)
+    # The create runs in a `start_async`; await it before reading the error.
+    html = render_async(view)
 
     assert html =~ "org/beta"
     assert Issue |> Ash.Query.filter(title == "no-repo-picked") |> Ash.read!() == []
