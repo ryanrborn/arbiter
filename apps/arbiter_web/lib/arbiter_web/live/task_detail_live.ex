@@ -62,6 +62,8 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Skills.Selection
   alias Arbiter.Tasks.Dependencies
+  alias Arbiter.Tasks.Dependency
+  alias Arbiter.Tasks.DependencyGraph
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
   alias Arbiter.Tasks.Workspace
@@ -91,6 +93,76 @@ defmodule ArbiterWeb.TaskDetailLive do
   # operator reads, and a long-lived task can accumulate hundreds of rows.
   @message_limit 50
 
+  # ---- relationship editing (bd-dmabmg) -----------------------------------
+
+  # The add modal is phrased as a sentence *from this issue's point of view*
+  # (design bd-dgh2xv §3.3): the operator picks "is blocked by", not
+  # `(from, type, to)`. Each phrase carries everything needed to turn that
+  # sentence back into an edge:
+  #
+  #   * `:type`   — the `Dependency` type written. Note that **both** blocking
+  #     phrasings write `:depends_on` (§2.7): `:blocks` is its exact inverse
+  #     and two ways to write one fact is how operators produce contradictory
+  #     duplicates. Pre-existing `:blocks` rows still render and still remove.
+  #   * `:invert` — false means `from` is this issue, true means `from` is the
+  #     target. That is the whole from/to convention, stated once, here.
+  #   * `:group`  — the `Dependencies.for_issue/1` group this phrase's edges
+  #     land in, which is what the duplicate pre-check consults.
+  @relationship_phrases [
+    %{
+      key: "is_blocked_by",
+      label: "is blocked by",
+      type: :depends_on,
+      invert: false,
+      group: :blocked_by
+    },
+    %{key: "blocks", label: "blocks", type: :depends_on, invert: true, group: :blocks},
+    %{
+      key: "is_parent_of",
+      label: "is the parent of",
+      type: :parent_of,
+      invert: false,
+      group: :children
+    },
+    %{
+      key: "is_child_of",
+      label: "is a child of",
+      type: :parent_of,
+      invert: true,
+      group: :parents
+    },
+    %{
+      key: "relates_to",
+      label: "relates to",
+      type: :relates_to,
+      invert: false,
+      group: :relates_to
+    },
+    %{
+      key: "discovered_from",
+      label: "was discovered from",
+      type: :discovered_from,
+      invert: false,
+      group: :discovered_from
+    },
+    %{
+      key: "conflicts_with",
+      label: "conflicts with",
+      type: :conflicts_with,
+      invert: false,
+      group: :conflicts_with
+    }
+  ]
+
+  @default_relationship_phrase "is_blocked_by"
+
+  # Ten rows is what fits under the search box without scrolling. The SQL
+  # `LIKE` pulls a wider slice first because "open above closed" (§3.3) is an
+  # Elixir-side sort — ranking after a `LIMIT 10` would rank whatever ten rows
+  # the b-tree happened to hand back.
+  @relationship_candidate_limit 10
+  @relationship_search_slice 50
+
   @impl true
   def mount(%{"id" => task_id}, _session, socket) do
     if connected?(socket) do
@@ -118,6 +190,12 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:dispatch_error, nil)
      |> assign(:dispatch_params, %{})
      |> assign(:dispatching, false)
+     |> assign(:relationship_phrase_options, relationship_phrase_options())
+     |> reset_relationship_form()
+     |> assign(:rel_modal, false)
+     |> assign(:rel_remove_entry, nil)
+     |> assign(:rel_remove_warnings, [])
+     |> assign(:rel_remove_error, nil)
      |> assign(:repo_options, [])
      |> assign(:repo_assignment_options, [])
      |> assign(:priority_options, TaskForm.priority_options())
@@ -473,6 +551,101 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
+  # ---- relationships: add / remove (bd-dmabmg) ----
+
+  def handle_event("open_relationship_modal", _params, socket) do
+    {:noreply, socket |> reset_relationship_form() |> assign(:rel_modal, true)}
+  end
+
+  def handle_event("cancel_relationship_modal", _params, socket) do
+    {:noreply, assign(socket, :rel_modal, false)}
+  end
+
+  # One `phx-change` for the whole modal: the phrase select, the typeahead box
+  # and the note all re-enter here, so the candidate list, its pre-checks and
+  # the warnings are always computed from one consistent set of inputs.
+  def handle_event("relationship_change", %{"rel" => params}, socket) do
+    {:noreply, apply_relationship_params(socket, params)}
+  end
+
+  def handle_event("select_relationship_target", %{"id" => id}, socket) do
+    {:noreply,
+     socket
+     |> assign(:rel_target, relationship_candidate(socket, id))
+     |> clear_relationship_error()
+     |> refresh_relationship_warnings()}
+  end
+
+  def handle_event("clear_relationship_target", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:rel_target, nil)
+     |> clear_relationship_error()
+     |> refresh_relationship_warnings()}
+  end
+
+  def handle_event("add_relationship", %{"rel" => params}, socket) do
+    socket = apply_relationship_params(socket, params)
+
+    case {socket.assigns.task, chosen_relationship_target_id(socket)} do
+      {%Issue{} = task, target_id} when target_id != "" ->
+        {:noreply, write_relationship(socket, task, target_id)}
+
+      {%Issue{}, _blank} ->
+        {:noreply,
+         assign(
+           socket,
+           :rel_error,
+           "Search for an #{socket.assigns.issue_label} to link, or paste its id."
+         )}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("open_remove_edge", %{"edge" => edge_id}, socket) do
+    case find_relationship_entry(socket.assigns.relationship_groups, edge_id) do
+      nil ->
+        {:noreply, socket}
+
+      entry ->
+        {:noreply,
+         socket
+         |> assign(:rel_remove_entry, entry)
+         |> assign(:rel_remove_error, nil)
+         |> assign(:rel_remove_warnings, relationship_remove_warnings(entry))}
+    end
+  end
+
+  def handle_event("cancel_remove_edge", _params, socket) do
+    {:noreply, assign(socket, rel_remove_entry: nil, rel_remove_error: nil)}
+  end
+
+  # `Dependencies.remove/3` normalises "matched nothing" to `{:ok, 0}` (§4.4),
+  # so an edge a second tab already removed is a success here, not an error —
+  # the operator's intent ("this edge should not exist") is satisfied either
+  # way, and `refresh_all/1` repaints the panel without it.
+  def handle_event(
+        "remove_edge",
+        _params,
+        %{assigns: %{rel_remove_entry: %{edge: edge}}} = socket
+      ) do
+    case Dependencies.remove(edge.from_issue_id, edge.to_issue_id, edge.type) do
+      {:ok, _count} ->
+        {:noreply,
+         socket
+         |> assign(rel_remove_entry: nil, rel_remove_error: nil, rel_remove_warnings: [])
+         |> put_flash(:info, "Removed the relationship.")
+         |> refresh_all()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :rel_remove_error, relationship_error_message(reason))}
+    end
+  end
+
+  def handle_event("remove_edge", _params, socket), do: {:noreply, socket}
+
   @impl true
   def handle_async(:dispatch, {:ok, {:ok, _result}}, socket) do
     {:noreply,
@@ -796,6 +969,388 @@ defmodule ArbiterWeb.TaskDetailLive do
       end
 
     assign(socket, :relationship_groups, groups)
+  end
+
+  # ---- relationship editing: state, typeahead, pre-checks, warnings ----
+  #
+  # bd-dmabmg (design bd-dgh2xv §2.1-§2.7, §3.3). Every write here goes through
+  # `Arbiter.Tasks.Dependencies`, which owns the guards; nothing below writes an
+  # edge itself. The pre-checks and warnings are advisory duplicates of the
+  # facade's own rules, run early so the operator finds out before committing —
+  # the facade re-runs them inside its transaction, which is what actually
+  # holds.
+
+  defp relationship_phrase_options, do: Enum.map(@relationship_phrases, &{&1.label, &1.key})
+
+  defp relationship_phrase(key),
+    do: Enum.find(@relationship_phrases, hd(@relationship_phrases), &(&1.key == key))
+
+  defp normalize_phrase_key(key) do
+    if Enum.any?(@relationship_phrases, &(&1.key == key)),
+      do: key,
+      else: @default_relationship_phrase
+  end
+
+  # `invert: false` means this issue is the edge's `from`; `invert: true` means
+  # the target is. This is the only place the from/to convention appears.
+  defp relationship_endpoints(%{invert: false}, this_id, target_id), do: {this_id, target_id}
+  defp relationship_endpoints(%{invert: true}, this_id, target_id), do: {target_id, this_id}
+
+  defp reset_relationship_form(socket) do
+    socket
+    |> assign(:rel_phrase, @default_relationship_phrase)
+    |> assign(:rel_query, "")
+    |> assign(:rel_note, "")
+    |> assign(:rel_target, nil)
+    |> assign(:rel_candidates, [])
+    |> assign(:rel_warnings, [])
+    |> assign(:rel_error, nil)
+    |> assign(:rel_cycle_path, [])
+  end
+
+  defp clear_relationship_error(socket), do: assign(socket, rel_error: nil, rel_cycle_path: [])
+
+  defp apply_relationship_params(socket, params) do
+    phrase = params |> Map.get("phrase", socket.assigns.rel_phrase) |> normalize_phrase_key()
+    query = Map.get(params, "query", socket.assigns.rel_query)
+
+    # Changing the phrase changes what a pick would *mean* (and whether it is
+    # legal at all); changing the query changes what is on offer. Either way
+    # the previous pick is no longer what the operator is looking at, so drop
+    # it rather than write an edge they had stopped composing.
+    target =
+      if phrase == socket.assigns.rel_phrase and query == socket.assigns.rel_query,
+        do: socket.assigns.rel_target,
+        else: nil
+
+    socket
+    |> assign(:rel_phrase, phrase)
+    |> assign(:rel_query, query)
+    |> assign(:rel_note, Map.get(params, "note", socket.assigns.rel_note))
+    |> assign(:rel_target, target)
+    |> clear_relationship_error()
+    |> refresh_relationship_candidates()
+    |> refresh_relationship_warnings()
+  end
+
+  # A pick from the list wins; failing that the raw search text is treated as a
+  # pasted id, which is how a cross-workspace id reaches the facade and earns
+  # its named rejection (§2.4).
+  defp chosen_relationship_target_id(%{assigns: %{rel_target: %Issue{id: id}}}), do: id
+  defp chosen_relationship_target_id(%{assigns: %{rel_query: query}}), do: String.trim(query)
+
+  defp write_relationship(socket, %Issue{} = task, target_id) do
+    phrase = relationship_phrase(socket.assigns.rel_phrase)
+    {from_id, to_id} = relationship_endpoints(phrase, task.id, target_id)
+    opts = [created_by: "dashboard", notes: TaskForm.trimmed(socket.assigns.rel_note)]
+
+    case Dependencies.add(from_id, to_id, phrase.type, opts) do
+      {:ok, _edge} ->
+        socket
+        |> reset_relationship_form()
+        |> assign(:rel_modal, false)
+        |> put_flash(:info, "#{task.id} #{phrase.label} #{target_id}.")
+        |> refresh_all()
+
+      {:error, reason} ->
+        socket
+        |> assign(:rel_error, relationship_error_message(reason, task.id, target_id, phrase))
+        |> assign(:rel_cycle_path, relationship_cycle_path(reason, from_id, to_id, phrase.type))
+    end
+  end
+
+  # Two facade rejections get re-worded rather than passed through, because
+  # both of the facade's own messages name the raw `(type, from, to)` triple
+  # this modal exists to hide (§3.3):
+  #
+  #   * the resource's `unique_edge` identity, which surfaces as a generic
+  #     invalid changeset — "already linked" is the useful reading, and it is
+  #     the same wording the typeahead greys a candidate with;
+  #   * the cycle, whose path is rendered underneath as linked ids instead.
+  #
+  # `:not_found` and `:cross_workspace` already read as plain sentences about
+  # the ids the operator typed, so they pass through unchanged.
+  defp relationship_error_message(reason, this_id, target_id, phrase) do
+    {from_id, to_id} = relationship_endpoints(phrase, this_id, target_id)
+
+    cond do
+      duplicate_edge?(from_id, to_id, phrase.type) ->
+        "#{this_id} already #{phrase.label} #{target_id} — they are already linked."
+
+      match?({:cyclic, _message}, reason) ->
+        "That would create a dependency cycle — everything on this path would " <>
+          "end up waiting on itself:"
+
+      true ->
+        relationship_error_message(reason)
+    end
+  end
+
+  defp relationship_error_message({_reason, message}) when is_binary(message), do: message
+  defp relationship_error_message(other), do: TaskForm.error_message(other)
+
+  defp duplicate_edge?(from_id, to_id, type) do
+    edges =
+      Dependency
+      |> Ash.Query.filter(from_issue_id == ^from_id and to_issue_id == ^to_id and type == ^type)
+      |> Ash.read!()
+
+    edges != []
+  end
+
+  # Acceptance #9 wants the cycle *named*, with every id on the path clickable.
+  # The facade's message already spells the walk out, but re-deriving the list
+  # is what lets the template link each id instead of shipping a linkified
+  # parse of an error string.
+  defp relationship_cycle_path({:cyclic, _message}, from_id, to_id, type) do
+    if DependencyGraph.gating?(type) do
+      {type, from_id, to_id}
+      |> DependencyGraph.normalize()
+      |> DependencyGraph.candidate_cycle(DependencyGraph.gating_edges(:all))
+      |> case do
+        {:error, {:cyclic, cycle}} -> cycle
+        _ -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp relationship_cycle_path(_reason, _from_id, _to_id, _type), do: []
+
+  # ---- typeahead ----
+
+  defp refresh_relationship_candidates(%{assigns: %{task: %Issue{} = task}} = socket) do
+    candidates =
+      case String.trim(socket.assigns.rel_query) do
+        "" ->
+          []
+
+        query ->
+          task
+          |> search_relationship_targets(query)
+          |> Enum.map(&relationship_candidate_entry(&1, socket))
+      end
+
+    assign(socket, :rel_candidates, candidates)
+  end
+
+  defp refresh_relationship_candidates(socket), do: assign(socket, :rel_candidates, [])
+
+  # Server-side `LIKE` over id + title, the same shape `AuditLogLive` uses;
+  # SQLite's `LIKE` is ASCII-case-insensitive, so no extra capability is
+  # needed. Scoped to the issue's own workspace (§2.4 — a cross-workspace edge
+  # is refused anyway, so offering one would be a trap) and with the issue
+  # itself excluded (a self-edge is refused by the resource).
+  defp search_relationship_targets(%Issue{} = task, query) do
+    pattern = "%#{query}%"
+    workspace_id = task.workspace_id
+    self_id = task.id
+
+    Issue
+    |> Ash.Query.filter(workspace_id == ^workspace_id and id != ^self_id)
+    |> Ash.Query.filter(like(id, ^pattern) or like(title, ^pattern))
+    |> Ash.Query.sort(id: :asc)
+    |> Ash.Query.limit(@relationship_search_slice)
+    |> Ash.read!()
+    |> Enum.sort_by(&{relationship_rank(&1), &1.id})
+    |> Enum.take(@relationship_candidate_limit)
+  end
+
+  defp relationship_rank(%Issue{status: :closed}), do: 1
+  defp relationship_rank(_issue), do: 0
+
+  defp relationship_candidate_entry(%Issue{} = candidate, socket),
+    do: %{issue: candidate, reason: relationship_block_reason(candidate, socket)}
+
+  defp relationship_block_reason(%Issue{} = candidate, socket) do
+    phrase = relationship_phrase(socket.assigns.rel_phrase)
+    {from_id, to_id} = relationship_endpoints(phrase, socket.assigns.task.id, candidate.id)
+
+    cond do
+      already_linked?(socket.assigns.relationship_groups, phrase.group, candidate.id) ->
+        "already linked"
+
+      Dependencies.would_cycle?(from_id, to_id, phrase.type) ->
+        "would create a dependency cycle"
+
+      true ->
+        nil
+    end
+  end
+
+  # Duplicate detection reads the *grouped* view rather than raw rows, so a
+  # pre-existing `blocks(x, this)` counts as "already blocked by x" even though
+  # the UI would write the `depends_on` inverse (§2.7).
+  defp already_linked?(groups, group, id),
+    do: groups |> Map.get(group, []) |> Enum.any?(&(&1.issue_id == id))
+
+  # Only a selectable candidate can be picked: a hand-rolled click on a greyed
+  # row is a no-op rather than a way around the pre-check.
+  defp relationship_candidate(socket, id) do
+    Enum.find_value(socket.assigns.rel_candidates, fn
+      %{issue: %Issue{id: ^id} = issue, reason: nil} -> issue
+      _ -> nil
+    end)
+  end
+
+  # ---- warnings (informational; they never disable the submit) ----
+
+  defp refresh_relationship_warnings(socket),
+    do: assign(socket, :rel_warnings, relationship_add_warnings(socket))
+
+  defp relationship_add_warnings(%{
+         assigns: %{task: %Issue{} = task, rel_target: %Issue{} = target, rel_phrase: key}
+       }) do
+    phrase = relationship_phrase(key)
+    gating_add_warnings(phrase, task, target) ++ auto_close_add_warnings(phrase, task, target)
+  end
+
+  defp relationship_add_warnings(_socket), do: []
+
+  # §2.1. Both warnings concern the endpoint the edge *gates* — the `from` of
+  # the `depends_on` row, which is this issue for "is blocked by" and the
+  # target for "blocks". They are mutually exclusive: an `:in_progress` issue
+  # is not in the dispatch queue, which only admits open+refined cards.
+  defp gating_add_warnings(%{type: :depends_on, invert: invert}, task, target) do
+    gated = if invert, do: target, else: task
+
+    cond do
+      gated.status == :in_progress -> [in_progress_warning(gated)]
+      dispatchable?(gated) -> [dispatch_queue_warning(gated)]
+      true -> []
+    end
+  end
+
+  defp gating_add_warnings(_phrase, _task, _target), do: []
+
+  # §2.2. `maybe_auto_close/1` fires once every `:parent_of` child is closed,
+  # so attaching an already-closed child to a parent whose other children are
+  # all closed completes it — and the facade now runs that re-evaluation on
+  # every edge write, which is exactly why the operator is told first.
+  defp auto_close_add_warnings(%{type: :parent_of, invert: invert}, task, target) do
+    {parent, child} = if invert, do: {target, task}, else: {task, target}
+    parent = load_child_rollup(parent)
+
+    if auto_close_completes?(parent, child), do: [auto_close_warning(parent)], else: []
+  end
+
+  defp auto_close_add_warnings(_phrase, _task, _target), do: []
+
+  defp relationship_remove_warnings(%{edge: %Dependency{} = edge}),
+    do: gating_remove_warnings(edge) ++ auto_close_remove_warnings(edge)
+
+  defp relationship_remove_warnings(_entry), do: []
+
+  # The mirror of §2.1: dropping the last unclosed gating edge puts the gated
+  # issue back in the queue.
+  defp gating_remove_warnings(%Dependency{type: type} = edge)
+       when type in [:depends_on, :blocks] do
+    {dependent, dependency} = DependencyGraph.normalize(edge)
+
+    with {:ok, %Issue{status: :open, refined: true} = gated} <- Ash.get(Issue, dependent),
+         [] <- Enum.reject(gating_blockers(dependent), &(&1.issue_id == dependency)) do
+      [
+        %{
+          key: "dispatchable",
+          text: "#{gated.id} becomes dispatchable; Autopilot may pick it up within ~15s.",
+          link: nil
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  defp gating_remove_warnings(_edge), do: []
+
+  defp auto_close_remove_warnings(%Dependency{type: :parent_of} = edge) do
+    with {:ok, parent} <- Ash.get(Issue, edge.from_issue_id, load: [:child_total, :child_closed]),
+         {:ok, child} <- Ash.get(Issue, edge.to_issue_id),
+         true <- auto_close_completes_without?(parent, child) do
+      [auto_close_warning(parent)]
+    else
+      _ -> []
+    end
+  end
+
+  defp auto_close_remove_warnings(_edge), do: []
+
+  defp auto_close_completes?(
+         %Issue{auto_close: true, status: status} = parent,
+         %Issue{status: :closed}
+       )
+       when status != :closed,
+       do: (parent.child_closed || 0) == (parent.child_total || 0)
+
+  defp auto_close_completes?(_parent, _child), do: false
+
+  defp auto_close_completes_without?(
+         %Issue{auto_close: true, status: status} = parent,
+         %Issue{} = child
+       )
+       when status != :closed do
+    remaining_total = (parent.child_total || 0) - 1
+    remaining_closed = (parent.child_closed || 0) - if(child.status == :closed, do: 1, else: 0)
+
+    remaining_total > 0 and remaining_closed == remaining_total
+  end
+
+  defp auto_close_completes_without?(_parent, _child), do: false
+
+  defp in_progress_warning(%Issue{} = issue) do
+    %{
+      key: "in-progress",
+      text:
+        "A worker is running on #{issue.id} right now — this will not stop it; " <>
+          "it only applies to the next dispatch.",
+      link: %{href: "/workers/#{issue.id}", label: "view the worker"}
+    }
+  end
+
+  defp dispatch_queue_warning(%Issue{} = issue) do
+    %{
+      key: "dispatch-queue",
+      text: "#{issue.id} is in the dispatch queue; this pulls it out within ~15s.",
+      link: nil
+    }
+  end
+
+  defp auto_close_warning(%Issue{} = parent) do
+    %{
+      key: "auto-close",
+      text:
+        "#{parent.id} has auto_close set and no other open children — " <>
+          "this will close #{parent.id}.",
+      link: nil
+    }
+  end
+
+  defp dispatchable?(%Issue{status: :open, refined: true, id: id}), do: gating_blockers(id) == []
+  defp dispatchable?(_issue), do: false
+
+  defp gating_blockers(issue_id) do
+    issue_id
+    |> Dependencies.for_issue()
+    |> Map.get(:blocked_by, [])
+    |> Enum.filter(fn
+      %{issue: %Issue{status: status}} -> status != :closed
+      _entry -> false
+    end)
+  end
+
+  defp load_child_rollup(%Issue{} = issue) do
+    case Ash.load(issue, [:child_total, :child_closed]) do
+      {:ok, loaded} -> loaded
+      _ -> issue
+    end
+  end
+
+  defp find_relationship_entry(groups, edge_id) do
+    groups
+    |> Map.values()
+    |> List.flatten()
+    |> Enum.find(&(&1.edge.id == edge_id))
   end
 
   defp refresh_versions(socket) do
@@ -1680,8 +2235,17 @@ defmodule ArbiterWeb.TaskDetailLive do
                 class="order-5"
               >
                 <:actions>
-                  <%!-- bd-dgh2xv: "+ add" affordance for a new Dependency edge
-                       lands here. --%>
+                  <%!-- bd-dmabmg: available at every status, Backlog included
+                       (§2.5) — wiring edges before promotion is what avoids
+                       the promote-then-block dispatch window. --%>
+                  <button
+                    type="button"
+                    id="rel-add-open"
+                    phx-click="open_relationship_modal"
+                    class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors cursor-pointer"
+                  >
+                    + add
+                  </button>
                 </:actions>
                 <div class="flex flex-col gap-3">
                   <.relationship_group
@@ -2238,6 +2802,215 @@ defmodule ArbiterWeb.TaskDetailLive do
         </div>
         <div class="modal-backdrop" phx-click="cancel_dispatch"></div>
       </div>
+      <%!-- Add-a-relationship modal (bd-dmabmg, design §3.3). Phrased as a
+           sentence from this issue's point of view — "bd-x is blocked by …" —
+           so the operator never meets the from/to convention that produces
+           most wrong edges. --%>
+      <div :if={@rel_modal && @task} class="modal modal-open" id="relationship-add-modal">
+        <div class="modal-box max-w-xl">
+          <h3 class="font-semibold text-lg mb-3">Add a relationship</h3>
+          <.form
+            for={%{}}
+            as={:rel}
+            id="relationship-add-form"
+            phx-change="relationship_change"
+            phx-submit="add_relationship"
+            class="space-y-3"
+          >
+            <%!-- The id *is* the label: read top to bottom the control spells
+                 out "bd-x … is blocked by …", which is the sentence the
+                 operator is composing. --%>
+            <.input
+              type="select"
+              name="rel[phrase]"
+              id="rel-phrase"
+              label={"#{@task_id}…"}
+              options={@relationship_phrase_options}
+              value={@rel_phrase}
+            />
+
+            <.input
+              type="text"
+              name="rel[query]"
+              id="rel-query"
+              label={"Which #{@issue_label}?"}
+              value={@rel_query}
+              autocomplete="off"
+              phx-debounce="150"
+              placeholder={"Search by id or title — or paste an #{@issue_label} id"}
+            />
+
+            <div
+              :if={@rel_target}
+              id="rel-selected"
+              class="flex items-center gap-2 rounded-[var(--radius-field)] border border-[var(--border-default)] px-2 py-1.5"
+            >
+              <code class="text-xs text-[var(--text-title)]">{@rel_target && @rel_target.id}</code>
+              <span class="truncate text-sm flex-1">{@rel_target && @rel_target.title}</span>
+              <button
+                type="button"
+                id="rel-clear-target"
+                phx-click="clear_relationship_target"
+                class="text-[11px] text-[var(--text-link)] cursor-pointer"
+              >
+                change
+              </button>
+            </div>
+
+            <ul
+              :if={!@rel_target && @rel_candidates != []}
+              id="rel-candidates"
+              class="flex flex-col gap-1"
+            >
+              <li :for={candidate <- @rel_candidates} id={"rel-candidate-#{candidate.issue.id}"}>
+                <button
+                  :if={is_nil(candidate.reason)}
+                  type="button"
+                  phx-click="select_relationship_target"
+                  phx-value-id={candidate.issue.id}
+                  class="flex w-full items-center gap-2 rounded-[var(--radius-field)] px-2 py-1.5 text-left hover:bg-[var(--surface-sunken)] transition-colors cursor-pointer"
+                >
+                  <code class="text-xs text-[var(--text-label)] shrink-0">{candidate.issue.id}</code>
+                  <span class="truncate text-sm flex-1">{candidate.issue.title}</span>
+                  <span class={["badge badge-xs shrink-0", status_badge_class(candidate.issue.status)]}>
+                    {candidate.issue.status}
+                  </span>
+                </button>
+                <%!-- Greyed, not hidden: "why can't I pick this one" is the
+                     question the pre-check exists to answer (§3.3). --%>
+                <div
+                  :if={candidate.reason}
+                  data-role="rel-candidate-disabled"
+                  class="flex flex-wrap items-center gap-2 rounded-[var(--radius-field)] px-2 py-1.5 opacity-50"
+                >
+                  <code class="text-xs text-[var(--text-label)] shrink-0">{candidate.issue.id}</code>
+                  <span class="truncate text-sm flex-1">{candidate.issue.title}</span>
+                  <span class="text-[11px] text-[var(--arb-attention)]">⚠ {candidate.reason}</span>
+                </div>
+              </li>
+            </ul>
+
+            <p
+              :if={!@rel_target && @rel_candidates == [] && String.trim(@rel_query) != ""}
+              id="rel-no-matches"
+              class="text-[11.5px] italic text-[var(--text-label)]"
+            >
+              No {@issue_label} in this {@workspace_label} matches that. Submitting anyway will
+              try the text as an id.
+            </p>
+
+            <.input
+              type="textarea"
+              name="rel[note]"
+              id="rel-note"
+              label="Note (optional)"
+              value={@rel_note}
+              rows="2"
+              phx-debounce="300"
+              placeholder="Why does this relationship exist?"
+            />
+
+            <div
+              :for={warning <- @rel_warnings}
+              id={"rel-warning-#{warning.key}"}
+              data-role="rel-warning"
+              class="rounded-[var(--radius-field)] border-l-[3px] border-l-[var(--arb-attention)] bg-[var(--surface-sunken)] px-2.5 py-2 text-[11.5px] text-[var(--text-secondary)]"
+            >
+              ⚠ {warning.text}
+              <.link
+                :if={warning.link}
+                navigate={warning.link && warning.link.href}
+                class="ml-1 underline text-[var(--text-link)]"
+              >
+                {warning.link && warning.link.label}
+              </.link>
+            </div>
+
+            <div :if={@rel_error} id="rel-error" class="text-sm text-error">
+              {@rel_error}
+              <span :if={@rel_cycle_path != []} id="rel-cycle-path" class="block mt-1 text-xs">
+                <span :for={{id, index} <- Enum.with_index(@rel_cycle_path)}>
+                  <span :if={index > 0}>→</span>
+                  <.link
+                    navigate={~p"/tasks/#{id}"}
+                    class="underline font-[family-name:var(--font-mono)]"
+                  >
+                    {id}
+                  </.link>
+                </span>
+              </span>
+            </div>
+
+            <div class="modal-action">
+              <ArbiterWeb.CoreComponents.button
+                type="button"
+                phx-click="cancel_relationship_modal"
+                class="btn btn-sm btn-ghost"
+              >
+                Cancel
+              </ArbiterWeb.CoreComponents.button>
+              <%!-- Never disabled: every warning above is informational, and
+                   the only hard blocks are the facade's four guards (§3.3). --%>
+              <ArbiterWeb.CoreComponents.button
+                type="submit"
+                id="rel-submit"
+                variant="primary"
+                class="btn btn-sm btn-primary"
+              >
+                Add relationship
+              </ArbiterWeb.CoreComponents.button>
+            </div>
+          </.form>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_relationship_modal"></div>
+      </div>
+
+      <%!-- Remove confirm. Deliberately a modal and not `data-confirm`: this
+           is where the mirror-image warnings get read. --%>
+      <div
+        :if={@rel_remove_entry && @task}
+        class="modal modal-open"
+        id="relationship-remove-modal"
+      >
+        <div class="modal-box">
+          <h3 class="font-semibold text-lg mb-3">Remove this relationship</h3>
+          <p class="text-sm text-base-content/70 mb-3">
+            <code class="text-xs">{@task_id}</code>
+            <span class="font-[family-name:var(--font-mono)]">
+              {@rel_remove_entry && @rel_remove_entry.edge.type}
+            </span>
+            <code class="text-xs">{@rel_remove_entry && @rel_remove_entry.issue_id}</code>
+            — the edge is deleted; neither {@issue_label} is otherwise changed.
+          </p>
+          <div
+            :for={warning <- @rel_remove_warnings}
+            id={"rel-remove-warning-#{warning.key}"}
+            data-role="rel-warning"
+            class="mb-2 rounded-[var(--radius-field)] border-l-[3px] border-l-[var(--arb-attention)] bg-[var(--surface-sunken)] px-2.5 py-2 text-[11.5px] text-[var(--text-secondary)]"
+          >
+            ⚠ {warning.text}
+          </div>
+          <p :if={@rel_remove_error} class="text-sm text-error">{@rel_remove_error}</p>
+          <div class="modal-action">
+            <ArbiterWeb.CoreComponents.button
+              type="button"
+              phx-click="cancel_remove_edge"
+              class="btn btn-sm btn-ghost"
+            >
+              Cancel
+            </ArbiterWeb.CoreComponents.button>
+            <ArbiterWeb.CoreComponents.button
+              type="button"
+              id="rel-remove-confirm"
+              phx-click="remove_edge"
+              class="btn btn-sm btn-error"
+            >
+              Remove
+            </ArbiterWeb.CoreComponents.button>
+          </div>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_remove_edge"></div>
+      </div>
     </Layouts.app>
     """
   end
@@ -2335,6 +3108,24 @@ defmodule ArbiterWeb.TaskDetailLive do
         >
           {@entry.issue.status}
         </span>
+        <%!-- Removal is confirmed in a modal rather than a `data-confirm`
+             prompt, because the confirm is where the §2.1/§2.2 mirror
+             warnings ("becomes dispatchable", "will close bd-parent") have to
+             be read. Cross-workspace edges keep no ⨯: `remove/3` would happily
+             delete one, but the panel renders them read-only (§2.4) and a
+             half-editable row is worse than an honest one. --%>
+        <button
+          :if={!cross_workspace?(@entry.issue, @task)}
+          type="button"
+          id={"rel-remove-#{@entry.edge.id}"}
+          phx-click="open_remove_edge"
+          phx-value-edge={@entry.edge.id}
+          title="Remove this relationship"
+          aria-label={"Remove the relationship to #{@entry.issue_id}"}
+          class="shrink-0 px-1 text-[13px] leading-none text-[var(--text-label)] hover:text-[var(--arb-fail)] transition-colors cursor-pointer"
+        >
+          ⨯
+        </button>
       </div>
       <p
         :if={@entry.issue && awaiting_verification_blocker?(@entry, @awaiting_verification_hint)}
