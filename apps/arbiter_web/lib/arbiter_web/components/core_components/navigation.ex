@@ -40,7 +40,10 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
         <:right><.quota_bar window="5h" pct={68} /><.live_badge live /></:right>
       </.top_nav>
   """
-  attr :items, :list, required: true, doc: "list of %{label: string, href: string}"
+  attr :items, :list,
+    required: true,
+    doc:
+      "list of %{label: string, href: string, badge: integer | nil} — `badge` is optional and only renders when it is a positive integer"
 
   attr :current_path, :string,
     default: nil,
@@ -83,7 +86,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
             !nav_active?(@current_path, item.href) && "font-normal text-[var(--text-secondary)]"
           ]}
         >
-          {item.label}
+          {item.label}<.nav_badge count={item[:badge]} />
         </.link>
       </nav>
 
@@ -103,7 +106,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
                 !nav_active?(@current_path, item.href) && "font-normal text-[var(--text-secondary)]"
               ]}
             >
-              {item.label}
+              {item.label}<.nav_badge count={item[:badge]} />
             </.link>
           </li>
         </ul>
@@ -111,6 +114,21 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
 
       <span class="ml-auto flex flex-none items-center gap-4">{render_slot(@right)}</span>
     </header>
+    """
+  end
+
+  # A count riding a nav entry (the open-epic count on "Epics", bd-2wmxt5).
+  # Zero and nil both render nothing: a badge only exists to say "there is
+  # something here", so an empty one is noise.
+  attr :count, :integer, default: nil
+
+  defp nav_badge(assigns) do
+    ~H"""
+    <span
+      :if={is_integer(@count) and @count > 0}
+      data-role="nav-badge"
+      class="ml-1.5 inline-block min-w-[16px] px-1 rounded-[var(--radius-pill)] bg-[var(--surface-raised)] text-[9.5px] leading-[15px] text-center font-[family-name:var(--font-mono)] text-[var(--text-secondary)] align-middle"
+    >{@count}</span>
     """
   end
 

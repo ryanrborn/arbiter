@@ -63,6 +63,12 @@ defmodule ArbiterWeb.Layouts do
     doc: "drives the drawer's relative timestamps (ArbiterWeb.LiveHooks)"
   )
 
+  attr(:open_epic_count, :integer,
+    default: nil,
+    doc:
+      "override for tests/specimens; real callers omit it and the nav counts open epics itself"
+  )
+
   slot(:inner_block, required: true)
 
   def app(assigns) do
@@ -80,7 +86,16 @@ defmodule ArbiterWeb.Layouts do
         assigns.quota_on_exhaustion || Arbiter.Quota.default_workspace_on_exhaustion()
       )
 
-    assigns = assign(assigns, :nav_items, nav_items())
+    # Same lazy-read shape as `quota_on_exhaustion` above: the nav's open-epic
+    # badge (bd-2wmxt5) is global chrome, so threading it through all eleven
+    # LiveViews' `<Layouts.app ...>` call sites would buy nothing. Tests and
+    # specimens that render the layout outside a DB sandbox pass the count in.
+    assigns =
+      assign(
+        assigns,
+        :nav_items,
+        nav_items(assigns.open_epic_count || Arbiter.Tasks.open_epic_count())
+      )
 
     assigns =
       assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
@@ -316,10 +331,14 @@ defmodule ArbiterWeb.Layouts do
   # Usage and Audit — cross-cutting operator visibility, like both neighbors.
   # Sessions (bd-c76fu9) sits after Loop: like Workers it is a list of live
   # things Arbiter is running, but it is the operator's own, not the fleet's.
-  defp nav_items do
+  # Epics (bd-2wmxt5) sits directly after Issues — it is the same ledger at a
+  # coarser grain — and is the one entry that carries a count, because epics
+  # are the thing the board deliberately no longer shows.
+  defp nav_items(open_epic_count) do
     [
       %{label: "Board", href: ~p"/"},
       %{label: cap_plural("issue"), href: ~p"/tasks"},
+      %{label: cap_plural("epic"), href: ~p"/epics", badge: open_epic_count},
       %{label: cap_plural("worker"), href: ~p"/workers"},
       %{label: cap_plural("merge queue"), href: ~p"/merge_queue"},
       %{label: cap_plural("workspace"), href: ~p"/workspaces"},
