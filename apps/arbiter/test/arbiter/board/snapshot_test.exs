@@ -24,7 +24,8 @@ defmodule Arbiter.Board.SnapshotTest do
         acceptance: nil,
         notes: nil,
         created_at: @now,
-        updated_at: @now
+        updated_at: @now,
+        closed_at: nil
       },
       attrs
     )
@@ -856,18 +857,81 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
-  describe "closed today column" do
-    test "keeps only issues closed on the board's current day, newest first" do
+  describe "closed recent column (last 24 hours)" do
+    test "includes issues closed within the last 24 hours, newest-closed first" do
+      # @now = 2026-08-22 12:00:00 UTC
+      # 13h ago (within 24h, yesterday): 2026-08-21 23:00:00 UTC
+      # 20h ago (within 24h): 2026-08-21 16:00:00 UTC
+      # 23h ago (within 24h): 2026-08-21 13:00:00 UTC
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :closed, updated_at: ~U[2026-08-22 09:00:00Z]}),
-            issue("bd-b", %{status: :closed, updated_at: ~U[2026-08-22 11:00:00Z]}),
-            issue("bd-c", %{status: :closed, updated_at: @yesterday})
+            issue("bd-a", %{status: :closed, closed_at: ~U[2026-08-21 13:00:00Z]}),
+            issue("bd-b", %{status: :closed, closed_at: ~U[2026-08-21 16:00:00Z]}),
+            issue("bd-c", %{status: :closed, closed_at: ~U[2026-08-21 23:00:00Z]})
           ]
         )
 
-      assert ids(board.closed_today) == ["bd-b", "bd-a"]
+      # Should include all (all are within 24h), sorted newest-closed first
+      assert ids(board.closed_today) == ["bd-c", "bd-b", "bd-a"]
+    end
+
+    test "excludes issues closed more than 24 hours ago" do
+      # @now = 2026-08-22 12:00:00 UTC
+      # 25h ago (beyond 24h): 2026-08-21 11:00:00 UTC
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{status: :closed, closed_at: ~U[2026-08-21 11:00:00Z]}),
+            issue("bd-b", %{status: :closed, closed_at: ~U[2026-08-22 11:00:00Z]})
+          ]
+        )
+
+      # Should exclude bd-a (25h ago), include bd-b (1h ago)
+      assert ids(board.closed_today) == ["bd-b"]
+    end
+
+    test "does not include recently updated issues closed more than 24h ago" do
+      # @now = 2026-08-22 12:00:00 UTC
+      # Closed 30h ago but updated 1h ago: should NOT be included
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{
+              status: :closed,
+              closed_at: ~U[2026-08-21 06:00:00Z],
+              updated_at: ~U[2026-08-22 11:00:00Z]
+            })
+          ]
+        )
+
+      # Should be empty (closed_at is what matters, not updated_at)
+      assert ids(board.closed_today) == []
+    end
+
+    test "falls back to updated_at for legacy issues with nil closed_at" do
+      # For backward compatibility, if closed_at is nil, use updated_at
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{status: :closed, closed_at: nil, updated_at: ~U[2026-08-22 11:00:00Z]})
+          ]
+        )
+
+      # Should include it because updated_at is within 24h
+      assert ids(board.closed_today) == ["bd-a"]
+    end
+
+    test "excludes legacy issues with nil closed_at updated more than 24h ago" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{status: :closed, closed_at: nil, updated_at: ~U[2026-08-21 11:00:00Z]})
+          ]
+        )
+
+      # Should exclude it because even updated_at is beyond 24h
+      assert ids(board.closed_today) == []
     end
   end
 

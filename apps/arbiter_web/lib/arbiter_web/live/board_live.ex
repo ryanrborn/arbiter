@@ -4,7 +4,7 @@ defmodule ArbiterWeb.BoardLive do
   fleet doing" in one look.
 
   Five columns for where a piece of work actually sits: **Backlog**,
-  **Ready**, **Running**, **Waiting**, **Closed today**. They are stages, not
+  **Ready**, **Running**, **Waiting**, **Closed · last 24h**. They are stages, not
   statuses — the task FSM still only knows `open` / `in_progress` / `closed`,
   and every column is derived from worker state, review state, merge-queue
   membership and the issue's `refined` flag by `Arbiter.Board.Snapshot`.
@@ -115,7 +115,7 @@ defmodule ArbiterWeb.BoardLive do
     %{key: "ready", label: "Ready", tone: nil},
     %{key: "running", label: "Running", tone: "live"},
     %{key: "waiting", label: "Waiting", tone: nil},
-    %{key: "closed", label: "Closed today", tone: nil}
+    %{key: "closed", label: "Closed · last 24h", tone: nil}
   ]
 
   @impl true
@@ -910,13 +910,13 @@ defmodule ArbiterWeb.BoardLive do
               />
             </div>
 
-            <%!-- Closed today — the day's evidence. No action on it. --%>
+            <%!-- Closed in the last 24 hours (rolling). No action on it. --%>
             <div
               id="board-column-closed"
               data-column="closed"
               class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
             >
-              <.column_head label="Closed today" count={length(@closed)} tone={nil} />
+              <.column_head label="Closed · last 24h" count={length(@closed)} tone={nil} />
 
               <div
                 :for={card <- Enum.take(@closed, limit(@expanded, "closed"))}

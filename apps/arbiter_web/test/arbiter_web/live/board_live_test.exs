@@ -125,7 +125,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "Ready"
       assert html =~ "Running"
       assert html =~ "Waiting"
-      assert html =~ "Closed today"
+      assert html =~ "Closed · last 24h"
 
       assert has_element?(view, "#board-column-backlog")
       assert has_element?(view, "#board-column-waiting")
