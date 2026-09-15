@@ -190,6 +190,110 @@ defmodule Arbiter.Usage.Estimate do
       nil
   end
 
+  @typedoc """
+  Design bd-9jj5lf §4 — `"$X spent · ~$Y–Z to go"`. `spent` is the summed
+  actual spend of the epic's closed children; `to_go_low`/`to_go_high` is the
+  sum of p25/p75 estimates across open, promoted, dispatchable children only.
+  `excluded_count` covers blocked children, parked (running/waiting) children,
+  and non-dispatchable `:epic` sub-children — none of these have a defensible
+  cost basis for the remaining estimate. `upcoming_count` is unpromoted
+  Backlog children, reported separately since they aren't committed work yet.
+  `dispatchable_unestimated_count` is dispatchable children the estimator
+  itself has no history for (`:insufficient_data`) — counted, but contributing
+  nothing to the sum, same as a task-level `estimate: nil`.
+  """
+  @type epic_rollup :: %{
+          spent: float(),
+          to_go_low: float(),
+          to_go_high: float(),
+          closed_count: non_neg_integer(),
+          dispatchable_count: non_neg_integer(),
+          dispatchable_unestimated_count: non_neg_integer(),
+          excluded_count: non_neg_integer(),
+          upcoming_count: non_neg_integer()
+        }
+
+  @doc """
+  The epic cost rollup (design bd-9jj5lf §4): `nil` for a non-epic issue, an
+  all-zero rollup for a childless one.
+
+  Reuses `Arbiter.Tasks.EpicRollup.children_with_status/1` for membership and
+  the blocked/parked classification (one query, shared with the `/epics` page
+  and the epic-detail mini-board) rather than re-deriving it. The "spent" half
+  is `Arbiter.Usage.Budget.spend_by_task/2` over closed children; the "to go"
+  half is `for_issue/2` over open, promoted, dispatchable children, built on
+  one shared sample so an N-child epic costs one ledger read, not N.
+
+  Accepts the same options as `for_issue/2` (`:sample`, `:now`, `:window_days`,
+  `:min_n`).
+  """
+  @spec epic_cost_rollup(Issue.t() | String.t(), keyword()) :: epic_rollup() | nil
+  def epic_cost_rollup(issue_or_id, opts \\ [])
+
+  def epic_cost_rollup(%Issue{issue_type: :epic} = epic, opts) do
+    do_epic_cost_rollup(epic, opts)
+  rescue
+    error ->
+      Logger.warning("Usage.Estimate.epic_cost_rollup failed: #{Exception.message(error)}")
+      nil
+  end
+
+  def epic_cost_rollup(%Issue{}, _opts), do: nil
+
+  def epic_cost_rollup(task_id, opts) when is_binary(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{} = issue} -> epic_cost_rollup(issue, opts)
+      _ -> nil
+    end
+  end
+
+  defp do_epic_cost_rollup(epic, opts) do
+    children = Arbiter.Tasks.EpicRollup.children_with_status(epic)
+
+    {closed, open} = Enum.split_with(children, &(&1.bucket == :closed))
+    {upcoming, promoted} = Enum.split_with(open, &(&1.bucket == :backlog))
+
+    {dispatchable, excluded} =
+      Enum.split_with(promoted, fn %{issue: i, bucket: bucket, blocked?: blocked?} ->
+        bucket == :ready and i.issue_type != :epic and not blocked?
+      end)
+
+    spend_by_id =
+      closed
+      |> Enum.map(& &1.issue.id)
+      |> Arbiter.Usage.Budget.spend_by_task(opts)
+
+    spent =
+      closed
+      |> Enum.reduce(0.0, fn %{issue: i}, acc -> acc + Map.get(spend_by_id, i.id, 0.0) end)
+      |> money()
+
+    {to_go_low, to_go_high, unestimated} =
+      if dispatchable == [] do
+        {0.0, 0.0, 0}
+      else
+        opts_with_sample = Keyword.put_new_lazy(opts, :sample, fn -> resolve_sample(opts) end)
+
+        dispatchable
+        |> Enum.map(fn %{issue: i} -> for_issue(i, opts_with_sample) end)
+        |> Enum.reduce({0.0, 0.0, 0}, fn
+          :insufficient_data, {lo, hi, n} -> {lo, hi, n + 1}
+          est, {lo, hi, n} -> {lo + est.p25, hi + est.p75, n}
+        end)
+      end
+
+    %{
+      spent: spent,
+      to_go_low: money(to_go_low),
+      to_go_high: money(to_go_high),
+      closed_count: length(closed),
+      dispatchable_count: length(dispatchable),
+      dispatchable_unestimated_count: unestimated,
+      excluded_count: length(excluded),
+      upcoming_count: length(upcoming)
+    }
+  end
+
   defp resolve_sample(opts) do
     case Keyword.fetch(opts, :sample) do
       {:ok, sample} when is_list(sample) -> sample
