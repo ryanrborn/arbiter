@@ -68,6 +68,8 @@ defmodule Arbiter.Board.SnapshotTest do
 
   defp ids(cards), do: Enum.map(cards, & &1.id)
 
+  defp parent_of(parent_id, child_id), do: {parent_id, child_id}
+
   describe "ready column" do
     test "holds open issues that have no live worker, highest priority first" do
       board =
@@ -932,6 +934,144 @@ defmodule Arbiter.Board.SnapshotTest do
 
       # Should exclude it because even updated_at is beyond 24h
       assert ids(board.closed_today) == []
+    end
+
+    # bd-38of5i (design bd-2s901b §4): an epic is a rollup of children, not a
+    # piece of work — so "the day's evidence of progress" is the children that
+    # closed, not the container that closed because they did. Closed-today was
+    # the one column epics still leaked into; every other column already
+    # excludes them via `queueable?/2` / `orphaned?/3`.
+    test "an epic closed in the last 24h is not a Closed card" do
+      board =
+        derive(
+          issues: [
+            issue("bd-epic", %{
+              issue_type: :epic,
+              status: :closed,
+              closed_at: ~U[2026-08-22 11:00:00Z]
+            }),
+            issue("bd-a", %{status: :closed, closed_at: ~U[2026-08-22 10:00:00Z]})
+          ]
+        )
+
+      assert ids(board.closed_today) == ["bd-a"]
+    end
+
+    test "excluding the epic leaves every other column, the counts and the slot math alone" do
+      issues = [
+        issue("bd-epic", %{issue_type: :epic, status: :closed, closed_at: @now}),
+        issue("bd-ready"),
+        issue("bd-backlog", %{refined: false}),
+        issue("bd-run", %{status: :in_progress}),
+        issue("bd-closed", %{status: :closed, closed_at: @now})
+      ]
+
+      board = derive(issues: issues, workers: [worker("bd-run", :running)])
+
+      assert ids(board.backlog) == ["bd-backlog"]
+      assert Enum.map(board.ready, & &1.card.id) == ["bd-ready"]
+      assert ids(board.running) == ["bd-run"]
+      assert board.waiting == []
+      assert ids(board.closed_today) == ["bd-closed"]
+      assert board.slots_total == 4
+      assert board.slots_free == 3
+    end
+  end
+
+  # bd-38of5i (design bd-2s901b §4): with epics gone from every column, a
+  # child card is the only place an epic stays discoverable on the board — so
+  # every card carries a ref to its parent for the view to render as a chip.
+  describe "parent ref on cards" do
+    test "a card whose issue has a parent_of parent carries the parent's id, title and progress" do
+      board =
+        derive(
+          issues: [
+            issue("bd-epic", %{issue_type: :epic, title: "Browser sessions"}),
+            issue("bd-a"),
+            issue("bd-b", %{status: :closed, closed_at: @now})
+          ],
+          parent_of: [parent_of("bd-epic", "bd-a"), parent_of("bd-epic", "bd-b")]
+        )
+
+      assert [%{card: %{parent: parent}}] = board.ready
+
+      assert parent == %{
+               id: "bd-epic",
+               title: "Browser sessions",
+               issue_type: :epic,
+               child_total: 2,
+               child_closed: 1
+             }
+    end
+
+    test "a card whose issue has no parent carries a nil parent" do
+      board = derive(issues: [issue("bd-a")])
+
+      assert [%{card: %{parent: nil}}] = board.ready
+    end
+
+    test "every column's cards carry the ref, not just Ready" do
+      board =
+        derive(
+          issues: [
+            issue("bd-epic", %{issue_type: :epic, title: "Epic"}),
+            issue("bd-backlog", %{refined: false}),
+            issue("bd-run", %{status: :in_progress}),
+            issue("bd-wait", %{status: :in_progress, updated_at: @yesterday}),
+            issue("bd-closed", %{status: :closed, closed_at: @now})
+          ],
+          workers: [worker("bd-run", :running)],
+          parent_of: [
+            parent_of("bd-epic", "bd-backlog"),
+            parent_of("bd-epic", "bd-run"),
+            parent_of("bd-epic", "bd-wait"),
+            parent_of("bd-epic", "bd-closed")
+          ]
+        )
+
+      assert [%{parent: %{id: "bd-epic"}}] = board.backlog
+      assert [%{parent: %{id: "bd-epic"}}] = board.running
+      assert [%{parent: %{id: "bd-epic"}}] = board.waiting
+      assert [%{parent: %{id: "bd-epic"}}] = board.closed_today
+    end
+
+    # Multiple parents are unusual but legal. A card has room for one chip, so
+    # it takes the most recently updated parent — the same tie-break the
+    # detail-page banner stacks by.
+    test "with more than one parent, the card takes the most recently updated one" do
+      board =
+        derive(
+          issues: [
+            issue("bd-old", %{issue_type: :epic, updated_at: @yesterday}),
+            issue("bd-new", %{issue_type: :epic, updated_at: @now}),
+            issue("bd-a")
+          ],
+          parent_of: [parent_of("bd-old", "bd-a"), parent_of("bd-new", "bd-a")]
+        )
+
+      assert [%{card: %{parent: %{id: "bd-new"}}}] = board.ready
+    end
+
+    # A parent_of row pointing at an issue the board never read is a dangling
+    # edge, not a chip: better no chip than one that links to a 404 with a
+    # blank title.
+    test "a parent the board did not read produces no ref" do
+      board = derive(issues: [issue("bd-a")], parent_of: [parent_of("bd-gone", "bd-a")])
+
+      assert [%{card: %{parent: nil}}] = board.ready
+    end
+
+    # A non-epic parent (a plain task with subtasks) still gets a chip; the
+    # component renders it without the epic chrome.
+    test "a non-epic parent still produces a ref, carrying its own type" do
+      board =
+        derive(
+          issues: [issue("bd-parent", %{issue_type: :task}), issue("bd-a")],
+          parent_of: [parent_of("bd-parent", "bd-a")]
+        )
+
+      assert %{card: %{parent: %{id: "bd-parent", issue_type: :task}}} =
+               Enum.find(board.ready, &(&1.card.id == "bd-a"))
     end
   end
 

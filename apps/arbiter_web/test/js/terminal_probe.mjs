@@ -117,22 +117,46 @@ export async function probe(el) {
   check("scrollback", `scrollback=${term.options.scrollback}`, term.options.scrollback === 5000)
 
   // -- §6.3: fit ------------------------------------------------------------
-  const proposed = handle.fit.proposeDimensions()
+  const proposed = handle.fit()
   check(
     "fit-proposes-a-geometry",
     proposed ? `${proposed.cols}x${proposed.rows} (term ${term.cols}x${term.rows})` : "no proposal",
     proposed && proposed.cols > 0 && proposed.rows > 0
   )
 
+  // bd-3r2otb: the pane the dashboard renders has `p-2`, and the old fit addon
+  // measured a box that included it — one row too many, and the bottom line of
+  // the agent's UI clipped in half. Padding is the regression, so the probe
+  // fits a padded element and checks the rendered screen against the *content*
+  // box.
+  el.style.padding = "8px"
+  el.style.height = "417px"
+  handle.fit()
+  await tick()
+
+  const paneStyle = getComputedStyle(el)
+  const contentHeight =
+    el.clientHeight - parseFloat(paneStyle.paddingTop) - parseFloat(paneStyle.paddingBottom)
+  const screenHeight = el.querySelector(".xterm-screen").getBoundingClientRect().height
+
+  check(
+    "fit-stays-inside-a-padded-container",
+    `${term.rows} rows render ${screenHeight}px inside a ${contentHeight}px content box`,
+    screenHeight <= contentHeight + 0.5
+  )
+
+  el.style.padding = "0px"
+  el.style.height = "400px"
+
   // A terminal cannot reflow below ~80 columns, so the pane keeps a floor
   // width and its container scrolls instead (see SessionLive's
-  // #terminal-scroller). At the page's `min-w-[640px]` floor the fit addon
-  // must still land at or above 80 columns.
+  // #terminal-scroller). At the page's `min-w-[640px]` floor the fit must
+  // still land at or above 80 columns.
   el.style.width = "640px"
-  handle.fit.fit()
+  handle.fit()
   check("narrow-floor-is-at-least-80-cols", `cols=${term.cols} at 640px`, term.cols >= 80)
   el.style.width = "800px"
-  handle.fit.fit()
+  handle.fit()
 
   // -- §6.3: copy / paste ---------------------------------------------------
   const pushes = []

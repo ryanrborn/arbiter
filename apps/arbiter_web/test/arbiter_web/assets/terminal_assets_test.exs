@@ -24,8 +24,7 @@ defmodule ArbiterWeb.TerminalAssetsTest do
   # {file, upstream package, pinned version}
   @bundles [
     {"xterm.js", "@xterm/xterm", "5.5.0"},
-    {"addon-canvas.js", "@xterm/addon-canvas", "0.7.0"},
-    {"addon-fit.js", "@xterm/addon-fit", "0.10.0"}
+    {"addon-canvas.js", "@xterm/addon-canvas", "0.7.0"}
   ]
 
   describe "vendored xterm (§6.1)" do
