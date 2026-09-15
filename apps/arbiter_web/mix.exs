@@ -94,6 +94,21 @@ defmodule ArbiterWeb.MixProject do
       # Markdown rendering + HTML sanitization in one pass (comrak + ammonia,
       # shipped as a precompiled Rust NIF — no local toolchain required).
       {:mdex, "~> 0.13"},
+      # Only needed so the *release* build can force a source build of that
+      # NIF: upstream's precompiled `mdex_native` artifact requires
+      # GLIBC_2.34, which RHEL 8 / our `redhat/ubi8` build image (2.28)
+      # cannot load — v0.1.64 could not boot because of it (#1728). The
+      # release workflow sets RUSTLER_PRECOMPILED_FORCE_BUILD_ALL=1, which
+      # makes `rustler_precompiled` hand off to Rustler; Rustler in turn has
+      # to already be in the dependency tree (mdex_native declares it
+      # `optional: true`, so it is not fetched otherwise).
+      #
+      # Fetching it costs nothing here: `rustler` is pure Elixir and only
+      # shells out to cargo when a NIF is actually built, so dev machines and
+      # CI still use the downloaded artifact and need no Rust toolchain.
+      # Version must track the `rustler` crate version in
+      # mdex_native's Cargo.toml (0.38) — Rustler refuses a mismatch.
+      {:rustler, "~> 0.38", optional: true, runtime: false},
       {:finch, "~> 0.19"},
       {:bandit, "~> 1.5"},
       # finch pins mint "~> 1.8"; force the patched line to clear known CVEs.
