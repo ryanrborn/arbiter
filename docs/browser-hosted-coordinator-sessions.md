@@ -818,7 +818,7 @@ State plainly what per-session isolation therefore *is* and *is not*:
 One credential hazard to carry over, not re-learn: `ConfigDir` **copies** rather
 than symlinks `.credentials.json`, because both sides refresh it and a symlink
 would let a session write through and corrupt the operator's login (`:28`, and
-`remove_stale_credentials/1` at `:558`). Mode-B sessions multiply the number of
+`ConfigDir.remove_credentials/1`). Mode-B sessions multiply the number of
 independent refreshers of one grant. §12 flags this.
 
 ### 8.3 Spike — `--remote-control` under an OAuth token
@@ -956,6 +956,44 @@ promotion queue, the staleness checker that quarantines memories whose `file:lin
 no longer resolves, and transcript distillation. They appear in the phase table
 (§13) as their own children. This RFC builds only the scaffold: which layers
 mount, read vs write, and where candidates land.
+
+### 9.6 Status — phase 3 shipped (bd-aprlbb, #1684)
+
+Provisioning is wired into `Arbiter.Sessions.launch/1`: the row is written, the
+scaffold is built, then the scope starts. A provisioning failure aborts the
+launch and ends the row rather than starting a pane that would hang.
+
+| §9 item | Where it landed |
+|---|---|
+| 9.1 layout | `Arbiter.Sessions.Layout` (pure paths) + `Arbiter.Sessions.Provisioning` (creation) |
+| 9.2 onboarding gates | `Arbiter.Agents.Claude.ConfigDir.Interactive` — merges into `.claude.json` rather than overwriting it, so Claude Code's own state (incl. `bridgeOauth*`) survives a re-provision |
+| 9.3 MCP | `Arbiter.MCP.Scope.mint_session/2`; `.mcp.json` written mode `0600` via the existing `AgentConfig.Claude.write_mcp_config/2` |
+| 9.4 memory | mount points only (`memory/shared`, `memory/candidates`), plus the read-only doctrine in the generated `CLAUDE.md`. No promotion — phase 12 |
+| generated instructions | `Arbiter.Sessions.Instructions` |
+
+Two decisions worth carrying forward:
+
+* **Revocation without a revocation table.** Scope tokens are stateless signed
+  blobs, and §9.3 asks for a revocable one. Rather than add a table, the token
+  carries a `session_id` claim and `Scope.from_token/1` refuses it when the row
+  is ended or `mcp_token_revoked_at` is set. Killing a session therefore
+  revokes its token by construction, and a token naming a session with no row
+  is revoked rather than accepted. The cost is one indexed primary-key read per
+  presented **session** token; worker and plain coordinator tokens never touch
+  the database.
+* **A launch wrapper, not a direct `claude` invocation.** §10.3 forbids a
+  credential in argv, and the pane's command line *is* a `tmux -e` list. So
+  provisioning writes `launch.sh` (mode `0700`) which sources `auth.env` (mode
+  `0600`, mode A only) and `exec`s the agent. The only path in argv is a file
+  the operator's user already owns.
+
+§10.2 layers shipped: **1** (scaffolded cwd, and provisioning *refuses* a
+sessions root inside the primary checkout rather than warning),
+**3** (`Write`/`Edit`/`NotebookEdit` denies under the checkout in the session's
+`settings.json`) and **4** (the generated `CLAUDE.md` names the path and the
+rule). Layer **2** (worktrees, not the checkout) ships as instruction only —
+there is no repo-work surface in phase 3 to enforce it at, and the session's
+`workspace/` directory is the place those worktrees go.
 
 ### 9.5 Pre-launch UI (decision 5)
 

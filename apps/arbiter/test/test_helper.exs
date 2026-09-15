@@ -10,7 +10,12 @@ System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
 # Every one of them tears down by exact unit name and exact socket path — this
 # repo has an incident class around pattern-based kills reaching the live
 # coordinator.
-ExUnit.start(exclude: [:live_systemd])
+# bd-aprlbb: `:live_claude` tests start the REAL `claude` CLI interactively and
+# assert it reaches a prompt with no onboarding wizard (RFC §9.2). Opt-in for
+# the same reason, plus a credential one — see the test's moduledoc:
+#
+#     mix test --include live_claude test/integration/session_onboarding_test.exs
+ExUnit.start(exclude: [:live_systemd, :live_claude])
 Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual)
 
 # bd-5scl0c: report loudly, with attribution, if anything is killed while

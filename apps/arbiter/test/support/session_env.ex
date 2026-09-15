@@ -66,4 +66,20 @@ defmodule Arbiter.Test.SessionEnv do
 
     override(overrides)
   end
+
+  @doc """
+  Sandbox the session roots and launch one stubbed session, returning the row.
+
+  For tests outside `apps/arbiter` that need a real session row (and therefore
+  a real revocation handle) without caring how it got there.
+  """
+  @spec launch_session!(keyword()) :: struct()
+  def launch_session!(opts \\ []) do
+    sandbox("launched")
+
+    {:ok, session} =
+      Arbiter.Sessions.launch(Keyword.put_new(opts, :runner, Arbiter.Test.SessionRunnerStub))
+
+    session
+  end
 end

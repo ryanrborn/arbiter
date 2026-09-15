@@ -55,6 +55,7 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
         case Scope.from_token(String.trim(token)) do
           {:ok, _scope} -> conn
           {:error, :expired} -> halt_unauthorized(conn, "Bearer token expired")
+          {:error, :revoked} -> halt_unauthorized(conn, "Bearer token revoked (session ended)")
           {:error, _} -> halt_unauthorized(conn, "Invalid Bearer token")
         end
 

@@ -126,7 +126,10 @@ defmodule Arbiter.Sessions.ProvisioningTest do
     test "mode B is the default, is recorded, and seeds the operator's credentials", %{
       operator: operator
     } do
-      File.write!(Path.join(operator, ".credentials.json"), ~s({"claudeAiOauth":{"a":"#{@token}"}}))
+      File.write!(
+        Path.join(operator, ".credentials.json"),
+        ~s({"claudeAiOauth":{"a":"#{@token}"}})
+      )
 
       session = launch!(credentials_source: operator)
       assert session.auth_mode == :seeded_credentials
@@ -230,7 +233,11 @@ defmodule Arbiter.Sessions.ProvisioningTest do
     end
 
     test "a sibling directory sharing the checkout's prefix is not mistaken for a child" do
-      assert Layout.outside_primary_checkout?("/home/x/dev/arbiter-sessions", "/home/x/dev/arbiter")
+      assert Layout.outside_primary_checkout?(
+               "/home/x/dev/arbiter-sessions",
+               "/home/x/dev/arbiter"
+             )
+
       refute Layout.outside_primary_checkout?("/home/x/dev/arbiter/apps", "/home/x/dev/arbiter")
       refute Layout.outside_primary_checkout?("/home/x/dev/arbiter", "/home/x/dev/arbiter")
     end

@@ -233,9 +233,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
          # next to `~/.claude`), not inside it — check both spellings.
          version when is_binary(version) <-
            binary_or_nil(read_json(Path.join(source, @claude_json))["lastOnboardingVersion"]) ||
-             binary_or_nil(
-               read_json(source <> ".json")["lastOnboardingVersion"]
-             ) do
+             binary_or_nil(read_json(source <> ".json")["lastOnboardingVersion"]) do
       version
     else
       _ -> nil

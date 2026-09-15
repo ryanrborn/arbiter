@@ -154,6 +154,7 @@ defmodule ArbiterWeb.MCP.Plug do
     message =
       case reason do
         :expired -> "Scope token expired"
+        :revoked -> "Scope token revoked — its session has ended (RFC §9.3)"
         :missing -> "Missing scope token (Authorization: Bearer <token> or ?token=<token>)"
         :forbidden -> "Coordinator scope required for the SSE stream"
         _ -> "Invalid scope token"

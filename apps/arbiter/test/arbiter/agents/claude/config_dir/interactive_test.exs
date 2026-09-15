@@ -20,7 +20,8 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
     {:ok, tmp: tmp, config: config, source: source}
   end
 
-  defp claude_json!(config), do: config |> Path.join(".claude.json") |> File.read!() |> Jason.decode!()
+  defp claude_json!(config),
+    do: config |> Path.join(".claude.json") |> File.read!() |> Jason.decode!()
 
   describe "the three onboarding gates (§9.2)" do
     test "writes .claude.json answering theme, onboarding and cwd trust", %{
@@ -81,9 +82,14 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       source: source,
       tmp: tmp
     } do
-      File.write!(Path.join(source, ".claude.json"), Jason.encode!(%{"lastOnboardingVersion" => "9.9.9"}))
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{"lastOnboardingVersion" => "9.9.9"})
+      )
 
-      assert :ok = Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: source)
+      assert :ok =
+               Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: source)
+
       assert claude_json!(config)["lastOnboardingVersion"] == "9.9.9"
     end
   end
@@ -132,7 +138,10 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       source: source,
       tmp: tmp
     } do
-      File.write!(Path.join(source, ".credentials.json"), ~s({"claudeAiOauth":{"accessToken":"sk-secret"}}))
+      File.write!(
+        Path.join(source, ".credentials.json"),
+        ~s({"claudeAiOauth":{"accessToken":"sk-secret"}})
+      )
 
       assert :ok =
                Interactive.ensure(config,
