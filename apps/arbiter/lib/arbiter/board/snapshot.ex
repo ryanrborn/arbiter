@@ -160,18 +160,18 @@ defmodule Arbiter.Board.Snapshot do
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
-    issues = Map.get(input, :issues) || []
-    workers = Map.get(input, :workers) || []
-    blocked_by = Map.get(input, :blocked_by) || %{}
-    changed = Map.get(input, :changed_files) || %{}
+    issues = Map.get(input, :issues, [])
+    workers = Map.get(input, :workers, [])
+    blocked_by = Map.get(input, :blocked_by, %{})
+    changed = Map.get(input, :changed_files, %{})
     now = Map.get(input, :now) || DateTime.utc_now()
-    slots_total = Map.get(input, :slots_total) || 0
-    quota = Map.get(input, :quota) || :ok
+    slots_total = Map.get(input, :slots_total, 0)
+    quota = Map.get(input, :quota, :ok)
     paused? = Map.get(input, :paused) == true
-    ready_order = Map.get(input, :ready_order) || []
+    ready_order = Map.get(input, :ready_order, [])
     # bd-38of5i: `{parent_id, child_id}` pairs from the `:parent_of` edges. An
     # *input*, like `:blocked_by` — the pure half never goes looking for rows.
-    parent_of = Map.get(input, :parent_of) || []
+    parent_of = Map.get(input, :parent_of, [])
     # bd-8jixav: which tasks have a live Watchdog. A Registry read, so it is an
     # *input* here rather than something `derive/1` goes and looks up — the
     # pure half stays pure and a caller that can't answer passes nothing, which
