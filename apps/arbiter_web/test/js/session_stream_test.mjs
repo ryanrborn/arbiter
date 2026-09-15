@@ -229,6 +229,60 @@ test("a refused join is tagged so a headless client can stop retrying", () => {
   assert.equal(rec.log.errors[1].join_refused, undefined)
 })
 
+test("a refusal that could succeed later keeps the client trying", () => {
+  // bd-3r2otb: the bridge may not be up the instant the launch redirect lands
+  // on the page. A refusal like this one is "ask again", and the client must
+  // say so rather than sit on "connecting…" — which is what the operator saw
+  // on the first live check, with no way to tell a retrying client from a
+  // wedged one.
+  const socket = new FakeSocket()
+  const rec = recorder()
+  const stream = new SessionStream({
+    socket,
+    sessionId: "sess-1",
+    geometry: () => ({ cols: 80, rows: 24 }),
+    sink: rec.sink
+  })
+  stream.connect()
+
+  socket.channel0.joins[0].push.reply("error", {
+    code: "bridge_unavailable",
+    detail: "{:error, :enoent}"
+  })
+
+  assert.equal(stream.finished, false)
+  assert.equal(socket.disconnected, false)
+  assert.equal(stream.joinRefusals, 1)
+  assert.deepEqual(rec.log.statuses, ["connecting", "reconnecting"])
+
+  // phoenix.js re-sends the same join push on its rejoin timer, so the retry
+  // arrives on the push we already hold.
+  socket.channel0.joins[0].push.reply("ok", { seq: 0, mode: "snapshot" })
+
+  assert.deepEqual(rec.log.statuses, ["connecting", "reconnecting", "live"])
+  assert.equal(stream.joins, 1)
+})
+
+test("a refusal that can never succeed stops rather than spinning", () => {
+  const socket = new FakeSocket()
+  const rec = recorder()
+  const stream = new SessionStream({
+    socket,
+    sessionId: "sess-gone",
+    geometry: () => ({ cols: 80, rows: 24 }),
+    sink: rec.sink
+  })
+  stream.connect()
+
+  socket.channel0.joins[0].push.reply("error", { code: "session_gone", detail: "no live session" })
+
+  // Left alone, phoenix.js rejoins a dead topic every few seconds for as long
+  // as the tab is open.
+  assert.equal(stream.finished, true)
+  assert.equal(socket.disconnected, true)
+  assert.deepEqual(rec.log.statuses, ["connecting", "ended"])
+})
+
 test("replayed bytes at or below last_seq are not rendered twice", () => {
   const { channel, stream, rec } = connected()
 

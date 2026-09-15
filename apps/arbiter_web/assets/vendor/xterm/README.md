@@ -14,7 +14,6 @@ pinned by construction, upgraded by hand.
 |---|---|---|
 | `xterm.js` | `@xterm/xterm` | `@xterm/xterm@5.5.0` |
 | `addon-canvas.js` | `@xterm/addon-canvas` | `@xterm/addon-canvas@0.7.0` |
-| `addon-fit.js` | `@xterm/addon-fit` | `@xterm/addon-fit@0.10.0` |
 | `../../css/xterm.css` | `@xterm/xterm` (`css/xterm.css`) | `@xterm/xterm@5.5.0` |
 
 Each file is the upstream published build verbatim, with a header comment
@@ -26,8 +25,22 @@ Tarball digests, as published on `registry.npmjs.org`:
 ```
 sha256  bd954fa721872170188cc5d7e83e88db3c83c9a18a4e8d24c2783d26491f59d2  xterm-5.5.0.tgz
 sha256  f8004a9c444289c686ac9b58df98505f3e027fcfea411b6845f9279cc281a774  addon-canvas-0.7.0.tgz
-sha256  917ac44972453d5eed52edc1e50260c76398ce48cf2290c2e60671102bba0b33  addon-fit-0.10.0.tgz
 ```
+
+## Why there is no `addon-fit` here (bd-3r2otb)
+
+`@xterm/addon-fit@0.10.0` was vendored alongside these and has been removed.
+It sizes the terminal from `getComputedStyle(terminal.element.parentElement)
+.height`, which Chrome resolves to the **border box** wherever `box-sizing:
+border-box` is in force — which, under Tailwind's preflight, is everywhere. The
+session pane is `h-[min(70vh,640px)] p-2`, so the addon counted its 16px of
+padding as usable terminal space: with a 20px cell that is exactly one row more
+than the box can show, and the bottom line of the agent's UI was clipped in
+half on the live dashboard.
+
+`assets/js/session_fit.mjs` does the arithmetic on the content box instead, and
+is unit-tested under `node --test` — which the addon, reading the DOM inside a
+minified bundle, could never be.
 
 ## Why the 5.x line, and why these are UMD rather than ESM builds
 
@@ -45,7 +58,7 @@ into `terminal._core` (`_renderService`, `_charSizeService`,
 `_characterJoinerService`, …), so running it against a major version it was
 never built for risks throwing out of `loadAddon` and leaving no terminal at
 all. **The renderer decision pins the terminal version**, so this is the 5.x
-line: `@xterm/xterm@5.5.0` with its contemporaneous `addon-fit@0.10.0`.
+line: `@xterm/xterm@5.5.0`.
 
 The 5.x line publishes only the UMD/CJS build (`lib/xterm.js`); the `.mjs`
 bundles first appear in 6.0.0 and in 5.6.0 *betas*, and a beta is not something

@@ -1,9 +1,11 @@
 // xterm.js, wired to phase 4's channel (bd-c76fu9, phase 5 of
 // `docs/browser-hosted-coordinator-sessions.md` §6).
 //
-// This is the DOM half of the browser terminal: it builds the `Terminal`, the
-// **canvas** renderer (§6.2) and the fit addon, and hands the protocol to
-// `session_stream.mjs`, which is DOM-free and unit-tested under `node --test`.
+// This is the DOM half of the browser terminal: it builds the `Terminal` and
+// the **canvas** renderer (§6.2), measures the pane, and hands everything that
+// can be reasoned about without a DOM to a module that is unit-tested under
+// `node --test` — the protocol to `session_stream.mjs`, the fit arithmetic to
+// `session_fit.mjs`, the copy/paste policy to `session_keys.mjs`.
 //
 // Everything imported here is either vendored (`../vendor/xterm/*`, see that
 // directory's README) or already a Mix dependency (`phoenix`). There is no
@@ -11,10 +13,11 @@
 
 import { Terminal } from "../vendor/xterm/xterm.js"
 import { CanvasAddon } from "../vendor/xterm/addon-canvas.js"
-import { FitAddon } from "../vendor/xterm/addon-fit.js"
 import { Socket } from "phoenix"
 
 import { SessionStream } from "./session_stream.mjs"
+import { fitGeometry } from "./session_fit.mjs"
+import { handleTerminalKey } from "./session_keys.mjs"
 
 // §6.3: the server holds 30k lines and the transcript holds everything, so the
 // client only needs what the operator will actually scroll.
@@ -68,8 +71,6 @@ export function createSessionTerminal(el, options = {}) {
     theme: readTheme(el)
   })
 
-  const fit = new FitAddon()
-  term.loadAddon(fit)
   term.open(el)
 
   // §6.2: canvas, never WebGL. Browsers cap live WebGL contexts at roughly
@@ -86,7 +87,25 @@ export function createSessionTerminal(el, options = {}) {
     console.warn("[session-terminal] canvas renderer unavailable, using the DOM renderer", error)
   }
 
-  safeFit(fit)
+  // §6.3: the fit is ours, not `@xterm/addon-fit`'s. The addon sizes the
+  // terminal from `getComputedStyle(parent).height`, which Chrome resolves to
+  // the **border box** under `box-sizing: border-box` — Tailwind's preflight
+  // puts every element in that mode — so the pane's own `p-2` was counted as
+  // usable terminal space. With a 20px cell that is exactly one row too many,
+  // and the bottom line of the agent's UI was clipped in half.
+  const applyFit = () => {
+    const geometry = paneGeometry(el, term)
+    if (!geometry) return null
+
+    if (geometry.cols !== term.cols || geometry.rows !== term.rows) {
+      clearRenderer(term)
+      term.resize(geometry.cols, geometry.rows)
+    }
+
+    return geometry
+  }
+
+  applyFit()
 
   // No connect params. The dashboard is loopback-only by design (§10.4) and
   // `ArbiterWeb.SessionSocket` trusts a loopback peer without a token, so the
@@ -132,7 +151,16 @@ export function createSessionTerminal(el, options = {}) {
   // encoded on the way out.
   term.onBinary((data) => stream.sendBytes(latin1Bytes(data)))
 
-  term.attachCustomKeyEventHandler((event) => handleKey(event, term))
+  term.attachCustomKeyEventHandler((event) =>
+    handleTerminalKey(event, {
+      term,
+      clipboard: typeof navigator === "undefined" ? null : navigator.clipboard,
+      // A blocked clipboard is reported rather than swallowed: "Ctrl+Shift+V
+      // did nothing" is the one outcome an operator cannot debug.
+      onClipboardError: (error) =>
+        onError({ code: "clipboard_blocked", detail: String((error && error.message) || error) })
+    })
+  )
 
   // Clicking anywhere in the pane - including its padding - focuses the
   // terminal, which is what an operator expects from something that looks like
@@ -142,18 +170,41 @@ export function createSessionTerminal(el, options = {}) {
     if (event.button === 0 && !term.hasSelection()) term.focus()
   })
 
+  let disposed = false
   let fitTimer = null
   const scheduleFit = () => {
     if (fitTimer) clearTimeout(fitTimer)
     fitTimer = setTimeout(() => {
       fitTimer = null
-      safeFit(fit)
-      stream.resize(term.cols, term.rows)
+      const geometry = applyFit()
+      // Only a geometry we actually measured is pushed. A pane that has not
+      // been laid out reports 0x0, and that number resizes the pane *every*
+      // attached client shares.
+      if (geometry) stream.resize(geometry.cols, geometry.rows)
     }, FIT_DEBOUNCE_MS)
   }
 
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(scheduleFit) : null
   if (observer) observer.observe(el)
+
+  // The dashboard's mono face is a **webfont** (Geist Mono, from Google
+  // Fonts), and xterm measures its cell exactly once — inside `open()`, with
+  // whatever fallback the browser had resolved at that instant. Nothing in
+  // xterm watches `document.fonts`, so without this the pane keeps a cell size
+  // the text no longer has and every fit computed from it is off, which is the
+  // second way the bottom row ends up clipped.
+  const fonts = typeof document === "undefined" ? null : document.fonts
+  if (fonts && fonts.ready) {
+    fonts.ready
+      .then(() => {
+        if (disposed) return
+        remeasure(term)
+        scheduleFit()
+      })
+      .catch(() => {
+        /* no webfont arrived; the fallback metrics were right all along */
+      })
+  }
 
   // The canvas renderer holds a *resolved* palette, so it does not follow the
   // CSS custom properties the way the pane's own background does. Without
@@ -187,14 +238,15 @@ export function createSessionTerminal(el, options = {}) {
   return {
     term,
     stream,
-    fit,
     renderer,
     focus: () => term.focus(),
+    fit: applyFit,
     refit: scheduleFit,
     detach: () => stream.detach(),
     kill: () => stream.kill(),
     applyTheme,
     dispose() {
+      disposed = true
       if (fitTimer) clearTimeout(fitTimer)
       if (observer) observer.disconnect()
       if (themeObserver) themeObserver.disconnect()
@@ -207,63 +259,66 @@ export function createSessionTerminal(el, options = {}) {
   }
 }
 
-// -- §6.3 copy/paste ----------------------------------------------------------
+// -- §6.3 fit ----------------------------------------------------------------
 
-// `Ctrl/Cmd+Shift+C` copies the selection and `Ctrl/Cmd+Shift+V` pastes, so
-// that plain `Ctrl+C` still sends SIGINT to the agent - the single most common
-// terminal papercut, and the one that matters most when the thing on the other
-// end is an agent mid-turn.
-function handleKey(event, term) {
-  if (event.type !== "keydown") return true
-  if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return true
+// The pane's **content box**. `clientHeight`/`clientWidth` already exclude
+// borders and any scrollbar the element itself shows, so only its padding is
+// left to take off — and taking it off is the whole fix: the old fit addon
+// measured a box that included it.
+function paneGeometry(el, term) {
+  const cell = cellSize(term)
+  if (!cell) return null
 
-  const key = event.key.toLowerCase()
+  const style = getComputedStyle(el)
 
-  if (key === "c") {
-    const selection = term.getSelection()
-    if (selection) writeClipboard(selection)
-    return false
-  }
-
-  if (key === "v") {
-    // Chrome and Firefox bind `Ctrl+Shift+V` themselves ("paste as plain
-    // text") and fire a *real* paste event at xterm's helper textarea, which
-    // xterm also handles. Returning `false` from a custom key handler does not
-    // stop that - only `preventDefault()` does - and without it the text lands
-    // twice.
-    event.preventDefault()
-
-    readClipboard().then((text) => {
-      // `term.paste()`, never the stream directly. xterm applies the two
-      // transformations that make a multi-line paste work at all, and both
-      // matter when the thing on the other end is a raw-mode TUI:
-      //   - `\r\n`/`\n` -> `\r`, because a raw-mode reader takes CR, not LF,
-      //     as Enter;
-      //   - bracketed-paste markers (`ESC[200~`/`ESC[201~`) when the app has
-      //     enabled the mode, so a pasted prompt is inserted as one block
-      //     rather than submitted line by line.
-      // It then emits the result through `onData` -> `stream.send`, which
-      // chunks it: a paste is not a keystroke and a 200 KB one must not become
-      // a single socket frame.
-      if (text) term.paste(text)
-    })
-    return false
-  }
-
-  return true
+  return fitGeometry({
+    width: el.clientWidth - px(style.paddingLeft) - px(style.paddingRight),
+    height: el.clientHeight - px(style.paddingTop) - px(style.paddingBottom),
+    cellWidth: cell.width,
+    cellHeight: cell.height,
+    scrollbarWidth: cell.scrollbarWidth
+  })
 }
 
-function writeClipboard(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).catch(() => {})
+// xterm's measured cell, read where `@xterm/addon-fit` read it.
+// `dimensions.css` is the CSS-pixel geometry the renderer actually draws
+// with, which is the one that has to divide into a CSS-pixel box.
+function cellSize(term) {
+  const core = term._core
+  const service = core && core._renderService
+  const dimensions = service && service.dimensions
+  const cell = dimensions && dimensions.css && dimensions.css.cell
+
+  if (!cell || !(cell.width > 0) || !(cell.height > 0)) return null
+
+  const viewport = core.viewport
+
+  return {
+    width: cell.width,
+    height: cell.height,
+    // With `scrollback: 0` xterm shows no viewport scrollbar at all.
+    scrollbarWidth:
+      term.options.scrollback === 0 || !viewport ? 0 : viewport.scrollBarWidth || 0
   }
 }
 
-function readClipboard() {
-  if (navigator.clipboard && navigator.clipboard.readText) {
-    return navigator.clipboard.readText().catch(() => null)
-  }
-  return Promise.resolve(null)
+// What the fit addon did before every resize: drop the renderer's cached
+// layers so the new geometry is drawn rather than stretched over the old one.
+function clearRenderer(term) {
+  const service = term._core && term._core._renderService
+  if (service && typeof service.clear === "function") service.clear()
+}
+
+// Re-measure the cell after a webfont arrives. xterm only measures inside
+// `open()`, and it does not watch `document.fonts`.
+function remeasure(term) {
+  const service = term._core && term._core._charSizeService
+  if (service && typeof service.measure === "function") service.measure()
+}
+
+function px(value) {
+  const parsed = parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 // -- helpers ------------------------------------------------------------------
@@ -272,17 +327,6 @@ function latin1Bytes(text) {
   const bytes = new Uint8Array(text.length)
   for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff
   return bytes
-}
-
-// `fit()` throws if the element has not been laid out yet - a background tab,
-// a `display: none` ancestor, a mount before first paint. Not an error: the
-// `ResizeObserver` fires again the moment it has a box.
-function safeFit(fit) {
-  try {
-    fit.fit()
-  } catch (_error) {
-    /* not laid out yet */
-  }
 }
 
 function cssValue(el, name, fallback) {
