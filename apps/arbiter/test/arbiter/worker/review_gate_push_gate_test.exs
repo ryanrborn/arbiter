@@ -329,11 +329,23 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
       assert sha(repo, "origin/" <> branch) == nil
 
       author = start_author(task, ws, repo, branch, repo)
-      start_gate(author, task, ws, branch, repo, command: [@push_check, branch, "ROUND1"])
 
-      # The round terminates (on this shape the diff range is empty, since the
-      # worktree's HEAD *is* the target tip) — well after `push_gate/1` ran.
-      wait_until(fn -> Ash.get!(Issue, task.id).review_park_reason != nil end, 20_000)
+      # `rounds: 1`: the worktree is off-branch, so `push_gate/1` fails open
+      # (`:unknown`, matching the ad-hoc/test-rig posture `PushState` documents)
+      # instead of blocking the round — this test is about `push_gate/1` never
+      # publishing the wrong commit, not about the round-cap. Left at the
+      # default of 3, the fixture's honest REQUEST_CHANGES (the branch really
+      # is unpushed) would route into a revise round with no `revise_command`,
+      # spawning a real (non-fixture) implementer session.
+      start_gate(author, task, ws, branch, repo,
+        command: [@push_check, branch, "ROUND1"],
+        rounds: 1
+      )
+
+      # A REQUEST_CHANGES that never converges fails the run rather than
+      # parking it (only a liveness failure of the gate itself parks) — well
+      # after `push_gate/1` ran.
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(author)) end, 20_000)
 
       {out, 0} = System.cmd("git", ["-C", repo, "ls-remote", "--heads", "origin", branch])
 
