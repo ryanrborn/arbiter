@@ -121,6 +121,10 @@ defmodule ArbiterCli.Cmd.Session do
 
   # ---- attach -----------------------------------------------------------------
 
+  # Every branch below terminates via `Output.die/2` or `Output.halt/1`
+  # (both `no_return()`) — spelled out so dialyzer does not report it as an
+  # accidental "no local return".
+  @spec attach([String.t()]) :: no_return()
   defp attach(args) do
     {read_only?, rest} = extract_flag(args, ["--read-only", "-r"])
 
