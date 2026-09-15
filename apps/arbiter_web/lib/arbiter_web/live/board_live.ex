@@ -4,7 +4,7 @@ defmodule ArbiterWeb.BoardLive do
   fleet doing" in one look.
 
   Five columns for where a piece of work actually sits: **Backlog**,
-  **Ready**, **Running**, **Waiting**, **Closed today**. They are stages, not
+  **Ready**, **Running**, **Waiting**, **Closed · last 24h**. They are stages, not
   statuses — the task FSM still only knows `open` / `in_progress` / `closed`,
   and every column is derived from worker state, review state, merge-queue
   membership and the issue's `refined` flag by `Arbiter.Board.Snapshot`.

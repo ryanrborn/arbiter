@@ -660,7 +660,7 @@ defmodule Arbiter.Board.Snapshot do
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
         assignee: Map.get(issue, :assignee),
-        closed_at: Map.get(issue, :closed_at)
+        closed_at: Map.get(issue, :closed_at) || Map.get(issue, :updated_at)
       }
     end)
   end
