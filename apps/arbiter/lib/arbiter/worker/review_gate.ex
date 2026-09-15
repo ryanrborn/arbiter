@@ -161,6 +161,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Reviews.Coverage
+  alias Arbiter.Reviews.PushState
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event, as: UsageEvent
@@ -285,6 +286,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | :commit_gate_no_changes
           | :commit_gate_uncommitted
           | :empty_diff
+          | :head_not_pushed
 
   @type opt ::
           {:author, pid()}
@@ -813,53 +815,64 @@ defmodule Arbiter.Worker.ReviewGate do
       {:ok, head_sha} ->
         state = %{state | head_sha: head_sha}
 
-        # bd-31bh37: guard against an unexpectedly-empty diff range. If
-        # base_sha == head_sha the reviewer would diff a commit against itself
-        # (empty output) and bogusly conclude "no work". This can happen when
-        # origin/<target> has already incorporated the branch's commits (e.g. the
-        # branch was merged into target before the review gate ran), making the
-        # merge-base equal to the branch HEAD. Treat this as an escalation rather
-        # than spawning a reviewer that will falsely reject. This is a safety net
-        # on top of sync_from_origin; the primary fix is fetching the pushed tip.
-        case empty_diff_guard(state) do
+        # bd-2jkrqu: the head about to be reviewed must be ON the remote branch
+        # the PR points at, or the verdict describes a commit the PR does not
+        # carry. Push it if it isn't; refuse to review if it can't be pushed.
+        case push_gate(state) do
           {:error, reason} ->
-            Logger.warning(
-              "ReviewGate: empty diff range detected for task=#{state.task_id}: #{reason}"
-            )
-
-            escalate_pre_review(state, reason, :empty_diff)
+            escalate_pre_review(state, reason, :head_not_pushed)
 
           :ok ->
-            case launch_worker(
-                   state,
-                   state.review_id,
-                   :reviewer,
-                   review_prompt(state),
-                   state.command
-                 ) do
-              {:ok, state} ->
-                {:noreply, state}
-
-              {:error, reason} ->
-                Logger.warning(
-                  "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
-                )
-
-                # bd-9zuvbh: a reviewer that could not be spawned (quota gate
-                # refusal, no outpost, an adapter error out of
-                # `start_worker_session/4`) is the SAME liveness failure as one
-                # whose session dies a step later — no verdict was produced and
-                # nobody has found a problem with the work. It parks as
-                # `:reviewer_failed` rather than failing the run, which also
-                # matters on a revise round: a round-2 spawn failure must not
-                # fail a run whose round-1 work was fine.
-                escalate_pre_review(
-                  state,
-                  "ReviewGate could not spawn a reviewer: #{inspect(reason)}",
-                  :reviewer_failed
-                )
-            end
+            spawn_reviewer_after_push(state)
         end
+    end
+  end
+
+  # bd-31bh37: guard against an unexpectedly-empty diff range. If
+  # base_sha == head_sha the reviewer would diff a commit against itself
+  # (empty output) and bogusly conclude "no work". This can happen when
+  # origin/<target> has already incorporated the branch's commits (e.g. the
+  # branch was merged into target before the review gate ran), making the
+  # merge-base equal to the branch HEAD. Treat this as an escalation rather
+  # than spawning a reviewer that will falsely reject. This is a safety net
+  # on top of sync_from_origin; the primary fix is fetching the pushed tip.
+  defp spawn_reviewer_after_push(state) do
+    case empty_diff_guard(state) do
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: empty diff range detected for task=#{state.task_id}: #{reason}"
+        )
+
+        escalate_pre_review(state, reason, :empty_diff)
+
+      :ok ->
+        launch_first_reviewer(state)
+    end
+  end
+
+  defp launch_first_reviewer(state) do
+    case launch_worker(state, state.review_id, :reviewer, review_prompt(state), state.command) do
+      {:ok, state} ->
+        {:noreply, state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        # bd-9zuvbh: a reviewer that could not be spawned (quota gate
+        # refusal, no outpost, an adapter error out of
+        # `start_worker_session/4`) is the SAME liveness failure as one
+        # whose session dies a step later — no verdict was produced and
+        # nobody has found a problem with the work. It parks as
+        # `:reviewer_failed` rather than failing the run, which also
+        # matters on a revise round: a round-2 spawn failure must not
+        # fail a run whose round-1 work was fine.
+        escalate_pre_review(
+          state,
+          "ReviewGate could not spawn a reviewer: #{inspect(reason)}",
+          :reviewer_failed
+        )
     end
   end
 
@@ -942,6 +955,139 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp with_base_sha(state), do: state
+
+  # ---- the head under review must be the pushed PR head (bd-2jkrqu) --------
+  #
+  # Everything downstream of here reads the LOCAL worktree: the reviewer agent
+  # opens files in it, `empty_diff_guard/1` diffs `base_sha..HEAD` in it, and
+  # an APPROVE stamps `git rev-parse HEAD`. That is only sound while local HEAD
+  # is a commit `origin/<branch>` carries. On vs-5l45oz it was not: the fix
+  # round committed `edadf22c` locally and never pushed, so round 2 reviewed —
+  # and approved — code the MR did not have.
+  #
+  # So before any round is paid for, make the head reachable on the remote:
+  #
+  #   * already there (or an ancestor of the remote tip) → proceed;
+  #   * ahead / never pushed → ONE push, then proceed on the same SHA;
+  #   * diverged, or the push was rejected → refuse. `origin/<branch>` may
+  #     carry another actor's commits (a ReviewGate implementer round pushes
+  #     straight to origin), so this never force-pushes; a human resolves it.
+  #   * push state undeterminable (no worktree, no `origin`, git unavailable)
+  #     → fail open and review exactly as before this guard existed. A local
+  #     ad-hoc checkout is not an incident.
+  #
+  # One evaluation and at most one push per round — `GuardRegistry` row G18.
+  defp push_gate(%{worktree_path: wt, branch: branch} = state)
+       when is_binary(wt) and is_binary(branch) do
+    case PushState.ensure_pushed(wt, branch) do
+      {:ok, :already_pushed, _push_state} ->
+        :ok
+
+      {:ok, :pushed, push_state} ->
+        Logger.info(
+          "ReviewGate: pushed `#{branch}` to #{push_state.remote} before round " <>
+            "#{state.round} for task=#{state.task_id} (head #{push_state.local_head})"
+        )
+
+        :ok
+
+      {:ok, :unknown, push_state} ->
+        Logger.info(
+          "ReviewGate: push state of `#{branch}` undeterminable for task=#{state.task_id} " <>
+            "(#{push_state.status}); reviewing the local head"
+        )
+
+        :ok
+
+      {:error, reason, push_state} ->
+        escalate_unpushed_head(state, push_state, reason)
+    end
+  end
+
+  defp push_gate(_state), do: :ok
+
+  # The findings text for a head that could not be put on the remote branch.
+  # Returned (not sent) so the caller decides which terminal it belongs to —
+  # a pre-review park on round 1, a park on the fix round's re-review.
+  defp escalate_unpushed_head(state, push_state, reason) do
+    Logger.warning(
+      "ReviewGate: refusing to review an unpushed head for task=#{state.task_id} " <>
+        "(#{push_state.status}, #{inspect(reason)})"
+    )
+
+    {:error,
+     """
+     ReviewGate refused to review `#{state.branch}`: the head it would review is
+     not on the remote branch the merge request points at, and could not be
+     pushed there.
+
+     #{PushState.describe(push_state)}
+     Push attempt: #{inspect(reason)}.
+
+     Reviewing this head would produce a verdict about code the MR does not
+     carry — the bd-2jkrqu failure, where an unpushed fix round was approved
+     while the MR still held the unfixed commit. **Do not merge this branch by
+     hand on the strength of a review it has not had.**
+
+     To clear it: reconcile `#{state.branch}` with `#{push_state.remote}/#{state.branch}`
+     (rebase or merge — never force-push, the remote may carry another worker's
+     commits), push, and re-run the review.
+     """
+     |> String.trim()}
+  end
+
+  # The fix round's re-review terminal for an unpushed head. `dispatch_next_review/1`
+  # runs inside the revise loop, so it takes the loop's own `finish/2` terminal
+  # rather than `escalate_pre_review/3`'s `{:stop, …}` handle_continue shape.
+  # Parks (class B/C posture): nothing merges, the run is not failed, and one
+  # escalation names the real push state.
+  defp escalate_pre_review_park(state, reason) do
+    record_round(state, :review, :request_changes, reason, converged: false)
+    finish(state, {:parked, :head_not_pushed, reason})
+  end
+
+  # The local head, used only to name a SHA in a coverage-write failure page —
+  # never to write a coverage row (see `pushed_head/1`).
+  defp local_head_for_report(state), do: full_head_sha_in(Map.get(state, :worktree_path))
+
+  @doc """
+  The head SHA a reviewed-SHA stamp or a `review_coverage` row may name, or a
+  refusal (bd-2jkrqu, acceptance 2).
+
+  `{:error, {:head_not_pushed, push_state}}` means the local head is positively
+  not on `origin/<branch>`: recording it would assert that the PR's head has
+  been reviewed when the PR carries a different commit. That write is exactly
+  what made the vs-5l45oz approval look legitimate, so it is refused and paged
+  rather than made.
+
+  An undeterminable push state falls back to the local head — the behaviour
+  before this guard existed.
+
+  Public so the refusal can be exercised directly against a real worktree; the
+  gate's own path reaches it through `stamp_reviewed_head/1` and
+  `record_review_coverage/1`.
+  """
+  @spec pushed_head(map()) :: {:ok, String.t()} | {:error, {:head_not_pushed, map()} | :no_head}
+  def pushed_head(state) do
+    wt = Map.get(state, :worktree_path)
+    branch = Map.get(state, :branch)
+
+    case PushState.reviewable_head(wt, branch, fetch?: false) do
+      {:ok, sha} -> {:ok, sha}
+      {:error, {:head_not_pushed, _} = err} -> {:error, err}
+      {:error, :no_head} -> fallback_head(wt)
+    end
+  end
+
+  # `PushState` reads `git rev-parse HEAD`; when there is no git at all the
+  # gate still has `full_head_sha_in/1`'s answer (nil for a missing worktree),
+  # which the callers already handle.
+  defp fallback_head(wt) do
+    case full_head_sha_in(wt) do
+      sha when is_binary(sha) and sha != "" -> {:ok, sha}
+      _ -> {:error, :no_head}
+    end
+  end
 
   # The escalation findings for a branch that conflicts with its target: name
   # the conflicting files and instruct resolution. A request_changes verdict, so
@@ -1495,6 +1641,20 @@ defmodule Arbiter.Worker.ReviewGate do
 
     review_id = reviewer_round_id(next.review_id, next.round)
 
+    # bd-2jkrqu: the fix round commits in the worktree and (historically) never
+    # pushed. `handle_continue(:spawn_reviewer, …)` — which runs the push gate
+    # for round 1 — is NOT on this path, so round 2+ would read a local-only
+    # head. This is the exact commit the vs-5l45oz reviewer approved.
+    case push_gate(next) do
+      {:error, reason} ->
+        {:done, escalate_pre_review_park(next, reason)}
+
+      :ok ->
+        launch_next_reviewer(next, review_id)
+    end
+  end
+
+  defp launch_next_reviewer(next, review_id) do
     case launch_worker(next, review_id, :reviewer, rereview_prompt(next), next.command) do
       {:ok, state} ->
         {:continue, state}
@@ -1552,7 +1712,9 @@ defmodule Arbiter.Worker.ReviewGate do
       1. `git status` to see what is uncommitted.
       2. `git add -A`
       3. `git commit -m "<a short message describing the work>"`
-      4. (`git push -u origin #{state.branch}` is OPTIONAL — the merge reads local HEAD.)
+      4. `git push -u origin #{state.branch}` — REQUIRED. The re-review and the
+         merge request both read the PUSHED head; a commit that stays local is
+         reviewed but never merged (bd-2jkrqu).
 
     Do not redo the work — just commit what is already on disk. If a hunk looks
     half-finished or wrong, finish it first, then commit it.
@@ -2855,8 +3017,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # reviewer actually reviewed. Best-effort — a failure here must never take the
   # gate down, it only means the guard keeps the previous (conservative) value.
   defp stamp_reviewed_head(state) do
+    # bd-2jkrqu: never stamp a head the PR does not carry. A refusal here leaves
+    # `last_reviewed_sha` at its older, more conservative value, which keeps the
+    # merge guard CLOSED — the safe direction.
     with task_id when is_binary(task_id) <- Map.get(state, :task_id),
-         sha when is_binary(sha) and sha != "" <- full_head_sha_in(Map.get(state, :worktree_path)),
+         {:ok, sha} <- pushed_head(state),
          {:ok, task} <- Ash.get(Issue, task_id) do
       case Ash.update(task, %{last_reviewed_sha: sha, last_reviewed_at: DateTime.utc_now()}) do
         {:ok, _} ->
@@ -2903,12 +3068,16 @@ defmodule Arbiter.Worker.ReviewGate do
   defp record_review_coverage(state) do
     task_id = Map.get(state, :task_id)
     mr_ref = coverage_mr_ref(state)
-    head_sha = full_head_sha_in(Map.get(state, :worktree_path))
+    head_sha = local_head_for_report(state)
     base_ref = Map.get(state, :target_branch)
 
     with {:ok, task_id} <- present(task_id, :no_task_id),
          {:ok, mr_ref} <- present(mr_ref, :no_mr_ref),
-         {:ok, head_sha} <- present(head_sha, :no_head_sha),
+         # bd-2jkrqu: the row must name the head the PR carries, not the local
+         # one. `{:error, {:head_not_pushed, _}}` routes into coverage_failed/4
+         # below: no row, and one page — the silently-missing row §3.3 warns
+         # about is exactly what an unpushed approval would leave behind.
+         {:ok, head_sha} <- pushed_head(state),
          {:ok, base_ref} <- present(base_ref, :no_base_ref),
          {:ok, net_diff_id} <- coverage_net_diff_id(state) do
       coverage_writer().(%{
