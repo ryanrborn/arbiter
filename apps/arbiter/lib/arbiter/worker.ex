@@ -5462,9 +5462,12 @@ defmodule Arbiter.Worker do
 
   defp park_push_line(push_state) do
     case Arbiter.Reviews.PushState.verdict(push_state) do
-      :unknown -> "the push state of the branch could not be checked from here " <>
-                    "(#{Arbiter.Reviews.PushState.describe(push_state)})."
-      _ -> Arbiter.Reviews.PushState.describe(push_state)
+      :unknown ->
+        "the push state of the branch could not be checked from here " <>
+          "(#{Arbiter.Reviews.PushState.describe(push_state)})."
+
+      _ ->
+        Arbiter.Reviews.PushState.describe(push_state)
     end
   end
 

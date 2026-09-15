@@ -87,7 +87,15 @@ defmodule Arbiter.Reviews.PushState do
 
   def inspect_branch(path, branch, opts) when is_binary(path) and is_binary(branch) do
     remote = Keyword.get(opts, :remote, "origin")
-    base = %{status: :unknown, branch: branch, remote: remote, local_head: nil, remote_head: nil, ahead_by: nil}
+
+    base = %{
+      status: :unknown,
+      branch: branch,
+      remote: remote,
+      local_head: nil,
+      remote_head: nil,
+      ahead_by: nil
+    }
 
     case git(path, ["rev-parse", "HEAD"]) do
       {:ok, local} -> resolve(path, %{base | local_head: local}, opts)

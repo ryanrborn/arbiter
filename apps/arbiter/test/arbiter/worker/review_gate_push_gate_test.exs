@@ -358,7 +358,9 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
       )
 
       wait_until(
-        fn -> Enum.any?(escalations(ws, task), &(&1.subject =~ "review coverage write failed")) end,
+        fn ->
+          Enum.any?(escalations(ws, task), &(&1.subject =~ "review coverage write failed"))
+        end,
         20_000
       )
 
