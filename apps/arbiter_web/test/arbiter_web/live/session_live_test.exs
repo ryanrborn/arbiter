@@ -186,6 +186,11 @@ defmodule ArbiterWeb.SessionLiveTest do
       # viewport scrolls the terminal rather than the page.
       assert has_element?(view, "#terminal-scroller")
       assert has_element?(view, "#terminal-status")
+
+      # The live cost HUD slot (§7.5, phase 7): hook-owned, same as the rest
+      # of the strip, updated from `usage` channel events rather than a
+      # LiveView diff.
+      assert has_element?(view, ~s(#terminal-status [data-role="usage"]))
     end
 
     test "a narrow viewport scrolls the terminal, not the page (§6.3)", %{conn: conn} do

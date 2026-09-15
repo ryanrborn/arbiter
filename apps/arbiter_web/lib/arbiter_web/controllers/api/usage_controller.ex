@@ -6,13 +6,14 @@ defmodule ArbiterWeb.Api.UsageController do
 
     * `GET /api/usage`          — aggregated rollup. Required query: `by` (one of
                                   `day | task | epic | workspace | repo |
-                                  model | step | provider | source`; `campaign`
-                                  also accepted as a deprecated alias for
-                                  `epic`). Optional: `workspace_id`, `since`
+                                  model | step | provider | source | session`;
+                                  `campaign` also accepted as a deprecated alias
+                                  for `epic`). Optional: `workspace_id`, `since`
                                   (ISO8601), `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
-                                  filters: `workspace_id`, `task_id`, `since`,
-                                  `step`, `source`, `limit` (default 50).
+                                  filters: `workspace_id`, `task_id`,
+                                  `session_id`, `since`, `step`, `source`,
+                                  `limit` (default 50).
     * `GET /api/usage/calibration` — difficulty mis-rating report (bd-3j4ch4):
                                   closed tasks whose actual cost lands outside
                                   their own tier's p25–p75 but inside an
@@ -94,6 +95,7 @@ defmodule ArbiterWeb.Api.UsageController do
         Event
         |> filter_eq(:workspace_id, params["workspace_id"])
         |> filter_eq(:task_id, params["task_id"])
+        |> filter_eq(:session_id, params["session_id"])
         |> filter_eq(:step, step)
         |> filter_eq(:source, source)
         |> filter_since(since)
@@ -197,6 +199,8 @@ defmodule ArbiterWeb.Api.UsageController do
     prefix = v <> "#%"
     Ash.Query.filter(query, task_id == ^v or like(task_id, ^prefix))
   end
+
+  defp filter_eq(query, :session_id, v), do: Ash.Query.filter(query, session_id == ^v)
 
   defp filter_eq(query, :step, v), do: Ash.Query.filter(query, step == ^v)
   defp filter_eq(query, :source, v), do: Ash.Query.filter(query, source == ^v)

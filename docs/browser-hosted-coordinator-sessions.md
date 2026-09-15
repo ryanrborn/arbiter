@@ -1127,8 +1127,8 @@ encoded in `ClaudeSessionFile`:
      keep the *parent's* `sessionId`. `read_totals/2` takes `:session_id` and
      skips lines stamped with a different one.
 
-Still open for phase 7: the live HUD tailer (§7.5's "live, approximate" half)
-and `arb usage --by session` / `--session <id>` (§7.6).
+Phase 7 (the live HUD tailer and `arb usage --by session` / `--session <id>`)
+shipped separately — see §7.9.
 
 ### 7.8 Post-deploy corrections — what the live run found (bd-be804c, follow-up)
 
@@ -1173,6 +1173,46 @@ deleted by
 `priv/repo/migrations/20260914060000_redate_coordinator_session_usage.exs` —
 they are derived data, so the next sweep re-derives them, on the right days and
 with costs.
+
+### 7.9 Status — phase 7 shipped (bd-67l88l)
+
+The two items §7.7 left open are done:
+
+  * **Live HUD tailer.** `Arbiter.Sessions.Stream` — the same one-reader-per-
+    session process that already fans out terminal bytes (§5.3) — gained a
+    second timer (`usage_poll_interval_ms`, default ~2s) that, while at least
+    one client is attached, re-reads the session's JSONL with
+    `ClaudeSessionFile.read_totals/2` and publishes the file's **cumulative**
+    totals (not a delta since the last tick) on `Sessions.usage_topic/1` — a
+    tab that attaches midway through the session, or reattaches after the
+    reader restarted, shows the correct number on the very next tick instead
+    of resuming from zero. `cost_usd` is the file's latest cumulative figure,
+    since `cost-state` records are periodic (or, on 2.1.270+, absent entirely
+    — see §7.7); `estimated` is `cost_source == :estimated` — true only when
+    the figure came from `ClaudePricing`'s token-based estimate, not merely
+    "not a `cost-state` record" (a file with no cost at all reports
+    `cost_usd: nil`, `estimated: false`). `ArbiterWeb.SessionChannel` was
+    already subscribed to that topic and forwarding it (phase 4's
+    placeholder), so no channel change was needed. `SessionLive`'s hook-owned
+    status strip renders a running token/cost chip from it, the same way it
+    already renders geometry from `meta` events — never a LiveView diff.
+
+    `session.provider_session_id` / `.config_dir` are read as of the reader's
+    own start rather than re-fetched every tick, but a mid-session rollover
+    (§7.5's "wrinkle") is *not* left to the authoritative sweep: a rollover
+    doesn't delete the old JSONL, so every tick with a known id also checks
+    for a newer `*.jsonl` in the same config dir and switches onto it (and
+    persists the new id) when one exists — the reader closes the gap itself,
+    on the next ~2s tick, rather than going dark for the rest of the session.
+
+  * **`arb usage --by session` / `--session <id>`.** `Arbiter.Usage.summarize/1`
+    gained a `:session` grouping that mirrors `:task`'s discipline exactly:
+    rows with no `session_id` are dropped rather than given a phantom group.
+    `GET /api/usage/events` gained a `session_id` filter, and `arb usage
+    --session <id>` is a new top-level flag (detected the same way
+    `--calibration` already is) that drills into it — the same event-list
+    renderer `arb usage events` uses, which now also prints `session=…` so
+    the drill-down is legible without cross-referencing.
 
 ## 8. Auth modes and Remote Control (AC 10)
 
@@ -1589,7 +1629,7 @@ Each phase is scoped to one child ticket.
 | 4 | **Transport** — *shipped (§5.5)* | Socket + channel, full envelope (§5.2), seq ring, resume, backpressure. Tested headlessly against a scripted PTY — no browser needed. | 1 | 3 |
 | 5 | **Frontend terminal** — *shipped (§6.4)* | Vendor xterm + canvas addon + CSS; colocated hook; fit/resize; copy-paste; `SessionLive` chrome. | 2 | 3 |
 | 6 | **Metering ingest** | Extend `ClaudeSessionFile` to parse `cost-state` (fixes the moduledoc's stated cost gap, benefits workers too); `Sessions.UsageIngest` writing `source: :coordinator_session`; end-of-session reconcile; `session_id` index. | 1 | 3 |
-| 7 | **Cost HUD + `arb usage --by session`** | Live `usage` channel events; HUD bar; CLI dimension + `--session` filter (§7.6). | 2 | 2 |
+| 7 | **Cost HUD + `arb usage --by session`** — *shipped (§7.9)* | Live `usage` channel events; HUD bar; CLI dimension + `--session` filter (§7.6). | 2 | 2 |
 | 8 | **Remote Control integration** | Mode-B launch with `--remote-control <name>`; **bridge verification** via `bridge-session` polling (§8.3); UI disable-with-reason under mode A. | 2 | 2 |
 | 9 | **Transcript persistence** | `pipe-pane` raw capture + redaction; session-keyed entry point on `SessionArchive`; subagent walk; retention. | 2 | 2 |
 | 10 | **Orphan reaping + CLI fallback** — *shipped (§4.10)* | Idle-deadline sweep; in-scope dead-man's switch; `arb session list/attach` (§4.7). | 2 | 2 |

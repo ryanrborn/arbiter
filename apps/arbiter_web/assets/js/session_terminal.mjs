@@ -45,7 +45,7 @@ const RESET = "[0m"
  *
  * Callbacks, all optional: `onStatus(state)` with "connecting" | "live" |
  * "reconnecting" | "detached" | "ended", `onExit(payload)`, `onMeta(meta)`,
- * `onError(err)`.
+ * `onUsage(payload)` (§7.5, phase 7 — the live cost HUD feed), `onError(err)`.
  */
 export function createSessionTerminal(el, options = {}) {
   const {
@@ -54,6 +54,7 @@ export function createSessionTerminal(el, options = {}) {
     onStatus = () => {},
     onExit = () => {},
     onMeta = () => {},
+    onUsage = () => {},
     onError = () => {}
   } = options
 
@@ -140,6 +141,7 @@ export function createSessionTerminal(el, options = {}) {
       },
       status: onStatus,
       meta: (meta) => onMeta(meta),
+      usage: (payload) => onUsage(payload),
       exit: (payload) => onExit(payload),
       error: (err) => onError(err)
     }
