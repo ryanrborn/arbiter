@@ -254,12 +254,30 @@ defmodule Arbiter.Sessions do
   @doc """
   Mark a session ended, recording why (§4.6 requires the reason).
 
-  Idempotent — re-ending an already-ended row keeps its original `ended_at`.
+  Idempotent — re-ending an already-ended row keeps its original `ended_at`
+  and `end_reason` (bd-bsdeb2: an exit racing an operator's Kill must not let
+  the loser overwrite the winner's reason).
+
+  Every path that ends a session — Kill, a payload exiting on its own, the
+  adoption/orphan sweep finding a vanished scope — runs through here, so this
+  is also the single place that tells `ArbiterWeb.SessionIndexLive` (and any
+  other subscriber) to refresh (bd-bsdeb2, `lifecycle_topic/0`).
   """
   @spec mark_ended(Session.t(), String.t()) :: {:ok, Session.t()} | {:error, term()}
   def mark_ended(%Session{} = session, reason) when is_binary(reason) do
-    Ash.update(session, %{end_reason: reason}, action: :mark_ended)
+    with {:ok, ended} <- Ash.update(session, %{end_reason: reason}, action: :mark_ended) do
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, lifecycle_topic(), {:session_ended, ended.id})
+      {:ok, ended}
+    end
   end
+
+  @doc """
+  The PubSub topic session lifecycle changes (currently just `mark_ended/2`)
+  are published on — the fleet-wide counterpart to `usage_topic/1`'s
+  per-session one (bd-bsdeb2).
+  """
+  @spec lifecycle_topic() :: String.t()
+  def lifecycle_topic, do: "sessions:lifecycle"
 
   @doc "Mark a session's scope confirmed live (launch, or re-adoption)."
   @spec mark_running(Session.t()) :: {:ok, Session.t()} | {:error, term()}

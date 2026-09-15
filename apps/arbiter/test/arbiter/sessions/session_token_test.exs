@@ -89,6 +89,19 @@ defmodule Arbiter.Sessions.SessionTokenTest do
       assert {:error, :revoked} = Scope.from_token(token)
     end
 
+    test "an exit racing an operator kill keeps the first ended_at/end_reason (bd-bsdeb2)" do
+      session = launch!()
+
+      {:ok, exited} = Sessions.mark_ended(session, "exited")
+      {:ok, killed_again} = Sessions.mark_ended(exited, "killed")
+
+      assert killed_again.end_reason == "exited"
+      assert DateTime.compare(killed_again.ended_at, exited.ended_at) == :eq
+
+      assert DateTime.compare(killed_again.mcp_token_revoked_at, exited.mcp_token_revoked_at) ==
+               :eq
+    end
+
     test "revoke_mcp_token/1 revokes without ending the session" do
       session = launch!()
       token = Sessions.mint_mcp_token(session)

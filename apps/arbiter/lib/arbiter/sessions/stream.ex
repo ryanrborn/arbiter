@@ -462,6 +462,12 @@ defmodule Arbiter.Sessions.Stream do
     else
       # Drain whatever the pane wrote on its way out before announcing it.
       state = pump(state)
+      # bd-bsdeb2: end the row *before* telling attached clients, so a client
+      # that reacts to the broadcast by re-fetching the session (the
+      # `agent_exited` hook path) already sees `:ended`. Best-effort — the
+      # in-memory `session` here can be stale or, in some tests, unpersisted;
+      # either way the pane is gone and clients must still be told.
+      _ = Sessions.mark_ended(state.session, "exited")
       broadcast(state, {:session_exit, state.id, %{code: nil, reason: "exited"}})
       {:stop, :normal, close_stream(state)}
     end

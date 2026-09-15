@@ -179,26 +179,18 @@ defmodule Arbiter.Sessions.Session do
       change set_attribute(:status, :ended)
 
       change fn changeset, _context ->
-        # Idempotent: re-ending an already-ended row keeps the first timestamp,
-        # so a sweep that runs twice does not rewrite history.
-        changeset =
-          case Ash.Changeset.get_data(changeset, :ended_at) do
-            nil -> Ash.Changeset.force_change_attribute(changeset, :ended_at, DateTime.utc_now())
-            _ -> changeset
-          end
-
-        # §9.3: ending a session revokes its MCP token, whatever ended it.
-        # Same idempotence — the first revocation timestamp is the true one.
-        case Ash.Changeset.get_data(changeset, :mcp_token_revoked_at) do
+        # Idempotent: re-ending an already-ended row (e.g. an exit racing an
+        # operator's Kill) keeps the first `ended_at` *and* `end_reason` — the
+        # second caller's reason must not overwrite the true one.
+        case Ash.Changeset.get_data(changeset, :ended_at) do
           nil ->
-            Ash.Changeset.force_change_attribute(
-              changeset,
-              :mcp_token_revoked_at,
-              DateTime.utc_now()
-            )
+            changeset
+            |> Ash.Changeset.force_change_attribute(:ended_at, DateTime.utc_now())
+            |> Ash.Changeset.force_change_attribute(:mcp_token_revoked_at, DateTime.utc_now())
 
           _ ->
-            changeset
+            original_reason = Ash.Changeset.get_data(changeset, :end_reason)
+            Ash.Changeset.force_change_attribute(changeset, :end_reason, original_reason)
         end
       end
     end

@@ -138,6 +138,27 @@ defmodule Arbiter.Sessions.OrphanReaperTest do
              end)
     end
 
+    test "a session whose scope vanished with no client attached is ended, not just reaped as an orphan (bd-bsdeb2)" do
+      {:ok, session} = Ash.create(Arbiter.Sessions.Session, %{cwd: "/tmp/work"})
+      {:ok, session} = Arbiter.Sessions.mark_running(session)
+
+      # No live units, no live sockets — the row's own scope is simply gone,
+      # the same "exited with nobody watching" case a dead Stream process
+      # would otherwise leave stuck at `:running` forever.
+      enumerate([])
+
+      {result, _seen} =
+        with_log(fn ->
+          OrphanReaper.sweep_once(%{}, runner: SessionRunnerStub, grace_ms: 3600_000)
+        end)
+        |> elem(0)
+
+      assert result.orphans == []
+      {:ok, reloaded} = Arbiter.Sessions.get(session.id)
+      assert reloaded.status == :ended
+      assert reloaded.mcp_token_revoked_at
+    end
+
     test "a grace-expired orphan with an attached tmux client is held off, not killed" do
       {:ok, runtime} = Application.fetch_env(:arbiter, :sessions_runtime_dir)
       socket = Path.join(runtime, "arbiter/session-orphan-2.sock")
