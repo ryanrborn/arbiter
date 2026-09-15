@@ -28,7 +28,39 @@ System.delete_env("ARBITER_SESSIONS_ROOT")
 # only where tmux is absent.
 tmux_exclude = if System.find_executable("tmux"), do: [], else: [:tmux]
 
-ExUnit.start(exclude: [:live_systemd, :live_claude] ++ tmux_exclude)
+# bd-b95w36: `:systemd_user` is the restart-survival regression test — it
+# starts a stand-in systemd user service, restarts it for real, and checks that
+# a session launched from inside it survives with no gap in its output. Same
+# opt-in reason as `:live_systemd`, plus one more: GitHub Actions runners often
+# have no systemd user instance at all, so it *cannot* run there.
+#
+# That makes silence the risk. A suite that reports green while the one
+# property every other phase assumes went unchecked is worse than no test, so
+# the exclusion announces itself with its reason instead of hiding in ExUnit's
+# "Excluding tags:" line.
+systemd_user_reason =
+  case Arbiter.Test.SystemdUser.status() do
+    :ok -> nil
+    {:unavailable, reason} -> reason
+  end
+
+ExUnit.start(exclude: [:live_systemd, :live_claude, :systemd_user] ++ tmux_exclude)
+
+# `mix test` applies its `--include`/`--exclude` before loading this file, so
+# the filters here are the run's real ones.
+included = Keyword.get(ExUnit.configuration(), :include, [])
+
+running_systemd_user? =
+  Enum.any?(included, fn
+    :systemd_user -> true
+    {:systemd_user, _} -> true
+    _ -> false
+  end)
+
+if not running_systemd_user? or systemd_user_reason != nil do
+  IO.puts(Arbiter.Test.SystemdUser.banner(systemd_user_reason))
+end
+
 Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual)
 
 # bd-5scl0c: report loudly, with attribution, if anything is killed while
