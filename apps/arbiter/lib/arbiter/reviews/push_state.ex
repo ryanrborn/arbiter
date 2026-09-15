@@ -148,21 +148,23 @@ defmodule Arbiter.Reviews.PushState do
   end
 
   defp resolve(path, %{branch: branch, remote: remote} = state, opts) do
-    with {:ok, _url} <- git(path, ["remote", "get-url", remote]) do
-      if Keyword.get(opts, :fetch?, true) do
-        # Best effort: a fetch failure (offline, auth) leaves the cached
-        # tracking ref in place and the comparison below still runs.
-        _ = git(path, ["fetch", "--quiet", remote, branch])
-      end
+    case git(path, ["remote", "get-url", remote]) do
+      {:ok, _url} ->
+        if Keyword.get(opts, :fetch?, true) do
+          # Best effort: a fetch failure (offline, auth) leaves the cached
+          # tracking ref in place and the comparison below still runs.
+          _ = git(path, ["fetch", "--quiet", remote, branch])
+        end
 
-      ref = remote <> "/" <> branch
+        ref = remote <> "/" <> branch
 
-      case git(path, ["rev-parse", "--verify", "--quiet", ref <> "^{commit}"]) do
-        {:ok, remote_head} -> compare(path, %{state | remote_head: remote_head}, ref)
-        :error -> %{state | status: :no_remote_branch}
-      end
-    else
-      :error -> %{state | status: :no_origin}
+        case git(path, ["rev-parse", "--verify", "--quiet", ref <> "^{commit}"]) do
+          {:ok, remote_head} -> compare(path, %{state | remote_head: remote_head}, ref)
+          :error -> %{state | status: :no_remote_branch}
+        end
+
+      :error ->
+        %{state | status: :no_origin}
     end
   end
 
