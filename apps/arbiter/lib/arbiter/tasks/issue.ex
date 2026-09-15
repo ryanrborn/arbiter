@@ -154,6 +154,11 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.GenerateId, []}
       change {Arbiter.Tasks.Issue.Changes.InheritTrackerType, []}
 
+      # bd-9dwbvt: bind a repo at creation time — explicit, else the
+      # workspace's only repo, else its `default_repo`, else a validation
+      # error naming the configured keys. Every creation path lands here.
+      change {Arbiter.Tasks.Issue.Changes.ResolveRepo, []}
+
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:created, issue)
                {:ok, issue}
