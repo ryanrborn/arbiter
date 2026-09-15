@@ -98,6 +98,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/mergers/github/repo_resolver.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/net_diff.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/checkout.ex" => :pure_tool,
+    # bd-2jkrqu: git only (rev-parse / fetch / push / merge-base), which never
+    # reads ROOTDIR or BINDIR.
+    "apps/arbiter/lib/arbiter/reviews/push_state.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/tasks/status_backfill.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker/primary_sync.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker/resume_context.ex" => :pure_tool,

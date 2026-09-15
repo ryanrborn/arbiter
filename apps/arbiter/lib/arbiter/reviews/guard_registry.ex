@@ -483,6 +483,31 @@ defmodule Arbiter.Reviews.GuardRegistry do
       sites: [{ReviewGate, :stamp_reviewed_head, 1}],
       anchors: ["stamp_reviewed_head"],
       summary: "best-effort reviewed-SHA stamp on APPROVE"
+    },
+    %{
+      id: :pre_review_push,
+      doc_ref: "G18",
+      class: :b,
+      class_source: :doc,
+      bound: {:attempts, 1},
+      episode: {:task, :review_id, :round},
+      terminal: :parked,
+      sites: [
+        {ReviewGate, :push_gate, 1},
+        {ReviewGate, :escalate_unpushed_head, 3},
+        {ReviewGate, :escalate_pre_review_park, 2},
+        {ReviewGate, :pushed_head, 1},
+        {ReviewGate, :fallback_head, 1}
+      ],
+      anchors: ["push_gate", "escalate_unpushed_head", "pushed_head", ":head_not_pushed"],
+      summary:
+        "the head a round reviews (and the head a stamp/coverage row names) must be on the remote branch",
+      policy_note:
+        "bd-2jkrqu. One push attempt per round, then the terminal: a diverged or " <>
+          "rejected push PARKS `:head_not_pushed` rather than force-pushing or " <>
+          "reviewing a head the MR does not carry. Undeterminable push state (no " <>
+          "`origin`, no worktree, git unavailable) fails OPEN — class B's posture, " <>
+          "and the reason an ad-hoc checkout is not an incident."
     }
   ]
 

@@ -5421,22 +5421,22 @@ defmodule Arbiter.Worker do
   defp escalate_review_park(_state, _reason, _findings), do: :ok
 
   defp review_park_body(%State{task_id: task_id} = state, reason, findings) do
+    push_state = park_push_state(state)
+
     """
     The review gate for #{task_id} reached a terminal state with no verdict it
     could act on: #{Arbiter.Tasks.ReviewPark.explain(reason)}.
 
-    The run was NOT failed. The work is committed and the branch is pushed
-    (#{mergeable_branch(state.meta) || "branch unknown"}); the run is recorded
-    `review_parked` and the task is parked with reason `#{reason}`. Nothing was
-    merged and no APPROVE was accepted — the content side of the guard is
-    still closed.
+    The run was NOT failed. The work is committed and #{park_push_line(push_state)}
+    The run is recorded `review_parked` and the task is parked with reason
+    `#{reason}`. Nothing was merged and no APPROVE was accepted — the content
+    side of the guard is still closed.
 
     A human decides what happens next. Any one of these clears the park:
 
       * re-run the review (`arb worker resume #{task_id}`) — the gate starts
         fresh and the park clears on its own;
-      * merge it by hand, if the diff is fine and only the gate's bookkeeping
-        was not;
+      * #{park_merge_advice(state, push_state)}
       * reject it (`arb issue close #{task_id}`), which also clears the park.
 
     Full round history: `review_gate_rounds_list` for #{task_id}.
@@ -5446,6 +5446,95 @@ defmodule Arbiter.Worker do
     #{findings}
     """
   end
+
+  # bd-2jkrqu: the park escalation used to ASSERT "the branch is pushed" and
+  # then offer "merge it by hand, if the diff is fine". On vs-5l45oz both
+  # sentences were wrong together: the fix round's commit never left the
+  # worktree, so a human following the advice would have merged the UNFIXED
+  # commit the MR still held. The push state is now read out of git, and the
+  # merge-by-hand option is withheld when the PR head is not the reviewed head.
+  defp park_push_state(%State{meta: meta}) do
+    Arbiter.Reviews.PushState.inspect_branch(
+      meta && Map.get(meta, :worktree_path),
+      mergeable_branch(meta)
+    )
+  end
+
+  defp park_push_line(push_state) do
+    case Arbiter.Reviews.PushState.verdict(push_state) do
+      :unknown ->
+        "the push state of the branch could not be checked from here " <>
+          "(#{Arbiter.Reviews.PushState.describe(push_state)})."
+
+      _ ->
+        Arbiter.Reviews.PushState.describe(push_state)
+    end
+  end
+
+  # The bullet that offers — or withholds — a hand merge. Withheld whenever the
+  # commit a human would merge is not the commit that was reviewed: either the
+  # branch is provably unpushed, or the reviewed SHA on file differs from the
+  # remote head. The `:diverged` arm comes first because "push it" is wrong
+  # advice there (bd-2jkrqu review round 1, finding 2).
+  defp park_merge_advice(%State{task_id: task_id} = state, push_state) do
+    alias Arbiter.Reviews.PushState
+
+    branch = mergeable_branch(state.meta) || "the branch"
+
+    cond do
+      # A diverged branch is the state that PRODUCES the `:head_not_pushed`
+      # park (`PushState.push_once/4` refuses to force-push it), so it is the
+      # likeliest reader of this bullet — and a plain `git push` is exactly
+      # what will be rejected for it. Give it the same reconcile wording the
+      # ReviewGate's own findings body uses, so the two texts in one
+      # escalation don't contradict each other.
+      push_state.status == :diverged ->
+        "**Do NOT merge by hand yet** — #{PushState.describe(push_state)} " <>
+          "The merge request holds a different commit than the one that was reviewed, " <>
+          "and a plain push will be rejected. Reconcile `#{branch}` with " <>
+          "`#{push_state.remote}/#{branch}` first (rebase or merge — never force-push, " <>
+          "the remote may carry another worker's commits), push, confirm the diff, " <>
+          "then merge;"
+
+      PushState.verdict(push_state) == :unpushed ->
+        "**Do NOT merge by hand yet** — #{PushState.describe(push_state)} " <>
+          "The merge request holds a different commit than the one that was reviewed. " <>
+          "Push `#{branch}` first, confirm the diff, then merge;"
+
+      reviewed_head_differs?(task_id, push_state) ->
+        "**Do NOT merge by hand without checking the diff** — the reviewed commit " <>
+          "(#{short_sha(last_reviewed_sha(task_id))}) is not the head of `#{branch}` " <>
+          "(#{short_sha(push_state.remote_head)}); they describe different code;"
+
+      PushState.verdict(push_state) == :unknown ->
+        "merge it by hand ONLY after confirming the PR head is the commit that was " <>
+          "reviewed — the push state of `#{branch}` could not be checked from here;"
+
+      true ->
+        "merge it by hand, if the diff is fine and only the gate's bookkeeping was not;"
+    end
+  end
+
+  defp reviewed_head_differs?(task_id, %{remote_head: remote}) when is_binary(remote) do
+    case last_reviewed_sha(task_id) do
+      sha when is_binary(sha) and sha != "" -> sha != remote
+      _ -> false
+    end
+  end
+
+  defp reviewed_head_differs?(_task_id, _push_state), do: false
+
+  defp last_reviewed_sha(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, task} -> Map.get(task, :last_reviewed_sha)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp short_sha(nil), do: "(unknown)"
+  defp short_sha(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
 
   # bd-2eyf9y: a `:no_verdict` escalation is either the generic "reviewer
   # produced nothing actionable" case or one of the ReviewGate revise-round
