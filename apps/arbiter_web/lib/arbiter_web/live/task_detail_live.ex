@@ -61,7 +61,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Messages.Message
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Skills.Selection
-  alias Arbiter.Tasks.Dependency
+  alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
   alias Arbiter.Tasks.Workspace
@@ -776,52 +776,26 @@ defmodule ArbiterWeb.TaskDetailLive do
     :exit, _ -> nil
   end
 
+  @empty_relationship_groups %{
+    blocked_by: [],
+    blocks: [],
+    parents: [],
+    children: [],
+    relates_to: [],
+    discovered_from: [],
+    discovered: [],
+    conflicts_with: []
+  }
+
   defp refresh_deps(socket) do
-    id = socket.assigns.task_id
-
-    {outbound, inbound} =
+    groups =
       try do
-        all =
-          Dependency
-          |> Ash.Query.filter(from_issue_id == ^id or to_issue_id == ^id)
-          |> Ash.read!()
-
-        out = Enum.filter(all, &(&1.from_issue_id == id))
-        ins = Enum.filter(all, &(&1.to_issue_id == id))
-
-        # Look up the other-side issue for each row so the template can
-        # show the target's title + status without an extra request per
-        # edge.
-        other_ids =
-          (Enum.map(out, & &1.to_issue_id) ++ Enum.map(ins, & &1.from_issue_id))
-          |> Enum.uniq()
-
-        by_id =
-          other_ids
-          |> Enum.map(fn oid ->
-            case Ash.get(Issue, oid) do
-              {:ok, b} -> {oid, b}
-              _ -> nil
-            end
-          end)
-          |> Enum.reject(&is_nil/1)
-          |> Map.new()
-
-        {decorate(out, :to_issue_id, by_id), decorate(ins, :from_issue_id, by_id)}
+        Dependencies.for_issue(socket.assigns.task_id)
       rescue
-        _ -> {[], []}
+        _ -> @empty_relationship_groups
       end
 
-    socket
-    |> assign(:outbound_deps, outbound)
-    |> assign(:inbound_deps, inbound)
-  end
-
-  defp decorate(deps, side_key, by_id) do
-    Enum.map(deps, fn d ->
-      other = Map.get(by_id, Map.get(d, side_key))
-      Map.put(d, :other_issue, other)
-    end)
+    assign(socket, :relationship_groups, groups)
   end
 
   defp refresh_versions(socket) do
@@ -1693,15 +1667,16 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
-              <%!-- RELATIONSHIPS: this issue's graph position — dependency
-                   edges plus parent/child progress (moved out of MACHINE
-                   STATE, design finding #4) — all in one panel. The
+              <%!-- RELATIONSHIPS: this issue's graph position, grouped by
+                   semantic role rather than raw edge direction (bd-11r7e1) —
+                   dependency edges plus parent/child progress (moved out of
+                   MACHINE STATE, design finding #4) — all in one panel. The
                    `:actions` slot is reserved, empty, for bd-dgh2xv's future
                    add/remove-dependency affordance. --%>
               <.panel
                 id="panel-relationships"
                 title="RELATIONSHIPS"
-                meta={relationships_meta(@outbound_deps, @inbound_deps, @task)}
+                meta={relationships_meta(@relationship_groups)}
                 class="order-5"
               >
                 <:actions>
@@ -1709,49 +1684,95 @@ defmodule ArbiterWeb.TaskDetailLive do
                        lands here. --%>
                 </:actions>
                 <div class="flex flex-col gap-3">
-                  <div class="flex flex-col gap-1.5">
-                    <h3 class="text-[11px] font-medium text-[var(--text-label)]">
-                      Blocked by ({length(@outbound_deps)})
-                    </h3>
-                    <p
-                      :if={@outbound_deps == []}
-                      class="text-[11.5px] italic text-[var(--text-label)]"
-                    >
-                      No outgoing dependencies.
-                    </p>
-                    <ul :if={@outbound_deps != []} class="flex flex-col gap-1.5">
-                      <li :for={d <- @outbound_deps}>
-                        <.dep_edge dep={d} other_id={d.to_issue_id} direction={:upstream} />
-                      </li>
-                    </ul>
-                  </div>
-
-                  <div class="flex flex-col gap-1.5 border-t border-[var(--border-default)] pt-3">
-                    <h3 class="text-[11px] font-medium text-[var(--text-label)]">
-                      Blocks ({length(@inbound_deps)})
-                    </h3>
-                    <p
-                      :if={@inbound_deps == []}
-                      class="text-[11.5px] italic text-[var(--text-label)]"
-                    >
-                      Nothing depends on this {@issue_label}.
-                    </p>
-                    <ul :if={@inbound_deps != []} class="flex flex-col gap-1.5">
-                      <li :for={d <- @inbound_deps}>
-                        <.dep_edge dep={d} other_id={d.from_issue_id} direction={:downstream} />
-                      </li>
-                    </ul>
-                  </div>
+                  <.relationship_group
+                    id="rel-blocked-by"
+                    label="Blocked by"
+                    entries={@relationship_groups.blocked_by}
+                    gating={true}
+                    awaiting_verification_hint={true}
+                    task={@task}
+                  />
+                  <.relationship_group
+                    id="rel-blocks"
+                    label="Blocks"
+                    entries={@relationship_groups.blocks}
+                    gating={true}
+                    task={@task}
+                  />
+                  <.relationship_group
+                    id="rel-parents"
+                    label="Parent"
+                    entries={@relationship_groups.parents}
+                    task={@task}
+                  />
 
                   <div
-                    :if={(@task.child_total || 0) > 0}
+                    :if={@relationship_groups.children != []}
+                    id="rel-children"
+                    data-role="relationship-group"
+                    data-gating="false"
                     class="flex flex-col gap-1.5 border-t border-[var(--border-default)] pt-3"
                   >
-                    <h3 class="text-[11px] font-medium text-[var(--text-label)]">Children</h3>
-                    <code class="text-xs text-[var(--text-secondary)]">
-                      {@task.child_closed || 0}/{@task.child_total} closed
-                    </code>
+                    <div class="flex items-center gap-2">
+                      <span class="inline-block size-1.5 rounded-full bg-[var(--text-label)]" />
+                      <h3 class="text-[11px] font-medium text-[var(--text-label)]">
+                        Children ({@task.child_closed || 0}/{@task.child_total || 0} closed)
+                      </h3>
+                      <span
+                        :if={@task.auto_close}
+                        data-role="auto-close-marker"
+                        class="badge badge-ghost badge-xs shrink-0"
+                      >
+                        auto_close: on
+                      </span>
+                    </div>
+                    <div
+                      class="h-1.5 w-full overflow-hidden rounded-full bg-[var(--surface-sunken)]"
+                      role="progressbar"
+                      aria-valuenow={child_progress_pct(@task)}
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                    >
+                      <div
+                        class="h-full bg-[var(--arb-live)]"
+                        style={"width: #{child_progress_pct(@task)}%"}
+                      />
+                    </div>
+                    <ul class="flex flex-col gap-1.5">
+                      <li
+                        :for={entry <- @relationship_groups.children}
+                        id={"rel-children-#{entry.edge.id}"}
+                      >
+                        <.relationship_row entry={entry} task={@task} />
+                      </li>
+                    </ul>
                   </div>
+
+                  <.relationship_group
+                    id="rel-related"
+                    label="Related"
+                    entries={@relationship_groups.relates_to}
+                    task={@task}
+                  />
+                  <.relationship_group
+                    id="rel-conflicts-with"
+                    label="Conflicts with"
+                    entries={@relationship_groups.conflicts_with}
+                    task={@task}
+                  />
+                  <.relationship_group
+                    id="rel-discovered-from"
+                    label="Discovered from"
+                    entries={@relationship_groups.discovered_from}
+                    task={@task}
+                  />
+
+                  <p
+                    :if={relationships_empty?(@relationship_groups)}
+                    class="text-[11.5px] italic text-[var(--text-label)]"
+                  >
+                    No relationships recorded for this {@issue_label}.
+                  </p>
                 </div>
               </.panel>
 
@@ -2223,42 +2244,123 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   # ---- render helpers ----
 
-  attr(:dep, :map, required: true)
-  attr(:other_id, :string, required: true)
-  attr(:direction, :atom, required: true)
+  # A labeled group of relationship rows, omitted entirely when empty
+  # (acceptance #1). `gating` distinguishes the two groups that actually
+  # change dispatch (Blocked by / Blocks) from the informational rest
+  # (acceptance #2); `data-gating` carries the same fact for tests.
+  attr(:id, :string, required: true)
+  attr(:label, :string, required: true)
+  attr(:entries, :list, required: true)
+  attr(:gating, :boolean, default: false)
+  attr(:awaiting_verification_hint, :boolean, default: false)
+  attr(:task, :map, required: true)
 
-  defp dep_edge(assigns) do
+  defp relationship_group(assigns) do
     ~H"""
-    <div class="flex items-center gap-2">
-      <ArbiterWeb.CoreComponents.icon
-        name={if @direction == :upstream, do: "hero-arrow-up-right", else: "hero-arrow-down-left"}
-        class="size-4 text-base-content/40 shrink-0"
-      />
-      <span class="badge badge-ghost badge-sm font-mono shrink-0">{@dep.type}</span>
-      <.link navigate={~p"/tasks/#{@other_id}"} class="min-w-0 flex-1 group">
-        <div class="flex items-center gap-2">
-          <code class="text-xs text-base-content/60 shrink-0 group-hover:text-primary transition-colors">
-            {@other_id}
-          </code>
-          <span
-            :if={@dep.other_issue}
-            class="truncate text-sm group-hover:text-primary transition-colors"
-            title={@dep.other_issue.title}
-          >
-            {@dep.other_issue.title}
-          </span>
-        </div>
-      </.link>
-      <ArbiterWeb.CoreComponents.Core.copy_id
-        id={@other_id}
-        dom_id={"copy-id-dep-#{@direction}-#{@dep.id}"}
-      />
-      <span
-        :if={@dep.other_issue}
-        class={["badge badge-xs shrink-0", status_badge_class(@dep.other_issue.status)]}
+    <div
+      :if={@entries != []}
+      id={@id}
+      data-role="relationship-group"
+      data-gating={to_string(@gating)}
+      class="flex flex-col gap-1.5 border-t border-[var(--border-default)] pt-3"
+    >
+      <div class="flex items-center gap-2">
+        <span class={[
+          "inline-block size-1.5 rounded-full",
+          @gating && "bg-[var(--arb-fail)]",
+          !@gating && "bg-[var(--text-label)]"
+        ]} />
+        <h3 class={[
+          "text-[11px] font-medium",
+          @gating && "text-[var(--arb-fail)]",
+          !@gating && "text-[var(--text-label)]"
+        ]}>
+          {@label} ({length(@entries)})
+        </h3>
+      </div>
+      <ul class="flex flex-col gap-1.5">
+        <li :for={entry <- @entries} id={"#{@id}-#{entry.edge.id}"}>
+          <.relationship_row
+            entry={entry}
+            task={@task}
+            awaiting_verification_hint={@awaiting_verification_hint}
+          />
+        </li>
+      </ul>
+    </div>
+    """
+  end
+
+  attr(:entry, :map, required: true)
+  attr(:task, :map, required: true)
+  attr(:awaiting_verification_hint, :boolean, default: false)
+
+  defp relationship_row(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-0.5">
+      <div class="flex items-center gap-2">
+        <span class="badge badge-ghost badge-xs font-mono shrink-0">{@entry.edge.type}</span>
+        <.link navigate={~p"/tasks/#{@entry.issue_id}"} class="min-w-0 flex-1 group">
+          <div class="flex items-center gap-2">
+            <code class="text-xs text-base-content/60 shrink-0 group-hover:text-primary transition-colors">
+              {@entry.issue_id}
+            </code>
+            <span
+              :if={@entry.issue}
+              class="truncate text-sm group-hover:text-primary transition-colors"
+              title={@entry.issue.title}
+            >
+              {@entry.issue.title}
+            </span>
+          </div>
+        </.link>
+        <span
+          :if={cross_workspace?(@entry.issue, @task)}
+          data-role="cross-workspace-marker"
+          class="badge badge-outline badge-xs shrink-0"
+          title="cross-workspace edge — read-only here"
+        >
+          ⧉ other workspace
+        </span>
+        <span
+          :if={@entry.issue && awaiting_verification_blocker?(@entry, @awaiting_verification_hint)}
+          data-role="awaiting-verification-chip"
+          class="badge badge-warning badge-xs shrink-0"
+        >
+          awaiting verification
+        </span>
+        <span
+          :if={@entry.issue && !awaiting_verification_blocker?(@entry, @awaiting_verification_hint)}
+          class={["badge badge-xs shrink-0", status_badge_class(@entry.issue.status)]}
+        >
+          {@entry.issue.status}
+        </span>
+      </div>
+      <p
+        :if={@entry.issue && awaiting_verification_blocker?(@entry, @awaiting_verification_hint)}
+        data-role="awaiting-verification-hint"
+        class="pl-6 text-[11px] text-[var(--text-secondary)]"
       >
-        {@dep.other_issue.status}
-      </span>
+        merged; waiting on someone to verify it — it blocks until verified.
+        <code class="ml-1 text-[10.5px]">arb issue verify {@entry.issue_id}</code>
+      </p>
+      <details
+        :if={present?(@entry.edge.notes) || present?(@entry.edge.created_by)}
+        class="pl-6"
+      >
+        <summary class="cursor-pointer text-[10.5px] text-[var(--text-label)] select-none">
+          notes
+        </summary>
+        <p :if={present?(@entry.edge.created_by)} class="text-[10.5px] text-[var(--text-secondary)]">
+          by {@entry.edge.created_by}
+        </p>
+        <p
+          :if={present?(@entry.edge.notes)}
+          class="whitespace-pre-wrap text-[10.5px] text-[var(--text-secondary)]"
+        >
+          {@entry.edge.notes}
+        </p>
+      </details>
     </div>
     """
   end
@@ -2622,15 +2724,46 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
-  defp relationships_meta(outbound, inbound, task) do
-    base = "#{length(outbound)} up · #{length(inbound)} down"
+  @displayed_relationship_groups [
+    :blocked_by,
+    :blocks,
+    :parents,
+    :children,
+    :relates_to,
+    :conflicts_with,
+    :discovered_from
+  ]
 
-    if (task.child_total || 0) > 0 do
-      "#{base} · #{task.child_closed || 0}/#{task.child_total} children"
-    else
-      base
-    end
+  defp relationships_meta(groups) do
+    gating = length(groups.blocked_by) + length(groups.blocks)
+
+    total =
+      Enum.reduce(@displayed_relationship_groups, 0, fn key, acc ->
+        acc + length(Map.get(groups, key, []))
+      end)
+
+    "#{gating} blocking · #{total} total"
   end
+
+  defp relationships_empty?(groups) do
+    Enum.all?(@displayed_relationship_groups, &(Map.get(groups, &1, []) == []))
+  end
+
+  defp cross_workspace?(nil, _task), do: false
+  defp cross_workspace?(%Issue{workspace_id: ws}, %Issue{workspace_id: ws}), do: false
+  defp cross_workspace?(%Issue{}, %Issue{}), do: true
+
+  defp awaiting_verification_blocker?(%{issue: %Issue{status: :awaiting_verification}}, true),
+    do: true
+
+  defp awaiting_verification_blocker?(_entry, _hint), do: false
+
+  defp child_progress_pct(%Issue{child_total: total, child_closed: closed})
+       when is_integer(total) and total > 0 do
+    round((closed || 0) / total * 100)
+  end
+
+  defp child_progress_pct(_task), do: 0
 
   # ---- activity stream ----
 
