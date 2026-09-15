@@ -1198,7 +1198,7 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "a reviewer/implementer worker on the same task does not count as running" do
       issues = [issue("bd-a", %{status: :in_progress})]
-      workers = [worker("bd-a#review", :running, %{meta: %{role: :reviewer}})]
+      workers = [worker("bd-a", :running, %{meta: %{role: :reviewer}})]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :waiting}
     end

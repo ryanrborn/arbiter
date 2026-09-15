@@ -2333,5 +2333,40 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#children-closed-#{child.id}")
       refute has_element?(view, "#children-ready-#{child.id}")
     end
+
+    test "a child's worker-only status transition moves it from Running to Waiting live", %{
+      conn: conn,
+      ws: ws
+    } do
+      alias Arbiter.Test.StubMerger
+
+      StubMerger.reset()
+
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, child} = Ash.create(Issue, %{title: "reviewed child", workspace_id: ws.id})
+      link_parent_of(epic, child)
+
+      {:ok, pid} = Worker.start(task_id: child.id, repo: "r", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :implement)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#children-running-#{child.id}")
+
+      StubMerger.next_open_ref("!bd-1273p2")
+
+      {:ok, "!bd-1273p2"} =
+        Worker.open_mr(pid, "feature/x", "Add x", "desc", %{
+          adapter: StubMerger,
+          workspace: nil,
+          interval_ms: 1_000_000,
+          initial_delay_ms: 1_000_000
+        })
+
+      assert has_element?(view, "#children-waiting-#{child.id}")
+      refute has_element?(view, "#children-running-#{child.id}")
+    end
   end
 end

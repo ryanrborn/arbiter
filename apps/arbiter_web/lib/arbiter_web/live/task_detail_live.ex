@@ -236,15 +236,29 @@ defmodule ArbiterWeb.TaskDetailLive do
   # synthetic suffix back to the issue, so each of them lands here.
   def handle_info({:worker_lifecycle, _event, %{task_id: worker_task_id}}, socket)
       when is_binary(worker_task_id) do
-    if ReviewGate.base_task_id(worker_task_id) == socket.assigns.task_id do
-      {:noreply,
-       socket
-       |> refresh_worker()
-       |> refresh_runs()
-       |> refresh_review_rounds()
-       |> refresh_budget()}
-    else
-      {:noreply, socket}
+    base_id = ReviewGate.base_task_id(worker_task_id)
+
+    cond do
+      base_id == socket.assigns.task_id ->
+        {:noreply,
+         socket
+         |> refresh_worker()
+         |> refresh_runs()
+         |> refresh_review_rounds()
+         |> refresh_budget()}
+
+      # The mini-board's Running/Waiting split is worker-derived
+      # (`classify_columns/2` reads live worker snapshots), but a worker
+      # status transition (e.g. `:running` -> `:awaiting_review`) broadcasts
+      # only on `"workers"` and never touches the child issue row, so no
+      # `:task_lifecycle` fires to repaint it. Recompute the mini-board (off
+      # the already-fetched `relationship_groups`, no extra query) whenever
+      # the event belongs to one of this epic's children.
+      epic_child?(socket, base_id) ->
+        {:noreply, refresh_children_by_status(socket, socket.assigns.relationship_groups)}
+
+      true ->
+        {:noreply, socket}
     end
   end
 
@@ -1024,7 +1038,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       |> Enum.filter(&(&1.task_id in child_ids))
 
     columns = Snapshot.classify_columns(children, workers)
-    sibling_deps = sibling_depends_on(child_ids)
+    sibling_deps = sibling_depends_on(children)
 
     empty_groups = %{backlog: [], ready: [], running: [], waiting: [], closed: []}
 
@@ -1042,6 +1056,15 @@ defmodule ArbiterWeb.TaskDetailLive do
     assign(socket, :children_by_status, nil)
   end
 
+  defp epic_child?(
+         %{assigns: %{task: %Issue{issue_type: :epic}, relationship_groups: groups}},
+         base_id
+       ) do
+    Enum.any?(groups.children, &(&1.issue && &1.issue.id == base_id))
+  end
+
+  defp epic_child?(_socket, _base_id), do: false
+
   defp list_live_workers do
     Worker.list_children()
   rescue
@@ -1050,14 +1073,21 @@ defmodule ArbiterWeb.TaskDetailLive do
     :exit, _ -> []
   end
 
-  # `{child_id => [sibling_issue]}` for every open-or-closed `:depends_on` edge
-  # between two of this epic's own children — both blocking phrasings
+  # `{child_id => [sibling_issue]}` for every *open* `:depends_on` edge between
+  # two of this epic's own children — both blocking phrasings
   # (`"is blocked by"` / `"blocks"`, bd-dgh2xv §3.3) write a `:depends_on` row,
-  # so one type filter catches sibling ordering however it was expressed.
+  # so one type filter catches sibling ordering however it was expressed. A
+  # sibling that has already closed is satisfied ordering history, not a live
+  # constraint, so it's dropped rather than shown as a marker (design
+  # bd-2s901b §3). Takes the already-fetched `children` (full `%Issue{}`
+  # structs from `Dependencies.for_issue/1`) instead of re-reading them —
+  # every sibling is by construction already in that list, since the
+  # `Dependency` filter constrains `to_issue_id in ^child_ids`.
   defp sibling_depends_on([]), do: %{}
 
-  defp sibling_depends_on(child_ids) do
-    issues_by_id = Map.new(Ash.read!(Ash.Query.filter(Issue, id in ^child_ids)), &{&1.id, &1})
+  defp sibling_depends_on(children) do
+    issues_by_id = Map.new(children, &{&1.id, &1})
+    child_ids = Map.keys(issues_by_id)
 
     Dependency
     |> Ash.Query.filter(
@@ -1065,7 +1095,9 @@ defmodule ArbiterWeb.TaskDetailLive do
     )
     |> Ash.read!()
     |> Enum.group_by(& &1.from_issue_id, &Map.get(issues_by_id, &1.to_issue_id))
-    |> Map.new(fn {id, sibs} -> {id, Enum.reject(sibs, &is_nil/1)} end)
+    |> Map.new(fn {id, sibs} ->
+      {id, Enum.reject(sibs, &(is_nil(&1) or &1.status == :closed))}
+    end)
   rescue
     _ -> %{}
   end
