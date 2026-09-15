@@ -350,15 +350,21 @@ defmodule ArbiterWeb.TaskIndexLive do
       f.workspace && "workspace: #{workspace_name(workspaces, f.workspace)}",
       f.type && "type: #{f.type}",
       f.priority && "priority: P#{f.priority}",
-      f.difficulty == :none && "difficulty: unrated",
-      is_integer(f.difficulty) && "difficulty: D#{f.difficulty}",
+      difficulty_filter_label(f.difficulty),
       f.stage && "stage: #{f.stage}",
       f.repo && "repo: #{f.repo}",
-      f.epic == :none && "parent: none",
-      is_binary(f.epic) && "parent: #{f.epic}"
+      epic_filter_label(f.epic)
     ]
     |> Enum.filter(& &1)
   end
+
+  defp difficulty_filter_label(:none), do: "difficulty: unrated"
+  defp difficulty_filter_label(d) when is_integer(d), do: "difficulty: D#{d}"
+  defp difficulty_filter_label(_), do: nil
+
+  defp epic_filter_label(:none), do: "parent: none"
+  defp epic_filter_label(e) when is_binary(e), do: "parent: #{e}"
+  defp epic_filter_label(_), do: nil
 
   defp workspace_name(workspaces, id) do
     case Enum.find(workspaces, &(&1.id == id)) do
