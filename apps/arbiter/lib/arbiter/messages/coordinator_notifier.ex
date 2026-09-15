@@ -557,6 +557,75 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     end)
   end
 
+  @doc """
+  Escalate an open task whose **worker spend** has passed its estimate group's
+  p90 (bd-8j9i9p AC5; operator decision 2026-09-15).
+
+  This one informs rather than intervenes: it does not stop the worker, pause
+  anything or trip a breaker. An overrun is not evidence of a stuck worker the
+  way a repeated review failure is — it is evidence that either the task was
+  under-rated or something is looping, and only the coordinator can say which.
+  So the page carries everything needed to judge that without opening the
+  page: the title, the spend, the range it blew through, the basis and sample
+  size behind that range, the difficulty rating, and what the worker is doing
+  right now.
+
+  **Once per task.** The dedupe is `Message.last_with_subject/3` against a
+  subject that carries no numbers, so it survives a restart and does not
+  re-fire as the total keeps climbing — a second page saying the same task is
+  still over budget tells the coordinator nothing the first did not.
+
+  `snapshot` carries `:task_id` + `:workspace_id`; `info` carries `:spend`,
+  `:estimate` (an `Arbiter.Usage.Estimate.t()`), `:difficulty` and
+  `:worker_state`. Best-effort, returns `:ok`.
+  """
+  @spec budget_exceeded(map(), map()) :: :ok
+  def budget_exceeded(%{workspace_id: ws_id} = snapshot, info) when is_binary(ws_id) do
+    escalate_event("budget_exceeded/2", snapshot, fn task_id ->
+      subject = budget_exceeded_subject(task_id)
+
+      if Message.last_with_subject(Message.coordinator_ref(), [subject], workspace_id: ws_id) do
+        :skip
+      else
+        {subject, budget_exceeded_body(task_id, info)}
+      end
+    end)
+  end
+
+  def budget_exceeded(_snapshot, _info), do: :ok
+
+  @doc """
+  The (number-free, so dedupe-stable) subject `budget_exceeded/2` pages under.
+  """
+  @spec budget_exceeded_subject(String.t()) :: String.t()
+  def budget_exceeded_subject(task_id), do: "#{task_id} worker spend over budget"
+
+  defp budget_exceeded_body(task_id, info) do
+    est = Map.get(info, :estimate) || %{}
+
+    [
+      "#{title_for(task_id)} (#{task_id}) has spent #{money(Map.get(info, :spend))} in " <>
+        "worker spend, past the p90 of what tasks like it cost.",
+      "Estimate: #{money(Map.get(est, :p25))}–#{money(Map.get(est, :p75))} " <>
+        "(median #{money(Map.get(est, :median))}, p90 #{money(Map.get(est, :p90))}) · " <>
+        "#{Map.get(est, :basis, "unknown")}, n=#{Map.get(est, :n, 0)}",
+      "Rated #{difficulty_label(Map.get(info, :difficulty))} · worker: " <>
+        "#{Map.get(info, :worker_state) || "no live worker"}",
+      "Worker spend only — coordinator session overhead is not counted, here or " <>
+        "in the estimate.",
+      "Nothing has been stopped or paused. This is one page per task: it will not " <>
+        "repeat as the total climbs. Judge whether the overrun is expected " <>
+        "(under-rated task) or a worker going in circles, and act, or don't."
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp difficulty_label(d) when is_integer(d), do: "D#{d}"
+  defp difficulty_label(_), do: "unrated"
+
+  defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+  defp money(_), do: "$?"
+
   defp dispatch_stuck_label({:ambiguous_repo, repos}) when is_list(repos),
     do: "ambiguous repo — #{Enum.join(repos, ", ")} are all configured"
 

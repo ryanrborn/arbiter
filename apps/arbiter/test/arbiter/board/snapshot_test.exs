@@ -981,6 +981,58 @@ defmodule Arbiter.Board.SnapshotTest do
   # bd-38of5i (design bd-2s901b §4): with epics gone from every column, a
   # child card is the only place an epic stays discoverable on the board — so
   # every card carries a ref to its parent for the view to render as a chip.
+  # bd-8j9i9p (design bd-9jj5lf §3): a task whose worker spend has passed its
+  # difficulty/type group's p90 is not a stuck worker, but it is a thing to
+  # look at — so it flags on the board the way `needs_you` does. The estimate
+  # itself is an *input* here: `derive/1` never reads the ledger.
+  describe "over-budget attention flag" do
+    test "an open issue in the over-budget set flags on its card" do
+      board =
+        derive(
+          issues: [issue("bd-a"), issue("bd-b")],
+          over_budget: ["bd-a"]
+        )
+
+      assert [%{card: %{id: "bd-a", over_budget: true}}, %{card: %{over_budget: false}}] =
+               board.ready
+    end
+
+    test "every open column carries the flag" do
+      board =
+        derive(
+          issues: [
+            issue("bd-backlog", %{refined: false}),
+            issue("bd-ready"),
+            issue("bd-run", %{status: :in_progress}),
+            issue("bd-wait", %{status: :in_progress, updated_at: @yesterday})
+          ],
+          workers: [worker("bd-run", :running)],
+          over_budget: ["bd-backlog", "bd-ready", "bd-run", "bd-wait"]
+        )
+
+      assert [%{over_budget: true}] = board.backlog
+      assert [%{card: %{over_budget: true}}] = board.ready
+      assert [%{over_budget: true}] = board.running
+      assert [%{over_budget: true}] = board.waiting
+    end
+
+    test "a closed card never flags, even if its id is in the set" do
+      board =
+        derive(
+          issues: [issue("bd-closed", %{status: :closed, closed_at: @now})],
+          over_budget: ["bd-closed"]
+        )
+
+      assert [%{over_budget: false}] = board.closed_today
+    end
+
+    test "no over-budget input means no card flags" do
+      board = derive(issues: [issue("bd-a")])
+
+      assert [%{card: %{over_budget: false}}] = board.ready
+    end
+  end
+
   describe "parent ref on cards" do
     test "a card whose issue has a parent_of parent carries the parent's id, title and progress" do
       board =
