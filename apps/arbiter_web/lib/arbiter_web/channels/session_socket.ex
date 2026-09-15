@@ -18,6 +18,11 @@ defmodule ArbiterWeb.SessionSocket do
   `Arbiter.MCP.Scope` token as the `token` connect param. No new remote-auth
   scheme is designed here, deliberately.
 
+  That includes phase 3's per-session tokens (§9.3), which carry a `session_id`
+  claim and stop verifying once the session ends or the token is revoked — so
+  revoking a session's credential closes its terminal socket too, not just its
+  `/mcp` access.
+
   ## `caller_session_id`
 
   A client may declare which session *it* is running inside. That is the input

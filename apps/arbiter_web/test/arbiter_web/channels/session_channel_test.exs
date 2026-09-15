@@ -85,6 +85,21 @@ defmodule ArbiterWeb.SessionChannelTest do
       assert {:ok, _socket} =
                connect(SessionSocket, %{"token" => token}, connect_info: off_box())
     end
+
+    # bd-aprlbb (phase 3) made a session's own MCP token revocable, and this
+    # socket is the newest thing that token can open. Revoking it has to close
+    # the terminal door too, or "killing a session revokes its credential"
+    # would be false for the one credential path that streams its keystrokes.
+    test "an off-box peer with a revoked session token is refused", %{session: session} do
+      token = Sessions.mint_mcp_token(session)
+
+      assert {:ok, _socket} =
+               connect(SessionSocket, %{"token" => token}, connect_info: off_box())
+
+      {:ok, _} = Sessions.revoke_mcp_token(session)
+
+      assert :error = connect(SessionSocket, %{"token" => token}, connect_info: off_box())
+    end
   end
 
   describe "join" do

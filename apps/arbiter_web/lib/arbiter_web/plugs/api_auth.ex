@@ -4,9 +4,9 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
 
   Requests from loopback addresses are allowed through without a token so local
   `arb` CLI usage and same-box tooling are unaffected — `ArbiterWeb.Loopback`
-  owns which addresses count, shared with `ArbiterWeb.SessionSocket`. All other origins must
-  present a valid `Authorization: Bearer <token>` using the same signed MCP
-  scope token mechanism used by the `/mcp` endpoint.
+  owns which addresses count, shared with `ArbiterWeb.SessionSocket`. All other
+  origins must present a valid `Authorization: Bearer <token>` using the same
+  signed MCP scope token mechanism used by the `/mcp` endpoint.
 
   Rejects unauthenticated non-loopback requests with HTTP 401 and a JSON error
   body matching the API error shape: `%{"error" => %{"message" => "..."}}`.
