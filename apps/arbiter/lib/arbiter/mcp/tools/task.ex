@@ -9,6 +9,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Verification
@@ -302,7 +303,11 @@ defmodule Arbiter.MCP.Tools.Task do
   @doc """
   Add a dependency edge between two tasks in the scope's workspace. Coordinator
   only. Both endpoints must resolve inside the workspace (a cross-workspace id is
-  reported not-found). Backs onto `Ash.create(Dependency, …)`.
+  reported not-found, which is why the scope checks stay here and are not left
+  to the facade's `:cross_workspace` error).
+
+  The write itself goes through `Arbiter.Tasks.Dependencies.add/4` (bd-apj0gq),
+  so it also gets the cycle guard and the `parent_of` auto-close re-evaluation.
   """
   @spec dep_add(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def dep_add(%Scope{} = scope, args) do
@@ -311,14 +316,14 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, type} <- Tools.require_enum(args, "type", Dependency.types()),
          {:ok, from_task} <- Tools.fetch_task(scope, args, from),
          {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to) do
-      attrs =
-        %{"from_issue_id" => from, "to_issue_id" => to, "type" => type}
-        |> Tools.maybe_put("notes", Tools.fetch_string(args, "notes"))
-        |> Tools.maybe_put("created_by", Tools.fetch_string(args, "created_by"))
+      opts =
+        []
+        |> Tools.maybe_put_kw(:notes, Tools.fetch_string(args, "notes"))
+        |> Tools.maybe_put_kw(:created_by, Tools.fetch_string(args, "created_by"))
 
-      case Ash.create(Dependency, attrs) do
+      case Dependencies.add(from, to, type, opts) do
         {:ok, dep} -> {:ok, Tools.serialize_dependency(dep)}
-        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+        {:error, reason} -> Tools.dependency_error(reason)
       end
     end
   end
@@ -329,6 +334,9 @@ defmodule Arbiter.MCP.Tools.Task do
   Remove dependency edges between two tasks in the scope's workspace. Coordinator
   only. With no `type` every edge between the pair is removed; with a `type`
   only that edge. Idempotent — removing an absent edge reports `removed: 0`.
+
+  Routed through `Arbiter.Tasks.Dependencies.remove/3` (bd-apj0gq), so detaching
+  an epic's last open child now re-evaluates the parent's `auto_close`.
   """
   @spec dep_remove(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def dep_remove(%Scope{} = scope, args) do
@@ -337,9 +345,10 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()),
          {:ok, from_task} <- Tools.fetch_task(scope, args, from),
          {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to) do
-      edges = find_dep_edges(from, to, type)
-      _ = Enum.each(edges, &Ash.destroy!/1)
-      {:ok, %{from_issue_id: from, to_issue_id: to, removed: length(edges)}}
+      case Dependencies.remove(from, to, type) do
+        {:ok, removed} -> {:ok, %{from_issue_id: from, to_issue_id: to, removed: removed}}
+        {:error, reason} -> Tools.dependency_error(reason)
+      end
     end
   end
 
@@ -373,18 +382,6 @@ defmodule Arbiter.MCP.Tools.Task do
     else
       {:ok, attrs}
     end
-  end
-
-  defp find_dep_edges(from, to, nil) do
-    Dependency
-    |> Ash.Query.filter(from_issue_id == ^from and to_issue_id == ^to)
-    |> Ash.read!()
-  end
-
-  defp find_dep_edges(from, to, type) do
-    Dependency
-    |> Ash.Query.filter(from_issue_id == ^from and to_issue_id == ^to and type == ^type)
-    |> Ash.read!()
   end
 
   defp task_create_spec do

@@ -6,81 +6,81 @@ defmodule ArbiterWeb.Api.DependencyController do
 
     * `POST   /api/dependencies` — :create  (from_issue_id, to_issue_id, type)
     * `DELETE /api/dependencies/:from/:to[?type=...]` — :delete
+
+  Both actions go through `Arbiter.Tasks.Dependencies` (bd-apj0gq). This used to
+  be the *unvalidated* write path — a raw `Ash.create` with no workspace check —
+  and it is the one `arb dep add`, `arb dep rm` and `arb create --deps/--parent`
+  call, so operators got the weakest guarantees of any surface. It now enforces
+  exactly what MCP does: both endpoints resolve, both live in one workspace, no
+  gating cycle, and a `parent_of` write re-evaluates the parent's `auto_close`.
+
+  Facade guard failures (`:invalid_type`, `:cross_workspace`, `:cyclic`) render
+  as 400 `invalid_request` carrying the facade's message verbatim — the named
+  cycle or the two workspace names are the whole point of the error. A missing
+  endpoint is 404; resource-level rejections (self-reference, duplicate edge)
+  stay 422, unchanged.
   """
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Tasks.Dependency
+  alias Arbiter.Tasks.Dependencies
 
   action_fallback ArbiterWeb.Api.FallbackController
 
   def create(conn, params) do
-    attrs = coerce_type(params)
-
-    case Ash.create(
-           Dependency,
-           Map.take(attrs, ["from_issue_id", "to_issue_id", "type", "created_by", "notes"])
-         ) do
-      {:ok, dep} ->
-        conn
-        |> put_status(:created)
-        |> render(:show, dependency: dep)
-
-      {:error, _} = err ->
-        err
+    with {:ok, from} <- require_param(params, "from_issue_id"),
+         {:ok, to} <- require_param(params, "to_issue_id"),
+         {:ok, type} <- require_param(params, "type"),
+         {:ok, dep} <- Dependencies.add(from, to, type, edge_opts(params)) do
+      conn
+      |> put_status(:created)
+      |> render(:show, dependency: dep)
+    else
+      {:error, reason} -> {:error, translate(reason)}
     end
   end
 
   def delete(conn, %{"from" => from, "to" => to} = params) do
-    with {:ok, edges} <- find_edges(from, to, params["type"]) do
-      case edges do
-        [] ->
-          {:error, :not_found}
+    case Dependencies.remove(from, to, params["type"]) do
+      # A removal that matched nothing keeps its historical 404: the CLI and any
+      # other HTTP client have always read it as "there was no such edge", and
+      # the facade's `{:ok, 0}` is about the *domain* call being a no-op, not
+      # about what a REST client should be told.
+      {:ok, 0} ->
+        {:error, :not_found}
 
-        deps ->
-          Enum.each(deps, &Ash.destroy!/1)
+      {:ok, _removed} ->
+        conn
+        |> put_status(:no_content)
+        |> send_resp(:no_content, "")
 
-          conn
-          |> put_status(:no_content)
-          |> send_resp(:no_content, "")
-      end
+      {:error, reason} ->
+        {:error, translate(reason)}
     end
   end
 
-  defp find_edges(from, to, nil) do
-    query = Ash.Query.do_filter(Ash.Query.new(Dependency), from_issue_id: from, to_issue_id: to)
-    Ash.read(query)
-  end
-
-  defp find_edges(from, to, type_str) when is_binary(type_str) do
-    case safe_atom(type_str) do
-      {:ok, type} ->
-        query =
-          Ash.Query.do_filter(Ash.Query.new(Dependency),
-            from_issue_id: from,
-            to_issue_id: to,
-            type: type
-          )
-
-        Ash.read(query)
-
-      :error ->
-        {:error, {:invalid_request, "invalid type: #{inspect(type_str)}"}}
+  defp require_param(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, {:missing_param, "#{key} is required"}}
     end
   end
 
-  defp coerce_type(%{"type" => t} = params) when is_binary(t) do
-    case safe_atom(t) do
-      {:ok, atom} -> Map.put(params, "type", atom)
-      :error -> params
-    end
+  defp edge_opts(params) do
+    []
+    |> put_opt(:notes, params["notes"])
+    |> put_opt(:created_by, params["created_by"])
   end
 
-  defp coerce_type(params), do: params
+  defp put_opt(opts, _key, nil), do: opts
+  defp put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp safe_atom(str) do
-    {:ok, String.to_existing_atom(str)}
-  rescue
-    ArgumentError -> :error
-  end
+  # The facade's guards all carry a message written for a human; hand it
+  # straight to the fallback rather than flattening it to "validation failed".
+  defp translate({:not_found, _message}), do: :not_found
+
+  defp translate({reason, message}) when is_atom(reason) and is_binary(message),
+    do: {:invalid_request, message}
+
+  defp translate(other), do: other
 end

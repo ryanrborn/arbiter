@@ -302,6 +302,56 @@ defmodule Arbiter.MCP.GraphToolsTest do
                  "type" => "depends_on"
                })
     end
+
+    # bd-apj0gq: graph_add_edge routes through `Arbiter.Tasks.Dependencies`, so
+    # a cycle is refused at write time rather than at graph_start.
+    test "rejects an edge that would close a cycle, naming it", ctx do
+      g = graph(ctx.ws)
+      a = issue(ctx.ws, "cyc-a")
+      b = issue(ctx.ws, "cyc-b")
+
+      assert {:ok, _} =
+               Tools.graph_add_edge(ctx.coordinator, %{
+                 "graph_id" => g.id,
+                 "from_issue_id" => a.id,
+                 "to_issue_id" => b.id,
+                 "type" => "depends_on"
+               })
+
+      assert {:error, {:invalid, msg}} =
+               Tools.graph_add_edge(ctx.coordinator, %{
+                 "graph_id" => g.id,
+                 "from_issue_id" => b.id,
+                 "to_issue_id" => a.id,
+                 "type" => "depends_on"
+               })
+
+      assert msg =~ "cycle"
+      assert msg =~ a.id
+      assert msg =~ b.id
+    end
+
+    test "conflicts_with is still never cycle-checked", ctx do
+      g = graph(ctx.ws)
+      a = issue(ctx.ws, "mutex-a")
+      b = issue(ctx.ws, "mutex-b")
+
+      assert {:ok, _} =
+               Tools.graph_add_edge(ctx.coordinator, %{
+                 "graph_id" => g.id,
+                 "from_issue_id" => a.id,
+                 "to_issue_id" => b.id,
+                 "type" => "conflicts_with"
+               })
+
+      assert {:ok, _} =
+               Tools.graph_add_edge(ctx.coordinator, %{
+                 "graph_id" => g.id,
+                 "from_issue_id" => b.id,
+                 "to_issue_id" => a.id,
+                 "type" => "conflicts_with"
+               })
+    end
   end
 
   # ---- graph_start --------------------------------------------------------

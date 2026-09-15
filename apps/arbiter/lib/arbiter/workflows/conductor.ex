@@ -154,6 +154,7 @@ defmodule Arbiter.Workflows.Conductor do
 
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Dependency
+  alias Arbiter.Tasks.DependencyGraph
   alias Arbiter.Tasks.Graph
   alias Arbiter.Tasks.GraphMember
   alias Arbiter.Tasks.Issue
@@ -162,7 +163,6 @@ defmodule Arbiter.Workflows.Conductor do
 
   @topic "tasks"
   @events_topic "events"
-  @gating_types [:depends_on, :blocks]
   @default_system_max 16
 
   defmodule State do
@@ -735,24 +735,10 @@ defmodule Arbiter.Workflows.Conductor do
   end
 
   # All gating edges among members, normalized to "dependent → dependency"
-  # directed edges (the dependent waits for the dependency):
-  #   * depends_on(from, to) → from waits for to → {from, to}
-  #   * blocks(from, to)     → to waits for from → {to, from}
-  defp gating_edges(member_ids) do
-    member_set = MapSet.new(member_ids)
-    gating = @gating_types
-
-    Dependency
-    |> Ash.Query.filter(type in ^gating)
-    |> Ash.read!()
-    |> Enum.filter(fn d ->
-      MapSet.member?(member_set, d.from_issue_id) and MapSet.member?(member_set, d.to_issue_id)
-    end)
-    |> Enum.map(fn
-      %{type: :depends_on, from_issue_id: from, to_issue_id: to} -> {from, to}
-      %{type: :blocks, from_issue_id: from, to_issue_id: to} -> {to, from}
-    end)
-  end
+  # directed edges (the dependent waits for the dependency). Shared with
+  # `Arbiter.Tasks.Dependencies`, which runs the same check over the *global*
+  # edge set on every gating-edge write so a cycle never reaches the DB.
+  defp gating_edges(member_ids), do: DependencyGraph.gating_edges(member_ids)
 
   # Symmetric conflicts_with adjacency among members: %{id => MapSet(peers)}.
   # The edge is stored in a single direction but means the same both ways, so
@@ -785,29 +771,7 @@ defmodule Arbiter.Workflows.Conductor do
   # Build a :digraph over member vertices + gating edges and look for the
   # shortest cycle through any vertex (sorted for determinism). Returns `:ok` or
   # `{:error, {:cyclic, cycle}}`.
-  defp detect_cycle(member_ids, edges) do
-    graph = :digraph.new()
-
-    try do
-      Enum.each(member_ids, &:digraph.add_vertex(graph, &1))
-      Enum.each(edges, fn {a, b} -> :digraph.add_edge(graph, a, b) end)
-
-      member_ids
-      |> Enum.sort()
-      |> Enum.find_value(fn vertex ->
-        case :digraph.get_short_cycle(graph, vertex) do
-          false -> nil
-          cycle -> cycle
-        end
-      end)
-      |> case do
-        nil -> :ok
-        cycle -> {:error, {:cyclic, cycle}}
-      end
-    after
-      :digraph.delete(graph)
-    end
-  end
+  defp detect_cycle(member_ids, edges), do: DependencyGraph.detect_cycle(member_ids, edges)
 
   # ---- misc ---------------------------------------------------------------
 

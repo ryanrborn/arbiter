@@ -879,6 +879,45 @@ defmodule Arbiter.MCP.ToolsTest do
                  "to_issue_id" => ctx.other.id
                })
     end
+
+    # bd-apj0gq: dep_add now routes through `Arbiter.Tasks.Dependencies`, so it
+    # inherits the facade's cycle guard. Before, this pair of edges persisted
+    # and deadlocked both tasks silently.
+    test "rejects a gating edge that would close a cycle, naming the cycle", ctx do
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "depends_on"
+               })
+
+      assert {:error, {:invalid, msg}} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.other.id,
+                 "to_issue_id" => ctx.task.id,
+                 "type" => "depends_on"
+               })
+
+      assert msg =~ "cycle"
+      assert msg =~ ctx.task.id
+      assert msg =~ ctx.other.id
+    end
+
+    test "a non-gating edge is never cycle-checked", ctx do
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "relates_to"
+               })
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.other.id,
+                 "to_issue_id" => ctx.task.id,
+                 "type" => "relates_to"
+               })
+    end
   end
 
   describe "parent/child grouping via dep_add parent_of + auto_close" do
@@ -921,6 +960,56 @@ defmodule Arbiter.MCP.ToolsTest do
       assert data.status == "closed"
       assert data.child_closed == 1
       assert data.child_total == 1
+    end
+
+    # bd-apj0gq: `maybe_auto_close` used to be reachable only from the child's
+    # own `:close` action, so attaching an already-closed child left the parent
+    # wrongly open. The facade re-evaluates it on the edge write.
+    test "attaching an already-closed child closes the auto_close parent", ctx do
+      assert {:ok, parent} =
+               Tools.task_create(ctx.coordinator, %{"title" => "epic", "auto_close" => true})
+
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})
+      {:ok, child} = Ash.update(child, %{}, action: :close)
+
+      assert {:ok, _dep} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => parent.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+      assert data.status == "closed"
+    end
+
+    test "detaching the last open child closes the auto_close parent", ctx do
+      assert {:ok, parent} =
+               Tools.task_create(ctx.coordinator, %{"title" => "epic", "auto_close" => true})
+
+      {:ok, done} = Ash.create(Issue, %{title: "done", workspace_id: ctx.ws.id})
+      {:ok, open} = Ash.create(Issue, %{title: "open", workspace_id: ctx.ws.id})
+
+      for child <- [done, open] do
+        {:ok, _} =
+          Tools.dep_add(ctx.coordinator, %{
+            "from_issue_id" => parent.id,
+            "to_issue_id" => child.id,
+            "type" => "parent_of"
+          })
+      end
+
+      {:ok, _} = Ash.update(done, %{}, action: :close)
+      assert {:ok, %{status: "open"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+
+      assert {:ok, %{removed: 1}} =
+               Tools.dep_remove(ctx.coordinator, %{
+                 "from_issue_id" => parent.id,
+                 "to_issue_id" => open.id,
+                 "type" => "parent_of"
+               })
+
+      assert {:ok, %{status: "closed"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
     end
   end
 
