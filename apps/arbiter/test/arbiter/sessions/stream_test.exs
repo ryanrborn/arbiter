@@ -756,11 +756,12 @@ defmodule Arbiter.Sessions.StreamTest do
       assert payload.tokens_out == 50
     end
 
-    test "a rollover onto a newer *.jsonl mid-session is picked up, not pinned to the stale id", %{
-      id: id,
-      opts: opts,
-      tmp_dir: tmp_dir
-    } do
+    test "a rollover onto a newer *.jsonl mid-session is picked up, not pinned to the stale id",
+         %{
+           id: id,
+           opts: opts,
+           tmp_dir: tmp_dir
+         } do
       old_provider_session_id = "prov-old-#{id}"
       {session, old_path} = usage_session(id, tmp_dir, old_provider_session_id)
 
@@ -816,7 +817,8 @@ defmodule Arbiter.Sessions.StreamTest do
       # A second tab (or a reattach) joins while the file has not changed
       # since the last read — the `{size, mtime}` skip that keeps the timer
       # cheap must not also leave this new client's HUD blank forever.
-      {:ok, _attached} = attach(session, opts, usage_poll_interval_ms: 5, subscriber: spawn_client())
+      {:ok, _attached} =
+        attach(session, opts, usage_poll_interval_ms: 5, subscriber: spawn_client())
 
       assert_receive {:session_usage, ^id, second}, 1_000
       assert second.tokens_in == 100

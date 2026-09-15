@@ -93,10 +93,17 @@ defmodule ArbiterCli.Cmd.Usage do
 
         _ ->
           cond do
-            calibration?(rest) -> calibration(rest, mode)
-            "--session" in rest and is_nil(session_flag(rest)) -> Output.die("--session requires an id")
-            session_id = session_flag(rest) -> session_detail(session_id, rest, mode)
-            true -> summarize(rest, mode)
+            calibration?(rest) ->
+              calibration(rest, mode)
+
+            "--session" in rest and is_nil(session_flag(rest)) ->
+              Output.die("--session requires an id")
+
+            session_id = session_flag(rest) ->
+              session_detail(session_id, rest, mode)
+
+            true ->
+              summarize(rest, mode)
           end
       end
     end
