@@ -87,10 +87,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "create"
     end
 
-    test "renders blocked-by + blocks dependency sections", %{conn: conn, ws: ws} do
+    test "renders blocked-by + blocks dependency sections by semantic role, not raw direction",
+         %{conn: conn, ws: ws} do
       {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
       {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
 
+      # a blocks b (a is the blocker, b is blocked).
       {:ok, _} =
         Ash.create(Dependency, %{
           from_issue_id: a.id,
@@ -98,11 +100,19 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :blocks
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{a.id}")
+      {:ok, _view, a_html} = live(conn, ~p"/tasks/#{a.id}")
 
-      assert html =~ "Blocked by (1)"
-      assert html =~ b.id
-      assert html =~ "B"
+      assert a_html =~ "Blocks (1)"
+      assert a_html =~ b.id
+      assert a_html =~ "B"
+      refute a_html =~ "Blocked by ("
+
+      {:ok, _view, b_html} = live(conn, ~p"/tasks/#{b.id}")
+
+      assert b_html =~ "Blocked by (1)"
+      assert b_html =~ a.id
+      assert b_html =~ "A"
+      refute b_html =~ "Blocks ("
     end
 
     test "shows worker info inline when one is running", %{conn: conn, ws: ws} do
@@ -1395,6 +1405,211 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert html =~ "rail-tdd"
       assert html =~ "always_on"
+    end
+  end
+
+  # bd-11r7e1: R1 regroups RELATIONSHIPS by semantic role (blocked_by,
+  # blocks, parents, children, relates_to, conflicts_with, discovered_from)
+  # rather than by raw edge direction.
+  describe "RELATIONSHIPS panel regrouping (bd-11r7e1)" do
+    test "parent_of edges land under Parent/Children, never under a blocking heading",
+         %{conn: conn, ws: ws} do
+      {:ok, parent} = Ash.create(Issue, %{title: "parent epic", workspace_id: ws.id})
+      {:ok, child} = Ash.create(Issue, %{title: "child issue", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: parent.id,
+          to_issue_id: child.id,
+          type: :parent_of
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+      parent_html = view |> element("#panel-relationships") |> render()
+
+      assert has_element?(view, "#rel-children")
+      refute has_element?(view, "#rel-blocked-by")
+      refute has_element?(view, "#rel-blocks")
+      assert parent_html =~ child.id
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{child.id}")
+      child_html = view |> element("#panel-relationships") |> render()
+
+      assert has_element?(view, "#rel-parents")
+      refute has_element?(view, "#rel-blocked-by")
+      refute has_element?(view, "#rel-blocks")
+      assert child_html =~ parent.id
+    end
+
+    test "empty groups are omitted entirely", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :relates_to})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+
+      assert has_element?(view, "#rel-related")
+      refute has_element?(view, "#rel-blocked-by")
+      refute has_element?(view, "#rel-blocks")
+      refute has_element?(view, "#rel-parents")
+      refute has_element?(view, "#rel-children")
+      refute has_element?(view, "#rel-conflicts-with")
+      refute has_element?(view, "#rel-discovered-from")
+    end
+
+    test "each of the seven groups renders by its own element id when populated",
+         %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
+      {:ok, c} = Ash.create(Issue, %{title: "C", workspace_id: ws.id})
+      {:ok, d} = Ash.create(Issue, %{title: "D", workspace_id: ws.id})
+      {:ok, e} = Ash.create(Issue, %{title: "E", workspace_id: ws.id})
+      {:ok, f} = Ash.create(Issue, %{title: "F", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :depends_on})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: c.id, to_issue_id: a.id, type: :depends_on})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: d.id, to_issue_id: a.id, type: :parent_of})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: e.id, type: :relates_to})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: f.id, type: :conflicts_with})
+
+      {:ok, g} = Ash.create(Issue, %{title: "G", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: g.id, type: :discovered_from})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+
+      assert has_element?(view, "#rel-blocked-by")
+      assert has_element?(view, "#rel-blocks")
+      assert has_element?(view, "#rel-parents")
+      assert has_element?(view, "#rel-related")
+      assert has_element?(view, "#rel-conflicts-with")
+      assert has_element?(view, "#rel-discovered-from")
+    end
+
+    test "gating groups carry a data-gating marker that informational groups don't",
+         %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
+      {:ok, c} = Ash.create(Issue, %{title: "C", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :depends_on})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: c.id, type: :relates_to})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+
+      assert has_element?(view, "#rel-blocked-by[data-gating=true]")
+      assert has_element?(view, "#rel-related[data-gating=false]")
+    end
+
+    test "children group shows a progress bar and an auto_close marker when set",
+         %{conn: conn, ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic", workspace_id: ws.id, auto_close: true})
+
+      {:ok, closed_child} = Ash.create(Issue, %{title: "done child", workspace_id: ws.id})
+      {:ok, _} = Ash.update(closed_child, %{}, action: :close)
+      {:ok, open_child} = Ash.create(Issue, %{title: "open child", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: parent.id,
+          to_issue_id: closed_child.id,
+          type: :parent_of
+        })
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: parent.id,
+          to_issue_id: open_child.id,
+          type: :parent_of
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+      children = view |> element("#rel-children") |> render()
+
+      assert children =~ "1/2 closed"
+      assert children =~ closed_child.id
+      assert children =~ open_child.id
+      assert has_element?(view, "#rel-children [role=progressbar]")
+      assert has_element?(view, "#rel-children [data-role=auto-close-marker]")
+    end
+
+    test "an awaiting_verification blocker gets a distinct chip, explanation, and verify hint",
+         %{conn: conn, ws: ws} do
+      {:ok, blocker} =
+        Ash.create(Issue, %{title: "merged blocker", workspace_id: ws.id})
+
+      {:ok, blocker} = Ash.update(blocker, %{}, action: :await_verification)
+
+      {:ok, downstream} = Ash.create(Issue, %{title: "waiting", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: downstream.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{downstream.id}")
+      blocked_by = view |> element("#rel-blocked-by") |> render()
+
+      assert has_element?(view, "#rel-blocked-by [data-role=awaiting-verification-chip]")
+      assert blocked_by =~ "awaiting verification"
+      assert blocked_by =~ "waiting on someone to verify"
+      assert blocked_by =~ "arb issue verify #{blocker.id}"
+    end
+
+    test "edge notes and created_by are reachable from the row when present",
+         %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: a.id,
+          to_issue_id: b.id,
+          type: :depends_on,
+          notes: "waiting on the migration to land first",
+          created_by: "dashboard"
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{a.id}")
+
+      assert html =~ "waiting on the migration to land first"
+      assert html =~ "dashboard"
+    end
+
+    test "a cross-workspace edge renders with a marker", %{conn: conn, ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{
+          name: "other-ws-#{System.unique_integer([:positive])}",
+          prefix: "othr"
+        })
+
+      {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: other_ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :relates_to})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+
+      assert has_element?(view, "#rel-related [data-role=cross-workspace-marker]")
     end
   end
 
