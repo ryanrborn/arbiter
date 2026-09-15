@@ -72,6 +72,7 @@ defmodule Arbiter.Sessions do
   alias Arbiter.Sessions.Provisioning
   alias Arbiter.Sessions.Runner
   alias Arbiter.Sessions.Session
+  alias Arbiter.Sessions.Terminal
   alias Arbiter.Usage.Event
 
   require Ash.Query
@@ -310,6 +311,27 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
+  The PubSub topic a session's live `usage` events are published on (§7.5).
+
+  Phase 4 wires the **transport** for the HUD feed — `ArbiterWeb.SessionChannel`
+  subscribes on join and forwards anything published here as a `usage` event —
+  without deciding what goes in it. Phase 7 is the producer; until then the
+  topic simply has no publisher, which is the cheapest possible placeholder.
+  """
+  @spec usage_topic(String.t()) :: String.t()
+  def usage_topic(session_id) when is_binary(session_id), do: "session_usage:" <> session_id
+
+  @doc "Publish a live usage payload to a session's attached clients (§7.5)."
+  @spec broadcast_usage(String.t(), map()) :: :ok | {:error, term()}
+  def broadcast_usage(session_id, payload) when is_binary(session_id) and is_map(payload) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      usage_topic(session_id),
+      {:session_usage, session_id, payload}
+    )
+  end
+
+  @doc """
   The command runner module in force: `:runner` option, then application
   config, then the real one.
   """
@@ -318,6 +340,20 @@ defmodule Arbiter.Sessions do
     Keyword.get(opts, :runner) ||
       Application.get_env(:arbiter, :sessions_runner) ||
       Runner.Host
+  end
+
+  @doc """
+  The terminal back end in force: `:terminal` option, then application config,
+  then the real one (phase 4 — `Arbiter.Sessions.Terminal`).
+
+  Same resolution order as `runner/1`, and the same purpose: the transport is
+  tested headlessly against a scripted PTY rather than a tmux server.
+  """
+  @spec terminal(keyword()) :: module()
+  def terminal(opts \\ []) do
+    Keyword.get(opts, :terminal) ||
+      Application.get_env(:arbiter, :sessions_terminal) ||
+      Terminal.Tmux
   end
 
   # -- launch internals -------------------------------------------------------

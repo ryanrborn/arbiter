@@ -498,6 +498,126 @@ a second provider actually needs one (bd-au3xrq)". This RFC does **not** propose
 building the behaviour now. It proposes not putting provider knowledge in the
 envelope, so that adding one later is additive.
 
+### 5.5 Status — phase 4 shipped (bd-3ymdvi, #1685)
+
+The transport is implemented. Six things in §5 were under-specified or wrong
+and were decided while building it; they are recorded here rather than left
+for the next reader to rediscover.
+
+**1. `seq` is framed into the payload, because there is no metadata.**
+§5.2 describes `stdout` as "`{:binary, bytes}` with `seq` in metadata". A
+Phoenix binary push is `{:binary, iodata}` and the WebSocket frame carries the
+payload and nothing else — no event name, no ref, no headers. Since §5.3's
+resume is keyed on session id + seq, the number has to be in the bytes:
+
+```
+<<"ARB1", seq::unsigned-big-64, payload::binary>>
+```
+
+`Arbiter.Sessions.Frame` prefixes and strips; it never looks at the payload,
+which is what keeps a split `\e[1;31m` or a split `🚀` byte-exact. Both
+directions use it — a client's stdin seq is what lets the server drop stdin
+a reconnecting client re-sent, rather than typing it into the pane twice.
+
+**2. One reader per session, not per attached client.** §4.3 says "one reader
+per attached browser". tmux makes that impossible: `pipe-pane` is a property
+of the pane, singular — issuing it twice replaces the first pipe. It is also
+the wrong shape for §5.3, which wants one `seq` space and one ring *per
+session* so two clients resuming from different points are talking about the
+same numbers. The property §4.3 actually cares about is untouched: a detach or
+an `arbiter` restart drops the reader, never the session.
+
+**3. `seq` is a byte offset into the pipe file, not a counter.** This falls
+out of `pipe-pane -O 'cat >> <path>'` and is the most useful invariant in the
+phase. Resume arithmetic becomes `pread(file, last_seq, head - last_seq)`; the
+in-memory ring becomes a fast path that preserves frame boundaries rather than
+the source of truth; and a reconnect after an `arbiter` restart is **gapless**
+rather than a repaint, because the `cat` tmux spawned lives in the *session's*
+scope, keeps appending while arbiter is dead, and a new reader picks the
+numbering back up from the file size. §12 item 7's ring size therefore matters
+less than it looked: outside the ring is not automatically a repaint.
+
+**4. Resize: last writer wins** (§12 item 8, which suggested "first client
+owns size, others letterbox"). The most recent `resize` from any attached
+client sets the pane size and every client is sent `meta`. This matches tmux's
+own `window-size latest`, needs no size-ownership handover when the owning
+client leaves, and is compatible with the suggestion — letterboxing is a
+frontend response to `meta`, which phase 5 can add without the transport
+having an opinion.
+
+**5. The client must reconnect on a *clean* close — phase 5 needs this line.**
+`phoenix.js` deliberately does not reconnect after WebSocket close code `1000`
+(normal closure), and a graceful `systemctl --user restart arbiter` produces
+exactly that: Bandit closes every socket with 1000 on shutdown before the BEAM
+exits. For a terminal client that is the wrong reading. The session *outlives*
+the server by design (§4.3), so a clean server close means "back shortly", not
+"stop watching this terminal" — without an override, the tab goes dead on
+every deploy and decision 3's gapless resume never gets a chance to run. One
+line in the socket's `onClose` fixes it:
+
+```js
+if (code === 1000) socket.reconnectTimer.scheduleTimeout()
+```
+
+This was found, not reasoned about: the first run of
+`ArbiterWeb.SessionTransportSocketTest` hung at "socket closed at seq 19 (code
+1000)" and never rejoined. Phase 5's hook must carry the same line, and its
+rejoin params must be a **closure** — `phoenix.js` only re-evaluates join
+params that are a function, so an object literal silently resumes from the
+`last_seq` the tab first connected with rather than the newest one.
+
+**6. A joining client is guaranteed its `snapshot` before any live frame.**
+§5.2 lists the events but says nothing about their order at join, and the
+obvious implementation gets it wrong: the reader registers the new subscriber
+*inside* the attach call, so its next poll can deliver a live frame to the
+channel before the channel has queued its own post-join flush. The client then
+sees a frame at `seq` newer than the snapshot, followed by the snapshot — and
+repaints backwards over bytes it has already drawn. The channel therefore
+holds anything that arrives in that window and drains it, in order, right
+after the snapshot or replay. Phase 5's client may rely on this: after a
+successful `join`, the first thing on the wire is always `snapshot` or the
+replay frames.
+
+Backpressure is §5.3 item 2 as written: each client acknowledges the bytes it
+has pushed onto the wire, a client past the high-water mark stops receiving
+frames and keeps no backlog, and one `capture-pane` snapshot repaints it when
+its acknowledgements catch up.
+
+One limit of that, so phase 5 does not assume more than is there: the
+acknowledgement is sent the moment a frame is handed to `push/3`, which returns
+as soon as the message reaches the transport process. The high-water mark
+therefore bounds the **channel process's** mailbox, not the Bandit connection
+process's send queue, which is where a genuinely slow *network* client's bytes
+would pile up. That is the right first cut — it is the queue the reader can see
+and the one AC 4 asks about — but a socket-level bound is still unbuilt.
+
+Tested headlessly: `Arbiter.Sessions.StreamTest` and
+`ArbiterWeb.SessionChannelTest` run against a scripted PTY that appends to the
+same kind of file tmux writes, so the byte path under test is the real one.
+`Arbiter.Integration.SessionTmuxTest` runs the same operations against a real
+tmux server on a scratch socket — cheap enough for the default suite, skipped
+only where tmux is absent.
+
+Tested over a real socket, too. `ArbiterWeb.SessionTransportSocketTest` stands
+the endpoint up on a real port under Bandit and drives it with
+`scripts/verify_session_transport.mjs` — the same `phoenix.js` the dashboard
+ships, run under Node's built-in `WebSocket` (no npm; §6.1). It stops the
+listener *and* the reader, lets the pane keep writing to the pipe file while
+both are down, brings them back, and asserts the client's own verdict:
+
+```
+joined (#1): {"mode":"snapshot","seq":0}
+before-the-restart
+socket closed at seq 19 (code 1000) — will resume
+joined (#2): {"mode":"resumed","seq":37}
+during-the-outage
+RESULT: PASS — frames=3 bytes=55 seq=55 reconnects=1 gaps=0 duplicates=0
+```
+
+That script is also the instrument for AC 8 on the live host: point it at a
+real session, `systemctl --user restart arbiter`, and read the same summary
+line.
+
 ## 6. Frontend (research task 3)
 
 ### 6.1 The constraint nobody expects: there is no npm
@@ -1146,10 +1266,17 @@ the same posture `docs/worker-security.md` takes.
    the CLI's dollar figure is incomplete. Map it to the ledger's existing
    `cost_note` (`event.ex:189`) rather than writing a misleading `cost_usd`.
 7. **Flaky connections.** Covered by seq-resume (§5.3), but the ring size (2 MB)
-   is a guess; measure against a real session before fixing it.
+   is a guess; measure against a real session before fixing it. *Partly
+   defused by phase 4* (§5.5 item 3): `seq` is a byte offset into the pipe
+   file, so a reconnect outside the in-memory ring is still served from the
+   file rather than repainted. The numbers are in `config/config.exs` under
+   `Arbiter.Sessions.Stream` and are still guesses.
 8. **Multiple browsers on one session.** tmux supports multi-client attach and
    `resize-window` makes size explicit, but two operators on one session will
-   fight over dimensions. Suggest: first client owns size, others letterbox.
+   fight over dimensions. Suggested: first client owns size, others letterbox.
+   *Decided in phase 4* (§5.5 item 4): the transport does last-writer-wins and
+   tells every client the new geometry with `meta`; letterboxing, if wanted, is
+   a frontend response to that event.
 
 ## 13. Phased implementation plan
 
@@ -1160,7 +1287,7 @@ Each phase is scoped to one child ticket.
 | 1 | **Session lifecycle core** | `sessions` table + `Arbiter.Sessions` context; launch via `systemd-run --user --scope` + tmux; adoption sweep on boot; kill. No UI. Tests assert scope/socket naming and re-adoption. | 1 | 3 |
 | 2 | **Restart-survival proof in CI** | An integration test that launches a session, restarts a stand-in unit, and asserts survival + gapless replay — the §4.2 spike as a regression test. Cheap, and protects the one property everything else assumes. | 1 | 2 |
 | 3 | **Provisioning scaffold** | `arb init`-style per-session layout (§9.1); pre-seed the three onboarding gates (§9.2); `ConfigDir` interactive variant; `.mcp.json` + per-session scope token; mode A/B selection. | 1 | 3 |
-| 4 | **Transport** | Socket + channel, full envelope (§5.2), seq ring, resume, backpressure. Tested headlessly against a scripted PTY — no browser needed. | 1 | 3 |
+| 4 | **Transport** — *shipped (§5.5)* | Socket + channel, full envelope (§5.2), seq ring, resume, backpressure. Tested headlessly against a scripted PTY — no browser needed. | 1 | 3 |
 | 5 | **Frontend terminal** | Vendor xterm + canvas addon + CSS; colocated hook; fit/resize; copy-paste; `SessionLive` chrome. | 2 | 3 |
 | 6 | **Metering ingest** | Extend `ClaudeSessionFile` to parse `cost-state` (fixes the moduledoc's stated cost gap, benefits workers too); `Sessions.UsageIngest` writing `source: :coordinator_session`; end-of-session reconcile; `session_id` index. | 1 | 3 |
 | 7 | **Cost HUD + `arb usage --by session`** | Live `usage` channel events; HUD bar; CLI dimension + `--session` filter (§7.6). | 2 | 2 |
