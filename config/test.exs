@@ -221,3 +221,23 @@ config :arbiter, :board_autopilot, enabled: false, interval_ms: :never
 config :arbiter,
        :sessions_runtime_dir,
        Path.join(System.tmp_dir!(), "arbiter-test-sessions-runtime")
+
+# Per-session provisioning scaffolds (bd-aprlbb, RFC §9.1). Under tmp so the
+# suite never scaffolds into a real `~/dev/arbiter-sessions`, and — with
+# `:primary_checkout` pinned to a path that exists nowhere — so the §10.2
+# live-checkout guard is exercised deterministically rather than against
+# whatever checkout the developer happens to be running from.
+config :arbiter,
+       :sessions_root,
+       Path.join(System.tmp_dir!(), "arbiter-test-sessions-root")
+
+config :arbiter, :primary_checkout, "/nonexistent/arbiter-primary-checkout"
+
+# Mode B copies the operator's real `~/.claude/.credentials.json` into a
+# session's config dir — correct in production (§8.2), catastrophic in a test
+# suite that provisions dozens of throwaway sessions under tmp. Point the
+# source at a directory that does not exist; the tests that exercise seeding
+# pass their own source explicitly.
+config :arbiter,
+       :sessions_credentials_source,
+       Path.join(System.tmp_dir!(), "arbiter-test-absent-operator-config")

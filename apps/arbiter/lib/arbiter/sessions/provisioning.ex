@@ -1,0 +1,375 @@
+defmodule Arbiter.Sessions.Provisioning do
+  @moduledoc """
+  Builds the RFC §9.1 scaffold a session launches into (bd-aprlbb, phase 3).
+
+  `Arbiter.Sessions.launch/1` writes the row, calls `provision/2`, then starts
+  the scope. Everything a session needs to reach a working prompt without a
+  human clicking through a wizard is created here, and nothing the session
+  needs is left to the agent to discover:
+
+    * the §9.1 directory tree (`Arbiter.Sessions.Layout`);
+    * an **interactive** `CLAUDE_CONFIG_DIR` — `.claude.json` answering the
+      three §9.2 onboarding gates, a hardened `settings.json`, and the auth
+      mode's credential posture
+      (`Arbiter.Agents.Claude.ConfigDir.Interactive`);
+    * `.mcp.json` carrying a per-session, revocable coordinator token
+      (§9.3), written mode `0600`;
+    * a generated `CLAUDE.md` (`Arbiter.Sessions.Instructions`);
+    * `memory/shared` + `memory/candidates` — §9.4's **mount points only**.
+      Phase 12 mounts the layers and implements promotion; creating the
+      directories now is what lets the generated instructions describe a
+      stable shape;
+    * `launch.sh`, the session's single argv token, and `auth.env` (mode
+      `0600`, mode A only) — see "Secrets".
+
+  ## Secrets
+
+  §10.3 is a hard rule: never a credential on a command line, because
+  `/proc/<pid>/cmdline` is world-readable on this host and the session's
+  command line is a `tmux -e` list. So mode A's `CLAUDE_CODE_OAUTH_TOKEN` is
+  **not** returned as env for the launcher; it is written to `auth.env` with
+  mode `0600` and sourced by `launch.sh` at exec time. The only credential-ish
+  thing in argv is the *path* of a file the operator's user already owns.
+
+  Mode B's credential never moves through Arbiter at all — `ConfigDir`'s
+  copy-never-symlink seeding puts it straight into the session config dir.
+
+  Neither token nor credential is ever written to the session row, an event, or
+  a log line.
+
+  ## Idempotence
+
+  `provision/2` is safe to re-run on an existing session dir. It re-renders the
+  generated files (instructions, settings, launch wrapper) and merges into
+  `.claude.json` rather than overwriting it, so a re-provision of a live
+  session does not stomp Claude Code's own state — including the `bridgeOauth*`
+  keys Remote Control writes there.
+
+  Minting is **not** idempotent: each call mints a fresh token and rewrites
+  `.mcp.json`. Tokens are the cheap part, and a scaffold that quietly reused a
+  revoked token would be worse than one that mints again.
+  """
+
+  alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Agents.Claude.ConfigDir.Interactive
+  alias Arbiter.Config.Paths
+  alias Arbiter.MCP
+  alias Arbiter.MCP.AgentConfig.Claude, as: ClaudeMCP
+  alias Arbiter.Sessions.Instructions
+  alias Arbiter.Sessions.Layout
+  alias Arbiter.Sessions.Session
+
+  require Logger
+
+  @secret_file_mode 0o600
+  @script_mode 0o700
+
+  @typedoc "What `provision/2` created, for the launcher and for tests."
+  @type provisioned :: %{
+          root: String.t(),
+          cwd: String.t(),
+          config_dir: String.t(),
+          launch_script: String.t(),
+          mcp_config: String.t() | nil,
+          auth_mode: :seeded_credentials | :oauth_token
+        }
+
+  @doc """
+  Provision `session`'s scaffold. Returns `{:ok, provisioned}` or
+  `{:error, reason}`.
+
+  A failure here **must** abort the launch: a session launched against an
+  unseeded config dir does not fail, it hangs on the onboarding wizard with
+  nobody at the keyboard (§9.2).
+
+  ## Options
+
+    * `:oauth_token` — mode A's token. Defaults to the one
+      `ConfigDir.oauth_token/1` resolves for the session's workspace. Ignored
+      in mode B.
+    * `:primary_checkout` — override for §10.2's live-checkout guard.
+    * `:mcp` — `false` to skip minting and `.mcp.json` entirely (a session with
+      no Arbiter access at all). Defaults to `Arbiter.MCP.enabled?/0`.
+    * `:extra_env` — extra **non-secret** pairs for the launch wrapper.
+  """
+  @spec provision(Session.t(), keyword()) :: {:ok, provisioned()} | {:error, term()}
+  def provision(%Session{} = session, opts \\ []) do
+    id = session.id
+    paths = Layout.paths(id)
+    cwd = session.cwd || paths.workspace
+    config_dir = session.config_dir || paths.config
+
+    with :ok <- check_outside_primary_checkout(paths.root, opts),
+         :ok <- check_outside_primary_checkout(cwd, opts),
+         :ok <- make_directories(id, config_dir, cwd),
+         :ok <- write_instructions(session, paths, opts),
+         :ok <- seed_config_dir(session, config_dir, cwd, opts),
+         :ok <- write_auth_env(session, paths, opts),
+         {:ok, mcp_config} <- write_mcp_config(session, paths, opts),
+         :ok <- write_launch_script(session, paths, config_dir, opts) do
+      {:ok,
+       %{
+         root: paths.root,
+         cwd: cwd,
+         config_dir: config_dir,
+         launch_script: paths.launch_script,
+         mcp_config: mcp_config,
+         auth_mode: session.auth_mode
+       }}
+    end
+  end
+
+  @doc """
+  Mint this session's MCP scope token (§9.3).
+
+  Coordinator tier, bound to the session's `workspace_id` (`nil` = the
+  cross-workspace default, decision 6), and `can_dispatch` taken from the row —
+  which defaults to **off** (§10.1).
+
+  The token is returned, never stored: the only durable copy is the mode-`0600`
+  `.mcp.json` inside the session's own directory. Its revocation handle is the
+  row, not a stored copy.
+  """
+  @spec mint_token(Session.t(), keyword()) :: String.t()
+  def mint_token(%Session{} = session, opts \\ []) do
+    MCP.Scope.mint_session(
+      session.id,
+      Keyword.merge(
+        [workspace_id: session.workspace_id, can_dispatch: session.can_dispatch],
+        opts
+      )
+    )
+  end
+
+  @doc """
+  Remove a session's scaffold from disk.
+
+  Not called by the lifecycle — an ended session's directory holds its
+  transcript and its candidate memories, which outlive it (§9.4, §11). This
+  exists for an operator-driven cleanup and for tests.
+  """
+  @spec destroy(Session.t() | String.t()) :: :ok
+  def destroy(%Session{id: id}), do: destroy(id)
+
+  def destroy(id) when is_binary(id) do
+    _ = File.rm_rf(Layout.session_dir(id))
+    :ok
+  end
+
+  # ---- internals ----------------------------------------------------------
+
+  # §10.2 layer 1, asserted rather than assumed. A misconfigured
+  # ARBITER_SESSIONS_ROOT pointing into the live source tree fails here, loudly,
+  # instead of handing an agent a cwd Phoenix hot-reload is watching.
+  defp check_outside_primary_checkout(path, opts) do
+    checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+
+    if Layout.outside_primary_checkout?(path, checkout) do
+      :ok
+    else
+      {:error,
+       {:inside_primary_checkout, path,
+        "refusing to provision a session under the primary checkout #{checkout} — " <>
+          "§10.2 layer 1 is that a session is scaffolded, never pointed at a checkout. " <>
+          "Set ARBITER_SESSIONS_ROOT to a directory outside it."}}
+    end
+  end
+
+  defp make_directories(id, config_dir, cwd) do
+    (Layout.directories(id) ++ [config_dir, cwd])
+    |> Enum.uniq()
+    |> Enum.reduce_while(:ok, fn dir, :ok ->
+      case File.mkdir_p(dir) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:mkdir_failed, dir, reason}}}
+      end
+    end)
+  end
+
+  defp write_instructions(session, paths, opts) do
+    content =
+      Instructions.render(session,
+        primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
+        mcp_server_name: MCP.server_name()
+      )
+
+    case File.write(paths.instructions, content) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:write_failed, paths.instructions, reason}}
+    end
+  end
+
+  defp seed_config_dir(session, config_dir, cwd, opts) do
+    Interactive.ensure(config_dir,
+      cwd: cwd,
+      auth_mode: session.auth_mode,
+      source_dir: credentials_source(opts),
+      primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+    )
+  end
+
+  @doc """
+  The operator config dir mode B copies `.credentials.json` from.
+
+  Defaults to `ConfigDir.source_dir/0` — the operator's real `~/.claude`, which
+  is the whole point of mode B (§8.2: every mode-B session authenticates as the
+  operator). `config :arbiter, :sessions_credentials_source, "/path"` overrides
+  it, which is how the **test suite** points it at a directory that does not
+  exist: a suite run must never copy the operator's live grant into a tmp
+  scaffold, and "don't provision in tests" is not available now that
+  provisioning is part of `launch/1`.
+  """
+  @spec credentials_source(keyword()) :: String.t() | nil
+  def credentials_source(opts \\ []) do
+    cond do
+      Keyword.has_key?(opts, :credentials_source) -> Keyword.get(opts, :credentials_source)
+      source = Application.get_env(:arbiter, :sessions_credentials_source) -> source
+      true -> ConfigDir.source_dir()
+    end
+  end
+
+  # Mode A only. The token reaches the agent through a mode-0600 file the
+  # wrapper sources — never through argv (§10.3).
+  defp write_auth_env(%Session{auth_mode: :oauth_token} = session, paths, opts) do
+    case oauth_token(session, opts) do
+      nil ->
+        {:error,
+         {:missing_oauth_token,
+          "auth mode A (:oauth_token) needs a CLAUDE_CODE_OAUTH_TOKEN for " <>
+            "workspace #{inspect(session.workspace_id)}, and none is configured. " <>
+            "Configure one on the workspace, or launch in mode B (:seeded_credentials)."}}
+
+      token ->
+        write_secret(paths.auth_env, "CLAUDE_CODE_OAUTH_TOKEN=#{token}\n")
+    end
+  end
+
+  defp write_auth_env(%Session{}, paths, _opts) do
+    # Mode B carries no env secret. Remove a stale file from a previous mode-A
+    # provisioning of the same session rather than leaving a live token behind.
+    _ = File.rm(paths.auth_env)
+    :ok
+  end
+
+  defp oauth_token(session, opts) do
+    case Keyword.fetch(opts, :oauth_token) do
+      {:ok, token} -> token
+      :error -> ConfigDir.oauth_token(session.workspace_id)
+    end
+  end
+
+  defp write_mcp_config(session, paths, opts) do
+    if Keyword.get(opts, :mcp, MCP.enabled?()) do
+      token = mint_token(session, opts)
+
+      with :ok <-
+             ClaudeMCP.write_mcp_config(paths.root,
+               mcp_url: MCP.server_url(),
+               scope_token: token,
+               server_name: MCP.server_name()
+             ),
+           :ok <- chmod(paths.mcp_config, @secret_file_mode) do
+        {:ok, paths.mcp_config}
+      else
+        {:error, reason} -> {:error, {:write_failed, paths.mcp_config, reason}}
+      end
+    else
+      _ = File.rm(paths.mcp_config)
+      {:ok, nil}
+    end
+  end
+
+  # The one argv token of a launched session. A wrapper, not a bare `claude`
+  # invocation, precisely so a credential can be a file read at exec time
+  # rather than a flag (§10.3).
+  defp write_launch_script(session, paths, config_dir, opts) do
+    env =
+      [
+        {"CLAUDE_CONFIG_DIR", config_dir},
+        {"ARB_SESSION_ID", session.id},
+        {"ARB_SESSION_ROOT", paths.root}
+      ] ++ Keyword.get(opts, :extra_env, [])
+
+    exports = Enum.map_join(env, "\n", fn {k, v} -> "export #{k}=#{shell_quote(v)}" end)
+
+    script = """
+    #!/bin/sh
+    # Generated by Arbiter.Sessions.Provisioning for session #{session.id}.
+    # Regenerated on every provision — do not edit.
+    #
+    # This wrapper exists so credentials never appear in argv (RFC §10.3):
+    # /proc/<pid>/cmdline is world-readable on this host, and the session's
+    # command line is a `tmux -e` list. Mode A's token is read from a
+    # mode-0600 file here instead.
+    set -e
+
+    #{exports}
+
+    # Mode A only; absent in mode B, where the credential is a copy inside
+    # CLAUDE_CONFIG_DIR that the CLI reads for itself.
+    if [ -r #{shell_quote(paths.auth_env)} ]; then
+      set -a
+      . #{shell_quote(paths.auth_env)}
+      set +a
+    fi
+
+    cd #{shell_quote(session.cwd || paths.workspace)}
+    exec #{agent_command(opts)}
+    """
+
+    with :ok <- File.write(paths.launch_script, script),
+         :ok <- chmod(paths.launch_script, @script_mode) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:write_failed, paths.launch_script, reason}}
+    end
+  end
+
+  @doc """
+  The agent invocation the launch wrapper `exec`s.
+
+  Overridable with `config :arbiter, :sessions_agent_command, "…"` — which is
+  how the live-systemd integration check pins a deterministic payload, and how
+  an install with `claude` somewhere unusual points at it.
+  """
+  @spec agent_command(keyword()) :: String.t()
+  def agent_command(opts \\ []) do
+    Keyword.get(opts, :agent_command) ||
+      Application.get_env(:arbiter, :sessions_agent_command) ||
+      "claude"
+  end
+
+  defp write_secret(path, contents) do
+    # Create the file empty at 0600 *before* writing the secret into it, so the
+    # token is never briefly readable at the default umask.
+    with :ok <- File.write(path, ""),
+         :ok <- chmod(path, @secret_file_mode),
+         :ok <- File.write(path, contents) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:write_failed, path, reason}}
+    end
+  end
+
+  defp chmod(path, mode) do
+    case File.chmod(path, mode) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Arbiter.Sessions.Provisioning: could not chmod #{inspect(path)} to " <>
+            "#{inspect(mode, base: :octal)} (#{inspect(reason)})"
+        )
+
+        :ok
+    end
+  end
+
+  # Single-quote for /bin/sh, escaping embedded single quotes the only way sh
+  # allows. Paths here are Arbiter-derived, but a session id or a configured
+  # root is still data, and data does not belong unquoted in a generated script.
+  defp shell_quote(value) do
+    "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
+  end
+end
