@@ -66,6 +66,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.DependencyGraph
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
+  alias Arbiter.Tasks.ParentRefs
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
   alias Arbiter.Usage.Event, as: UsageEvent
@@ -173,6 +174,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     {:ok,
      socket
      |> assign(:task_id, task_id)
+     |> assign(:parent_refs, [])
      |> assign(:issue_label, "issue")
      |> assign(:worker_label, "worker")
      |> assign(:workspace_label, "workspace")
@@ -968,8 +970,18 @@ defmodule ArbiterWeb.TaskDetailLive do
         _ -> @empty_relationship_groups
       end
 
-    assign(socket, :relationship_groups, groups)
+    socket
+    |> assign(:relationship_groups, groups)
+    |> assign(:parent_refs, parent_refs(socket.assigns[:task]))
   end
+
+  # bd-38of5i: the "↳ Part of <epic>" banner under the title. It rides on
+  # `refresh_deps/1` rather than `refresh_task/1` because it is an *edge*
+  # rollup: it has to repaint when a *sibling* closes, which arrives as a
+  # lifecycle event for some other task, and that is the one refresh those
+  # events run.
+  defp parent_refs(%Issue{} = task), do: ParentRefs.for_issue(task)
+  defp parent_refs(_task), do: []
 
   # ---- relationship editing: state, typeahead, pre-checks, warnings ----
   #
@@ -1729,6 +1741,14 @@ defmodule ArbiterWeb.TaskDetailLive do
               opened {relative_age(@task.created_at)} · updated {relative_age(@task.updated_at)}
             </span>
           </div>
+
+          <%!-- bd-38of5i (design bd-2s901b §7): what this issue is part of,
+               at breadcrumb tier — directly under the title/type row, above
+               the description. The RELATIONSHIPS panel also carries the same
+               edge in its Parent group; this is the glanceable duplicate, on
+               the theory that "which epic am I looking at a piece of" is a
+               header question, not a panel one. --%>
+          <.parent_links :if={@task} id="task-parents" parents={@parent_refs} class="mt-2" />
         </div>
 
         <%= if @task do %>
