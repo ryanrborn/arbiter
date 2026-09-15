@@ -193,6 +193,16 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       assert html =~ "1 / 2"
       refute html =~ "no-hit-here"
     end
+
+    test "a literal % in the search term is not treated as a wildcard", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "100% done", workspace_id: ws.id})
+      {:ok, _other} = Ash.create(Issue, %{title: "unrelated title", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{q: "100%"}}")
+
+      assert html =~ task.id
+      refute html =~ "unrelated title"
+    end
   end
 
   describe "filters" do
@@ -362,6 +372,15 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       refute html =~ "has-a-parent"
     end
 
+    test "parent-epic filter's 'no parent' option shows everything when no dependency rows exist at all",
+         %{conn: conn, ws: ws} do
+      {:ok, orphan} = Ash.create(Issue, %{title: "only-orphan-around", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{epic: "none"}}")
+
+      assert html =~ orphan.id
+    end
+
     test "a three-way filter combination (status + type + priority) is AND'd",
          %{conn: conn, ws: ws} do
       {:ok, target} =
@@ -428,6 +447,20 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       assert index_of(html, easy.id) < index_of(html, hard.id)
     end
 
+    test "sort=difficulty pushes unrated issues to the end, not the start", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, unrated} = Ash.create(Issue, %{title: "unrated-task", workspace_id: ws.id})
+      {:ok, easy} = Ash.create(Issue, %{title: "d0-task", workspace_id: ws.id, difficulty: 0})
+      {:ok, hard} = Ash.create(Issue, %{title: "d5-task", workspace_id: ws.id, difficulty: 5})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{sort: :difficulty}}")
+
+      assert index_of(html, easy.id) < index_of(html, hard.id)
+      assert index_of(html, hard.id) < index_of(html, unrated.id)
+    end
+
     test "sort=created orders newest-created first", %{conn: conn, ws: ws} do
       {:ok, first} = Ash.create(Issue, %{title: "created-first", workspace_id: ws.id})
       {:ok, second} = Ash.create(Issue, %{title: "created-second", workspace_id: ws.id})
@@ -492,10 +525,37 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/tasks?#{%{page: 2}}")
 
-      html = render_change(view, "filter", %{"type" => "bug"})
+      html =
+        view
+        |> form("#tasks-filter-form", %{"type" => "bug"})
+        |> render_change()
 
       assert_patch(view, ~p"/tasks?#{%{page: 1, type: :bug}}")
       refute html =~ ~s(href="/tasks?page=2)
+    end
+
+    test "changing a filter via the form preserves the currently-active status tab", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, open_bug} =
+        Ash.create(Issue, %{title: "open-bug", workspace_id: ws.id, issue_type: :bug})
+
+      {:ok, closed_bug} =
+        Ash.create(Issue, %{title: "closed-bug", workspace_id: ws.id, issue_type: :bug})
+
+      {:ok, _} = Ash.update(closed_bug, %{}, action: :close)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks?#{%{status: :open}}")
+
+      html =
+        view
+        |> form("#tasks-filter-form", %{"type" => "bug"})
+        |> render_change()
+
+      assert_patch(view, ~p"/tasks?#{%{page: 1, status: :open, type: :bug}}")
+      assert html =~ open_bug.id
+      refute html =~ closed_bug.id
     end
   end
 

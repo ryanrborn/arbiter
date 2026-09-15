@@ -103,6 +103,7 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   @impl true
   def handle_event("filter", params, socket) do
+    params = Map.put(params, "status", Atom.to_string(socket.assigns.f.status))
     {:noreply, push_patch(socket, to: task_path(parse_filters(params), 1))}
   end
 
@@ -167,12 +168,24 @@ defmodule ArbiterWeb.TaskIndexLive do
   defp filter_by_query(query, ""), do: query
 
   defp filter_by_query(query, q) do
-    pattern = "%#{q}%"
+    pattern = "%#{escape_like(q)}%"
 
+    # SQLite's LIKE is case-insensitive for ASCII by default; the ESCAPE
+    # clause keeps a literal `%` or `_` typed by the user from acting as a
+    # wildcard.
     Ash.Query.filter(
       query,
-      like(id, ^pattern) or like(title, ^pattern) or like(description, ^pattern)
+      fragment("? LIKE ? ESCAPE '\\'", id, ^pattern) or
+        fragment("? LIKE ? ESCAPE '\\'", title, ^pattern) or
+        fragment("? LIKE ? ESCAPE '\\'", description, ^pattern)
     )
+  end
+
+  defp escape_like(q) do
+    q
+    |> String.replace("\\", "\\\\")
+    |> String.replace("%", "\\%")
+    |> String.replace("_", "\\_")
   end
 
   defp filter_by_workspace(query, nil), do: query
@@ -198,8 +211,10 @@ defmodule ArbiterWeb.TaskIndexLive do
   defp filter_by_epic(query, nil), do: query
 
   defp filter_by_epic(query, :none) do
-    parented_ids = parented_issue_ids()
-    Ash.Query.filter(query, id not in ^parented_ids)
+    case parented_issue_ids() do
+      [] -> query
+      parented_ids -> Ash.Query.filter(query, id not in ^parented_ids)
+    end
   end
 
   defp filter_by_epic(query, epic_id) do
@@ -229,7 +244,7 @@ defmodule ArbiterWeb.TaskIndexLive do
   defp sort_by(query, :updated), do: Ash.Query.sort(query, updated_at: :desc)
   defp sort_by(query, :created), do: Ash.Query.sort(query, created_at: :desc)
   defp sort_by(query, :priority), do: Ash.Query.sort(query, priority: :asc)
-  defp sort_by(query, :difficulty), do: Ash.Query.sort(query, difficulty: :asc)
+  defp sort_by(query, :difficulty), do: Ash.Query.sort(query, difficulty: :asc_nils_last)
 
   # ---- URL <-> filter-state ----
 
