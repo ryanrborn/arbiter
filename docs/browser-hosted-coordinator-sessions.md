@@ -247,6 +247,11 @@ Teardown was by exact unit and socket name (`systemctl --user stop <unit>`,
 `tmux -S <sock> kill-server`); `systemctl --user is-active arbiter.service`
 confirmed `active` afterwards.
 
+**This whole section is now an automated test.** Phase 2 (bd-b95w36) turned
+these observations into
+`apps/arbiter/test/integration/session_restart_survival_test.exs`, negative
+control included — see §4.9.
+
 ### 4.3 Recommendation — transient systemd user unit, tmux inside it
 
 ```sh
@@ -400,6 +405,69 @@ What shipped:
 
 Not done here, and not attempted: transport, UI, provisioning, Remote
 Control, and the §4.6 idle deadline / dead-man's switch.
+
+### 4.9 Status — phase 2 shipped: §4.2 is a regression test (bd-b95w36)
+
+§4.8 measures the *mechanism* (sibling cgroup). It cannot measure the
+*consequence*, because it launches from the ExUnit BEAM's own cgroup and
+nothing ever restarts that. Phase 2 closes that gap:
+`apps/arbiter/test/integration/session_restart_survival_test.exs` brings up a
+throwaway systemd **user service** standing in for `arbiter.service` — same
+user manager, same `KillMode` (both set it by omission, so the default
+`control-group` applies; the test reads `arbiter.service`'s own value back and
+asserts they match), no blast radius on the live coordinator — launches a
+session from inside it through the real `Arbiter.Sessions.launch/1`, and
+restarts it for real.
+
+The launch gets *inside* the unit through the phase-1 seam: the unit's
+`ExecStart` is a small POSIX `sh` agent watching a command spool, and
+`Arbiter.Test.StandinUnit` implements `Arbiter.Sessions.Runner` by writing
+into that spool. The argv, the env and the ordering are the production code
+path; only the process that executes the argv moves into the restartable
+cgroup.
+
+Measured on the arbiter host, 2026-09-15:
+
+```
+[bd-b95w36] cgroup placement before the restart:
+  stand-in unit      arbrs1413-host.service (MainPID 3037301)
+  tmux, escaped      pid 3037377  …/app.slice/arb-session-e4139553-….scope
+  tmux, plain child  pid 3037307  …/app.slice/arbrs1413-host.service
+
+[bd-b95w36] restart survival, measured:
+  arbrs1413-host.service MainPID  3037301 -> 3037476
+  arb-session-e4139553-….scope  active
+  tmux, escaped      pid 3037377  ALIVE
+  tmux, plain child  pid 3037307  DEAD
+  pane ticks         range 1..20, count 20 (restart crossed at 10)
+
+[bd-b95w36] host: inactive   scope: active
+```
+
+Four assertions, one per §4.2 observation: the scope is still `active`; the
+tmux server is the **same pid**, so it survived rather than restarted; the
+pane's sequenced output is contiguous `1..N` across the restart instant (the
+spike's "range 1..58, count 58"); and — the negative control — a tmux started
+as a *plain child* of the same unit is dead, which is what proves the test is
+capable of failing. Verified by mutation: rewriting the runner to launch the
+session as a plain child fails both tests, at the cgroup assertion and again
+at `scope is inactive after restarting`.
+
+**It is opt-in, and its absence is loud.** GitHub Actions runners generally
+have no systemd user instance, so the test is tagged `:systemd_user` and
+excluded from `mix precommit`. A restart-survival test that quietly does not
+run is worse than none, so `test/test_helper.exs` prints a banner naming the
+reason on every run that does not include it, and on a host with no user
+manager the module tags itself `skip: <reason>` — ExUnit reports *skipped*,
+not passed. Run it with:
+
+```sh
+scripts/session-restart-survival.sh          # --log FILE to capture output
+```
+
+which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
+`mix test <path>` at the root is not scoped to one app), and re-checks
+`arbiter.service`'s state afterwards.
 
 ## 5. Transport and protocol (research task 2)
 
@@ -1285,7 +1353,7 @@ Each phase is scoped to one child ticket.
 | # | Phase | Scope | Pri | Diff |
 |---|---|---|---|---|
 | 1 | **Session lifecycle core** | `sessions` table + `Arbiter.Sessions` context; launch via `systemd-run --user --scope` + tmux; adoption sweep on boot; kill. No UI. Tests assert scope/socket naming and re-adoption. | 1 | 3 |
-| 2 | **Restart-survival proof in CI** | An integration test that launches a session, restarts a stand-in unit, and asserts survival + gapless replay — the §4.2 spike as a regression test. Cheap, and protects the one property everything else assumes. | 1 | 2 |
+| 2 | **Restart-survival proof in CI** — *shipped (§4.9)* | An integration test that launches a session, restarts a stand-in unit, and asserts survival + gapless replay — the §4.2 spike as a regression test. Cheap, and protects the one property everything else assumes. | 1 | 2 |
 | 3 | **Provisioning scaffold** | `arb init`-style per-session layout (§9.1); pre-seed the three onboarding gates (§9.2); `ConfigDir` interactive variant; `.mcp.json` + per-session scope token; mode A/B selection. | 1 | 3 |
 | 4 | **Transport** — *shipped (§5.5)* | Socket + channel, full envelope (§5.2), seq ring, resume, backpressure. Tested headlessly against a scripted PTY — no browser needed. | 1 | 3 |
 | 5 | **Frontend terminal** | Vendor xterm + canvas addon + CSS; colocated hook; fit/resize; copy-paste; `SessionLive` chrome. | 2 | 3 |
