@@ -386,9 +386,11 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "The repo this task belongs to, as a configured `repo_paths` key " <>
-                "(e.g. \"emricare/tonic\"). Optional — only needed in a multi-repo " <>
-                "workspace, where dispatch otherwise can't tell which checkout the work " <>
-                "is for. Every dispatch of the task uses it unless one names another repo."
+                "(e.g. \"emricare/tonic\"). Every task carries one (bd-9dwbvt); omit it and " <>
+                "it is resolved for you — the workspace's only repo, else its `default_repo`. " <>
+                "Creation is REFUSED, listing the configured keys, when a multi-repo " <>
+                "workspace has no `default_repo`, and a repo that is not a configured key is " <>
+                "rejected. Every dispatch of the task uses it unless one names another repo."
           }
         },
         "required" => ["title"],

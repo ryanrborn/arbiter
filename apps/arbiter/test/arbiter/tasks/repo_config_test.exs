@@ -98,4 +98,35 @@ defmodule Arbiter.Tasks.RepoConfigTest do
       assert RepoConfig.find_path(map, "widget/other") == nil
     end
   end
+
+  describe "find_key/2" do
+    test "returns the key itself on an exact match" do
+      assert RepoConfig.find_key(%{"widget" => "/home/dev/widget"}, "widget") == "widget"
+    end
+
+    test "returns the configured spelling on a normalized match" do
+      map = %{"verus_server" => "/home/dev/verus_server"}
+      assert RepoConfig.find_key(map, "verus-server") == "verus_server"
+    end
+
+    test "returns the bare key a forge-qualified slug matched" do
+      map = %{"verus_server" => "/home/dev/verus_server"}
+      assert RepoConfig.find_key(map, "some-org/verus-server") == "verus_server"
+    end
+
+    # The reason this exists rather than mapping `find_entry/2`'s result back
+    # to a key by value: two keys may alias the same checkout, and a by-value
+    # scan would return whichever the map enumerates first (bd-9dwbvt).
+    test "keeps aliased keys distinct when two keys share one path" do
+      map = %{"tonic" => "/srv/x", "tonic-alias" => "/srv/x"}
+
+      assert RepoConfig.find_key(map, "tonic-alias") == "tonic-alias"
+      assert RepoConfig.find_key(map, "tonic") == "tonic"
+    end
+
+    test "returns nil for an unregistered repo or a non-map" do
+      assert RepoConfig.find_key(%{"widget" => "/home/dev/widget"}, "other") == nil
+      assert RepoConfig.find_key(nil, "widget") == nil
+    end
+  end
 end

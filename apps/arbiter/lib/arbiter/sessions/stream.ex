@@ -174,6 +174,13 @@ defmodule Arbiter.Sessions.Stream do
   @attach_attempts 3
   @attach_retry_ms 5
 
+  # bd-bsdeb2 finding 3: `Terminal.Tmux.alive?/2` is one unretried exit-code
+  # check — a transient tmux/socket hiccup reads identically to a real exit,
+  # and ending a session is irreversible (it revokes the MCP token and takes
+  # the row out of adoption's re-adopt set). Require this many *consecutive*
+  # dead polls before believing it.
+  @dead_polls_required 2
+
   @type attached :: %{
           seq: non_neg_integer(),
           mode: :resumed | :snapshot,
@@ -372,7 +379,8 @@ defmodule Arbiter.Sessions.Stream do
       linger_timer: nil,
       last_turn_touch_ms: nil,
       usage_task_ref: nil,
-      usage_file_stat: nil
+      usage_file_stat: nil,
+      dead_polls: 0
     }
 
     {:ok, state, {:continue, :open}}
@@ -511,12 +519,27 @@ defmodule Arbiter.Sessions.Stream do
   def handle_info(:alive, state) do
     if state.terminal.alive?(state.session, state.opts) do
       schedule(:alive, state.config.alive_interval_ms)
-      {:noreply, refresh_geometry(state)}
+      {:noreply, refresh_geometry(%{state | dead_polls: 0})}
     else
-      # Drain whatever the pane wrote on its way out before announcing it.
-      state = pump(state)
-      broadcast(state, {:session_exit, state.id, %{code: nil, reason: "exited"}})
-      {:stop, :normal, close_stream(state)}
+      state = %{state | dead_polls: state.dead_polls + 1}
+
+      if state.dead_polls < @dead_polls_required do
+        # Not corroborated yet — could be a transient tmux/socket hiccup.
+        # Poll again rather than believing a single dead reading.
+        schedule(:alive, state.config.alive_interval_ms)
+        {:noreply, state}
+      else
+        # Drain whatever the pane wrote on its way out before announcing it.
+        state = pump(state)
+        # bd-bsdeb2: end the row *before* telling attached clients, so a client
+        # that reacts to the broadcast by re-fetching the session (the
+        # `agent_exited` hook path) already sees `:ended`. Best-effort — the
+        # in-memory `session` here can be stale or, in some tests, unpersisted;
+        # either way the pane is gone and clients must still be told.
+        _ = Sessions.mark_ended(state.session, "exited")
+        broadcast(state, {:session_exit, state.id, %{code: nil, reason: "exited"}})
+        {:stop, :normal, close_stream(state)}
+      end
     end
   end
 

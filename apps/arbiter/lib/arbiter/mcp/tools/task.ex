@@ -49,7 +49,12 @@ defmodule Arbiter.MCP.Tools.Task do
       # bd-3j4ch4: what tasks like this one have actually cost, as a
       # percentile range. `nil` when the ledger is too thin — never a made-up
       # number, and never absent, so "no estimate yet" can't read as "$0".
-      {:ok, Map.put(result, :estimate, Estimate.payload(loaded))}
+      result = Map.put(result, :estimate, Estimate.payload(loaded))
+
+      # bd-18vl9q: the epic cost rollup (design bd-9jj5lf §4). `nil` for a
+      # non-epic issue — the field always rides along so callers don't have to
+      # branch on `issue_type` to know whether to look for it.
+      {:ok, Map.put(result, :epic_rollup, Estimate.epic_cost_rollup(loaded))}
     end
   end
 

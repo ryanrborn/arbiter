@@ -2,7 +2,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
   # async: false — the ReviewPatrolSupervisor and its Registry are singletons.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.{ReviewPatrol, ReviewPatrolSupervisor}
 
   @registry Arbiter.Workflows.ReviewPatrolRegistry
@@ -10,17 +10,17 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
   # Seed an open review engagement (the lazy-start watched item, bd-7tr11p) for a
   # repo: a review_only task with a source_pr. `source_pr` encodes the repo —
   # qualified "owner/repo#N" for multi-repo, bare "#N" in a single-repo workspace.
+  # Repo deliberately nil (bd-9dwbvt's `:create` would otherwise refuse in these
+  # multi-repo, no-`default_repo` workspaces): the derivation under test reads
+  # `source_pr`, not the issue's repo.
   defp open_engagement!(ws, source_pr) do
-    {:ok, task} =
-      Ash.create(Issue, %{
-        title: "eng-#{System.unique_integer([:positive])}",
-        tracker_type: :none,
-        source_pr: to_string(source_pr),
-        review_only: true,
-        workspace_id: ws.id
-      })
-
-    task
+    issue_without_repo!(%{
+      title: "eng-#{System.unique_integer([:positive])}",
+      tracker_type: :none,
+      source_pr: to_string(source_pr),
+      review_only: true,
+      workspace_id: ws.id
+    })
   end
 
   # A long interval means the GenServer never touches the DB/forge during the

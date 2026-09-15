@@ -198,6 +198,13 @@ defmodule Arbiter.Usage do
   @spec calibration(keyword()) :: map()
   defdelegate calibration(opts \\ []), to: Estimate
 
+  @doc """
+  Epic cost rollup ("$X spent · ~$Y–Z to go") — see
+  `Arbiter.Usage.Estimate.epic_cost_rollup/2`.
+  """
+  @spec epic_cost_rollup(Arbiter.Tasks.Issue.t() | String.t(), keyword()) :: map() | nil
+  defdelegate epic_cost_rollup(issue_or_id, opts \\ []), to: Estimate
+
   @spec valid_groupings() :: [group_by()]
   def valid_groupings, do: @valid_by
 

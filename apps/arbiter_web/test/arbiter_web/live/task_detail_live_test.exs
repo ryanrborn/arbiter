@@ -330,7 +330,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
       assert html =~ "Task default (org/beta)"
 
-      {:ok, unassigned} = Ash.create(Issue, %{title: "unassigned", workspace_id: ws.id})
+      # bd-9dwbvt: `:create` now binds a repo, so an unassigned task is built
+      # the way one survives in the wild — filed with a repo, then cleared.
+      {:ok, unassigned} =
+        Ash.create(Issue, %{title: "unassigned", workspace_id: ws.id, repo: "org/alpha"})
+
+      {:ok, unassigned} = Ash.update(unassigned, %{repo: nil})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{unassigned.id}")
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
@@ -345,7 +350,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           config: %{"repo_paths" => %{"org/alpha" => "/tmp/arb-a", "org/beta" => "/tmp/arb-b"}}
         })
 
-      {:ok, task} = Ash.create(Issue, %{title: "ambiguous", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "ambiguous", workspace_id: ws.id, repo: "org/alpha"})
+
+      # bd-9dwbvt: dispatch's ambiguity only arises for a task with no repo,
+      # which is now a post-create state rather than a creatable one.
+      {:ok, task} = Ash.update(task, %{repo: nil})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
@@ -2185,6 +2195,252 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#panel-messages")
       refute has_element?(view, "[data-role='message-row']")
       assert has_element?(view, "#messages-empty")
+    end
+  end
+
+  # bd-1273p2: design bd-2s901b §3 — an epic's children grouped into the
+  # board's own five columns, below RELATIONSHIPS' flat Children rollup.
+  describe "epic children by status mini-board" do
+    defp link_parent_of(epic, child) do
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: epic.id, to_issue_id: child.id, type: :parent_of})
+
+      :ok
+    end
+
+    test "groups children into Backlog/Ready/Running/Waiting/Closed like the board", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, backlog_child} =
+        Ash.create(Issue, %{title: "backlog child", workspace_id: ws.id})
+
+      {:ok, ready_child} =
+        Ash.create(Issue, %{title: "ready child", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, ready_child} = Ash.update(ready_child, %{}, action: :promote_to_ready)
+
+      {:ok, running_child} =
+        Ash.create(Issue, %{title: "running child", workspace_id: ws.id})
+
+      {:ok, _pid} = Worker.start(task_id: running_child.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, waiting_child} = Ash.create(Issue, %{title: "waiting child", workspace_id: ws.id})
+      {:ok, waiting_child} = Ash.update(waiting_child, %{}, action: :await_verification)
+
+      {:ok, closed_child} = Ash.create(Issue, %{title: "closed child", workspace_id: ws.id})
+      {:ok, closed_child} = Ash.update(closed_child, %{}, action: :close)
+
+      for child <- [backlog_child, ready_child, running_child, waiting_child, closed_child] do
+        link_parent_of(epic, child)
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#panel-children-by-status")
+      assert has_element?(view, "#children-backlog-#{backlog_child.id}", "backlog child")
+      assert has_element?(view, "#children-ready-#{ready_child.id}", "ready child")
+      assert has_element?(view, "#children-running-#{running_child.id}", "running child")
+      assert has_element?(view, "#children-waiting-#{waiting_child.id}", "waiting child")
+      assert has_element?(view, "#children-closed-#{closed_child.id}", "closed child")
+
+      # A deliberately-unpromoted Backlog child carries no per-child stuck flag.
+      refute has_element?(view, "#children-backlog-#{backlog_child.id} [data-role]")
+    end
+
+    test "a child depending on a sibling shows a marker naming it", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, blocker} =
+        Ash.create(Issue, %{title: "blocker sibling", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, blocker} = Ash.update(blocker, %{}, action: :promote_to_ready)
+
+      {:ok, blocked} =
+        Ash.create(Issue, %{title: "blocked sibling", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, blocked} = Ash.update(blocked, %{}, action: :promote_to_ready)
+
+      link_parent_of(epic, blocker)
+      link_parent_of(epic, blocked)
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: blocked.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(
+               view,
+               "#children-ready-#{blocked.id} [data-role='sibling-depends-on-marker']",
+               blocker.id
+             )
+
+      # A closed sibling is satisfied ordering history, not a live
+      # constraint — its marker is dropped (design bd-2s901b §3).
+      {:ok, _} = Ash.update(blocker, %{}, action: :close)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      refute has_element?(
+               view,
+               "#children-ready-#{blocked.id} [data-role='sibling-depends-on-marker']"
+             )
+    end
+
+    test "Closed collapses by default past 5 children", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      for n <- 1..6 do
+        {:ok, child} = Ash.create(Issue, %{title: "closed #{n}", workspace_id: ws.id})
+        {:ok, child} = Ash.update(child, %{}, action: :close)
+        link_parent_of(epic, child)
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      refute has_element?(view, "#children-closed details[open]")
+    end
+
+    test "Closed does not collapse with 5 or fewer children", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      for n <- 1..5 do
+        {:ok, child} = Ash.create(Issue, %{title: "closed #{n}", workspace_id: ws.id})
+        {:ok, child} = Ash.update(child, %{}, action: :close)
+        link_parent_of(epic, child)
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#children-closed details[open]")
+    end
+
+    test "a non-epic issue does not render the mini-board", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, "#panel-children-by-status")
+    end
+
+    test "a child's status change moves it between groups live", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, child} =
+        Ash.create(Issue, %{title: "moving child", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, child} = Ash.update(child, %{}, action: :promote_to_ready)
+
+      link_parent_of(epic, child)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#children-ready-#{child.id}")
+      refute has_element?(view, "#children-closed-#{child.id}")
+
+      {:ok, _} = Ash.update(child, %{}, action: :close)
+
+      assert has_element?(view, "#children-closed-#{child.id}")
+      refute has_element?(view, "#children-ready-#{child.id}")
+    end
+
+    test "a child's worker-only status transition moves it from Running to Waiting live", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, child} = Ash.create(Issue, %{title: "reviewed child", workspace_id: ws.id})
+      link_parent_of(epic, child)
+
+      {:ok, pid} = Worker.start(task_id: child.id, repo: "r", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :implement)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#children-running-#{child.id}")
+
+      # `Worker.await/2` is a worker-only transition (:running -> :awaiting):
+      # it never writes the child's Issue row, so no `:task_lifecycle` fires —
+      # only the "workers" PubSub topic does. This isolates the mini-board's
+      # `epic_child?` refresh path (task_detail_live.ex) from the pre-existing
+      # `:task_lifecycle` catch-all, which would repaint the board anyway and
+      # mask a regression in the worker-only path.
+      :ok = Worker.await(pid, :manual_pause)
+
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "workers",
+        {:worker_lifecycle, :updated, %{task_id: child.id}}
+      )
+
+      assert has_element?(view, "#children-waiting-#{child.id}")
+      refute has_element?(view, "#children-running-#{child.id}")
+    end
+  end
+
+  # bd-18vl9q, design bd-9jj5lf §4: "$X spent · ~$Y-Z to go" on the epic
+  # detail page.
+  describe "epic cost rollup" do
+    test "shows spent, to-go, and the breakdown counts", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, closed_child} = Ash.create(Issue, %{title: "closed child", workspace_id: ws.id})
+      {:ok, closed_child} = Ash.update(closed_child, %{}, action: :close)
+      link_parent_of(epic, closed_child)
+
+      {:ok, _ev} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: closed_child.id,
+          base_task_id: closed_child.id,
+          role: "base",
+          source: :task,
+          step: :work,
+          workspace_id: ws.id,
+          cost_usd: 6.5,
+          occurred_at: DateTime.utc_now()
+        })
+
+      {:ok, backlog_child} = Ash.create(Issue, %{title: "backlog child", workspace_id: ws.id})
+      link_parent_of(epic, backlog_child)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#panel-epic-cost-rollup")
+      assert has_element?(view, "#epic-cost-rollup-headline", "$6.50 spent")
+      assert has_element?(view, "#epic-cost-rollup-breakdown", "1 closed")
+      assert has_element?(view, "#epic-cost-rollup-breakdown", "1 upcoming")
+    end
+
+    test "a non-epic issue does not render the cost rollup panel", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, "#panel-epic-cost-rollup")
+    end
+
+    test "a childless epic still renders the panel at all zeroes", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "childless epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#panel-epic-cost-rollup")
+      assert has_element?(view, "#epic-cost-rollup-headline", "$0.00 spent")
     end
   end
 end

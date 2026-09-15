@@ -89,6 +89,19 @@ defmodule Arbiter.Sessions.SessionTokenTest do
       assert {:error, :revoked} = Scope.from_token(token)
     end
 
+    test "an exit racing an operator kill keeps the first ended_at/end_reason (bd-bsdeb2)" do
+      session = launch!()
+
+      {:ok, exited} = Sessions.mark_ended(session, "exited")
+      {:ok, killed_again} = Sessions.mark_ended(exited, "killed")
+
+      assert killed_again.end_reason == "exited"
+      assert DateTime.compare(killed_again.ended_at, exited.ended_at) == :eq
+
+      assert DateTime.compare(killed_again.mcp_token_revoked_at, exited.mcp_token_revoked_at) ==
+               :eq
+    end
+
     test "revoke_mcp_token/1 revokes without ending the session" do
       session = launch!()
       token = Sessions.mint_mcp_token(session)
@@ -97,6 +110,27 @@ defmodule Arbiter.Sessions.SessionTokenTest do
 
       assert revoked.status == :running
       assert {:error, :revoked} = Scope.from_token(token)
+    end
+
+    test "a Kill winning against a stale in-memory struct's later exit keeps the kill (bd-bsdeb2 finding 1)" do
+      # Regression for the real ordering: `Arbiter.Sessions.Stream` holds a
+      # `session` struct captured at `init/1` and never refreshes it, so the
+      # second `mark_ended/2` call it makes is *always* against a stale
+      # "still running" struct, not the just-ended row. `mark_ended/2` must
+      # re-read the persisted row itself rather than trust its argument.
+      session = launch!()
+
+      {:ok, killed} = Sessions.kill(session.id, runner: SessionRunnerStub)
+      assert killed.end_reason == "killed"
+
+      # The Stream's stale pre-kill struct, exactly as it would call in.
+      {:ok, exited_again} = Sessions.mark_ended(session, "exited")
+
+      assert exited_again.end_reason == "killed"
+      assert DateTime.compare(exited_again.ended_at, killed.ended_at) == :eq
+
+      assert DateTime.compare(exited_again.mcp_token_revoked_at, killed.mcp_token_revoked_at) ==
+               :eq
     end
 
     test "a token naming a session with no row is revoked, not accepted" do

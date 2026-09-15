@@ -533,6 +533,131 @@ defmodule Arbiter.Tasks.ClaimTest do
     end
   end
 
+  # bd-9dwbvt: the claim/sync creation paths' slice of "every issue carries a
+  # repo". `arb issue claim` and the `tracker_claim` MCP tool both land on
+  # `Claim.claim/3`; `tracker_sync` / `arb issue sync` land on
+  # `Claim.plan/1` + `apply_plan/2`, which claims through the same function.
+  describe "claim/3 and apply_plan/2 — repo resolution (bd-9dwbvt)" do
+    defp repo_ws!(repo_paths, extra_config \\ %{}) do
+      config =
+        Map.merge(
+          %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "ryanrborn",
+                "repo" => "arbiter",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            },
+            "repo_paths" => repo_paths
+          },
+          extra_config
+        )
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "claim-repo-#{System.unique_integer([:positive])}",
+          prefix: "crp",
+          config: config
+        })
+
+      ws
+    end
+
+    defp stub_claim_43 do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            Req.Test.json(conn, [issue_payload()])
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+    end
+
+    test "a claim auto-fills the workspace's only repo" do
+      ws = repo_ws!(%{"arbiter" => "/srv/arbiter"})
+      stub_claim_43()
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.repo == "arbiter"
+    end
+
+    test "a claim falls back to the workspace default_repo" do
+      ws =
+        repo_ws!(
+          %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          %{"default_repo" => "tonic_device"}
+        )
+
+      stub_claim_43()
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.repo == "tonic_device"
+    end
+
+    test "an explicit --repo override still wins" do
+      ws =
+        repo_ws!(
+          %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          %{"default_repo" => "tonic_device"}
+        )
+
+      stub_claim_43()
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43", repo: "tonic")
+      assert task.repo == "tonic"
+    end
+
+    test "a claim with nothing to resolve fails, naming the configured keys" do
+      ws = repo_ws!(%{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"})
+      stub_claim_43()
+
+      assert {:error, error} = Claim.claim(ws, "43")
+      assert Exception.message(error) =~ "tonic_device"
+    end
+
+    test "an explicit --repo that is not configured is rejected" do
+      ws = repo_ws!(%{"tonic" => "/srv/tonic"})
+      stub_claim_43()
+
+      assert {:error, error} = Claim.claim(ws, "43", repo: "tonc")
+      assert Exception.message(error) =~ "tonc"
+    end
+
+    test "a sync auto-claim gets the workspace repo too" do
+      ws = repo_ws!(%{"arbiter" => "/srv/arbiter"})
+      stub_claim_43()
+
+      assert {:ok, [{:create, "43", _} | _] = plan} = Claim.plan(ws)
+      assert {:ok, [{:created, task}]} = Claim.apply_plan(ws, plan)
+      assert task.repo == "arbiter"
+    end
+
+    test "a sync auto-claim reports the failure per-action when nothing resolves" do
+      ws = repo_ws!(%{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"})
+      stub_claim_43()
+
+      assert {:ok, plan} = Claim.plan(ws)
+      assert {:ok, [{:error, {:create, "43", _}, error}]} = Claim.apply_plan(ws, plan)
+      assert Exception.message(error) =~ "tonic"
+    end
+  end
+
   describe "plan/1 and apply_plan/2 — GitHub" do
     test "creates tasks for assigned-open issues with no task, and closes orphan tasks",
          %{github_ws: ws} do

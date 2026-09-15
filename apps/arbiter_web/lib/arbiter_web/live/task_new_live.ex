@@ -27,6 +27,7 @@ defmodule ArbiterWeb.TaskNewLive do
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
+  alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Dispatch
   alias ArbiterWeb.TaskForm
@@ -235,18 +236,32 @@ defmodule ArbiterWeb.TaskNewLive do
   end
 
   # Repo choices for the workspace currently picked in the form (bd-2jum8j).
-  # Blank means "unassigned", which is what a single-repo workspace wants — it
-  # auto-selects at dispatch anyway. Delegated to `Dispatch.all_available_repos/1`
-  # so the form can't offer a repo whose configured path no longer resolves.
+  # Delegated to `Dispatch.all_available_repos/1` so the form can't offer a
+  # repo whose configured path no longer resolves.
+  #
+  # bd-9dwbvt: blank no longer means "unassigned" — the create action resolves
+  # the workspace's repo for you — so the blank choice says which repo that
+  # will be, or that you have to pick one when nothing resolves.
   defp repo_options(params, workspaces) do
-    ws_id =
-      TaskForm.trimmed(params["workspace_id"]) ||
-        case workspaces do
-          [%{id: id} | _] -> id
-          _ -> nil
-        end
+    ws_id = form_workspace_id(params, workspaces)
 
-    [{"— unassigned —", ""}] ++ Enum.map(Dispatch.all_available_repos(ws_id), &{&1, &1})
+    [{blank_repo_label(ws_id), ""}] ++ Enum.map(Dispatch.all_available_repos(ws_id), &{&1, &1})
+  end
+
+  defp form_workspace_id(params, workspaces) do
+    TaskForm.trimmed(params["workspace_id"]) ||
+      case workspaces do
+        [%{id: id} | _] -> id
+        _ -> nil
+      end
+  end
+
+  defp blank_repo_label(ws_id) do
+    case IssueRepo.resolve(ws_id, nil) do
+      {:ok, nil} -> "— unassigned —"
+      {:ok, repo} -> "— workspace default (#{repo}) —"
+      {:error, _} -> "— pick a repo —"
+    end
   end
 
   defp difficulty_value(params) do
@@ -407,7 +422,7 @@ defmodule ArbiterWeb.TaskNewLive do
             />
             <ArbiterWeb.CoreComponents.Forms.select
               name="task[repo]"
-              label="Repo (optional)"
+              label="Repo"
               options={repo_options(@form_params, @workspaces)}
               value={TaskForm.value(@form_params, "repo")}
             />
