@@ -32,8 +32,8 @@ defmodule Arbiter.MCP.Catalog do
   | `task_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
   | `task_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
-  | `dep_add` | coordinator | `Ash.create(Dependency, …)` (use `parent_of` to attach a child) |
-  | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
+  | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
+  | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
   | `worker_resume` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.resume/2` |
   | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) / `Arbiter.Reviews.ExternalReview.dispatch/1` (`pr`) |

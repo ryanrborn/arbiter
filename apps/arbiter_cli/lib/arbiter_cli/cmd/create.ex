@@ -80,6 +80,24 @@ defmodule ArbiterCli.Cmd.Create do
   upstream-create failure semantics: the task is durable, the failure is
   surfaced.
 
+  ### Edge validation and the atomicity gap (bd-apj0gq)
+
+  `--deps` and `--parent` POST to `/api/dependencies`, which now goes through
+  `Arbiter.Tasks.Dependencies` — so an edge into another workspace, or one that
+  would close a `depends_on`/`blocks` cycle, is refused, and the server's
+  message (naming the two workspaces, or the cycle) is what arb prints.
+
+  **Creation is still not atomic**: `arb create --deps/--parent` is one HTTP
+  call for the issue and one per edge, so a rejected edge leaves the task
+  created with the edge missing (arb says so and exits non-zero; re-run
+  `arb dep add` once the conflict is resolved). This is a deliberate remaining
+  gap, not an oversight — the CLI is a plain HTTP client and cannot call the
+  facade in-process, and closing it properly means teaching `POST /api/issues`
+  to accept edges so the issue and its edges share one transaction. It is
+  benign for scheduling: `refined` is not in `Issue`'s `:create` accept list,
+  so a newly created task lands in Backlog and cannot be dispatched in the
+  window before its edges land.
+
   `--labels` is accepted for interface parity with `bd` but the current Issue
   resource has no `labels` field; the value is reported back in a warning
   unless `--json` is set. The `labels` field is not yet part of the Issue resource.

@@ -62,6 +62,33 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert err =~ "failed to attach bd-007 to parent bd-epic"
   end
 
+  # bd-apj0gq: /api/dependencies now validates edges (cycles, cross-workspace).
+  # The operator has to see *why* the edge was refused, not a generic failure —
+  # the server's message names the cycle, and it must reach stderr intact.
+  test "--deps surfaces the server's edge-validation message verbatim" do
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
+      {{"post", "/api/dependencies"},
+       {%{
+          "error" => %{
+            "type" => "invalid_request",
+            "message" =>
+              "blocks bd-009 → bd-007 would create a dependency cycle: bd-009 → bd-007 → bd-009",
+            "details" => %{}
+          }
+        }, 400}}
+    ])
+
+    {_out, err, exit_code} = capture(fn -> Create.run(["X", "--deps", "bd-009"]) end)
+
+    refute exit_code == 0
+    assert err =~ "failed to add dependency bd-009 -> bd-007"
+    assert err =~ "would create a dependency cycle"
+    assert err =~ "bd-009 → bd-007 → bd-009"
+  end
+
   test "no title argument exits non-zero" do
     {_out, err, exit_code} = capture(fn -> Create.run([]) end)
     assert exit_code == 1
