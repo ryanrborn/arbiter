@@ -300,4 +300,73 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       refute line =~ "net=off"
     end
   end
+
+  # bd-5xlkkj gave interactive coordinator sessions their own profile. The whole
+  # point was that the headless worker's posture does not move with it, so this
+  # pins the worker side rather than the new side.
+  describe "the headless worker profile is unchanged by the session profile (bd-5xlkkj)" do
+    test "base/0 still bypasses the interactive classifier" do
+      assert SecurityPolicy.base().permissions.mode == :bypass
+      assert SecurityPolicy.default().permissions.mode == :bypass
+    end
+
+    test "base/0 still denies the async-wait tools a --print worker cannot use" do
+      assert :no_async_wait in SecurityPolicy.base().permissions.safe_defaults
+
+      deny = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.base())
+      assert "Monitor" in deny
+      assert "ScheduleWakeup" in deny
+    end
+
+    test "the worker's generated settings still say bypassPermissions" do
+      settings = Arbiter.Agents.Claude.Security.settings(SecurityPolicy.default())
+      assert settings["permissions"]["defaultMode"] == "bypassPermissions"
+    end
+  end
+
+  describe "interactive_session/0 (bd-5xlkkj)" do
+    test "runs in auto mode — a human is at the keyboard, so the classifier can ask" do
+      assert SecurityPolicy.interactive_session().permissions.mode == :auto
+    end
+
+    test "drops only :no_async_wait from the baseline categories" do
+      worker = SecurityPolicy.base().permissions.safe_defaults
+      session = SecurityPolicy.interactive_session().permissions.safe_defaults
+
+      assert worker -- session == [:no_async_wait]
+      assert session -- worker == []
+    end
+
+    test "keeps the destructive, secret-read and PR-create denies" do
+      deny = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.interactive_session())
+
+      assert "Bash(rm -rf:*)" in deny
+      assert "Bash(git push --force:*)" in deny
+      assert "Read(**/.env)" in deny
+      assert "Write(~/.ssh/**)" in deny
+      assert "Bash(gh pr create:*)" in deny
+      assert "Bash(glab mr create:*)" in deny
+      refute "Monitor" in deny
+      refute "ScheduleWakeup" in deny
+    end
+
+    test "reads its own config key, not the worker's" do
+      previous = Application.get_env(:arbiter, :worker_security_policy)
+
+      Application.put_env(:arbiter, :worker_security_policy, %{
+        "permissions" => %{"mode" => "strict"}
+      })
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:arbiter, :worker_security_policy, previous)
+        else
+          Application.delete_env(:arbiter, :worker_security_policy)
+        end
+      end)
+
+      assert SecurityPolicy.default().permissions.mode == :strict
+      assert SecurityPolicy.interactive_session().permissions.mode == :auto
+    end
+  end
 end

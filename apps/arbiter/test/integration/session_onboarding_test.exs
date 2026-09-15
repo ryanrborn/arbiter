@@ -56,14 +56,21 @@ defmodule Arbiter.Integration.SessionOnboardingTest do
   alias Arbiter.Sessions.Layout
   alias Arbiter.Test.SessionEnv
 
-  # What the three §9.2 gates look like on screen. Any of these means a gate we
-  # were supposed to have pre-answered is still blocking.
+  # What a §9.2 gate looks like on screen. Any of these means a gate we were
+  # supposed to have pre-answered is still blocking.
+  #
+  # The last two are §9.2.1 (bd-5xlkkj): the first real launch of a provisioned
+  # session cleared the original three and then stopped on these. Their exact
+  # wording is copied out of the installed CLI (Claude Code 2.1.272), not
+  # paraphrased from the screenshot.
   @wizard_markers [
     "Select login method",
     "Choose the text style",
     "Do you trust the files in this folder",
     "Let's get started",
-    "console.anthropic.com/oauth"
+    "console.anthropic.com/oauth",
+    "New MCP server found in this project:",
+    "WARNING: Claude Code running in Bypass Permissions mode"
   ]
 
   # What a working prompt looks like. Any one is enough — the banner text moves
@@ -169,6 +176,11 @@ defmodule Arbiter.Integration.SessionOnboardingTest do
 
     assert ready?(screen),
            "the session never reached a prompt within the timeout:\n\n#{screen}"
+
+    # bd-5xlkkj AC 2: the posture the session actually came up in, not just the
+    # absence of the warning screen. `Ko.auto.indicator` in the CLI bundle is
+    # the string the footer draws for auto mode.
+    assert File.read!(Path.join(session.config_dir, "settings.json")) =~ ~s("defaultMode": "auto")
 
     # And the revocation half of §9.3, end to end on a live session.
     {:ok, killed} = Sessions.kill(session.id)
