@@ -82,6 +82,37 @@ defmodule ArbiterCli.OutputTest do
       refute Output.format_issue_detail(issue) =~ "Estimate:"
     end
 
+    # bd-18vl9q: "$X spent · ~$Y-Z to go" rendered for an epic.
+    test "renders the epic cost rollup" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "epic_rollup" => %{
+          "spent" => 20.0,
+          "to_go_low" => 6.0,
+          "to_go_high" => 16.0,
+          "closed_count" => 2,
+          "dispatchable_count" => 2,
+          "excluded_count" => 1,
+          "upcoming_count" => 3
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Rollup:"
+      assert out =~ "Rollup:     $20.00 spent"
+      assert out =~ "~$6.00–$16.00 to go"
+      assert out =~ "closed=2"
+      assert out =~ "dispatchable=2"
+      assert out =~ "excluded=1"
+      assert out =~ "upcoming=3"
+    end
+
+    test "omits the cost rollup line when there is no epic rollup" do
+      issue = %{"id" => "x", "title" => "T", "epic_rollup" => nil}
+      refute Output.format_issue_detail(issue) =~ "Rollup:"
+    end
+
     test "renders tracker label only when tracker is meaningful" do
       issue = %{"id" => "x", "title" => "T", "tracker_type" => "jira", "tracker_ref" => "VR-1"}
       assert Output.format_issue_detail(issue) =~ "Tracker:"

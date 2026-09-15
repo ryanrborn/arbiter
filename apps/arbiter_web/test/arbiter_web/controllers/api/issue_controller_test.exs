@@ -502,6 +502,45 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert Map.has_key?(body, "estimate")
       assert body["estimate"] == nil
     end
+
+    # bd-18vl9q AC3: `arb issue show` renders the epic cost rollup for an
+    # `:epic` issue.
+    test "carries the epic cost rollup for an epic", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "an epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, child} =
+        Ash.create(Issue, %{title: "a child", workspace_id: ws.id, issue_type: :task})
+
+      {:ok, closed} = Ash.update(child, %{close_upstream: false}, action: :close)
+
+      {:ok, _ev} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: closed.id,
+          base_task_id: closed.id,
+          role: "base",
+          source: :task,
+          step: :work,
+          workspace_id: ws.id,
+          cost_usd: 4.25,
+          occurred_at: DateTime.utc_now()
+        })
+
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(epic.id, closed.id, :parent_of)
+
+      body = conn |> get(~p"/api/issues/#{epic.id}") |> json_response(200)
+
+      assert body["epic_rollup"]["spent"] == 4.25
+      assert body["epic_rollup"]["closed_count"] == 1
+    end
+
+    test "epic_rollup is null for a non-epic issue", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "not an epic", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert Map.has_key?(body, "epic_rollup")
+      assert body["epic_rollup"] == nil
+    end
   end
 
   describe "GET /api/issues" do

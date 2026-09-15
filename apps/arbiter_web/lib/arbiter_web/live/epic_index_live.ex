@@ -42,6 +42,7 @@ defmodule ArbiterWeb.EpicIndexLive do
   alias Arbiter.Tasks
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Usage
 
   require Ash.Query
 
@@ -128,6 +129,7 @@ defmodule ArbiterWeb.EpicIndexLive do
 
     rollups = Tasks.epic_rollups(epics)
     workspaces = Map.new(socket.assigns.workspaces, &{&1.id, &1})
+    sample = Arbiter.Usage.Estimate.sample()
 
     rows =
       epics
@@ -135,6 +137,7 @@ defmodule ArbiterWeb.EpicIndexLive do
         %{
           epic: e,
           rollup: Map.fetch!(rollups, e.id),
+          cost_rollup: Usage.epic_cost_rollup(e, sample: sample),
           workspace_name: workspace_name(workspaces, e.workspace_id)
         }
       end)
@@ -426,6 +429,17 @@ defmodule ArbiterWeb.EpicIndexLive do
           </span>
         </div>
 
+        <%!-- bd-18vl9q, design bd-9jj5lf §4: the compact cost rollup — worker
+             spend only (excludes coordinator-session overhead). --%>
+        <div
+          :if={@row.cost_rollup}
+          id={"epic-#{@row.epic.id}-cost-rollup"}
+          class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
+          title="Worker spend only — excludes coordinator session overhead"
+        >
+          {cost_rollup_label(@row.cost_rollup)}
+        </div>
+
         <div
           :if={@row.rollup.stuck != []}
           class="flex flex-wrap items-center gap-1.5"
@@ -528,4 +542,13 @@ defmodule ArbiterWeb.EpicIndexLive do
   end
 
   defp relative_age(_), do: "—"
+
+  # bd-18vl9q: "$X spent · ~$Y-Z to go" (design bd-9jj5lf §4). Upcoming
+  # (unpromoted Backlog) spend is deliberately not in the headline range —
+  # only committed, dispatchable work shapes the "to go" number.
+  defp cost_rollup_label(%{spent: spent, to_go_low: lo, to_go_high: hi}) do
+    "#{money(spent)} spent · ~#{money(lo)}–#{money(hi)} to go"
+  end
+
+  defp money(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
 end

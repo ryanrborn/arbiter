@@ -13,8 +13,13 @@ defmodule ArbiterWeb.Api.IssueJSON do
 
   # bd-3j4ch4: the single-issue read carries a cost estimate (or an explicit
   # null — "no estimate yet" has to be distinguishable from "$0").
-  def show(%{issue: issue, estimate: estimate}),
-    do: Map.put(data(issue), :estimate, estimate)
+  # bd-18vl9q: and the epic cost rollup, null for a non-epic issue.
+  def show(%{issue: issue, estimate: estimate, epic_rollup: epic_rollup}) do
+    issue
+    |> data()
+    |> Map.put(:estimate, estimate)
+    |> Map.put(:epic_rollup, epic_rollup)
+  end
 
   def show(%{issue: issue}), do: data(issue)
 

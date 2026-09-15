@@ -107,6 +107,25 @@ defmodule Arbiter.Tasks.EpicRollup do
     Map.fetch!(for_epics([epic]), id)
   end
 
+  @doc """
+  Per-child classification for one epic: bucket (see moduledoc) plus whether
+  the child is held by an open gating blocker. The shared basis for
+  `for_epics/1`'s counts and `Arbiter.Usage.Estimate.epic_cost_rollup/2`'s
+  dispatchable/excluded split (design bd-9jj5lf §4) — one membership +
+  blocking read, not two independently-derived ones.
+  """
+  @spec children_with_status(Issue.t() | String.t()) :: [
+          %{issue: Issue.t(), bucket: atom(), blocked?: boolean()}
+        ]
+  def children_with_status(epic) do
+    children = children_of(epic_id(epic))
+    blocked = blocked_ids(children)
+
+    Enum.map(children, fn child ->
+      %{issue: child, bucket: bucket(child), blocked?: MapSet.member?(blocked, child.id)}
+    end)
+  end
+
   defp epic_id(%{id: id}), do: id
   defp epic_id(id) when is_binary(id), do: id
 
