@@ -8,7 +8,26 @@ System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
 # so they run by default and are skipped only where node is absent.
 node_exclude = if System.find_executable("node"), do: [], else: [:node]
 
-ExUnit.start(exclude: node_exclude)
+# bd-c76fu9: `:browser` tests bundle the real terminal hook with esbuild and
+# run it inside a headless Chromium over the DevTools Protocol, because the
+# canvas renderer and the §6.3 key bindings cannot be checked anywhere else.
+# Still no npm — the browser and the esbuild binary are ones already on disk —
+# but a machine without either has nothing to run, so the tag is excluded
+# rather than failing.
+chrome_candidates = [
+  System.get_env("ARB_CHROME"),
+  Path.expand("~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome"),
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/google-chrome"
+]
+
+browser_exclude =
+  if node_exclude == [] and Enum.any?(chrome_candidates, &(&1 && File.exists?(&1))),
+    do: [],
+    else: [:browser]
+
+ExUnit.start(exclude: node_exclude ++ browser_exclude)
 Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual)
 
 # bd-5scl0c: report loudly, with attribution, if anything is killed while
