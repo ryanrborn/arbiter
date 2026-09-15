@@ -329,10 +329,12 @@ defmodule ArbiterWeb.SessionLive do
         export default {
           mounted() {
             this.statusEl = document.getElementById("terminal-status")
+            this.state = "connecting"
 
             this.terminal = createSessionTerminal(this.el, {
               sessionId: this.el.dataset.sessionId,
               onStatus: (state) => {
+                this.state = state
                 this.setState(state)
                 // The page cannot see the channel, so it is told. Without this
                 // a terminal that never starts is indistinguishable from one
@@ -342,6 +344,7 @@ defmodule ArbiterWeb.SessionLive do
               },
               onMeta: (meta) => this.setMeta(meta),
               onExit: (payload) => {
+                this.state = "ended"
                 this.setState("ended")
                 this.pushEvent("agent_exited", payload || {})
               },
@@ -353,6 +356,19 @@ defmodule ArbiterWeb.SessionLive do
             this.handleEvent("session:detach", () => this.terminal.detach())
 
             this.terminal.focus()
+          },
+
+          // A LiveView rejoin re-runs `mount/3` — `terminal_live?` is back to
+          // false, the strip is re-rendered as "connecting…" and a fresh stall
+          // check is armed — but it does *not* re-mount hooks. The terminal's
+          // own `/session` socket is separate and usually never dropped, so
+          // `onStatus` has nothing new to report and nothing re-announces the
+          // state. Without this the page would tell the operator to reload a
+          // terminal that is working.
+          reconnected() {
+            this.statusEl = document.getElementById("terminal-status")
+            this.setState(this.state)
+            if (this.state === "live") this.pushEvent("terminal_live", {})
           },
 
           destroyed() {

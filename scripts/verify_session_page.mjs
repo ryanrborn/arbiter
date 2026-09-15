@@ -131,9 +131,19 @@ process.exit(failed ? 1 : 0)
 
 async function run(page) {
   await page.goto(`${BASE}/sessions`)
+  // `isConnected()` reports the *socket*, not the root LiveView: between the
+  // socket opening and the view's join reply landing there is a window where
+  // the button exists but no view owns its `phx-click`, and a click fired
+  // there is dropped silently. `phx-connected` is set in `hideLoader()`, off
+  // the join reply, so it is the earliest point a click is guaranteed to be
+  // routed.
   await page.poll(
-    "!!window.liveSocket && window.liveSocket.isConnected()",
-    "the dashboard's LiveView socket never connected"
+    `(() => {
+       if (!window.liveSocket || !window.liveSocket.isConnected()) return false
+       const main = document.querySelector("[data-phx-main]")
+       return !!main && main.classList.contains("phx-connected")
+     })()`,
+    "the dashboard's root LiveView never joined"
   )
 
   // A marker that only a *full page load* can clear. Criterion 1 is about the
@@ -156,10 +166,25 @@ async function run(page) {
     })
   `)
 
-  await page.eval(`document.getElementById("launch-session").click()`)
-
+  // The click is re-issued every poll until the URL changes, so a click lost
+  // to any residual race costs 100ms rather than the whole deadline. It cannot
+  // launch a second session: LiveView marks the clicked element with
+  // `data-phx-ref-src` + `phx-click-loading` for exactly as long as the server
+  // has that event in flight, and both are gone only once the reply (here, the
+  // redirect) has been applied.
   const sessionId = await page.pollValue(
-    `(document.location.pathname.match(/^\\/sessions\\/(.+)$/) || [])[1] || null`,
+    `(() => {
+       const match = document.location.pathname.match(/^\\/sessions\\/(.+)$/)
+       if (match) return match[1]
+
+       const button = document.getElementById("launch-session")
+       const inFlight =
+         !button ||
+         button.hasAttribute("data-phx-ref-src") ||
+         button.classList.contains("phx-click-loading")
+       if (!inFlight) button.click()
+       return null
+     })()`,
     "the launch never navigated to /sessions/<id>"
   )
   console.log(`SESSION ${sessionId}`)
@@ -201,6 +226,30 @@ async function run(page) {
   )
 
   if (state !== "live") return
+
+  // -- a LiveView-only rejoin must not false-flag a stall ---------------------
+  //
+  // Dropping the *LiveView* socket re-runs `mount/3`: `terminal_live?` is back
+  // to false and a fresh stall check is armed. The terminal's own `/session`
+  // socket stays up, so nothing on the channel changes and only the hook's
+  // `reconnected()` can re-announce the state. The verdict is taken further
+  // down, once the server's 8s stall window has elapsed.
+  await page.eval(`
+    window.__arbRejoined = false
+    window.liveSocket.disconnect(() => {
+      window.__arbRejoined = true
+      window.liveSocket.connect()
+    })
+  `)
+  await page.poll("window.__arbRejoined === true", "the LiveView socket never dropped")
+  await page.poll(
+    `(() => {
+       const main = document.querySelector("[data-phx-main]")
+       return !!main && main.classList.contains("phx-connected")
+     })()`,
+    "the LiveView never rejoined"
+  )
+  const rejoinedAt = Date.now()
 
   // -- criterion 2: every fitted row is actually visible ----------------------
 
@@ -246,6 +295,28 @@ async function run(page) {
     "ctrl-shift-v-reaches-the-hook",
     JSON.parse(paste).length > 0,
     `document saw ${paste} (the pane's bytes are asserted server-side)`
+  )
+
+  // -- the deferred verdict on the rejoin's stall banner ----------------------
+  //
+  // `@stall_ms` is 8s from the rejoin's `mount/3`. The checks above have
+  // already burned part of it; wait out the rest plus a margin, then the
+  // banner is either there or it never will be.
+  await page.settle(Math.max(0, rejoinedAt + 9_500 - Date.now()))
+
+  const afterStall = await page.eval(
+    `(() => {
+       const stalled = !!document.getElementById("terminal-stalled")
+       const el = document.getElementById("terminal-status")
+       return JSON.stringify({ stalled, state: el && el.dataset.state })
+     })()`
+  )
+  const stallVerdict = JSON.parse(afterStall)
+
+  check(
+    "a-liveview-rejoin-does-not-claim-the-terminal-stalled",
+    !stallVerdict.stalled && stallVerdict.state === "live",
+    `stall banner=${stallVerdict.stalled} status=${stallVerdict.state}`
   )
 
   // -- criterion 4: kill replaces the terminal, live --------------------------
