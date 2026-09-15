@@ -330,7 +330,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
       assert html =~ "Task default (org/beta)"
 
-      {:ok, unassigned} = Ash.create(Issue, %{title: "unassigned", workspace_id: ws.id})
+      # bd-9dwbvt: `:create` now binds a repo, so an unassigned task is built
+      # the way one survives in the wild — filed with a repo, then cleared.
+      {:ok, unassigned} =
+        Ash.create(Issue, %{title: "unassigned", workspace_id: ws.id, repo: "org/alpha"})
+
+      {:ok, unassigned} = Ash.update(unassigned, %{repo: nil})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{unassigned.id}")
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
@@ -345,7 +350,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           config: %{"repo_paths" => %{"org/alpha" => "/tmp/arb-a", "org/beta" => "/tmp/arb-b"}}
         })
 
-      {:ok, task} = Ash.create(Issue, %{title: "ambiguous", workspace_id: ws.id})
+      {:ok, task} =
+        Ash.create(Issue, %{title: "ambiguous", workspace_id: ws.id, repo: "org/alpha"})
+
+      # bd-9dwbvt: dispatch's ambiguity only arises for a task with no repo,
+      # which is now a post-create state rather than a creatable one.
+      {:ok, task} = Ash.update(task, %{repo: nil})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
