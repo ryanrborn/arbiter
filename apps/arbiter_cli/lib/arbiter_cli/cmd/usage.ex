@@ -10,7 +10,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
   Usage:
 
-      arb usage [--by day|task|epic|workspace|repo|model|step|provider|source]
+      arb usage [--by day|task|epic|workspace|repo|model|step|provider|source|session]
                 [--since YYYY-MM-DD | <iso8601>]
                 [--workspace <id>]
                 [--limit N]
@@ -18,6 +18,7 @@ defmodule ArbiterCli.Cmd.Usage do
       arb usage events [--task <task-id>] [--workspace <id>] [--step work|review|impl]
                        [--source task|probe|preflight|coordinator_session|terminal_session|maintenance]
                        [--since ...] [--limit N] [--json]
+      arb usage --session <id> [--since ...] [--limit N] [--json]
       arb usage --calibration [--workspace <id>] [--window-days N] [--json]
 
   `--by campaign` is still accepted as a deprecated alias for `--by epic`.
@@ -50,6 +51,14 @@ defmodule ArbiterCli.Cmd.Usage do
   whole history at its real dates — expect `--since 30d` to jump, and `--since
   1d` not to.
 
+  ## `--by session` / `--session <id>` (§7.6)
+
+  `--by session` groups session-sourced rows only (`session_id` present) into
+  one row per session — cost, tokens, duration — mirroring how `--by task`
+  above excludes rows that carry no task. `--session <id>` is the drill-down:
+  the raw event rows for one session, newest first, the same shape `events`
+  prints.
+
   ## `--calibration`: which D-ratings the money disagrees with (bd-3j4ch4)
 
   For every closed task in a 60-day window, compare what it actually cost
@@ -79,8 +88,23 @@ defmodule ArbiterCli.Cmd.Usage do
       rest = Output.drop_json(argv)
 
       case rest do
-        ["events" | tail] -> events(tail, mode)
-        _ -> if calibration?(rest), do: calibration(rest, mode), else: summarize(rest, mode)
+        ["events" | tail] ->
+          events(tail, mode)
+
+        _ ->
+          cond do
+            calibration?(rest) ->
+              calibration(rest, mode)
+
+            "--session" in rest and is_nil(session_flag(rest)) ->
+              Output.die("--session requires an id")
+
+            session_id = session_flag(rest) ->
+              session_detail(session_id, rest, mode)
+
+            true ->
+              summarize(rest, mode)
+          end
       end
     end
   end
@@ -124,6 +148,7 @@ defmodule ArbiterCli.Cmd.Usage do
           workspace: :string,
           step: :string,
           source: :string,
+          session: :string,
           since: :string,
           limit: :integer
         ]
@@ -135,6 +160,36 @@ defmodule ArbiterCli.Cmd.Usage do
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
       |> maybe_put(:step, Keyword.get(opts, :step))
       |> maybe_put(:source, Keyword.get(opts, :source))
+      |> maybe_put(:session_id, Keyword.get(opts, :session))
+      |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
+      |> maybe_put(:limit, Keyword.get(opts, :limit) || @default_event_limit)
+
+    case Client.get("/api/usage/events", params) do
+      {:ok, %{"data" => rows}} -> emit_events(rows, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # ---- session detail (§7.6) ----------------------------------------------
+
+  # `--session <id>` is a top-level flag (not nested under `events`), so it is
+  # detected the same way `--calibration` is: parsed out of the raw argv
+  # before deciding which subcommand to run.
+  defp session_flag(argv) do
+    {opts, _rest, _bad} = OptionParser.parse(argv, switches: [session: :string])
+    Keyword.get(opts, :session)
+  end
+
+  defp session_detail(session_id, argv, mode) do
+    {opts, _rest, _bad} =
+      OptionParser.parse(argv,
+        switches: [session: :string, workspace: :string, since: :string, limit: :integer]
+      )
+
+    params =
+      []
+      |> maybe_put(:session_id, session_id)
+      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
       |> maybe_put(:limit, Keyword.get(opts, :limit) || @default_event_limit)
 
@@ -301,7 +356,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
     Enum.each(rows, fn ev ->
       IO.puts(
-        "  #{ev["occurred_at"]}  source=#{ev["source"] || "task"}  task=#{ev["task_id"] || "-"}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
+        "  #{ev["occurred_at"]}  source=#{ev["source"] || "task"}  task=#{ev["task_id"] || "-"}  session=#{ev["session_id"] || "-"}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
       )
     end)
   end

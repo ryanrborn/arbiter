@@ -297,6 +297,10 @@ defmodule ArbiterWeb.SessionLive do
             class="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--border-default)] text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
           >
             <span data-role="state">connecting…</span>
+            <%!-- Live cost HUD (§7.5, phase 7): hook-owned, same reason the
+                  rest of this strip is — a value that updates every ~2s must
+                  not become a LiveView diff. --%>
+            <span data-role="usage" class="text-[var(--text-label)]"></span>
             <span data-role="meta" class="ml-auto text-[var(--text-label)]"></span>
           </div>
 
@@ -385,6 +389,12 @@ defmodule ArbiterWeb.SessionLive do
           ended: "agent exited"
         }
 
+        function formatTokens(n) {
+          if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+          if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+          return String(n)
+        }
+
         export default {
           mounted() {
             this.statusEl = document.getElementById("terminal-status")
@@ -402,6 +412,7 @@ defmodule ArbiterWeb.SessionLive do
                 if (state === "live") this.pushEvent("terminal_live", {})
               },
               onMeta: (meta) => this.setMeta(meta),
+              onUsage: (payload) => this.setUsage(payload),
               onExit: (payload) => {
                 this.state = "ended"
                 this.setState("ended")
@@ -452,6 +463,27 @@ defmodule ArbiterWeb.SessionLive do
             const clients = meta.attached_clients
             slot.textContent =
               `${meta.cols}x${meta.rows}` + (clients > 1 ? ` · ${clients} clients` : "")
+          },
+
+          // Each `usage` event carries the file's *cumulative* tokens and
+          // latest known cost (§7.5, phase 7) — assigned, not accumulated,
+          // so a tab that (re)attaches mid-session shows the right number on
+          // its very next tick instead of resuming from zero or double
+          // counting against a reader that restarted.
+          setUsage(payload) {
+            if (!this.statusEl || !payload) return
+            const slot = this.statusEl.querySelector('[data-role="usage"]')
+            if (!slot) return
+
+            const tokensIn = payload.tokens_in || 0
+            const tokensOut = payload.tokens_out || 0
+
+            const tokens = `${formatTokens(tokensIn)} in / ${formatTokens(tokensOut)} out`
+            const cost =
+              typeof payload.cost_usd === "number" ? `$${payload.cost_usd.toFixed(2)}` : "cost unavailable"
+            const marker = payload.estimated ? " (estimated)" : ""
+
+            slot.textContent = `${tokens} · ${cost}${marker}`
           }
         }
       </script>

@@ -11,6 +11,7 @@ defmodule Arbiter.Sessions.StreamTest do
   """
   use ExUnit.Case, async: true
 
+  alias Arbiter.Sessions
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Stream
@@ -653,6 +654,201 @@ defmodule Arbiter.Sessions.StreamTest do
 
       assert {:error, {:tmux_failed, 1, "no server running"}} = attach(session, opts)
       wait_until(fn -> Stream.whereis(id) == nil end)
+    end
+  end
+
+  describe "live cost HUD (§7.5, phase 7)" do
+    defp write_jsonl(path, lines) do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, Enum.map_join(lines, "", &(&1 <> "\n")))
+    end
+
+    defp usage_session(id, tmp_dir, provider_session_id) do
+      config_dir = Path.join(tmp_dir, "claude-config-#{id}")
+      path = Path.join([config_dir, "projects", "proj", provider_session_id <> ".jsonl"])
+
+      {
+        %Session{
+          id: id,
+          tmux_socket: Path.join(tmp_dir, "s.sock"),
+          config_dir: config_dir,
+          provider_session_id: provider_session_id
+        },
+        path
+      }
+    end
+
+    test "publishes token deltas and the last known cost on a timer", %{
+      id: id,
+      opts: opts,
+      tmp_dir: tmp_dir
+    } do
+      provider_session_id = "prov-#{id}"
+      {session, path} = usage_session(id, tmp_dir, provider_session_id)
+
+      write_jsonl(path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:00.000Z","sessionId":"#{provider_session_id}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50}}})
+      ])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(id))
+
+      {:ok, _attached} = attach(session, opts, usage_poll_interval_ms: 5)
+
+      assert_receive {:session_usage, ^id, payload}, 1_000
+      assert payload.tokens_in == 100
+      assert payload.tokens_out == 50
+      assert payload.model == "claude-opus-5"
+      # 2.1.270+ writes no cost-state, so this file's cost (if any) is always
+      # `ClaudePricing`'s estimate, never the CLI's own figure.
+      assert payload.estimated == true
+    end
+
+    test "a second tick reports the file's cumulative totals, not just what changed", %{
+      id: id,
+      opts: opts,
+      tmp_dir: tmp_dir
+    } do
+      provider_session_id = "prov-#{id}"
+      {session, path} = usage_session(id, tmp_dir, provider_session_id)
+
+      write_jsonl(path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:00.000Z","sessionId":"#{provider_session_id}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50}}})
+      ])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(id))
+      {:ok, _attached} = attach(session, opts, usage_poll_interval_ms: 5)
+
+      assert_receive {:session_usage, ^id, first}, 1_000
+      assert first.tokens_in == 100
+
+      File.write!(
+        path,
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:05.000Z","sessionId":"#{provider_session_id}","message":{"id":"m2","model":"claude-opus-5","usage":{"input_tokens":30,"output_tokens":10}}}) <>
+          "\n",
+        [:append]
+      )
+
+      # Cumulative, not a delta: a client attaching only in time for this
+      # second push must still see the session's whole-life totals.
+      assert_receive {:session_usage, ^id, second}, 1_000
+      assert second.tokens_in == 130
+      assert second.tokens_out == 60
+    end
+
+    test "discovers the provider session id from disk when the row has none", %{
+      id: id,
+      opts: opts,
+      tmp_dir: tmp_dir
+    } do
+      provider_session_id = "prov-#{id}"
+      {session, path} = usage_session(id, tmp_dir, provider_session_id)
+      session = %{session | provider_session_id: nil}
+
+      write_jsonl(path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:00.000Z","sessionId":"#{provider_session_id}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50}}})
+      ])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(id))
+      {:ok, _attached} = attach(session, opts, usage_poll_interval_ms: 5)
+
+      assert_receive {:session_usage, ^id, payload}, 1_000
+      assert payload.tokens_in == 100
+      assert payload.tokens_out == 50
+    end
+
+    test "a rollover onto a newer *.jsonl mid-session is picked up, not pinned to the stale id",
+         %{
+           id: id,
+           opts: opts,
+           tmp_dir: tmp_dir
+         } do
+      old_provider_session_id = "prov-old-#{id}"
+      {session, old_path} = usage_session(id, tmp_dir, old_provider_session_id)
+
+      write_jsonl(old_path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:00.000Z","sessionId":"#{old_provider_session_id}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50}}})
+      ])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(id))
+      {:ok, _attached} = attach(session, opts, usage_poll_interval_ms: 5)
+
+      assert_receive {:session_usage, ^id, first}, 1_000
+      assert first.tokens_in == 100
+
+      # `--resume`/compaction rolls the CLI onto a new file without deleting
+      # the old one (`usage_ingest.ex`'s rollover note) — the old file's
+      # `{size, mtime}` never changes again, so a reader pinned to it would go
+      # dark for the rest of the session.
+      new_provider_session_id = "prov-new-#{id}"
+      new_path = Path.join(Path.dirname(old_path), new_provider_session_id <> ".jsonl")
+
+      write_jsonl(new_path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:05:00.000Z","sessionId":"#{new_provider_session_id}","message":{"id":"m2","model":"claude-opus-5","usage":{"input_tokens":40,"output_tokens":20}}})
+      ])
+
+      # Force the new file strictly newer than the old one — both writes can
+      # otherwise land in the same wall-clock second and tie.
+      {:ok, %{mtime: old_mtime}} = File.stat(old_path, time: :posix)
+      File.touch!(new_path, old_mtime + 1)
+
+      assert_receive {:session_usage, ^id, second}, 1_000
+      assert second.tokens_in == 40
+      assert second.tokens_out == 20
+    end
+
+    test "a second attach on an already-unchanged file still gets pushed a usage payload", %{
+      id: id,
+      opts: opts,
+      tmp_dir: tmp_dir
+    } do
+      provider_session_id = "prov-#{id}"
+      {session, path} = usage_session(id, tmp_dir, provider_session_id)
+
+      write_jsonl(path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:00.000Z","sessionId":"#{provider_session_id}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50}}})
+      ])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(id))
+      {:ok, _attached} = attach(session, opts, usage_poll_interval_ms: 5)
+
+      assert_receive {:session_usage, ^id, first}, 1_000
+      assert first.tokens_in == 100
+
+      # A second tab (or a reattach) joins while the file has not changed
+      # since the last read — the `{size, mtime}` skip that keeps the timer
+      # cheap must not also leave this new client's HUD blank forever.
+      {:ok, _attached} =
+        attach(session, opts, usage_poll_interval_ms: 5, subscriber: spawn_client())
+
+      assert_receive {:session_usage, ^id, second}, 1_000
+      assert second.tokens_in == 100
+    end
+
+    test "nothing is published while no client is attached", %{
+      id: id,
+      opts: opts,
+      tmp_dir: tmp_dir
+    } do
+      provider_session_id = "prov-#{id}"
+      {session, path} = usage_session(id, tmp_dir, provider_session_id)
+
+      write_jsonl(path, [
+        ~s({"type":"assistant","timestamp":"2026-09-15T10:00:00.000Z","sessionId":"#{provider_session_id}","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50}}})
+      ])
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(id))
+
+      # ScriptedPty is installed for `id` (see setup), so the reader can open
+      # a stream, but nobody calls `attach/2` — the poll should have nothing
+      # to do and nobody home to send it to.
+      pid =
+        start_supervised!(
+          {Stream, {session, Keyword.merge(opts, usage_poll_interval_ms: 5)}},
+          restart: :temporary
+        )
+
+      Process.monitor(pid)
+      refute_receive {:session_usage, ^id, _payload}, 100
     end
   end
 

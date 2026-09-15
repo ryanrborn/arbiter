@@ -67,7 +67,7 @@ class FakeSocket {
 
 // A sink that records everything, in order.
 function recorder() {
-  const log = { writes: [], repaints: [], metas: [], exits: [], errors: [], statuses: [] }
+  const log = { writes: [], repaints: [], metas: [], usages: [], exits: [], errors: [], statuses: [] }
   return {
     log,
     text() { return log.writes.map((w) => Buffer.from(w.payload).toString("utf8")).join("") },
@@ -75,6 +75,7 @@ function recorder() {
       write: (payload, info) => log.writes.push({ payload, info }),
       repaint: (seq, data, info) => log.repaints.push({ seq, data, info }),
       meta: (m) => log.metas.push(m),
+      usage: (u) => log.usages.push(u),
       exit: (p) => log.exits.push(p),
       error: (e) => log.errors.push(e),
       status: (s) => log.statuses.push(s)
@@ -157,6 +158,23 @@ test("a snapshot repaints and resets the sequence arithmetic", () => {
   channel.emit("stdout", serverFrame(905, "after"))
   assert.equal(rec.text(), "after")
   assert.equal(rec.log.writes[0].info.gap, 0)
+})
+
+test("a usage event is forwarded to the sink verbatim (§7.5, phase 7)", () => {
+  const { channel, rec } = connected()
+
+  const payload = {
+    tokens_in: 100,
+    tokens_out: 50,
+    cache_creation: 0,
+    cache_read: 0,
+    cost_usd: 0.42,
+    model: "claude-opus-5",
+    estimated: true
+  }
+
+  channel.emit("usage", payload)
+  assert.deepEqual(rec.log.usages, [payload])
 })
 
 // -- reconnect + resume (acceptance criterion 3) -------------------------------

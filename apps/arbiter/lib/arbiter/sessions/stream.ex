@@ -87,12 +87,66 @@ defmodule Arbiter.Sessions.Stream do
         read_chunk_bytes: 65_536,     # max payload per frame
         poll_interval_ms: 25,
         alive_interval_ms: 1_000,
+        usage_poll_interval_ms: 2_000, # live cost HUD cadence (§7.5, phase 7)
         linger_ms: 5_000,             # reader lifetime after the last detach
         snapshot_lines: 2_000
 
   Every key is also accepted as an option to `attach/2`, which is how the
   suite drives it. Configuration is fixed by the **first** attach for the
   reader's lifetime.
+
+  ## Live cost HUD (§7.5, phase 7)
+
+  Same reader, one more timer: every `usage_poll_interval_ms` (~2s), while at
+  least one client is attached, it re-reads the session's on-disk JSONL with
+  `Arbiter.Usage.ClaudeSessionFile.read_totals/2` — the same reconciliation
+  arithmetic `Arbiter.Sessions.UsageIngest` already uses, reused rather than
+  reimplemented — and publishes the file's *cumulative* totals as a `usage`
+  event on `Arbiter.Sessions.usage_topic/1`. `ArbiterWeb.SessionChannel`
+  subscribes to that topic independently of this reader's own `subs` (it is
+  PubSub, not a direct send), so multiple attached tabs share one tailer —
+  and, because the payload is always the file's running total rather than a
+  delta since some reader-private baseline, a tab that attaches midway
+  through the session's life (or reattaches after the reader restarted) shows
+  the correct number on the very next tick instead of resuming from zero.
+
+  `estimated` mirrors `totals.cost_source == :estimated` — true only when the
+  figure came from `Arbiter.Usage.ClaudePricing`'s token-based estimate. A
+  file with no cost at all (`cost_source: nil`, e.g. an unpriced model) is
+  reported with `cost_usd: nil` and `estimated: false` — a missing number is
+  not the same claim as an estimated one.
+
+  Reading and JSON-decoding a whole session transcript is not free, so two
+  guards keep this timer from competing with the 25ms PTY poll and the
+  synchronous `attach`/`send_input`/`snapshot` calls this same GenServer must
+  keep answering: a tick is skipped entirely when the file's `{size, mtime}`
+  is unchanged since the last read, and the read that does happen runs in a
+  short-lived `Task` (`Arbiter.TaskSupervisor`) rather than inline, with the
+  reader tracking one in-flight ref so a slow read is never started twice
+  concurrently.
+
+  `session.provider_session_id` is nullable at launch (the CLI picks it, not
+  Arbiter — see `Arbiter.Sessions.Session`'s moduledoc). Until it is known,
+  the reader discovers it itself: the newest `*.jsonl` under
+  `session.config_dir/projects/*/`, by mtime, is assumed to be the file the
+  CLI is currently appending to. The discovered id is persisted back onto the
+  row with `Arbiter.Sessions.record_provider_session/2` (best-effort — a
+  failure to persist is not fatal to the tick, since the id is still used to
+  read *this* tick's totals) so `Arbiter.Sessions.usage_events/1`, whose only
+  other writer this column has, sees it too.
+
+  The same discovery is also how the §7.5 rollover wrinkle stays closed for
+  the *whole* session, not just its start: `--resume`/compaction rolls the
+  CLI onto a new `<sid>.jsonl` without deleting the old one, so a stale
+  `provider_session_id` would keep resolving forever if the reader only
+  discovered on an outright `locate/2` miss. Instead every tick with a known
+  id also checks for a newer `*.jsonl` in the same config dir and switches
+  (and persists) onto it when one exists — so a rollover mid-session, not
+  just a missing file, re-discovers rather than going dark.
+
+  This reads `session.config_dir` as it was at the reader's own start (or
+  last resume) rather than re-fetching the row every tick — cheap, and
+  consistent with every other use of `state.session` in this module.
   """
 
   use GenServer
@@ -101,6 +155,7 @@ defmodule Arbiter.Sessions.Stream do
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Session
+  alias Arbiter.Usage.ClaudeSessionFile
 
   require Logger
 
@@ -115,6 +170,7 @@ defmodule Arbiter.Sessions.Stream do
     read_chunk_bytes: 65_536,
     poll_interval_ms: 25,
     alive_interval_ms: 1_000,
+    usage_poll_interval_ms: 2_000,
     linger_ms: 5_000
   ]
 
@@ -328,6 +384,8 @@ defmodule Arbiter.Sessions.Stream do
       open_error: nil,
       linger_timer: nil,
       last_turn_touch_ms: nil,
+      usage_task_ref: nil,
+      usage_file_stat: nil,
       dead_polls: 0
     }
 
@@ -340,6 +398,7 @@ defmodule Arbiter.Sessions.Stream do
       {:ok, state} ->
         schedule(:poll, state.config.poll_interval_ms)
         schedule(:alive, state.config.alive_interval_ms)
+        schedule(:usage_poll, state.config.usage_poll_interval_ms)
         {:noreply, refresh_geometry(state)}
 
       {:error, reason} ->
@@ -365,12 +424,21 @@ defmodule Arbiter.Sessions.Stream do
       else
         ref = Process.monitor(pid)
 
-        put_in(state.subs[pid], %{
-          ref: ref,
-          inflight: 0,
-          mode: :live,
-          needs_snapshot: false
-        })
+        state =
+          put_in(state.subs[pid], %{
+            ref: ref,
+            inflight: 0,
+            mode: :live,
+            needs_snapshot: false
+          })
+
+        # A joining client (first attach, or reattach after the reader
+        # restarted) has never seen a `usage` event. The `{size, mtime}` skip
+        # in `maybe_read_usage/3` is reader-global, so without this the next
+        # tick would still skip an unchanged file and leave this client's HUD
+        # blank indefinitely. Clearing it forces one re-read on the next tick,
+        # which `publish_usage/2` broadcasts to every attached client.
+        %{state | usage_file_stat: nil}
       end
 
     # `0` is truthy in Elixir, and a browser really does report it: xterm.js's
@@ -490,12 +558,39 @@ defmodule Arbiter.Sessions.Stream do
     end
   end
 
+  def handle_info(:usage_poll, state) do
+    schedule(:usage_poll, state.config.usage_poll_interval_ms)
+    {:noreply, poll_usage(state)}
+  end
+
   def handle_info(:linger_expired, state) do
     if map_size(state.subs) == 0 do
       {:stop, :normal, close_stream(state)}
     else
       {:noreply, %{state | linger_timer: nil}}
     end
+  end
+
+  # The in-flight usage-read Task, landing. Matched (and demonitored) before
+  # the subscriber `:DOWN` clause below, which would otherwise also match this
+  # shape.
+  def handle_info({ref, result}, %{usage_task_ref: ref} = state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | usage_task_ref: nil}
+
+    case result do
+      {:ok, totals} ->
+        publish_usage(state, totals)
+        {:noreply, state}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{usage_task_ref: ref} = state)
+      when is_reference(ref) do
+    {:noreply, %{state | usage_task_ref: nil}}
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
@@ -816,6 +911,147 @@ defmodule Arbiter.Sessions.Stream do
   defp broadcast(state, message) do
     for {pid, _sub} <- state.subs, do: send(pid, message)
     :ok
+  end
+
+  # -- live cost HUD (§7.5, phase 7) -------------------------------------------
+
+  # Nobody watching: skip the file read entirely rather than tailing a
+  # session nothing is attached to.
+  defp poll_usage(%{subs: subs} = state) when map_size(subs) == 0, do: state
+
+  # A previous tick's read is still in flight — never start a second one
+  # concurrently (the file only grows every ~2s; there is nothing new to read
+  # before the first one lands).
+  defp poll_usage(%{usage_task_ref: ref} = state) when is_reference(ref), do: state
+
+  defp poll_usage(%{session: session} = state) do
+    case usage_source(session) do
+      {:ok, provider_session_id, path, session} ->
+        maybe_read_usage(%{state | session: session}, path, provider_session_id)
+
+      :not_found ->
+        state
+    end
+  end
+
+  # `session.provider_session_id` resolves to a file: use it, *unless* a
+  # newer `*.jsonl` has since appeared in the same config dir. A rollover
+  # (`--resume`/compaction) does not delete the old file — the CLI starts
+  # appending to a new `<sid>.jsonl` alongside it — so `locate/2` keeps
+  # resolving the stale id forever and this reader would otherwise go dark
+  # for the rest of the session. If `locate/2` fails outright (the file was
+  # actually removed), fall through to discovery the same way.
+  defp usage_source(%{provider_session_id: id} = session) when is_binary(id) and id != "" do
+    case ClaudeSessionFile.locate(session.config_dir, id) do
+      {:ok, path} -> usage_source_or_newer(session, id, path)
+      :not_found -> discover_usage_source(session)
+    end
+  end
+
+  defp usage_source(session), do: discover_usage_source(session)
+
+  defp usage_source_or_newer(session, id, path) do
+    case discover_provider_session_file(session.config_dir) do
+      {:ok, ^id, _path} ->
+        {:ok, id, path, session}
+
+      {:ok, newer_id, newer_path} ->
+        if jsonl_mtime(newer_path) > jsonl_mtime(path) do
+          {:ok, newer_id, newer_path, persist_provider_session(session, newer_id)}
+        else
+          {:ok, id, path, session}
+        end
+
+      :not_found ->
+        {:ok, id, path, session}
+    end
+  end
+
+  # `provider_session_id` is nullable at launch (the CLI picks it). Assume the
+  # newest `*.jsonl` under the session's own config dir is the file the CLI is
+  # currently appending to, and persist the discovery back onto the row
+  # (best-effort: a failed write doesn't stop this tick from using the id it
+  # just found — it's `Sessions.usage_events/1` that needs the column, and
+  # that can wait for the next successful tick).
+  defp discover_usage_source(session) do
+    case discover_provider_session_file(session.config_dir) do
+      {:ok, provider_session_id, path} ->
+        {:ok, provider_session_id, path, persist_provider_session(session, provider_session_id)}
+
+      :not_found ->
+        :not_found
+    end
+  end
+
+  defp discover_provider_session_file(config_dir)
+       when is_binary(config_dir) and config_dir != "" do
+    case Path.wildcard(Path.join([config_dir, "projects", "*", "*.jsonl"])) do
+      [] ->
+        :not_found
+
+      paths ->
+        path = Enum.max_by(paths, &jsonl_mtime/1)
+        {:ok, Path.basename(path, ".jsonl"), path}
+    end
+  end
+
+  defp discover_provider_session_file(_config_dir), do: :not_found
+
+  defp jsonl_mtime(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %{mtime: mtime}} -> mtime
+      _ -> 0
+    end
+  end
+
+  defp persist_provider_session(session, provider_session_id) do
+    case Sessions.record_provider_session(session, provider_session_id) do
+      {:ok, updated} -> updated
+      _ -> session
+    end
+  rescue
+    _ -> session
+  end
+
+  # Skip the (relatively expensive) full parse when the file hasn't changed
+  # since the last read, and run the read that does happen off the GenServer
+  # in a short-lived Task so decoding a multi-MB transcript never blocks the
+  # 25ms PTY poll or a synchronous `attach`/`send_input`/`snapshot` call.
+  defp maybe_read_usage(state, path, provider_session_id) do
+    case file_stat_key(path) do
+      nil ->
+        state
+
+      stat when stat == state.usage_file_stat ->
+        state
+
+      stat ->
+        %Task{ref: ref} =
+          Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn ->
+            ClaudeSessionFile.read_totals(path, session_id: provider_session_id)
+          end)
+
+        %{state | usage_task_ref: ref, usage_file_stat: stat}
+    end
+  end
+
+  defp file_stat_key(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %{size: size, mtime: mtime}} -> {size, mtime}
+      _ -> nil
+    end
+  end
+
+  defp publish_usage(state, totals) do
+    Sessions.broadcast_usage(state.id, %{
+      tokens_in: totals.tokens_in,
+      tokens_out: totals.tokens_out,
+      cache_creation: totals.cache_creation_tokens,
+      cache_read: totals.cache_read_tokens,
+      cost_usd: totals.cost_usd,
+      model: totals.model,
+      estimated: totals.cost_source == :estimated
+    })
   end
 
   # -- misc -------------------------------------------------------------------
