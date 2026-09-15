@@ -43,6 +43,22 @@ defmodule Arbiter.Reviews.PushState do
   (and more). The head under review is published; whether the branch also
   moved on is a different question, and not this guard's.
 
+  ## The worktree must be ON the branch
+
+  Every answer here is derived from the worktree's `git rev-parse HEAD` — the
+  commit that is *checked out*, which is only the branch's head while the
+  worktree is on that branch. Some ad-hoc runs and test rigs reuse a repo as
+  the worktree with HEAD on `main` and a `branch:` that lives elsewhere (the
+  shape `Arbiter.Worker.ReviewGate.prepare_branch_for_review/1` and
+  `reviewer_commit_check/1` already guard for). Comparing `main`'s tip against
+  `origin/<branch>` answers a question nobody asked, and `ensure_pushed/3`
+  would then push `main`'s tip onto the PR branch — a merge-safety guard
+  writing the wrong commit to the remote it is protecting.
+
+  So the branch check is a precondition of the module, not of its callers: a
+  worktree that is not on `branch` (including a detached HEAD) is
+  `:not_on_branch` → `:unknown`, and every caller fails open on it.
+
   ## Fetching
 
   `inspect_branch/3` fetches `origin/<branch>` first by default, because a
@@ -60,6 +76,7 @@ defmodule Arbiter.Reviews.PushState do
           | :diverged
           | :no_remote_branch
           | :no_origin
+          | :not_on_branch
           | :unknown
 
   @type t :: %{
@@ -68,7 +85,8 @@ defmodule Arbiter.Reviews.PushState do
           remote: String.t(),
           local_head: String.t() | nil,
           remote_head: String.t() | nil,
-          ahead_by: non_neg_integer() | nil
+          ahead_by: non_neg_integer() | nil,
+          checked_out: String.t() | nil
         }
 
   @doc """
@@ -94,11 +112,12 @@ defmodule Arbiter.Reviews.PushState do
       remote: remote,
       local_head: nil,
       remote_head: nil,
-      ahead_by: nil
+      ahead_by: nil,
+      checked_out: nil
     }
 
     case git(path, ["rev-parse", "HEAD"]) do
-      {:ok, local} -> resolve(path, %{base | local_head: local}, opts)
+      {:ok, local} -> on_branch(path, %{base | local_head: local}, opts)
       :error -> base
     end
   end
@@ -110,8 +129,22 @@ defmodule Arbiter.Reviews.PushState do
       remote: Keyword.get(opts, :remote, "origin"),
       local_head: nil,
       remote_head: nil,
-      ahead_by: nil
+      ahead_by: nil,
+      checked_out: nil
     }
+  end
+
+  # The precondition (see the moduledoc): `local_head` is only the branch's
+  # head while the worktree is checked out on the branch. Anything else — a
+  # different branch, a detached HEAD, a `rev-parse` that failed — is
+  # `:not_on_branch`, which reads as `:unknown` and so pushes nothing, stamps
+  # nothing and accuses nobody.
+  defp on_branch(path, %{branch: branch} = state, opts) do
+    case git(path, ["rev-parse", "--abbrev-ref", "HEAD"]) do
+      {:ok, ^branch} -> resolve(path, state, opts)
+      {:ok, other} -> %{state | status: :not_on_branch, checked_out: other}
+      :error -> %{state | status: :not_on_branch}
+    end
   end
 
   defp resolve(path, %{branch: branch, remote: remote} = state, opts) do
@@ -175,6 +208,8 @@ defmodule Arbiter.Reviews.PushState do
       :ahead -> :unpushed
       :diverged -> :unpushed
       :no_remote_branch -> :unpushed
+      # :not_on_branch, :no_origin, :unknown — see the moduledoc; never an
+      # accusation, never a push.
       _ -> :unknown
     end
   end
@@ -214,6 +249,14 @@ defmodule Arbiter.Reviews.PushState do
   def describe(%{status: :no_origin} = s),
     do: "push state unknown: this checkout has no `#{s.remote}` remote."
 
+  def describe(%{status: :not_on_branch, checked_out: other} = s) when is_binary(other),
+    do:
+      "push state unknown: the worktree is checked out on `#{other}`, not on " <>
+        "`#{s.branch}`, so its HEAD #{short(s.local_head)} says nothing about `#{ref(s)}`."
+
+  def describe(%{status: :not_on_branch} = s),
+    do: "push state unknown: the worktree is not checked out on `#{s.branch}`."
+
   def describe(_state), do: "push state could not be determined from the worktree."
 
   defp ref(%{remote: remote, branch: branch}), do: remote <> "/" <> branch
@@ -238,7 +281,10 @@ defmodule Arbiter.Reviews.PushState do
     * `{:ok, :already_pushed, state}` — nothing to do.
     * `{:ok, :pushed, state}` — one push landed the local head on the remote.
     * `{:ok, :unknown, state}` — push state is undeterminable (no remote, no
-      git); fail open, exactly as the gate did before this guard existed.
+      git, or the worktree is not checked out on `branch`); fail open, exactly
+      as the gate did before this guard existed. **Nothing is pushed on this
+      path** — in particular a worktree sitting on `main` must never have
+      `main`'s tip pushed onto the PR branch.
     * `{:error, reason, state}` — the head is definitely not on the remote and
       could not be put there. A **diverged** branch is never force-pushed: the
       remote may carry another worker's commits, so this escalates instead.
@@ -292,8 +338,9 @@ defmodule Arbiter.Reviews.PushState do
   `{:error, {:head_not_pushed, state}}` means the local head is positively not
   on the remote branch: stamping it would record a review of a commit the PR
   does not carry, which is the write that made the vs-5l45oz approval look
-  legitimate. An undeterminable push state falls back to the local head (the
-  pre-bd-2jkrqu behaviour) rather than refusing.
+  legitimate. An undeterminable push state — including a worktree that is not
+  checked out on `branch`, whose HEAD is not the branch's head at all — falls
+  back to the local head (the pre-bd-2jkrqu behaviour) rather than refusing.
   """
   @spec reviewable_head(String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, String.t()} | {:error, {:head_not_pushed, t()} | :no_head}

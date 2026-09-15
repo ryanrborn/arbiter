@@ -972,9 +972,21 @@ defmodule Arbiter.Worker.ReviewGate do
   #   * diverged, or the push was rejected → refuse. `origin/<branch>` may
   #     carry another actor's commits (a ReviewGate implementer round pushes
   #     straight to origin), so this never force-pushes; a human resolves it.
-  #   * push state undeterminable (no worktree, no `origin`, git unavailable)
-  #     → fail open and review exactly as before this guard existed. A local
-  #     ad-hoc checkout is not an incident.
+  #   * push state undeterminable (no worktree, no `origin`, git unavailable,
+  #     or the worktree is not checked out on `branch`) → fail open and review
+  #     exactly as before this guard existed. A local ad-hoc checkout is not an
+  #     incident.
+  #
+  # The last of those is the sibling guard `prepare_branch_for_review/1` and
+  # `reviewer_commit_check/1` spell out inline (`current_branch(wt) == branch`;
+  # see also `Arbiter.Worker` around the reviewer-commit check): ad-hoc runs and
+  # test rigs reuse a repo as the worktree with HEAD on `main`. Here it is not
+  # spelled out again because `PushState.inspect_branch/3` enforces it as a
+  # module precondition — `:not_on_branch` → `:unknown` — so `ensure_pushed/3`,
+  # `reviewable_head/3` and the park text all get it, and no later caller can
+  # reintroduce the hole by forgetting it. Without it this guard would push
+  # `main`'s tip to `refs/heads/<branch>`: a merge-safety guard writing the
+  # wrong commit to the very branch it protects.
   #
   # One evaluation and at most one push per round — `GuardRegistry` row G18.
   defp push_gate(%{worktree_path: wt, branch: branch} = state)
@@ -1061,7 +1073,9 @@ defmodule Arbiter.Worker.ReviewGate do
   rather than made.
 
   An undeterminable push state falls back to the local head — the behaviour
-  before this guard existed.
+  before this guard existed. That includes a worktree that is not checked out
+  on `branch`: its HEAD is some other branch's commit, so it is neither
+  accused of being unpushed nor blessed as the PR head.
 
   Public so the refusal can be exercised directly against a real worktree; the
   gate's own path reaches it through `stamp_reviewed_head/1` and

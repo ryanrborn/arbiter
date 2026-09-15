@@ -5474,13 +5474,28 @@ defmodule Arbiter.Worker do
   # The bullet that offers — or withholds — a hand merge. Withheld whenever the
   # commit a human would merge is not the commit that was reviewed: either the
   # branch is provably unpushed, or the reviewed SHA on file differs from the
-  # remote head.
+  # remote head. The `:diverged` arm comes first because "push it" is wrong
+  # advice there (bd-2jkrqu review round 1, finding 2).
   defp park_merge_advice(%State{task_id: task_id} = state, push_state) do
     alias Arbiter.Reviews.PushState
 
     branch = mergeable_branch(state.meta) || "the branch"
 
     cond do
+      # A diverged branch is the state that PRODUCES the `:head_not_pushed`
+      # park (`PushState.push_once/4` refuses to force-push it), so it is the
+      # likeliest reader of this bullet — and a plain `git push` is exactly
+      # what will be rejected for it. Give it the same reconcile wording the
+      # ReviewGate's own findings body uses, so the two texts in one
+      # escalation don't contradict each other.
+      push_state.status == :diverged ->
+        "**Do NOT merge by hand yet** — #{PushState.describe(push_state)} " <>
+          "The merge request holds a different commit than the one that was reviewed, " <>
+          "and a plain push will be rejected. Reconcile `#{branch}` with " <>
+          "`#{push_state.remote}/#{branch}` first (rebase or merge — never force-push, " <>
+          "the remote may carry another worker's commits), push, confirm the diff, " <>
+          "then merge;"
+
       PushState.verdict(push_state) == :unpushed ->
         "**Do NOT merge by hand yet** — #{PushState.describe(push_state)} " <>
           "The merge request holds a different commit than the one that was reviewed. " <>

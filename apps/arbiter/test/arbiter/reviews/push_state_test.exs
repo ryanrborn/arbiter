@@ -154,6 +154,43 @@ defmodule Arbiter.Reviews.PushStateTest do
       assert PushState.verdict(state) == :unknown
     end
 
+    # bd-2jkrqu review round 1, finding 1: the repo-as-worktree shape. HEAD is
+    # on `main`, `feature/x` is a local branch one commit ahead and checked out
+    # nowhere. `rev-parse HEAD` answers for `main`, so comparing it against
+    # `origin/feature/x` — and worse, pushing it there — is about the wrong
+    # commit entirely.
+    test "a worktree that is not checked out on the branch is :not_on_branch / :unknown",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      git!(["branch", "feature/x"], repo)
+      # advance feature/x without checking it out
+      git!(["checkout", "-q", "feature/x"], repo)
+      feature_head = commit(repo, "a.txt")
+      git!(["checkout", "-q", "main"], repo)
+      main_head = sha(repo, "HEAD")
+      refute main_head == feature_head
+
+      state = PushState.inspect_branch(repo, "feature/x")
+
+      assert state.status == :not_on_branch
+      assert state.checked_out == "main"
+      assert PushState.verdict(state) == :unknown
+      assert PushState.describe(state) =~ "not on `feature/x`"
+      refute PushState.describe(state) =~ "NOT pushed"
+    end
+
+    test "a detached HEAD is :not_on_branch, not an accusation", %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/x")
+      head = commit(repo, "a.txt")
+      git!(["checkout", "-q", "--detach", head], repo)
+
+      state = PushState.inspect_branch(repo, b)
+
+      assert state.status == :not_on_branch
+      assert PushState.verdict(state) == :unknown
+    end
+
     test "no worktree path or no branch is :unknown, never a false accusation" do
       assert PushState.verdict(PushState.inspect_branch(nil, "feature/x")) == :unknown
       assert PushState.verdict(PushState.inspect_branch("/nonexistent/xyz", "b")) == :unknown
@@ -225,6 +262,52 @@ defmodule Arbiter.Reviews.PushStateTest do
       assert sha(repo, "HEAD") == mine
     end
 
+    # The write this guard must never make (bd-2jkrqu review round 1, finding 1):
+    # `git push origin HEAD:refs/heads/feature/x` from a worktree sitting on
+    # `main` publishes `main`'s tip AS the PR branch. Where the remote branch
+    # already exists and is an ancestor, it fast-forwards the real PR branch
+    # onto unrelated content.
+    test "a worktree on another branch pushes nothing and moves no ref on origin",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/x")
+      published = commit(repo, "a.txt")
+      git!(["push", "-q", "-u", "origin", b], repo)
+      commit(repo, "unpushed.txt")
+      git!(["checkout", "-q", "main"], repo)
+      main_head = sha(repo, "HEAD")
+
+      # The shape where the damage is worst: origin/<branch> exists and main is
+      # its ancestor, so a push would silently fast-forward it onto main.
+      assert {_, 0} =
+               System.cmd("git", ["merge-base", "--is-ancestor", main_head, published],
+                 cd: repo,
+                 stderr_to_stdout: true
+               )
+
+      assert {:ok, :unknown, state} = PushState.ensure_pushed(repo, b)
+      assert state.status == :not_on_branch
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> b) == published
+    end
+
+    test "a worktree on another branch creates no ref for a branch origin has never seen",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      git!(["checkout", "-q", "-b", "feature/x"], repo)
+      commit(repo, "a.txt")
+      git!(["checkout", "-q", "main"], repo)
+
+      assert {:ok, :unknown, _state} = PushState.ensure_pushed(repo, "feature/x")
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/feature/x") == nil
+
+      {out, _} = git(["ls-remote", "--heads", "origin", "feature/x"], repo)
+      assert String.trim(out) == "", "a ref was created on origin: #{out}"
+    end
+
     test "a repo with no origin fails open rather than escalating", %{tmp: tmp} do
       repo = init_repo(tmp, origin: false)
       b = branch(repo, "feature/x")
@@ -256,6 +339,19 @@ defmodule Arbiter.Reviews.PushStateTest do
 
       assert {:error, {:head_not_pushed, state}} = PushState.reviewable_head(repo, b)
       assert state.status == :ahead
+    end
+
+    test "falls back to the local head when the worktree is on another branch",
+         %{tmp: tmp} do
+      repo = init_repo(tmp)
+      b = branch(repo, "feature/x")
+      commit(repo, "a.txt")
+      git!(["push", "-q", "-u", "origin", b], repo)
+      commit(repo, "unpushed.txt")
+      git!(["checkout", "-q", "main"], repo)
+      main_head = sha(repo, "HEAD")
+
+      assert {:ok, ^main_head} = PushState.reviewable_head(repo, b)
     end
 
     test "fails open when push state cannot be determined", %{tmp: tmp} do

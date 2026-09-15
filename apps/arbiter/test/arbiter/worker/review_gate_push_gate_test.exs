@@ -306,6 +306,57 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
     end
   end
 
+  describe "the worktree-on-another-branch shape (AC1)" do
+    # bd-2jkrqu review round 1, finding 1: `push_gate/1` runs
+    # before anything else in a round, and `PushState.ensure_pushed/3` pushes
+    # `HEAD:refs/heads/<branch>`. Some ad-hoc runs and test rigs reuse the repo
+    # itself as the worktree with HEAD on `main` and `branch:` checked out
+    # elsewhere — the shape `prepare_branch_for_review/1` and
+    # `reviewer_commit_check/1` already guard for. Unguarded, the gate would
+    # publish `main`'s tip AS the PR branch: a merge-safety guard writing the
+    # wrong commit to the branch it protects.
+    test "never publishes the checked-out branch's HEAD as the PR branch",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/push-9"
+      :ok = seed_feature_branch(repo, branch)
+
+      # The repo IS the worktree: HEAD on `main`, `branch` checked out nowhere
+      # and one commit ahead.
+      assert String.trim(elem(git(["rev-parse", "--abbrev-ref", "HEAD"], repo), 0)) == "main"
+      main_head = sha(repo, "HEAD")
+      refute sha(repo, branch) == main_head
+      assert sha(repo, "origin/" <> branch) == nil
+
+      author = start_author(task, ws, repo, branch, repo)
+      start_gate(author, task, ws, branch, repo, command: [@push_check, branch, "ROUND1"])
+
+      # The round terminates (on this shape the diff range is empty, since the
+      # worktree's HEAD *is* the target tip) — well after `push_gate/1` ran.
+      wait_until(fn -> Ash.get!(Issue, task.id).review_park_reason != nil end, 20_000)
+
+      {out, 0} = System.cmd("git", ["-C", repo, "ls-remote", "--heads", "origin", branch])
+
+      assert String.trim(out) == "",
+             "push_gate published a commit from the wrong branch to origin/#{branch}: #{out}"
+
+      assert sha(repo, "origin/main") == main_head, "origin/main was moved"
+    end
+
+    test "pushed_head/1 falls back to the local head instead of accusing a branch it is not on",
+         %{repo: repo} do
+      branch = "feature/push-10"
+      :ok = seed_feature_branch(repo, branch)
+      main_head = sha(repo, "HEAD")
+
+      # Not `{:error, {:head_not_pushed, _}}`: the worktree's HEAD is another
+      # branch's commit, so it is neither accused nor blessed — the exact
+      # pre-guard behaviour.
+      assert {:ok, ^main_head} =
+               ReviewGate.pushed_head(%{worktree_path: repo, branch: branch})
+    end
+  end
+
   describe "the fix round's re-review (AC1)" do
     test "a fix-round commit is pushed before round 2 reads it",
          %{repo: repo, ws: ws, tmp: tmp} do
@@ -426,6 +477,56 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
       assert body =~ "NOT pushed"
       assert body =~ "Do NOT merge by hand"
       refute body =~ "merge it by hand, if the diff is fine"
+    end
+
+    # bd-2jkrqu review round 1, finding 2: `:diverged` is the state that
+    # PRODUCES the `:head_not_pushed` park (a diverged branch is never
+    # force-pushed), so it is the likeliest reader of this bullet — and
+    # "push it first" is precisely what git will reject. The ReviewGate's own
+    # findings body says "reconcile … never force-push"; the two texts in one
+    # escalation must not contradict each other.
+    test "a diverged branch is told to reconcile, not to push",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-11"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      base = sha(wt, "HEAD")
+
+      other = Path.join(tmp, "other-#{System.unique_integer([:positive])}")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+
+      git!(["reset", "-q", "--hard", base], wt)
+      commit_in(wt, "mine.txt", "mine\n")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      :ok =
+        Worker.review_gate_verdict(
+          author,
+          {:parked, :head_not_pushed, "ReviewGate refused to review an unpushed head"}
+        )
+
+      wait_until(fn -> escalations(ws, task) != [] end)
+
+      body = hd(escalations(ws, task)).body
+
+      assert body =~ "DIVERGED"
+      assert body =~ "Do NOT merge by hand"
+      assert body =~ "Reconcile `#{branch}`"
+      assert body =~ "never force-push"
+
+      refute body =~ "Push `#{branch}` first",
+             "a diverged branch was told to do the one thing git will reject"
     end
 
     test "a genuinely pushed branch still offers the merge-by-hand option",
