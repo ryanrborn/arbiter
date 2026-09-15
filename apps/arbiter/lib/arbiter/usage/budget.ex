@@ -181,19 +181,19 @@ defmodule Arbiter.Usage.Budget do
   attention set (design §3).
 
   A closed task that ran over is done: there is nothing to act on, and it is
-  calibration-report material instead, so it is never in this set however far
-  over it ran. One ledger read and one estimator sample cover the whole list.
+  calibration-report material instead, so it is never in this list however far
+  over it ran. One ledger read and one estimator sample cover the whole input.
 
   Best-effort: a failed ledger read costs the board its cost flags, not its
   columns.
   """
-  @spec over_budget_ids([Issue.t() | map()], keyword()) :: MapSet.t()
+  @spec over_budget_ids([Issue.t() | map()], keyword()) :: [String.t()]
   def over_budget_ids(issues, opts \\ []) when is_list(issues) do
     open = Enum.filter(issues, &open?/1)
 
     case open do
       [] ->
-        MapSet.new()
+        []
 
       open ->
         sample = Keyword.get_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
@@ -207,12 +207,12 @@ defmodule Arbiter.Usage.Budget do
           spend > 0.0 and
             state(spend, Estimate.for_issue(to_issue(issue), opts)) == :over_budget
         end)
-        |> MapSet.new(& &1.id)
+        |> Enum.map(& &1.id)
     end
   rescue
     error ->
       Logger.warning("Usage.Budget.over_budget_ids failed: #{Exception.message(error)}")
-      MapSet.new()
+      []
   end
 
   # The board hands `derive/1` plain maps in its pure tests and `%Issue{}`

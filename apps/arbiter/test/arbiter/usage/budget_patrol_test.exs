@@ -158,6 +158,7 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
       assert [] = escalations(ws)
     end
   end
+
   # The sweep above is called directly; this drives the process the
   # application actually supervises — `init/1` -> a `:poll` call -> the same
   # sweep — so the GenServer wiring is proven, not just the function under it.
