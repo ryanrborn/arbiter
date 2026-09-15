@@ -587,6 +587,23 @@ defmodule ArbiterWeb.BoardLive do
   defp relative(%DateTime{} = ts, %DateTime{} = now), do: "#{elapsed(ts, now)} ago"
   defp relative(_, _), do: ""
 
+  # bd-8j9i9p (design bd-9jj5lf §3): worker spend past the p90 of what issues
+  # like this one cost. A flag, not a hue — the card's accent belongs to the
+  # state that owns it right now, and money is a second axis, so this reads
+  # alongside `needs_you` rather than competing with it. Open cards only:
+  # `Snapshot.derive/1` never sets it on a closed one.
+  defp over_budget_flag(assigns) do
+    ~H"""
+    <span
+      data-over-budget
+      title="worker spend is past the p90 of what issues like this cost — excludes coordinator session overhead"
+      aria-label="over budget"
+      class="hero-banknotes"
+      style="width: 11px; height: 11px; background-color: var(--arb-fail);"
+    />
+    """
+  end
+
   defp quota_note(:ok), do: nil
   defp quota_note(nil), do: nil
   defp quota_note({:hold, reason}), do: reason
@@ -736,6 +753,9 @@ defmodule ArbiterWeb.BoardLive do
                   <:parent :if={card.parent}>
                     <.parent_link parent={card.parent} mode="compact" />
                   </:parent>
+                  <:status :if={card.over_budget}>
+                    <.over_budget_flag />
+                  </:status>
                 </.task_card>
               </div>
 
@@ -784,6 +804,9 @@ defmodule ArbiterWeb.BoardLive do
                   <:parent :if={entry.card.parent}>
                     <.parent_link parent={entry.card.parent} mode="compact" />
                   </:parent>
+                  <:status :if={entry.card.over_budget}>
+                    <.over_budget_flag />
+                  </:status>
                 </.task_card>
               </div>
 
@@ -838,8 +861,11 @@ defmodule ArbiterWeb.BoardLive do
                     <.parent_link parent={card.parent} mode="compact" />
                   </:parent>
                   <:status>
-                    <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]">
-                      {elapsed(card.since, @now)}
+                    <span class="flex items-center gap-1.5">
+                      <.over_budget_flag :if={card.over_budget} />
+                      <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]">
+                        {elapsed(card.since, @now)}
+                      </span>
                     </span>
                   </:status>
                 </.task_card>
@@ -889,6 +915,7 @@ defmodule ArbiterWeb.BoardLive do
                   </:parent>
                   <:status>
                     <span class="flex items-center gap-1.5">
+                      <.over_budget_flag :if={card.over_budget} />
                       <span
                         :if={card.needs_you}
                         data-needs-you
