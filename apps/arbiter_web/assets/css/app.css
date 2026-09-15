@@ -6,6 +6,11 @@
 @import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@300;400;500;600&display=swap");
 
 @import "tailwindcss" source(none);
+
+/* xterm.js base styles, vendored alongside its JS bundles (RFC 6.1: no npm
+   here, so no node_modules path to import from). Provenance and upgrade steps
+   live in ../vendor/xterm/README.md. */
+@import "./xterm.css";
 @source "../css";
 @source "../js";
 @source "../../lib/arbiter_web";
