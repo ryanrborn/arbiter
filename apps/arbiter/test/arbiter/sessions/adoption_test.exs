@@ -103,6 +103,50 @@ defmodule Arbiter.Sessions.AdoptionTest do
       assert reloaded.status == :running
     end
 
+    test "with a launch_grace_ms, a fresh :starting row is left alone even with no live scope" do
+      session = session_row!(:starting)
+      # No scope live yet — this is exactly what `Sessions.launch/1`'s
+      # write-row-then-provision-then-start-scope window looks like mid-flight.
+      enumerate([])
+
+      assert {:ok, %{adopted: [], ended: [], orphans: []}} =
+               Adoption.sweep(runner: SessionRunnerStub, launch_grace_ms: 30_000)
+
+      assert {:ok, reloaded} = Sessions.get(session.id)
+      assert reloaded.status == :starting
+    end
+
+    test "with a launch_grace_ms, a :starting row past the grace is judged normally" do
+      session = session_row!(:starting)
+      enumerate([])
+
+      past_grace = DateTime.add(session.started_at, 31, :second)
+
+      assert {:ok, %{ended: [id]}} =
+               Adoption.sweep(runner: SessionRunnerStub, launch_grace_ms: 30_000, now: past_grace)
+
+      assert id == session.id
+    end
+
+    test "without a launch_grace_ms (the boot default), a fresh :starting row is judged immediately" do
+      session = session_row!(:starting)
+      enumerate([])
+
+      assert {:ok, %{ended: [id]}} = Adoption.sweep(runner: SessionRunnerStub)
+      assert id == session.id
+    end
+
+    test "a periodic-sweep context is reflected in the end_reason" do
+      session = session_row!(:running)
+      enumerate([])
+
+      assert {:ok, %{ended: [_]}} =
+               Adoption.sweep(runner: SessionRunnerStub, context: "periodic orphan-reaper sweep")
+
+      assert {:ok, reloaded} = Sessions.get(session.id)
+      assert reloaded.end_reason =~ "periodic orphan-reaper sweep"
+    end
+
     test "a live tmux socket alone is enough to keep a row" do
       session = session_row!(:running)
       File.write!(session.tmux_socket, "")

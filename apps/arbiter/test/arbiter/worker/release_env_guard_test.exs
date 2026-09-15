@@ -64,7 +64,11 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
   # this number to change, and with it a fresh look at the new call.
   @port_open_allowlist %{
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => 1,
-    "apps/arbiter/lib/arbiter/agents/preflight.ex" => 1
+    "apps/arbiter/lib/arbiter/agents/preflight.ex" => 1,
+    # bd-3qkbch: `arb session attach`'s full-terminal handoff to tmux. Not a
+    # BEAM/agent child, but every Port.open/2 site is scrubbed regardless of
+    # what it spawns (rule 2's own text).
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/session.ex" => 1
   }
 
   # Every file under `apps/*/lib` that contains a subprocess spawn primitive,
@@ -112,7 +116,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter_web/lib/arbiter_web/application.ex" => :pure_tool,
     "apps/arbiter_cli/lib/arbiter_cli/version.ex" => :pure_tool,
     "apps/arbiter_cli/lib/arbiter_cli/cmd/init.ex" => :pure_tool,
-    "apps/arbiter_cli/lib/arbiter_cli/cmd/start.ex" => :scrubbed
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/start.ex" => :scrubbed,
+    # bd-3qkbch: opens a Port for tmux only (§4.7's CLI fallback) — scrubbed
+    # for the same blanket rule-2 reason, not because tmux is a BEAM/agent.
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/session.ex" => :scrubbed
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects

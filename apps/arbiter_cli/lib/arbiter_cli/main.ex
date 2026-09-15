@@ -94,6 +94,10 @@ defmodule ArbiterCli.Main do
       arb mcp token mint  --tier coordinator [--workspace <id>] [--ttl <seconds>] [--json]
       arb mcp token verify <token> [--json]
 
+      arb session list                        works with the server stopped (§4.7):
+                                               reads systemd + tmux directly, never HTTP
+      arb session attach <id> [--read-only]
+
   ## Meta commands (no resource)
 
       arb prime                Mission briefing — run at the start of a session
@@ -249,6 +253,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
   defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)
+  defp dispatch_known("session", args), do: ArbiterCli.Cmd.Session.run(args)
   # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`.
   defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
   # Top-level shortcut: `arb verify <id>` == `arb issue verify <id>`.

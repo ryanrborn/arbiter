@@ -111,6 +111,24 @@ defmodule Arbiter.Sessions.Naming do
   @spec pipe_basename(String.t()) :: String.t()
   def pipe_basename(id) when is_binary(id), do: @socket_prefix <> id <> @pipe_suffix
 
+  @doc """
+  Absolute path of arbiter's own liveness heartbeat file (§4.6.3, phase 10).
+
+  Beside the sockets, in the same tmpfs: `Arbiter.Sessions.Heartbeat` touches
+  it while running, and every session's in-scope dead-man's switch
+  (`Arbiter.Sessions.Provisioning`'s generated `watchdog.sh`) reads its mtime
+  to decide whether arbiter is still around — the one mechanism that works if
+  arbiter never comes back at all, because it needs no connection *to*
+  arbiter, only a file arbiter used to be touching.
+  """
+  @spec heartbeat_path() :: {:ok, String.t()} | {:error, :no_runtime_dir}
+  def heartbeat_path do
+    case socket_dir() do
+      {:ok, dir} -> {:ok, Path.join(dir, "heartbeat")}
+      error -> error
+    end
+  end
+
   @doc "The session id a socket path belongs to, or `nil`."
   @spec session_id_from_socket(String.t()) :: String.t() | nil
   def session_id_from_socket(path) when is_binary(path) do

@@ -79,6 +79,12 @@ defmodule ArbiterWeb.SessionChannel do
 
   require Logger
 
+  # How often an attached channel re-stamps `last_client_at` (§4.6 item 2) —
+  # short enough that `Arbiter.Sessions.IdleReaper`'s 24h default TTL never
+  # sees a continuously-attached client as idle, long enough not to matter as
+  # write load.
+  @touch_client_interval_ms 5 * 60_000
+
   @impl true
   def join("session:" <> session_id, params, socket) do
     with {:ok, session} <- fetch_live_session(session_id),
@@ -90,6 +96,12 @@ defmodule ArbiterWeb.SessionChannel do
         |> assign(:last_stdin_seq, 0)
         |> assign(:joined?, false)
         |> assign(:pending, [])
+
+      # A client is now attached — the idle-deadline's `last_client_at` input
+      # (§4.6 item 2). Stamped again on a timer below so a client that stays
+      # attached without ever rejoining does not go stale after 24h.
+      _ = Sessions.touch_client(session)
+      Process.send_after(self(), :touch_client, @touch_client_interval_ms)
 
       send(self(), :after_join)
 
@@ -145,6 +157,16 @@ defmodule ArbiterWeb.SessionChannel do
 
   def handle_info({:session_usage, _id, _payload} = message, socket),
     do: stream_event(message, socket)
+
+  def handle_info(:touch_client, socket) do
+    case Sessions.get(socket.assigns.session_id) do
+      {:ok, session} -> Sessions.touch_client(session)
+      {:error, :not_found} -> :ok
+    end
+
+    Process.send_after(self(), :touch_client, @touch_client_interval_ms)
+    {:noreply, socket}
+  end
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
