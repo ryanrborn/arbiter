@@ -38,6 +38,10 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.lifecycle_topic())
+    end
+
     {:ok,
      socket
      |> assign(:kill_candidate, nil)
@@ -82,6 +86,19 @@ defmodule ArbiterWeb.SessionIndexLive do
 
     {:noreply, socket |> assign(:kill_candidate, nil) |> refresh()}
   end
+
+  # bd-bsdeb2: a session ending on its own (exit, crash, a vanished scope the
+  # sweep reaped) has no other reason for this page to hear about it — Kill
+  # already refreshes locally after its own call returns.
+  @impl true
+  def handle_info({:session_ended, _session_id}, socket) do
+    {:noreply, refresh(socket)}
+  end
+
+  # `ArbiterWeb.LiveHooks` subscribes every view to the coordinator mailbox and
+  # quota topics and lets their messages fall through (`:cont`), so any page
+  # with a `handle_info/2` of its own has to tolerate them.
+  def handle_info(_message, socket), do: {:noreply, socket}
 
   defp refresh(socket) do
     sessions = Sessions.list()
