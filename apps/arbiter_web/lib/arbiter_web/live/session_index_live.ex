@@ -4,9 +4,10 @@ defmodule ArbiterWeb.SessionIndexLive do
   `docs/browser-hosted-coordinator-sessions.md`).
 
   Every browser-hosted coordinator session Arbiter has ever launched, newest
-  first, with the four things an operator does to one: launch, open, and kill —
-  detach lives on the session page, because it is a *client* action (drop this
-  browser's reader, leave the agent running) rather than a fleet one.
+  first, with the three fleet-level things an operator does to one: launch,
+  open, and kill. Detach lives on the session page, because it is a *client*
+  action — drop this browser's reader, leave the agent running — rather than a
+  fleet one.
 
   ## Launch takes no options, deliberately
 
@@ -60,7 +61,8 @@ defmodule ArbiterWeb.SessionIndexLive do
   end
 
   def handle_event("confirm_kill", %{"id" => id}, socket) do
-    {:noreply, assign(socket, :kill_candidate, Enum.find(socket.assigns.sessions, &(&1.id == id)))}
+    {:noreply,
+     assign(socket, :kill_candidate, Enum.find(socket.assigns.sessions, &(&1.id == id)))}
   end
 
   def handle_event("cancel_kill", _params, socket) do

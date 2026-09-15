@@ -68,7 +68,9 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, "#session-#{newer.id}")
       assert html =~ ~s(href="/sessions/#{newer.id}")
 
-      assert [first, second] = Regex.scan(~r/id="session-([-0-9a-f]+)"/, html, capture: :all_but_first)
+      assert [first, second] =
+               Regex.scan(~r/id="session-([-0-9a-f]+)"/, html, capture: :all_but_first)
+
       assert first == [newer.id]
       assert second == [older.id]
     end
