@@ -180,6 +180,7 @@ defmodule ArbiterCli.Output do
         {"Type", issue["issue_type"]},
         {"Backlog", backlog_label(issue)},
         {"Progress", child_progress_label(issue)},
+        {"Cost rollup", epic_rollup_label(issue["epic_rollup"])},
         {"Auto-close", auto_close_label(issue)},
         {"Assignee", issue["assignee"]},
         {"Workspace", issue["workspace_id"]},
@@ -244,6 +245,19 @@ defmodule ArbiterCli.Output do
   end
 
   defp estimate_label(_), do: nil
+
+  # bd-18vl9q: "$X spent · ~$Y-Z to go" (design bd-9jj5lf §4). `n=` counts ride
+  # along so "why does this range look small" is answerable without a second
+  # lookup — e.g. `dispatchable=0` says the range is $0-0 because nothing is
+  # queued, not because the estimator came up empty.
+  defp epic_rollup_label(%{"spent" => spent, "to_go_low" => lo, "to_go_high" => hi} = r)
+       when is_number(spent) and is_number(lo) and is_number(hi) do
+    "#{money(spent)} spent · ~#{money(lo)}–#{money(hi)} to go " <>
+      "(closed=#{r["closed_count"]}, dispatchable=#{r["dispatchable_count"]}, " <>
+      "excluded=#{r["excluded_count"]}, upcoming=#{r["upcoming_count"]})"
+  end
+
+  defp epic_rollup_label(_), do: nil
 
   defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
   defp money(_), do: "?"

@@ -98,6 +98,30 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       refute has_element?(view, "#epic-#{manual.id}-auto-close")
     end
 
+    # bd-18vl9q, design bd-9jj5lf §4: the compact "$X spent · ~$Y-Z to go" rollup.
+    test "a row shows the compact cost rollup", %{conn: conn, ws: ws} do
+      e = epic(ws, "cost-epic")
+      closed = child(ws, e, "c1", :closed)
+
+      {:ok, _ev} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: closed.id,
+          base_task_id: closed.id,
+          role: "base",
+          source: :task,
+          step: :work,
+          workspace_id: ws.id,
+          cost_usd: 9.5,
+          occurred_at: DateTime.utc_now()
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/epics")
+
+      rollup = render(element(view, "#epic-#{e.id}-cost-rollup"))
+      assert rollup =~ "$9.50 spent"
+      assert rollup =~ "to go"
+    end
+
     test "a row shows the epic's age", %{conn: conn, ws: ws} do
       e = epic(ws, "aged-epic")
 

@@ -2380,4 +2380,57 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute has_element?(view, "#children-running-#{child.id}")
     end
   end
+
+  # bd-18vl9q, design bd-9jj5lf §4: "$X spent · ~$Y-Z to go" on the epic
+  # detail page.
+  describe "epic cost rollup" do
+    test "shows spent, to-go, and the breakdown counts", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, closed_child} = Ash.create(Issue, %{title: "closed child", workspace_id: ws.id})
+      {:ok, closed_child} = Ash.update(closed_child, %{}, action: :close)
+      link_parent_of(epic, closed_child)
+
+      {:ok, _ev} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: closed_child.id,
+          base_task_id: closed_child.id,
+          role: "base",
+          source: :task,
+          step: :work,
+          workspace_id: ws.id,
+          cost_usd: 6.5,
+          occurred_at: DateTime.utc_now()
+        })
+
+      {:ok, backlog_child} = Ash.create(Issue, %{title: "backlog child", workspace_id: ws.id})
+      link_parent_of(epic, backlog_child)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#panel-epic-cost-rollup")
+      assert has_element?(view, "#epic-cost-rollup-headline", "$6.50 spent")
+      assert has_element?(view, "#epic-cost-rollup-breakdown", "1 closed")
+      assert has_element?(view, "#epic-cost-rollup-breakdown", "1 upcoming")
+    end
+
+    test "a non-epic issue does not render the cost rollup panel", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, "#panel-epic-cost-rollup")
+    end
+
+    test "a childless epic still renders the panel at all zeroes", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "childless epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#panel-epic-cost-rollup")
+      assert has_element?(view, "#epic-cost-rollup-headline", "$0.00 spent")
+    end
+  end
 end

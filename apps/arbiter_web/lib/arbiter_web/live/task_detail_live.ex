@@ -70,6 +70,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.ParentRefs
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
+  alias Arbiter.Usage
   alias Arbiter.Usage.Budget
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
@@ -178,6 +179,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:task_id, task_id)
      |> assign(:parent_refs, [])
      |> assign(:children_by_status, nil)
+     |> assign(:epic_cost_rollup, nil)
      |> assign(:issue_label, "issue")
      |> assign(:worker_label, "worker")
      |> assign(:workspace_label, "workspace")
@@ -1027,7 +1029,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   # a child's status change arrives as a `:task_lifecycle` event for that
   # child, which is exactly what `refresh_deps/1` already re-runs on.
   defp refresh_children_by_status(
-         %{assigns: %{task: %Issue{issue_type: :epic}}} = socket,
+         %{assigns: %{task: %Issue{issue_type: :epic} = epic}} = socket,
          groups
        ) do
     children = groups.children |> Enum.map(& &1.issue) |> Enum.reject(&is_nil/1)
@@ -1049,11 +1051,18 @@ defmodule ArbiterWeb.TaskDetailLive do
         Map.update!(acc, column, &(&1 ++ [chip]))
       end)
 
-    assign(socket, :children_by_status, by_column)
+    socket
+    |> assign(:children_by_status, by_column)
+    # bd-18vl9q, design bd-9jj5lf §4: rides the same refresh trigger as the
+    # mini-board above — a child's lifecycle event is exactly what should
+    # move the epic's cost rollup too.
+    |> assign(:epic_cost_rollup, Usage.epic_cost_rollup(epic))
   end
 
   defp refresh_children_by_status(socket, _groups) do
-    assign(socket, :children_by_status, nil)
+    socket
+    |> assign(:children_by_status, nil)
+    |> assign(:epic_cost_rollup, nil)
   end
 
   defp epic_child?(
@@ -2565,6 +2574,48 @@ defmodule ArbiterWeb.TaskDetailLive do
                     chips={@children_by_status.closed}
                     collapsible={length(@children_by_status.closed) > 5}
                   />
+                </div>
+              </.panel>
+
+              <%!-- Design bd-9jj5lf §4 (bd-18vl9q): the epic cost rollup —
+                   "$X spent · ~$Y-Z to go" over closed children's actual
+                   spend plus the summed p25-p75 estimates of open,
+                   dispatchable children. Worker spend only, per §7. --%>
+              <.panel
+                :if={@epic_cost_rollup}
+                id="panel-epic-cost-rollup"
+                title="COST ROLLUP"
+                class="order-5"
+              >
+                <div class="flex flex-col gap-2">
+                  <p
+                    id="epic-cost-rollup-headline"
+                    class="text-[13px] font-[family-name:var(--font-mono)] text-[var(--text-title)]"
+                    title="Worker spend only — excludes coordinator session overhead"
+                  >
+                    {money(@epic_cost_rollup.spent)} spent
+                    <span class="text-[var(--text-label)]">·</span>
+                    ~{money(@epic_cost_rollup.to_go_low)}{"–"}{money(@epic_cost_rollup.to_go_high)} to go
+                  </p>
+                  <div
+                    id="epic-cost-rollup-breakdown"
+                    class="flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+                  >
+                    <span>{@epic_cost_rollup.closed_count} closed</span>
+                    <span>{@epic_cost_rollup.dispatchable_count} dispatchable</span>
+                    <span
+                      :if={@epic_cost_rollup.dispatchable_unestimated_count > 0}
+                      title="Dispatchable children the estimator has no history for"
+                    >
+                      ({@epic_cost_rollup.dispatchable_unestimated_count} no estimate)
+                    </span>
+                    <span title="Blocked, parked, or non-dispatchable epic sub-children">
+                      {@epic_cost_rollup.excluded_count} excluded
+                    </span>
+                    <span title="Unpromoted Backlog children — not committed work yet">
+                      {@epic_cost_rollup.upcoming_count} upcoming
+                    </span>
+                  </div>
                 </div>
               </.panel>
 

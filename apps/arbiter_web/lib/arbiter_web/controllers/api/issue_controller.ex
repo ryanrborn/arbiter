@@ -76,8 +76,16 @@ defmodule ArbiterWeb.Api.IssueController do
       # `arb issue show` renders it without a second round trip. Only here —
       # the index would pay a ledger scan per row for a number nobody reads
       # in a list.
-      {:ok, issue} -> render(conn, :show, issue: issue, estimate: Estimate.payload(issue))
-      {:error, _} = err -> err
+      # bd-18vl9q: same for the epic cost rollup — nil for a non-epic issue.
+      {:ok, issue} ->
+        render(conn, :show,
+          issue: issue,
+          estimate: Estimate.payload(issue),
+          epic_rollup: Estimate.epic_cost_rollup(issue)
+        )
+
+      {:error, _} = err ->
+        err
     end
   end
 
