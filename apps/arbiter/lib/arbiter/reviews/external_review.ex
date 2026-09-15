@@ -68,7 +68,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Reviews.{Checkout, Coverage, PrState, Record}
-  alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
+  alias Arbiter.Tasks.{Issue, IssueRepo, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.CodeReview.DiffScope
@@ -1420,6 +1420,11 @@ defmodule Arbiter.Reviews.ExternalReview do
         # zero-finding review leaves this empty (correctly quiet).
         posted_findings: normalize_findings(findings)
       }
+      # bd-9dwbvt: an engagement belongs to the PR's repo. `repo_name` is the
+      # bare name / forge slug this review ran against; `configured_key/2` maps
+      # it onto the `repo_paths` key, and yields nil (leaving the create to
+      # resolve normally) when it maps to nothing.
+      |> maybe_put(:repo, IssueRepo.configured_key(ws_id, Map.get(prepared, :repo_name)))
       |> maybe_put(:last_reviewed_sha, head_sha)
       |> maybe_put(:last_seen_comment_id, watermark)
       |> maybe_put(:last_verdict, verdict_or_nil(verdict, report_only))

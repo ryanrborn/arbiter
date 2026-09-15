@@ -120,6 +120,75 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     assert task.repo == "org/alpha"
   end
 
+  # bd-9dwbvt: the dashboard's slice of "every issue carries a repo".
+  test "leaving the repo select blank takes the workspace's repo (bd-9dwbvt)",
+       %{conn: conn} do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "form-sole-#{System.unique_integer([:positive])}",
+        prefix: "fsl",
+        config: %{"repo_paths" => %{"org/alpha" => "/tmp/arb-resolvable"}}
+      })
+
+    {:ok, view, html} = live(conn, ~p"/tasks/new")
+
+    # The field no longer advertises itself as optional...
+    refute html =~ "Repo (optional)"
+
+    # ...and once a workspace is picked, its blank choice names the repo that
+    # leaving it blank will now assign.
+    html =
+      view
+      |> form("#task-new-form", %{"task" => %{"title" => "x", "workspace_id" => ws.id}})
+      |> render_change()
+
+    assert html =~ "workspace default (org/alpha)"
+
+    view
+    |> form("#task-new-form", %{
+      "task" => %{"title" => "blank-repo-select", "workspace_id" => ws.id, "repo" => ""}
+    })
+    |> render_submit()
+
+    assert_redirect(view)
+
+    [task] =
+      Issue
+      |> Ash.Query.filter(title == "blank-repo-select")
+      |> Ash.read!()
+
+    assert task.repo == "org/alpha"
+  end
+
+  test "a multi-repo workspace with no default_repo reports the error on submit (bd-9dwbvt)",
+       %{conn: conn} do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "form-ambig-#{System.unique_integer([:positive])}",
+        prefix: "fam",
+        config: %{
+          "repo_paths" => %{
+            "org/alpha" => "/tmp/arb-resolvable",
+            "org/beta" => "/tmp/arb-resolvable-too"
+          }
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/tasks/new")
+
+    view
+    |> form("#task-new-form", %{
+      "task" => %{"title" => "no-repo-picked", "workspace_id" => ws.id, "repo" => ""}
+    })
+    |> render_submit()
+
+    # The create runs in a `start_async`; await it before reading the error.
+    html = render_async(view)
+
+    assert html =~ "org/beta"
+    assert Issue |> Ash.Query.filter(title == "no-repo-picked") |> Ash.read!() == []
+  end
+
   # `issue_type` is only defaulted on a *missing* key; a blank one used to
   # survive as "" and reach Ash as a bad atom cast.
   test "a blank issue_type falls back to the default rather than erroring",

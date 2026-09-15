@@ -8,6 +8,7 @@ defmodule ArbiterCli.Cmd.Issue do
       arb issue create    <title> [--description ...] [--priority ...]
                           [--type ...] [--deps id1,id2] [--labels a,b]
                           [--parent <parent-id>] [--auto-close]
+                          [--repo <repo_paths key>]
       arb issue update    <id> [--title ...] [--priority N] [--difficulty N]
                           [--status s] [--description d] [--assignee a]
                           [--append-notes text] [--qa-notes text]

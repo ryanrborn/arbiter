@@ -70,6 +70,38 @@ defmodule Arbiter.Tasks.RepoConfig do
   end
 
   @doc """
+  Like `find_entry/2`, but returns the *key* `repo` matched on rather than the
+  value stored under it. Same three passes, same order.
+
+  Use this whenever the caller has to persist or compare the configured key
+  itself: mapping an entry back to its key by value is ambiguous, because two
+  `repo_paths` keys may legitimately point at the same checkout (an alias),
+  and the by-value scan would then hand back whichever key the map happens to
+  enumerate first rather than the one the caller named (bd-9dwbvt).
+
+  Returns `nil` if `map` isn't a map, or the repo isn't registered.
+  """
+  def find_key(map, repo) when is_map(map) and is_binary(repo) do
+    if Map.has_key?(map, repo) do
+      repo
+    else
+      target = normalize_slug(repo)
+
+      Enum.find_value(map, fn {k, _v} -> if normalize_slug(k) == target, do: k end) ||
+        find_key_by_slug_suffix(map, repo)
+    end
+  end
+
+  def find_key(_map, _repo), do: nil
+
+  defp find_key_by_slug_suffix(map, repo) do
+    case String.split(repo, "/") do
+      [_owner, name] when name != "" -> find_key(map, name)
+      _ -> nil
+    end
+  end
+
+  @doc """
   Looks up `repo`'s filesystem path in a `repo_paths`-shaped map. See
   `find_entry/2` for the matching rules. Returns `nil` if `map`
   isn't a map, or the repo isn't registered.

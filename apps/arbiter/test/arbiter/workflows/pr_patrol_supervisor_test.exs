@@ -2,7 +2,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
   # async: false — the PRPatrolSupervisor and its Registry are singletons.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.{PRPatrol, PRPatrolSupervisor}
 
   @registry Arbiter.Workflows.PRPatrolRegistry
@@ -10,9 +10,13 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
   # Seed an open fleet-authored PR task (the lazy-start watched item, bd-7tr11p)
   # for a repo. `pr_ref` is not create-accepted, so set it via :update — exactly
   # as the MergeQueue does when it opens the PR.
+  # The repo is deliberately left nil (bd-9dwbvt's `:create` would otherwise
+  # refuse in these multi-repo, no-`default_repo` workspaces): the lazy-start
+  # gate keys off `pr_ref`, not the issue's repo, and pinning one here would
+  # imply this derivation reads it.
   defp open_pr_task!(ws, pr_ref) do
-    {:ok, task} =
-      Ash.create(Issue, %{
+    task =
+      issue_without_repo!(%{
         title: "authored-#{System.unique_integer([:positive])}",
         description: "d",
         issue_type: :feature,

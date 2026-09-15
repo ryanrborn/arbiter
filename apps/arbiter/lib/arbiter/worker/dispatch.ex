@@ -64,6 +64,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
@@ -1406,26 +1407,11 @@ defmodule Arbiter.Worker.Dispatch do
   @spec all_available_repos(Issue.t() | String.t() | nil) :: [String.t()]
   def all_available_repos(%Issue{workspace_id: ws_id}), do: all_available_repos(ws_id)
 
+  # bd-9dwbvt: one enumeration, shared with the create-time resolver
+  # (`Arbiter.Tasks.IssueRepo`) — the set of repos an issue may be created
+  # against and the set dispatch resolves against must not be able to drift.
   def all_available_repos(ws_id) when is_binary(ws_id) or is_nil(ws_id) do
-    ws_repos =
-      case load_workspace_config(ws_id) do
-        %{"repo_paths" => rp} when is_map(rp) ->
-          Enum.flat_map(rp, fn {k, v} ->
-            if repo_path_from_config(v) != nil, do: [k], else: []
-          end)
-
-        _ ->
-          []
-      end
-
-    app_repos =
-      :arbiter
-      |> Application.get_env(:repo_paths, %{})
-      |> Enum.flat_map(fn {k, v} ->
-        if repo_path_from_config(v) != nil, do: [k], else: []
-      end)
-
-    (ws_repos ++ app_repos) |> Enum.uniq() |> Enum.sort()
+    IssueRepo.configured_repos(ws_id)
   end
 
   # Pre-flight auth check (bd-awi4nw): before transitioning the task and
