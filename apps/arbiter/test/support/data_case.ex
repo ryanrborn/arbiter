@@ -249,6 +249,34 @@ defmodule Arbiter.DataCase do
   end
 
   @doc """
+  Create an issue whose `repo` is `nil` — the shape every issue had before
+  bd-9dwbvt, and the one the backfill and dispatch's late resolution still
+  have to cope with.
+
+  `:create` now binds a repo (`Arbiter.Tasks.Issue.Changes.ResolveRepo`), and
+  in a multi-repo workspace with no `default_repo` it refuses to create at all
+  without one. `:update` is deliberately not hooked, so this seeds with a
+  configured repo (when the workspace has any) and then clears it — which is
+  also exactly how an operator un-assigns a repo in production.
+
+  Use this ONLY where the repo-less state is the thing under test. A test that
+  just wants an issue should let `:create` resolve the repo normally.
+  """
+  def issue_without_repo!(attrs) when is_map(attrs) do
+    ws_id = Map.get(attrs, :workspace_id) || Map.get(attrs, "workspace_id")
+
+    seed =
+      case Arbiter.Tasks.IssueRepo.configured_repos(ws_id) do
+        [] -> attrs
+        [repo | _] -> Map.put(attrs, :repo, repo)
+      end
+
+    {:ok, issue} = Ash.create(Arbiter.Tasks.Issue, seed)
+    {:ok, issue} = Ash.update(issue, %{repo: nil})
+    issue
+  end
+
+  @doc """
   A helper that transforms changeset errors into a map of messages.
 
       assert {:error, changeset} = Accounts.create_user(%{password: "short"})
