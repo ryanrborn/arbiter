@@ -42,18 +42,22 @@ defmodule Arbiter.Tasks.Dependency do
     SQLite enforces this via FK constraints; deleting a referenced issue is
     restricted (matches Issue→Workspace policy).
 
-  ## Not audited
+  ## Audited
 
-  Dependency edges are intentionally NOT covered by paper_trail. Edges are cheap
-  to recreate and the audit overhead isn't worth it for graph metadata. If we
-  later want history (e.g. "when was the blocks edge added/removed?") we can
-  add `AshPaperTrail.Resource` here without schema changes.
+  Edges **are** paper-trailed (bd-apj0gq). They used not to be, on the reasoning
+  that "edges are cheap to recreate" — true while every edge was written by a
+  script. Once `Arbiter.Tasks.Dependencies` put edge writes behind one facade
+  reachable from MCP, REST, the CLI and (next) a browser button, "who added this
+  blocker, and when" became an operator question, so every create and destroy
+  now writes a `Arbiter.Tasks.Dependency.Version` row. The `dependencies` table
+  itself is unchanged; the history lives in `dependencies_versions`.
   """
 
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Tasks,
-    data_layer: AshSqlite.DataLayer
+    data_layer: AshSqlite.DataLayer,
+    extensions: [AshPaperTrail.Resource]
 
   @types ~w(blocks depends_on relates_to discovered_from parent_of conflicts_with)a
 
@@ -65,6 +69,20 @@ defmodule Arbiter.Tasks.Dependency do
       reference :from_issue, on_delete: :restrict
       reference :to_issue, on_delete: :restrict
     end
+  end
+
+  paper_trail do
+    change_tracking_mode(:changes_only)
+    store_action_name?(true)
+    store_action_inputs?(true)
+    ignore_attributes([:created_at, :updated_at])
+    # Snapshot the edge's identity onto every version row so "bd-a depends_on
+    # bd-b was removed on <date>" is readable without diffing `changes` — the
+    # destroy version is otherwise an empty diff against a now-deleted row.
+    attributes_as_attributes([:from_issue_id, :to_issue_id, :type])
+    # No FK from version rows back to `dependencies`: an edge is destroyed, not
+    # archived, and its history must not block the destroy (matches Workspace).
+    reference_source?(false)
   end
 
   actions do

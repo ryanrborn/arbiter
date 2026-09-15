@@ -55,6 +55,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.MCP.Scope
   alias Arbiter.Tasks.Claim
+  alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Graph
   alias Arbiter.Tasks.GraphMember
@@ -1195,6 +1196,10 @@ defmodule Arbiter.MCP.Tools do
   Add a dependency edge between two directives for graph ordering / mutual
   exclusion. Coordinator only. `type` is one of `depends_on`, `blocks`,
   `conflicts_with`.
+
+  The write goes through `Arbiter.Tasks.Dependencies.add/4` (bd-apj0gq), so a
+  gating edge that would close a cycle is refused here rather than surviving to
+  `graph_start`.
   """
   @spec graph_add_edge(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def graph_add_edge(%Scope{} = scope, args) do
@@ -1207,11 +1212,9 @@ defmodule Arbiter.MCP.Tools do
          {:ok, graph} <- fetch_graph(scope, graph_id),
          {:ok, _from} <- fetch_task_in_workspace(graph.workspace_id, from_id),
          {:ok, _to} <- fetch_task_in_workspace(graph.workspace_id, to_id) do
-      attrs =
-        %{"from_issue_id" => from_id, "to_issue_id" => to_id, "type" => type}
-        |> maybe_put("notes", fetch_string(args, "notes"))
+      opts = maybe_put_kw([], :notes, fetch_string(args, "notes"))
 
-      case Ash.create(Dependency, attrs) do
+      case Dependencies.add(from_id, to_id, type, opts) do
         {:ok, dep} ->
           Logger.info(
             "[graph_add_edge] #{type} edge #{from_id}→#{to_id} added for graph #{graph_id}"
@@ -1219,8 +1222,8 @@ defmodule Arbiter.MCP.Tools do
 
           {:ok, serialize_dependency(dep)}
 
-        {:error, err} ->
-          {:error, {:invalid, ash_error_message(err)}}
+        {:error, reason} ->
+          dependency_error(reason)
       end
     end
   end
@@ -2039,6 +2042,23 @@ defmodule Arbiter.MCP.Tools do
   end
 
   def ash_error_message(err), do: inspect(err)
+
+  @doc """
+  Render an `Arbiter.Tasks.Dependencies` failure as an MCP error tuple.
+
+  The facade's own guards come back as `{reason, message}` with a message
+  already written for a human (the named cycle, the two workspaces); a
+  resource-level rejection comes back as an `Ash` error. `:not_found` keeps its
+  own reason so an agent can tell "no such task" from "that edge is illegal".
+  """
+  @spec dependency_error(term()) :: {:error, {atom(), String.t()}}
+  def dependency_error({:not_found, message}) when is_binary(message),
+    do: {:error, {:not_found, message}}
+
+  def dependency_error({reason, message}) when is_atom(reason) and is_binary(message),
+    do: {:error, {:invalid, message}}
+
+  def dependency_error(err), do: {:error, {:invalid, ash_error_message(err)}}
 
   # ---- delegation to split-out submodules ---------------------------------
   #
