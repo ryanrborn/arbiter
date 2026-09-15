@@ -217,26 +217,53 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
     end
   end
 
-  # Prefer an explicit config, then whatever the operator's own install has
-  # already onboarded to (a version we know this host's CLI accepts), then the
-  # compiled fallback.
+  # `lastOnboardingVersion` gates the "what's new" screen, not the blocking
+  # login wizard (`hasCompletedOnboarding` is that one, and §9.2 measured it).
+  # So the right answer is simply the **highest** version any of our sources
+  # knows about: a value below the installed CLI's costs a changelog screen an
+  # operator has to dismiss, and a value above it costs nothing.
+  #
+  # Taking the operator's value as a *floor* rather than a preference is the
+  # point — their `~/.claude.json` may well be older than our constant (it was,
+  # on the dogfood host: 2.1.63 against a 2.1.270 CLI), and preferring it would
+  # hand every session the screen we are trying to pre-answer.
   defp onboarding_version(existing, opts) do
-    Keyword.get(opts, :onboarding_version) ||
-      operator_onboarding_version(opts) ||
-      binary_or_nil(Map.get(existing, "lastOnboardingVersion")) ||
-      @fallback_onboarding_version
+    case Keyword.get(opts, :onboarding_version) do
+      explicit when is_binary(explicit) and explicit != "" ->
+        explicit
+
+      _ ->
+        [
+          @fallback_onboarding_version,
+          operator_onboarding_version(opts),
+          binary_or_nil(Map.get(existing, "lastOnboardingVersion"))
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.reduce(&higher_version/2)
+    end
+  end
+
+  # Version strings from other people's files are data: an unparseable one
+  # loses rather than crashing a launch.
+  defp higher_version(a, b) do
+    case {Version.parse(a), Version.parse(b)} do
+      {{:ok, va}, {:ok, vb}} -> if Version.compare(va, vb) == :lt, do: b, else: a
+      {{:ok, _}, :error} -> a
+      {:error, {:ok, _}} -> b
+      _ -> a
+    end
   end
 
   defp operator_onboarding_version(opts) do
-    with source when is_binary(source) <- source_dir(opts),
-         # The operator's file sits *beside* their config dir (`~/.claude.json`
-         # next to `~/.claude`), not inside it — check both spellings.
-         version when is_binary(version) <-
-           binary_or_nil(read_json(Path.join(source, @claude_json))["lastOnboardingVersion"]) ||
-             binary_or_nil(read_json(source <> ".json")["lastOnboardingVersion"]) do
-      version
-    else
-      _ -> nil
+    case source_dir(opts) do
+      source when is_binary(source) ->
+        # The operator's file sits *beside* their config dir (`~/.claude.json`
+        # next to `~/.claude`), not inside it — check both spellings.
+        binary_or_nil(read_json(Path.join(source, @claude_json))["lastOnboardingVersion"]) ||
+          binary_or_nil(read_json(source <> ".json")["lastOnboardingVersion"])
+
+      _ ->
+        nil
     end
   end
 

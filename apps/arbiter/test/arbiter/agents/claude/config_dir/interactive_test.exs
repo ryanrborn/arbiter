@@ -77,7 +77,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       assert claude_json!(config)["hasCompletedOnboarding"] == true
     end
 
-    test "takes lastOnboardingVersion from the operator's own .claude.json when readable", %{
+    test "takes the operator's lastOnboardingVersion when it is newer than ours", %{
       config: config,
       source: source,
       tmp: tmp
@@ -91,6 +91,56 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
                Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: source)
 
       assert claude_json!(config)["lastOnboardingVersion"] == "9.9.9"
+    end
+
+    test "keeps ours when the operator's is older — a low version re-triggers the screen", %{
+      config: config,
+      source: source,
+      tmp: tmp
+    } do
+      # The dogfood host really is like this: `~/.claude.json` says 2.1.63
+      # against a much newer CLI. Preferring it would hand every session the
+      # "what's new" screen this module exists to pre-answer.
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{"lastOnboardingVersion" => "0.0.1"})
+      )
+
+      assert :ok =
+               Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: source)
+
+      assert claude_json!(config)["lastOnboardingVersion"] != "0.0.1"
+    end
+
+    test "finds the operator's file beside their config dir, not only inside it", %{
+      config: config,
+      tmp: tmp
+    } do
+      # `~/.claude.json` sits next to `~/.claude`, which is the real layout.
+      beside = Path.join(tmp, "operator-home")
+      File.mkdir_p!(beside)
+      File.write!(beside <> ".json", Jason.encode!(%{"lastOnboardingVersion" => "9.9.9"}))
+
+      assert :ok =
+               Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: beside)
+
+      assert claude_json!(config)["lastOnboardingVersion"] == "9.9.9"
+    end
+
+    test "an unparseable version from someone else's file does not crash a launch", %{
+      config: config,
+      source: source,
+      tmp: tmp
+    } do
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{"lastOnboardingVersion" => "not-a-version"})
+      )
+
+      assert :ok =
+               Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: source)
+
+      assert is_binary(claude_json!(config)["lastOnboardingVersion"])
     end
   end
 

@@ -260,7 +260,12 @@ defmodule Arbiter.Sessions.Provisioning do
 
   defp write_mcp_config(session, paths, opts) do
     if Keyword.get(opts, :mcp, MCP.enabled?()) do
-      token = mint_token(session, opts)
+      # Narrowed on purpose: `opts` here is the whole `launch/1` keyword list
+      # (`:runner`, `:cwd`, `:cols`, an OAuth token…), and `MCP.mint/2` forwards
+      # its options straight into `Plug.Crypto.sign/4`. Only the claim-shaping
+      # and TTL keys belong in a crypto call.
+      token =
+        mint_token(session, Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth]))
 
       with :ok <-
              ClaudeMCP.write_mcp_config(paths.root,
