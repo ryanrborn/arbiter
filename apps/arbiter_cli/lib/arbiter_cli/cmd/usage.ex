@@ -94,6 +94,7 @@ defmodule ArbiterCli.Cmd.Usage do
         _ ->
           cond do
             calibration?(rest) -> calibration(rest, mode)
+            "--session" in rest and is_nil(session_flag(rest)) -> Output.die("--session requires an id")
             session_id = session_flag(rest) -> session_detail(session_id, rest, mode)
             true -> summarize(rest, mode)
           end
@@ -174,11 +175,14 @@ defmodule ArbiterCli.Cmd.Usage do
 
   defp session_detail(session_id, argv, mode) do
     {opts, _rest, _bad} =
-      OptionParser.parse(argv, switches: [session: :string, since: :string, limit: :integer])
+      OptionParser.parse(argv,
+        switches: [session: :string, workspace: :string, since: :string, limit: :integer]
+      )
 
     params =
       []
       |> maybe_put(:session_id, session_id)
+      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
       |> maybe_put(:limit, Keyword.get(opts, :limit) || @default_event_limit)
 

@@ -252,6 +252,33 @@ defmodule ArbiterCli.Cmd.UsageTest do
       assert code == 0
       assert out =~ "(no usage events)"
     end
+
+    test "`--session` with no value errors instead of silently falling back to --by day" do
+      {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Usage.run(["--session"]) end)
+
+      assert code != 0
+      assert err =~ "--session requires an id"
+    end
+
+    test "passes --workspace through to the drill-down, like `events` does" do
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["session_id"] == "sess-abc123"
+           assert conn.query_params["workspace_id"] == "ws-1"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Usage.run(["--session", "sess-abc123", "--workspace", "ws-1"])
+        end)
+
+      assert code == 0
+      assert out =~ "(no usage events)"
+    end
   end
 
   describe "arb usage events" do

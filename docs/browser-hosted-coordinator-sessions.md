@@ -1182,22 +1182,28 @@ The two items §7.7 left open are done:
     session process that already fans out terminal bytes (§5.3) — gained a
     second timer (`usage_poll_interval_ms`, default ~2s) that, while at least
     one client is attached, re-reads the session's JSONL with
-    `ClaudeSessionFile.read_totals/2` and publishes the delta since the last
-    tick on `Sessions.usage_topic/1`. Token counts are deltas; `cost_usd` is
-    the file's latest cumulative figure, since `cost-state` records are
-    periodic (or, on 2.1.270+, absent entirely — see §7.7); `estimated`
-    mirrors `cost_source != :cost_state`. `ArbiterWeb.SessionChannel` was
+    `ClaudeSessionFile.read_totals/2` and publishes the file's **cumulative**
+    totals (not a delta since the last tick) on `Sessions.usage_topic/1` — a
+    tab that attaches midway through the session, or reattaches after the
+    reader restarted, shows the correct number on the very next tick instead
+    of resuming from zero. `cost_usd` is the file's latest cumulative figure,
+    since `cost-state` records are periodic (or, on 2.1.270+, absent entirely
+    — see §7.7); `estimated` is `cost_source == :estimated` — true only when
+    the figure came from `ClaudePricing`'s token-based estimate, not merely
+    "not a `cost-state` record" (a file with no cost at all reports
+    `cost_usd: nil`, `estimated: false`). `ArbiterWeb.SessionChannel` was
     already subscribed to that topic and forwarding it (phase 4's
     placeholder), so no channel change was needed. `SessionLive`'s hook-owned
     status strip renders a running token/cost chip from it, the same way it
     already renders geometry from `meta` events — never a LiveView diff.
 
-    This reads `session.provider_session_id` / `.config_dir` as of the
-    reader's own start rather than re-fetching the row every tick, so a
-    mid-session provider-id rollover (§7.5's "wrinkle") is a gap the
-    *authoritative* path (`Sessions.UsageIngest`'s periodic sweep) closes on
-    its own — consistent with the HUD being documented as "cheap,
-    approximate".
+    `session.provider_session_id` / `.config_dir` are read as of the reader's
+    own start rather than re-fetched every tick, but a mid-session rollover
+    (§7.5's "wrinkle") is *not* left to the authoritative sweep: a rollover
+    doesn't delete the old JSONL, so every tick with a known id also checks
+    for a newer `*.jsonl` in the same config dir and switches onto it (and
+    persists the new id) when one exists — the reader closes the gap itself,
+    on the next ~2s tick, rather than going dark for the rest of the session.
 
   * **`arb usage --by session` / `--session <id>`.** `Arbiter.Usage.summarize/1`
     gained a `:session` grouping that mirrors `:task`'s discipline exactly:

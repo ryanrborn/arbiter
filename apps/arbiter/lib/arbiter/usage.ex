@@ -27,8 +27,8 @@ defmodule Arbiter.Usage do
   ## Aggregation
 
   `summarize/1` rolls events up by one of `:day`, `:task`, `:epic`,
-  `:workspace`, `:repo`, `:model`, `:step`, `:provider`, or `:source`. It
-  returns a list
+  `:workspace`, `:repo`, `:model`, `:step`, `:provider`, `:source`, or
+  `:session`. It returns a list
   of maps with `{group:, total_cost_usd:, tokens_in:, tokens_out:, ...}`.
   `:campaign` (the old name for `:epic`) is still accepted as a deprecated
   alias — see `summarize/1` below.

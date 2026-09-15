@@ -132,11 +132,17 @@ defmodule Arbiter.Sessions.Stream do
   CLI is currently appending to. The discovered id is persisted back onto the
   row with `Arbiter.Sessions.record_provider_session/2` (best-effort — a
   failure to persist is not fatal to the tick, since the id is still used to
-  read *this* tick's totals) so later ticks, and the authoritative
-  `Arbiter.Sessions.UsageIngest` sweep, pick it up too. The same discovery
-  path also closes the §7.5 rollover wrinkle: a tick that finds its
-  previously-known id no longer resolves a file re-discovers rather than
-  going dark.
+  read *this* tick's totals) so `Arbiter.Sessions.usage_events/1`, whose only
+  other writer this column has, sees it too.
+
+  The same discovery is also how the §7.5 rollover wrinkle stays closed for
+  the *whole* session, not just its start: `--resume`/compaction rolls the
+  CLI onto a new `<sid>.jsonl` without deleting the old one, so a stale
+  `provider_session_id` would keep resolving forever if the reader only
+  discovered on an outright `locate/2` miss. Instead every tick with a known
+  id also checks for a newer `*.jsonl` in the same config dir and switches
+  (and persists) onto it when one exists — so a rollover mid-session, not
+  just a missing file, re-discovers rather than going dark.
 
   This reads `session.config_dir` as it was at the reader's own start (or
   last resume) rather than re-fetching the row every tick — cheap, and
@@ -418,12 +424,21 @@ defmodule Arbiter.Sessions.Stream do
       else
         ref = Process.monitor(pid)
 
-        put_in(state.subs[pid], %{
-          ref: ref,
-          inflight: 0,
-          mode: :live,
-          needs_snapshot: false
-        })
+        state =
+          put_in(state.subs[pid], %{
+            ref: ref,
+            inflight: 0,
+            mode: :live,
+            needs_snapshot: false
+          })
+
+        # A joining client (first attach, or reattach after the reader
+        # restarted) has never seen a `usage` event. The `{size, mtime}` skip
+        # in `maybe_read_usage/3` is reader-global, so without this the next
+        # tick would still skip an unchanged file and leave this client's HUD
+        # blank indefinitely. Clearing it forces one re-read on the next tick,
+        # which `publish_usage/2` broadcasts to every attached client.
+        %{state | usage_file_stat: nil}
       end
 
     # `0` is truthy in Elixir, and a browser really does report it: xterm.js's
@@ -919,24 +934,45 @@ defmodule Arbiter.Sessions.Stream do
     end
   end
 
-  # `session.provider_session_id` resolves to a file: use it. If it no longer
-  # does (a rollover moved the CLI onto a new id since the reader last saw
-  # this row), fall through to discovery rather than going dark — the §7.5
-  # "wrinkle" this closes for free.
+  # `session.provider_session_id` resolves to a file: use it, *unless* a
+  # newer `*.jsonl` has since appeared in the same config dir. A rollover
+  # (`--resume`/compaction) does not delete the old file — the CLI starts
+  # appending to a new `<sid>.jsonl` alongside it — so `locate/2` keeps
+  # resolving the stale id forever and this reader would otherwise go dark
+  # for the rest of the session. If `locate/2` fails outright (the file was
+  # actually removed), fall through to discovery the same way.
   defp usage_source(%{provider_session_id: id} = session) when is_binary(id) and id != "" do
     case ClaudeSessionFile.locate(session.config_dir, id) do
-      {:ok, path} -> {:ok, id, path, session}
+      {:ok, path} -> usage_source_or_newer(session, id, path)
       :not_found -> discover_usage_source(session)
     end
   end
 
   defp usage_source(session), do: discover_usage_source(session)
 
-  # `provider_session_id` is nullable at launch (the CLI picks it) and stale
-  # after a rollover. Either way, assume the newest `*.jsonl` under the
-  # session's own config dir is the file the CLI is currently appending to,
-  # and persist the discovery back onto the row (best-effort: a failed write
-  # doesn't stop this tick from using the id it just found).
+  defp usage_source_or_newer(session, id, path) do
+    case discover_provider_session_file(session.config_dir) do
+      {:ok, ^id, _path} ->
+        {:ok, id, path, session}
+
+      {:ok, newer_id, newer_path} ->
+        if jsonl_mtime(newer_path) > jsonl_mtime(path) do
+          {:ok, newer_id, newer_path, persist_provider_session(session, newer_id)}
+        else
+          {:ok, id, path, session}
+        end
+
+      :not_found ->
+        {:ok, id, path, session}
+    end
+  end
+
+  # `provider_session_id` is nullable at launch (the CLI picks it). Assume the
+  # newest `*.jsonl` under the session's own config dir is the file the CLI is
+  # currently appending to, and persist the discovery back onto the row
+  # (best-effort: a failed write doesn't stop this tick from using the id it
+  # just found — it's `Sessions.usage_events/1` that needs the column, and
+  # that can wait for the next successful tick).
   defp discover_usage_source(session) do
     case discover_provider_session_file(session.config_dir) do
       {:ok, provider_session_id, path} ->
