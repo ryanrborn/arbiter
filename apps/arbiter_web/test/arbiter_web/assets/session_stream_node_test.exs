@@ -5,7 +5,9 @@ defmodule ArbiterWeb.SessionStreamNodeTest do
 
   `assets/js/session_stream.mjs` owns the resume protocol the terminal hook
   depends on — the `last_seq` rejoin closure, duplicate suppression after a
-  reconnect, binary stdin framing, the debounced resize. A JS test suite that
+  reconnect, binary stdin framing, the debounced resize — and `session_fit.mjs`
+  and `session_keys.mjs` own the pane's geometry and its copy/paste policy
+  (bd-3r2otb). A JS test suite that
   only runs when somebody remembers to type `node --test` is a suite that
   stops running, so this shells out to it and fails the Elixir build with its
   transcript attached.
@@ -18,13 +20,21 @@ defmodule ArbiterWeb.SessionStreamNodeTest do
   @moduletag :node
 
   @root Path.expand("../../../../..", __DIR__)
-  @suite "apps/arbiter_web/test/js/session_stream_test.mjs"
+
+  # Named one by one rather than by directory: `node --test <dir>` treats every
+  # file under a path containing `test/` as a suite, and `terminal_probe.mjs`
+  # is a browser probe that imports xterm and would die on `document`.
+  @suites [
+    "apps/arbiter_web/test/js/session_stream_test.mjs",
+    "apps/arbiter_web/test/js/session_fit_test.mjs",
+    "apps/arbiter_web/test/js/session_keys_test.mjs"
+  ]
 
   test "node --test apps/arbiter_web/test/js passes" do
     node = System.find_executable("node") || flunk("node is required by the :node tag")
 
     {output, status} =
-      System.cmd(node, ["--test", @suite], cd: @root, stderr_to_stdout: true)
+      System.cmd(node, ["--test" | @suites], cd: @root, stderr_to_stdout: true)
 
     assert status == 0, "the browser terminal's JS suite failed:\n\n#{output}"
     assert output =~ ~r/# fail 0|fail 0/

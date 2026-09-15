@@ -12,7 +12,8 @@
 // socket and a real reader.
 //
 // `assets/js/session_terminal.mjs` is the other half: xterm, the canvas
-// renderer, the fit addon and the DOM.
+// renderer and the DOM. `session_fit.mjs` and `session_keys.mjs` are the same
+// bargain for the pane's geometry and its copy/paste bindings.
 
 export const MAGIC = "ARB1"
 export const HEADER_SIZE = 12
@@ -75,6 +76,17 @@ function joinRefusal(err) {
 }
 
 /**
+ * Refusals that will never become a join, whoever asks and however often
+ * (bd-3r2otb).
+ *
+ * Everything else is "ask again": the bridge that is not up yet, the reader
+ * that went away mid-attach, the session row a launch has created but not
+ * finished marking running. Those are exactly what the first join after a
+ * launch redirect can land in, and the client's job there is to keep asking.
+ */
+const PERMANENT_REFUSALS = ["session_gone", "bad_topic"]
+
+/**
  * One attached terminal client.
  *
  * `sink` is the renderer-shaped side of it, all optional:
@@ -103,6 +115,7 @@ export class SessionStream {
     this.resizeDebounceMs = resizeDebounceMs
 
     this.joins = 0
+    this.joinRefusals = 0
     this.reconnects = 0
     this.snapshots = 0
     this.finished = false
@@ -156,7 +169,7 @@ export class SessionStream {
         this._setStatus("live")
         this._emit("joined", reply)
       })
-      .receive("error", (err) => this._emit("error", joinRefusal(err)))
+      .receive("error", (err) => this._onJoinRefused(err))
 
     this.socket.connect()
 
@@ -275,6 +288,30 @@ export class SessionStream {
     const rejoin = this.joins > 1
     this._lastSeq = seq
     this._emit("repaint", seq, data, { rejoin })
+  }
+
+  _onJoinRefused(err) {
+    const refusal = joinRefusal(err)
+
+    this.joinRefusals += 1
+    this._emit("error", refusal)
+
+    if (PERMANENT_REFUSALS.includes(refusal.code)) {
+      // phoenix.js would otherwise rejoin a topic that can never accept it,
+      // every few seconds, for as long as the tab is open.
+      this._finish("ended")
+      return
+    }
+
+    // Retryable, and phoenix.js has already scheduled the next attempt — on
+    // its rejoin timer if the socket is up, on the socket's next open if it is
+    // not. Because the join params are a closure, that retry carries the
+    // newest `last_seq` rather than the one this client started with.
+    //
+    // What is left is to stop the page claiming to be "connecting…" while it
+    // waits: a refused first join looked exactly like a wedged one, which is
+    // how the live check spent a minute on a terminal that was retrying.
+    this._setStatus("reconnecting")
   }
 
   _onExit(payload) {

@@ -15,7 +15,7 @@ defmodule ArbiterWeb.SessionLive do
   §6.3 is explicit that the two must not contend for space, so the chrome is a
   fixed-height header and footer and the terminal gets the rest via a flex
   column. Nothing that updates frequently is rendered *over* the terminal: a
-  HUD that reflowed on every update would fight `FitAddon` for rows.
+  HUD that reflowed on every update would fight the fit for rows.
 
   ## Narrow widths (§6.3)
 
@@ -28,18 +28,28 @@ defmodule ArbiterWeb.SessionLive do
   ## Exit
 
   Two independent paths say the agent is gone, because they arrive at very
-  different times. The channel's `exit` event is immediate and reaches the
-  page through the hook (`agent_exited`); the row's own `:ended` status is
-  whatever eventually reaped it, and is what a reload shows.
+  different times. The channel's `exit` event is immediate and reaches the page
+  through the hook (`agent_exited`); the row's own `:ended` status is whatever
+  eventually reaped it, and is what the page's own Kill button produces.
 
-  Either way the terminal **stays mounted**. Whether the pane exists is decided
-  once, at mount (`@terminal?`), and never re-decided: unmounting it would
-  destroy the xterm instance, and with it everything the agent printed —
-  including whatever it said on its way out, which is exactly what the operator
-  is there to read. The stream has already finished by then, so the pane is
-  inert: it will not reconnect and it will not re-attach. The "nothing to
-  attach to" placeholder is only for a session that was already over when the
-  page loaded.
+  Either way the terminal is **replaced** by the "nothing to attach to"
+  placeholder, live, without a reload (bd-3r2otb). It used to stay mounted so
+  its scrollback could still be read, and on the live dashboard that read as a
+  bug: the header said "Agent exited" above a full terminal that silently did
+  nothing. Removing the element is also what closes the channel — the hook's
+  `destroyed()` disposes the socket — so the page stops holding a reader open
+  for a session that is over. Keeping the scrollback is not the page's job; the
+  transcript is (§4.5).
+
+  ## When the terminal never starts
+
+  The hook reports reaching `live`, and the LiveView checks a few seconds after
+  mount that it heard so. The failure this exists for has no other symptom: a
+  tab that is running an asset bundle from before a deploy has no hook for
+  `phx-hook=".SessionTerminal"` at all, so nothing mounts, nothing connects,
+  and the hook-painted status strip sits on its server-rendered "connecting…"
+  forever. That is indistinguishable from a slow server unless the page says
+  so.
   """
 
   use ArbiterWeb, :live_view
@@ -51,18 +61,24 @@ defmodule ArbiterWeb.SessionLive do
 
   require Logger
 
+  # Long enough that a slow first join is not called a failure, short enough
+  # that an operator has not already started debugging the wrong thing.
+  @stall_ms 8_000
+
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     case Sessions.get(id) do
       {:ok, session} ->
+        if connected?(socket), do: Process.send_after(self(), :terminal_stall_check, @stall_ms)
+
         {:ok,
          socket
          |> assign(:session, session)
          |> assign(:kill_candidate, nil)
          |> assign(:agent_exit, nil)
-         # Decided once and never re-decided — see the moduledoc. An exit must
-         # not take the scrollback with it.
-         |> assign(:terminal?, attachable?(session, nil))}
+         |> assign(:terminal_live?, false)
+         |> assign(:terminal_stalled?, false)
+         |> put_terminal()}
 
       {:error, :not_found} ->
         {:ok,
@@ -107,7 +123,7 @@ defmodule ArbiterWeb.SessionLive do
           put_flash(socket, :error, "Could not end that session: #{inspect(reason)}")
       end
 
-    {:noreply, assign(socket, :kill_candidate, nil)}
+    {:noreply, socket |> assign(:kill_candidate, nil) |> put_terminal()}
   end
 
   # From the hook: phase 4's `exit` channel event. Reload the row too — a
@@ -125,7 +141,33 @@ defmodule ArbiterWeb.SessionLive do
      |> assign(:agent_exit, %{
        code: payload["code"],
        reason: payload["reason"]
-     })}
+     })
+     |> put_terminal()}
+  end
+
+  # From the hook, the first time its stream reaches `live`. Only ever clears
+  # the stall notice — a terminal that connects late is not a problem, it is
+  # just late.
+  def handle_event("terminal_live", _payload, socket) do
+    {:noreply, socket |> assign(:terminal_live?, true) |> assign(:terminal_stalled?, false)}
+  end
+
+  @impl true
+  def handle_info(:terminal_stall_check, socket) do
+    stalled? = socket.assigns.terminal? and not socket.assigns.terminal_live?
+    {:noreply, assign(socket, :terminal_stalled?, stalled?)}
+  end
+
+  # `ArbiterWeb.LiveHooks` subscribes every view to the coordinator mailbox and
+  # quota topics and lets their messages fall through (`:cont`), so any page
+  # with a `handle_info/2` of its own has to tolerate them.
+  def handle_info(_message, socket), do: {:noreply, socket}
+
+  # Whether there is anything to attach to is re-decided on every change, so a
+  # session that ends while the page is open swaps to the placeholder without a
+  # reload (bd-3r2otb).
+  defp put_terminal(socket) do
+    assign(socket, :terminal?, attachable?(socket.assigns.session, socket.assigns.agent_exit))
   end
 
   defp attachable?(session, agent_exit), do: session.status == :running and is_nil(agent_exit)
@@ -203,6 +245,27 @@ defmodule ArbiterWeb.SessionLive do
             <span data-role="meta" class="ml-auto text-[var(--text-label)]"></span>
           </div>
 
+          <%!-- Not inside the status strip: that is `phx-update="ignore"` and
+                hook-owned, and this is precisely the case where there may be
+                no hook to own it. --%>
+          <div
+            :if={@terminal_stalled?}
+            id="terminal-stalled"
+            class="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--border-default)] bg-[var(--surface-field)] text-[11px] text-[var(--text-body)]"
+          >
+            <.icon name="hero-exclamation-triangle" class="size-4 text-[var(--text-label)]" />
+            <span>The terminal has not connected.</span>
+            <%!-- A full page load on purpose: the likeliest cause is a tab
+                  still running the asset bundle it loaded before the last
+                  deploy, and a live navigation would not replace it. --%>
+            <a
+              href={~p"/sessions/#{@session.id}"}
+              class="text-[var(--text-link)] no-underline hover:underline"
+            >
+              Reload the page
+            </a>
+          </div>
+
           <%!-- §6.3: a terminal cannot reflow below ~80 columns, so a narrow
                 viewport scrolls this container rather than the page. --%>
           <div id="terminal-scroller" class="overflow-x-auto bg-[var(--arb-term-bg,#16181d)]">
@@ -269,7 +332,14 @@ defmodule ArbiterWeb.SessionLive do
 
             this.terminal = createSessionTerminal(this.el, {
               sessionId: this.el.dataset.sessionId,
-              onStatus: (state) => this.setState(state),
+              onStatus: (state) => {
+                this.setState(state)
+                // The page cannot see the channel, so it is told. Without this
+                // a terminal that never starts is indistinguishable from one
+                // that is merely slow, and the strip says "connecting…"
+                // forever either way.
+                if (state === "live") this.pushEvent("terminal_live", {})
+              },
               onMeta: (meta) => this.setMeta(meta),
               onExit: (payload) => {
                 this.setState("ended")
