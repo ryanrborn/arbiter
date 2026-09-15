@@ -230,6 +230,59 @@ defmodule Arbiter.Sessions.AdoptionTest do
     end
   end
 
+  # The boot task calls `sweep_on_boot/1`, not `sweep/1`, so the primary gate
+  # and the never-crash-the-boot wrapper need their own coverage: a mistake in
+  # either would first show up on a live restart.
+  #
+  # These assert *behaviour* rather than the summary log line. The summary is
+  # `Logger.info`, and the suite runs at `:warning` (config/test.exs), so the
+  # message is filtered before any handler sees it — `capture_log`'s `:level`
+  # option cannot raise the global level back. Production runs at `:info`,
+  # which is what makes the boot summary observable after a restart.
+  describe "sweep_on_boot/1 — the boot task's entry point" do
+    test "a non-primary instance does not touch a single row" do
+      session = session_row!(:running)
+      enumerate([])
+
+      assert :ok = Adoption.sweep_on_boot(primary?: false, runner: SessionRunnerStub)
+
+      # The reason this gate exists: a duplicate or transient boot that swept
+      # would mark the live instance's sessions ended. Nothing is enumerated,
+      # so nothing can be concluded.
+      assert SessionRunnerStub.calls() == []
+      assert {:ok, reloaded} = Sessions.get(session.id)
+      assert reloaded.status == :running
+      assert reloaded.ended_at == nil
+    end
+
+    test "the primary instance really sweeps" do
+      live = session_row!(:running)
+      vanished = session_row!(:running)
+      enumerate([live.scope_unit])
+
+      assert :ok = Adoption.sweep_on_boot(primary?: true, runner: SessionRunnerStub)
+
+      assert {:ok, %{status: :running}} = Sessions.get(live.id)
+      assert {:ok, ended} = Sessions.get(vanished.id)
+      assert ended.status == :ended
+      assert ended.end_reason =~ "adoption sweep"
+    end
+
+    test "an enumeration failure is logged and never crashes the boot" do
+      SessionRunnerStub.script(fn
+        "systemctl", _args, _opts -> {"Failed to connect to bus", 1}
+        _cmd, _args, _opts -> {"", 0}
+      end)
+
+      log =
+        capture_log(fn ->
+          assert :ok = Adoption.sweep_on_boot(primary?: true, runner: SessionRunnerStub)
+        end)
+
+      assert log =~ "skipped, no rows touched"
+    end
+  end
+
   # The orphan branch always logs a warning; swallow it so the assertion output
   # stays readable while still returning the sweep result.
   defp capture_orphans do

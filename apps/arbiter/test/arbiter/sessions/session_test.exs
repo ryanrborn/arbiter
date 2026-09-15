@@ -97,6 +97,73 @@ defmodule Arbiter.Sessions.SessionTest do
     end
   end
 
+  describe "the migrated table (AC 1)" do
+    # The resource passing is not the same as the migration being right: this
+    # migration is hand-written with no committed `resource_snapshots` entry
+    # (see its moduledoc for why), so nothing else would notice the two
+    # drifting apart. Asserted against the live schema rather than the DSL.
+    test "has exactly the columns RFC §7.4 item 4 names, and no others" do
+      columns =
+        Repo.query!("PRAGMA table_info(sessions)").rows
+        |> Enum.map(fn [_cid, name, _type, notnull, _default, pk] ->
+          {name, notnull == 1, pk == 1}
+        end)
+        |> Enum.sort()
+
+      assert columns == [
+               {"auth_mode", true, false},
+               {"config_dir", false, false},
+               {"cwd", true, false},
+               {"end_reason", false, false},
+               {"ended_at", false, false},
+               {"id", true, true},
+               {"inserted_at", true, false},
+               {"last_client_at", false, false},
+               {"provider", true, false},
+               {"provider_session_id", false, false},
+               {"remote_control", true, false},
+               {"scope_unit", true, false},
+               {"started_at", true, false},
+               {"status", true, false},
+               {"tmux_socket", true, false},
+               {"updated_at", true, false},
+               {"workspace_id", false, false}
+             ]
+    end
+
+    test "indexes the two columns that are read by key" do
+      indexes =
+        Repo.query!("PRAGMA index_list(sessions)").rows
+        |> Enum.map(fn [_seq, name, unique | _] -> {name, unique == 1} end)
+        |> Enum.sort()
+
+      assert {"sessions_provider_session_id_index", false} in indexes
+      assert {"sessions_status_index", false} in indexes
+      assert {"sessions_scope_unit_index", true} in indexes
+    end
+
+    test "one row per scope is enforced by the database, not just by the id" do
+      session = create!(%{})
+
+      assert {:error, %Exqlite.Error{message: message}} =
+               Repo.query(
+                 "INSERT INTO sessions (id, provider, scope_unit, tmux_socket, cwd, " <>
+                   "auth_mode, remote_control, started_at, status, inserted_at, updated_at) " <>
+                   "VALUES (?, 'claude_code', ?, '/tmp/other.sock', '/tmp', " <>
+                   "'seeded_credentials', 0, ?, 'running', ?, ?)",
+                 [
+                   Ash.UUID.generate(),
+                   session.scope_unit,
+                   session.started_at,
+                   session.started_at,
+                   session.started_at
+                 ]
+               )
+
+      assert message =~ "UNIQUE constraint failed: sessions.scope_unit"
+    end
+  end
+
   describe "joining the usage ledger by string (AC 1)" do
     test "rows the existing ingest wrote join to a session by provider session id" do
       dir = tmp_dir!("join")
