@@ -13,6 +13,11 @@ defmodule ArbiterWeb.Api.UsageController do
     * `GET /api/usage/events`   — raw event list (newest first). Optional
                                   filters: `workspace_id`, `task_id`, `since`,
                                   `step`, `source`, `limit` (default 50).
+    * `GET /api/usage/calibration` — difficulty mis-rating report (bd-3j4ch4):
+                                  closed tasks whose actual cost lands outside
+                                  their own tier's p25–p75 but inside an
+                                  adjacent tier's. Optional: `workspace_id`,
+                                  `window_days`.
 
   `by=task` covers task-attributed spend only — probe / pre-flight / session
   rows carry no `task_id` (bd-adyhvn). Use `by=source` for the full split.
@@ -24,6 +29,7 @@ defmodule ArbiterWeb.Api.UsageController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Usage
+  alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
   require Ash.Query
 
@@ -51,6 +57,31 @@ defmodule ArbiterWeb.Api.UsageController do
         {:error, reason} ->
           {:error, {:invalid_request, "could not summarize usage: #{inspect(reason)}"}}
       end
+    end
+  end
+
+  @doc """
+  The mis-rating report behind `arb usage --calibration`.
+
+  Rendered wholesale rather than paginated: the flagged list is the tasks
+  whose rating looks wrong, which is a handful even over a busy 60 days, and
+  truncating it would silently hide the tail that matters most.
+  """
+  def calibration(conn, params) do
+    with {:ok, window_days} <- parse_window_days(params["window_days"]) do
+      opts =
+        []
+        |> add_opt(:workspace_id, params["workspace_id"])
+        |> add_opt(:window_days, window_days)
+
+      report = Estimate.calibration(opts)
+
+      json(conn, %{
+        window_days: report.window_days,
+        re_dispatched_flagged: report.re_dispatched_flagged,
+        tiers: Enum.map(report.tiers, &render_tier/1),
+        flagged: Enum.map(report.flagged, &render_flag/1)
+      })
     end
   end
 
@@ -89,6 +120,37 @@ defmodule ArbiterWeb.Api.UsageController do
     }
   end
 
+  defp render_tier(tier) do
+    %{
+      difficulty: tier.difficulty,
+      n: tier.n,
+      n_scored: tier.n_scored,
+      re_dispatched: tier.re_dispatched,
+      p25: round_money(tier.p25),
+      median: round_money(tier.median),
+      p75: round_money(tier.p75),
+      p90: round_money(tier.p90),
+      under_rated: tier.under_rated,
+      over_rated: tier.over_rated,
+      under_rate: tier.under_rate,
+      over_rate: tier.over_rate
+    }
+  end
+
+  defp render_flag(flag) do
+    %{
+      task_id: flag.task_id,
+      title: flag.title,
+      difficulty: flag.difficulty,
+      issue_type: render_group(flag.issue_type),
+      actual_cost_usd: round_money(flag.actual_cost_usd),
+      direction: Atom.to_string(flag.direction),
+      suggested_difficulty: flag.suggested_difficulty,
+      re_dispatched: flag.re_dispatched
+    }
+  end
+
+  defp render_group(nil), do: nil
   defp render_group(g) when is_binary(g), do: g
   defp render_group(g) when is_atom(g), do: Atom.to_string(g)
   defp render_group(g), do: inspect(g)
@@ -217,6 +279,21 @@ defmodule ArbiterWeb.Api.UsageController do
 
   defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, n}
   defp parse_limit(_), do: {:error, {:invalid_request, "limit must be a positive integer"}}
+
+  defp parse_window_days(nil), do: {:ok, nil}
+  defp parse_window_days(""), do: {:ok, nil}
+
+  defp parse_window_days(raw) when is_binary(raw) do
+    case Integer.parse(raw) do
+      {n, ""} when n > 0 -> {:ok, n}
+      _ -> {:error, {:invalid_request, "window_days must be a positive integer"}}
+    end
+  end
+
+  defp parse_window_days(n) when is_integer(n) and n > 0, do: {:ok, n}
+
+  defp parse_window_days(_),
+    do: {:error, {:invalid_request, "window_days must be a positive integer"}}
 
   defp parse_optional_limit(nil), do: {:ok, nil}
   defp parse_optional_limit(""), do: {:ok, nil}

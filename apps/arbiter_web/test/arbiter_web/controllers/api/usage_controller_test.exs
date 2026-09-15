@@ -1,6 +1,8 @@
 defmodule ArbiterWeb.Api.UsageControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event
 
   @ws "ws-api-usage"
@@ -20,6 +22,28 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
 
     {:ok, ev} = Ash.create(Event, Map.merge(base, attrs))
     ev
+  end
+
+  # bd-3j4ch4 calibration fixtures: a closed, rated task with one priced row.
+  defp closed_task!(ws, difficulty, cost) do
+    {:ok, issue} =
+      Ash.create(Issue, %{
+        title: "calib d#{difficulty} $#{cost}",
+        workspace_id: ws.id,
+        difficulty: difficulty,
+        issue_type: :feature
+      })
+
+    {:ok, closed} = Ash.update(issue, %{close_upstream: false}, action: :close)
+
+    insert_event!(%{
+      task_id: closed.id,
+      base_task_id: closed.id,
+      role: "base",
+      cost_usd: cost
+    })
+
+    closed
   end
 
   describe "GET /api/usage" do
@@ -185,6 +209,67 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
     test "an unknown source is a 400, not a crash", %{conn: conn} do
       conn = get(conn, ~p"/api/usage/events", %{source: "not_a_source", workspace_id: @ws})
       assert json_response(conn, 400)
+    end
+  end
+
+  # bd-3j4ch4: the mis-rating report backing `arb usage --calibration`.
+  describe "GET /api/usage/calibration" do
+    test "reports per-tier rates and the flagged tasks", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "calib-ws", prefix: "cal"})
+
+      Enum.each(1..10, &closed_task!(ws, 1, &1 * 1.0))
+      Enum.each(11..20, &closed_task!(ws, 2, &1 * 1.0))
+      Enum.each(21..30, &closed_task!(ws, 3, &1 * 1.0))
+
+      # A D2 task that cost like a D3 one.
+      under = closed_task!(ws, 2, 25.0)
+
+      conn = get(conn, ~p"/api/usage/calibration")
+      body = json_response(conn, 200)
+
+      assert body["window_days"] == 60
+
+      d2 = Enum.find(body["tiers"], &(&1["difficulty"] == 2))
+      assert d2["n"] == 11
+      assert d2["under_rated"] == 1
+      assert d2["over_rated"] == 0
+      assert d2["under_rate"] > 0.0
+
+      flag = Enum.find(body["flagged"], &(&1["task_id"] == under.id))
+      assert flag["direction"] == "under_rated"
+      assert flag["suggested_difficulty"] == 3
+      assert flag["re_dispatched"] == false
+    end
+
+    # The contract with `arb usage --calibration`, which lives in another app
+    # and renders these keys by name. Drift here reads as a blank column, not
+    # as a failure, so pin the shape.
+    test "renders exactly the keys the CLI renderer consumes", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "calib-shape-ws", prefix: "cals"})
+      Enum.each(1..10, &closed_task!(ws, 2, &1 * 1.0))
+      Enum.each(21..30, &closed_task!(ws, 3, &1 * 1.0))
+      closed_task!(ws, 2, 25.0)
+
+      body = conn |> get(~p"/api/usage/calibration") |> json_response(200)
+
+      assert Enum.sort(Map.keys(body)) ==
+               ~w(flagged re_dispatched_flagged tiers window_days)
+
+      assert Enum.sort(Map.keys(hd(body["tiers"]))) ==
+               ~w(difficulty median n n_scored over_rate over_rated p25 p75 p90
+                  re_dispatched under_rate under_rated)
+
+      assert Enum.sort(Map.keys(hd(body["flagged"]))) ==
+               ~w(actual_cost_usd difficulty direction issue_type re_dispatched
+                  suggested_difficulty task_id title)
+    end
+
+    test "an empty ledger is an empty report, not a crash", %{conn: conn} do
+      conn = get(conn, ~p"/api/usage/calibration")
+      body = json_response(conn, 200)
+
+      assert body["tiers"] == []
+      assert body["flagged"] == []
     end
   end
 end

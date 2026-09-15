@@ -176,6 +176,7 @@ defmodule ArbiterCli.Output do
         {"Status", issue["status"]},
         {"Priority", issue["priority"]},
         {"Difficulty", difficulty_label(issue["difficulty"])},
+        {"Estimate", estimate_label(issue["estimate"])},
         {"Type", issue["issue_type"]},
         {"Backlog", backlog_label(issue)},
         {"Progress", child_progress_label(issue)},
@@ -232,6 +233,20 @@ defmodule ArbiterCli.Output do
 
   defp blank_to(v, fallback) when v in [nil, ""], do: fallback
   defp blank_to(v, _fallback), do: v
+
+  # bd-3j4ch4: what tasks like this one have cost, as a range. The basis and
+  # sample size ride along on purpose — a `global, n=11` range and a
+  # `difficulty+type, n=214` range should not read the same.
+  defp estimate_label(%{"range" => [p25, p75]} = est)
+       when is_number(p25) and is_number(p75) do
+    "#{money(p25)}\u2013#{money(p75)} (median #{money(est["median"])}, " <>
+      "p90 #{money(est["p90"])}) \u00b7 #{est["basis"]}, n=#{est["n"]}"
+  end
+
+  defp estimate_label(_), do: nil
+
+  defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+  defp money(_), do: "?"
 
   defp difficulty_label(nil), do: nil
   defp difficulty_label(n) when is_integer(n) and n in 0..5, do: "D#{n}"

@@ -393,6 +393,60 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       conn = get(conn, ~p"/api/issues/api-doesnotexist")
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
+
+    # bd-3j4ch4 AC5: `arb issue show` renders the cost estimate, and this is
+    # where it gets the numbers from.
+    test "carries the cost estimate when the ledger has enough history", %{conn: conn, ws: ws} do
+      for cost <- Enum.map(1..10, &(&1 * 1.0)) do
+        {:ok, past} =
+          Ash.create(Issue, %{
+            title: "history",
+            workspace_id: ws.id,
+            difficulty: 2,
+            issue_type: :feature
+          })
+
+        {:ok, closed} = Ash.update(past, %{close_upstream: false}, action: :close)
+
+        {:ok, _ev} =
+          Ash.create(Arbiter.Usage.Event, %{
+            task_id: closed.id,
+            base_task_id: closed.id,
+            role: "base",
+            source: :task,
+            step: :work,
+            workspace_id: ws.id,
+            cost_usd: cost,
+            occurred_at: DateTime.utc_now()
+          })
+      end
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "size me",
+          workspace_id: ws.id,
+          difficulty: 2,
+          issue_type: :feature
+        })
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert body["estimate"]["range"] == [3.0, 8.0]
+      assert body["estimate"]["median"] == 5.0
+      assert body["estimate"]["p90"] == 9.0
+      assert body["estimate"]["n"] == 10
+      assert body["estimate"]["basis"] == "difficulty+type"
+      assert body["estimate"]["fallback_level"] == 0
+    end
+
+    test "estimate is null when the ledger is empty", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "no history", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert Map.has_key?(body, "estimate")
+      assert body["estimate"] == nil
+    end
   end
 
   describe "GET /api/issues" do

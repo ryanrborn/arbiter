@@ -11,6 +11,11 @@ defmodule ArbiterWeb.Api.IssueJSON do
   def show(%{issue: issue, warnings: warnings}) when warnings != [],
     do: Map.put(data(issue), :warnings, warnings)
 
+  # bd-3j4ch4: the single-issue read carries a cost estimate (or an explicit
+  # null — "no estimate yet" has to be distinguishable from "$0").
+  def show(%{issue: issue, estimate: estimate}),
+    do: Map.put(data(issue), :estimate, estimate)
+
   def show(%{issue: issue}), do: data(issue)
 
   @doc "Renders a list of issues wrapped under :data."
