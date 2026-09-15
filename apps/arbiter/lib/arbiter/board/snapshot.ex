@@ -32,8 +32,9 @@ defmodule Arbiter.Board.Snapshot do
       deploy`), which always flags `needs_you` since nothing will retry it on
       its own. Longest wait first, because a stalled card is the thing worth
       seeing.
-    * **Closed today** — issues closed since midnight UTC. The day's evidence
-      of progress, and the only column with no action on it.
+    * **Closed · last 24h** — issues closed in the last 24 hours (rolling window,
+      keyed on `closed_at`). The day's evidence of progress, and the only column
+      with no action on it.
 
   ## Backlog, and why refinement is not a status
 
@@ -640,13 +641,18 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp closed_today_cards(issues, now) do
-    today = DateTime.to_date(now)
+    twenty_four_hours_ago = DateTime.add(now, -24, :hour)
 
     issues
     |> Enum.filter(fn issue ->
-      issue.status == :closed and same_day?(Map.get(issue, :updated_at), today)
+      issue.status == :closed and
+        closed_within_24h?(
+          Map.get(issue, :closed_at),
+          Map.get(issue, :updated_at),
+          twenty_four_hours_ago
+        )
     end)
-    |> Enum.sort_by(&Map.get(&1, :updated_at), {:desc, DateTime})
+    |> Enum.sort_by(&closed_sort_key/1, {:desc, DateTime})
     |> Enum.map(fn issue ->
       %{
         id: issue.id,
@@ -654,9 +660,25 @@ defmodule Arbiter.Board.Snapshot do
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
         assignee: Map.get(issue, :assignee),
-        closed_at: Map.get(issue, :updated_at)
+        closed_at: Map.get(issue, :closed_at)
       }
     end)
+  end
+
+  defp closed_within_24h?(%DateTime{} = closed_at, _updated_at, cutoff) do
+    DateTime.compare(closed_at, cutoff) != :lt
+  end
+
+  defp closed_within_24h?(nil, %DateTime{} = updated_at, cutoff) do
+    DateTime.compare(updated_at, cutoff) != :lt
+  end
+
+  defp closed_within_24h?(nil, nil, _cutoff) do
+    false
+  end
+
+  defp closed_sort_key(issue) do
+    Map.get(issue, :closed_at) || Map.get(issue, :updated_at)
   end
 
   defp base_card(worker, issues_by_id) do
@@ -781,9 +803,6 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp since(worker), do: Map.get(worker, :step_started_at) || Map.get(worker, :started_at)
-
-  defp same_day?(%DateTime{} = ts, today), do: DateTime.to_date(ts) == today
-  defp same_day?(_, _), do: false
 
   # nil priority sorts last: an unprioritised issue is not urgent by omission.
   defp priority(issue) do
