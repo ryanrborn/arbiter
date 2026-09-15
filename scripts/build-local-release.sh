@@ -107,6 +107,29 @@ TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
 
 export MIX_ENV=prod
 
+# `mdex_native` ships its Rust NIF through `rustler_precompiled`, which
+# *downloads* a prebuilt `.so` rather than compiling one. Upstream's
+# x86_64-unknown-linux-gnu artifact needs symbols up to GLIBC_2.34, so on an
+# older host (RHEL 8 / glibc 2.28) the release cannot boot at all — that is
+# #1728. Build it from source instead when a Rust toolchain is available, so
+# it links against *this* machine's glibc; the glibc guard at the end of this
+# script fails the build if we end up shipping an artifact that is too new.
+GLIBC_BASELINE="${ARB_GLIBC_BASELINE:-$(ldd --version 2>/dev/null | head -n 1 | awk '{print $NF}')}"
+if ! printf '%s' "$GLIBC_BASELINE" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+  echo "warning: could not determine this host's glibc version; assuming the RHEL 8 baseline 2.28." >&2
+  GLIBC_BASELINE="2.28"
+fi
+
+if command -v cargo >/dev/null 2>&1; then
+  echo "Rust toolchain found — building rustler_precompiled NIFs from source (glibc $GLIBC_BASELINE)."
+  export RUSTLER_PRECOMPILED_FORCE_BUILD_ALL=1
+else
+  echo "warning: no \`cargo\` on PATH — rustler_precompiled NIFs will be downloaded as prebuilt" >&2
+  echo "         artifacts. If this host's glibc is older than upstream's build host, the guard" >&2
+  echo "         at the end of this script will reject the release (see #1728). Install Rust" >&2
+  echo "         (https://rustup.rs) and re-run to build them locally instead." >&2
+fi
+
 mix local.hex --force --if-missing
 mix local.rebar --force --if-missing
 mix deps.get --only prod
@@ -125,6 +148,14 @@ TARBALL="$OUTPUT_DIR/arbiter-local-${SHA}-${TIMESTAMP}-linux.tar.gz"
 # directory, so `ReleaseFiles.unpack!/2`'s generic (non-nested) branch
 # handles it identically to a published release asset.
 tar -czf "$TARBALL" -C "$CLONE_PATH/_build/prod/rel/arbiter" .
+
+# Never hand `arb server deploy --local` a tarball that cannot boot here.
+GLIBC_GUARD="$CLONE_PATH/scripts/check-release-glibc.sh"
+if [ -x "$GLIBC_GUARD" ]; then
+  bash "$GLIBC_GUARD" --baseline "$GLIBC_BASELINE" "$TARBALL"
+else
+  echo "warning: $GLIBC_GUARD is missing — skipping the glibc check." >&2
+fi
 
 ESCRIPT="$OUTPUT_DIR/arb-local-${SHA}-${TIMESTAMP}"
 cp "$CLONE_PATH/apps/arbiter_cli/arb" "$ESCRIPT"
