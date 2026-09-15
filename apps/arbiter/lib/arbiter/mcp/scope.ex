@@ -17,6 +17,7 @@ defmodule Arbiter.MCP.Scope do
         workspace_id: "uuid" | nil,    # worker: the bound workspace; coordinator: nil (workspace-agnostic)
         task_id:      "bd-…" | nil,    # worker tier: the one task it may read/progress
         repo:         "shipyard" | nil,# worker tier: its repo
+        session_id:   "uuid" | nil,    # browser-hosted session this token belongs to (revocable)
         can_dispatch:    false | true,    # coordinator-only; the recursion guardrail
         depth:        0                # dispatch-recursion depth (Phase 2 guardrail)
       }
@@ -51,6 +52,7 @@ defmodule Arbiter.MCP.Scope do
             workspace_id: nil,
             task_id: nil,
             repo: nil,
+            session_id: nil,
             can_dispatch: false,
             depth: 0
 
@@ -61,6 +63,7 @@ defmodule Arbiter.MCP.Scope do
           workspace_id: String.t() | nil,
           task_id: String.t() | nil,
           repo: String.t() | nil,
+          session_id: String.t() | nil,
           can_dispatch: boolean(),
           depth: non_neg_integer()
         }
@@ -126,18 +129,64 @@ defmodule Arbiter.MCP.Scope do
     |> MCP.mint(opts)
   end
 
+  @doc """
+  Mint the `:coordinator`-tier token for one browser-hosted session
+  (RFC §9.3, bd-aprlbb).
+
+  Differs from `mint_coordinator/2` in exactly three ways, all of them
+  deliberate:
+
+    * It carries a `session_id` claim, which makes the token **revocable**.
+      Scope tokens are stateless signed blobs with no revocation table
+      (`Arbiter.MCP`'s incident-response note), so the session row is the
+      handle: `from_token/1` refuses a token whose session has been ended,
+      killed, or explicitly revoked. That is what lets "killing a session
+      revokes its token" be true without rotating `SECRET_KEY_BASE` and
+      invalidating every other token on the installation.
+    * `can_dispatch` defaults **off** (§10.1: dispatch recursion is the
+      documented guardrail and switching it on is a deliberate pre-launch
+      choice), where `mint_coordinator/2` defaults it on.
+    * `workspace_id` is `nil` for the cross-workspace default (decision 6) and
+      bound for the opt-in single-workspace binding — the same two shapes
+      `same_workspace?/2` already models.
+
+  The session id also makes MCP audit rows attributable to the same session the
+  usage ledger keys on.
+  """
+  @spec mint_session(String.t(), keyword()) :: String.t()
+  def mint_session(session_id, opts \\ []) when is_binary(session_id) and session_id != "" do
+    %{
+      tier: :coordinator,
+      workspace_id: nilable_string(Keyword.get(opts, :workspace_id)),
+      task_id: nil,
+      repo: nil,
+      session_id: session_id,
+      can_dispatch: Keyword.get(opts, :can_dispatch, false),
+      depth: Keyword.get(opts, :depth, 0)
+    }
+    |> MCP.mint(opts)
+  end
+
   # ---- verifying ----------------------------------------------------------
 
   @doc """
   Verify and decode a presented bearer token into a `%Scope{}`. Returns
-  `{:error, :expired | :invalid}` for an expired, tampered, or malformed token
-  (the transport rejects those with HTTP 401).
+  `{:error, :expired | :invalid}` for an expired, tampered, or malformed token,
+  or `{:error, :revoked}` for a session token whose session has ended (the
+  transport rejects all three with HTTP 401).
+
+  The revocation check costs one indexed primary-key read, and **only** for a
+  token that carries a `session_id` claim — worker and plain coordinator tokens
+  never touch the database here. It lives in `from_token/1` rather than in the
+  transport plug for the same reason `own_task/2` and `same_workspace?/2` do:
+  this module is the single enforcement point, and a check a caller has to
+  remember to make is a check that eventually gets skipped.
   """
-  @spec from_token(String.t()) :: {:ok, t()} | {:error, :expired | :invalid}
+  @spec from_token(String.t()) :: {:ok, t()} | {:error, :expired | :invalid | :revoked}
   def from_token(token) when is_binary(token) do
-    case MCP.verify(token) do
-      {:ok, claims} -> from_claims(claims)
-      {:error, reason} -> {:error, reason}
+    with {:ok, claims} <- MCP.verify(token),
+         {:ok, scope} <- from_claims(claims) do
+      check_revocation(scope)
     end
   end
 
@@ -151,6 +200,7 @@ defmodule Arbiter.MCP.Scope do
        workspace_id: ws,
        task_id: task,
        repo: nilable_string(c[:repo]),
+       session_id: nil,
        can_dispatch: false,
        depth: depth(c[:depth])
      }}
@@ -170,6 +220,7 @@ defmodule Arbiter.MCP.Scope do
        workspace_id: nilable_string(c[:workspace_id]),
        task_id: nil,
        repo: nil,
+       session_id: nilable_string(c[:session_id]),
        can_dispatch: c[:can_dispatch] == true or c[:can_sling] == true,
        depth: depth(c[:depth])
      }}
@@ -182,6 +233,16 @@ defmodule Arbiter.MCP.Scope do
 
   defp depth(d) when is_integer(d) and d >= 0, do: d
   defp depth(_), do: 0
+
+  # A session token outlives nothing: the moment its row is ended, killed, or
+  # explicitly revoked, the token stops verifying. A claim naming a session
+  # with no row at all is revoked too — the row is the authority, and its
+  # absence cannot mean "allow".
+  defp check_revocation(%__MODULE__{session_id: nil} = scope), do: {:ok, scope}
+
+  defp check_revocation(%__MODULE__{session_id: id} = scope) do
+    if Arbiter.Sessions.mcp_token_revoked?(id), do: {:error, :revoked}, else: {:ok, scope}
+  end
 
   # ---- data-level enforcement --------------------------------------------
 
