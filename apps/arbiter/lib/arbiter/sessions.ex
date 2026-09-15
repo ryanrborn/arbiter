@@ -285,6 +285,21 @@ defmodule Arbiter.Sessions do
   @spec touch_client(Session.t()) :: {:ok, Session.t()} | {:error, term()}
   def touch_client(%Session{} = session), do: Ash.update(session, %{}, action: :touch_client)
 
+  @doc "Note that a turn happened — the other idle-deadline input (§4.6 item 2, phase 10)."
+  @spec touch_turn(Session.t()) :: {:ok, Session.t()} | {:error, term()}
+  def touch_turn(%Session{} = session), do: Ash.update(session, %{}, action: :touch_turn)
+
+  @doc """
+  Pin (or unpin) a session against the idle-TTL sweep (§4.6 item 2, phase 10).
+
+  A `keep_alive` session is never a candidate for `Arbiter.Sessions.IdleReaper`,
+  however long it has gone without a client or a turn.
+  """
+  @spec set_keep_alive(Session.t(), boolean()) :: {:ok, Session.t()} | {:error, term()}
+  def set_keep_alive(%Session{} = session, keep_alive?) when is_boolean(keep_alive?) do
+    Ash.update(session, %{keep_alive: keep_alive?}, action: :set_keep_alive)
+  end
+
   @doc """
   The usage-ledger rows attributable to a session, oldest first.
 

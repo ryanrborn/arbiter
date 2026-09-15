@@ -57,6 +57,13 @@ defmodule Arbiter.Sessions.Session do
       `--remote-control` (§8). Phase 8 sets it; phase 1 only records it.
     * `started_at` / `ended_at` / `last_client_at` — lifecycle. `last_client_at`
       is the idle-deadline input for phase 10's reaper (§4.6 item 2).
+    * `last_turn_at` — a turn happened (JSONL rollover, a usage event), which is
+      activity distinct from a client merely being attached. `Arbiter.Sessions.IdleReaper`
+      takes the newer of `last_client_at` / `last_turn_at` / `started_at` as
+      "last activity" (§4.6 item 2, phase 10).
+    * `keep_alive` — the operator's pin against the idle-TTL sweep (§4.6 item
+      2). Defaults `false`: a session is reapable unless someone deliberately
+      opts it out.
     * `status` — `:starting` (row written, scope not yet confirmed), `:running`
       (scope live), `:ended` (gone, for any reason).
     * `end_reason` — free text saying *why* it ended: an operator kill, a failed
@@ -233,6 +240,19 @@ defmodule Arbiter.Sessions.Session do
       require_atomic? false
       change set_attribute(:last_client_at, &DateTime.utc_now/0)
     end
+
+    update :touch_turn do
+      description "A turn happened — the other idle-deadline input (§4.6 item 2, phase 10)."
+      accept []
+      require_atomic? false
+      change set_attribute(:last_turn_at, &DateTime.utc_now/0)
+    end
+
+    update :set_keep_alive do
+      description "Pin (or unpin) a session against the idle-TTL sweep (§4.6 item 2)."
+      accept [:keep_alive]
+      require_atomic? false
+    end
   end
 
   attributes do
@@ -323,6 +343,15 @@ defmodule Arbiter.Sessions.Session do
     attribute :ended_at, :utc_datetime_usec, public?: true
 
     attribute :last_client_at, :utc_datetime_usec, public?: true
+
+    attribute :last_turn_at, :utc_datetime_usec, public?: true
+
+    attribute :keep_alive, :boolean do
+      allow_nil? false
+      public? true
+      default false
+      description "Operator pin against the idle-TTL sweep (§4.6 item 2). Off by default."
+    end
 
     attribute :status, :atom do
       allow_nil? false

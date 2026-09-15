@@ -158,6 +158,14 @@ config :arbiter, :pr_state_poller, enabled: false
 # synchronously with an explicit :timeout_ms.
 config :arbiter, :stale_review_reaper, enabled: false
 
+# Disable the coordinator-session reaping GenServers in test — they would
+# otherwise sweep/touch on a timer, off the sandbox connection. Tests drive
+# `Arbiter.Sessions.IdleReaper.reap/1`, `Arbiter.Sessions.OrphanReaper.sweep_once/2`
+# and `Arbiter.Sessions.Heartbeat.touch/0` synchronously (bd-3qkbch, phase 10).
+config :arbiter, :sessions_idle_reaper, enabled: false
+config :arbiter, :sessions_orphan_reaper, enabled: false
+config :arbiter, :sessions_heartbeat, enabled: false
+
 # Disable the Stage 3 canary ticker in test — it would otherwise walk every
 # workspace a test creates on a timer, off the sandbox connection. Tests drive
 # `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.
