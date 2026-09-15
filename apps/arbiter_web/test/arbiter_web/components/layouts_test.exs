@@ -75,8 +75,9 @@ defmodule ArbiterWeb.LayoutsTest do
     test "the Epics entry carries a badge with the open-epic count" do
       html = render_app(%{open_epic_count: 7})
 
-      assert html =~ ~s(data-role="nav-badge")
-      assert html =~ ">7<"
+      # Whitespace-tolerant: the formatter decides whether the count sits on
+      # its own line inside the span, and that is not what this test is about.
+      assert html =~ ~r/data-role="nav-badge"[^>]*>\s*7\s*</
     end
 
     test "a zero open-epic count renders no badge" do

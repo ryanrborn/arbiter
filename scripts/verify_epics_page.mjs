@@ -108,7 +108,16 @@ try {
   // Exact-PID teardown only. This repo has an incident class around
   // pattern-matching kills reaching the live coordinator.
   browser.kill("SIGTERM")
-  rmSync(work, { recursive: true, force: true })
+  await exited(browser)
+  // Chromium keeps writing into its profile until it is actually gone, so a
+  // removal issued alongside the signal loses the race under load
+  // (`ENOTEMPTY`). Wait for the exit, retry, and never let cleanup decide the
+  // verdict — every CHECK has already been printed by this point.
+  try {
+    rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  } catch (error) {
+    console.log(`NOTE: could not remove ${work}: ${error && error.message}`)
+  }
 }
 
 const failed = checks.length === 0 || checks.some((c) => !c.ok)
@@ -420,6 +429,24 @@ function round(n) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Resolves on the child's exit, or after a grace period if it will not go —
+// a hung browser must not hang the verification.
+function exited(child, graceMs = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL")
+      resolve()
+    }, graceMs)
+    child.once("exit", done)
+  })
 }
 
 async function waitForDevToolsPort(file) {
