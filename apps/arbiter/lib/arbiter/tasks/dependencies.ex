@@ -133,26 +133,31 @@ defmodule Arbiter.Tasks.Dependencies do
     with {:ok, type} <- cast_optional_type(type) do
       transaction(fn ->
         case edges_between(from_id, to_id, type) do
-          [] ->
-            {:ok, 0}
-
-          edges ->
-            Enum.each(edges, &Ash.destroy!/1)
-
-            if Enum.any?(edges, &(&1.type == :parent_of)) do
-              case fetch_issue(from_id) do
-                {:ok, parent} -> reevaluate_auto_close(:parent_of, parent)
-                _ -> :ok
-              end
-            end
-
-            {:ok, length(edges)}
+          [] -> {:ok, 0}
+          edges -> destroy_edges_and_reevaluate(edges, from_id)
         end
       end)
       |> case do
         {:ok, 0} -> {:ok, 0}
         other -> after_commit(other, from_id, to_id)
       end
+    end
+  end
+
+  defp destroy_edges_and_reevaluate(edges, from_id) do
+    Enum.each(edges, &Ash.destroy!/1)
+
+    if Enum.any?(edges, &(&1.type == :parent_of)) do
+      reevaluate_parent_auto_close(from_id)
+    end
+
+    {:ok, length(edges)}
+  end
+
+  defp reevaluate_parent_auto_close(from_id) do
+    case fetch_issue(from_id) do
+      {:ok, parent} -> reevaluate_auto_close(:parent_of, parent)
+      _ -> :ok
     end
   end
 
