@@ -15,6 +15,17 @@ defmodule ArbiterWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
+  # Browser-hosted coordinator sessions (bd-3ymdvi, RFC §5.1): a terminal byte
+  # stream is the wrong shape for LiveView's diffing, and the topic has to be
+  # keyed to the session id rather than to a LiveView process so a browser
+  # reload reattaches instead of re-mounting terminal state.
+  #
+  # `:peer_data` is the whole auth input — §10.4 is loopback-only, and
+  # `ArbiterWeb.SessionSocket` applies the same rule as `Plugs.ApiAuth`.
+  # No longpoll: `stdin`/`stdout` are binary frames.
+  socket "/session", ArbiterWeb.SessionSocket,
+    websocket: [connect_info: [:peer_data], max_frame_size: 1_048_576]
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),

@@ -27,6 +27,7 @@ defmodule Arbiter.Sessions.Naming do
   @unit_prefix "arb-session-"
   @socket_prefix "session-"
   @tmux_session "coord"
+  @pipe_suffix ".out"
 
   @doc "The `--unit=` argument for `systemd-run`, without the `.scope` suffix."
   @spec unit_arg(String.t()) :: String.t()
@@ -88,6 +89,27 @@ defmodule Arbiter.Sessions.Naming do
       error -> error
     end
   end
+
+  @doc """
+  Absolute path of the session's **pipe file** — the raw byte stream tmux's
+  `pipe-pane` appends to and `Arbiter.Sessions.Stream` reads (phase 4).
+
+  Beside the socket, in the same tmpfs, for the same reason: it is worthless
+  once the user manager is gone. It is a plain file rather than a FIFO so that
+  a reader which is not running (arbiter restarting, nobody attached) never
+  blocks the pane's writer, and so `seq` can simply be a byte offset into it.
+  """
+  @spec pipe_path(String.t()) :: {:ok, String.t()} | {:error, :no_runtime_dir}
+  def pipe_path(id) when is_binary(id) do
+    case socket_dir() do
+      {:ok, dir} -> {:ok, Path.join(dir, pipe_basename(id))}
+      error -> error
+    end
+  end
+
+  @doc "The pipe file's name, without a directory."
+  @spec pipe_basename(String.t()) :: String.t()
+  def pipe_basename(id) when is_binary(id), do: @socket_prefix <> id <> @pipe_suffix
 
   @doc "The session id a socket path belongs to, or `nil`."
   @spec session_id_from_socket(String.t()) :: String.t() | nil

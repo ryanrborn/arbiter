@@ -21,7 +21,14 @@ System.delete_env("ARBITER_SESSIONS_ROOT")
 # the same reason, plus a credential one — see the test's moduledoc:
 #
 #     mix test --include live_claude test/integration/session_onboarding_test.exs
-ExUnit.start(exclude: [:live_systemd, :live_claude])
+# bd-3ymdvi: `:tmux` tests run a real tmux server on a scratch socket in the
+# test's own `tmp_dir` — no systemd, no session row, torn down by exact socket
+# path. They are cheap and they are the only proof that phase 4's tmux argv is
+# right on the tmux that is installed, so they run by default and are skipped
+# only where tmux is absent.
+tmux_exclude = if System.find_executable("tmux"), do: [], else: [:tmux]
+
+ExUnit.start(exclude: [:live_systemd, :live_claude] ++ tmux_exclude)
 Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual)
 
 # bd-5scl0c: report loudly, with attribution, if anything is killed while

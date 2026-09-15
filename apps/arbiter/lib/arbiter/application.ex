@@ -104,6 +104,15 @@ defmodule Arbiter.Application do
       # (`ARBITER_COORDINATOR_SESSION_DIRS`), and inert in test. See
       # `Arbiter.Sessions.UsageIngest`.
       Arbiter.Sessions.UsageIngest,
+      # Terminal transport for browser-hosted coordinator sessions (bd-3ymdvi,
+      # phase 4). One `Arbiter.Sessions.Stream` reader per *attached* session,
+      # started on first attach and stopped when the last client leaves — so
+      # the tree holds only the registry and a dynamic supervisor, never a
+      # handle on a session. A reader dying (or this whole app restarting)
+      # drops the reader, never the tmux session: that lives in its own
+      # systemd scope, which is the property phases 1-2 exist to protect.
+      {Registry, keys: :unique, name: Arbiter.Sessions.Stream.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Sessions.Stream.Supervisor},
       # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
       # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
       # it starts without error but never reaches the MCP server — so a worker
