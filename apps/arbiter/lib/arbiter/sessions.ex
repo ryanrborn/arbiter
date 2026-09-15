@@ -64,6 +64,7 @@ defmodule Arbiter.Sessions do
   alias Arbiter.Sessions.Provider
   alias Arbiter.Sessions.Runner
   alias Arbiter.Sessions.Session
+  alias Arbiter.Sessions.Terminal
   alias Arbiter.Usage.Event
 
   require Ash.Query
@@ -242,6 +243,20 @@ defmodule Arbiter.Sessions do
     Keyword.get(opts, :runner) ||
       Application.get_env(:arbiter, :sessions_runner) ||
       Runner.Host
+  end
+
+  @doc """
+  The terminal back end in force: `:terminal` option, then application config,
+  then the real one (phase 4 — `Arbiter.Sessions.Terminal`).
+
+  Same resolution order as `runner/1`, and the same purpose: the transport is
+  tested headlessly against a scripted PTY rather than a tmux server.
+  """
+  @spec terminal(keyword()) :: module()
+  def terminal(opts \\ []) do
+    Keyword.get(opts, :terminal) ||
+      Application.get_env(:arbiter, :sessions_terminal) ||
+      Terminal.Tmux
   end
 
   # -- launch internals -------------------------------------------------------
