@@ -500,7 +500,7 @@ envelope, so that adding one later is additive.
 
 ### 5.5 Status — phase 4 shipped (bd-3ymdvi, #1685)
 
-The transport is implemented. Five things in §5 were under-specified or wrong
+The transport is implemented. Six things in §5 were under-specified or wrong
 and were decided while building it; they are recorded here rather than left
 for the next reader to rediscover.
 
@@ -566,10 +566,30 @@ rejoin params must be a **closure** — `phoenix.js` only re-evaluates join
 params that are a function, so an object literal silently resumes from the
 `last_seq` the tab first connected with rather than the newest one.
 
+**6. A joining client is guaranteed its `snapshot` before any live frame.**
+§5.2 lists the events but says nothing about their order at join, and the
+obvious implementation gets it wrong: the reader registers the new subscriber
+*inside* the attach call, so its next poll can deliver a live frame to the
+channel before the channel has queued its own post-join flush. The client then
+sees a frame at `seq` newer than the snapshot, followed by the snapshot — and
+repaints backwards over bytes it has already drawn. The channel therefore
+holds anything that arrives in that window and drains it, in order, right
+after the snapshot or replay. Phase 5's client may rely on this: after a
+successful `join`, the first thing on the wire is always `snapshot` or the
+replay frames.
+
 Backpressure is §5.3 item 2 as written: each client acknowledges the bytes it
 has pushed onto the wire, a client past the high-water mark stops receiving
 frames and keeps no backlog, and one `capture-pane` snapshot repaints it when
 its acknowledgements catch up.
+
+One limit of that, so phase 5 does not assume more than is there: the
+acknowledgement is sent the moment a frame is handed to `push/3`, which returns
+as soon as the message reaches the transport process. The high-water mark
+therefore bounds the **channel process's** mailbox, not the Bandit connection
+process's send queue, which is where a genuinely slow *network* client's bytes
+would pile up. That is the right first cut — it is the queue the reader can see
+and the one AC 4 asks about — but a socket-level bound is still unbuilt.
 
 Tested headlessly: `Arbiter.Sessions.StreamTest` and
 `ArbiterWeb.SessionChannelTest` run against a scripted PTY that appends to the
