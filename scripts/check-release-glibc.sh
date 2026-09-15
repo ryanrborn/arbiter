@@ -131,7 +131,13 @@ LABELS=()
 
 for p in "${PATHS[@]}"; do
   if [ -d "$p" ]; then
-    ROOTS+=("$p")
+    # Strip trailing slashes so reported paths come out relative to the root
+    # ("lib/foo/priv/bar.so", not the whole absolute path).
+    norm="$p"
+    while [ "$norm" != "/" ] && [ "${norm%/}" != "$norm" ]; do
+      norm="${norm%/}"
+    done
+    ROOTS+=("$norm")
     LABELS+=("$p")
   elif [ -f "$p" ]; then
     case "$p" in

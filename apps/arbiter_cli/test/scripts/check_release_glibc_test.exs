@@ -135,6 +135,16 @@ defmodule ArbiterCli.Scripts.CheckReleaseGlibcTest do
       assert out =~ "2.34"
     end
 
+    test "reports paths relative to the scan root, trailing slash or not" do
+      dir = tmp_dir!("relpath")
+      write_so!(Path.join(dir, "lib/foo/priv/bar.so"), ["2.28"])
+
+      for root <- [dir, dir <> "/"] do
+        {out, 0} = run([root])
+        assert out =~ ~r/^\s+2\.28\s+lib\/foo\/priv\/bar\.so$/m, out
+      end
+    end
+
     test "an empty scan fails instead of passing vacuously" do
       dir = tmp_dir!("empty")
       File.mkdir_p!(Path.join(dir, "lib"))
