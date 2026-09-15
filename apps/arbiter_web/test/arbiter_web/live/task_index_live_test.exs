@@ -146,4 +146,385 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       assert new_html =~ "Create an issue"
     end
   end
+
+  describe "text search" do
+    test "an id substring hits, case-insensitively", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "unrelated title", workspace_id: ws.id})
+      {:ok, _other} = Ash.create(Issue, %{title: "noise", workspace_id: ws.id})
+
+      substring = task.id |> String.slice(4, 3) |> String.upcase()
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{q: substring}}")
+
+      assert html =~ task.id
+      refute html =~ "noise"
+    end
+
+    test "a title substring hits, case-insensitively", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "Frobnicate the Widget", workspace_id: ws.id})
+      {:ok, _other} = Ash.create(Issue, %{title: "totally different", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{q: "widget"}}")
+
+      assert html =~ task.id
+      refute html =~ "totally different"
+    end
+
+    test "a query with no matches renders the empty state naming the search",
+         %{conn: conn, ws: ws} do
+      {:ok, _task} = Ash.create(Issue, %{title: "present", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{q: "zzz-nope-zzz"}}")
+
+      assert html =~ ~s(id="tasks-empty")
+      assert html =~ "zzz-nope-zzz"
+    end
+
+    test "search paginates correctly across many matches", %{conn: conn, ws: ws} do
+      for n <- 1..30 do
+        {:ok, _} = Ash.create(Issue, %{title: "match-#{n}", workspace_id: ws.id})
+      end
+
+      {:ok, _} = Ash.create(Issue, %{title: "no-hit-here", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{q: "match-"}}")
+
+      assert html =~ "30 total"
+      assert html =~ "1 / 2"
+      refute html =~ "no-hit-here"
+    end
+  end
+
+  describe "filters" do
+    test "status filter includes awaiting_verification", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "parked-for-verification", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{}, action: :await_verification)
+      {:ok, _open} = Ash.create(Issue, %{title: "still-open", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{status: :awaiting_verification}}")
+
+      assert html =~ task.id
+      refute html =~ "still-open"
+    end
+
+    test "workspace filter narrows to one workspace", %{conn: conn, ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{
+          name: "other-#{System.unique_integer([:positive])}",
+          prefix: "oth"
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "in-target-ws", workspace_id: ws.id})
+      {:ok, _other} = Ash.create(Issue, %{title: "in-other-ws", workspace_id: other_ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{workspace: ws.id}}")
+
+      assert html =~ task.id
+      refute html =~ "in-other-ws"
+    end
+
+    test "type filter narrows to one issue_type", %{conn: conn, ws: ws} do
+      {:ok, bug} =
+        Ash.create(Issue, %{title: "a-bug", workspace_id: ws.id, issue_type: :bug})
+
+      {:ok, _chore} =
+        Ash.create(Issue, %{title: "a-chore", workspace_id: ws.id, issue_type: :chore})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{type: :bug}}")
+
+      assert html =~ bug.id
+      refute html =~ "a-chore"
+    end
+
+    test "priority filter narrows to one priority", %{conn: conn, ws: ws} do
+      {:ok, p0} = Ash.create(Issue, %{title: "top-priority", workspace_id: ws.id, priority: 0})
+      {:ok, _p3} = Ash.create(Issue, %{title: "low-priority", workspace_id: ws.id, priority: 3})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{priority: 0}}")
+
+      assert html =~ p0.id
+      refute html =~ "low-priority"
+    end
+
+    test "difficulty filter narrows to one difficulty", %{conn: conn, ws: ws} do
+      {:ok, d3} = Ash.create(Issue, %{title: "d3-task", workspace_id: ws.id, difficulty: 3})
+      {:ok, _d1} = Ash.create(Issue, %{title: "d1-task", workspace_id: ws.id, difficulty: 1})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{difficulty: 3}}")
+
+      assert html =~ d3.id
+      refute html =~ "d1-task"
+    end
+
+    test "difficulty filter's 'unrated' option matches nil difficulty", %{conn: conn, ws: ws} do
+      {:ok, unrated} = Ash.create(Issue, %{title: "no-difficulty", workspace_id: ws.id})
+
+      {:ok, _rated} =
+        Ash.create(Issue, %{title: "has-difficulty", workspace_id: ws.id, difficulty: 2})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{difficulty: "none"}}")
+
+      assert html =~ unrated.id
+      refute html =~ "has-difficulty"
+    end
+
+    test "stage filter narrows Backlog (refined: false)", %{conn: conn, ws: ws} do
+      {:ok, backlog} =
+        Ash.create(Issue, %{title: "in-backlog", workspace_id: ws.id, issue_type: :task})
+
+      {:ok, ready} =
+        Ash.create(Issue, %{title: "in-ready", workspace_id: ws.id, issue_type: :task})
+
+      {:ok, _ready} = Ash.update(ready, %{}, action: :promote_to_ready)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{stage: :backlog}}")
+
+      assert html =~ backlog.id
+      refute html =~ "in-ready"
+    end
+
+    test "stage filter narrows Ready (refined: true)", %{conn: conn, ws: ws} do
+      {:ok, _backlog} =
+        Ash.create(Issue, %{title: "in-backlog", workspace_id: ws.id, issue_type: :task})
+
+      {:ok, ready} =
+        Ash.create(Issue, %{title: "in-ready", workspace_id: ws.id, issue_type: :task})
+
+      {:ok, ready} = Ash.update(ready, %{}, action: :promote_to_ready)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{stage: :ready}}")
+
+      assert html =~ ready.id
+      refute html =~ "in-backlog"
+    end
+
+    test "repo filter narrows to one repo", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "in-tonic", workspace_id: ws.id, repo: "org/tonic"})
+
+      {:ok, _other} =
+        Ash.create(Issue, %{title: "in-verus", workspace_id: ws.id, repo: "org/verus"})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{repo: "org/tonic"}}")
+
+      assert html =~ task.id
+      refute html =~ "in-verus"
+    end
+
+    test "parent-epic filter narrows to an epic's children", %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the-epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, other_epic} =
+        Ash.create(Issue, %{title: "another-epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, child} = Ash.create(Issue, %{title: "epic-child", workspace_id: ws.id})
+      {:ok, other_child} = Ash.create(Issue, %{title: "other-epic-child", workspace_id: ws.id})
+
+      {:ok, _dep} =
+        Ash.create(Arbiter.Tasks.Dependency, %{
+          from_issue_id: epic.id,
+          to_issue_id: child.id,
+          type: :parent_of
+        })
+
+      {:ok, _dep2} =
+        Ash.create(Arbiter.Tasks.Dependency, %{
+          from_issue_id: other_epic.id,
+          to_issue_id: other_child.id,
+          type: :parent_of
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{epic: epic.id}}")
+
+      assert html =~ child.id
+      refute html =~ "other-epic-child"
+    end
+
+    test "parent-epic filter's 'no parent' option excludes parented issues",
+         %{conn: conn, ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the-epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, child} = Ash.create(Issue, %{title: "has-a-parent", workspace_id: ws.id})
+      {:ok, orphan} = Ash.create(Issue, %{title: "no-parent-here", workspace_id: ws.id})
+
+      {:ok, _dep} =
+        Ash.create(Arbiter.Tasks.Dependency, %{
+          from_issue_id: epic.id,
+          to_issue_id: child.id,
+          type: :parent_of
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{epic: "none"}}")
+
+      assert html =~ orphan.id
+      refute html =~ "has-a-parent"
+    end
+
+    test "a three-way filter combination (status + type + priority) is AND'd",
+         %{conn: conn, ws: ws} do
+      {:ok, target} =
+        Ash.create(Issue, %{
+          title: "matches-all-three",
+          workspace_id: ws.id,
+          issue_type: :bug,
+          priority: 1
+        })
+
+      {:ok, _wrong_type} =
+        Ash.create(Issue, %{
+          title: "wrong-type",
+          workspace_id: ws.id,
+          issue_type: :chore,
+          priority: 1
+        })
+
+      {:ok, _wrong_priority} =
+        Ash.create(Issue, %{
+          title: "wrong-priority",
+          workspace_id: ws.id,
+          issue_type: :bug,
+          priority: 3
+        })
+
+      {:ok, wrong_status} =
+        Ash.create(Issue, %{
+          title: "wrong-status",
+          workspace_id: ws.id,
+          issue_type: :bug,
+          priority: 1
+        })
+
+      {:ok, _} = Ash.update(wrong_status, %{}, action: :close)
+
+      {:ok, _view, html} =
+        live(conn, ~p"/tasks?#{%{status: :open, type: :bug, priority: 1}}")
+
+      assert html =~ target.id
+      refute html =~ "wrong-type"
+      refute html =~ "wrong-priority"
+      refute html =~ "wrong-status"
+    end
+  end
+
+  describe "sorting" do
+    test "sort=priority orders P0 before P4", %{conn: conn, ws: ws} do
+      {:ok, low} = Ash.create(Issue, %{title: "low-pri", workspace_id: ws.id, priority: 4})
+      {:ok, high} = Ash.create(Issue, %{title: "high-pri", workspace_id: ws.id, priority: 0})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{sort: :priority}}")
+
+      assert String.contains?(html, high.id) and String.contains?(html, low.id)
+      assert index_of(html, high.id) < index_of(html, low.id)
+    end
+
+    test "sort=difficulty orders D0 before D5", %{conn: conn, ws: ws} do
+      {:ok, hard} = Ash.create(Issue, %{title: "d5-task", workspace_id: ws.id, difficulty: 5})
+      {:ok, easy} = Ash.create(Issue, %{title: "d0-task", workspace_id: ws.id, difficulty: 0})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{sort: :difficulty}}")
+
+      assert index_of(html, easy.id) < index_of(html, hard.id)
+    end
+
+    test "sort=created orders newest-created first", %{conn: conn, ws: ws} do
+      {:ok, first} = Ash.create(Issue, %{title: "created-first", workspace_id: ws.id})
+      {:ok, second} = Ash.create(Issue, %{title: "created-second", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{sort: :created}}")
+
+      assert index_of(html, second.id) < index_of(html, first.id)
+    end
+
+    test "sort=updated (default) orders most-recently-updated first", %{conn: conn, ws: ws} do
+      {:ok, stale} = Ash.create(Issue, %{title: "stale-task", workspace_id: ws.id})
+      {:ok, fresh} = Ash.create(Issue, %{title: "fresh-task", workspace_id: ws.id})
+      {:ok, _} = Ash.update(stale, %{title: "stale-task-touched"}, action: :update)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{sort: :updated}}")
+
+      assert index_of(html, stale.id) < index_of(html, fresh.id)
+    end
+
+    defp index_of(html, needle) do
+      {pos, _len} = :binary.match(html, needle)
+      pos
+    end
+  end
+
+  describe "URL-persisted state" do
+    test "every filter, search, sort and page param round-trips through a reload",
+         %{conn: conn, ws: ws} do
+      {:ok, target} =
+        Ash.create(Issue, %{
+          title: "round-trip-me",
+          workspace_id: ws.id,
+          issue_type: :bug,
+          priority: 1,
+          difficulty: 2,
+          repo: "org/tonic"
+        })
+
+      params = %{
+        q: "round-trip",
+        workspace: ws.id,
+        type: :bug,
+        priority: 1,
+        difficulty: 2,
+        repo: "org/tonic",
+        sort: :priority,
+        page: 1
+      }
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{params}")
+      assert html =~ target.id
+
+      # Simulate a reload with the exact same URL.
+      {:ok, _view2, html2} = live(conn, ~p"/tasks?#{params}")
+      assert html2 =~ target.id
+    end
+
+    test "changing a filter resets the page to 1", %{conn: conn, ws: ws} do
+      for n <- 1..30 do
+        {:ok, _} = Ash.create(Issue, %{title: "page-task-#{n}", workspace_id: ws.id})
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/tasks?#{%{page: 2}}")
+
+      html = render_change(view, "filter", %{"type" => "bug"})
+
+      assert_patch(view, ~p"/tasks?#{%{page: 1, type: :bug}}")
+      refute html =~ ~s(href="/tasks?page=2)
+    end
+  end
+
+  describe "clear filters" do
+    test "the clear-filters control resets to defaults", %{conn: conn, ws: ws} do
+      {:ok, matching} =
+        Ash.create(Issue, %{title: "matches-filter", workspace_id: ws.id, priority: 1})
+
+      {:ok, other} =
+        Ash.create(Issue, %{title: "other-priority", workspace_id: ws.id, priority: 3})
+
+      {:ok, view, html} = live(conn, ~p"/tasks?#{%{priority: 1}}")
+      assert html =~ ~s(id="tasks-clear-filters")
+      refute html =~ other.id
+
+      html = view |> element("#tasks-clear-filters") |> render_click()
+
+      assert html =~ matching.id
+      assert html =~ other.id
+      refute html =~ ~s(id="tasks-clear-filters")
+    end
+
+    test "the empty state names the active filters", %{conn: conn, ws: ws} do
+      {:ok, _task} = Ash.create(Issue, %{title: "present", workspace_id: ws.id, priority: 2})
+
+      {:ok, _view, html} = live(conn, ~p"/tasks?#{%{priority: 0}}")
+
+      assert html =~ ~s(id="tasks-empty")
+      assert html =~ "priority: P0"
+    end
+  end
 end
