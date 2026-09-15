@@ -688,6 +688,99 @@ The repo already has the colocated-hook precedent for terminal-ish UI:
 `.LogStreamStick` in `core_components/domain.ex:578` does scroll-pinning for the
 live worker log. The session hook is the same pattern, one level up.
 
+### 6.4 Status — phase 5 shipped (bd-c76fu9)
+
+The browser terminal is live at `/sessions` (list) and `/sessions/:id` (one
+session), linked from the global nav between Loop and Usage.
+
+| §6 item | Where it landed |
+|---|---|
+| 6.1 vendor, no npm | `apps/arbiter_web/assets/vendor/xterm/` + `assets/css/xterm.css`, imported from `app.css`. Provenance, digests and upgrade steps in that directory's `README.md`; `ArbiterWeb.TerminalAssetsTest` fails if a `package.json` appears or a version drifts |
+| 6.2 canvas, not WebGL | `assets/js/session_terminal.mjs` loads `CanvasAddon`; the same test greps the asset tree for `addon-webgl` |
+| 6.3 interaction | copy/paste, scrollback 5000, the narrow-width floor and the fit debounce, all in `session_terminal.mjs` |
+| the hook | `.SessionTerminal`, colocated in `ArbiterWeb.SessionLive` |
+| the protocol | `assets/js/session_stream.mjs` — DOM-free on purpose (below) |
+| page chrome | `ArbiterWeb.SessionIndexLive`, `ArbiterWeb.SessionLive` |
+
+**The canvas addon pins the terminal version.** Upstream shipped
+`@xterm/xterm@6.0.0` on 2025-12-22 alongside new `addon-webgl`, `addon-search`,
+`addon-web-links` and `addon-fit` releases — and **no new `addon-canvas`**. Its
+last release is still `0.7.0` (2024-04-05), declaring
+`peerDependencies: {"@xterm/xterm": "^5.0.0"}`. The addon reaches deep into
+`terminal._core`, so running it against a major version it was never built for
+risks throwing out of `loadAddon` and leaving no terminal at all. §6.2 chose
+canvas on failure-mode grounds that have not changed, so the vendored set is
+the 5.x line: `xterm@5.5.0` + `addon-canvas@0.7.0` + `addon-fit@0.10.0`. That
+line publishes only the UMD/CJS build (the `.mjs` bundles first appear in 6.0.0
+and in 5.6.0 *betas*); esbuild consumes it and emits ESM, so nothing downstream
+can tell. Revisit when upstream ships a canvas addon for 6.x.
+
+**The protocol is a separate, DOM-free module.** The parts of a terminal client
+that are easy to get subtly wrong — the `last_seq` rejoin closure, duplicate
+suppression on resume, binary stdin framing, the debounced resize — are exactly
+the parts a browser makes untestable. They live in `session_stream.mjs`, which
+`apps/arbiter_web/test/js/session_stream_test.mjs` drives under `node --test`
+and which `scripts/verify_session_transport.mjs` now drives over a real socket
+**instead of reimplementing the protocol a second time**. So §5.5's resume
+proof and §6's browser client are the same code, not two readings of the same
+spec.
+
+**One phoenix.js trap, carried over from phase 4.** A graceful
+`systemctl --user restart arbiter` closes every WebSocket with code `1000`, and
+phoenix.js deliberately does not reconnect after a normal closure. For a
+session that outlives the server by design (§4.3) that is the wrong reading, so
+the hook schedules the reconnect itself. Without it §10.1's headline experience
+— restart arbiter, the terminal comes back — silently does not happen.
+
+#### What was verified, and how
+
+`scripts/verify_session_terminal.mjs` bundles the *real* `createSessionTerminal`
+with the esbuild binary the `esbuild` Mix package already installed and runs it
+inside a headless Chromium over the DevTools Protocol — no npm, no Playwright,
+no new dependency. `ArbiterWeb.SessionTerminalBrowserTest` runs it as part of
+`mix test` wherever a browser is on disk, and skips loudly where one is not.
+Recorded result on the development host (Chrome for Testing 151.0.7922.34):
+
+```
+CHECK construct: PASS — createSessionTerminal returned a handle
+CHECK canvas-renderer: PASS — renderer=canvas canvas layers=4
+CHECK no-dom-renderer-rows: PASS — .xterm-rows children=0
+CHECK binary-write: PASS — row 0 = "hello red"
+CHECK split-utf8-reassembled: PASS — row 1 = "🚀ok"
+CHECK scrollback: PASS — scrollback=5000
+CHECK fit-proposes-a-geometry: PASS — 112x19 (term 112x19)
+CHECK narrow-floor-is-at-least-80-cols: PASS — cols=89 at 640px
+CHECK selection: PASS — selected 31 chars
+CHECK ctrl-shift-c-copies-the-selection: PASS — clipboard = "hello red\n🚀ok\n…"
+CHECK ctrl-shift-v-pastes-as-stdin: PASS — stdin = "pasted-from-the-clipboard"
+CHECK plain-ctrl-c-is-still-sigint: PASS — stdin bytes = [3]
+CHECK frame-round-trip: PASS — seq=8589934592 bytes=255,0,27
+RESULT: PASS
+```
+
+Resume is proved separately and end-to-end by
+`ArbiterWeb.SessionTransportSocketTest`, which takes the listener *and* the
+reader down, keeps writing to the pipe file while both are gone, brings them
+back, and reads the tally off the browser's own engine:
+`RESULT: PASS — frames=3 bytes=55 seq=55 reconnects=1 gaps=0 duplicates=0`.
+
+Narrow widths are a two-part check because they are a two-part claim: the page
+must not scroll sideways (`#terminal-scroller` is `overflow-x-auto`, asserted in
+`ArbiterWeb.SessionLiveTest`) and the pane must keep a floor width wide enough
+to be a terminal (`min-w-[640px]`, measured at **89 columns** in the browser
+check above).
+
+#### Left to later phases, deliberately
+
+* The **cost HUD** is phase 7. §6.3's rule that it sits *outside* the xterm
+  element is already satisfied by the status strip's position and by
+  `phx-update="ignore"` over the pane.
+* The **pre-launch options UI** is phase 11. Launch here takes no options and
+  uses the guardrail defaults: mode B, cross-workspace, `can_dispatch` **off**.
+* **Multiple concurrent terminals on one page** are not exercised. The hook is
+  per-element and holds no module state, so nothing prevents it; it is simply
+  not a shape phase 5 ships a page for.
+
 ## 7. Metering and attribution (research task 4)
 
 ### 7.1 Recommendation
@@ -1288,7 +1381,7 @@ Each phase is scoped to one child ticket.
 | 2 | **Restart-survival proof in CI** | An integration test that launches a session, restarts a stand-in unit, and asserts survival + gapless replay — the §4.2 spike as a regression test. Cheap, and protects the one property everything else assumes. | 1 | 2 |
 | 3 | **Provisioning scaffold** | `arb init`-style per-session layout (§9.1); pre-seed the three onboarding gates (§9.2); `ConfigDir` interactive variant; `.mcp.json` + per-session scope token; mode A/B selection. | 1 | 3 |
 | 4 | **Transport** — *shipped (§5.5)* | Socket + channel, full envelope (§5.2), seq ring, resume, backpressure. Tested headlessly against a scripted PTY — no browser needed. | 1 | 3 |
-| 5 | **Frontend terminal** | Vendor xterm + canvas addon + CSS; colocated hook; fit/resize; copy-paste; `SessionLive` chrome. | 2 | 3 |
+| 5 | **Frontend terminal** — *shipped (§6.4)* | Vendor xterm + canvas addon + CSS; colocated hook; fit/resize; copy-paste; `SessionLive` chrome. | 2 | 3 |
 | 6 | **Metering ingest** | Extend `ClaudeSessionFile` to parse `cost-state` (fixes the moduledoc's stated cost gap, benefits workers too); `Sessions.UsageIngest` writing `source: :coordinator_session`; end-of-session reconcile; `session_id` index. | 1 | 3 |
 | 7 | **Cost HUD + `arb usage --by session`** | Live `usage` channel events; HUD bar; CLI dimension + `--session` filter (§7.6). | 2 | 2 |
 | 8 | **Remote Control integration** | Mode-B launch with `--remote-control <name>`; **bridge verification** via `bridge-session` polling (§8.3); UI disable-with-reason under mode A. | 2 | 2 |
