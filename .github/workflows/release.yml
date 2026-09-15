@@ -25,6 +25,22 @@ jobs:
       LC_ALL: en_US.UTF-8
       ELIXIR_ERL_OPTIONS: "+fnu"
       MIX_ENV: prod
+      # Build every `rustler_precompiled` NIF from source inside this
+      # container instead of downloading upstream's prebuilt artifact.
+      #
+      # Only `mdex_native` uses rustler_precompiled today, and its upstream
+      # x86_64-unknown-linux-gnu artifact is linked against a glibc newer
+      # than ubi8's: it requires symbols up to GLIBC_2.34, so v0.1.64 could
+      # not boot on RHEL 8.10 / glibc 2.28 at all (#1728) — `kernel` died in
+      # `on_load` and the deploy auto-rolled back. Building it here links it
+      # against this image's glibc 2.28, which makes the release portable to
+      # every host at or above the build image, the same as every other `.so`
+      # we ship. The "Check shipped binaries…" step below enforces that.
+      #
+      # This is release-only: dev machines and the PR CI job leave the
+      # variable unset and keep using the downloaded artifact, so they need
+      # no Rust toolchain.
+      RUSTLER_PRECOMPILED_FORCE_BUILD_ALL: "1"
 
     steps:
       - name: Install system dependencies
@@ -59,6 +75,19 @@ jobs:
           mkdir -p /opt/elixir
           unzip -q /tmp/elixir.zip -d /opt/elixir
           echo "/opt/elixir/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain
+        # Needed only because RUSTLER_PRECOMPILED_FORCE_BUILD_ALL is set for
+        # this job (see the job `env` above): the mdex_native NIF is compiled
+        # here rather than downloaded. Keep RUST_VERSION at or above the
+        # `rust-version` in deps/mdex_native/native/mdex_native_nif/Cargo.toml.
+        run: |
+          RUST_VERSION="1.91.0"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" --no-modify-path
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+          "${HOME}/.cargo/bin/cargo" --version
+          "${HOME}/.cargo/bin/rustc" --version
 
       - name: Verify UTF-8 locale
         run: |
@@ -125,6 +154,14 @@ jobs:
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
           sha256sum apps/arbiter_cli/arb > arb.sha256
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Check shipped binaries against the ubi8 glibc baseline
+        # Last line of defence for #1728: fail the release here, naming the
+        # file, rather than shipping a tarball that cannot boot on RHEL 8.
+        # Runs against the packaged tarball, i.e. exactly what gets published.
+        # Locally: scripts/check-release-glibc.sh _build/prod/rel/arbiter
+        run: |
+          bash scripts/check-release-glibc.sh --baseline 2.28 "${TARBALL}"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
