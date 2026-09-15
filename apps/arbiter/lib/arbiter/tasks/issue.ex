@@ -749,11 +749,18 @@ defmodule Arbiter.Tasks.Issue do
 
       description """
       The repo this task belongs to, as a `repo_paths` key (e.g. "org/tonic").
-      Nullable; when unset, dispatch keeps its old behaviour of auto-selecting
-      the workspace's sole configured repo (and erroring `{:ambiguous_repo, _}`
-      when there is more than one). When set, it is the default repo for every
-      dispatch of this task — an explicit per-dispatch `repo:` opt still wins.
-      See `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
+
+      Resolved at creation by `Arbiter.Tasks.Issue.Changes.ResolveRepo` —
+      explicit, else the workspace's only repo, else its `default_repo`, else
+      the create is refused (bd-9dwbvt). Still nullable at the schema level:
+      rows filed before that change (until
+      `mix arbiter.backfill_issue_repos` runs), workspaces that configure no
+      repos at all, and an operator deliberately clearing it on `:update` all
+      leave it null, and dispatch keeps its old late resolution for those.
+
+      When set, it is the default repo for every dispatch of this task — an
+      explicit per-dispatch `repo:` opt still wins. See
+      `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
       """
     end
 

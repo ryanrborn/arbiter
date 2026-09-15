@@ -17,6 +17,17 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert out =~ "Hello"
   end
 
+  # bd-9dwbvt: `--help` prints the moduledoc, which has to say that repo is now
+  # resolved for you rather than left unset.
+  test "--help says repo is defaulted from the workspace, not optional" do
+    {out, _err, exit_code} = capture(fn -> Create.run(["--help"]) end)
+
+    assert exit_code == 0
+    assert out =~ "--repo"
+    assert out =~ "default_repo"
+    refute out =~ "Optional, and unnecessary in a single-repo workspace"
+  end
+
   test "--parent attaches the new issue to the parent task via a parent_of edge" do
     parent = self()
 

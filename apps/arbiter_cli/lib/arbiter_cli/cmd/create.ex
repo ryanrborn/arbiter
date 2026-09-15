@@ -40,12 +40,24 @@ defmodule ArbiterCli.Cmd.Create do
   one-line justification in the task's description. Routing maps the value
   to abstract `{model_tier, thinking}` (see `Arbiter.Agents.Routing.ByDifficulty`).
 
-  `--repo owner/name` assigns the issue to one of the workspace's configured
-  `repo_paths` keys. Optional, and unnecessary in a single-repo workspace —
-  dispatch auto-selects the sole repo. In a multi-repo workspace it is what
-  stops every dispatch from having to name the repo (or failing with
-  `{:ambiguous_repo, _}`); an explicit `arb dispatch <id> <repo>` still wins
-  for that one run.
+  ## --repo owner/name — required, but usually defaulted (bd-9dwbvt)
+
+  Every issue now carries a repo from the moment it is created. `--repo`
+  names one of the workspace's configured `repo_paths` keys; when you omit
+  it, the server resolves one for you:
+
+      explicit --repo  →  the workspace's only repo  →  its `default_repo`
+
+  So in a single-repo workspace, or a multi-repo one with a `default_repo`
+  set, you never have to pass it. In a multi-repo workspace with no
+  `default_repo`, creation is **refused** with an error listing the
+  configured repo keys — pass one of them, or set `default_repo` on the
+  workspace (`arb workspace config set default_repo <key>`). A `--repo` that
+  is not a configured key is rejected outright rather than persisted for
+  dispatch to fail on later.
+
+  An explicit `arb dispatch <id> <repo>` still overrides the issue's repo for
+  that one run.
 
   `--parent <parent-id>` attaches the new issue as a child of an existing parent
   task immediately after creation, by adding a `parent_of` dependency edge
