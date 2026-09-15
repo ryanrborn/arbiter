@@ -179,19 +179,20 @@ defmodule Arbiter.Tasks.IssueRepo do
   defp slug_key(repo_maps, repo) do
     if String.contains?(repo, "/") do
       target = RepoConfig.normalize_slug(repo)
-
-      Enum.find_value(repo_maps, fn map ->
-        Enum.find_value(map, fn {k, v} ->
-          with path when is_binary(path) <- RepoConfig.repo_path_from_config(v),
-               {:ok, {owner, name}} <- RepoResolver.from_remote(path),
-               true <- RepoConfig.normalize_slug("#{owner}/#{name}") == target do
-            k
-          else
-            _ -> nil
-          end
-        end)
-      end)
+      Enum.find_value(repo_maps, &match_slug_in_map(&1, target))
     end
+  end
+
+  defp match_slug_in_map(map, target) do
+    Enum.find_value(map, fn {k, v} ->
+      with path when is_binary(path) <- RepoConfig.repo_path_from_config(v),
+           {:ok, {owner, name}} <- RepoResolver.from_remote(path),
+           true <- RepoConfig.normalize_slug("#{owner}/#{name}") == target do
+        k
+      else
+        _ -> nil
+      end
+    end)
   end
 
   defp usable_default(config, repos) do
