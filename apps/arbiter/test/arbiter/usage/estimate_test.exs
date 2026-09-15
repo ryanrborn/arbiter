@@ -229,6 +229,43 @@ defmodule Arbiter.Usage.EstimateTest do
       assert row.task_id == closed.id
     end
 
+    # Found by running the estimator against a snapshot of the live ledger:
+    # `id in ^ids` compiles to one OR term per id, and SQLite caps expression
+    # trees at depth 1000. A 60-day window on a busy fleet passes that, and the
+    # whole estimate blows up rather than degrading.
+    test "reads issues in chunks so a wide window can't blow the expression-tree limit" do
+      rows =
+        for i <- 1..1200 do
+          %{
+            task_id: "bd-chunk-#{i}",
+            source: :task,
+            step: :work,
+            workspace_id: "ws-est",
+            occurred_at: @now,
+            cost_usd: 1.0
+          }
+        end
+
+      Ash.bulk_create!(rows, Event, :create)
+
+      # None of those ids is a real closed issue, so the sample is empty — the
+      # point is that it comes back at all.
+      assert Estimate.sample(now: @now) == []
+    end
+
+    test "chunked issue reads assemble the whole sample, not just the first chunk", %{ws: ws} do
+      issues =
+        for cost <- Enum.map(1..6, &(&1 * 1.0)) do
+          issue = closed_issue!(ws, %{difficulty: 2})
+          event!(issue.id, %{cost_usd: cost})
+          issue.id
+        end
+
+      sample = Estimate.sample(now: @now, id_chunk: 2)
+
+      assert Enum.sort(Enum.map(sample, & &1.task_id)) == Enum.sort(issues)
+    end
+
     test "counts only worker spend (source = :task)", %{ws: ws} do
       issue = closed_issue!(ws, %{difficulty: 2})
       event!(issue.id, %{cost_usd: 5.0})

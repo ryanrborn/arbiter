@@ -75,6 +75,7 @@ defmodule Arbiter.Usage.Estimate do
   @half_life_days 30
   @min_group_n 10
   @unrated_difficulty 2
+  @id_chunk 200
 
   # Everything from the first `#` is a ReviewGate synthetic-suffix chain
   # (`#review`, `#impl2`, `#r3`, `#v2`, `#t2`, or several chained) — the same
@@ -298,7 +299,9 @@ defmodule Arbiter.Usage.Estimate do
       title: row.title,
       difficulty: row.difficulty,
       issue_type: row.issue_type,
-      actual_cost_usd: row.cost_usd,
+      # Rounded here because this is a display record, not a sample row — a
+      # flagged cost is read next to the tier percentiles, which are cents.
+      actual_cost_usd: money(row.cost_usd),
       direction: direction,
       suggested_difficulty: suggested,
       re_dispatched: row.re_dispatched
@@ -356,6 +359,9 @@ defmodule Arbiter.Usage.Estimate do
       Event
       |> Ash.Query.filter(source == ^task_source and occurred_at >= ^since)
       |> Ash.Query.filter(not is_nil(task_id))
+      # Never `raw`: it holds the agent CLI's whole result payload, and
+      # decoding one per row is most of the cost of building the sample.
+      |> Ash.Query.select([:task_id, :base_task_id, :cost_usd, :occurred_at, :step, :role])
 
     query =
       case Keyword.get(opts, :workspace_id) do
@@ -370,7 +376,7 @@ defmodule Arbiter.Usage.Estimate do
       |> Enum.map(fn {task_id, events} -> fold_task(task_id, events, now) end)
       |> Enum.reject(&is_nil/1)
 
-    attach_issues(folded)
+    attach_issues(folded, Keyword.get(opts, :id_chunk, @id_chunk))
   end
 
   # `base_task_id` is authoritative where the migration filled it in; older
@@ -438,16 +444,14 @@ defmodule Arbiter.Usage.Estimate do
 
   # Join to the issues table: the sample is closed tasks only, and difficulty /
   # issue_type are the grouping keys.
-  defp attach_issues([]), do: []
+  defp attach_issues([], _chunk), do: []
 
-  defp attach_issues(rows) do
-    ids = Enum.map(rows, & &1.task_id)
-    closed = :closed
-
+  defp attach_issues(rows, chunk) do
     issues =
-      Issue
-      |> Ash.Query.filter(id in ^ids and status == ^closed)
-      |> Ash.read!()
+      rows
+      |> Enum.map(& &1.task_id)
+      |> Enum.chunk_every(chunk)
+      |> Enum.flat_map(&read_closed_issues/1)
       |> Map.new(&{&1.id, &1})
 
     rows
@@ -509,4 +513,16 @@ defmodule Arbiter.Usage.Estimate do
   end
 
   defp money(value), do: Float.round(value / 1, 2)
+
+  # `id in ^ids` compiles to one OR term per id and SQLite caps expression
+  # trees at depth 1000, so a wide window's worth of ids has to go in batches
+  # — otherwise the whole estimate raises instead of degrading.
+  defp read_closed_issues(ids) do
+    closed = :closed
+
+    Issue
+    |> Ash.Query.filter(id in ^ids and status == ^closed)
+    |> Ash.Query.select([:id, :title, :difficulty, :issue_type])
+    |> Ash.read!()
+  end
 end
