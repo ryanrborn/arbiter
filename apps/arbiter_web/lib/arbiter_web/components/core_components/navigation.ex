@@ -128,7 +128,9 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
       :if={is_integer(@count) and @count > 0}
       data-role="nav-badge"
       class="ml-1.5 inline-block min-w-[16px] px-1 rounded-[var(--radius-pill)] bg-[var(--surface-raised)] text-[9.5px] leading-[15px] text-center font-[family-name:var(--font-mono)] text-[var(--text-secondary)] align-middle"
-    >{@count}</span>
+    >
+      {@count}
+    </span>
     """
   end
 

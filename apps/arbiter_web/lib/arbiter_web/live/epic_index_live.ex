@@ -248,7 +248,8 @@ defmodule ArbiterWeb.EpicIndexLive do
   defp active_filter_summary(f, workspaces) do
     [
       f.status != @default_filters.status && "status: #{f.status}",
-      f.workspace && "workspace: #{workspace_name(Map.new(workspaces, &{&1.id, &1}), f.workspace)}",
+      f.workspace &&
+        "workspace: #{workspace_name(Map.new(workspaces, &{&1.id, &1}), f.workspace)}",
       f.blocked && "has blocked children",
       f.sort != @default_filters.sort && "sort: #{@sort_labels[f.sort]}"
     ]
@@ -273,7 +274,13 @@ defmodule ArbiterWeb.EpicIndexLive do
       coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
+        <%!-- `flex-wrap`: the shared header is a single non-wrapping row, and at
+             ~400px its actions are pushed past the viewport edge (measured by
+             `ArbiterWeb.EpicPageBrowserTest`). Wrapping is applied here rather
+             than in the component so the other index pages keep the layout
+             their own screenshots were taken against. --%>
         <ArbiterWeb.CoreComponents.Domain.index_header
+          class="flex-wrap"
           icon="hero-rectangle-stack"
           title="Epics"
           count={@total_count}

@@ -65,8 +65,7 @@ defmodule ArbiterWeb.Layouts do
 
   attr(:open_epic_count, :integer,
     default: nil,
-    doc:
-      "override for tests/specimens; real callers omit it and the nav counts open epics itself"
+    doc: "override for tests/specimens; real callers omit it and the nav counts open epics itself"
   )
 
   slot(:inner_block, required: true)

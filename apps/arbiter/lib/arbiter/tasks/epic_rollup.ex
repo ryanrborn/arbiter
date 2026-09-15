@@ -59,7 +59,13 @@ defmodule Arbiter.Tasks.EpicRollup do
 
   @type t :: %{
           epic_id: String.t(),
-          counts: %{backlog: non_neg_integer(), ready: non_neg_integer(), running: non_neg_integer(), waiting: non_neg_integer(), closed: non_neg_integer()},
+          counts: %{
+            backlog: non_neg_integer(),
+            ready: non_neg_integer(),
+            running: non_neg_integer(),
+            waiting: non_neg_integer(),
+            closed: non_neg_integer()
+          },
           total: non_neg_integer(),
           closed: non_neg_integer(),
           percent_complete: non_neg_integer(),
