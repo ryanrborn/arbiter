@@ -83,6 +83,11 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/workflows/code_review/checks.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/review_reply.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/quota/cloud_code.ex" => :scrubbed,
+    # bd-bpt0ag: the single spawn point for coordinator sessions. It runs
+    # `systemd-run` / `tmux` / `systemctl`, and the tmux server it starts goes
+    # on to host an agent CLI and whatever that CLI runs — so the scrub has to
+    # happen once here, at the scope boundary, and is inherited by every pane.
+    "apps/arbiter/lib/arbiter/sessions/runner/host.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker.ex" => :pure_tool,
