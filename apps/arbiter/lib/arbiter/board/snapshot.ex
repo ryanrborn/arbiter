@@ -400,6 +400,51 @@ defmodule Arbiter.Board.Snapshot do
     _ -> :ok
   end
 
+  # ---- shared column classification -----------------------------------------
+
+  @doc """
+  The board's own column classification, applied to an arbitrary set of
+  issues rather than the whole board.
+
+  Design bd-2s901b §3: an epic detail page groups its children into a
+  "Children by status" mini-board using these same five columns, so it needs
+  the same answer the board itself would give — this is that answer,
+  factored out so the two surfaces can't drift apart.
+
+  `workers` need only be the live workers for these issues' ids (a caller
+  scoped to one epic's children has no reason to pass the whole fleet).
+  Only author workers (not a reviewer/implementer gate pass) count here —
+  matching `derive/1`'s own author/gate split. As on the board itself, an
+  author worker's presence, not the issue's own `status`, is what separates
+  Running/Waiting from Backlog/Ready: a worker attached before the issue
+  record catches up still claims the issue.
+
+  Returns `%{issue_id => :backlog | :ready | :running | :waiting | :closed}`.
+  """
+  @spec classify_columns([map()], [map()]) :: %{String.t() => atom()}
+  def classify_columns(issues, workers \\ []) do
+    authors = Enum.filter(workers, &(worker_role(&1) not in [:reviewer, :implementer]))
+    worked = MapSet.new(authors, & &1.task_id)
+
+    running =
+      authors |> Enum.filter(&(&1.status in @running_statuses)) |> MapSet.new(& &1.task_id)
+
+    Map.new(issues, &{&1.id, column_for(&1, worked, running)})
+  end
+
+  defp column_for(%{status: :closed}, _worked, _running), do: :closed
+
+  defp column_for(issue, worked, running) do
+    cond do
+      MapSet.member?(running, issue.id) -> :running
+      Map.get(issue, :status) == :awaiting_verification -> :waiting
+      MapSet.member?(worked, issue.id) -> :waiting
+      Map.get(issue, :status) == :in_progress -> :waiting
+      refined?(issue) -> :ready
+      true -> :backlog
+    end
+  end
+
   # ---- backlog / ready ------------------------------------------------------
 
   # The one filter both columns share: work that exists, is dispatchable in

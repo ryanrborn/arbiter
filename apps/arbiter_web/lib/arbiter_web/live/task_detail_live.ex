@@ -57,6 +57,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Agents
+  alias Arbiter.Board.Snapshot
   alias Arbiter.Mergers
   alias Arbiter.Messages.Message
   alias Arbiter.ReviewGate.Round
@@ -176,6 +177,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      socket
      |> assign(:task_id, task_id)
      |> assign(:parent_refs, [])
+     |> assign(:children_by_status, nil)
      |> assign(:issue_label, "issue")
      |> assign(:worker_label, "worker")
      |> assign(:workspace_label, "workspace")
@@ -999,6 +1001,73 @@ defmodule ArbiterWeb.TaskDetailLive do
     socket
     |> assign(:relationship_groups, groups)
     |> assign(:parent_refs, parent_refs(socket.assigns[:task]))
+    |> refresh_children_by_status(groups)
+  end
+
+  # Design bd-2s901b §3: an epic's children grouped into the same five board
+  # columns (Backlog/Ready/Running/Waiting/Closed) as `Arbiter.Board.Snapshot`,
+  # via `Snapshot.classify_columns/2` — the mini-board and the board proper
+  # can't drift onto different answers for the same child. Rides on
+  # `refresh_deps/1` because it reuses the `:children` group already fetched
+  # there (no second dependency query for the child list itself), and because
+  # a child's status change arrives as a `:task_lifecycle` event for that
+  # child, which is exactly what `refresh_deps/1` already re-runs on.
+  defp refresh_children_by_status(
+         %{assigns: %{task: %Issue{issue_type: :epic}}} = socket,
+         groups
+       ) do
+    children = groups.children |> Enum.map(& &1.issue) |> Enum.reject(&is_nil/1)
+    child_ids = Enum.map(children, & &1.id)
+
+    workers =
+      list_live_workers()
+      |> Enum.filter(&(&1.task_id in child_ids))
+
+    columns = Snapshot.classify_columns(children, workers)
+    sibling_deps = sibling_depends_on(child_ids)
+
+    empty_groups = %{backlog: [], ready: [], running: [], waiting: [], closed: []}
+
+    by_column =
+      Enum.reduce(children, empty_groups, fn child, acc ->
+        column = Map.get(columns, child.id, :backlog)
+        chip = %{issue: child, depends_on: Map.get(sibling_deps, child.id, [])}
+        Map.update!(acc, column, &(&1 ++ [chip]))
+      end)
+
+    assign(socket, :children_by_status, by_column)
+  end
+
+  defp refresh_children_by_status(socket, _groups) do
+    assign(socket, :children_by_status, nil)
+  end
+
+  defp list_live_workers do
+    Worker.list_children()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  # `{child_id => [sibling_issue]}` for every open-or-closed `:depends_on` edge
+  # between two of this epic's own children — both blocking phrasings
+  # (`"is blocked by"` / `"blocks"`, bd-dgh2xv §3.3) write a `:depends_on` row,
+  # so one type filter catches sibling ordering however it was expressed.
+  defp sibling_depends_on([]), do: %{}
+
+  defp sibling_depends_on(child_ids) do
+    issues_by_id = Map.new(Ash.read!(Ash.Query.filter(Issue, id in ^child_ids)), &{&1.id, &1})
+
+    Dependency
+    |> Ash.Query.filter(
+      type == :depends_on and from_issue_id in ^child_ids and to_issue_id in ^child_ids
+    )
+    |> Ash.read!()
+    |> Enum.group_by(& &1.from_issue_id, &Map.get(issues_by_id, &1.to_issue_id))
+    |> Map.new(fn {id, sibs} -> {id, Enum.reject(sibs, &is_nil/1)} end)
+  rescue
+    _ -> %{}
   end
 
   # bd-38of5i: the "↳ Part of <epic>" banner under the title. It rides on
@@ -2425,6 +2494,48 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
+              <%!-- Design bd-2s901b §3: an epic-only mini-board, directly below
+                   RELATIONSHIPS' flat Children rollup, that groups the same
+                   children into the board's own five columns
+                   (`Snapshot.classify_columns/2`) so a set of 14-18 children
+                   is scannable at a glance instead of one long flat list. --%>
+              <.panel
+                :if={@children_by_status}
+                id="panel-children-by-status"
+                title="CHILDREN BY STATUS"
+                meta={children_by_status_meta(@children_by_status)}
+                class="order-5"
+              >
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  <.children_status_column
+                    id="children-backlog"
+                    label="Backlog"
+                    chips={@children_by_status.backlog}
+                  />
+                  <.children_status_column
+                    id="children-ready"
+                    label="Ready"
+                    chips={@children_by_status.ready}
+                  />
+                  <.children_status_column
+                    id="children-running"
+                    label="Running"
+                    chips={@children_by_status.running}
+                  />
+                  <.children_status_column
+                    id="children-waiting"
+                    label="Waiting"
+                    chips={@children_by_status.waiting}
+                  />
+                  <.children_status_column
+                    id="children-closed"
+                    label="Closed"
+                    chips={@children_by_status.closed}
+                    collapsible={length(@children_by_status.closed) > 5}
+                  />
+                </div>
+              </.panel>
+
               <%!-- Messages addressed to (`to_ref`) or about (`task_ref`) this
                    issue: coordinator directions to its worker, worker
                    escalations back up, sibling flags. Read/clear state is
@@ -3239,6 +3350,79 @@ defmodule ArbiterWeb.TaskDetailLive do
       </details>
     </div>
     """
+  end
+
+  # One column of the epic's "Children by status" mini-board (design
+  # bd-2s901b §3). Rendered with a plain `<details>` rather than any
+  # LiveView-tracked open/closed assign: acceptance #4 only asks that Closed
+  # start collapsed past 5 children, and `<details open={...}>` gets that for
+  # free, computed once per render, with no state to keep in sync.
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :chips, :list, required: true
+  attr :collapsible, :boolean, default: false
+
+  defp children_status_column(assigns) do
+    ~H"""
+    <div id={@id} data-role="children-status-column" class="min-w-0">
+      <details open={not @collapsible}>
+        <summary class="flex items-center gap-1.5 mb-1.5 cursor-pointer select-none">
+          <span class="text-[11px] font-medium text-[var(--text-label)]">{@label}</span>
+          <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+            ({length(@chips)})
+          </span>
+        </summary>
+        <ul class="flex flex-col gap-1.5">
+          <li :for={chip <- @chips} id={"#{@id}-#{chip.issue.id}"}>
+            <.children_status_chip chip={chip} />
+          </li>
+          <li :if={@chips == []} class="text-[11px] italic text-[var(--text-label)]">
+            none
+          </li>
+        </ul>
+      </details>
+    </div>
+    """
+  end
+
+  defp children_status_chip(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-0.5 rounded-[var(--radius-field)] border border-[var(--border-default)] p-1.5">
+      <.link navigate={~p"/tasks/#{@chip.issue.id}"} class="min-w-0 group">
+        <div class="flex items-center gap-1.5">
+          <code class="text-[10.5px] text-base-content/60 shrink-0 group-hover:text-primary transition-colors">
+            {@chip.issue.id}
+          </code>
+          <span
+            class="truncate text-[11.5px] group-hover:text-primary transition-colors"
+            title={@chip.issue.title}
+          >
+            {@chip.issue.title}
+          </span>
+        </div>
+      </.link>
+      <p
+        :for={sibling <- @chip.depends_on}
+        data-role="sibling-depends-on-marker"
+        class="text-[10.5px] text-[var(--text-secondary)]"
+      >
+        ← depends on
+        <.link navigate={~p"/tasks/#{sibling.id}"} class="hover:text-primary transition-colors">
+          {sibling.id}
+        </.link>
+      </p>
+    </div>
+    """
+  end
+
+  defp children_by_status_meta(by_column) do
+    total =
+      by_column
+      |> Map.values()
+      |> Enum.map(&length/1)
+      |> Enum.sum()
+
+    "#{total} children"
   end
 
   # ---- view helpers (status visuals + formatting) ----

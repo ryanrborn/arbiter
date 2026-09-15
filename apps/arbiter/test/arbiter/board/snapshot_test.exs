@@ -1142,4 +1142,85 @@ defmodule Arbiter.Board.SnapshotTest do
       assert [%{state: :blocked, reason: "scheduler paused"}] = board.ready
     end
   end
+
+  # bd-1273p2: an epic detail page groups its children into the same five
+  # columns the board renders, using this helper so the two surfaces can't
+  # drift onto different classifications.
+  describe "classify_columns/2" do
+    test "an unrefined open issue lands in backlog" do
+      assert Snapshot.classify_columns([issue("bd-a", %{refined: false})]) == %{
+               "bd-a" => :backlog
+             }
+    end
+
+    test "a refined open issue lands in ready" do
+      assert Snapshot.classify_columns([issue("bd-a", %{refined: true})]) == %{"bd-a" => :ready}
+    end
+
+    test "an in-progress issue with a live running worker lands in running" do
+      issues = [issue("bd-a", %{status: :in_progress})]
+      workers = [worker("bd-a", :running)]
+
+      assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :running}
+    end
+
+    test "a worker's presence outranks a stale open status, same as the board" do
+      issues = [issue("bd-a", %{status: :open})]
+      workers = [worker("bd-a", :idle)]
+
+      assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :running}
+    end
+
+    test "an in-progress issue with a parked worker lands in waiting" do
+      issues = [issue("bd-a", %{status: :in_progress})]
+      workers = [worker("bd-a", :awaiting_review)]
+
+      assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :waiting}
+    end
+
+    test "an in-progress issue with no worker at all lands in waiting" do
+      issues = [issue("bd-a", %{status: :in_progress})]
+
+      assert Snapshot.classify_columns(issues) == %{"bd-a" => :waiting}
+    end
+
+    test "an awaiting_verification issue lands in waiting" do
+      issues = [issue("bd-a", %{status: :awaiting_verification})]
+
+      assert Snapshot.classify_columns(issues) == %{"bd-a" => :waiting}
+    end
+
+    test "a closed issue lands in closed" do
+      issues = [issue("bd-a", %{status: :closed})]
+
+      assert Snapshot.classify_columns(issues) == %{"bd-a" => :closed}
+    end
+
+    test "a reviewer/implementer worker on the same task does not count as running" do
+      issues = [issue("bd-a", %{status: :in_progress})]
+      workers = [worker("bd-a#review", :running, %{meta: %{role: :reviewer}})]
+
+      assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :waiting}
+    end
+
+    test "classifies a full mix of issues independently" do
+      issues = [
+        issue("bd-backlog", %{refined: false}),
+        issue("bd-ready", %{refined: true}),
+        issue("bd-running", %{status: :in_progress}),
+        issue("bd-waiting", %{status: :in_progress}),
+        issue("bd-closed", %{status: :closed})
+      ]
+
+      workers = [worker("bd-running", :running)]
+
+      assert Snapshot.classify_columns(issues, workers) == %{
+               "bd-backlog" => :backlog,
+               "bd-ready" => :ready,
+               "bd-running" => :running,
+               "bd-waiting" => :waiting,
+               "bd-closed" => :closed
+             }
+    end
+  end
 end
