@@ -493,7 +493,9 @@ defmodule Arbiter.Sessions.StreamTest do
       :ok = Stream.detach(id, self())
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
-      assert Stream.whereis(id) == nil
+      # The Registry drops the entry when it handles the reader's DOWN, which
+      # is not ordered against *our* DOWN.
+      wait_until(fn -> Stream.whereis(id) == nil end)
 
       # The pipe was closed; nothing killed the terminal.
       assert {:stop_stream} in ScriptedPty.calls(id)
@@ -521,6 +523,40 @@ defmodule Arbiter.Sessions.StreamTest do
 
       ScriptedPty.emit(id, "!")
       assert assert_stdout(id, "!") == 17
+    end
+  end
+
+  describe "reader lifecycle races" do
+    test "reattaching the instant the previous reader stops always succeeds", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      # A browser reload, or a second tab opening as the first closes: the
+      # registry entry for a reader outlives its reply by however long the
+      # Registry takes to handle the DOWN, so `attach/2` can resolve a pid that
+      # is already terminating and the call to it exits `:noproc`.
+      #
+      # A stress test rather than a deterministic one — the window is the
+      # registry's handling of a single `:DOWN` and cannot be opened on demand
+      # — so it is run from several processes at once to widen it, and every
+      # attach must still come back `{:ok, _}` rather than an exit.
+      tasks =
+        for _ <- 1..8 do
+          Task.async(fn ->
+            for _ <- 1..15 do
+              {:ok, _attached} = attach(session, opts)
+              :ok = Stream.detach(id, self())
+            end
+
+            :done
+          end)
+        end
+
+      assert Enum.map(tasks, &Task.await(&1, 30_000)) == List.duplicate(:done, 8)
+
+      assert {:ok, attached} = attach(session, opts)
+      assert attached.meta.attached_clients == 1
     end
   end
 
@@ -589,7 +625,7 @@ defmodule Arbiter.Sessions.StreamTest do
       ScriptedPty.put(id, start_stream_result: {:error, {:tmux_failed, 1, "no server running"}})
 
       assert {:error, {:tmux_failed, 1, "no server running"}} = attach(session, opts)
-      assert Stream.whereis(id) == nil
+      wait_until(fn -> Stream.whereis(id) == nil end)
     end
   end
 

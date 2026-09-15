@@ -118,6 +118,12 @@ defmodule Arbiter.Sessions.Stream do
     linger_ms: 5_000
   ]
 
+  # Rounds `attach/2` will re-resolve the reader over before giving up. Three
+  # is generous: the window it covers is the registry's handling of one
+  # `:DOWN`, not any kind of real work.
+  @attach_attempts 3
+  @attach_retry_ms 5
+
   @type attached :: %{
           seq: non_neg_integer(),
           mode: :resumed | :snapshot,
@@ -161,7 +167,15 @@ defmodule Arbiter.Sessions.Stream do
       {:session_exit,     session_id, %{code: code, reason: reason}}
   """
   @spec attach(Session.t(), keyword()) :: {:ok, attached()} | {:error, term()}
-  def attach(%Session{} = session, opts \\ []) do
+  def attach(%Session{} = session, opts \\ []), do: attach(session, opts, @attach_attempts)
+
+  # A reader replies to `detach` and *then* terminates, and the registry drops
+  # its entry only when it handles the resulting `:DOWN` — which is not ordered
+  # against anything the caller can see. So `ensure_started/2` can hand back a
+  # pid that is already on its way out, and the call to it exits `:noproc`.
+  # That window is exactly a browser reload, or a second tab opening as the
+  # first closes, so it is retried rather than surfaced as a crash.
+  defp attach(session, opts, attempts) do
     subscriber = Keyword.get(opts, :subscriber, self())
 
     with {:ok, pid} <- ensure_started(session, opts) do
@@ -171,6 +185,15 @@ defmodule Arbiter.Sessions.Stream do
          Keyword.get(opts, :rows)}
       )
     end
+  catch
+    :exit, reason when attempts > 1 ->
+      Logger.debug("Sessions.Stream #{session.id}: reader went away mid-attach, retrying")
+      _ = reason
+      Process.sleep(@attach_retry_ms)
+      attach(session, opts, attempts - 1)
+
+    :exit, reason ->
+      {:error, {:reader_unavailable, reason}}
   end
 
   @doc """

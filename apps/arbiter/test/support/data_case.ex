@@ -104,9 +104,16 @@ defmodule Arbiter.DataCase do
     Arbiter.Workflows.ReviewPatrolSupervisor,
     Arbiter.Workflows.MergedPRFinalizerSupervisor,
     Arbiter.Workflows.DispatchQueueSupervisor,
-    Arbiter.Workflows.ConductorSupervisor,
-    Arbiter.Sessions.Stream.Supervisor
+    Arbiter.Workflows.ConductorSupervisor
   ]
+
+  # Deliberately NOT here: `Arbiter.Sessions.Stream.Supervisor` (bd-3ymdvi).
+  # This list exists for processes that can be mid-write on the shared sandbox
+  # connection at teardown. A session reader never touches the database — it
+  # reads a pipe file and sends messages — so it cannot corrupt the connection,
+  # and it stops itself when the subscriber it monitors dies. Sweeping it here
+  # would instead reach *into a concurrently running `async: true` test* and
+  # kill the reader it is in the middle of asserting on.
 
   @doc false
   def stop_leaked_dynamic_children do
