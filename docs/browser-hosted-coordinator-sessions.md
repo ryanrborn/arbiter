@@ -500,7 +500,7 @@ envelope, so that adding one later is additive.
 
 ### 5.5 Status — phase 4 shipped (bd-3ymdvi, #1685)
 
-The transport is implemented. Four things in §5 were under-specified or wrong
+The transport is implemented. Five things in §5 were under-specified or wrong
 and were decided while building it; they are recorded here rather than left
 for the next reader to rediscover.
 
@@ -545,6 +545,27 @@ client leaves, and is compatible with the suggestion — letterboxing is a
 frontend response to `meta`, which phase 5 can add without the transport
 having an opinion.
 
+**5. The client must reconnect on a *clean* close — phase 5 needs this line.**
+`phoenix.js` deliberately does not reconnect after WebSocket close code `1000`
+(normal closure), and a graceful `systemctl --user restart arbiter` produces
+exactly that: Bandit closes every socket with 1000 on shutdown before the BEAM
+exits. For a terminal client that is the wrong reading. The session *outlives*
+the server by design (§4.3), so a clean server close means "back shortly", not
+"stop watching this terminal" — without an override, the tab goes dead on
+every deploy and decision 3's gapless resume never gets a chance to run. One
+line in the socket's `onClose` fixes it:
+
+```js
+if (code === 1000) socket.reconnectTimer.scheduleTimeout()
+```
+
+This was found, not reasoned about: the first run of
+`ArbiterWeb.SessionTransportSocketTest` hung at "socket closed at seq 19 (code
+1000)" and never rejoined. Phase 5's hook must carry the same line, and its
+rejoin params must be a **closure** — `phoenix.js` only re-evaluates join
+params that are a function, so an object literal silently resumes from the
+`last_seq` the tab first connected with rather than the newest one.
+
 Backpressure is §5.3 item 2 as written: each client acknowledges the bytes it
 has pushed onto the wire, a client past the high-water mark stops receiving
 frames and keeps no backlog, and one `capture-pane` snapshot repaints it when
@@ -556,6 +577,26 @@ same kind of file tmux writes, so the byte path under test is the real one.
 `Arbiter.Integration.SessionTmuxTest` runs the same operations against a real
 tmux server on a scratch socket — cheap enough for the default suite, skipped
 only where tmux is absent.
+
+Tested over a real socket, too. `ArbiterWeb.SessionTransportSocketTest` stands
+the endpoint up on a real port under Bandit and drives it with
+`scripts/verify_session_transport.mjs` — the same `phoenix.js` the dashboard
+ships, run under Node's built-in `WebSocket` (no npm; §6.1). It stops the
+listener *and* the reader, lets the pane keep writing to the pipe file while
+both are down, brings them back, and asserts the client's own verdict:
+
+```
+joined (#1): {"mode":"snapshot","seq":0}
+before-the-restart
+socket closed at seq 19 (code 1000) — will resume
+joined (#2): {"mode":"resumed","seq":37}
+during-the-outage
+RESULT: PASS — frames=3 bytes=55 seq=55 reconnects=1 gaps=0 duplicates=0
+```
+
+That script is also the instrument for AC 8 on the live host: point it at a
+real session, `systemctl --user restart arbiter`, and read the same summary
+line.
 
 ## 6. Frontend (research task 3)
 
