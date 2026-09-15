@@ -104,7 +104,8 @@ defmodule Arbiter.DataCase do
     Arbiter.Workflows.ReviewPatrolSupervisor,
     Arbiter.Workflows.MergedPRFinalizerSupervisor,
     Arbiter.Workflows.DispatchQueueSupervisor,
-    Arbiter.Workflows.ConductorSupervisor
+    Arbiter.Workflows.ConductorSupervisor,
+    Arbiter.Sessions.Stream.Supervisor
   ]
 
   @doc false

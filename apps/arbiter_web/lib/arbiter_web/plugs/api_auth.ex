@@ -2,9 +2,9 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   @moduledoc """
   Loopback-exempt token authentication for the `/api` pipeline.
 
-  Requests from loopback addresses (`127.0.0.0/8`, `::1`, or IPv4-mapped IPv6
-  loopback `::ffff:127.x.x.x`) are allowed through without a token so local
-  `arb` CLI usage and same-box tooling are unaffected. All other origins must
+  Requests from loopback addresses are allowed through without a token so local
+  `arb` CLI usage and same-box tooling are unaffected — `ArbiterWeb.Loopback`
+  owns which addresses count, shared with `ArbiterWeb.SessionSocket`. All other origins must
   present a valid `Authorization: Bearer <token>` using the same signed MCP
   scope token mechanism used by the `/mcp` endpoint.
 
@@ -18,35 +18,16 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   @behaviour Plug
 
   import Plug.Conn
-  import Bitwise
 
   alias Arbiter.MCP.Scope
+  alias ArbiterWeb.Loopback
 
   @impl true
   def init(opts), do: opts
 
   @impl true
-  # IPv4 loopback 127.0.0.0/8
-  def call(%Plug.Conn{remote_ip: {127, _, _, _}} = conn, _opts) do
-    conn
-  end
-
-  # IPv6 loopback ::1
-  def call(%Plug.Conn{remote_ip: {0, 0, 0, 0, 0, 0, 0, 1}} = conn, _opts) do
-    conn
-  end
-
-  # IPv4-mapped IPv6 loopback ::ffff:127.x.x.x
-  def call(%Plug.Conn{remote_ip: {0, 0, 0, 0, 0, 0xFFFF, hi, _lo}} = conn, _opts) do
-    case hi >>> 8 do
-      127 -> conn
-      _ -> require_bearer(conn)
-    end
-  end
-
-  # Non-loopback addresses require a token
-  def call(conn, _opts) do
-    require_bearer(conn)
+  def call(%Plug.Conn{remote_ip: remote_ip} = conn, _opts) do
+    if Loopback.loopback?(remote_ip), do: conn, else: require_bearer(conn)
   end
 
   defp require_bearer(conn) do
