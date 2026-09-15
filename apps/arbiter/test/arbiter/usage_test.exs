@@ -170,6 +170,43 @@ defmodule Arbiter.UsageTest do
       assert_in_delta review_rollup.total_cost_usd, 0.40, 0.001
     end
 
+    test "by session groups session-sourced rows only, dropping task rows with no session_id" do
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-hud-1",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 5.0,
+        tokens_in: 3000,
+        tokens_out: 1500,
+        duration_ms: 120_000,
+        occurred_at: DateTime.utc_now()
+      })
+
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-hud-1",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 2.5,
+        tokens_in: 900,
+        tokens_out: 400,
+        duration_ms: 40_000,
+        occurred_at: DateTime.utc_now()
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :session, workspace_id: "ws-usage")
+
+      assert [session_rollup] = rollups
+      assert session_rollup.group == "sess-hud-1"
+      assert session_rollup.rows == 2
+      assert_in_delta session_rollup.total_cost_usd, 7.5, 0.001
+    end
+
     test "by step splits work vs review" do
       {:ok, rollups} = Usage.summarize(by: :step, workspace_id: "ws-usage")
       by_step = Map.new(rollups, &{&1.group, &1})

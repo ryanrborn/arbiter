@@ -179,6 +179,64 @@ defmodule ArbiterCli.Cmd.UsageTest do
     end
   end
 
+  describe "arb usage --by session" do
+    test "renders one row per session" do
+      stub_get("/api/usage", %{
+        "by" => "session",
+        "data" => [
+          %{
+            "group" => "sess-abc123",
+            "rows" => 4,
+            "total_cost_usd" => 9.7842,
+            "tokens_in" => 42_000,
+            "tokens_out" => 18_500,
+            "cache_creation_tokens" => 100,
+            "cache_read_tokens" => 900,
+            "duration_ms" => 3_600_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "session"]) end)
+
+      assert code == 0
+      assert out =~ "Usage rollup by session"
+      assert out =~ "sess-abc123"
+      assert out =~ "9.7842"
+    end
+  end
+
+  describe "arb usage --session <id>" do
+    test "shows that session's events, drilling into /api/usage/events" do
+      stub_get("/api/usage/events", %{
+        "data" => [
+          %{
+            "id" => "x",
+            "task_id" => nil,
+            "source" => "coordinator_session",
+            "session_id" => "sess-abc123",
+            "step" => "other",
+            "model" => "claude-opus-4-7",
+            "cost_usd" => 5.0,
+            "tokens_in" => 20_000,
+            "tokens_out" => 9_000,
+            "duration_ms" => 1_800_000,
+            "occurred_at" => "2026-09-10T12:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--session", "sess-abc123"]) end)
+
+      assert code == 0
+      assert out =~ "Usage events (1)"
+      assert out =~ "session=sess-abc123"
+      assert out =~ "source=coordinator_session"
+    end
+  end
+
   describe "arb usage events" do
     test "lists one line per event in text mode" do
       stub_get("/api/usage/events", %{

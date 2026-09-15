@@ -60,7 +60,16 @@ defmodule Arbiter.Usage do
   end
 
   @type group_by ::
-          :day | :task | :epic | :workspace | :repo | :model | :step | :provider | :source
+          :day
+          | :task
+          | :epic
+          | :workspace
+          | :repo
+          | :model
+          | :step
+          | :provider
+          | :source
+          | :session
 
   @type since :: DateTime.t() | nil
 
@@ -75,7 +84,7 @@ defmodule Arbiter.Usage do
           required(:duration_ms) => non_neg_integer()
         }
 
-  @valid_by ~w(day task epic workspace repo model step provider source)a
+  @valid_by ~w(day task epic workspace repo model step provider source session)a
 
   # `campaign` was the old name for the `epic` grouping. Accepted as a
   # deprecated alias for one release; normalized to `:epic` before validation
@@ -109,6 +118,12 @@ defmodule Arbiter.Usage do
   or sentinel group for spend that belongs to no task. Every other grouping
   counts them, so `:day`, `:workspace`, `:provider` and `:source` totals are
   the real consumption. Use `:source` to see the split.
+
+  `:session` is the mirror image of `:task`: it groups by `session_id` and
+  **drops** rows that carry none (i.e. everything but `coordinator_session` /
+  `terminal_session` sources), the same "don't invent a phantom group"
+  discipline `:task` already applies (§7.6 of
+  `docs/browser-hosted-coordinator-sessions.md`).
   """
   @spec summarize(keyword()) :: {:ok, [rollup()]} | {:error, term()}
   def summarize(opts) when is_list(opts) do
@@ -255,6 +270,14 @@ defmodule Arbiter.Usage do
   defp group_events(events, :source),
     do: Enum.group_by(events, &Atom.to_string(&1.source || :task))
 
+  # Mirrors `:task`'s exclusion above: a row with no `session_id` belongs to
+  # no session, so it is dropped rather than grouped under a `nil` sentinel.
+  defp group_events(events, :session) do
+    events
+    |> Enum.filter(&session_attributed?/1)
+    |> Enum.group_by(& &1.session_id)
+  end
+
   defp group_events(events, :workspace),
     do: Enum.group_by(events, &(&1.workspace_id || "(none)"))
 
@@ -277,6 +300,7 @@ defmodule Arbiter.Usage do
   end
 
   defp task_attributed?(ev), do: is_binary(ev.task_id) and ev.task_id != ""
+  defp session_attributed?(ev), do: is_binary(ev.session_id) and ev.session_id != ""
 
   # Drop any ReviewGate synthetic-id suffix (`#review`, `#r2`, ...) so a
   # review event is still attributable to the author task for epic lookup.

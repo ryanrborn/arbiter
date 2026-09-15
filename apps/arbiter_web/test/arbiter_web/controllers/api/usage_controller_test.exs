@@ -95,6 +95,36 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert json_response(conn, 200)["by"] == "epic"
     end
 
+    test "by=session groups session-sourced rows only", %{conn: conn} do
+      _ =
+        insert_event!(%{
+          task_id: nil,
+          source: :coordinator_session,
+          session_id: "sess-web-1",
+          cost_usd: 1.0,
+          tokens_in: 100
+        })
+
+      _ =
+        insert_event!(%{
+          task_id: nil,
+          source: :coordinator_session,
+          session_id: "sess-web-1",
+          cost_usd: 2.0,
+          tokens_in: 200
+        })
+
+      _ = insert_event!(%{task_id: "bd-no-session", cost_usd: 5.0})
+
+      conn = get(conn, ~p"/api/usage", %{by: "session", workspace_id: @ws})
+      body = json_response(conn, 200)["data"]
+
+      assert [row] = body
+      assert row["group"] == "sess-web-1"
+      assert row["rows"] == 2
+      assert_in_delta row["total_cost_usd"], 3.0, 0.001
+    end
+
     test "missing by returns 400", %{conn: conn} do
       conn = get(conn, ~p"/api/usage", %{})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
@@ -157,6 +187,29 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert length(data) == 1
       assert hd(data)["task_id"] == "bd-trib2#review"
       assert hd(data)["step"] == "review"
+    end
+
+    test "session_id filter", %{conn: conn} do
+      _ =
+        insert_event!(%{
+          task_id: nil,
+          source: :coordinator_session,
+          session_id: "sess-only",
+          cost_usd: 0.3
+        })
+
+      _ =
+        insert_event!(%{
+          task_id: nil,
+          source: :coordinator_session,
+          session_id: "sess-other",
+          cost_usd: 0.4
+        })
+
+      conn = get(conn, ~p"/api/usage/events", %{session_id: "sess-only", workspace_id: @ws})
+      data = json_response(conn, 200)["data"]
+      assert Enum.all?(data, &(&1["session_id"] == "sess-only"))
+      assert data != []
     end
   end
 

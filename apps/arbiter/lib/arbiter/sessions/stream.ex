@@ -87,12 +87,41 @@ defmodule Arbiter.Sessions.Stream do
         read_chunk_bytes: 65_536,     # max payload per frame
         poll_interval_ms: 25,
         alive_interval_ms: 1_000,
+        usage_poll_interval_ms: 2_000, # live cost HUD cadence (§7.5, phase 7)
         linger_ms: 5_000,             # reader lifetime after the last detach
         snapshot_lines: 2_000
 
   Every key is also accepted as an option to `attach/2`, which is how the
   suite drives it. Configuration is fixed by the **first** attach for the
   reader's lifetime.
+
+  ## Live cost HUD (§7.5, phase 7)
+
+  Same reader, one more timer: every `usage_poll_interval_ms` (~2s), while at
+  least one client is attached, it re-reads the session's on-disk JSONL with
+  `Arbiter.Usage.ClaudeSessionFile.read_totals/2` — the same reconciliation
+  arithmetic `Arbiter.Sessions.UsageIngest` already uses, reused rather than
+  reimplemented — and publishes the *delta* since the previous tick as a
+  `usage` event on `Arbiter.Sessions.usage_topic/1`. `ArbiterWeb.SessionChannel`
+  subscribes to that topic independently of this reader's own `subs` (it is
+  PubSub, not a direct send), so multiple attached tabs share one tailer.
+
+  Token counts in the payload are deltas — "what changed since the last
+  push" — but `cost_usd` is the file's latest cumulative figure: `cost-state`
+  records are periodic (often absent entirely on 2.1.270+, see
+  `ClaudeSessionFile`'s moduledoc), so there is rarely a *new* dollar amount
+  to diff, only the most recently known total. `estimated` mirrors
+  `totals.cost_source != :cost_state` — true whenever that total came from
+  `Arbiter.Usage.ClaudePricing`'s token-based estimate rather than the CLI's
+  own accounting, which is the HUD's "estimated" marker (AC 1).
+
+  This reads `session.config_dir` / `session.provider_session_id` as they
+  were at the reader's own start (or last resume) rather than re-fetching the
+  row every tick — cheap, and consistent with every other use of
+  `state.session` in this module. A mid-session provider-id rollover (§7.5's
+  "wrinkle") is therefore a gap the *authoritative* reconciliation
+  (`Arbiter.Sessions.UsageIngest`) closes on its own sweep; the live HUD is
+  documented as "cheap, approximate" for exactly this reason.
   """
 
   use GenServer
@@ -101,6 +130,7 @@ defmodule Arbiter.Sessions.Stream do
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Session
+  alias Arbiter.Usage.ClaudeSessionFile
 
   require Logger
 
@@ -115,8 +145,19 @@ defmodule Arbiter.Sessions.Stream do
     read_chunk_bytes: 65_536,
     poll_interval_ms: 25,
     alive_interval_ms: 1_000,
+    usage_poll_interval_ms: 2_000,
     linger_ms: 5_000
   ]
+
+  # The zero-baseline a fresh reader diffs its first usage poll against —
+  # nothing has been shown yet, so the first tick's delta is the file's
+  # whole in-window total.
+  @blank_usage_totals %{
+    tokens_in: 0,
+    tokens_out: 0,
+    cache_creation_tokens: 0,
+    cache_read_tokens: 0
+  }
 
   # Rounds `attach/2` will re-resolve the reader over before giving up. Three
   # is generous: the window it covers is the registry's handling of one
@@ -320,7 +361,8 @@ defmodule Arbiter.Sessions.Stream do
       pending_snapshot: nil,
       open_error: nil,
       linger_timer: nil,
-      last_turn_touch_ms: nil
+      last_turn_touch_ms: nil,
+      usage_last: @blank_usage_totals
     }
 
     {:ok, state, {:continue, :open}}
@@ -332,6 +374,7 @@ defmodule Arbiter.Sessions.Stream do
       {:ok, state} ->
         schedule(:poll, state.config.poll_interval_ms)
         schedule(:alive, state.config.alive_interval_ms)
+        schedule(:usage_poll, state.config.usage_poll_interval_ms)
         {:noreply, refresh_geometry(state)}
 
       {:error, reason} ->
@@ -465,6 +508,11 @@ defmodule Arbiter.Sessions.Stream do
       broadcast(state, {:session_exit, state.id, %{code: nil, reason: "exited"}})
       {:stop, :normal, close_stream(state)}
     end
+  end
+
+  def handle_info(:usage_poll, state) do
+    schedule(:usage_poll, state.config.usage_poll_interval_ms)
+    {:noreply, poll_usage(state)}
   end
 
   def handle_info(:linger_expired, state) do
@@ -793,6 +841,51 @@ defmodule Arbiter.Sessions.Stream do
   defp broadcast(state, message) do
     for {pid, _sub} <- state.subs, do: send(pid, message)
     :ok
+  end
+
+  # -- live cost HUD (§7.5, phase 7) -------------------------------------------
+
+  # Nobody watching: skip the file read entirely rather than tailing a
+  # session nothing is attached to.
+  defp poll_usage(%{subs: subs} = state) when map_size(subs) == 0, do: state
+
+  defp poll_usage(%{session: session} = state) do
+    with provider_session_id when is_binary(provider_session_id) <-
+           session.provider_session_id,
+         {:ok, path} <- ClaudeSessionFile.locate(session.config_dir, provider_session_id),
+         {:ok, totals} <-
+           ClaudeSessionFile.read_totals(path, session_id: provider_session_id) do
+      publish_usage_delta(state, totals)
+      %{state | usage_last: usage_snapshot(totals)}
+    else
+      _ -> state
+    end
+  end
+
+  defp publish_usage_delta(state, totals) do
+    last = state.usage_last
+
+    Sessions.broadcast_usage(state.id, %{
+      tokens_in: usage_delta(totals.tokens_in, last.tokens_in),
+      tokens_out: usage_delta(totals.tokens_out, last.tokens_out),
+      cache_creation: usage_delta(totals.cache_creation_tokens, last.cache_creation_tokens),
+      cache_read: usage_delta(totals.cache_read_tokens, last.cache_read_tokens),
+      cost_usd: totals.cost_usd,
+      model: totals.model,
+      estimated: totals.cost_source != :cost_state
+    })
+  end
+
+  defp usage_delta(now, prev) when is_integer(now) and is_integer(prev), do: max(now - prev, 0)
+  defp usage_delta(_now, _prev), do: 0
+
+  defp usage_snapshot(totals) do
+    %{
+      tokens_in: totals.tokens_in,
+      tokens_out: totals.tokens_out,
+      cache_creation_tokens: totals.cache_creation_tokens,
+      cache_read_tokens: totals.cache_read_tokens
+    }
   end
 
   # -- misc -------------------------------------------------------------------

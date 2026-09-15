@@ -95,6 +95,9 @@ const PERMANENT_REFUSALS = ["session_gone", "bad_topic"]
  *                          `seq`, and the `skipped`/`gap` byte counts
  *   repaint(seq, data, info)  a snapshot: clear and redraw from `data`
  *   meta(meta) / exit(payload) / error(err)
+ *   usage(payload)         live cost HUD feed (§7.5, phase 7):
+ *                          `{tokens_in, tokens_out, cache_creation,
+ *                          cache_read, cost_usd, model, estimated}`
  *   status(state)          "connecting" | "live" | "reconnecting" |
  *                          "detached" | "ended"
  */
@@ -152,6 +155,7 @@ export class SessionStream {
     this.channel.on("stdout", (payload) => this._onStdout(payload))
     this.channel.on("snapshot", (payload) => this._onSnapshot(payload))
     this.channel.on("meta", (meta) => this._emit("meta", meta))
+    this.channel.on("usage", (payload) => this._emit("usage", payload))
     this.channel.on("error", (err) => this._emit("error", err))
     this.channel.on("exit", (payload) => this._onExit(payload))
 
