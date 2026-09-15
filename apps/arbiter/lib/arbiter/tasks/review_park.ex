@@ -17,11 +17,17 @@ defmodule Arbiter.Tasks.ReviewPark do
       days, and all four chain-B incidents (bd-6dxit2, bd-869mmg, bd-1xss5z,
       bd-c6tdbu) ended the same way — a failed run on work that was fine.
 
-  A park is what "fail open on liveness" looks like on the record. The branch is
-  pushed, the PR is open, the round is recorded honestly (`converged: false`)
-  and the work is one human decision away from merging — so the durable run row
-  says `:review_parked`, not `:failed`, and the task carries a named reason a
-  human can act on.
+  A park is what "fail open on liveness" looks like on the record. The work is
+  committed, the PR is open, the round is recorded honestly (`converged: false`)
+  and the work is usually one human decision away from merging — so the durable
+  run row says `:review_parked`, not `:failed`, and the task carries a named
+  reason a human can act on.
+
+  Whether the branch is *pushed* is checked, never assumed: bd-2jkrqu found the
+  escalation asserting "the branch is pushed" over a branch that was not, next
+  to an offer to merge it by hand. `Arbiter.Reviews.PushState` answers that
+  question for the escalation body, and `:head_not_pushed` is the park for a
+  head that could not be put on the remote at all.
 
   ## A flag, not a status
 
@@ -60,6 +66,7 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :commit_gate_no_changes
           | :commit_gate_uncommitted
           | :empty_diff
+          | :head_not_pushed
           | :review_rerun
 
   @reasons %{
@@ -76,7 +83,11 @@ defmodule Arbiter.Tasks.ReviewPark do
     commit_gate_no_changes: "a fix round left HEAD unmoved and the worktree clean (G15/G16)",
     commit_gate_uncommitted:
       "the implementer left uncommitted work and HEAD did not move, twice (G15/G16)",
-    empty_diff: "the target branch has already absorbed this branch's commits (G2)"
+    empty_diff: "the target branch has already absorbed this branch's commits (G2)",
+    head_not_pushed:
+      "the head to be reviewed is not on the remote branch the merge request points at, " <>
+        "and could not be pushed there — reviewing it would judge code the MR does not " <>
+        "carry (G18)"
   }
 
   # The phrase each reason contributes to the escalation subject. These are
@@ -93,7 +104,8 @@ defmodule Arbiter.Tasks.ReviewPark do
       "fix round produced no changes after an approval-gap rejection",
     commit_gate_no_changes: "fix round produced no changes",
     commit_gate_uncommitted: "implementer left uncommitted work",
-    empty_diff: "the target branch already absorbed these commits"
+    empty_diff: "the target branch already absorbed these commits",
+    head_not_pushed: "the branch is not pushed and could not be"
   }
 
   @doc """
