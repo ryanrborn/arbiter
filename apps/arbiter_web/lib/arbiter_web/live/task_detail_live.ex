@@ -69,6 +69,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.ParentRefs
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
+  alias Arbiter.Usage.Budget
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
@@ -234,7 +235,12 @@ defmodule ArbiterWeb.TaskDetailLive do
   def handle_info({:worker_lifecycle, _event, %{task_id: worker_task_id}}, socket)
       when is_binary(worker_task_id) do
     if ReviewGate.base_task_id(worker_task_id) == socket.assigns.task_id do
-      {:noreply, socket |> refresh_worker() |> refresh_runs() |> refresh_review_rounds()}
+      {:noreply,
+       socket
+       |> refresh_worker()
+       |> refresh_runs()
+       |> refresh_review_rounds()
+       |> refresh_budget()}
     else
       {:noreply, socket}
     end
@@ -823,6 +829,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp refresh_all(socket) do
     socket
     |> refresh_task()
+    |> refresh_budget()
     |> refresh_workspace()
     |> refresh_worker()
     |> refresh_runs()
@@ -845,6 +852,25 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> assign(:task, task)
     |> assign(:acceptance_items, acceptance_items(task && task.acceptance))
   end
+
+  # bd-8j9i9p (design bd-9jj5lf §3): worker spend so far, the percentile range
+  # it is read against, and which of the three threshold states that lands in.
+  # Best-effort on purpose — a ledger read that fails costs the header its
+  # cost line, not the page.
+  defp refresh_budget(%{assigns: %{task: %Issue{} = task}} = socket) do
+    budget =
+      try do
+        Budget.assess(task)
+      rescue
+        e ->
+          Logger.warning("Failed to assess spend for #{task.id}: #{inspect(e)}")
+          nil
+      end
+
+    assign(socket, :budget, budget)
+  end
+
+  defp refresh_budget(socket), do: assign(socket, :budget, nil)
 
   # The effective post-layering skill set (workspace -> repo -> issue) a
   # dispatch of this issue would carry right now — the same resolution the
@@ -1739,6 +1765,45 @@ defmodule ArbiterWeb.TaskDetailLive do
                  question an operator actually asks of a header. --%>
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)] tabular-nums">
               opened {relative_age(@task.created_at)} · updated {relative_age(@task.updated_at)}
+            </span>
+          </div>
+
+          <%!-- bd-8j9i9p (design bd-9jj5lf §3): what this issue has cost so far,
+               against what issues like it usually cost. "worker spend", never
+               "spent" — §7 keeps coordinator-session overhead out of both
+               halves, and the tooltip says so. --%>
+          <div
+            :if={@task && @budget}
+            id="task-spend"
+            class="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1.5 text-[11px] font-[family-name:var(--font-mono)]"
+          >
+            <span
+              id="task-spend-figure"
+              title="Worker spend: this issue's agent sessions and their review / fix-pass rounds. Excludes coordinator session overhead, which is metered per session and belongs to no single issue."
+              class="text-[var(--text-label)]"
+            >
+              worker spend
+              <span class="tabular-nums font-medium text-[var(--text-title)]">
+                {money(@budget.spend)}
+              </span>
+            </span>
+            <span id="task-spend-estimate" class="text-[var(--text-label)] tabular-nums">
+              {estimate_label(@budget.estimate)}
+            </span>
+            <span
+              :if={spend_chip_label(@budget.state)}
+              id="task-spend-chip"
+              data-state={@budget.state}
+              title={spend_chip_title(@budget)}
+              class={[
+                "px-[7px] py-[1px] rounded-[var(--radius-chip)] border border-solid font-medium",
+                @budget.state == :running_high &&
+                  "border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] text-[var(--arb-attention)]",
+                @budget.state == :over_budget &&
+                  "border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[var(--arb-fail-text)]"
+              ]}
+            >
+              {spend_chip_label(@budget.state)}
             </span>
           </div>
 
@@ -3210,6 +3275,35 @@ defmodule ArbiterWeb.TaskDetailLive do
   # real content to render.
   defp present?(v) when is_binary(v), do: String.trim(v) != ""
   defp present?(_), do: false
+
+  # ---- worker spend (bd-8j9i9p) --------------------------------------------
+
+  # `Estimate: $3.00–$8.00 (p90 $9.00) · difficulty+type, n=77`. Basis and n
+  # ride along always, not just on the coarse rungs: a `global, n=11` range and
+  # a `difficulty+type, n=214` range should not read the same.
+  defp estimate_label(nil), do: "no estimate yet"
+
+  defp estimate_label(est) do
+    "Estimate: #{money(est.p25)}\u2013#{money(est.p75)} (p90 #{money(est.p90)}) " <>
+      "\u00b7 #{est.basis}, n=#{est.n}"
+  end
+
+  defp spend_chip_label(:running_high), do: "running high"
+  defp spend_chip_label(:over_budget), do: "over budget"
+  defp spend_chip_label(_state), do: nil
+
+  defp spend_chip_title(%{state: :running_high, estimate: est}),
+    do: "Past the p75 of what issues like this cost (#{money(est.p75)}) — informational."
+
+  defp spend_chip_title(%{state: :over_budget, estimate: est}),
+    do:
+      "Past the p90 of what issues like this cost (#{money(est.p90)}). " <>
+        "Nothing has been stopped; the coordinator has been told once."
+
+  defp spend_chip_title(_budget), do: nil
+
+  defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+  defp money(_n), do: "$?"
 
   defp difficulty_label(nil), do: "—"
   defp difficulty_label(d) when is_integer(d) and d in 0..5, do: "D#{d}"
