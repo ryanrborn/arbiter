@@ -1459,6 +1459,45 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute has_element?(view, "#rel-discovered-from")
     end
 
+    test "each of the seven groups renders by its own element id when populated",
+         %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
+      {:ok, c} = Ash.create(Issue, %{title: "C", workspace_id: ws.id})
+      {:ok, d} = Ash.create(Issue, %{title: "D", workspace_id: ws.id})
+      {:ok, e} = Ash.create(Issue, %{title: "E", workspace_id: ws.id})
+      {:ok, f} = Ash.create(Issue, %{title: "F", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :depends_on})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: c.id, to_issue_id: a.id, type: :depends_on})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: d.id, to_issue_id: a.id, type: :parent_of})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: e.id, type: :relates_to})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: f.id, type: :conflicts_with})
+
+      {:ok, g} = Ash.create(Issue, %{title: "G", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: g.id, type: :discovered_from})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+
+      assert has_element?(view, "#rel-blocked-by")
+      assert has_element?(view, "#rel-blocks")
+      assert has_element?(view, "#rel-parents")
+      assert has_element?(view, "#rel-related")
+      assert has_element?(view, "#rel-conflicts-with")
+      assert has_element?(view, "#rel-discovered-from")
+    end
+
     test "gating groups carry a data-gating marker that informational groups don't",
          %{conn: conn, ws: ws} do
       {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
