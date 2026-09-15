@@ -98,6 +98,7 @@ defmodule Arbiter.Board.Snapshot do
 
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Usage.Budget
   alias Arbiter.Worker.Watchdog
 
   require Ash.Query
@@ -177,6 +178,11 @@ defmodule Arbiter.Board.Snapshot do
     # pure half stays pure and a caller that can't answer passes nothing, which
     # reads as "unknown" on the card rather than a false "no watchdog" alarm.
     watchdog_live = Map.get(input, :watchdog_live)
+    # bd-8j9i9p (design bd-9jj5lf §3): the ids whose worker spend has passed
+    # their estimate group's p90. An *input* like the two above — the flag is a
+    # ledger question, and the pure half never goes to the ledger. A caller
+    # that can't answer passes nothing, and no card flags.
+    over_budget = over_budget_set(Map.get(input, :over_budget))
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
     parents = parent_refs(parent_of, issues_by_id)
@@ -204,12 +210,19 @@ defmodule Arbiter.Board.Snapshot do
       })
 
     %{
-      backlog: with_parents(backlog_cards(issues, worked), parents),
-      ready: with_parents_in_entries(plan.entries, parents),
-      running: with_parents(running, parents),
+      backlog:
+        backlog_cards(issues, worked) |> with_parents(parents) |> with_over_budget(over_budget),
+      ready: plan.entries |> with_parents_in_entries(parents) |> with_over_budget_in_entries(over_budget),
+      running: running |> with_parents(parents) |> with_over_budget(over_budget),
       waiting:
-        with_parents(waiting(authors, issues, issues_by_id, worked, now, watchdog_live), parents),
-      closed_today: with_parents(closed_today_cards(issues, now), parents),
+        authors
+        |> waiting(issues, issues_by_id, worked, now, watchdog_live)
+        |> with_parents(parents)
+        |> with_over_budget(over_budget),
+      # A closed task that ran over is done — there is nothing left to act on,
+      # so the Closed column never flags, whatever the input says.
+      closed_today:
+        closed_today_cards(issues, now) |> with_parents(parents) |> with_over_budget(nil),
       promote: plan.promote,
       slots_total: slots_total,
       slots_free: slots_free,
@@ -256,7 +269,8 @@ defmodule Arbiter.Board.Snapshot do
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
       ready_order: Keyword.get(opts, :ready_order, []),
-      watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> load_watchdog_live(workers) end)
+      watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> load_watchdog_live(workers) end),
+      over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
   end
 
@@ -669,6 +683,28 @@ defmodule Arbiter.Board.Snapshot do
 
   defp with_parents(cards, parents) do
     Enum.map(cards, &Map.put(&1, :parent, Map.get(parents, &1.id)))
+  end
+
+  # ---- over-budget flag (bd-8j9i9p) ----------------------------------------
+  #
+  # Every card carries the key, `false` where it doesn't apply, so the view
+  # reads one field everywhere instead of branching on which column built the
+  # card — the same shape rule the parent ref follows.
+
+  defp over_budget_set(nil), do: MapSet.new()
+  defp over_budget_set(%MapSet{} = set), do: set
+  defp over_budget_set(ids) when is_list(ids), do: MapSet.new(ids)
+
+  defp with_over_budget(cards, nil),
+    do: Enum.map(cards, &Map.put(&1, :over_budget, false))
+
+  defp with_over_budget(cards, set),
+    do: Enum.map(cards, &Map.put(&1, :over_budget, MapSet.member?(set, &1.id)))
+
+  defp with_over_budget_in_entries(entries, set) do
+    Enum.map(entries, fn entry ->
+      %{entry | card: Map.put(entry.card, :over_budget, MapSet.member?(set, entry.card.id))}
+    end)
   end
 
   # A Ready entry wraps its card; the ref belongs on the card, where every
