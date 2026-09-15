@@ -171,6 +171,11 @@ config :arbiter, :sessions_heartbeat, enabled: false
 # `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.
 config :arbiter, :loop_canary_ticker, enabled: false
 
+# bd-8j9i9p: no background over-budget sweep in test — it would otherwise walk
+# every issue a test creates on a timer, off the sandbox connection. Tests
+# drive `Arbiter.Usage.BudgetPatrol.sweep/1` synchronously.
+config :arbiter, :budget_patrol, enabled: false
+
 # Disable the durable events retention sweeper in test — it would otherwise
 # delete rows on a timer off the sandbox connection. Tests drive
 # `Arbiter.Events.Retention.sweep/1` synchronously.

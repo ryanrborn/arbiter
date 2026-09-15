@@ -1026,4 +1026,66 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "xl:w-auto"
     end
   end
+
+  # bd-8j9i9p (design bd-9jj5lf §3): an open card whose worker spend has passed
+  # its estimate group's p90 carries the same kind of flag `needs_you` does —
+  # the board is read from across a room, and "this one is burning money" is a
+  # thing to notice without opening it.
+  describe "over-budget flag on a card" do
+    setup %{ws: ws} do
+      # n=10 closed D2 features costing $1..$10 → p90 $9.
+      Enum.each(1..10, fn n ->
+        {:ok, closed} =
+          Ash.update(
+            backlog_issue(ws, "history #{n}", %{difficulty: 2, issue_type: :feature}),
+            %{close_upstream: false},
+            action: :close
+          )
+
+        spend!(closed.id, ws, n * 1.0)
+      end)
+
+      :ok
+    end
+
+    test "a Ready card past p90 flags; one inside its range does not",
+         %{conn: conn, ws: ws} do
+      over = issue(ws, "runaway", %{difficulty: 2, issue_type: :feature})
+      fine = issue(ws, "ordinary", %{difficulty: 2, issue_type: :feature})
+      spend!(over.id, ws, 40.0)
+      spend!(fine.id, ws, 4.0)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s([id="card-#{over.id}"] [data-over-budget]))
+      refute has_element?(view, ~s([id="card-#{fine.id}"] [data-over-budget]))
+    end
+
+    test "a closed card never flags, however far over it ran", %{conn: conn, ws: ws} do
+      task = backlog_issue(ws, "ran over, then landed", %{difficulty: 2, issue_type: :feature})
+      spend!(task.id, ws, 40.0)
+      {:ok, closed} = Ash.update(task, %{close_upstream: false}, action: :close)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s([id="card-#{closed.id}"]))
+      refute has_element?(view, ~s([id="card-#{closed.id}"] [data-over-budget]))
+    end
+  end
+
+  defp spend!(task_id, ws, cost) do
+    {:ok, ev} =
+      Ash.create(Arbiter.Usage.Event, %{
+        task_id: task_id,
+        base_task_id: task_id,
+        source: :task,
+        step: :work,
+        role: "base",
+        workspace_id: ws.id,
+        occurred_at: DateTime.utc_now(),
+        cost_usd: cost
+      })
+
+    ev
+  end
 end
