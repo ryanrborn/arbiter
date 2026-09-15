@@ -63,7 +63,8 @@ config :arbiter,
     Arbiter.Settings,
     Arbiter.Skills,
     Arbiter.Loop,
-    Arbiter.Events
+    Arbiter.Events,
+    Arbiter.Sessions
   ]
 
 # Quota-aware dispatch throttle (bd-7cd38f). Governs what the fleet dispatcher

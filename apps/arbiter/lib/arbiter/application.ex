@@ -191,6 +191,13 @@ defmodule Arbiter.Application do
   #     is :running but has no live Conductor — crash-safe boot recovery (C6,
   #     bd-81iaxo). Runs after the worker-run reconcile sweep so orphaned runs
   #     are already marked :failed before the drain re-reads member statuses.
+  #   * session_adoption: reconcile the `sessions` table against the coordinator
+  #     sessions systemd and tmux still have running (bd-bpt0ag, RFC §4.6). This
+  #     is the ONLY thing that reconnects Arbiter to a session after a restart —
+  #     nothing in the BEAM holds a handle to one, by design — so it doubles as
+  #     the reattach path and as orphan detection. Primary-gated: a duplicate
+  #     boot must not mark the live instance's sessions ended. It never kills an
+  #     unrecognised live scope; see Arbiter.Sessions.Adoption.
   #   * merge_queue: eagerly start one MergeQueue per existing workspace once the
   #     tree is up, so a cold boot misses no `:worker_done` events.
   #
@@ -224,6 +231,15 @@ defmodule Arbiter.Application do
            ConductorReconciler.reconcile_running_graphs(primary?: primary?)
          end},
         id: :conductor_reconcile_boot_task,
+        restart: :temporary
+      ),
+      Supervisor.child_spec(
+        {Task,
+         fn ->
+           primary? = Arbiter.SingleInstance.primary?()
+           Arbiter.Sessions.Adoption.sweep_on_boot(primary?: primary?)
+         end},
+        id: :session_adoption_boot_task,
         restart: :temporary
       ),
       Supervisor.child_spec(
