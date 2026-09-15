@@ -235,6 +235,38 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, "#session-exit")
     end
 
+    test "an exit leaves the terminal mounted so its output is still readable",
+         %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      render_hook(view, "agent_exited", %{"code" => 0, "reason" => nil})
+
+      # Removing the pane would dispose the xterm instance and take the
+      # scrollback with it — including whatever the agent said on the way out,
+      # which is the whole reason the operator is looking.
+      assert has_element?(view, "#session-terminal-#{session.id}")
+      refute has_element?(view, "#terminal-inactive")
+
+      # ...but there is nothing left to detach from.
+      refute has_element?(view, "#detach-session")
+    end
+
+    test "a session that was already over shows no hook-owned status strip",
+         %{conn: conn} do
+      session = launch!()
+      {:ok, _} = Sessions.kill(session.id, runner: NoopRunner, reason: "reaped")
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      # The strip's text is painted by the hook, and no hook mounts here, so a
+      # rendered strip would read "connecting…" forever directly above the
+      # "nothing to attach to" placeholder.
+      refute has_element?(view, "#terminal-status")
+      assert has_element?(view, "#terminal-inactive")
+    end
+
     test "a session whose row is already ended says so without needing the hook",
          %{conn: conn} do
       session = launch!()

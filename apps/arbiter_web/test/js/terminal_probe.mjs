@@ -6,8 +6,9 @@
 // **canvas** addon actually construct together at the versions we vendored,
 // that a `Uint8Array` write renders (and that a UTF-8 character split across
 // two writes is reassembled rather than corrupted), that `FitAddon` computes
-// a geometry, and that §6.3's copy/paste bindings do what they claim while
-// leaving plain `Ctrl+C` alone.
+// a geometry, and that §6.3's copy/paste bindings do what they claim - a
+// multi-line paste normalized to CR and bracketed when the app asks for it,
+// sent exactly once - while leaving plain `Ctrl+C` alone.
 //
 // It drives the *real* `createSessionTerminal`, not a reimplementation. The
 // socket endpoint is deliberately unreachable: nothing here needs a server,
@@ -48,6 +49,11 @@ function keydown(term, key, { ctrl = false, shift = false } = {}) {
 export async function probe(el) {
   // A deterministic clipboard: the point is to check *our* handler, not to
   // negotiate a permission prompt in a headless browser.
+  // Multi-line on purpose: a single-line paste passes whether or not the
+  // handler goes through xterm, and going around xterm is the bug this check
+  // exists to catch (no LF -> CR, no bracketed paste).
+  const CLIPBOARD = "pasted-from-the-clipboard\nsecond line\r\nthird line\n"
+
   let copied = null
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
@@ -55,7 +61,7 @@ export async function probe(el) {
       writeText: async (text) => {
         copied = text
       },
-      readText: async () => "pasted-from-the-clipboard"
+      readText: async () => CLIPBOARD
     }
   })
 
@@ -148,18 +154,49 @@ export async function probe(el) {
   )
   term.clearSelection()
 
+  pushes.length = 0
   keydown(term, "V", { ctrl: true, shift: true })
   await tick()
   await tick()
-  const pasted = pushes
+  const stdin = pushes.filter((p) => p.event === "stdin")
+  const pasted = stdin
+    .map((p) => new TextDecoder().decode(decodeFrame(p.payload).payload))
+    .join("")
+
+  // Every newline must have arrived as CR: a raw-mode TUI (Claude Code, on the
+  // other end of this terminal) reads CR as Enter and does nothing at all with
+  // LF, so a paste that keeps its LFs is a paste that silently does not work.
+  check(
+    "ctrl-shift-v-pastes-as-stdin",
+    `stdin = ${JSON.stringify(pasted)}`,
+    pasted === "pasted-from-the-clipboard\rsecond line\rthird line\r"
+  )
+
+  // Chrome and Firefox bind Ctrl+Shift+V themselves and fire a real paste
+  // event at the helper textarea as well. Synthetic key events are untrusted
+  // so this probe cannot reproduce that directly - but if the handler ever
+  // stopped calling preventDefault() *and* kept its own clipboard read, the
+  // duplicate would show up here as a second frame.
+  check("paste-is-sent-once", `stdin frames = ${stdin.length}`, stdin.length === 1)
+
+  // Bracketed paste: with the mode off (no app has enabled it here) xterm
+  // must send the text bare. With it on it wraps the text in ESC[200~/ESC[201~
+  // so the app inserts it as one block instead of running each line.
+  pushes.length = 0
+  await writeAsync(term, new TextEncoder().encode("\u001b[?2004h"))
+  keydown(term, "V", { ctrl: true, shift: true })
+  await tick()
+  await tick()
+  const bracketed = pushes
     .filter((p) => p.event === "stdin")
     .map((p) => new TextDecoder().decode(decodeFrame(p.payload).payload))
     .join("")
   check(
-    "ctrl-shift-v-pastes-as-stdin",
-    `stdin = ${JSON.stringify(pasted)}`,
-    pasted === "pasted-from-the-clipboard"
+    "bracketed-paste-is-wrapped-when-the-app-asks",
+    `stdin = ${JSON.stringify(bracketed.slice(0, 24))}…${JSON.stringify(bracketed.slice(-8))}`,
+    bracketed.startsWith("\u001b[200~") && bracketed.endsWith("\u001b[201~")
   )
+  await writeAsync(term, new TextEncoder().encode("\u001b[?2004l"))
 
   // The papercut this binding exists to avoid: plain Ctrl+C must still be
   // SIGINT, not "copy".
@@ -172,6 +209,22 @@ export async function probe(el) {
     .map((p) => Array.from(decodeFrame(p.payload).payload))
     .flat()
   check("plain-ctrl-c-is-still-sigint", `stdin bytes = ${JSON.stringify(sigint)}`, sigint[0] === 3)
+
+  // -- the theme follows the dashboard toggle -------------------------------
+  // The canvas renderer resolves its palette once, so unlike the pane's CSS
+  // background it does not follow `--arb-term-*` on its own. Without the
+  // hook's observer, flipping the theme leaves a light terminal in a dark
+  // frame until reload.
+  const lightBg = term.options.theme.background
+  document.documentElement.setAttribute("data-theme", "dark")
+  await tick()
+  const darkBg = term.options.theme.background
+  check(
+    "theme-follows-the-dashboard-toggle",
+    `${lightBg} -> ${darkBg}`,
+    lightBg === "#ffffff" && darkBg === "#16181d"
+  )
+  document.documentElement.removeAttribute("data-theme")
 
   // -- framing, in a browser's DataView/BigInt ------------------------------
   const round = decodeFrame(encodeFrame(2 ** 33, new Uint8Array([0xff, 0x00, 0x1b])).buffer)

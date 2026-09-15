@@ -31,6 +31,15 @@ defmodule ArbiterWeb.SessionLive do
   different times. The channel's `exit` event is immediate and reaches the
   page through the hook (`agent_exited`); the row's own `:ended` status is
   whatever eventually reaped it, and is what a reload shows.
+
+  Either way the terminal **stays mounted**. Whether the pane exists is decided
+  once, at mount (`@terminal?`), and never re-decided: unmounting it would
+  destroy the xterm instance, and with it everything the agent printed —
+  including whatever it said on its way out, which is exactly what the operator
+  is there to read. The stream has already finished by then, so the pane is
+  inert: it will not reconnect and it will not re-attach. The "nothing to
+  attach to" placeholder is only for a session that was already over when the
+  page loaded.
   """
 
   use ArbiterWeb, :live_view
@@ -50,7 +59,10 @@ defmodule ArbiterWeb.SessionLive do
          socket
          |> assign(:session, session)
          |> assign(:kill_candidate, nil)
-         |> assign(:agent_exit, nil)}
+         |> assign(:agent_exit, nil)
+         # Decided once and never re-decided — see the moduledoc. An exit must
+         # not take the scrollback with it.
+         |> assign(:terminal?, attachable?(session, nil))}
 
       {:error, :not_found} ->
         {:ok,
@@ -177,8 +189,12 @@ defmodule ArbiterWeb.SessionLive do
         <Core.panel padded={false} body_class="flex flex-col">
           <%!-- The status strip is chrome, pinned outside the xterm element so
                 it can never fight FitAddon for rows (§6.3). Its contents are
-                hook-owned, so LiveView is told to keep out of them. --%>
+                hook-owned — so LiveView is told to keep out of them, and so it
+                is only rendered when there is a hook to own it. Otherwise it
+                would sit there reading "connecting…" forever above a pane that
+                is never going to connect. --%>
           <div
+            :if={@terminal?}
             id="terminal-status"
             phx-update="ignore"
             class="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--border-default)] text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
@@ -191,7 +207,7 @@ defmodule ArbiterWeb.SessionLive do
                 viewport scrolls this container rather than the page. --%>
           <div id="terminal-scroller" class="overflow-x-auto bg-[var(--arb-term-bg,#16181d)]">
             <div
-              :if={attachable?(@session, @agent_exit)}
+              :if={@terminal?}
               id={"session-terminal-#{@session.id}"}
               phx-hook=".SessionTerminal"
               phx-update="ignore"
@@ -201,7 +217,7 @@ defmodule ArbiterWeb.SessionLive do
             </div>
 
             <div
-              :if={not attachable?(@session, @agent_exit)}
+              :if={not @terminal?}
               id="terminal-inactive"
               class="min-w-[640px] px-4 py-10 text-center text-[12px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
             >
@@ -253,8 +269,6 @@ defmodule ArbiterWeb.SessionLive do
 
             this.terminal = createSessionTerminal(this.el, {
               sessionId: this.el.dataset.sessionId,
-              token: this.el.dataset.token || null,
-              callerSessionId: this.el.dataset.callerSessionId || null,
               onStatus: (state) => this.setState(state),
               onMeta: (meta) => this.setMeta(meta),
               onExit: (payload) => {

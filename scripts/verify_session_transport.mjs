@@ -83,8 +83,17 @@ const state = {
   duplicates: 0,
   repaints: 0,
   errors: [],
+  preJoinSocketErrors: 0,
   done: false
 }
+
+// How many failed connection attempts to tolerate *before the first successful
+// join*. After a join, a failing socket is the expected middle of the run (the
+// server is restarting) and is tolerated indefinitely. Before one, it is a bad
+// --url, a refused upgrade or a rejected --token, and there is nothing to
+// resume — so the script says so rather than retrying until the operator
+// notices. At the socket's backoff this is a little under four seconds.
+const MAX_PRE_JOIN_SOCKET_ERRORS = 5
 
 function note(line) {
   // Everything diagnostic goes to stderr so `--echo` keeps stdout a clean
@@ -167,15 +176,36 @@ const stream = new SessionStream({
 
     error(err) {
       // Socket-level errors are expected while the server is down: every
-      // reconnect attempt against a stopped listener is one. They are noted,
-      // never counted — only the channel refusing us is a failure.
+      // reconnect attempt against a stopped listener is one. Once we have
+      // joined at least once they are noted and never counted — that is
+      // criterion 8's whole middle section. Before the first join they mean
+      // we never got in at all, and retrying forever would hang.
       if (err && err.code === "socket_error") {
         note(`socket error: ${describe(err.detail)}`)
+
+        if (stream.joins === 0 && ++state.preJoinSocketErrors >= MAX_PRE_JOIN_SOCKET_ERRORS) {
+          state.errors.push(
+            `could not connect to ${opts.url} after ${state.preJoinSocketErrors} attempts` +
+              ` (last: ${describe(err.detail)})`
+          )
+          finish()
+        }
+
         return
       }
 
       state.errors.push(JSON.stringify(err))
       note(`error event: ${JSON.stringify(err)}`)
+
+      // A refused join is terminal: phoenix.js re-joins on its own timer
+      // forever, so a bad --session, an already-ended session or a token the
+      // channel will not take would otherwise leave this script spinning
+      // silently. It is the instrument criterion 8 is measured with, and a
+      // hang is the worst way for an instrument to fail.
+      if (err && err.join_refused) {
+        note("the channel refused the join — retrying cannot fix that, so the run stops here")
+        finish()
+      }
     }
   }
 })

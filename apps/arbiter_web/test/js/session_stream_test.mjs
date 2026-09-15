@@ -199,6 +199,36 @@ test("a clean 1000 close still schedules a reconnect", () => {
   assert.equal(rec.log.statuses.at(-1), "reconnecting")
 })
 
+test("a refused join is tagged so a headless client can stop retrying", () => {
+  const socket = new FakeSocket()
+  const rec = recorder()
+  const stream = new SessionStream({
+    socket,
+    sessionId: "sess-gone",
+    geometry: () => ({ cols: 80, rows: 24 }),
+    sink: rec.sink
+  })
+  stream.connect()
+
+  socket.channel0.joins[0].push.reply("error", {
+    code: "session_gone",
+    detail: "no live session sess-gone"
+  })
+
+  // phoenix.js re-joins forever on its own timer, so a refusal it can never
+  // fix has to be distinguishable from a slow reconnect — otherwise
+  // `scripts/verify_session_transport.mjs`, the instrument criterion 8 is
+  // measured with, spins silently instead of failing.
+  assert.equal(rec.log.errors.length, 1)
+  assert.equal(rec.log.errors[0].code, "session_gone")
+  assert.equal(rec.log.errors[0].join_refused, true)
+
+  // An in-band error event is *not* tagged: those are per-message and the
+  // channel is still perfectly usable after one.
+  socket.channel0.emit("error", { code: "bad_frame", detail: "stdin was not ARB1" })
+  assert.equal(rec.log.errors[1].join_refused, undefined)
+})
+
 test("replayed bytes at or below last_seq are not rendered twice", () => {
   const { channel, stream, rec } = connected()
 
@@ -254,10 +284,14 @@ test("stdin is pushed as an ARB1-framed ArrayBuffer with a monotonic counter", (
   assert.deepEqual(Array.from(second.payload), [0xc3, 0xa9])
 })
 
+// A paste reaches the stream the same way typing does — through xterm's
+// `Terminal.paste()` -> `onData` -> `send`, so it has already been newline
+// normalized and bracketed by the time it gets here. All the stream adds is
+// chunking, because a 200 KB paste must not become one socket frame.
 test("a large paste is chunked into several stdin frames (§6.3)", () => {
   const { channel, stream } = connected({ stdinChunkBytes: 16 })
 
-  stream.paste("x".repeat(40))
+  stream.send("x".repeat(40))
 
   const pushes = channel.pushesFor("stdin")
   assert.equal(pushes.length, 3)

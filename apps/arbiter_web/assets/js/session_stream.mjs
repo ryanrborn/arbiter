@@ -59,6 +59,22 @@ export function decodeFrame(buffer) {
 }
 
 /**
+ * Tag a refused `join` reply so a consumer can tell it from an in-band `error`
+ * event.
+ *
+ * The difference is the difference between "retry" and "give up". phoenix.js
+ * re-joins on its own timer forever, so a refusal it cannot fix — a session
+ * that is gone, a bridge that is not there, a topic it will never accept —
+ * looks exactly like a slow reconnect unless the client is told. Anything
+ * driving this stream headlessly (`scripts/verify_session_transport.mjs`) has
+ * to stop rather than loop.
+ */
+function joinRefusal(err) {
+  const base = err && typeof err === "object" ? err : { code: "join_refused", detail: err }
+  return { ...base, join_refused: true }
+}
+
+/**
  * One attached terminal client.
  *
  * `sink` is the renderer-shaped side of it, all optional:
@@ -140,21 +156,23 @@ export class SessionStream {
         this._setStatus("live")
         this._emit("joined", reply)
       })
-      .receive("error", (err) => this._emit("error", err))
+      .receive("error", (err) => this._emit("error", joinRefusal(err)))
 
     this.socket.connect()
 
     return this
   }
 
-  /** Type `text` into the pane. UTF-8 encoded here; never decoded in transit. */
+  /**
+   * Type `text` into the pane. UTF-8 encoded here; never decoded in transit.
+   *
+   * This is also the paste path (§6.3), and deliberately the *only* one: a
+   * paste reaches it through `Terminal.paste()` -> `onData`, so it arrives
+   * already newline-normalized and bracketed. There is no second entry point
+   * that would skip that.
+   */
   send(text) {
     return this.sendBytes(encoder.encode(text))
-  }
-
-  /** A paste (§6.3) — same path as typing, just larger, so it is chunked. */
-  paste(text) {
-    return this.send(text)
   }
 
   sendBytes(bytes) {

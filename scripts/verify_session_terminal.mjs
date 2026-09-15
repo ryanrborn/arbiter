@@ -101,7 +101,14 @@ writeFileSync(
   `<!doctype html>
 <meta charset="utf-8">
 <link rel="stylesheet" href="${path.join(ASSETS, "css/xterm.css")}">
-<style>body { margin: 0; background: #16181d }</style>
+<style>
+  body { margin: 0; background: #16181d }
+  /* Mirrors how app.css defines the terminal palette: custom properties that
+     the data-theme attribute on <html> re-resolves. The canvas renderer holds
+     a resolved palette, so the hook has to notice. */
+  :root { --arb-term-bg: #ffffff; --arb-term-fg: #1f2430 }
+  [data-theme="dark"] { --arb-term-bg: #16181d; --arb-term-fg: #d6dae2 }
+</style>
 <div id="terminal"></div>
 <script src="${bundle}"></script>
 `

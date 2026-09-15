@@ -48,8 +48,6 @@ export function createSessionTerminal(el, options = {}) {
   const {
     sessionId,
     endpoint = "/session",
-    token = null,
-    callerSessionId = null,
     onStatus = () => {},
     onExit = () => {},
     onMeta = () => {},
@@ -90,15 +88,14 @@ export function createSessionTerminal(el, options = {}) {
 
   safeFit(fit)
 
+  // No connect params. The dashboard is loopback-only by design (§10.4) and
+  // `ArbiterWeb.SessionSocket` trusts a loopback peer without a token, so the
+  // page has none to send; reaching the dashboard from elsewhere is Remote
+  // Control's job (§8), not a second auth scheme here. The socket also accepts
+  // a `caller_session_id` for §10.1's self-kill guard, but a *browser* is not
+  // running inside a coordinator session and has nothing truthful to declare
+  // there - the clients that do (an agent's own tooling) pass it themselves.
   const socket = new Socket(endpoint, {
-    params: () => {
-      const params = {}
-      if (token) params.token = token
-      // Only ever used to *refuse* an action (§10.1's self-kill guard), so a
-      // client understating it can only reduce its own privileges.
-      if (callerSessionId) params.caller_session_id = callerSessionId
-      return params
-    },
     // Reconnect briskly: the point is to be back before the operator is.
     reconnectAfterMs: (tries) => [100, 250, 500, 1000, 2000][tries - 1] || 2000
   })
@@ -135,7 +132,7 @@ export function createSessionTerminal(el, options = {}) {
   // encoded on the way out.
   term.onBinary((data) => stream.sendBytes(latin1Bytes(data)))
 
-  term.attachCustomKeyEventHandler((event) => handleKey(event, term, stream))
+  term.attachCustomKeyEventHandler((event) => handleKey(event, term))
 
   // Clicking anywhere in the pane - including its padding - focuses the
   // terminal, which is what an operator expects from something that looks like
@@ -158,6 +155,33 @@ export function createSessionTerminal(el, options = {}) {
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(scheduleFit) : null
   if (observer) observer.observe(el)
 
+  // The canvas renderer holds a *resolved* palette, so it does not follow the
+  // CSS custom properties the way the pane's own background does. Without
+  // this, flipping the dashboard theme leaves a light terminal sitting in a
+  // dark frame (or the reverse) until the page is reloaded.
+  //
+  // `assets/js/theme.js` funnels every path - the toggle's `phx:set-theme`,
+  // another tab's `storage` event, the pre-paint default - through the
+  // `data-theme` attribute on <html>, so observing that attribute covers all
+  // of them. The media query is the remaining case: under `system` there is no
+  // attribute to change when the OS flips.
+  const applyTheme = () => {
+    term.options.theme = readTheme(el)
+  }
+
+  const themeObserver =
+    typeof MutationObserver === "function" ? new MutationObserver(applyTheme) : null
+  if (themeObserver) {
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"]
+    })
+  }
+
+  const colorScheme =
+    typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null
+  if (colorScheme && colorScheme.addEventListener) colorScheme.addEventListener("change", applyTheme)
+
   stream.connect()
 
   return {
@@ -169,9 +193,14 @@ export function createSessionTerminal(el, options = {}) {
     refit: scheduleFit,
     detach: () => stream.detach(),
     kill: () => stream.kill(),
+    applyTheme,
     dispose() {
       if (fitTimer) clearTimeout(fitTimer)
       if (observer) observer.disconnect()
+      if (themeObserver) themeObserver.disconnect()
+      if (colorScheme && colorScheme.removeEventListener) {
+        colorScheme.removeEventListener("change", applyTheme)
+      }
       stream.dispose()
       term.dispose()
     }
@@ -184,7 +213,7 @@ export function createSessionTerminal(el, options = {}) {
 // that plain `Ctrl+C` still sends SIGINT to the agent - the single most common
 // terminal papercut, and the one that matters most when the thing on the other
 // end is an agent mid-turn.
-function handleKey(event, term, stream) {
+function handleKey(event, term) {
   if (event.type !== "keydown") return true
   if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return true
 
@@ -197,10 +226,26 @@ function handleKey(event, term, stream) {
   }
 
   if (key === "v") {
+    // Chrome and Firefox bind `Ctrl+Shift+V` themselves ("paste as plain
+    // text") and fire a *real* paste event at xterm's helper textarea, which
+    // xterm also handles. Returning `false` from a custom key handler does not
+    // stop that - only `preventDefault()` does - and without it the text lands
+    // twice.
+    event.preventDefault()
+
     readClipboard().then((text) => {
-      // Chunked into stdin frames by `SessionStream` - a paste is not a
-      // keystroke and a 200 KB one must not become a single socket frame.
-      if (text) stream.paste(text)
+      // `term.paste()`, never the stream directly. xterm applies the two
+      // transformations that make a multi-line paste work at all, and both
+      // matter when the thing on the other end is a raw-mode TUI:
+      //   - `\r\n`/`\n` -> `\r`, because a raw-mode reader takes CR, not LF,
+      //     as Enter;
+      //   - bracketed-paste markers (`ESC[200~`/`ESC[201~`) when the app has
+      //     enabled the mode, so a pasted prompt is inserted as one block
+      //     rather than submitted line by line.
+      // It then emits the result through `onData` -> `stream.send`, which
+      // chunks it: a paste is not a keystroke and a 200 KB one must not become
+      // a single socket frame.
+      if (text) term.paste(text)
     })
     return false
   }
