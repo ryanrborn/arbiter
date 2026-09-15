@@ -207,6 +207,39 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert ev.step == :work
   end
 
+  # bd-3j4ch4: the backfilled row has to say what kind of pass it was, exactly
+  # as the live worker path does. An unlabelled `step: :work` row for a
+  # review-gate implementer folds onto the base task as a second *base* work
+  # session, which `Arbiter.Usage.Estimate` reads as a re-dispatch.
+  test "labels the backfilled Usage.Event with the run's role and base task" do
+    base_task_id = "bd-recon-role-#{System.unique_integer([:positive])}"
+    task_id = base_task_id <> "#review#impl1"
+    session_id = "crash-impl-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("recon-impl-cwd")
+    config_dir = tmp_dir!("recon-impl-cfg")
+    write_session_jsonl!(config_dir, cwd, session_id)
+
+    run =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        status: :running,
+        worker_type: :impl,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        output_lines: []
+      })
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert [ev] = usage_events_for(run.id)
+    assert ev.step == :impl
+    assert ev.role == "impl"
+    assert ev.base_task_id == base_task_id
+  end
+
   test "does not write a second Usage.Event when one already exists for the run" do
     task_id = "bd-crash-dup-#{System.unique_integer([:positive])}"
     session_id = "crash-dup-#{System.unique_integer([:positive])}"

@@ -13,6 +13,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Verification
+  alias Arbiter.Usage.Estimate
 
   require Ash.Query
 
@@ -45,7 +46,10 @@ defmodule Arbiter.MCP.Tools.Task do
           do: Map.delete(result, :pr_body),
           else: result
 
-      {:ok, result}
+      # bd-3j4ch4: what tasks like this one have actually cost, as a
+      # percentile range. `nil` when the ledger is too thin — never a made-up
+      # number, and never absent, so "no estimate yet" can't read as "$0".
+      {:ok, Map.put(result, :estimate, Estimate.payload(loaded))}
     end
   end
 

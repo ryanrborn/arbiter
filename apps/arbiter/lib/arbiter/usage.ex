@@ -36,11 +36,22 @@ defmodule Arbiter.Usage do
   The CLI (`arb usage`) and Phoenix endpoint (`GET /api/usage`) sit on top of
   this. Anything new (per-day burn dashboards, budget routing) should call
   `summarize/1` rather than re-doing SQL.
+
+  ## Estimation (bd-3j4ch4)
+
+  `summarize/1` answers "what has been spent". `estimate_for_issue/2` answers
+  the forward-looking question — "what will this task cost?" — from the same
+  ledger, as a percentile range over comparable closed tasks, and
+  `calibration/1` reports which closed tasks' actual costs say their
+  difficulty rating was wrong. Both delegate to `Arbiter.Usage.Estimate`,
+  which owns the window, the grouping ladder and the data-hygiene rules;
+  they are re-exported here so callers have one door into the ledger.
   """
 
   use Ash.Domain
 
   alias Arbiter.Tasks.Dependency
+  alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
   require Ash.Query
 
@@ -158,6 +169,19 @@ defmodule Arbiter.Usage do
   end
 
   defp zero_tokens?(ev), do: (ev.tokens_in || 0) == 0 and (ev.tokens_out || 0) == 0
+
+  @doc """
+  Percentile cost estimate for an issue — see `Arbiter.Usage.Estimate.for_issue/2`.
+  """
+  @spec estimate_for_issue(Arbiter.Tasks.Issue.t() | String.t(), keyword()) ::
+          Estimate.t() | :insufficient_data
+  defdelegate estimate_for_issue(issue_or_id, opts \\ []), to: Estimate, as: :for_issue
+
+  @doc """
+  Difficulty mis-rating report — see `Arbiter.Usage.Estimate.calibration/1`.
+  """
+  @spec calibration(keyword()) :: map()
+  defdelegate calibration(opts \\ []), to: Estimate
 
   @spec valid_groupings() :: [group_by()]
   def valid_groupings, do: @valid_by

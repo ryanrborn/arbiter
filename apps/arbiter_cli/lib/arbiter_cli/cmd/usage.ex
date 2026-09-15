@@ -18,6 +18,7 @@ defmodule ArbiterCli.Cmd.Usage do
       arb usage events [--task <task-id>] [--workspace <id>] [--step work|review|impl]
                        [--source task|probe|preflight|coordinator_session|terminal_session|maintenance]
                        [--since ...] [--limit N] [--json]
+      arb usage --calibration [--workspace <id>] [--window-days N] [--json]
 
   `--by campaign` is still accepted as a deprecated alias for `--by epic`.
 
@@ -48,6 +49,21 @@ defmodule ArbiterCli.Cmd.Usage do
   happened. The first sweep after enabling the ingest therefore backfills the
   whole history at its real dates — expect `--since 30d` to jump, and `--since
   1d` not to.
+
+  ## `--calibration`: which D-ratings the money disagrees with (bd-3j4ch4)
+
+  For every closed task in a 60-day window, compare what it actually cost
+  against its own difficulty tier's p25–p75. A cost above its tier's p75 that
+  lands inside the *next* tier's range reads as **possibly under-rated**;
+  below its p25 and inside the *previous* tier's, **possibly over-rated**.
+  Only tiers with at least ten closed tasks are used in either direction.
+
+  This is a hint about ratings, not a verdict on a task: the spread inside a
+  tier is wide by design, so a single flagged task means little and the
+  per-tier *rate* is the number to read. Tasks re-dispatched after a failure
+  (more than one work session) are listed but held out of those rates — a
+  re-slung task costs double for reasons that say nothing about how hard it
+  was, and counting it would read as "D-ratings run low".
   """
 
   alias ArbiterCli.{Client, Output}
@@ -64,7 +80,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
       case rest do
         ["events" | tail] -> events(tail, mode)
-        _ -> summarize(rest, mode)
+        _ -> if calibration?(rest), do: calibration(rest, mode), else: summarize(rest, mode)
       end
     end
   end
@@ -126,6 +142,114 @@ defmodule ArbiterCli.Cmd.Usage do
       {:ok, %{"data" => rows}} -> emit_events(rows, mode)
       {:error, err} -> Output.die(err)
     end
+  end
+
+  # ---- calibration -------------------------------------------------------
+
+  defp calibration?(argv), do: "--calibration" in argv
+
+  defp calibration(argv, mode) do
+    {opts, _rest, _bad} =
+      OptionParser.parse(argv,
+        switches: [calibration: :boolean, workspace: :string, window_days: :integer],
+        aliases: [w: :workspace]
+      )
+
+    params =
+      []
+      |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
+      |> maybe_put(:window_days, Keyword.get(opts, :window_days))
+
+    case Client.get("/api/usage/calibration", params) do
+      {:ok, report} -> emit_calibration(report, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_calibration(report, :json), do: IO.puts(Jason.encode!(report))
+
+  defp emit_calibration(report, :text) do
+    tiers = report["tiers"] || []
+    flagged = report["flagged"] || []
+
+    IO.puts("Cost calibration — #{report["window_days"]}-day window, worker spend only")
+    IO.puts("")
+
+    if tiers == [] do
+      IO.puts("  (no rated closed tasks in the window)")
+    else
+      IO.puts("  " <> calib_columns(["TIER", "N", "P25-P75", "UNDER-RATED", "OVER-RATED"]))
+
+      Enum.each(tiers, &IO.puts("  " <> tier_row(&1)))
+      IO.puts("")
+      emit_flagged(flagged, "under_rated", "Possibly under-rated (cost fits the tier above):")
+      emit_flagged(flagged, "over_rated", "Possibly over-rated (cost fits the tier below):")
+      emit_footnote(report)
+    end
+  end
+
+  defp tier_row(tier) do
+    calib_columns([
+      "D#{tier["difficulty"]}",
+      to_string(tier["n"]),
+      "#{dollars(tier["p25"])}-#{dollars(tier["p75"])}",
+      "#{tier["under_rated"]} (#{percent(tier["under_rate"])})",
+      "#{tier["over_rated"]} (#{percent(tier["over_rate"])})"
+    ])
+  end
+
+  defp emit_flagged(flagged, direction, heading) do
+    rows = Enum.filter(flagged, &(&1["direction"] == direction))
+
+    IO.puts(heading)
+
+    case rows do
+      [] ->
+        IO.puts("  (none)")
+
+      rows ->
+        Enum.each(rows, fn f ->
+          # `*` marks a re-dispatched task, held out of the rates above, so the
+          # list stays readable without cross-referencing the footnote.
+          mark = if f["re_dispatched"], do: "*", else: " "
+
+          IO.puts(
+            "  #{mark}#{String.pad_trailing(to_string(f["task_id"]), 12)} " <>
+              "D#{f["difficulty"]} -> D#{f["suggested_difficulty"]}  " <>
+              "#{String.pad_leading(dollars(f["actual_cost_usd"]), 9)}  " <>
+              "#{f["issue_type"]}  #{f["title"]}"
+          )
+        end)
+    end
+
+    IO.puts("")
+  end
+
+  defp emit_footnote(%{"re_dispatched_flagged" => n}) when is_integer(n) and n > 0 do
+    IO.puts(
+      "* #{n} flagged #{plural_task(n)} re-dispatched (more than one work session) and " <>
+        "held out of the\n  per-tier rates above: re-slinging inflates cost without saying " <>
+        "the rating was wrong."
+    )
+  end
+
+  defp emit_footnote(_report), do: :ok
+
+  defp plural_task(1), do: "task was"
+  defp plural_task(_), do: "tasks were"
+
+  defp dollars(nil), do: "-"
+  defp dollars(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+
+  defp percent(nil), do: "0.0%"
+  defp percent(r) when is_number(r), do: :erlang.float_to_binary(r * 100, decimals: 1) <> "%"
+
+  defp calib_columns(cells) do
+    widths = [5, 5, 18, 15, 15]
+
+    cells
+    |> Enum.zip(widths)
+    |> Enum.map_join("  ", fn {c, w} -> String.pad_trailing(to_string(c), w) end)
   end
 
   # ---- render ------------------------------------------------------------

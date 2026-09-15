@@ -24,6 +24,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   alias Arbiter.Tasks.Verification
+  alias Arbiter.Usage.Estimate
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -71,7 +72,11 @@ defmodule ArbiterWeb.Api.IssueController do
 
   def show(conn, %{"id" => id}) do
     case Ash.get(Issue, id, load: [:child_total, :child_closed]) do
-      {:ok, issue} -> render(conn, :show, issue: issue)
+      # bd-3j4ch4: the cost estimate rides along on the single-issue read so
+      # `arb issue show` renders it without a second round trip. Only here —
+      # the index would pay a ledger scan per row for a number nobody reads
+      # in a list.
+      {:ok, issue} -> render(conn, :show, issue: issue, estimate: Estimate.payload(issue))
       {:error, _} = err -> err
     end
   end
