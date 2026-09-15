@@ -34,6 +34,20 @@ defmodule Arbiter.MCP.CatalogTest do
                                 loop_pending_list loop_pending_diff loop_pending_apply
                                 loop_pending_reject breaker_list breaker_reset)
 
+  describe "tool descriptions" do
+    # bd-apj0gq: the description listed five of the six types, but
+    # `require_enum(args, "type", Dependency.types())` has always accepted all
+    # six — an agent reading the catalog could not discover `conflicts_with`.
+    test "dep_add documents every dependency type the tool accepts" do
+      %{description: description} =
+        @coordinator |> Catalog.visible() |> Enum.find(&(&1.name == "dep_add"))
+
+      for type <- Arbiter.Tasks.Dependency.types() do
+        assert description =~ Atom.to_string(type)
+      end
+    end
+  end
+
   describe "visible/1" do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do
       names = @worker |> Catalog.visible() |> Enum.map(& &1.name)

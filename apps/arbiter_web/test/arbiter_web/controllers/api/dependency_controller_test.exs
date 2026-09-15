@@ -36,6 +36,83 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
 
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
     end
+
+    # bd-apj0gq — the REST surface used to be the *unvalidated* one, and it is
+    # the one `arb dep add` / `arb create --deps` route through. It now goes
+    # through `Arbiter.Tasks.Dependencies` and gets the same guards as MCP.
+    test "rejects endpoints in different workspaces, naming both", %{conn: conn, a: a} do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dep-other-ws", prefix: "dow"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      conn =
+        post(conn, ~p"/api/dependencies", %{
+          from_issue_id: a.id,
+          to_issue_id: foreign.id,
+          type: "blocks"
+        })
+
+      assert %{"error" => %{"message" => message}} = json_response(conn, 400)
+      assert message =~ "dep-test-ws"
+      assert message =~ "dep-other-ws"
+      assert Dependency |> Ash.read!() |> Enum.empty?()
+    end
+
+    test "rejects an edge that would close a gating cycle", %{conn: conn, a: a, b: b} do
+      {:ok, _} =
+        Ash.create(Dependency, %{from_issue_id: b.id, to_issue_id: a.id, type: :depends_on})
+
+      conn =
+        post(conn, ~p"/api/dependencies", %{
+          from_issue_id: a.id,
+          to_issue_id: b.id,
+          type: "depends_on"
+        })
+
+      assert %{"error" => %{"message" => message}} = json_response(conn, 400)
+      assert message =~ "cycle"
+      assert message =~ a.id
+      assert message =~ b.id
+    end
+
+    test "rejects an unknown edge type", %{conn: conn, a: a, b: b} do
+      conn =
+        post(conn, ~p"/api/dependencies", %{
+          from_issue_id: a.id,
+          to_issue_id: b.id,
+          type: "nonsense"
+        })
+
+      assert %{"error" => %{"message" => message}} = json_response(conn, 400)
+      assert message =~ "nonsense"
+    end
+
+    test "reports an unknown endpoint as not found", %{conn: conn, a: a} do
+      conn =
+        post(conn, ~p"/api/dependencies", %{
+          from_issue_id: a.id,
+          to_issue_id: "bd-nope",
+          type: "blocks"
+        })
+
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+
+    test "re-evaluates auto_close for a parent_of parent", %{conn: conn, ws: ws, a: a} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic", workspace_id: ws.id, auto_close: true})
+
+      {:ok, child} = Ash.update(a, %{}, action: :close)
+
+      conn =
+        post(conn, ~p"/api/dependencies", %{
+          from_issue_id: parent.id,
+          to_issue_id: child.id,
+          type: "parent_of"
+        })
+
+      assert json_response(conn, 201)
+      assert Ash.get!(Issue, parent.id).status == :closed
+    end
   end
 
   describe "DELETE /api/dependencies/:from/:to" do

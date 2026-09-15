@@ -564,9 +564,12 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Add a dependency edge between two tasks in the workspace. `type` is one of blocks, " <>
-          "depends_on, relates_to, discovered_from, parent_of. Use `parent_of` (from = parent, " <>
-          "to = child) to attach a child to a parent task — that is how grouping/epics work; the " <>
-          "parent then rolls up child progress and can auto-close.",
+          "depends_on, relates_to, discovered_from, parent_of, conflicts_with. Use `parent_of` " <>
+          "(from = parent, to = child) to attach a child to a parent task — that is how " <>
+          "grouping/epics work; the parent then rolls up child progress and can auto-close. " <>
+          "`conflicts_with` is a symmetric mutex: the Conductor will not co-dispatch the pair. " <>
+          "Only blocks/depends_on gate readiness, and a gating edge that would close a cycle " <>
+          "is rejected with the cycle named.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
