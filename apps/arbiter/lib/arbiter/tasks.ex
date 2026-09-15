@@ -43,4 +43,29 @@ defmodule Arbiter.Tasks do
     resource Arbiter.Tasks.Graph
     resource Arbiter.Tasks.GraphMember
   end
+
+  require Ash.Query
+
+  @doc """
+  Per-status child breakdown + stuck signals for `epics`, keyed by epic id.
+
+  The read model behind `/epics` (bd-2wmxt5). See `Arbiter.Tasks.EpicRollup`
+  for the bucket definitions and the three derived stuck signals.
+  """
+  @spec epic_rollups([Arbiter.Tasks.Issue.t() | String.t()]) ::
+          %{String.t() => Arbiter.Tasks.EpicRollup.t()}
+  defdelegate epic_rollups(epics), to: Arbiter.Tasks.EpicRollup, as: :for_epics
+
+  @doc """
+  How many epics are not closed — the number on the "Epics" nav badge.
+  """
+  @spec open_epic_count() :: non_neg_integer()
+  def open_epic_count do
+    epic = :epic
+    closed = :closed
+
+    Arbiter.Tasks.Issue
+    |> Ash.Query.filter(issue_type == ^epic and status != ^closed)
+    |> Ash.count!()
+  end
 end

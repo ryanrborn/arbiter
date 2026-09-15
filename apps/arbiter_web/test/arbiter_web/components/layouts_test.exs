@@ -13,7 +13,8 @@ defmodule ArbiterWeb.LayoutsTest do
           flash: %{},
           current_path: "/",
           quotas: [],
-          quota_on_exhaustion: :ask
+          quota_on_exhaustion: :ask,
+          open_epic_count: 0
         },
         assigns_overrides
       )
@@ -26,6 +27,7 @@ defmodule ArbiterWeb.LayoutsTest do
           current_path={@current_path}
           quotas={@quotas}
           quota_on_exhaustion={@quota_on_exhaustion}
+          open_epic_count={@open_epic_count}
         >
           content
         </Layouts.app>
@@ -42,6 +44,7 @@ defmodule ArbiterWeb.LayoutsTest do
       order = [
         "Board",
         "Issues",
+        "Epics",
         "Workers",
         "Merge queue",
         "Workspaces",
@@ -55,6 +58,32 @@ defmodule ArbiterWeb.LayoutsTest do
       indices = Enum.map(order, fn label -> :binary.match(html, label) |> elem(0) end)
 
       assert indices == Enum.sort(indices)
+    end
+
+    test "the Epics entry links to /epics and sits directly after Issues" do
+      html = render_app()
+
+      assert html =~ ~s(href="/epics")
+
+      {issues, _} = :binary.match(html, "Issues")
+      {epics, _} = :binary.match(html, "Epics")
+      {workers, _} = :binary.match(html, "Workers")
+
+      assert issues < epics and epics < workers
+    end
+
+    test "the Epics entry carries a badge with the open-epic count" do
+      html = render_app(%{open_epic_count: 7})
+
+      # Whitespace-tolerant: the formatter decides whether the count sits on
+      # its own line inside the span, and that is not what this test is about.
+      assert html =~ ~r/data-role="nav-badge"[^>]*>\s*7\s*</
+    end
+
+    test "a zero open-epic count renders no badge" do
+      html = render_app(%{open_epic_count: 0})
+
+      refute html =~ ~s(data-role="nav-badge")
     end
 
     test "About is no longer part of the nav" do
