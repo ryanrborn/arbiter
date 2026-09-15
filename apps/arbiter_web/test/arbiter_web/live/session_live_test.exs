@@ -84,6 +84,22 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, "#session-#{session.id}")
       assert html =~ "killed by hand"
     end
+
+    test "a session ending on its own (no Kill click) updates the list live, via PubSub (bd-bsdeb2)",
+         %{conn: conn} do
+      session = launch!()
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#session-#{session.id}", "running")
+
+      # Simulate the Stream noticing a dead pane, or the periodic reaper
+      # noticing a vanished scope — either way `mark_ended/2` is the one
+      # place that runs, no Kill click involved.
+      {:ok, _ended} = Sessions.mark_ended(session, "exited")
+
+      assert render(view) =~ "exited"
+      assert has_element?(view, "#session-#{session.id}", "ended")
+    end
   end
 
   describe "launching" do
@@ -250,6 +266,24 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert html =~ "Agent exited"
       assert html =~ "137"
       assert has_element?(view, "#session-exit")
+    end
+
+    test "the page's own status chip flips to ended too, when the row was already ended by the time the exit event arrives (bd-bsdeb2)",
+         %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, html} = live(conn, ~p"/sessions/#{session.id}")
+      assert html =~ "running"
+
+      # `Arbiter.Sessions.Stream` now runs `mark_ended/2` before broadcasting
+      # the exit, so by the time the channel's `exit` event reaches the hook
+      # and the hook forwards `agent_exited`, the row is already `:ended`.
+      {:ok, _ended} = Sessions.mark_ended(session, "exited")
+
+      html = render_hook(view, "agent_exited", %{"code" => nil, "reason" => "exited"})
+
+      assert html =~ "ended"
+      assert html =~ "exited"
     end
 
     test "an exit replaces the terminal with the nothing-to-attach-to state",
