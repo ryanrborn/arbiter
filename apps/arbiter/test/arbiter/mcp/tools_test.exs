@@ -3533,7 +3533,12 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "worker_dispatch/2 provider: \"codex\" writes the Codex MCP config (bd-bi5t54)" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "mcp-codex-#{:erlang.unique_integer([:positive])}")
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "mcp-codex-#{System.pid()}-#{:erlang.unique_integer([:positive])}"
+        )
+
       File.mkdir_p!(tmp)
       on_exit(fn -> File.rm_rf!(tmp) end)
 
@@ -3614,7 +3619,12 @@ defmodule Arbiter.MCP.ToolsTest do
   # not the raw `{:agent_session_active, id}` tuple the generic fallback renders.
   describe "worker_dispatch/2 onto a task with a live agent session" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "mcp-live-#{:erlang.unique_integer([:positive])}")
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "mcp-live-#{System.pid()}-#{:erlang.unique_integer([:positive])}"
+        )
+
       File.mkdir_p!(tmp)
       on_exit(fn -> File.rm_rf!(tmp) end)
 
