@@ -93,6 +93,9 @@ defmodule Arbiter.Application do
       # workspace that has not set `loop.autonomous_routing_enabled`, which is
       # all of them by default.
       Arbiter.Loop.CanaryTicker,
+      # bd-8j9i9p: pages the coordinator once when an open task's worker spend
+      # crosses its estimate group's p90. Informational — it stops nothing.
+      Arbiter.Usage.BudgetPatrol,
       # Prunes `Arbiter.Events.Record` rows past the retention window
       # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
       # grow without bound. See `Arbiter.Events.Retention` for config.
