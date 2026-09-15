@@ -128,7 +128,9 @@ defmodule Arbiter.Sessions.SessionTokenTest do
 
       assert exited_again.end_reason == "killed"
       assert DateTime.compare(exited_again.ended_at, killed.ended_at) == :eq
-      assert DateTime.compare(exited_again.mcp_token_revoked_at, killed.mcp_token_revoked_at) == :eq
+
+      assert DateTime.compare(exited_again.mcp_token_revoked_at, killed.mcp_token_revoked_at) ==
+               :eq
     end
 
     test "a token naming a session with no row is revoked, not accepted" do

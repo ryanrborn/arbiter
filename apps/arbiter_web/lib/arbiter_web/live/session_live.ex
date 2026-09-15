@@ -185,7 +185,10 @@ defmodule ArbiterWeb.SessionLive do
   # From `Sessions.mark_ended/2` (Kill, an on-its-own exit, or the orphan
   # reaper) — repaint even when no `.SessionTerminal` hook is mounted to fire
   # `agent_exited` (bd-bsdeb2 finding 4).
-  def handle_info({:session_ended, session_id}, %{assigns: %{session: %{id: session_id}}} = socket) do
+  def handle_info(
+        {:session_ended, session_id},
+        %{assigns: %{session: %{id: session_id}}} = socket
+      ) do
     session =
       case Sessions.get(session_id) do
         {:ok, session} -> session
