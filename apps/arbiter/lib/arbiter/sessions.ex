@@ -38,23 +38,30 @@ defmodule Arbiter.Sessions do
     * `usage_events/1` — the ledger rows attributable to a session, joined by
       string on the *provider* session id (§7.4 item 4).
 
-  ## Phase 1 boundaries
+  ## Provisioning (phase 3)
 
-  Provisioning (`CLAUDE_CONFIG_DIR` seeding, `.mcp.json`, credentials), the
-  browser transport and UI, and Remote Control are later phases. Until
-  provisioning exists, `Arbiter.Sessions.Provider.ClaudeCode` launches an
-  interactive **shell** in the pane rather than `claude` — the RFC's phase-1
-  scope explicitly allows a trivial payload, and launching a real agent with
-  an unseeded config dir would only hang on the three interactive onboarding
-  gates §9.2 documents.
+  `launch/1` now **provisions before it launches**
+  (`Arbiter.Sessions.Provisioning`): the §9.1 directory tree, an interactive
+  `CLAUDE_CONFIG_DIR` with the three §9.2 onboarding gates pre-answered, a
+  generated `CLAUDE.md`, and a `.mcp.json` carrying a per-session revocable
+  coordinator token. A provisioning failure aborts the launch and ends the row
+  — a session launched against an unseeded config dir does not fail, it hangs
+  on a wizard nobody can click through.
+
+  ## Phase boundaries
+
+  The browser transport and UI, Remote Control, and the memory layers
+  themselves are later phases; phase 3 leaves only the §9.4 mount points.
 
   ## Secrets
 
   Nothing secret goes on a command line. `/proc/<pid>/cmdline` is world-readable
   on this host and this repo has an incident class around exactly that (§10.3),
   so the only env reaching the pane through `tmux -e` is non-secret
-  (`ARB_SESSION_ID`, `CLAUDE_CONFIG_DIR`). Credentials arrive via the session's
-  config dir in phase 3, never as an argv token.
+  (`ARB_SESSION_ID`, `CLAUDE_CONFIG_DIR`). Mode A's OAuth token is written to a
+  mode-`0600` file the launch wrapper sources; mode B's credential is a copy
+  inside the session's config dir. Neither is ever an argv token, and neither
+  is ever written to the row.
   """
 
   use Ash.Domain
@@ -62,6 +69,7 @@ defmodule Arbiter.Sessions do
   alias Arbiter.Sessions.Guards
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Provider
+  alias Arbiter.Sessions.Provisioning
   alias Arbiter.Sessions.Runner
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Terminal
@@ -84,6 +92,8 @@ defmodule Arbiter.Sessions do
           cwd: String.t(),
           auth_mode: atom(),
           remote_control: boolean(),
+          can_dispatch: boolean(),
+          provision: boolean(),
           cols: pos_integer(),
           rows: pos_integer(),
           runner: module()
@@ -102,22 +112,88 @@ defmodule Arbiter.Sessions do
 
   ## Options
 
-    * `:cwd` — the agent's working directory. Required.
+    * `:cwd` — the agent's working directory. **Optional since phase 3**: the
+      default is the scaffolded `<sessions_root>/<id>/workspace`, because
+      decision 4 / §10.2 layer 1 is that a session is scaffolded rather than
+      pointed at an existing checkout.
     * `:provider` — default `:claude_code`.
     * `:workspace_id` — `nil` (default) means cross-workspace.
-    * `:config_dir` — the session's `CLAUDE_CONFIG_DIR`; `nil` in phase 1.
-    * `:auth_mode` — `:seeded_credentials` (default, mode B) or `:oauth_token`.
-    * `:remote_control` — recorded only in phase 1.
+    * `:config_dir` — override the session's `CLAUDE_CONFIG_DIR`; defaults to
+      the scaffolded one.
+    * `:auth_mode` — `:seeded_credentials` (default, mode B — Amendment 2) or
+      `:oauth_token` (mode A).
+    * `:can_dispatch` — default `false` (§10.1).
+    * `:remote_control` — recorded; phase 8 acts on it.
+    * `:provision` — `false` skips provisioning (the phase-1 shape, used by the
+      lifecycle tests that assert only the command). Default `true`.
     * `:cols` / `:rows` — initial pane geometry (default #{@default_cols}x#{@default_rows}).
     * `:runner` — command runner module, for tests. See `Arbiter.Sessions.Runner`.
   """
   @spec launch(launch_opts()) :: {:ok, Session.t()} | {:error, term()}
   def launch(opts \\ []) do
-    with {:ok, cwd} <- fetch_cwd(opts),
-         {:ok, socket_dir} <- Naming.socket_dir(),
+    with {:ok, socket_dir} <- Naming.socket_dir(),
          :ok <- ensure_socket_dir(socket_dir),
-         {:ok, session} <- create_row(cwd, opts) do
+         {:ok, session} <- create_row(opts),
+         {:ok, session} <- provision(session, opts) do
       start_scope(session, opts)
+    end
+  end
+
+  # Provisioning failures end the row the same way a failed spawn does: an
+  # operator wants to see *why* a launch never happened, and the adoption sweep
+  # must not mistake a half-provisioned row for a live session.
+  defp provision(session, opts) do
+    if Keyword.get(opts, :provision, true) do
+      case Provisioning.provision(session, opts) do
+        {:ok, _provisioned} ->
+          {:ok, session}
+
+        {:error, reason} ->
+          message = "provisioning failed: #{describe(reason)}"
+          Logger.error("Arbiter.Sessions.launch/1 #{session.id}: #{message}")
+          _ = mark_ended(session, message)
+          {:error, {:provisioning_failed, reason}}
+      end
+    else
+      {:ok, session}
+    end
+  end
+
+  @doc """
+  Mint this session's MCP scope token (§9.3).
+
+  Coordinator tier, `can_dispatch` from the row (off by default), bound to the
+  session's workspace or cross-workspace when it has none — and **revocable**:
+  the token carries the session id, and `Arbiter.MCP.Scope.from_token/1`
+  refuses it once the row is ended or revoked.
+  """
+  @spec mint_mcp_token(Session.t(), keyword()) :: String.t()
+  defdelegate mint_mcp_token(session, opts \\ []), to: Provisioning, as: :mint_token
+
+  @doc """
+  Revoke the session's MCP token without ending the session (§9.3).
+
+  Ending or killing a session revokes its token automatically; this is the
+  leaked-token path, where the session itself is fine and only the credential
+  needs replacing.
+  """
+  @spec revoke_mcp_token(Session.t()) :: {:ok, Session.t()} | {:error, term()}
+  def revoke_mcp_token(%Session{} = session),
+    do: Ash.update(session, %{}, action: :revoke_mcp_token)
+
+  @doc """
+  Whether the MCP token minted for `session_id` has been revoked (§9.3).
+
+  `Arbiter.MCP.Scope.from_token/1` calls this for every token carrying a
+  `session_id` claim. A session with **no row** is revoked: the row is the
+  authority, and its absence cannot mean "allow".
+  """
+  @spec mcp_token_revoked?(String.t()) :: boolean()
+  def mcp_token_revoked?(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      {:ok, %Session{mcp_token_revoked_at: nil}} -> false
+      {:ok, %Session{}} -> true
+      {:error, :not_found} -> true
     end
   end
 
@@ -282,13 +358,6 @@ defmodule Arbiter.Sessions do
 
   # -- launch internals -------------------------------------------------------
 
-  defp fetch_cwd(opts) do
-    case Keyword.get(opts, :cwd) do
-      cwd when is_binary(cwd) and cwd != "" -> {:ok, cwd}
-      _ -> {:error, :cwd_required}
-    end
-  end
-
   defp ensure_socket_dir(dir) do
     case File.mkdir_p(dir) do
       :ok -> :ok
@@ -296,14 +365,15 @@ defmodule Arbiter.Sessions do
     end
   end
 
-  defp create_row(cwd, opts) do
+  defp create_row(opts) do
     Ash.create(Session, %{
       provider: Keyword.get(opts, :provider, :claude_code),
       workspace_id: Keyword.get(opts, :workspace_id),
       config_dir: Keyword.get(opts, :config_dir),
-      cwd: cwd,
+      cwd: Keyword.get(opts, :cwd),
       auth_mode: Keyword.get(opts, :auth_mode, :seeded_credentials),
-      remote_control: Keyword.get(opts, :remote_control, false)
+      remote_control: Keyword.get(opts, :remote_control, false),
+      can_dispatch: Keyword.get(opts, :can_dispatch, false)
     })
   end
 
@@ -372,4 +442,11 @@ defmodule Arbiter.Sessions do
   end
 
   defp summarize(out), do: inspect(out)
+
+  # Provisioning errors carry their own operator-facing message where they have
+  # one (§10.2's refusal, mode A's missing token); everything else is a
+  # filesystem tuple and inspects fine.
+  defp describe({_tag, _path, message}) when is_binary(message), do: message
+  defp describe({_tag, message}) when is_binary(message), do: message
+  defp describe(reason), do: inspect(reason)
 end

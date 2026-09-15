@@ -102,7 +102,7 @@ defmodule Arbiter.Sessions.SessionTest do
     # migration is hand-written with no committed `resource_snapshots` entry
     # (see its moduledoc for why), so nothing else would notice the two
     # drifting apart. Asserted against the live schema rather than the DSL.
-    test "has exactly the columns RFC §7.4 item 4 names, and no others" do
+    test "has exactly the columns RFC §7.4 item 4 and phase 3 name, and no others" do
       columns =
         Repo.query!("PRAGMA table_info(sessions)").rows
         |> Enum.map(fn [_cid, name, _type, notnull, _default, pk] ->
@@ -112,6 +112,7 @@ defmodule Arbiter.Sessions.SessionTest do
 
       assert columns == [
                {"auth_mode", true, false},
+               {"can_dispatch", true, false},
                {"config_dir", false, false},
                {"cwd", true, false},
                {"end_reason", false, false},
@@ -119,9 +120,11 @@ defmodule Arbiter.Sessions.SessionTest do
                {"id", true, true},
                {"inserted_at", true, false},
                {"last_client_at", false, false},
+               {"mcp_token_revoked_at", false, false},
                {"provider", true, false},
                {"provider_session_id", false, false},
                {"remote_control", true, false},
+               {"root_dir", false, false},
                {"scope_unit", true, false},
                {"started_at", true, false},
                {"status", true, false},
