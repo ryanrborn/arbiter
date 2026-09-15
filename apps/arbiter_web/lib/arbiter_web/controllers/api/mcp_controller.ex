@@ -63,14 +63,15 @@ defmodule ArbiterWeb.Api.McpController do
           "workspace_id" => scope.workspace_id,
           "task_id" => scope.task_id,
           "repo" => scope.repo,
+          "session_id" => scope.session_id,
           "can_dispatch" => scope.can_dispatch,
           "depth" => scope.depth
         })
 
-      {:error, :expired} ->
+      {:error, reason} when reason in [:expired, :revoked] ->
         conn
         |> put_status(:ok)
-        |> json(%{"valid" => false, "reason" => "expired"})
+        |> json(%{"valid" => false, "reason" => to_string(reason)})
 
       {:error, _} ->
         conn

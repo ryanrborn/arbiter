@@ -13,30 +13,24 @@ defmodule Arbiter.SessionsTest do
   alias Arbiter.Sessions
   alias Arbiter.Sessions.Guards
   alias Arbiter.Sessions.Naming
+  alias Arbiter.Test.SessionEnv
   alias Arbiter.Test.SessionRunnerStub
 
   setup do
-    runtime = Path.join(System.tmp_dir!(), "bd-bpt0ag-rt-#{System.unique_integer([:positive])}")
-    previous = Application.get_env(:arbiter, :sessions_runtime_dir)
-    Application.put_env(:arbiter, :sessions_runtime_dir, runtime)
-
-    on_exit(fn ->
-      if previous do
-        Application.put_env(:arbiter, :sessions_runtime_dir, previous)
-      else
-        Application.delete_env(:arbiter, :sessions_runtime_dir)
-      end
-
-      File.rm_rf(runtime)
-    end)
+    # Save-and-restore, not put-then-delete: `delete_env` would drop the values
+    # `config/test.exs` sets and send every later test's provisioning into the
+    # operator's real `~/dev/arbiter-sessions` (see `Arbiter.Test.SessionEnv`).
+    env = SessionEnv.sandbox("lifecycle")
 
     SessionRunnerStub.reset()
-    {:ok, runtime: runtime}
+    {:ok, runtime: env[:sessions_runtime_dir]}
   end
 
   defp launch!(opts \\ []) do
     {:ok, session} =
-      Sessions.launch(Keyword.merge([cwd: "/tmp", runner: SessionRunnerStub], opts))
+      Sessions.launch(
+        Keyword.merge([cwd: "/tmp", provision: false, runner: SessionRunnerStub], opts)
+      )
 
     session
   end
@@ -124,7 +118,7 @@ defmodule Arbiter.SessionsTest do
       log =
         capture_log(fn ->
           assert {:error, {:launch_failed, 1, _out}} =
-                   Sessions.launch(cwd: "/tmp", runner: SessionRunnerStub)
+                   Sessions.launch(cwd: "/tmp", provision: false, runner: SessionRunnerStub)
         end)
 
       assert log =~ "launch failed"
@@ -135,9 +129,14 @@ defmodule Arbiter.SessionsTest do
       assert %DateTime{} = session.ended_at
     end
 
-    test "cwd is required" do
-      assert {:error, :cwd_required} = Sessions.launch(runner: SessionRunnerStub)
-      assert Sessions.list() == []
+    test "cwd defaults to the scaffolded workspace rather than being required (phase 3)" do
+      # Phase 1 required `:cwd`. Decision 4 / §10.2 layer 1 reverses that: a
+      # session is *scaffolded*, never pointed at a checkout, so the default
+      # is the session's own workspace directory and the caller supplies
+      # nothing.
+      assert {:ok, session} = Sessions.launch(runner: SessionRunnerStub)
+      assert session.cwd == Arbiter.Sessions.Layout.workspace_dir(session.id)
+      assert File.dir?(session.cwd)
     end
   end
 

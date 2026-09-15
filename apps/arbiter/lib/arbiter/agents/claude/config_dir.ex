@@ -468,13 +468,47 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   # fleet into a false expiry.
   defp seed_links(dir, workspace) do
     if oauth_token_configured?(workspace) do
-      remove_stale_credentials(dir)
+      remove_credentials(dir)
     else
-      case source_dir() do
-        nil -> :ok
-        source -> Enum.each(@seed_links, &link_one(source, dir, &1))
-      end
+      seed_credentials(dir)
     end
+  end
+
+  @doc """
+  Copy the operator's `.credentials.json` into `dir` (mode B, §8.2).
+
+  The public half of `seed_links/2`, for callers that have already *decided*
+  the auth mode rather than inferring it from the worker OAuth-token gate —
+  notably `Arbiter.Agents.Claude.ConfigDir.Interactive`, where the mode is an
+  explicit per-session choice recorded on the session row.
+
+  Best-effort and idempotent: a missing source is `:ok` (the caller falls back
+  to whatever the inherited environment provides), and an already-fresh copy is
+  left alone. Always a **copy**, never a symlink — both sides refresh the grant
+  and a symlink would let the copier write through and corrupt the operator's
+  login (§8.2).
+  """
+  @spec seed_credentials(String.t(), String.t() | nil) :: :ok
+  def seed_credentials(dir, source \\ nil) do
+    case source || source_dir() do
+      nil -> :ok
+      src -> Enum.each(@seed_links, &link_one(src, dir, &1))
+    end
+
+    :ok
+  end
+
+  @doc """
+  Remove any `.credentials.json` from `dir` (mode A, §8.1).
+
+  Mode-A callers authenticate with a `CLAUDE_CODE_OAUTH_TOKEN` and must not
+  also carry a copy of the operator's grant: two independent refreshers of one
+  refresh token rotate each other out, which is the defect bd-6umoh9 closed.
+  """
+  @spec remove_credentials(String.t()) :: :ok
+  def remove_credentials(dir) do
+    _ = File.rm(Path.join(dir, ".credentials.json"))
+    :ok
   end
 
   @doc """
@@ -553,11 +587,6 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
         nil
     end
-  end
-
-  defp remove_stale_credentials(dir) do
-    _ = File.rm(Path.join(dir, ".credentials.json"))
-    :ok
   end
 
   defp link_one(source, dir, name) do
