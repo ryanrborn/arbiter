@@ -170,6 +170,24 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, "#terminal-status")
     end
 
+    test "a narrow viewport scrolls the terminal, not the page (§6.3)", %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      # The container scrolls sideways...
+      assert has_element?(view, "#terminal-scroller.overflow-x-auto")
+
+      # ...and the pane keeps a floor width rather than shrinking the font to
+      # illegibility. A terminal cannot reflow meaningfully below ~80 columns;
+      # `scripts/verify_session_terminal.mjs` checks in a real browser that
+      # this floor really does fit 80 of them.
+      assert has_element?(
+               view,
+               ~s(#session-terminal-#{session.id}[class*="min-w-[640px]"])
+             )
+    end
+
     test "a session that no longer exists redirects back to the list", %{conn: conn} do
       assert {:error, {:live_redirect, %{to: "/sessions"}}} =
                live(conn, ~p"/sessions/00000000-0000-0000-0000-000000000000")
