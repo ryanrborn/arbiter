@@ -196,8 +196,7 @@ defmodule Arbiter.Usage.Estimate do
     difficulty = difficulty || @unrated_difficulty
 
     rungs = [
-      {0, "difficulty+type",
-       &(&1.difficulty == difficulty and &1.issue_type == issue_type)},
+      {0, "difficulty+type", &(&1.difficulty == difficulty and &1.issue_type == issue_type)},
       {1, "difficulty", &(&1.difficulty == difficulty)},
       {2, "global", fn _row -> true end}
     ]

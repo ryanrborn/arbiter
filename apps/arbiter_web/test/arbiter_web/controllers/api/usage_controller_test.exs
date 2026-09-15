@@ -211,6 +211,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert json_response(conn, 400)
     end
   end
+
   # bd-3j4ch4: the mis-rating report backing `arb usage --calibration`.
   describe "GET /api/usage/calibration" do
     test "reports per-tier rates and the flagged tasks", %{conn: conn} do
@@ -238,6 +239,29 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert flag["direction"] == "under_rated"
       assert flag["suggested_difficulty"] == 3
       assert flag["re_dispatched"] == false
+    end
+
+    # The contract with `arb usage --calibration`, which lives in another app
+    # and renders these keys by name. Drift here reads as a blank column, not
+    # as a failure, so pin the shape.
+    test "renders exactly the keys the CLI renderer consumes", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "calib-shape-ws", prefix: "cals"})
+      Enum.each(1..10, &closed_task!(ws, 2, &1 * 1.0))
+      Enum.each(21..30, &closed_task!(ws, 3, &1 * 1.0))
+      closed_task!(ws, 2, 25.0)
+
+      body = conn |> get(~p"/api/usage/calibration") |> json_response(200)
+
+      assert Enum.sort(Map.keys(body)) ==
+               ~w(flagged re_dispatched_flagged tiers window_days)
+
+      assert Enum.sort(Map.keys(hd(body["tiers"]))) ==
+               ~w(difficulty median n n_scored over_rate over_rated p25 p75 p90
+                  re_dispatched under_rate under_rated)
+
+      assert Enum.sort(Map.keys(hd(body["flagged"]))) ==
+               ~w(actual_cost_usd difficulty direction issue_type re_dispatched
+                  suggested_difficulty task_id title)
     end
 
     test "an empty ledger is an empty report, not a crash", %{conn: conn} do
