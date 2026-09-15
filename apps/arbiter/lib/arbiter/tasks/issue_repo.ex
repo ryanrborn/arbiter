@@ -12,7 +12,7 @@ defmodule Arbiter.Tasks.IssueRepo do
   Every issue now resolves its repo at *creation* time instead, in this order:
 
     1. An explicit repo, canonicalized onto the configured `repo_paths` key it
-       matches (see `Arbiter.Tasks.RepoConfig.find_entry/2` — an explicit
+       matches (see `Arbiter.Tasks.RepoConfig.find_key/2` — an explicit
        `verus_server` or `leotech/verus-server` both land on a configured
        `verus-server`).
     2. The workspace's only configured repo.
@@ -158,10 +158,10 @@ defmodule Arbiter.Tasks.IssueRepo do
   # back to a key by value keeps two keys that alias the same checkout
   # (`%{"tonic" => "/srv/x", "tonic-alias" => "/srv/x"}`) distinct.
   defp canonical_key(repo_maps, repo) do
-    Enum.find_value(repo_maps, &configured_key(&1, repo)) || slug_key(repo_maps, repo)
+    Enum.find_value(repo_maps, &usable_key(&1, repo)) || slug_key(repo_maps, repo)
   end
 
-  defp configured_key(map, repo) do
+  defp usable_key(map, repo) do
     key = RepoConfig.find_key(map, repo)
 
     if key && RepoConfig.repo_path_from_config(Map.get(map, key)) != nil, do: key
