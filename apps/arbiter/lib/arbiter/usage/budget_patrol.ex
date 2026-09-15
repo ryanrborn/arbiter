@@ -59,7 +59,12 @@ defmodule Arbiter.Usage.BudgetPatrol do
 
   # ---- process -------------------------------------------------------------
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  # `name: nil` starts an unregistered instance — how a test drives its own
+  # copy while the application's singleton is already up under the module name.
+  def start_link(opts \\ []) do
+    name = Keyword.get(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, if(name, do: [name: name], else: []))
+  end
 
   @doc "Run one sweep synchronously (tests, and `arb`-driven pokes)."
   @spec poll(GenServer.server()) :: :ok

@@ -12,6 +12,7 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
   # async: false — the sweep reads the whole ledger and the whole issue table.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -155,6 +156,22 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
       assert :ok = BudgetPatrol.sweep(now: @now, min_n: 11)
 
       assert [] = escalations(ws)
+    end
+  end
+  # The sweep above is called directly; this drives the process the
+  # application actually supervises — `init/1` -> a `:poll` call -> the same
+  # sweep — so the GenServer wiring is proven, not just the function under it.
+  describe "the supervised ticker" do
+    test "a poll on the running process escalates the same way", %{ws: ws} do
+      task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      event!(task.id, ws, %{cost_usd: 40.0})
+
+      pid = start_supervised!({BudgetPatrol, name: nil, enabled: false})
+
+      assert :ok = BudgetPatrol.poll(pid)
+
+      assert [escalation] = escalations(ws)
+      assert escalation.subject == CoordinatorNotifier.budget_exceeded_subject(task.id)
     end
   end
 end
