@@ -23,6 +23,9 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
   defp claude_json!(config),
     do: config |> Path.join(".claude.json") |> File.read!() |> Jason.decode!()
 
+  defp settings!(config),
+    do: config |> Path.join("settings.json") |> File.read!() |> Jason.decode!()
+
   describe "the three onboarding gates (§9.2)" do
     test "writes .claude.json answering theme, onboarding and cwd trust", %{
       config: config,
@@ -224,6 +227,133 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
                )
 
       refute File.exists?(Path.join(config, ".credentials.json"))
+    end
+  end
+
+  # bd-5xlkkj — the post-merge live check of phase 5 found a freshly provisioned
+  # session still stopping on two prompts nobody was there to answer, and running
+  # under the *headless worker's* profile. These pin the fixes against the keys
+  # Claude Code 2.1.272 actually reads (verified against the installed binary:
+  # `bO=["acceptEdits","auto","bypassPermissions","default","dontAsk","plan"]`,
+  # and `enabledMcpjsonServers` / `skipAutoPermissionPrompt` in the settings
+  # schema).
+  describe "first-launch prompts (bd-5xlkkj)" do
+    test "pre-approves the session's project MCP server in the user settings", %{
+      config: config,
+      tmp: tmp
+    } do
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: nil,
+                 mcp_servers: ["arbiter"]
+               )
+
+      assert settings!(config)["enabledMcpjsonServers"] == ["arbiter"]
+    end
+
+    test "pre-approves it in .claude.json's project entry too", %{config: config, tmp: tmp} do
+      cwd = Path.join(tmp, "workspace")
+
+      assert :ok = Interactive.ensure(config, cwd: cwd, source_dir: nil, mcp_servers: ["arbiter"])
+
+      assert claude_json!(config)["projects"][cwd]["enabledMcpjsonServers"] == ["arbiter"]
+    end
+
+    test "omits the pre-approval entirely when the session has no MCP server", %{
+      config: config,
+      tmp: tmp
+    } do
+      cwd = Path.join(tmp, "workspace")
+
+      assert :ok = Interactive.ensure(config, cwd: cwd, source_dir: nil, mcp_servers: [])
+
+      refute Map.has_key?(settings!(config), "enabledMcpjsonServers")
+      refute Map.has_key?(claude_json!(config)["projects"][cwd], "enabledMcpjsonServers")
+    end
+
+    test "launches in auto mode, never bypassPermissions", %{config: config, tmp: tmp} do
+      assert :ok = Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: nil)
+
+      settings = settings!(config)
+
+      assert settings["permissions"]["defaultMode"] == "auto"
+      refute settings["permissions"]["defaultMode"] == "bypassPermissions"
+      refute settings |> Jason.encode!() |> String.contains?("bypassPermissions")
+    end
+
+    test "pre-answers the auto-mode notices so auto mode costs no prompt either", %{
+      config: config,
+      tmp: tmp
+    } do
+      assert :ok = Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: nil)
+
+      # `shouldShowAutoModeEntryWarning` is false when userSettings carries this.
+      assert settings!(config)["skipAutoPermissionPrompt"] == true
+
+      # The "auto mode is now the default" notice reads .claude.json.
+      json = claude_json!(config)
+      assert json["hasSeenAutoDefaultNotice"] == true
+      assert json["hasSeenAutoModeEntryWarning"] == true
+    end
+
+    test "the interactive profile does not deny Monitor / ScheduleWakeup", %{
+      config: config,
+      tmp: tmp
+    } do
+      assert :ok = Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: nil)
+
+      deny = settings!(config)["permissions"]["deny"]
+
+      # A coordinator session needs Monitor for the /events stream (docs/monitoring.md).
+      refute "Monitor" in deny
+      refute "ScheduleWakeup" in deny
+    end
+
+    test "but keeps the destructive, secret-read, PR-create and checkout denies", %{
+      config: config,
+      tmp: tmp
+    } do
+      checkout = "/home/someone/dev/arbiter"
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: nil,
+                 primary_checkout: checkout
+               )
+
+      deny = settings!(config)["permissions"]["deny"]
+
+      assert "Bash(rm -rf:*)" in deny
+      assert "Read(**/.env)" in deny
+      assert "Bash(gh pr create:*)" in deny
+      assert "Bash(glab mr create:*)" in deny
+      assert "Write(#{checkout}/**)" in deny
+      assert "Edit(#{checkout}/**)" in deny
+    end
+
+    test "the session profile ignores the headless worker's install-wide override", %{
+      config: config,
+      tmp: tmp
+    } do
+      previous = Application.get_env(:arbiter, :worker_security_policy)
+
+      Application.put_env(:arbiter, :worker_security_policy, %{
+        "permissions" => %{"mode" => "bypass"}
+      })
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:arbiter, :worker_security_policy, previous)
+        else
+          Application.delete_env(:arbiter, :worker_security_policy)
+        end
+      end)
+
+      assert :ok = Interactive.ensure(config, cwd: Path.join(tmp, "workspace"), source_dir: nil)
+
+      assert settings!(config)["permissions"]["defaultMode"] == "auto"
     end
   end
 end

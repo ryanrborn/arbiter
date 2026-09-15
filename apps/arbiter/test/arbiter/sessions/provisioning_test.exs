@@ -35,6 +35,22 @@ defmodule Arbiter.Sessions.ProvisioningTest do
     session
   end
 
+  defp session_settings!(session),
+    do:
+      session.id
+      |> Layout.config_dir()
+      |> Path.join("settings.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+  defp session_claude_json!(session),
+    do:
+      session.id
+      |> Layout.config_dir()
+      |> Path.join(".claude.json")
+      |> File.read!()
+      |> Jason.decode!()
+
   describe "the §9.1 layout (AC 1)" do
     test "creates the whole tree for a session id, and launch/1 uses it", %{root: root} do
       session = launch!()
@@ -289,6 +305,15 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       assert "Edit(#{checkout}/**)" in settings["permissions"]["deny"]
     end
 
+    test "layer 3 survives the bd-5xlkkj switch to auto mode", %{checkout: checkout} do
+      session = launch!()
+      settings = session_settings!(session)
+
+      assert settings["permissions"]["defaultMode"] == "auto"
+      assert "Write(#{checkout}/**)" in settings["permissions"]["deny"]
+      assert "Bash(rm -rf:*)" in settings["permissions"]["deny"]
+    end
+
     test "layer 4: the generated CLAUDE.md names the checkout and the worktree rule", %{
       checkout: checkout
     } do
@@ -310,6 +335,48 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       "Bearer " <> token = config["mcpServers"]["arbiter"]["headers"]["Authorization"]
 
       refute session.id |> Layout.instructions_path() |> File.read!() |> String.contains?(token)
+    end
+  end
+
+  # bd-5xlkkj — the post-merge live check of phase 5 watched a real first launch
+  # stop on two prompts nobody was there to answer. These assert the *provisioned*
+  # scaffold, not just the generator, because the bug was that provisioning never
+  # passed the server name through.
+  describe "first launch needs no operator click (bd-5xlkkj)" do
+    test "pre-approves the MCP server it just wrote a .mcp.json for" do
+      session = launch!()
+
+      assert Arbiter.MCP.server_name() in session_settings!(session)["enabledMcpjsonServers"]
+
+      project = session_claude_json!(session)["projects"][session.cwd]
+      assert Arbiter.MCP.server_name() in project["enabledMcpjsonServers"]
+    end
+
+    test "writes no pre-approval for a session provisioned without MCP" do
+      session = launch!(mcp: false)
+
+      refute Map.has_key?(session_settings!(session), "enabledMcpjsonServers")
+    end
+
+    test "launches in auto mode with no bypass-warning to accept" do
+      session = launch!()
+      settings = session_settings!(session)
+
+      assert settings["permissions"]["defaultMode"] == "auto"
+      assert settings["skipAutoPermissionPrompt"] == true
+      refute settings |> Jason.encode!() |> String.contains?("bypassPermissions")
+
+      json = session_claude_json!(session)
+      assert json["hasSeenAutoDefaultNotice"] == true
+      assert json["hasSeenAutoModeEntryWarning"] == true
+    end
+
+    test "leaves Monitor and ScheduleWakeup available to the coordinator session" do
+      session = launch!()
+      deny = session_settings!(session)["permissions"]["deny"]
+
+      refute "Monitor" in deny
+      refute "ScheduleWakeup" in deny
     end
   end
 end

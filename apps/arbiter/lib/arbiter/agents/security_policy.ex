@@ -205,6 +205,64 @@ defmodule Arbiter.Agents.SecurityPolicy do
   end
 
   @doc """
+  The baseline for an **interactive coordinator session** — a real TUI on a
+  real PTY with a human at the keyboard (`Arbiter.Sessions`), not a headless
+  `claude --print` worker.
+
+  Two things separate it from `base/0`, and both follow from that one
+  difference (bd-5xlkkj):
+
+    * `mode: :auto` rather than `:bypass`. `:bypass` exists because a headless
+      run freezes on a permission prompt nobody can answer; a session *has*
+      somebody to answer, so the classifier is a working guard rather than a
+      hang, and running it also spares the operator the "WARNING: Claude Code
+      running in Bypass Permissions mode" acceptance screen on every first
+      launch.
+    * `:no_async_wait` is dropped. `Monitor` and `ScheduleWakeup` are denied to
+      workers because `--print` ends the process the instant a turn produces no
+      tool call, so a wakeup has no session left to arrive in (bd-d534xo). In a
+      session the turn *is* interactive and the wakeup does arrive — `Monitor`
+      is how a coordinator session watches the `/events` stream
+      (`docs/monitoring.md`).
+
+  Everything else is deliberately unchanged: the destructive-fs, force-push,
+  secret-read and outside-write denies all apply, and so does `:no_pr_create`
+  (the MergeQueue still owns PR creation — bd-53xrmi — and a hand-rolled
+  `gh pr create` from a coordinator console produces the same duplicate on the
+  same wrong base).
+  """
+  @spec interactive_session_base() :: t()
+  def interactive_session_base do
+    base = base()
+
+    %{
+      base
+      | permissions: %{
+          base.permissions
+          | mode: :auto,
+            safe_defaults: @safe_default_categories -- [:no_async_wait]
+        }
+    }
+  end
+
+  @doc """
+  `interactive_session_base/0` overlaid with
+  `Application.get_env(:arbiter, :session_security_policy)`.
+
+  A **separate** config key from `:worker_security_policy` on purpose: the two
+  postures are no longer the same document, and an install that hardened its
+  headless workers must not silently drag an interactive session back to
+  `bypassPermissions` (or vice versa).
+  """
+  @spec interactive_session() :: t()
+  def interactive_session do
+    merge(
+      interactive_session_base(),
+      Application.get_env(:arbiter, :session_security_policy, %{})
+    )
+  end
+
+  @doc """
   Resolve the effective policy for a workspace (or `nil`), with an optional
   per-dispatch `override` map applied last and an optional `repo` name that
   pulls in a per-repo override layer. See the moduledoc for precedence.
