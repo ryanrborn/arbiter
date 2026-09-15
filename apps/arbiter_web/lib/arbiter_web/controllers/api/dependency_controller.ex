@@ -78,6 +78,7 @@ defmodule ArbiterWeb.Api.DependencyController do
   # The facade's guards all carry a message written for a human; hand it
   # straight to the fallback rather than flattening it to "validation failed".
   defp translate({:not_found, _message}), do: :not_found
+
   defp translate({reason, message}) when is_atom(reason) and is_binary(message),
     do: {:invalid_request, message}
 
