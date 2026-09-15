@@ -85,6 +85,13 @@ defmodule Arbiter.Usage.Estimate do
   # `fix_pass` marker.
   @fix_pass_suffix ~r/[:#_-]fix_?pass$/
 
+  # The merge queue's colon suffixes, anchored to the two it actually writes
+  # (`FixPassDispatcher`, `ConflictResolver`). Stripping everything after the
+  # first `:` instead would fold unrelated namespaced ids — e.g.
+  # `Reviews.ExternalReview`'s `"ext:<record_id>"` rows — into one bogus
+  # bucket.
+  @colon_suffix ~r/:(fixpass|fix_pass|conflict)$/
+
   @type t :: %{
           p25: float(),
           median: float(),
@@ -399,8 +406,7 @@ defmodule Arbiter.Usage.Estimate do
     |> String.split("#", parts: 2)
     |> hd()
     |> String.replace(@fix_pass_suffix, "")
-    |> String.split(":", parts: 2)
-    |> hd()
+    |> String.replace(@colon_suffix, "")
   end
 
   defp fold_task(task_id, events, now) do
@@ -414,8 +420,7 @@ defmodule Arbiter.Usage.Estimate do
     else
       latest = priced |> Enum.map(& &1.occurred_at) |> Enum.max(DateTime)
 
-      work_sessions =
-        Enum.count(events, &(&1.step == :work and &1.role in [nil, "", "base"]))
+      work_sessions = Enum.count(events, &base_work_session?(&1, task_id))
 
       %{
         task_id: task_id,
@@ -431,6 +436,19 @@ defmodule Arbiter.Usage.Estimate do
         re_dispatched: work_sessions > 1
       }
     end
+  end
+
+  # A second *base* work session means the task was re-dispatched: dispatched,
+  # closed out, then slung again. Subordinate passes don't count — and `role`
+  # alone can't tell them apart, because only the live worker path
+  # (`Worker.record_usage_event/3`) labels it. A row backfilled from disk by
+  # `Workers.Reconciler` before bd-3j4ch4 carries `role: nil` and, for an
+  # implementer or fix pass, `step: :work`. So also require that the row's own
+  # `task_id` survived folding unchanged: a row that folded in from a
+  # suffixed id (`<base>#impl2`, `<base>:fixpass`) is by construction a
+  # subordinate pass, whatever its role says.
+  defp base_work_session?(%Event{} = event, fold_id) do
+    event.step == :work and event.role in [nil, "", "base"] and event.task_id == fold_id
   end
 
   # Exponential decay with a #{@half_life_days}-day half-life: today's spend

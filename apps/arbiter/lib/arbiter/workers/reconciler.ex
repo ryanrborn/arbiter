@@ -451,13 +451,11 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   defp write_reconciled_usage(%Run{} = run, totals) do
-    step = if run.worker_type == :review, do: :review, else: :work
-
     attrs = %{
       task_id: run.task_id,
       workspace_id: run.workspace_id,
       repo: run.repo,
-      step: step,
+      step: usage_step_for(run.worker_type),
       model: run.model || totals.model,
       provider: "claude",
       tokens_in: totals.tokens_in,
@@ -475,6 +473,15 @@ defmodule Arbiter.Workers.Reconciler do
       worker_run_id: run.id,
       session_id: run.session_id,
       occurred_at: DateTime.utc_now(),
+      # bd-3j4ch4: carry the run's place in the hierarchy onto the ledger row,
+      # exactly as `Worker.record_usage_event/3` does for a live session.
+      # Without it a reconciled review-gate implementer or merge-queue fix pass
+      # lands as an unlabelled `step: :work` row, and every consumer that folds
+      # subordinate passes onto the base task (`Arbiter.Usage.Estimate`) reads
+      # it as a second base work session — i.e. a re-dispatch that never
+      # happened.
+      base_task_id: run.base_task_id || Worker.ReviewGate.base_task_id(run.task_id),
+      role: run.role || usage_role_for(run.worker_type),
       raw: %{
         "arb_usage_source" => %{
           "reconciled_from" => "session_jsonl",
@@ -505,4 +512,15 @@ defmodule Arbiter.Workers.Reconciler do
         :ok
     end
   end
+
+  # Mirrors `Worker.record_usage_event/3`: only a reviewer and a review-gate
+  # implementer get their own step; the merge queue's fix/conflict passes are
+  # still work, distinguished by `role`.
+  defp usage_step_for(:review), do: :review
+  defp usage_step_for(:impl), do: :impl
+  defp usage_step_for(_), do: :work
+
+  defp usage_role_for(:main), do: "base"
+  defp usage_role_for(nil), do: "base"
+  defp usage_role_for(worker_type), do: Atom.to_string(worker_type)
 end

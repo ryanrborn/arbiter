@@ -190,6 +190,48 @@ defmodule Arbiter.Usage.EstimateTest do
       assert_in_delta row.cost_usd, 3.9375, 1.0e-9
     end
 
+    test "an unlabelled subordinate row is not a second work session", %{ws: ws} do
+      issue = closed_issue!(ws, %{difficulty: 2})
+
+      event!(issue.id, %{cost_usd: 2.0})
+
+      # How `Workers.Reconciler` backfilled a review-gate implementer or a
+      # merge-queue fix pass from the on-disk session file before bd-3j4ch4:
+      # `step: :work` with no role at all. Folding it onto the base task must
+      # not read as the task having been dispatched twice.
+      event!(issue.id <> "#impl1", %{cost_usd: 1.0, base_task_id: nil, role: nil})
+      event!(issue.id <> ":fixpass", %{cost_usd: 0.5, base_task_id: nil, role: nil})
+
+      assert [row] = Estimate.sample(now: @now)
+      assert row.work_sessions == 1
+      refute row.re_dispatched
+      assert_in_delta row.cost_usd, 3.5, 1.0e-9
+    end
+
+    test "a genuinely re-slung task still counts two work sessions", %{ws: ws} do
+      issue = closed_issue!(ws, %{difficulty: 2})
+      event!(issue.id, %{cost_usd: 2.0})
+      event!(issue.id, %{cost_usd: 3.0})
+
+      assert [row] = Estimate.sample(now: @now)
+      assert row.work_sessions == 2
+      assert row.re_dispatched
+    end
+
+    test "fold_task_id/1 strips only the known subordinate suffixes" do
+      assert Estimate.fold_task_id("bd-abc#review#impl2") == "bd-abc"
+      assert Estimate.fold_task_id("bd-abc:fixpass") == "bd-abc"
+      assert Estimate.fold_task_id("bd-abc:conflict") == "bd-abc"
+      assert Estimate.fold_task_id("bd-abc_fix_pass") == "bd-abc"
+      assert Estimate.fold_task_id("bd-abc") == "bd-abc"
+
+      # `Reviews.ExternalReview` writes `source: :task` rows whose task_id is
+      # `"ext:<record_id>"`. Those are distinct records, not passes over one
+      # task — collapsing them all to "ext" would invent a single giant task.
+      assert Estimate.fold_task_id("ext:mr-17") == "ext:mr-17"
+      assert Estimate.fold_task_id("ext:mr-18") == "ext:mr-18"
+    end
+
     test "excludes null-cost rows rather than counting them as $0", %{ws: ws} do
       issue = closed_issue!(ws, %{difficulty: 2})
 
