@@ -208,6 +208,40 @@ migrations were probably never applied — the message says so rather than
 asserting the schema moved. Check the schema before choosing between fixing
 forward and rolling back.
 
+### The first upgrade past v0.1.63 is not protected — snapshot the DB
+
+Everything above describes the **current** deployer. The ordering guarantee
+("stop → boot → migrate", and the cross-migration rollback refusal) shipped in
+#1653, and it lives in the `arb` CLI, not in the server. A deploy is driven by
+the CLI you already have installed — so when you upgrade *from* v0.1.63 or
+earlier, the deploy still runs under the **old** ordering, no matter which
+release you are deploying:
+
+    migrate  →  swap  →  restart  →  health check  →  roll back on failure
+
+That means a failed health check rolls the *code* back and leaves the *schema*
+migrated. The prior release then runs against a newer schema, and
+`arb server doctor` will still report `migrations up to date` — Ecto only
+checks that the migrations it knows about are present, not that the schema has
+nothing extra.
+
+This is exactly what happened on the first v0.1.64 attempt (#1728): the release
+could not boot, the deploy auto-rolled back to v0.1.63, and all 20 of
+v0.1.64's migrations stayed applied (`schema_migrations` 59 → 79, including the
+new `sessions`, `review_coverage`, `provider_accounts` and
+`provider_credentials` tables plus their backfills).
+
+So, for that one upgrade only:
+
+1. **Snapshot the SQLite DB first** — with the service stopped, copy
+   `~/.arbiter/arbiter.sqlite3*` (including `-wal`/`-shm`) somewhere safe, or
+   use `sqlite3 <db> ".backup <path>"`.
+2. Deploy. If the health check fails and it rolls back, assume the schema
+   moved: either fix forward to a release that boots, or restore the snapshot
+   before running the older code for any length of time.
+3. From the next upgrade on, the installed CLI has #1653 and the ordering above
+   applies.
+
 ### Post-deploy: confirm patrols are lazy (bd-7tr11p acceptance gate)
 
 Patrols exist only while a repo has watched work (an open review engagement or a
