@@ -38,6 +38,7 @@ defmodule Arbiter.Tasks.IssueRepo do
   it, change nothing else.
   """
 
+  alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
 
@@ -152,17 +153,46 @@ defmodule Arbiter.Tasks.IssueRepo do
   # *entry*, so map back to the key it came from — the issue must persist the
   # key dispatch will look up, not the caller's spelling of it.
   defp canonical_key(repo_maps, repo) do
-    Enum.find_value(repo_maps, fn map ->
-      case RepoConfig.find_entry(map, repo) do
-        nil ->
-          nil
+    Enum.find_value(repo_maps, &key_from_entry(&1, repo)) || slug_key(repo_maps, repo)
+  end
 
-        entry ->
-          Enum.find_value(map, fn {k, v} ->
-            if v == entry and RepoConfig.repo_path_from_config(v) != nil, do: k
-          end)
-      end
-    end)
+  defp key_from_entry(map, repo) do
+    case RepoConfig.find_entry(map, repo) do
+      nil ->
+        nil
+
+      entry ->
+        Enum.find_value(map, fn {k, v} ->
+          if v == entry and RepoConfig.repo_path_from_config(v) != nil, do: k
+        end)
+    end
+  end
+
+  # Reverse slug resolution, the same miss-path fallback
+  # `Arbiter.Worker.Dispatch` does for `{:repo_not_found, _}` (bd-49ajyt):
+  # `repo_paths` is keyed by bare repo name ("client") while PRPatrol /
+  # ReviewPatrol / a PR URL only have the forge slug ("leotech/verus-client"),
+  # and neither spelling contains the other. Match by reading each configured
+  # checkout's `origin` remote.
+  #
+  # Only runs when every cheap pass above missed AND the repo is slug-shaped,
+  # so an ordinary repo-name create never pays the git cost.
+  defp slug_key(repo_maps, repo) do
+    if String.contains?(repo, "/") do
+      target = RepoConfig.normalize_slug(repo)
+
+      Enum.find_value(repo_maps, fn map ->
+        Enum.find_value(map, fn {k, v} ->
+          with path when is_binary(path) <- RepoConfig.repo_path_from_config(v),
+               {:ok, {owner, name}} <- RepoResolver.from_remote(path),
+               true <- RepoConfig.normalize_slug("#{owner}/#{name}") == target do
+            k
+          else
+            _ -> nil
+          end
+        end)
+      end)
+    end
   end
 
   defp usable_default(config, repos) do

@@ -129,6 +129,45 @@ defmodule Arbiter.Tasks.IssueRepoTest do
     end
   end
 
+  describe "resolve/2 — a forge slug that no key spells" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "ir-slug-#{:erlang.unique_integer([:positive])}")
+      path = Path.join(tmp, "checkout")
+      File.mkdir_p!(path)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", path])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          path,
+          "remote",
+          "add",
+          "origin",
+          "git@github.com:leotech/verus-client.git"
+        ])
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      %{path: path}
+    end
+
+    test "resolves an owner/repo slug onto the repo_paths key by origin remote", %{path: path} do
+      # The leotech shape: the key is "client", the forge slug is
+      # "leotech/verus-client", and neither spelling contains the other. This
+      # is the repo PRPatrol hands a follow-up.
+      ws = ws!(%{"repo_paths" => %{"client" => path, "server" => "/srv/server"}})
+
+      assert {:ok, "client"} = IssueRepo.resolve(ws.id, "leotech/verus-client")
+      assert IssueRepo.configured_key(ws.id, "leotech/verus-client") == "client"
+    end
+
+    test "still rejects a slug that matches no configured repo's remote", %{path: path} do
+      ws = ws!(%{"repo_paths" => %{"client" => path, "server" => "/srv/server"}})
+
+      assert {:error, {:repo_not_configured, "someone/else", _}} =
+               IssueRepo.resolve(ws.id, "someone/else")
+    end
+  end
+
   describe "configured_key/2" do
     test "returns the canonical key, or nil when nothing matches" do
       ws = ws!(%{"repo_paths" => %{"verus-server" => "/srv/vs"}})

@@ -1076,7 +1076,81 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert task.source_pr == "60"
       assert task.title =~ "PR #60"
       assert task.workspace_id == multi_ws.id
+      # bd-9dwbvt: a worker-filed follow-up carries the PR's repo, which in a
+      # multi-repo workspace with no `default_repo` is also the only thing that
+      # lets the create succeed at all.
+      assert task.repo == "owner/explicit-repo"
       assert is_pid(Worker.whereis(task.id))
+    end
+
+    test "a follow-up whose repo resolves to nothing is logged, not crashed", %{tmp: tmp} do
+      # Same multi-repo shape, but the patrol repo is NOT in `repo_paths` — so
+      # bd-9dwbvt's create-time resolution has nothing to bind and refuses.
+      # The patrol must survive the tick.
+      {:ok, multi_ws} =
+        Ash.create(Workspace, %{
+          name: "unresolvable-#{System.unique_integer([:positive])}",
+          prefix: "ur",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(
+        signals_stub(
+          repo: "owner/unregistered-repo",
+          pulls: [pull(61, title: "unregistered PR", html_url: "https://gh/pr/61")],
+          nodes: %{
+            61 =>
+              pr_node(
+                reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]
+              )
+          }
+        )
+      )
+
+      # Two OTHER repos are configured, so the workspace is multi-repo with no
+      # `default_repo` and the create cannot fall back to anything.
+      repo_paths = Application.get_env(:arbiter, :repo_paths, %{})
+
+      put_app_env(
+        :arbiter,
+        :repo_paths,
+        repo_paths
+        |> Map.put("owner/one", seed_repo!(tmp, "one"))
+        |> Map.put("owner/two", seed_repo!(tmp, "two"))
+      )
+
+      name = String.to_atom("PRPatrol_unresolvable_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           [
+             repo: "owner/unregistered-repo",
+             workspace_id: multi_ws.id,
+             interval_ms: 60_000,
+             name: name,
+             dispatch_opts: [claude_command: ["sleep", "2"]]
+           ]}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = PRPatrol.tick(name)
+        end)
+
+      assert log =~ "could not file a follow-up"
+      assert Process.alive?(pid)
+      assert tasks_for_repo() == []
     end
   end
 
