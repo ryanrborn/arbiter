@@ -14,6 +14,7 @@ defmodule Arbiter.Sessions.Layout do
         transcript/           # raw PTY byte stream (§11)
         auth.env              # mode 0600, mode-A only (§10.3)
         launch.sh             # mode 0700 wrapper; the only argv token
+        watchdog.sh           # mode 0700; in-scope dead-man's switch (§4.6.3)
 
   Kept separate from `Arbiter.Sessions.Provisioning` for the same reason
   `Arbiter.Sessions.Naming` is separate from the launcher: the mapping from a
@@ -104,6 +105,13 @@ defmodule Arbiter.Sessions.Layout do
   @spec launch_script_path(String.t()) :: String.t()
   def launch_script_path(id), do: Path.join(session_dir(id), "launch.sh")
 
+  @doc """
+  The in-scope dead-man's switch (§4.6 item 3, phase 10) — `launch.sh`
+  backgrounds it before `exec`ing the agent.
+  """
+  @spec watchdog_script_path(String.t()) :: String.t()
+  def watchdog_script_path(id), do: Path.join(session_dir(id), "watchdog.sh")
+
   @doc "Every directory `Arbiter.Sessions.Provisioning` creates, in creation order."
   @spec directories(String.t()) :: [String.t()]
   def directories(id) do
@@ -132,7 +140,8 @@ defmodule Arbiter.Sessions.Layout do
       memory_candidates: memory_candidates_dir(id),
       transcript: transcript_dir(id),
       auth_env: auth_env_path(id),
-      launch_script: launch_script_path(id)
+      launch_script: launch_script_path(id),
+      watchdog_script: watchdog_script_path(id)
     }
   end
 

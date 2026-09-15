@@ -110,6 +110,22 @@ defmodule ArbiterWeb.SessionLive do
     {:noreply, assign(socket, :kill_candidate, nil)}
   end
 
+  def handle_event("toggle_keep_alive", _params, socket) do
+    session = socket.assigns.session
+
+    socket =
+      case Sessions.set_keep_alive(session, not session.keep_alive) do
+        {:ok, updated} ->
+          assign(socket, :session, updated)
+
+        {:error, reason} ->
+          Logger.error("SessionLive: set_keep_alive #{session.id} failed: #{inspect(reason)}")
+          put_flash(socket, :error, "Could not update keep_alive: #{inspect(reason)}")
+      end
+
+    {:noreply, socket}
+  end
+
   def handle_event("kill", _params, socket) do
     session = socket.assigns.session
 
@@ -204,6 +220,16 @@ defmodule ArbiterWeb.SessionLive do
           </span>
 
           <span class="ml-auto flex items-center gap-2">
+            <Core.button
+              :if={@session.status == :running}
+              id="toggle-keep-alive"
+              size="sm"
+              variant="secondary"
+              phx-click="toggle_keep_alive"
+            >
+              {if @session.keep_alive, do: "Unpin keep_alive", else: "Pin keep_alive"}
+            </Core.button>
+
             <Core.button
               :if={attachable?(@session, @agent_exit)}
               id="detach-session"
@@ -305,6 +331,10 @@ defmodule ArbiterWeb.SessionLive do
           <div class="flex gap-2">
             <dt class="min-w-[7rem]">can dispatch</dt>
             <dd>{@session.can_dispatch}</dd>
+          </div>
+          <div class="flex gap-2">
+            <dt class="min-w-[7rem]">keep_alive</dt>
+            <dd id="keep-alive-value">{@session.keep_alive}</dd>
           </div>
         </dl>
       </div>

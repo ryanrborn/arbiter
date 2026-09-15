@@ -104,6 +104,22 @@ defmodule Arbiter.Application do
       # (`ARBITER_COORDINATOR_SESSION_DIRS`), and inert in test. See
       # `Arbiter.Sessions.UsageIngest`.
       Arbiter.Sessions.UsageIngest,
+      # Touches arbiter's own liveness file (bd-3qkbch, phase 10, §4.6.3) so
+      # every session's in-scope dead-man's switch can tell whether arbiter is
+      # around without ever connecting to it. Inert wherever
+      # XDG_RUNTIME_DIR is unset. See Arbiter.Sessions.Heartbeat.
+      Arbiter.Sessions.Heartbeat,
+      # Idle-TTL sweep (bd-3qkbch, phase 10, §4.6 item 2): terminates
+      # coordinator sessions with no client or turn activity for
+      # `:idle_ttl_ms` (default 24h), unless pinned `keep_alive`. See
+      # Arbiter.Sessions.IdleReaper.
+      Arbiter.Sessions.IdleReaper,
+      # Kill-after-grace policy for orphan scopes (bd-3qkbch, phase 10, §4.6
+      # item 1): re-sweeps `Arbiter.Sessions.Adoption` periodically and kills
+      # an orphan only once it has persisted across a full grace window —
+      # never on the sweep that first notices it. See
+      # Arbiter.Sessions.OrphanReaper.
+      Arbiter.Sessions.OrphanReaper,
       # Terminal transport for browser-hosted coordinator sessions (bd-3ymdvi,
       # phase 4). One `Arbiter.Sessions.Stream` reader per *attached* session,
       # started on first attach and stopped when the last client leaves — so

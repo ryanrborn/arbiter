@@ -319,7 +319,8 @@ defmodule Arbiter.Sessions.Stream do
       title: "",
       pending_snapshot: nil,
       open_error: nil,
-      linger_timer: nil
+      linger_timer: nil,
+      last_turn_touch_ms: nil
     }
 
     {:ok, state, {:continue, :open}}
@@ -562,6 +563,25 @@ defmodule Arbiter.Sessions.Stream do
     |> Map.put(:seq, seq)
     |> ring_push(seq, data)
     |> deliver(frame)
+    |> touch_turn()
+  end
+
+  # The idle-deadline's other input (§4.6 item 2): the pane actually produced
+  # output, whether or not anyone is attached to watch it — this is what
+  # keeps an unattended agent mid-tool-loop off the idle sweep. Throttled
+  # against the 25ms poll tick; a DB write per byte read would be pointless
+  # load for a signal only ever compared against a TTL measured in hours.
+  @touch_turn_min_interval_ms 60_000
+  defp touch_turn(state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    if is_nil(state.last_turn_touch_ms) or
+         now_ms - state.last_turn_touch_ms >= @touch_turn_min_interval_ms do
+      _ = Sessions.touch_turn(state.session)
+      %{state | last_turn_touch_ms: now_ms}
+    else
+      state
+    end
   end
 
   defp deliver(state, frame) do
