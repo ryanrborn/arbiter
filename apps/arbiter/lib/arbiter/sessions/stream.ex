@@ -149,7 +149,9 @@ defmodule Arbiter.Sessions.Stream do
     * `:subscriber` — the pid to stream to. Defaults to the caller.
     * `:last_seq` — resume point. `nil` (default) asks for a full snapshot.
     * `:cols` / `:rows` — the client's geometry; applied under the last-writer-wins
-      rule when both are given.
+      rule when both are **positive integers**. A client that cannot measure
+      itself yet leaves the pane's size alone, whether it says so with `nil` or
+      with the `0` a browser reports for an unlaid-out terminal.
     * `:terminal` — the `Arbiter.Sessions.Terminal` to use. Test seam.
     * `:pipe_dir` — where the pipe file lives. Test seam.
     * plus any configuration key from the moduledoc.
@@ -362,7 +364,13 @@ defmodule Arbiter.Sessions.Stream do
         })
       end
 
-    state = if cols && rows, do: apply_resize(state, cols, rows), else: state
+    # `0` is truthy in Elixir, and a browser really does report it: xterm.js's
+    # fit addon measures 0×0 for a terminal whose container has not been laid
+    # out yet — a background tab, or a join before first paint. Handing that to
+    # `Terminal.resize/4`, whose contract (and every implementation's guard) is
+    # `pos_integer()`, would kill the reader *every other client shares*. Same
+    # check as `resize/4`'s own guard.
+    state = if geometry?(cols, rows), do: apply_resize(state, cols, rows), else: state
     {resume, state} = resume(state, last_seq)
 
     # Everyone *else* learns the client count changed; the joiner is told in
@@ -711,6 +719,10 @@ defmodule Arbiter.Sessions.Stream do
         broadcast_meta(state)
         state
     end
+  end
+
+  defp geometry?(cols, rows) do
+    is_integer(cols) and cols > 0 and is_integer(rows) and rows > 0
   end
 
   defp apply_resize(state, cols, rows) do

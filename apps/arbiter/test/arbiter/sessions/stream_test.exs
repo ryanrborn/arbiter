@@ -428,6 +428,33 @@ defmodule Arbiter.Sessions.StreamTest do
       assert {:resize, 132, 43} in ScriptedPty.calls(id)
     end
 
+    test "a client reporting a zero-sized terminal does not take the reader down", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+      reader = Stream.whereis(id)
+
+      second = spawn_client()
+
+      # xterm.js's fit addon measures 0×0 for a terminal whose container has
+      # not been laid out yet — a background tab, or a join before first paint.
+      # The reader is shared, so passing that through to `Terminal.resize/4`
+      # (`pos_integer()` on both axes, guarded in every implementation) would
+      # kill *this* client's stream and everybody else's with it.
+      assert {:ok, _} = attach(session, opts, subscriber: second, cols: 0, rows: 0)
+
+      assert Stream.whereis(id) == reader
+      assert Stream.stats(id).cols == 80
+      assert Stream.stats(id).rows == 24
+      refute {:resize, 0, 0} in ScriptedPty.calls(id)
+
+      ScriptedPty.emit(id, "still here")
+      assert_stdout(id, "still here")
+      assert_receive {:client_got, ^second, {:session_stdout, ^id, _frame}}, 1_000
+    end
+
     test "last writer wins — the most recent resize is the pane size", %{
       session: session,
       id: id,

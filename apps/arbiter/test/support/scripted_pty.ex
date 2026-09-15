@@ -39,7 +39,8 @@ defmodule Arbiter.Test.ScriptedPty do
     path: nil,
     input: <<>>,
     calls: [],
-    start_stream_result: :ok
+    start_stream_result: :ok,
+    on_start_stream: nil
   }
 
   # -- test API ---------------------------------------------------------------
@@ -80,9 +81,22 @@ defmodule Arbiter.Test.ScriptedPty do
 
   # -- Terminal behaviour -----------------------------------------------------
 
+  # `:on_start_stream` is a one-argument function handed the reader's `opts`.
+  # It runs *inside the reader*, from the `handle_continue(:open, …)` that
+  # precedes the reader's reply to the `attach/2` that started it — which makes
+  # it the one place a test can act while a joining client is still blocked in
+  # that call. `session_channel_test.exs` uses it to force the join-ordering
+  # race deterministically.
   @impl Arbiter.Sessions.Terminal
-  def start_stream(%Session{id: id}, path, _opts) do
-    GenServer.call(server(), {:start_stream, id, path})
+  def start_stream(%Session{id: id}, path, opts) do
+    result = GenServer.call(server(), {:start_stream, id, path})
+
+    case fetch(id).on_start_stream do
+      nil -> :ok
+      fun when is_function(fun, 1) -> fun.(opts)
+    end
+
+    result
   end
 
   @impl Arbiter.Sessions.Terminal
@@ -104,8 +118,13 @@ defmodule Arbiter.Test.ScriptedPty do
     GenServer.call(server(), {:send_input, id, bytes})
   end
 
+  # Guarded exactly like `Terminal.Tmux.resize/4`, and for the same reason: the
+  # behaviour's contract is `pos_integer()` on both axes. A stub that quietly
+  # accepted `0` would let a caller that crashes the real backend pass the
+  # suite.
   @impl Arbiter.Sessions.Terminal
-  def resize(%Session{id: id}, cols, rows, _opts) do
+  def resize(%Session{id: id}, cols, rows, _opts)
+      when is_integer(cols) and cols > 0 and is_integer(rows) and rows > 0 do
     GenServer.call(
       server(),
       {:record, id, {:resize, cols, rows}, %{cols: cols, rows: rows}}

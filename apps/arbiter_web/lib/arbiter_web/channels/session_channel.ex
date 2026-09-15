@@ -48,6 +48,21 @@ defmodule ArbiterWeb.SessionChannel do
   seen on **this** channel is dropped. The counter is per channel process, so
   a genuinely new connection starting again at 1 is not affected.
 
+  ## Join ordering
+
+  A client may rely on the first thing it receives after a successful `join`
+  being its `snapshot` (or its replay frames) — never a live `stdout`. The
+  reader starts streaming to this pid during the attach call, so frames can
+  land before the join flush runs; they are held and delivered in order
+  afterwards rather than jumping the queue. Without that, a client would have
+  to repaint backwards over bytes it had already drawn.
+
+  ## Geometry
+
+  `cols`/`rows` are only honoured when both are positive integers. Anything
+  else — absent, non-integer, or the `0` a browser reports for a terminal it
+  has not laid out yet — means "no opinion", and the pane keeps its size.
+
   ## Backpressure
 
   Every pushed frame is acknowledged back to the reader
@@ -73,6 +88,8 @@ defmodule ArbiterWeb.SessionChannel do
         |> assign(:session_id, session_id)
         |> assign(:attached, attached)
         |> assign(:last_stdin_seq, 0)
+        |> assign(:joined?, false)
+        |> assign(:pending, [])
 
       send(self(), :after_join)
 
@@ -108,33 +125,26 @@ defmodule ArbiterWeb.SessionChannel do
 
     Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(session_id))
 
-    {:noreply, assign(socket, :attached, %{attached | replay: [], snapshot: nil})}
+    socket
+    |> assign(:attached, %{attached | replay: [], snapshot: nil})
+    |> assign(:joined?, true)
+    |> drain_pending()
   end
 
-  def handle_info({:session_stdout, session_id, frame}, socket) do
-    push_frame(socket, session_id, frame)
-    {:noreply, socket}
-  end
+  def handle_info({:session_stdout, _id, _frame} = message, socket),
+    do: stream_event(message, socket)
 
-  def handle_info({:session_snapshot, _session_id, payload}, socket) do
-    push(socket, "snapshot", payload)
-    {:noreply, socket}
-  end
+  def handle_info({:session_snapshot, _id, _payload} = message, socket),
+    do: stream_event(message, socket)
 
-  def handle_info({:session_meta, _session_id, meta}, socket) do
-    push(socket, "meta", meta)
-    {:noreply, socket}
-  end
+  def handle_info({:session_meta, _id, _meta} = message, socket),
+    do: stream_event(message, socket)
 
-  def handle_info({:session_exit, _session_id, payload}, socket) do
-    push(socket, "exit", payload)
-    {:stop, {:shutdown, :session_exited}, socket}
-  end
+  def handle_info({:session_exit, _id, _payload} = message, socket),
+    do: stream_event(message, socket)
 
-  def handle_info({:session_usage, _session_id, payload}, socket) do
-    push(socket, "usage", payload)
-    {:noreply, socket}
-  end
+  def handle_info({:session_usage, _id, _payload} = message, socket),
+    do: stream_event(message, socket)
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
@@ -240,10 +250,64 @@ defmodule ArbiterWeb.SessionChannel do
   defp attach(session, params) do
     Stream.attach(session,
       subscriber: self(),
-      last_seq: positive_integer(params["last_seq"]),
+      last_seq: non_neg_integer(params["last_seq"]),
       cols: positive_integer(params["cols"]),
       rows: positive_integer(params["rows"])
     )
+  end
+
+  # The join-ordering barrier.
+  #
+  # `Stream.attach/2` registers this pid as a subscriber *inside* the reader's
+  # `GenServer.call`, so the reader's next poll can deliver a live frame before
+  # `join/3` has got as far as `send(self(), :after_join)`. Pushing that frame
+  # straight through would put a `seq` newer than the snapshot on the wire
+  # ahead of it, and a client following the protocol would then repaint
+  # backwards over bytes it had already rendered. So anything that arrives in
+  # that window is held and drained, in arrival order, the moment the
+  # snapshot/replay flush is done.
+  defp stream_event(message, %{assigns: %{joined?: false}} = socket) do
+    {:noreply, assign(socket, :pending, [message | socket.assigns.pending])}
+  end
+
+  defp stream_event(message, socket), do: dispatch(message, socket)
+
+  defp drain_pending(socket) do
+    drain(Enum.reverse(socket.assigns.pending), assign(socket, :pending, []))
+  end
+
+  defp drain([], socket), do: {:noreply, socket}
+
+  defp drain([message | rest], socket) do
+    case dispatch(message, socket) do
+      {:noreply, socket} -> drain(rest, socket)
+      stop -> stop
+    end
+  end
+
+  defp dispatch({:session_stdout, session_id, frame}, socket) do
+    push_frame(socket, session_id, frame)
+    {:noreply, socket}
+  end
+
+  defp dispatch({:session_snapshot, _session_id, payload}, socket) do
+    push(socket, "snapshot", payload)
+    {:noreply, socket}
+  end
+
+  defp dispatch({:session_meta, _session_id, meta}, socket) do
+    push(socket, "meta", meta)
+    {:noreply, socket}
+  end
+
+  defp dispatch({:session_exit, _session_id, payload}, socket) do
+    push(socket, "exit", payload)
+    {:stop, {:shutdown, :session_exited}, socket}
+  end
+
+  defp dispatch({:session_usage, _session_id, payload}, socket) do
+    push(socket, "usage", payload)
+    {:noreply, socket}
   end
 
   # The reader is told the bytes are on the wire the moment they are handed to
@@ -254,7 +318,17 @@ defmodule ArbiterWeb.SessionChannel do
     Stream.ack(session_id, byte_size(frame))
   end
 
-  defp positive_integer(value) when is_integer(value) and value >= 0, do: value
+  # `last_seq` is a byte offset, so `0` — the very start of the stream — is a
+  # legitimate resume point.
+  defp non_neg_integer(value) when is_integer(value) and value >= 0, do: value
+  defp non_neg_integer(_value), do: nil
+
+  # Geometry is not: `Terminal.resize/4` takes `pos_integer()`. xterm.js's fit
+  # addon reports `0` cols/rows for a terminal whose container has not been laid
+  # out yet (a background tab, a join before first paint), and the reader is
+  # shared, so letting a `0` through would take every other attached client's
+  # stream down with it. `nil` means "no opinion" — keep the pane's size.
+  defp positive_integer(value) when is_integer(value) and value > 0, do: value
   defp positive_integer(_value), do: nil
 
   defp error_code({:self_kill, _detail}), do: "self_kill_refused"

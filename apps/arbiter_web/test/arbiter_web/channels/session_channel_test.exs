@@ -113,6 +113,55 @@ defmodule ArbiterWeb.SessionChannelTest do
       assert_push "meta", %{cols: 100, rows: 30, attached_clients: 1, title: "scripted"}
     end
 
+    test "a frame delivered during the join is pushed after the snapshot", %{
+      session: session,
+      topic: topic
+    } do
+      early = Frame.encode(7, "early")
+
+      # The reader starts streaming to the joining pid inside `Stream.attach/2`,
+      # so a live frame can reach this channel's mailbox before `join/3` has got
+      # as far as queueing its own `:after_join`. `:on_start_stream` runs in the
+      # reader while the channel is blocked in exactly that call, which makes
+      # the race — otherwise sub-microsecond against a 25 ms poll — deterministic.
+      ScriptedPty.put(session.id,
+        on_start_stream: fn opts ->
+          send(opts[:subscriber], {:session_stdout, session.id, early})
+        end
+      )
+
+      assert {:ok, _reply, _socket} = join_session(topic)
+
+      # Strict mailbox order: a live frame must never precede the snapshot whose
+      # seq it is newer than, or the client repaints backwards over it.
+      assert {"snapshot", %{data: "SNAP"}} = next_push()
+      assert {"meta", %{attached_clients: 1}} = next_push()
+      assert {"stdout", {:binary, ^early}} = next_push()
+    end
+
+    test "a client reporting a zero-sized terminal leaves the others streaming", %{
+      session: session,
+      topic: topic
+    } do
+      {:ok, _reply, first} = join_session(topic)
+      assert_push "snapshot", %{}
+      assert_push "meta", %{cols: 80, rows: 24, attached_clients: 1}
+
+      # xterm.js's fit addon reports 0 cols/rows for a terminal whose container
+      # has not been laid out — a background tab, or a join before first paint.
+      # The reader is shared, so a `0` reaching `Terminal.resize/4` would take
+      # this already-attached client's stream down too.
+      _second = spawn_second_client(topic, %{"cols" => 0, "rows" => 0})
+
+      assert_push "meta", %{cols: 80, rows: 24, attached_clients: 2}
+      assert Stream.stats(session.id).cols == 80
+
+      ScriptedPty.emit(session.id, "still here")
+      assert_push "stdout", {:binary, frame}
+      assert {:ok, 10, "still here"} = Frame.decode(frame)
+      assert Process.alive?(first.channel_pid)
+    end
+
     test "an unknown session is refused with error :session_gone" do
       assert {:error, %{code: "session_gone"}} = join_session("session:#{Ash.UUID.generate()}")
     end
@@ -381,12 +430,12 @@ defmodule ArbiterWeb.SessionChannelTest do
   # A second channel client on the same topic. It joins from its **own**
   # process, so it is that process — not the test — that plays transport for
   # the second socket, and the two clients' traffic stays distinguishable.
-  defp spawn_second_client(topic) do
+  defp spawn_second_client(topic, params \\ %{}) do
     parent = self()
 
     spawn_link(fn ->
       {:ok, _reply, socket} =
-        subscribe_and_join(session_socket(nil, parent), SessionChannel, topic, %{})
+        subscribe_and_join(session_socket(nil, parent), SessionChannel, topic, params)
 
       send(parent, {:second, :joined, socket})
       relay(parent)
@@ -409,6 +458,14 @@ defmodule ArbiterWeb.SessionChannelTest do
     end
 
     relay(parent)
+  end
+
+  # `assert_push` matches on event name, so it happily skips over an earlier
+  # push to find the one it wants — useless for asserting *order*. This takes
+  # the next push whatever it is, so a sequence of calls is mailbox order.
+  defp next_push do
+    assert_receive %Phoenix.Socket.Message{event: event, payload: payload}, 1_000
+    {event, payload}
   end
 
   defp leave_and_flush(socket) do
