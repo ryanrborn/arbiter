@@ -206,6 +206,23 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert {:ok, %{status: :running}} = Sessions.get(session.id)
     end
 
+    test "keep_alive can be pinned and unpinned from the session page (§4.6 item 2)", %{
+      conn: conn
+    } do
+      session = launch!()
+      refute session.keep_alive
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      html = view |> element("#toggle-keep-alive") |> render_click()
+      assert html =~ "Unpin keep_alive"
+      assert {:ok, %{keep_alive: true}} = Sessions.get(session.id)
+
+      html = view |> element("#toggle-keep-alive") |> render_click()
+      assert html =~ "Pin keep_alive"
+      assert {:ok, %{keep_alive: false}} = Sessions.get(session.id)
+    end
+
     test "kill from the session page also needs a confirmation", %{conn: conn} do
       session = launch!()
 

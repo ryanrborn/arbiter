@@ -126,7 +126,7 @@ defmodule ArbiterCli.Cmd.Session do
 
     case rest do
       [id | _] ->
-        socket = socket_path(id)
+        socket = require_socket_path(id)
 
         unless File.exists?(socket) do
           Output.die(
@@ -176,8 +176,23 @@ defmodule ArbiterCli.Cmd.Session do
     end
   end
 
-  defp socket_path(id) do
-    runtime_dir = System.get_env("XDG_RUNTIME_DIR") || "/tmp"
-    Path.join([runtime_dir, "arbiter", @socket_prefix <> id <> ".sock"])
+  # Server-side (`Arbiter.Sessions.Naming.runtime_dir/0`) has no `/tmp`
+  # fallback — `Sessions.launch/1` refuses to launch at all without
+  # `XDG_RUNTIME_DIR`, so a socket can never actually exist under `/tmp`.
+  # Inventing that path here would send the operator chasing a location the
+  # server would never have used; die with the real cause instead.
+  defp require_socket_path(id) do
+    case System.get_env("XDG_RUNTIME_DIR") do
+      nil ->
+        Output.die(
+          "XDG_RUNTIME_DIR is unset",
+          "Coordinator sessions live under a systemd user session's runtime " <>
+            "dir. Run from a real login session, or `loginctl enable-linger $USER` " <>
+            "and `export XDG_RUNTIME_DIR=/run/user/$(id -u)`."
+        )
+
+      runtime_dir ->
+        Path.join([runtime_dir, "arbiter", @socket_prefix <> id <> ".sock"])
+    end
   end
 end

@@ -47,6 +47,12 @@ defmodule Arbiter.Sessions.OrphanReaper do
   @default_interval_ms 15 * 60_000
   @default_grace_ms 60 * 60_000
 
+  # Passed to `Adoption.sweep/1`'s `:launch_grace_ms`: this sweep runs on a
+  # timer while the app is live, unlike the boot-only sweep, so a launch in
+  # `Sessions.launch/1`'s row-written-but-not-yet-`:running` window can land
+  # inside a sweep for real. See `Adoption.sweep/1`'s doc for the race.
+  @launch_grace_ms 30_000
+
   @doc false
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -68,7 +74,12 @@ defmodule Arbiter.Sessions.OrphanReaper do
     grace_ms = Keyword.get(opts, :grace_ms, cfg(:grace_ms, @default_grace_ms))
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
-    case Adoption.sweep(runner: runner) do
+    case Adoption.sweep(
+           runner: runner,
+           context: "periodic orphan-reaper sweep",
+           now: now,
+           launch_grace_ms: @launch_grace_ms
+         ) do
       {:ok, result} ->
         {to_kill, updated_seen} = decide(seen, result.orphans, now, grace_ms)
         Enum.each(to_kill, &kill_orphan(&1, runner))
@@ -160,6 +171,10 @@ defmodule Arbiter.Sessions.OrphanReaper do
       interval_ms: cfg_opt(:interval_ms, opts, @default_interval_ms),
       grace_ms: cfg_opt(:grace_ms, opts, @default_grace_ms),
       runner: Keyword.get(opts, :runner),
+      # Test seam: defaults to the real global guard. Overridable so the
+      # primary-gate branch below can be asserted without standing up a
+      # losing `Arbiter.SingleInstance` lock.
+      primary_check?: Keyword.get(opts, :primary_check?, &Arbiter.SingleInstance.primary?/0),
       seen: %{}
     }
 
@@ -170,9 +185,22 @@ defmodule Arbiter.Sessions.OrphanReaper do
 
   @impl true
   def handle_info(:sweep, state) do
-    {_result, seen} = sweep_once(state.seen, sweep_opts(state))
+    # Gated exactly like `Adoption.sweep_on_boot/1`: `sweep_once/2` calls
+    # `Adoption.sweep/1`, which is not read-only — it marks rows `:running` or
+    # `:ended`. A duplicate/secondary instance running this on a 15-minute
+    # timer, unlike the boot-only sweep this replaced, would otherwise mark
+    # every live session `:ended` under the primary on its next tick.
+    state =
+      if state.primary_check?.() do
+        {_result, seen} = sweep_once(state.seen, sweep_opts(state))
+        %{state | seen: seen}
+      else
+        Logger.warning("Arbiter.Sessions.OrphanReaper sweep skipped: not the primary instance")
+        state
+      end
+
     schedule(self(), state.interval_ms)
-    {:noreply, %{state | seen: seen}}
+    {:noreply, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}

@@ -71,15 +71,38 @@ defmodule Arbiter.Sessions.Adoption do
         }
 
   @doc """
-  Run the sweep. Options: `:runner` (see `Arbiter.Sessions.Runner`).
+  Run the sweep. Options:
+
+    * `:runner` — see `Arbiter.Sessions.Runner`.
+    * `:context` — human-readable phrase for the `end_reason` written on rows
+      this sweep ends, e.g. `"adoption sweep at boot"` (default) or
+      `"periodic orphan-reaper sweep"` — the reason should say which one
+      actually ended the row (§4.6: "say *why* it ended").
+    * `:now` — test seam for the `:starting`-row launch grace below.
+    * `:launch_grace_ms` — how long a `:starting` row is left alone before
+      the sweep is allowed to judge it (default `0`, i.e. no grace).
+      `Sessions.launch/1` writes the row, then provisions, then starts the
+      scope — a row can be `:starting` with neither a live unit nor a live
+      socket for that whole window. That race is harmless for the boot-only
+      sweep (nothing else is launching sessions while the BEAM comes up, and
+      a `:starting` row surviving a restart is exactly a crashed launch this
+      sweep exists to clean up — hence the `0` default). It stops being
+      harmless once a sweep runs on a timer while the app is live
+      (`Arbiter.Sessions.OrphanReaper`), where a launch can land inside a
+      sweep for real: the sweep would mark the row `:ended` under the
+      launcher, and `start_scope/2`'s later `mark_running` would resurrect an
+      already-ended row. Callers that run periodically pass a nonzero grace.
   """
   @spec sweep(keyword()) :: {:ok, result()} | {:error, term()}
   def sweep(opts \\ []) do
     runner = Sessions.runner(opts)
+    context = Keyword.get(opts, :context, "adoption sweep at boot")
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    launch_grace_ms = Keyword.get(opts, :launch_grace_ms, 0)
 
     with {:ok, units} <- live_units(runner) do
       sockets = live_sockets(runner)
-      reconcile(units, sockets)
+      reconcile(units, sockets, context, now, launch_grace_ms)
     end
   end
 
@@ -179,12 +202,13 @@ defmodule Arbiter.Sessions.Adoption do
 
   # -- reconciliation ---------------------------------------------------------
 
-  defp reconcile(units, sockets) do
+  defp reconcile(units, sockets, context, now, launch_grace_ms) do
     unit_set = MapSet.new(units)
     socket_set = MapSet.new(sockets)
 
     {adopted, ended} =
-      open_rows()
+      now
+      |> open_rows(launch_grace_ms)
       |> Enum.split_with(&live?(&1, unit_set, socket_set))
 
     adopted_ids =
@@ -208,7 +232,7 @@ defmodule Arbiter.Sessions.Adoption do
       for session <- ended, reduce: [] do
         acc ->
           reason =
-            "scope #{session.scope_unit} is gone (adoption sweep at boot) — " <>
+            "scope #{session.scope_unit} is gone (#{context}) — " <>
               "no live unit and no tmux server on #{session.tmux_socket}"
 
           case Sessions.mark_ended(session, reason) do
@@ -240,12 +264,21 @@ defmodule Arbiter.Sessions.Adoption do
 
   # Every row the sweep is allowed to judge: an `:ended` row is history, and
   # re-adopting one would resurrect a session the operator deliberately killed.
-  defp open_rows do
+  # A `:starting` row younger than `launch_grace_ms` is excluded too — see
+  # `sweep/1`'s `:launch_grace_ms` doc.
+  defp open_rows(now, launch_grace_ms) do
     Session
     |> Ash.Query.filter(status != :ended)
     |> Ash.Query.sort(started_at: :asc)
     |> Ash.read!()
+    |> Enum.reject(&mid_launch?(&1, now, launch_grace_ms))
   end
+
+  defp mid_launch?(%Session{status: :starting, started_at: started_at}, now, launch_grace_ms) do
+    DateTime.diff(now, started_at, :millisecond) < launch_grace_ms
+  end
+
+  defp mid_launch?(_session, _now, _launch_grace_ms), do: false
 
   defp live?(session, unit_set, socket_set) do
     MapSet.member?(unit_set, session.scope_unit) or

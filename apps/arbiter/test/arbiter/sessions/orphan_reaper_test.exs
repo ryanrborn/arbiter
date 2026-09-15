@@ -156,4 +156,51 @@ defmodule Arbiter.Sessions.OrphanReaperTest do
       assert seen_after == seen_before
     end
   end
+
+  describe "the periodic sweep's primary gate" do
+    # `SessionRunnerStub`'s script lives in the *calling* process's dictionary
+    # (see its moduledoc), and `sweep_once/2` here runs inside the GenServer's
+    # own process — so these tests read the "skipped" log line as the signal
+    # rather than tracking runner calls, which would need a cross-process
+    # double to observe from here.
+    test "a secondary instance's :sweep tick is skipped and logged" do
+      {:ok, pid} =
+        OrphanReaper.start_link(
+          name: nil,
+          enabled: false,
+          runner: SessionRunnerStub,
+          grace_ms: 3600_000,
+          primary_check?: fn -> false end
+        )
+
+      log =
+        with_log(fn ->
+          send(pid, :sweep)
+          _ = :sys.get_state(pid)
+        end)
+        |> elem(1)
+
+      assert log =~ "not the primary instance"
+    end
+
+    test "a primary instance's :sweep tick runs the sweep, unskipped" do
+      {:ok, pid} =
+        OrphanReaper.start_link(
+          name: nil,
+          enabled: false,
+          runner: SessionRunnerStub,
+          grace_ms: 3600_000,
+          primary_check?: fn -> true end
+        )
+
+      log =
+        with_log(fn ->
+          send(pid, :sweep)
+          _ = :sys.get_state(pid)
+        end)
+        |> elem(1)
+
+      refute log =~ "not the primary instance"
+    end
+  end
 end

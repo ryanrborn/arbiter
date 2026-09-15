@@ -181,6 +181,18 @@ defmodule ArbiterWeb.SessionChannelTest do
       assert {:error, %{code: "bridge_unavailable", detail: detail}} = join_session(topic)
       assert detail =~ "tmux_failed"
     end
+
+    test "a join stamps last_client_at (§4.6 item 2's idle-deadline input)", %{
+      session: session,
+      topic: topic
+    } do
+      assert is_nil(session.last_client_at)
+
+      assert {:ok, _reply, _socket} = join_session(topic)
+
+      assert {:ok, reloaded} = Sessions.get(session.id)
+      assert %DateTime{} = reloaded.last_client_at
+    end
   end
 
   describe "stdout (AC 1)" do
