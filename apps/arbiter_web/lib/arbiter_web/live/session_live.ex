@@ -69,7 +69,15 @@ defmodule ArbiterWeb.SessionLive do
   def mount(%{"id" => id}, _session, socket) do
     case Sessions.get(id) do
       {:ok, session} ->
-        if connected?(socket), do: Process.send_after(self(), :terminal_stall_check, @stall_ms)
+        if connected?(socket) do
+          Process.send_after(self(), :terminal_stall_check, @stall_ms)
+          # bd-bsdeb2 finding 4: the hook-driven `agent_exited` path only fires
+          # when a `.SessionTerminal` hook is actually mounted and connected —
+          # a session ended by the orphan reaper (AC 2) with no client hook
+          # live (post-restart, or a stalled connect) would otherwise show
+          # `running` until reload.
+          Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.lifecycle_topic())
+        end
 
         {:ok,
          socket
@@ -174,10 +182,31 @@ defmodule ArbiterWeb.SessionLive do
     {:noreply, assign(socket, :terminal_stalled?, stalled?)}
   end
 
+  # From `Sessions.mark_ended/2` (Kill, an on-its-own exit, or the orphan
+  # reaper) — repaint even when no `.SessionTerminal` hook is mounted to fire
+  # `agent_exited` (bd-bsdeb2 finding 4).
+  def handle_info(
+        {:session_ended, session_id},
+        %{assigns: %{session: %{id: session_id}}} = socket
+      ) do
+    session =
+      case Sessions.get(session_id) do
+        {:ok, session} -> session
+        {:error, :not_found} -> socket.assigns.session
+      end
+
+    {:noreply, socket |> assign(:session, session) |> put_terminal()}
+  end
+
+  def handle_info({:session_ended, _other_session_id}, socket), do: {:noreply, socket}
+
   # `ArbiterWeb.LiveHooks` subscribes every view to the coordinator mailbox and
   # quota topics and lets their messages fall through (`:cont`), so any page
   # with a `handle_info/2` of its own has to tolerate them.
-  def handle_info(_message, socket), do: {:noreply, socket}
+  def handle_info(message, socket) do
+    Logger.debug("SessionLive: unhandled message #{inspect(message)}")
+    {:noreply, socket}
+  end
 
   # Whether there is anything to attach to is re-decided on every change, so a
   # session that ends while the page is open swaps to the placeholder without a
