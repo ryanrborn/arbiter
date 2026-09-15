@@ -205,8 +205,17 @@ defmodule Arbiter.Sessions.Provisioning do
       cwd: cwd,
       auth_mode: session.auth_mode,
       source_dir: credentials_source(opts),
-      primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+      primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
+      # Pre-approve exactly the server `write_mcp_config/3` is about to declare,
+      # and nothing when it is about to declare none (bd-5xlkkj). Without this a
+      # first launch stops on "New MCP server found in this project: arbiter"
+      # with nobody at the keyboard to answer it.
+      mcp_servers: mcp_servers(opts)
     )
+  end
+
+  defp mcp_servers(opts) do
+    if Keyword.get(opts, :mcp, MCP.enabled?()), do: [MCP.server_name()], else: []
   end
 
   @doc """

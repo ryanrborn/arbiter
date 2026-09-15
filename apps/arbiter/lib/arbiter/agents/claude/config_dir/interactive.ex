@@ -15,6 +15,20 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
   | Login-method wizard | `hasCompletedOnboarding: true` + `lastOnboardingVersion` |
   | "Is this a folder you trust?" | `projects.<cwd>.hasTrustDialogAccepted: true` |
 
+  The live check of the first real browser session (bd-5xlkkj) found two more
+  that §9.2 had not measured, because they only fire once the *other* three are
+  answered and the TUI actually gets far enough to load a project:
+
+  | Gate | Key written here |
+  |---|---|
+  | "New MCP server found in this project: arbiter" | `enabledMcpjsonServers` (settings) + `projects.<cwd>.enabledMcpjsonServers` |
+  | "WARNING: Claude Code running in Bypass Permissions mode" | not seeded — *removed*, by running the session in `auto` mode (see `settings/1`) |
+
+  Key names verified against the installed CLI (Claude Code 2.1.272) rather
+  than assumed: the settings schema describes `enabledMcpjsonServers` as "List
+  of approved MCP servers from .mcp.json", and the permission-mode enum is
+  `["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]`.
+
   `--print` never reaches any of them, which is why `ConfigDir` does not seed
   them today — it writes `settings.json` but never `.claude.json`. In a
   detached tmux pane an unseeded launch does not fail, it **hangs**: a session
@@ -74,7 +88,8 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
           source_dir: String.t() | nil,
           primary_checkout: String.t() | nil,
           theme: String.t(),
-          extra_deny: [String.t()]
+          extra_deny: [String.t()],
+          mcp_servers: [String.t()]
         ]
 
   @doc """
@@ -95,6 +110,10 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
       omits the rule.
     * `:theme` — default `#{@default_theme}`.
     * `:extra_deny` — additional Claude deny rules to union in.
+    * `:mcp_servers` — the `.mcp.json` server keys to pre-approve, so first
+      launch does not stop on "New MCP server found in this project". Defaults
+      to `[Arbiter.MCP.server_name/0]`; `[]` writes no pre-approval at all,
+      which is the honest answer for a session provisioned with `mcp: false`.
 
   Returns `:ok`, or `{:error, reason}` when the directory could not be
   prepared. Unlike `ConfigDir.ensure/1` a failure is **not** degradable: a
@@ -123,34 +142,63 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
   @spec claude_json(map(), String.t(), opts()) :: map()
   def claude_json(existing, cwd, opts \\ []) when is_map(existing) and is_binary(cwd) do
     projects = Map.get(existing, "projects", %{})
-    project = projects |> Map.get(cwd, %{}) |> Map.put("hasTrustDialogAccepted", true)
+
+    project =
+      projects
+      |> Map.get(cwd, %{})
+      |> Map.put("hasTrustDialogAccepted", true)
+      |> put_mcp_approval(opts)
 
     existing
     |> Map.put("theme", Keyword.get(opts, :theme) || Map.get(existing, "theme") || @default_theme)
     |> Map.put("hasCompletedOnboarding", true)
     |> Map.put("lastOnboardingVersion", onboarding_version(existing, opts))
+    # Auto mode's own two one-time screens (bd-5xlkkj). Neither is a security
+    # gate — one is the "auto mode is now the default" notice, the other the
+    # auto-mode entry warning — but both are text an unattended launch would
+    # otherwise put in front of a session before its first prompt.
+    |> Map.put("hasSeenAutoDefaultNotice", true)
+    |> Map.put("hasSeenAutoModeEntryWarning", true)
     |> Map.put("projects", Map.put(projects, cwd, project))
   end
 
   @doc """
-  The session `settings.json` document: the install-wide hardened floor
-  (`Arbiter.Agents.SecurityPolicy.default/0`) plus the §10.2 layer-3 deny rules
-  for the primary checkout.
+  The session `settings.json` document: the **interactive** hardened floor
+  (`Arbiter.Agents.SecurityPolicy.interactive_session/0`) plus the §10.2
+  layer-3 deny rules for the primary checkout, plus the two first-launch
+  pre-answers this file exists to give (bd-5xlkkj).
 
   Layer 3 is a **guardrail, not a sandbox** — a session runs as the operator's
   user and can reach anything that user can (§10.2's own caveat). It catches
   the accident case, which is the observed failure mode: a careless edit in the
   live checkout that Phoenix hot-reload picks up half-written.
+
+  ## Not the worker profile
+
+  This used to be `SecurityPolicy.default/0` — the **headless worker's**
+  document, `bypassPermissions` and all. That was wrong in both directions: it
+  handed every session the bypass-mode acceptance warning on first launch, and
+  it denied `Monitor`/`ScheduleWakeup`, which a coordinator session needs to
+  watch the `/events` stream. `interactive_session/0` is the separate profile;
+  the worker's is untouched.
+
+  `skipAutoPermissionPrompt` suppresses auto mode's own entry warning. It is
+  only honoured from the policy, user and flag settings sources — the user
+  source is exactly this file, since a session's `CLAUDE_CONFIG_DIR` is its
+  own (§9.1).
   """
   @spec settings(opts()) :: map()
   def settings(opts \\ []) do
     extra = checkout_deny_rules(primary_checkout(opts)) ++ Keyword.get(opts, :extra_deny, [])
-    policy = SecurityPolicy.default()
+    policy = SecurityPolicy.interactive_session()
 
-    Security.settings(%{
+    %{
       policy
       | permissions: %{policy.permissions | deny: policy.permissions.deny ++ extra}
-    })
+    }
+    |> Security.settings()
+    |> Map.put("skipAutoPermissionPrompt", true)
+    |> put_mcp_approval(opts)
   end
 
   @doc """
@@ -175,7 +223,36 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
   @spec filenames() :: [String.t()]
   def filenames, do: [@claude_json, @settings_json]
 
+  @doc """
+  The `.mcp.json` server keys a session pre-approves, resolved from `opts`.
+
+  Defaults to the one server provisioning actually writes
+  (`Arbiter.MCP.server_name/0`). Pre-approving a *named* server rather than
+  setting `enableAllProjectMcpServers` is the point: the session's cwd is a
+  scaffold we wrote, but blanket approval would also cover any `.mcp.json` a
+  git worktree created inside it later brings along.
+  """
+  @spec mcp_servers(opts()) :: [String.t()]
+  def mcp_servers(opts \\ []) do
+    case Keyword.get(opts, :mcp_servers) do
+      nil -> [Arbiter.MCP.server_name()]
+      servers when is_list(servers) -> Enum.filter(servers, &(is_binary(&1) and &1 != ""))
+    end
+  end
+
   # ---- internals ----------------------------------------------------------
+
+  # Two places read this, and which one answers depends on whether the cwd is a
+  # trusted workspace — so both get written. Verified against Claude Code
+  # 2.1.272: with only the settings key the server reports approved, and with
+  # only the `.claude.json` project key it reports approved too; with neither it
+  # reports "⏸ Pending approval (run `claude` to approve)".
+  defp put_mcp_approval(document, opts) do
+    case mcp_servers(opts) do
+      [] -> document
+      servers -> Map.put(document, "enabledMcpjsonServers", servers)
+    end
+  end
 
   defp write_claude_json(dir, cwd, opts) do
     path = Path.join(dir, @claude_json)
