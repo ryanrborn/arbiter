@@ -430,6 +430,24 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       refute html =~ "in the dispatch queue"
     end
 
+    test "no queue warning when the gated issue is already blocked by something else",
+         %{conn: conn, ws: ws} do
+      task = ready(issue(ws, %{issue_type: :task}))
+      existing = issue(ws)
+      {:ok, _} = Dependencies.add(task.id, existing.id, :depends_on)
+      target = issue(ws)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element("#rel-add-open") |> render_click()
+
+      view
+      |> form("#relationship-add-form", rel: %{phrase: "is_blocked_by", query: target.id})
+      |> render_change()
+
+      html = view |> element("#rel-candidate-#{target.id} button") |> render_click()
+      refute html =~ "in the dispatch queue"
+    end
+
     # Warning 2.
     test "warns that a running worker is not stopped, and links the worker page",
          %{conn: conn, ws: ws} do

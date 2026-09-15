@@ -1054,18 +1054,36 @@ defmodule ArbiterWeb.TaskDetailLive do
 
       {:error, reason} ->
         socket
-        |> assign(:rel_error, relationship_error_message(reason, from_id, to_id, phrase.type))
+        |> assign(:rel_error, relationship_error_message(reason, task.id, target_id, phrase))
         |> assign(:rel_cycle_path, relationship_cycle_path(reason, from_id, to_id, phrase.type))
     end
   end
 
-  # The resource's `unique_edge` identity reports itself as a generic invalid
-  # changeset; "already linked" is what the operator needs to read, and it is
-  # the same wording the typeahead greys the candidate with.
-  defp relationship_error_message(reason, from_id, to_id, type) do
-    if duplicate_edge?(from_id, to_id, type),
-      do: "#{from_id} and #{to_id} are already linked as #{type} — nothing to add.",
-      else: relationship_error_message(reason)
+  # Two facade rejections get re-worded rather than passed through, because
+  # both of the facade's own messages name the raw `(type, from, to)` triple
+  # this modal exists to hide (§3.3):
+  #
+  #   * the resource's `unique_edge` identity, which surfaces as a generic
+  #     invalid changeset — "already linked" is the useful reading, and it is
+  #     the same wording the typeahead greys a candidate with;
+  #   * the cycle, whose path is rendered underneath as linked ids instead.
+  #
+  # `:not_found` and `:cross_workspace` already read as plain sentences about
+  # the ids the operator typed, so they pass through unchanged.
+  defp relationship_error_message(reason, this_id, target_id, phrase) do
+    {from_id, to_id} = relationship_endpoints(phrase, this_id, target_id)
+
+    cond do
+      duplicate_edge?(from_id, to_id, phrase.type) ->
+        "#{this_id} already #{phrase.label} #{target_id} — they are already linked."
+
+      match?({:cyclic, _message}, reason) ->
+        "That would create a dependency cycle — everything on this path would " <>
+          "end up waiting on itself:"
+
+      true ->
+        relationship_error_message(reason)
+    end
   end
 
   defp relationship_error_message({_reason, message}) when is_binary(message), do: message
@@ -2799,19 +2817,17 @@ defmodule ArbiterWeb.TaskDetailLive do
             phx-submit="add_relationship"
             class="space-y-3"
           >
-            <div class="flex flex-wrap items-end gap-2">
-              <code class="text-xs pb-3 text-[var(--text-title)]">{@task_id}</code>
-              <div class="min-w-[14rem] flex-1">
-                <.input
-                  type="select"
-                  name="rel[phrase]"
-                  id="rel-phrase"
-                  label="…"
-                  options={@relationship_phrase_options}
-                  value={@rel_phrase}
-                />
-              </div>
-            </div>
+            <%!-- The id *is* the label: read top to bottom the control spells
+                 out "bd-x … is blocked by …", which is the sentence the
+                 operator is composing. --%>
+            <.input
+              type="select"
+              name="rel[phrase]"
+              id="rel-phrase"
+              label={"#{@task_id}…"}
+              options={@relationship_phrase_options}
+              value={@rel_phrase}
+            />
 
             <.input
               type="text"
@@ -2890,6 +2906,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               label="Note (optional)"
               value={@rel_note}
               rows="2"
+              phx-debounce="300"
               placeholder="Why does this relationship exist?"
             />
 
