@@ -50,6 +50,10 @@ defmodule ArbiterWeb.SessionLive do
   and the hook-painted status strip sits on its server-rendered "connecting…"
   forever. That is indistinguishable from a slow server unless the page says
   so.
+
+  Off-loopback (bd-2zskbb) is a different case decided at mount, not a stall:
+  no `.SessionTerminal` hook is ever rendered there, so the stall check is
+  skipped rather than firing a "Reload the page" banner that cannot help.
   """
 
   use ArbiterWeb, :live_view
@@ -180,7 +184,13 @@ defmodule ArbiterWeb.SessionLive do
 
   @impl true
   def handle_info(:terminal_stall_check, socket) do
-    stalled? = socket.assigns.terminal? and not socket.assigns.terminal_live?
+    # Off-loopback the LiveView socket connects fine but no `.SessionTerminal`
+    # hook is ever rendered (bd-2zskbb) — there is nothing to stall, and the
+    # remote notice already explains why, so this must not also fire the
+    # "Reload the page" banner, which cannot help there.
+    stalled? =
+      socket.assigns.terminal? and socket.assigns.loopback? and not socket.assigns.terminal_live?
+
     {:noreply, assign(socket, :terminal_stalled?, stalled?)}
   end
 
@@ -367,8 +377,19 @@ defmodule ArbiterWeb.SessionLive do
             >
               <.icon name="hero-lock-closed" class="size-5 text-[var(--text-label)]" />
               <p>This session's terminal is loopback-only by design.</p>
-              <p :if={@session.auth_mode == :seeded_credentials} class="text-[var(--text-label)]">
+              <p
+                :if={@session.auth_mode == :seeded_credentials and @session.remote_control}
+                class="text-[var(--text-label)]"
+              >
                 Reach it from another device via Remote Control.
+              </p>
+              <p
+                :if={@session.auth_mode == :seeded_credentials and not @session.remote_control}
+                class="text-[var(--text-label)]"
+              >
+                Remote Control (mode B, launched with <code>--remote-control</code>) is the
+                supported way to reach a session from another device — this one was not launched
+                with it.
               </p>
               <p :if={@session.auth_mode != :seeded_credentials} class="text-[var(--text-label)]">
                 This session runs under a workspace token (mode A), which does not support
