@@ -292,6 +292,56 @@ defmodule ArbiterWeb.SessionChannelTest do
       ref = push(socket, "resize", %{"cols" => 0, "rows" => -1})
       assert_reply ref, :error, %{code: "bad_payload"}
     end
+
+    # -- bd-14b11h ----------------------------------------------------------
+    #
+    # Navigating away from /sessions/<id> and back re-mounts the hook, which
+    # joins afresh. If the geometry it brings differs from the pane's, the
+    # snapshot the reader captures in the same call is content the pane
+    # reflowed for a size the agent has not redrawn at — the garbled terminal
+    # in #1733. The client cannot tell: by the time `meta` reaches it the pane
+    # has already been resized, so the reply says it outright.
+
+    test "a join that resizes the pane says so, so the client can force a repaint", %{
+      session: session,
+      topic: topic
+    } do
+      assert {:ok, %{resized: true}, _socket} =
+               join_session(topic, %{"cols" => 132, "rows" => 43})
+
+      assert {:resize, 132, 43} in ScriptedPty.calls(session.id)
+    end
+
+    test "a join that already matches the pane does not claim to have resized it", %{
+      topic: topic
+    } do
+      assert {:ok, %{resized: false}, _socket} =
+               join_session(topic, %{"cols" => 80, "rows" => 24})
+    end
+
+    test "a join that cannot measure itself does not claim to have resized it", %{topic: topic} do
+      assert {:ok, %{resized: false}, _socket} = join_session(topic, %{"cols" => 0, "rows" => 0})
+    end
+
+    test "redraw nudges the pane so the running agent repaints the whole screen", %{
+      session: session,
+      topic: topic
+    } do
+      {:ok, _reply, socket} = join_session(topic, %{"cols" => 100, "rows" => 30})
+      assert_push "snapshot", %{}
+      assert_push "meta", %{cols: 100, rows: 30}
+
+      ref = push(socket, "redraw", %{})
+      assert_reply ref, :ok, _reply
+
+      # SIGWINCH is the only lever a pane gives us, so the nudge is a resize
+      # one row short and straight back. It has to *end* at the real geometry.
+      resizes = for {:resize, cols, rows} <- ScriptedPty.calls(session.id), do: {cols, rows}
+      assert Enum.take(resizes, -2) == [{100, 29}, {100, 30}]
+
+      assert_push "meta", %{cols: 100, rows: 30}
+      assert Stream.stats(session.id).rows == 30
+    end
   end
 
   describe "resume (AC 3)" do

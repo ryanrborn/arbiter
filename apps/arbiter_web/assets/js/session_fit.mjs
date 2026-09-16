@@ -49,3 +49,66 @@ export function fitGeometry({
 function positive(value) {
   return Number.isFinite(value) && value > 0
 }
+
+// The number of animation frames a mount will wait for its container to get a
+// box before giving up and connecting anyway. ~20 frames is a third of a
+// second at 60Hz: long enough for a LiveView patch, a webfont swap and a
+// scrollbar appearing, short enough that a genuinely hidden pane (a background
+// tab, which never paints at all) still attaches promptly.
+const SETTLE_FRAMES = 20
+
+/**
+ * Measure until the pane has a box, then report it — once (bd-14b11h).
+ *
+ * The mount-time fit cannot be a single synchronous measurement. On a LiveView
+ * navigation the hook's `mounted()` runs inside the DOM patch, and the pane it
+ * is handed can still be 0x0; `fitGeometry` correctly refuses to size that, and
+ * the old code simply gave up, leaving xterm on its 80x24 construction default.
+ * That default is not inert: it is what the join's `cols`/`rows` carry, so it
+ * resizes the pane *every* attached client shares and the snapshot captured in
+ * the same breath is reflowed for a geometry the agent has not redrawn at.
+ *
+ * `measure` returns a geometry or `null`. `onSettled` is called exactly once,
+ * with the first geometry that measured, or with `null` when the budget ran
+ * out — the caller still has to connect either way. `schedule` is
+ * `requestAnimationFrame` in the browser and a list in the tests.
+ *
+ * Returns a `cancel()`: a hook that is navigated away from mid-settle must not
+ * come back to life and resize a pane it no longer owns.
+ */
+export function settleFit({
+  measure,
+  schedule,
+  onSettled = () => {},
+  frames = SETTLE_FRAMES
+}) {
+  let cancelled = false
+  let left = frames
+
+  const attempt = () => {
+    if (cancelled) return
+
+    const geometry = measure()
+
+    if (geometry) {
+      cancelled = true
+      onSettled(geometry)
+      return
+    }
+
+    if (left <= 0) {
+      cancelled = true
+      onSettled(null)
+      return
+    }
+
+    left -= 1
+    schedule(attempt)
+  }
+
+  attempt()
+
+  return () => {
+    cancelled = true
+  }
+}
