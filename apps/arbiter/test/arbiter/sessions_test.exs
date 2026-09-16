@@ -316,22 +316,44 @@ defmodule Arbiter.SessionsTest do
 
   describe "remote control bridge verification (§8.3)" do
     test "remote_control: true starts a background verify against config_dir, and a failure broadcasts bridge_unavailable" do
+      test_pid = self()
+
       session =
         launch!(
           remote_control: true,
-          bridge_verify_fun: fn _dir, _opts -> {:error, :bridge_unavailable} end
+          bridge_verify_fun: fn _dir, _opts ->
+            send(test_pid, {:verify_started, self()})
+            receive do: (:go -> :ok)
+            {:error, :bridge_unavailable}
+          end
         )
 
+      assert_receive {:verify_started, task_pid}, 1_000
+
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(session.id))
+      send(task_pid, :go)
 
       assert_receive {:session_error, session_id, %{code: "bridge_unavailable"}}, 1_000
       assert session_id == session.id
     end
 
     test "a bridge that comes up broadcasts nothing" do
-      session = launch!(remote_control: true, bridge_verify_fun: fn _dir, _opts -> :ok end)
+      test_pid = self()
+
+      session =
+        launch!(
+          remote_control: true,
+          bridge_verify_fun: fn _dir, _opts ->
+            send(test_pid, {:verify_started, self()})
+            receive do: (:go -> :ok)
+            :ok
+          end
+        )
+
+      assert_receive {:verify_started, task_pid}, 1_000
 
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(session.id))
+      send(task_pid, :go)
 
       refute_receive {:session_error, _id, _payload}, 200
     end

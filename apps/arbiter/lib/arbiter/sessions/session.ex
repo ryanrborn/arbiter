@@ -304,7 +304,7 @@ defmodule Arbiter.Sessions.Session do
       remote_control = Ash.Changeset.get_attribute(changeset, :remote_control)
       auth_mode = Ash.Changeset.get_attribute(changeset, :auth_mode)
 
-      if remote_control and auth_mode != :seeded_credentials do
+      if remote_control == true and auth_mode != :seeded_credentials do
         {:error,
          field: :remote_control,
          message: "requires auth_mode: :seeded_credentials (mode B) — see RFC §8.3"}

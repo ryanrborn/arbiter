@@ -478,6 +478,6 @@ defmodule ArbiterWeb.SessionIndexLive do
   defp dispatch_label(%{can_dispatch: true}), do: " · can dispatch"
   defp dispatch_label(_session), do: ""
 
-  defp remote_control_label(%{remote_control: true}), do: " · remote control"
+  defp remote_control_label(%{remote_control: true}), do: " · remote control requested"
   defp remote_control_label(_session), do: ""
 end

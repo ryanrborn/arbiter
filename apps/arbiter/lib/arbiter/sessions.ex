@@ -507,7 +507,7 @@ defmodule Arbiter.Sessions do
   says it is "the transport for the HUD feed… without deciding what goes in
   it", and `ArbiterWeb.SessionChannel` already subscribes there on join, so a
   second producer needs no new subscription. `ArbiterWeb.SessionChannel`
-  forwards this as the channel's own `error` event (`%{code, detail}}`),
+  forwards this as the channel's own `error` event (`%{code, detail}`),
   which is the one already wired end-to-end to the terminal's error surface
   — no client-side change needed.
 
