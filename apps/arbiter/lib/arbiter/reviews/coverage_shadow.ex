@@ -3,21 +3,27 @@ defmodule Arbiter.Reviews.CoverageShadow do
   P3 of `docs/review-coverage-and-guard-policy.md` (design #1635), §3.4/§6.3:
   **shadow mode**.
 
-  `Arbiter.Worker.Watchdog` and `Arbiter.Workflows.MergeQueue` both keep
-  deciding whether to merge exactly as they did before — on
-  `issues.last_reviewed_sha`, through `Arbiter.Mergers.ReviewedSha` — and
-  additionally hand their answer to `observe/1`, which computes
-  `Arbiter.Reviews.Coverage.decide/3` over the same head and records whether
-  the two agree. **The old answer is the one acted on.** Nothing in this
-  module can change a merge decision; `observe/1` returns `:ok` for every
-  input it is ever given, including ones whose `ctx` lookups raise.
+  `Arbiter.Worker.Watchdog` and `Arbiter.Workflows.MergeQueue` evaluate **both**
+  predicates on every guarded-merge decision — the `issues.last_reviewed_sha`
+  guard through `Arbiter.Mergers.ReviewedSha`, and
+  `Arbiter.Reviews.Coverage.decide/3` — and hand both answers to `observe/1`,
+  which records whether they agree. Nothing in this module can change a merge
+  decision: `observe/1` returns `:ok` for every input it is ever given,
+  including ones whose `ctx` lookups raise.
 
-  That is the whole point of the phase. P4 flips the read path over to
-  `decide/3` behind `merge.coverage_enabled`, and P5/P6 then delete the latch,
-  the suspension and the memo. Flipping on the strength of unit tests alone is
-  exactly the move that produced chain A — four guards in nine days, each
-  correct in isolation. So P3 buys the evidence first: run both predicates
-  against real production traffic and count the disagreements.
+  Which of the two is *acted on* is the call site's business, and since P4
+  (#1736) it is a workspace flag: `merge.coverage_enabled` off (the default)
+  is P3's arrangement — the old guard decides, the coverage predicate shadows
+  it — and on is the flip, where `decide/3` decides and the old guard shadows.
+  `:authoritative` on the observation is how the log line and the durable row
+  say which way round it was.
+
+  That is the whole point of the phase. Flipping on the strength of unit tests
+  alone is exactly the move that produced chain A — four guards in nine days,
+  each correct in isolation. So shadow mode buys the evidence first: run both
+  predicates against real production traffic and count the disagreements.
+  `preflip_gate/0` is that count, with §6.3's threshold and §4.5's one
+  documented exception applied.
 
   ## Reading the counter
 
@@ -48,9 +54,11 @@ defmodule Arbiter.Reviews.CoverageShadow do
   ## What shadow mode costs
 
   One forge round-trip per guarded-merge decision that reaches §3.2's rule 3 —
-  the three-dot compare `ctx.fetch_diff` performs. Rules 0, 1 and 2 answer
-  without it, so the healthy post-P1 path (a `:reviewed` row exists for the
-  head the forge reports) adds no forge traffic at all. The paths that do pay
+  the three-dot compare `ctx.fetch_diff` performs — and, since P4, one more on
+  any decision that reaches rule 2 with a covered local head (the ancestry
+  probe). Rules 0 and 1 answer without either, so the healthy post-P1 path (a
+  `:reviewed` row exists for the head the forge reports) adds no forge traffic
+  at all. The paths that do pay
   are the ones where the head already differs from the stamp, which in the
   Watchdog already fetched two diffs of its own (`base_merge_only?/3`); the
   MergeQueue's stale-SHA retry (§2.3's M3, unbounded by design until P6) is
@@ -62,12 +70,16 @@ defmodule Arbiter.Reviews.CoverageShadow do
 
   §3.4 requires an adopter to persist the `:mechanical` row a rule-3 match
   implies, so the *next* base merge resolves at rule 1 instead of
-  re-fingerprinting. That is a P4 obligation, not a P3 one: in shadow mode the
-  row would be coverage that no guard reads, written on the strength of a
-  predicate that has not yet been proven. So `observe/1` discards it, and the
-  `:arbiter, :coverage_shadow_record_mechanical` flag (default `false`) exists
-  only so P4 can turn the write on ahead of the read flip if the rollout wants
-  the rows warm.
+  re-fingerprinting. In shadow mode the row would be coverage that no guard
+  reads, written on the strength of a predicate that is not being acted on, so
+  `observe/1` discards it; the `:arbiter, :coverage_shadow_record_mechanical`
+  flag (default `false`) turns the write on for a rollout that wants the rows
+  warm ahead of the flip.
+
+  A **flipped** call site is the adopter §3.4 means, and it holds the row
+  itself: it computed the decision it is acting on, so it persists the row
+  directly (`Coverage.record/1`) rather than through here, and hands
+  `observe/1` the answer it already has.
   """
 
   require Ash.Query

@@ -18,12 +18,19 @@ defmodule Arbiter.Reviews.Coverage do
   to. It is a **pure function** — every git/forge fact it needs arrives
   through `ctx`.
 
-  P3 (#1649) gives it its first call site, `Arbiter.Reviews.CoverageShadow`,
+  P3 (#1649) gave it its first call site, `Arbiter.Reviews.CoverageShadow`,
   which both merge paths call *alongside* their existing guard and which acts
-  on nothing: it counts and logs whether the two predicates agree. So
+  on nothing: it counts and logs whether the two predicates agree.
+
+  P4 (#1736) flips the read path behind the workspace flag
+  `merge.coverage_enabled` (`Arbiter.Tasks.Workspace.coverage_enabled?/1`).
+  With the flag **off** — the default, and where every workspace starts —
   `issues.last_reviewed_sha` is still the authoritative input to every merge
-  decision, and no production code path yet *acts* on coverage. P4 flips the
-  read path behind `merge.coverage_enabled`.
+  decision and this predicate only shadows it. With the flag **on**,
+  `Arbiter.Worker.Watchdog` and `Arbiter.Workflows.MergeQueue` act on
+  `decide/3`'s answer and the old guard shadows *it*, still logging every
+  disagreement. The flag is only turned on for a workspace whose shadow
+  evidence passes `Arbiter.Reviews.CoverageShadow.preflip_gate/0`.
   """
 
   require Ash.Query

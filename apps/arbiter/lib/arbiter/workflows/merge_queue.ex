@@ -346,6 +346,11 @@ defmodule Arbiter.Workflows.MergeQueue do
   Force a poll cycle. In tests, prefer this over waiting for the periodic
   timer. Returns `:ok` once the cycle completes.
   """
+  @spec tick(GenServer.server()) :: :ok
+  def tick(server \\ __MODULE__) do
+    GenServer.call(server, :tick)
+  end
+
   @doc """
   How many consecutive `{:unknown, _}` coverage answers the queue waits out
   before parking the item and paging the coordinator once (bd-df3zlo / #1736,
@@ -353,11 +358,6 @@ defmodule Arbiter.Workflows.MergeQueue do
   """
   @spec coverage_unknown_grace_ticks() :: pos_integer()
   def coverage_unknown_grace_ticks, do: @coverage_unknown_grace_ticks
-
-  @spec tick(GenServer.server()) :: :ok
-  def tick(server \\ __MODULE__) do
-    GenServer.call(server, :tick)
-  end
 
   # ---- GenServer callbacks ------------------------------------------------
 

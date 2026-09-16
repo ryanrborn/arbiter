@@ -311,7 +311,12 @@ path — which alone resolves the "one column, two meanings" collision in §2.6.
 @spec decide(coverage :: [Entry.t()], head :: String.t() | nil, ctx :: ctx()) ::
         {:covered, String.t()}
         | {:uncovered, :authored_content | :no_coverage}
-        | {:unknown, :forge_lagging | :diff_unavailable | :no_base_ref | :no_head}
+        | {:unknown,
+           :forge_lagging
+           | :ancestry_unavailable
+           | :diff_unavailable
+           | :no_base_ref
+           | :no_head}
 ```
 
 Resolved in order; the first hit wins:
@@ -324,6 +329,16 @@ Resolved in order; the first hit wins:
    "have we ever seen our head echoed" boolean: it is decidable on the first
    poll rather than after up to 5, and it cannot be satisfied by an unrelated
    commit.
+
+   The probe is three-valued (P4, bd-df3zlo / #1736): a `true` proves the lag,
+   a `false` disproves it and falls through to the content rules, and a probe
+   that was *asked and could not answer* — an API error, a timeout, an
+   unrecognised shape — stops here as **`{:unknown, :ancestry_unavailable}`**.
+   With the lag question open, the content rules below would be answering a
+   different question than the one that was asked, so a probe failure yields a
+   pause and can never yield `covered`. A ctx that supplies **no** probe is a
+   caller that has declared it cannot ask: rule 2 is unreachable for it and
+   rules 3-6 decide, exactly as in P3.
 3. `NetDiff.fingerprint(base...head) ∈ coverage.net_diff_id` →
    **`{:covered, head}`**, and a `:mechanical` row is written for `head`
    naming the matched row as `derived_from`. This subsumes W5 `base_merge_only?`
@@ -770,6 +785,34 @@ is unreachable and a forge-lag poll counts as a `covered->unknown` or
 separable from a real `covered->uncovered` disagreement, which is the one that
 would block P4.
 
+**The first gap is closed (P4, bd-df3zlo / #1736).**
+`Arbiter.Mergers.Merger`'s optional `ancestor?/3` gives both hosted adapters
+an ancestry proof — GitHub reads `compare/{base}...{head}`'s `status`, GitLab
+reads `repository/merge_base` — and both merge paths inject it, so rule 2 is
+reachable and a forge-lag poll answers `{:unknown, :forge_lagging}` on the
+first poll. An adapter with no repo to ask (`Direct`) still supplies no probe,
+which leaves rule 2 unreachable for it, deliberately: that is the second gap,
+and it is a `Direct`-strategy merge with no MR head to race against rather than
+a review that was skipped.
+
+**Reading the gate (P4).** The SQL above counts every row, including the ones a
+workspace that has *already* flipped produced — which are no longer evidence
+about whether it may flip. `Arbiter.Reviews.CoverageShadow.preflip_gate/0`
+(`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:200` (`preflip_gate`)) is
+the query with that distinction and §4.5's deferral built in:
+
+```
+MIX_ENV=prod mix run --no-start -e \
+  'IO.inspect(Arbiter.Reviews.CoverageShadow.preflip_gate(), pretty: true)'
+```
+
+It answers `%{merges:, agreements:, blocking:, deferred:,
+deferred_observations:, pass?:}` where `:merges` counts only observations the
+old guard decided, `:blocking` must be empty, and `:deferred` is the one
+documented exception — `covered->uncovered`, the post-approval `fix_pass` class,
+which is P7's ticket and is listed observation by observation so it can be
+eyeballed rather than trusted.
+
 ---
 
 ## 7. Phase table
@@ -785,7 +828,7 @@ verifies a merged change against it.
 | **P1** | Dual-write from every stamping site in §3.3 (ReviewGate, ReviewPatrol, ExternalReview). `last_reviewed_sha` still authoritative | P0 | P1 | D2 | **Restart-and-observe:** after a server restart, one real ReviewGate approval writes exactly one `:reviewed` row whose `head_sha` matches the PR head and whose `net_diff_id` is non-nil; the old stamp still matches |
 | **P2** | `Coverage.decide/3` — the six rules — as a pure function over a coverage list + ctx. No call sites | P0 | P1 | D3 | Property tests for rules 1–6; table tests for §4.1–§4.6, one per walkthrough; `{:unknown, :forge_lagging}` requires ancestry, not just inequality |
 | **P3** | **Shadow mode.** Watchdog and MergeQueue call `decide/3` alongside the existing guard and log disagreements. Behaviour unchanged | P1, P2 | P1 | D2 | **Restart-and-observe:** disagreement log line appears for a real base-merge PR and names both answers; zero disagreements on the exact-match path over ≥20 merges |
-| **P4** | **Read-path flip** behind `merge.coverage_enabled`. `decide/3` is authoritative; old guard still shadows | P3 proven live | P0 | D3 | **Restart-and-observe:** one fix-round PR and one base-merge PR merge on the first eligible poll with no `{:stale_reviewed_sha, …}` and no `{:unreviewed_head, …}` in the journal |
+| **P4** ✅ | **Read-path flip** behind `merge.coverage_enabled` (bd-df3zlo / #1736). `decide/3` is authoritative when the flag is on; old guard still shadows. Adds the `:ancestor?` probe both adapters lacked, and W20/M8's bounded wait for `{:unknown, _}` | P3 proven live | P0 | D3 | **Restart-and-observe:** one fix-round PR and one base-merge PR merge on the first eligible poll with no `{:stale_reviewed_sha, …}` and no `{:unreviewed_head, …}` in the journal. Flag stays **off** until `preflip_gate/0` passes |
 | **P5** | Delete the Watchdog latch/suspension/memo/grace machinery (§6.1 rows 2–5) | P4 live ≥7 days, zero disagreements | P1 | D3 | `watchdog.ex` loses ≥250 lines; every deleted-guard test either deletes or re-points at `decide/3`; **restart-and-observe** one full approve→merge cycle |
 | **P6** | Delete the MergeQueue mirror; queue calls `decide/3`; **bound both unbounded merge-call retries: M3's stale-SHA retry and W7's `merge_fail_count`** become class A's bound + park | P5 | P1 | D2 | A stale-coverage item reaches a terminal parked state within N ticks and escalates exactly once; a Watchdog whose `merge/2` keeps failing parks after 5 consecutive attempts, escalates once, and issues no further merge call (it may keep watching); no class-A row in the registry has an unbounded merge-call path; **restart-and-observe** |
 | **P7** | Post-approval `fix_pass` / conflict-resolver pushes stop suspending the guard; content-equal pushes write `:mechanical`, content-changing ones route to a scoped `S2..S3` re-review (§4.5) | P4 | P0 | D3 | A fix-pass commit is never merged without a coverage row; the re-review is delta-scoped; **restart-and-observe** on a real CI-failure PR |
