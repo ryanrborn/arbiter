@@ -237,6 +237,92 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, ~s(#terminal-status [data-role="usage"]))
     end
 
+    test "a non-loopback peer sees a notice instead of an inert terminal, and is told Remote Control works (mode B, launched with --remote-control, bd-2zskbb)",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute has_element?(view, "#session-terminal-#{session.id}")
+      refute has_element?(view, "#terminal-status")
+      assert has_element?(view, "#terminal-remote-notice")
+      assert has_element?(view, "#terminal-remote-notice", "loopback-only")
+
+      assert has_element?(
+               view,
+               "#terminal-remote-notice",
+               "Reach it from another device via Remote Control"
+             )
+    end
+
+    test "a non-loopback peer under mode B but launched without --remote-control is told the precondition plainly rather than told it works (bd-2zskbb)",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: false)
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute has_element?(view, "#session-terminal-#{session.id}")
+      assert has_element?(view, "#terminal-remote-notice")
+      assert has_element?(view, "#terminal-remote-notice", "this one was not launched with it")
+
+      refute has_element?(
+               view,
+               "#terminal-remote-notice",
+               "Reach it from another device via Remote Control."
+             )
+    end
+
+    test "a non-loopback peer under a workspace token (mode A) is told Remote Control will not work either (bd-2zskbb)",
+         %{conn: conn} do
+      session =
+        launch!(auth_mode: :oauth_token, oauth_token: "sk-ant-oat01-SESSION-LIVE-TEST-TOKEN")
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute has_element?(view, "#session-terminal-#{session.id}")
+      assert has_element?(view, "#terminal-remote-notice")
+      assert has_element?(view, "#terminal-remote-notice", "does not support Remote Control")
+    end
+
+    test "a non-loopback peer never sees the stall banner alongside the remote notice (bd-2zskbb)",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      assert has_element?(view, "#terminal-remote-notice")
+      refute has_element?(view, "#terminal-stalled")
+
+      # This is the case the ticket says "Refreshing does not help, and
+      # cannot": the stall check must not fire the "Reload the page" banner
+      # off-loopback, since there is no hook there to ever go live.
+      send(view.pid, :terminal_stall_check)
+      refute has_element?(view, "#terminal-stalled")
+    end
+
+    test "a loopback peer attaches exactly as before, with no extra banner (bd-2zskbb)", %{
+      conn: conn
+    } do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      assert has_element?(view, "#session-terminal-#{session.id}")
+      refute has_element?(view, "#terminal-remote-notice")
+    end
+
     test "a narrow viewport scrolls the terminal, not the page (§6.3)", %{conn: conn} do
       session = launch!()
 

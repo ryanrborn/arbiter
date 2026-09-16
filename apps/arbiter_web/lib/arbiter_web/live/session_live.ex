@@ -50,6 +50,10 @@ defmodule ArbiterWeb.SessionLive do
   and the hook-painted status strip sits on its server-rendered "connecting…"
   forever. That is indistinguishable from a slow server unless the page says
   so.
+
+  Off-loopback (bd-2zskbb) is a different case decided at mount, not a stall:
+  no `.SessionTerminal` hook is ever rendered there, so the stall check is
+  skipped rather than firing a "Reload the page" banner that cannot help.
   """
 
   use ArbiterWeb, :live_view
@@ -57,6 +61,7 @@ defmodule ArbiterWeb.SessionLive do
   alias Arbiter.Sessions
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Data
+  alias ArbiterWeb.Loopback
   alias ArbiterWeb.SessionIndexLive
 
   require Logger
@@ -86,6 +91,7 @@ defmodule ArbiterWeb.SessionLive do
          |> assign(:agent_exit, nil)
          |> assign(:terminal_live?, false)
          |> assign(:terminal_stalled?, false)
+         |> assign(:loopback?, loopback_peer?(socket))
          |> put_terminal()}
 
       {:error, :not_found} ->
@@ -178,7 +184,13 @@ defmodule ArbiterWeb.SessionLive do
 
   @impl true
   def handle_info(:terminal_stall_check, socket) do
-    stalled? = socket.assigns.terminal? and not socket.assigns.terminal_live?
+    # Off-loopback the LiveView socket connects fine but no `.SessionTerminal`
+    # hook is ever rendered (bd-2zskbb) — there is nothing to stall, and the
+    # remote notice already explains why, so this must not also fire the
+    # "Reload the page" banner, which cannot help there.
+    stalled? =
+      socket.assigns.terminal? and socket.assigns.loopback? and not socket.assigns.terminal_live?
+
     {:noreply, assign(socket, :terminal_stalled?, stalled?)}
   end
 
@@ -216,6 +228,20 @@ defmodule ArbiterWeb.SessionLive do
   end
 
   defp attachable?(session, agent_exit), do: session.status == :running and is_nil(agent_exit)
+
+  # `ArbiterWeb.SessionSocket` (§10.4) trusts a loopback peer and nothing
+  # else, with no token sent from the browser — so a `/session` connect from
+  # off-loopback is a dead end no matter what this page does. Deciding it
+  # here, before the hook ever mounts, means the operator sees why instead of
+  # an inert terminal that silently never attaches (bd-2zskbb). `:peer_data`
+  # is available on both the disconnected and connected mount once declared
+  # in the `/live` socket's `connect_info` (`endpoint.ex`).
+  defp loopback_peer?(socket) do
+    case get_connect_info(socket, :peer_data) do
+      %{address: address} -> Loopback.loopback?(address)
+      _ -> true
+    end
+  end
 
   @impl true
   def render(assigns) do
@@ -291,7 +317,7 @@ defmodule ArbiterWeb.SessionLive do
                 would sit there reading "connecting…" forever above a pane that
                 is never going to connect. --%>
           <div
-            :if={@terminal?}
+            :if={@terminal? and @loopback?}
             id="terminal-status"
             phx-update="ignore"
             class="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--border-default)] text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
@@ -329,13 +355,46 @@ defmodule ArbiterWeb.SessionLive do
                 viewport scrolls this container rather than the page. --%>
           <div id="terminal-scroller" class="overflow-x-auto bg-[var(--arb-term-bg,#16181d)]">
             <div
-              :if={@terminal?}
+              :if={@terminal? and @loopback?}
               id={"session-terminal-#{@session.id}"}
               phx-hook=".SessionTerminal"
               phx-update="ignore"
               data-session-id={@session.id}
               class="min-w-[640px] h-[min(70vh,640px)] p-2"
             >
+            </div>
+
+            <%!-- §10.4: `ArbiterWeb.SessionSocket` trusts a loopback peer and
+                  sends no auth scheme for anything else, so a `/session`
+                  connect from here would just fail silently — the browser
+                  sends no token (`session_terminal.mjs`). Say so up front
+                  instead of rendering a terminal that never attaches
+                  (bd-2zskbb). --%>
+            <div
+              :if={@terminal? and not @loopback?}
+              id="terminal-remote-notice"
+              class="min-w-[640px] flex flex-col items-center gap-2 px-4 py-10 text-center text-[12px] text-[var(--text-body)] font-[family-name:var(--font-mono)]"
+            >
+              <.icon name="hero-lock-closed" class="size-5 text-[var(--text-label)]" />
+              <p>This session's terminal is loopback-only by design.</p>
+              <p
+                :if={@session.auth_mode == :seeded_credentials and @session.remote_control}
+                class="text-[var(--text-label)]"
+              >
+                Reach it from another device via Remote Control.
+              </p>
+              <p
+                :if={@session.auth_mode == :seeded_credentials and not @session.remote_control}
+                class="text-[var(--text-label)]"
+              >
+                Remote Control (mode B, launched with <code>--remote-control</code>) is the
+                supported way to reach a session from another device — this one was not launched
+                with it.
+              </p>
+              <p :if={@session.auth_mode != :seeded_credentials} class="text-[var(--text-label)]">
+                This session runs under a workspace token (mode A), which does not support
+                Remote Control. Reach it from this machine directly.
+              </p>
             </div>
 
             <div
