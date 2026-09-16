@@ -30,7 +30,7 @@ defmodule ArbiterWeb.EndpointConfigTest do
   describe "config/runtime.exs bind address (prod)" do
     setup do
       env = %{
-        "SECRET_KEY_BASE" => System.get_env("SECRET_KEY_BASE") || "test-secret-key-base",
+        "SECRET_KEY_BASE" => System.get_env("SECRET_KEY_BASE"),
         "DATABASE_PATH" => System.get_env("DATABASE_PATH")
       }
 
@@ -40,7 +40,7 @@ defmodule ArbiterWeb.EndpointConfigTest do
         end
       end)
 
-      System.put_env("SECRET_KEY_BASE", env["SECRET_KEY_BASE"])
+      System.put_env("SECRET_KEY_BASE", env["SECRET_KEY_BASE"] || "test-secret-key-base")
       :ok
     end
 

@@ -7,9 +7,11 @@ defmodule ArbiterWeb.Loopback do
   and `X-Forwarded-For` is never to be trusted. An operator can override the
   bind address with `ARB_BIND_ADDRESS` (`ArbiterWeb.Boot.BindAddressCheck`
   logs a boot WARNING when that override isn't loopback, since every
-  unauthenticated page — including a terminal into every worker session —
-  becomes reachable by anyone who can reach the port). Loopback covers the
-  three shapes a same-box peer actually arrives as:
+  unauthenticated LiveView page becomes reachable by anyone who can reach the
+  port). The worker-session terminal stays gated by this module's
+  `loopback?/1` regardless of the bind address, so it is the one page that
+  does *not* become reachable off-loopback. Loopback covers the three shapes
+  a same-box peer actually arrives as:
 
     * IPv4 `127.0.0.0/8`
     * IPv6 `::1`

@@ -486,8 +486,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           status: :fail,
           detail:
             "bound to #{ip} — the dashboard has no login; " <>
-              "anyone who can reach this address gets full access, including a " <>
-              "terminal into every worker session",
+              "anyone who can reach this address gets full access to its " <>
+              "unauthenticated pages",
           hint:
             "Off-loopback peers get no terminal. If this is intentional " <>
               "(e.g. a VPN-reachable install), unset ARB_BIND_ADDRESS to fall " <>

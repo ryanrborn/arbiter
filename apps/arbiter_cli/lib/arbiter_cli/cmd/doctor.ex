@@ -11,6 +11,7 @@ defmodule ArbiterCli.Cmd.Doctor do
     4. Do any repos resolve? (zero repos means nothing can be dispatched)
     5. Do the CLI and server report the same version?
     6. Are database migrations up to date?
+    7. Is the server bound to a loopback address? (the dashboard has no login)
 
   Exit code 0 on all green, 1 on any failure.
   """
