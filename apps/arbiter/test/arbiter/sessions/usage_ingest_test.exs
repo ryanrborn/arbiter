@@ -204,6 +204,25 @@ defmodule Arbiter.Sessions.UsageIngestTest do
       assert {:ok, %{rows_written: 1}} = UsageIngest.ingest()
       assert [_ev] = rows_for(sid)
     end
+
+    test "sweeps a browser-hosted session's config_dir, two levels deeper than a coordinator dir" do
+      config_dir = tmp_dir!("browser-session")
+      project_dir = Path.join(config_dir, "projects/-home-ryan-dev-admiral")
+      File.mkdir_p!(project_dir)
+      sid = "sess-#{System.unique_integer([:positive])}"
+
+      write!(project_dir, sid, [
+        turn(sid, "m1", now(), 10, 100),
+        cost_state(sid, 2.5, start_ms())
+      ])
+
+      assert {:ok, %{rows_written: 1}} =
+               UsageIngest.ingest(dirs: [], sessions: [%{config_dir: config_dir}])
+
+      assert [ev] = rows_for(sid)
+      assert ev.session_id == sid
+      assert_in_delta ev.cost_usd, 2.5, 0.0000001
+    end
   end
 
   describe "privacy" do

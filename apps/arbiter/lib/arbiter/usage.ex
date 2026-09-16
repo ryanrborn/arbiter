@@ -81,7 +81,16 @@ defmodule Arbiter.Usage do
           required(:tokens_out) => non_neg_integer(),
           required(:cache_creation_tokens) => non_neg_integer(),
           required(:cache_read_tokens) => non_neg_integer(),
-          required(:duration_ms) => non_neg_integer()
+          required(:duration_ms) => non_neg_integer(),
+          # Meaningful only for `:by :session` groups. `estimated_event?/1`
+          # reads `raw["arb_usage_source"]["cost_source"]`, which only
+          # `Sessions.UsageIngest` ever stamps; the worker (`Worker`) and
+          # `Reconciler` ingest paths never set `cost_source`, so every other
+          # grouping (`:task`, `:day`, `:workspace`, …) always reports
+          # `estimated: false` regardless of whether the underlying cost was a
+          # real `cost-state`/API figure or an unmarked token-priced guess.
+          # Read `false` there as "provenance unknown", not "exact".
+          required(:estimated) => boolean()
         }
 
   @valid_by ~w(day task epic workspace repo model step provider source session)a
@@ -100,6 +109,11 @@ defmodule Arbiter.Usage do
       deprecated alias for `:epic`). Required.
     * `:since` — `%DateTime{}` filter on `occurred_at`. Optional.
     * `:workspace_id` — restrict to one workspace. Optional.
+    * `:session_ids` — restrict to a list of `session_id` values, pushed into
+      the query as `session_id in ^ids` rather than filtered after the read.
+      `Event` indexes `:session_id`, so this keeps a `:by :session` rollup for
+      a handful of known sessions (e.g. `/sessions`' live-refresh tick) an
+      indexed lookup instead of a full-table read. Optional.
     * `:limit` — cap the returned rows (after sort). Optional.
 
   Returns `{:ok, [rollup]}` or `{:error, reason}`. Rows are sorted by
@@ -238,24 +252,28 @@ defmodule Arbiter.Usage do
   end
 
   defp base_filter(query, opts) do
-    query =
-      case Keyword.get(opts, :since) do
-        nil -> query
-        %DateTime{} = dt -> Ash.Query.filter(query, occurred_at >= ^dt)
-      end
-
-    query =
-      case Keyword.get(opts, :until) do
-        nil -> query
-        %DateTime{} = dt -> Ash.Query.filter(query, occurred_at <= ^dt)
-      end
-
-    case Keyword.get(opts, :workspace_id) do
-      nil -> query
-      "" -> query
-      ws -> Ash.Query.filter(query, workspace_id == ^ws)
-    end
+    query
+    |> filter_since(Keyword.get(opts, :since))
+    |> filter_until(Keyword.get(opts, :until))
+    |> filter_workspace_id(Keyword.get(opts, :workspace_id))
+    |> filter_session_ids(Keyword.get(opts, :session_ids))
   end
+
+  defp filter_since(query, nil), do: query
+  defp filter_since(query, %DateTime{} = dt), do: Ash.Query.filter(query, occurred_at >= ^dt)
+
+  defp filter_until(query, nil), do: query
+  defp filter_until(query, %DateTime{} = dt), do: Ash.Query.filter(query, occurred_at <= ^dt)
+
+  defp filter_workspace_id(query, nil), do: query
+  defp filter_workspace_id(query, ""), do: query
+  defp filter_workspace_id(query, ws), do: Ash.Query.filter(query, workspace_id == ^ws)
+
+  defp filter_session_ids(query, nil), do: query
+  defp filter_session_ids(query, []), do: query
+
+  defp filter_session_ids(query, ids) when is_list(ids),
+    do: Ash.Query.filter(query, session_id in ^ids)
 
   # Group events by the requested dimension. For :epic we resolve each
   # event's task's `:parent_of` parents at read time (a join would be cleaner
@@ -352,7 +370,8 @@ defmodule Arbiter.Usage do
       tokens_out: 0,
       cache_creation_tokens: 0,
       cache_read_tokens: 0,
-      duration_ms: 0
+      duration_ms: 0,
+      estimated: false
     }
 
     Enum.reduce(events, init, fn ev, acc ->
@@ -364,10 +383,21 @@ defmodule Arbiter.Usage do
           tokens_out: acc.tokens_out + (ev.tokens_out || 0),
           cache_creation_tokens: acc.cache_creation_tokens + (ev.cache_creation_tokens || 0),
           cache_read_tokens: acc.cache_read_tokens + (ev.cache_read_tokens || 0),
-          duration_ms: acc.duration_ms + (ev.duration_ms || 0)
+          duration_ms: acc.duration_ms + (ev.duration_ms || 0),
+          estimated: acc.estimated or estimated_event?(ev)
       }
     end)
   end
+
+  # `Sessions.UsageIngest` stamps `raw["arb_usage_source"]["cost_source"]`
+  # with the same `:cost_state | :estimated | none` provenance
+  # `ClaudeSessionFile` reports live (see `ClaudePricing`'s moduledoc) — this
+  # is the persisted mirror of that marker, so a rollup can carry it forward
+  # without recomputing an estimate itself.
+  defp estimated_event?(%{raw: %{"arb_usage_source" => %{"cost_source" => "estimated"}}}),
+    do: true
+
+  defp estimated_event?(_ev), do: false
 
   defp sort_rollups(rollups, :day), do: Enum.sort_by(rollups, & &1.group)
 

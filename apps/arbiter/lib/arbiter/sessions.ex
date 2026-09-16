@@ -295,10 +295,30 @@ defmodule Arbiter.Sessions do
 
     with {:ok, ended} <- Ash.update(current, %{end_reason: reason}, action: :mark_ended) do
       Phoenix.PubSub.broadcast(Arbiter.PubSub, lifecycle_topic(), {:session_ended, ended.id})
+      _ = final_usage_ingest(ended)
       _ = archive_session_jsonl(ended)
       _ = purge_transcript_pipe(ended)
       {:ok, ended}
     end
+  end
+
+  # One last synchronous sweep of just this session's own JSONL (bd-9mrzti) —
+  # the periodic `Arbiter.Sessions.UsageIngest` sweep only looks at non-ended
+  # sessions, so without this a session's final turns (up to its
+  # `interval_ms`) would sit unswept on a row nothing will read again, and
+  # `/sessions` would show a stale total for an ended session forever.
+  # Best-effort, same reasoning as `archive_session_jsonl/1`: a metering
+  # hiccup must never block a session from ending.
+  defp final_usage_ingest(%Session{} = session) do
+    Arbiter.Sessions.UsageIngest.ingest(dirs: [], sessions: [session])
+  rescue
+    e ->
+      Logger.warning(
+        "Sessions.mark_ended: final usage ingest raised for #{session.id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
   end
 
   # Best-effort: `archive_session/4` already reduces every failure mode to
