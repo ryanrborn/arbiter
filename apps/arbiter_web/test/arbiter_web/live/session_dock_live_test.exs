@@ -18,15 +18,63 @@ defmodule ArbiterWeb.SessionDockLiveTest do
 
   alias Arbiter.Sessions
   alias Arbiter.Test.NoopRunner
+  alias Arbiter.Usage.Event
 
   setup do
     Arbiter.Test.SessionEnv.sandbox("session-dock")
+    # The dock's own Kill and `/sessions`' Launch run inside the LiveView
+    # process, which has no access to the test's process dictionary and calls
+    # `Sessions.launch/1` with no `:runner` — so the stub has to come from
+    # application config or it would really shell out to `systemd-run`.
+    put_env(:sessions_runner, NoopRunner)
     :ok
+  end
+
+  defp put_env(key, value) do
+    previous = Application.fetch_env(:arbiter, key)
+    Application.put_env(:arbiter, key, value)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, old} -> Application.put_env(:arbiter, key, old)
+        :error -> Application.delete_env(:arbiter, key)
+      end
+    end)
   end
 
   defp launch!(opts \\ []) do
     {:ok, session} = Sessions.launch(Keyword.put_new(opts, :runner, NoopRunner))
     session
+  end
+
+  # The info view's cost/tokens read the same canonical rollup `/sessions` and
+  # `arb usage --by session` do, so it is driven by writing ledger rows rather
+  # than by faking terminal bytes.
+  defp create_event!(attrs) do
+    base = %{
+      task_id: nil,
+      source: :coordinator_session,
+      step: :other,
+      provider: "claude",
+      model: "claude-opus-4-7",
+      occurred_at: DateTime.utc_now()
+    }
+
+    {:ok, event} = Ash.create(Event, Map.merge(base, attrs))
+    event
+  end
+
+  # Open a window from the roster and leave it expanded — the state every
+  # title-bar control is exercised from.
+  defp open!(dock, session) do
+    open_roster(dock)
+    render_click(element(dock, "#session-dock-open-#{session.id}"))
+    dock
+  end
+
+  defp open_menu!(dock, session) do
+    render_click(element(dock, "#session-dock-menu-#{session.id}"))
+    dock
   end
 
   defp dock(conn, path \\ "/") do
@@ -297,19 +345,25 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert has_element?(dock, "#session-dock-remote-#{session.id}", "loopback-only")
     end
 
-    test "an ended session's window has nothing to attach to", %{conn: conn} do
+    # Phase 2 replaced the pane with a placeholder the moment the session
+    # ended; phase 3 (bd-a292yj) keeps it, read-only, because the last output
+    # is most interesting exactly then. What goes away is the *channel*: an
+    # ended window has nothing attached and no status strip to paint.
+    test "an ended session's window keeps its pane but attaches nothing", %{conn: conn} do
       session = launch!(name: "over")
       {_view, dock} = dock(conn)
       open_roster(dock)
       render_click(element(dock, "#session-dock-open-#{session.id}"))
 
       assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert has_element?(dock, "#session-dock-status-#{session.id}")
 
       {:ok, _ended} = Sessions.kill(session.id)
       render(dock)
 
-      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
-      assert has_element?(dock, "#session-dock-inactive-#{session.id}")
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}[data-readonly]")
+      refute has_element?(dock, "#session-dock-status-#{session.id}")
+      assert has_element?(dock, "#session-dock-ended-#{session.id}")
     end
 
     # §6.3, moved here with the terminal: a terminal cannot reflow meaningfully
@@ -420,17 +474,20 @@ defmodule ArbiterWeb.SessionDockLiveTest do
 
     # The hook reports the channel's `exit` event up, because the row may not
     # be marked ended yet — the same reason `SessionLive` did (bd-bsdeb2).
-    test "an agent that exits under the hook flips the window without a reload",
+    # Phase 3 (bd-a292yj) changed what that does to the pane: the last output
+    # is most interesting exactly when the session dies, so the pane stays and
+    # goes read-only rather than being replaced by a placeholder.
+    test "an agent that exits under the hook freezes the window rather than emptying it",
          %{conn: conn} do
       session = launch!(name: "exits")
       {_view, dock} = dock(conn)
-      open_roster(dock)
-      render_click(element(dock, "#session-dock-open-#{session.id}"))
+      open!(dock, session)
 
       render_hook(dock, "terminal_exited", %{"id" => session.id, "code" => 1})
 
-      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
-      assert has_element?(dock, "#session-dock-inactive-#{session.id}")
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}[data-readonly]")
+      assert has_element?(dock, "#session-dock-ended-#{session.id}")
+      refute has_element?(dock, "#session-dock-unavailable-#{session.id}")
     end
 
     test "dismissing removes the window without touching the session", %{conn: conn} do
@@ -545,53 +602,511 @@ defmodule ArbiterWeb.SessionDockLiveTest do
     end
   end
 
-  describe "scope discipline" do
-    test "/sessions and /sessions/:id still work and keep their own controls",
+  describe "title-bar controls (phase 3, bd-a292yj)" do
+    test "keep_alive is pinned and unpinned from the window's overflow", %{conn: conn} do
+      session = launch!(name: "pinned")
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      assert {:ok, %{keep_alive: false}} = Sessions.get(session.id)
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-keep-alive-#{session.id}"))
+      assert {:ok, %{keep_alive: true}} = Sessions.get(session.id)
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-keep-alive-#{session.id}"))
+      assert {:ok, %{keep_alive: false}} = Sessions.get(session.id)
+    end
+
+    # A one-click kill in a title bar that is always on screen is a different
+    # risk profile from one on a page you navigated to deliberately, so the
+    # confirmation the pages ask for is kept here — and it is literally the
+    # same component, not a second copy that can drift.
+    test "kill asks first, and a single click in the title bar ends nothing",
          %{conn: conn} do
-      session = launch!(name: "untouched")
+      session = launch!(name: "not yet")
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-kill-#{session.id}"))
+
+      assert has_element?(dock, "#kill-session-modal")
+      assert {:ok, %{status: :running}} = Sessions.get(session.id)
+
+      render_click(element(dock, "#confirm-kill"))
+
+      assert {:ok, %{status: :ended}} = Sessions.get(session.id)
+      refute has_element?(dock, "#kill-session-modal")
+    end
+
+    test "cancelling the confirmation leaves the session running", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-kill-#{session.id}"))
+      render_click(element(dock, "#cancel-kill"))
+
+      refute has_element?(dock, "#kill-session-modal")
+      assert {:ok, %{status: :running}} = Sessions.get(session.id)
+    end
+
+    # Detach is "drop this browser's reader, leave the agent running", which
+    # is exactly what collapsing already does — so it is the same handler,
+    # named for what an operator came looking for.
+    test "detach collapses the window and leaves the session running", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-expanded="true"]))
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-detach-#{session.id}"))
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-expanded="false"]))
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert {:ok, %{status: :running}} = Sessions.get(session.id)
+    end
+
+    # Every control carries its own session id, so the one that is *expanded*
+    # is irrelevant to which session they act on.
+    test "a control acts on its own window, not on the expanded one", %{conn: conn} do
+      expanded = launch!(name: "expanded")
+      other = launch!(name: "other")
+
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{"open" => [expanded.id, other.id], "expanded" => expanded.id})
+
+      open_menu!(dock, other)
+      render_click(element(dock, "#session-dock-keep-alive-#{other.id}"))
+
+      assert {:ok, %{keep_alive: true}} = Sessions.get(other.id)
+      assert {:ok, %{keep_alive: false}} = Sessions.get(expanded.id)
+    end
+
+    # One click can raise both the open window's click-away and another
+    # window's toggle, and the order is not ours to decide — so a close that
+    # names the window it is closing is the only one that cannot close the
+    # menu that click just opened.
+    test "closing one window's overflow never closes another's", %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+
+      {_view, dock} = dock(conn)
+      render_hook(dock, "restore", %{"open" => [a.id, b.id], "expanded" => nil})
+
+      open_menu!(dock, b)
+      assert has_element?(dock, "#session-dock-menu-panel-#{b.id}")
+
+      render_hook(dock, "close_menu", %{"id" => a.id})
+      assert has_element?(dock, "#session-dock-menu-panel-#{b.id}")
+
+      render_hook(dock, "close_menu", %{"id" => b.id})
+      refute has_element?(dock, "#session-dock-menu-panel-#{b.id}")
+    end
+
+    test "an ended session's window offers neither kill nor keep_alive", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      {:ok, _} = Sessions.kill(session.id)
+      render(dock)
+
+      open_menu!(dock, session)
+
+      refute has_element?(dock, "#session-dock-kill-#{session.id}")
+      refute has_element?(dock, "#session-dock-keep-alive-#{session.id}")
+      assert has_element?(dock, "#session-dock-info-#{session.id}")
+    end
+  end
+
+  describe "the info view" do
+    test "shows the session's metadata without leaving the page", %{conn: conn} do
+      session = launch!(name: "inspect me")
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-info-panel-#{session.id}")
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-info-#{session.id}"))
+
+      panel = "#session-dock-info-panel-#{session.id}"
+      assert has_element?(dock, panel)
+      assert has_element?(dock, panel, session.config_dir)
+      assert has_element?(dock, panel, session.scope_unit)
+      assert has_element?(dock, "#session-dock-keep-alive-value-#{session.id}", "false")
+    end
+
+    test "shows the session's cost and tokens", %{conn: conn} do
+      session = launch!()
+      {:ok, session} = Sessions.record_provider_session(session, "prov-dock-info")
+
+      create_event!(%{
+        session_id: "prov-dock-info",
+        cost_usd: 1.25,
+        tokens_in: 4000,
+        tokens_out: 900
+      })
+
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-info-#{session.id}"))
+
+      assert has_element?(dock, "#session-dock-usage-#{session.id}", "$1.25")
+    end
+
+    test "says so rather than showing $0.00 when the ledger has nothing yet",
+         %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-info-#{session.id}"))
+
+      assert has_element?(dock, "#session-dock-usage-empty-#{session.id}")
+    end
+
+    # The panel is an overlay on the window's *frame*, and a collapsed window
+    # has no frame on screen — so Info has to bring the window it was invoked
+    # on with it, rather than arming a panel nobody can see (review finding 3).
+    test "info on a collapsed window expands that window and shows its panel",
+         %{conn: conn} do
+      first = launch!(name: "collapsed")
+      second = launch!(name: "expanded")
+
+      {_view, dock} = dock(conn)
+      open!(dock, first)
+      open!(dock, second)
+
+      # The second open took the expanded slot, so `first` is a title bar only.
+      assert has_element?(dock, "#session-dock-window-#{second.id}[data-expanded=true]")
+      assert has_element?(dock, "#session-dock-window-#{first.id}[data-expanded=false]")
+
+      open_menu!(dock, first)
+      render_click(element(dock, "#session-dock-info-#{first.id}"))
+
+      assert has_element?(dock, "#session-dock-window-#{first.id}[data-expanded=true]")
+      assert has_element?(dock, "#session-dock-info-panel-#{first.id}")
+      refute has_element?(dock, "#session-dock-info-panel-#{second.id}")
+    end
+
+    # The info side is an *overlay*, never a replacement: unmounting the pane
+    # would dispose the xterm and throw the scrollback away for the sake of
+    # reading a config dir.
+    test "flipping to info does not tear the terminal down", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-info-#{session.id}"))
+
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert has_element?(dock, "#session-dock-info-panel-#{session.id}")
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-info-#{session.id}"))
+      refute has_element?(dock, "#session-dock-info-panel-#{session.id}")
+    end
+  end
+
+  # The dock mounts `layout: false` and renders no flash group, and a nested
+  # LiveView's flash never reaches the host page's `<Layouts.app>` — so an
+  # action that fails has to say so here or it says nothing at all (review
+  # finding 2).
+  describe "an action that fails" do
+    test "a failed kill is reported in the dock, not swallowed", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-error")
+
+      # The id no longer resolves — the same shape a kill takes when the row is
+      # gone by the time the confirmation is answered.
+      render_click(dock, "kill", %{"id" => Ecto.UUID.generate()})
+
+      assert has_element?(dock, "#session-dock-error")
+      refute has_element?(dock, "#kill-session-modal")
+
+      render_click(element(dock, "#session-dock-error-dismiss"))
+      refute has_element?(dock, "#session-dock-error")
+    end
+
+    test "a later success clears the notice", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_click(dock, "kill", %{"id" => Ecto.UUID.generate()})
+      assert has_element?(dock, "#session-dock-error")
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-keep-alive-#{session.id}"))
+
+      assert {:ok, %{keep_alive: true}} = Sessions.get(session.id)
+      refute has_element?(dock, "#session-dock-error")
+    end
+  end
+
+  describe "a session that ends while it is docked" do
+    test "keeps its window and its pane, read-only, with the end reason shown",
+         %{conn: conn} do
+      session = launch!(name: "dies docked")
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+
+      {:ok, _} = Sessions.kill(session.id)
+      render(dock)
+
+      # The pane element is the same one, still mounted: LiveView leaves a
+      # `phx-update="ignore"` subtree alone, so the scrollback in it survives.
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}[data-readonly]")
+      assert has_element?(dock, "#session-dock-ended-#{session.id}", "killed")
+      assert has_element?(dock, "#session-dock-end-reason-#{session.id}", "killed")
+    end
+
+    # There is nothing to attach to, so there must be no channel to attach
+    # with: a read-only pane keeps its bytes, not its socket.
+    test "the read-only pane carries no live status strip", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      {:ok, _} = Sessions.kill(session.id)
+      render(dock)
+
+      refute has_element?(dock, "#session-dock-status-#{session.id}")
+    end
+
+    test "collapsing and re-expanding keeps the frozen pane", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      {:ok, _} = Sessions.kill(session.id)
+      render(dock)
+
+      render_click(element(dock, "#session-dock-title-#{session.id}"))
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+
+      render_click(element(dock, "#session-dock-title-#{session.id}"))
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+    end
+
+    test "dismissing it removes it from the dock and from persisted state",
+         %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      {:ok, _} = Sessions.kill(session.id)
+      render(dock)
+
+      render_click(element(dock, "#session-dock-dismiss-#{session.id}"))
+
+      refute has_element?(dock, "#session-dock-window-#{session.id}")
+      assert_push_event(dock, "session-dock:forget", %{id: _})
+      assert_push_event(dock, "session-dock:persist", %{open: [], expanded: nil})
+    end
+
+    # Re-opening a dismissed, ended session is the "ended elsewhere" case
+    # again: the pane it had was disposed with the window.
+    test "re-opening a dismissed ended session does not pretend to have its scrollback",
+         %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      {:ok, _} = Sessions.kill(session.id)
+      render(dock)
+      render_click(element(dock, "#session-dock-dismiss-#{session.id}"))
+
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert has_element?(dock, "#session-dock-unavailable-#{session.id}")
+    end
+  end
+
+  # A LiveView rejoin re-runs `mount/3`, so every window — and every note that
+  # one of them is holding a dead pane — is gone server-side while the panes
+  # themselves are still on screen. `restore` is how both come back.
+  describe "a rejoin, with a frozen window on screen" do
+    test "a client-reported frozen window keeps its read-only pane", %{conn: conn} do
+      session = launch!()
+      {:ok, _} = Sessions.kill(session.id)
+
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => [session.id],
+        "expanded" => session.id,
+        "frozen" => [session.id]
+      })
+
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}[data-readonly]")
+      assert has_element?(dock, "#session-dock-ended-#{session.id}")
+      refute has_element?(dock, "#session-dock-unavailable-#{session.id}")
+    end
+
+    # Same hostility as the rest of the payload: `localStorage` and the DOM are
+    # both things a devtools console can write.
+    test "a frozen claim about a session that is still running is dropped", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => [session.id],
+        "expanded" => session.id,
+        "frozen" => [session.id]
+      })
+
+      refute has_element?(dock, "#session-dock-ended-#{session.id}")
+      assert has_element?(dock, "#session-dock-status-#{session.id}")
+    end
+
+    test "a frozen claim about a window that is not open is dropped", %{conn: conn} do
+      open_one = launch!()
+      other = launch!()
+      {:ok, _} = Sessions.kill(other.id)
+
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => [open_one.id],
+        "expanded" => open_one.id,
+        "frozen" => [other.id]
+      })
+
+      refute has_element?(dock, "#session-dock-window-#{other.id}")
+    end
+  end
+
+  describe "a session that ended before this browser session" do
+    # Until transcript persistence (bd-5pelo2, phase 9) the dock has nothing
+    # to replay for a session it never watched. Saying so — and pointing at
+    # the index — is the honest answer; rendering an empty terminal is not.
+    test "says its scrollback is unavailable and points at the index", %{conn: conn} do
+      session = launch!(name: "over already")
+      {:ok, _} = Sessions.kill(session.id)
+
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+      refute has_element?(dock, "#session-dock-status-#{session.id}")
+
+      assert has_element?(dock, "#session-dock-unavailable-#{session.id}")
+      assert has_element?(dock, ~s(#session-dock-unavailable-#{session.id} a[href="/sessions"]))
+      assert has_element?(dock, "#session-dock-end-reason-#{session.id}", "killed")
+    end
+
+    test "its metadata and cost are still reachable from the info view", %{conn: conn} do
+      session = launch!()
+      {:ok, session} = Sessions.record_provider_session(session, "prov-dock-ended")
+      {:ok, _} = Sessions.kill(session.id)
+
+      create_event!(%{
+        session_id: "prov-dock-ended",
+        cost_usd: 0.5,
+        tokens_in: 100,
+        tokens_out: 50
+      })
+
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-info-#{session.id}"))
+
+      assert has_element?(dock, "#session-dock-info-panel-#{session.id}", session.config_dir)
+      assert has_element?(dock, "#session-dock-usage-#{session.id}", "$0.50")
+    end
+  end
+
+  describe "off loopback (§10.4, bd-2zskbb)" do
+    defp remote(conn) do
+      Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+    end
+
+    test "mode B with Remote Control is told about SSH forwarding first, Remote Control second",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+
+      {_view, dock} = dock(remote(conn))
+      open!(dock, session)
+
+      notice = "#session-dock-remote-#{session.id}"
+      assert has_element?(dock, notice, "ssh -L 4848:127.0.0.1:4848")
+      assert has_element?(dock, notice, "Remote Control")
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+    end
+
+    test "mode B without --remote-control is told the precondition plainly",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: false)
+
+      {_view, dock} = dock(remote(conn))
+      open!(dock, session)
+
+      notice = "#session-dock-remote-#{session.id}"
+      assert has_element?(dock, notice, "ssh -L 4848:127.0.0.1:4848")
+      assert has_element?(dock, notice, "not enabled on this session")
+    end
+
+    test "mode A is told to forward the port, with no Remote Control offer",
+         %{conn: conn} do
+      session =
+        launch!(auth_mode: :oauth_token, oauth_token: "sk-ant-oat01-SESSION-DOCK-TEST-TOKEN")
+
+      {_view, dock} = dock(remote(conn))
+      open!(dock, session)
+
+      notice = "#session-dock-remote-#{session.id}"
+      assert has_element?(dock, notice, "ssh -L 4848:127.0.0.1:4848")
+      assert has_element?(dock, notice, "workspace token")
+    end
+  end
+
+  describe "the fate of /sessions/:id (phase 3's decision)" do
+    # Executed, not left half-done: the dock owns every per-session control,
+    # so the route whose controls moved away is gone rather than left as a
+    # page that can only point elsewhere.
+    test "the per-session route no longer exists", %{conn: conn} do
+      session = launch!()
+
+      assert conn |> get("/sessions/#{session.id}") |> Map.fetch!(:status) == 404
+    end
+
+    test "/sessions still launches, names and lists — and opens into the dock",
+         %{conn: conn} do
+      ended = launch!(name: "finished")
+      {:ok, _} = Sessions.kill(ended.id)
 
       {:ok, index, _html} = live(conn, ~p"/sessions")
-      assert has_element?(index, "#session-#{session.id}")
+
       assert has_element?(index, "#launch-session")
-      assert has_element?(index, "#kill-session-#{session.id}")
+      assert has_element?(index, "#launch-session-name")
+      assert has_element?(index, "#session-#{ended.id}")
 
-      {:ok, page, html} = live(conn, ~p"/sessions/#{session.id}")
-      assert has_element?(page, "#session-dock")
-
-      # Phase 2 moved the terminal: the page renders no second copy of the
-      # hook, and with nothing expanded in the dock there is no terminal in
-      # the document at all.
-      refute html =~ "SessionTerminal"
-      refute has_element?(page, "#session-terminal-#{session.id}")
-      assert has_element?(page, "#terminal-in-dock")
+      render_click(element(index, "#open-in-dock-#{ended.id}"))
+      assert_push_event(index, "session-dock:open", %{id: id})
+      assert id == ended.id
     end
 
-    # bd-9myzv8: `/sessions/:id` hands the session to the dock rather than
-    # growing a terminal of its own, so clicking a session in the list still
-    # ends with a terminal in front of the operator.
-    test "the session page asks the dock to open the session it is showing",
-         %{conn: conn} do
-      session = launch!(name: "handed over")
+    test "launching hands the new session straight to the dock", %{conn: conn} do
+      {:ok, index, _html} = live(conn, ~p"/sessions")
 
-      {:ok, page, _html} = live(conn, ~p"/sessions/#{session.id}")
+      render_submit(element(index, "#launch-session-form"), %{"name" => "born in the dock"})
 
-      assert_push_event(page, "session-dock:open", %{id: id})
-      assert id == session.id
-
-      # And a discoverable way to ask again after dismissing it.
-      assert has_element?(page, "#open-in-dock")
-      render_click(element(page, "#open-in-dock"))
-      assert_push_event(page, "session-dock:open", %{id: ^id})
-    end
-
-    test "an ended session is not pushed into the dock", %{conn: conn} do
-      session = launch!(name: "over")
-      {:ok, _ended} = Sessions.kill(session.id)
-
-      {:ok, page, _html} = live(conn, ~p"/sessions/#{session.id}")
-
-      refute_push_event(page, "session-dock:open", %{})
-      refute has_element?(page, "#open-in-dock")
+      assert_push_event(index, "session-dock:open", %{id: id})
+      assert {:ok, %{name: "born in the dock"}} = Sessions.get(id)
     end
   end
 end

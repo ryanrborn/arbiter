@@ -11,7 +11,7 @@ defmodule ArbiterWeb.Endpoint do
     same_site: "Lax"
   ]
 
-  # `:peer_data` lets `SessionLive` tell a loopback peer from a LAN one
+  # `:peer_data` lets the dashboard tell a loopback peer from a LAN one
   # server-side, mirroring the `/session` socket below — it needs the same
   # input to say up front that the terminal is loopback-only (bd-2zskbb),
   # rather than let a doomed `/session` connect attempt fail silently.

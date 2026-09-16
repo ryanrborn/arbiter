@@ -249,13 +249,13 @@ test("dismissing a session forgets it, so re-opening starts from a snapshot", ()
   assert.equal(resumeFrom("sess-f"), null)
 })
 
-// -- the handover from /sessions/:id (bd-9myzv8) -------------------------------
+// -- the handover from a sibling view (bd-9myzv8) ------------------------------
 //
-// `SessionLive` hands its session to the dock with a `push_event`, which
+// A sibling view hands its session to the dock with a `push_event`, which
 // reaches the client as a `window` event. On a *live navigation* the dock's
-// hook is already mounted and catches it directly — but on a cold load of
-// `/sessions/:id` the parent view joins and dispatches before its sticky
-// children have joined at all, and the event would land on nothing. So it is
+// hook is already mounted and catches it directly — but on a cold load the
+// parent view joins and dispatches before its sticky children have joined at
+// all, and the event would land on nothing. So it is
 // remembered by a listener installed at import time and claimed by whichever
 // comes first.
 
@@ -280,4 +280,64 @@ test("a malformed open request is no request at all", () => {
     rememberOpenRequest(detail)
     assert.equal(takeOpenRequest(), null, `detail: ${JSON.stringify(detail)}`)
   }
+})
+
+// -- a window whose session ended (bd-a292yj) ---------------------------------
+//
+// A LiveView rejoin re-runs the dock's `mount/3`, so the server forgets which
+// windows are holding a dead pane. The client is the one that still knows —
+// and it has to know it *without* reading the DOM, because `reconnected()`
+// runs after the join reply's patch has already removed every pane.
+
+import {
+  finalScreenFor,
+  forgetFinalScreen,
+  forgetFrozen,
+  frozenIds,
+  markFrozen,
+  rememberFinalScreen
+} from "../../assets/js/session_dock.mjs"
+
+test("a frozen window is remembered until it is dismissed", () => {
+  markFrozen("sess-frozen")
+  assert.ok(frozenIds().includes("sess-frozen"))
+
+  forgetFrozen("sess-frozen")
+  assert.ok(!frozenIds().includes("sess-frozen"))
+})
+
+test("marking the same window twice does not report it twice", () => {
+  markFrozen("sess-twice")
+  markFrozen("sess-twice")
+
+  assert.equal(frozenIds().filter((id) => id === "sess-twice").length, 1)
+  forgetFrozen("sess-twice")
+})
+
+test("a frozen mark that is not a session id is not a claim about anything", () => {
+  const before = frozenIds().length
+
+  markFrozen(null)
+  markFrozen("")
+  markFrozen(7)
+
+  assert.equal(frozenIds().length, before)
+})
+
+test("a final screen is kept until the window is dismissed", () => {
+  assert.equal(finalScreenFor("sess-final"), null)
+
+  rememberFinalScreen("sess-final", "the last thing it printed")
+  assert.equal(finalScreenFor("sess-final"), "the last thing it printed")
+
+  forgetFinalScreen("sess-final")
+  assert.equal(finalScreenFor("sess-final"), null)
+})
+
+test("a final screen that is not text is not remembered", () => {
+  rememberFinalScreen("sess-junk", null)
+  rememberFinalScreen("sess-junk", 42)
+  rememberFinalScreen("", "orphan")
+
+  assert.equal(finalScreenFor("sess-junk"), null)
 })

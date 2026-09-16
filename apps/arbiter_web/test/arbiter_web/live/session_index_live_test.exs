@@ -1,12 +1,21 @@
 defmodule ArbiterWeb.SessionIndexLiveTest do
   @moduledoc """
-  Cost/tokens column on `/sessions` (bd-9mrzti, follow-up to phase 7's live
-  cost HUD on the session detail page, bd-67l88l).
+  `/sessions` — the sessions index (bd-c76fu9 phase 5, bd-9mrzti's cost/tokens
+  column, bd-a292yj's move of every per-session control into the dock).
 
-  The column reads `Arbiter.Usage.summarize(by: :session)` — the same
-  canonical rollup `arb usage --by session` uses — rather than tailing a
-  session's JSONL itself, so these tests drive it by writing
-  `Arbiter.Usage.Event` rows, not by faking terminal bytes.
+  Since phase 3 of the session dock this is the *only* sessions page: there is
+  no `/sessions/:id`, and what used to be tested there — keep_alive, kill from
+  the session's own surface, the exit banner, the metadata, the non-loopback
+  notice — is in `ArbiterWeb.SessionDockLiveTest`, against the dock window that
+  owns it now. What is left here is what the index itself owns: launching,
+  naming at launch, listing, handing a session to the dock, and Kill (a fleet
+  act, shared with the dock through `SessionIndexLive.kill_modal/1`).
+
+  The cost/tokens column reads `ArbiterWeb.SessionUsage` —
+  `Arbiter.Usage.summarize(by: :session)`, the same canonical rollup `arb usage
+  --by session` uses — rather than tailing a session's JSONL itself, so those
+  tests drive it by writing `Arbiter.Usage.Event` rows, not by faking terminal
+  bytes.
   """
   use ArbiterWeb.ConnCase, async: false
 
@@ -125,6 +134,262 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
       assert has_element?(view, "#session-#{session.id}-usage", "$0.75")
       refute has_element?(view, "#session-#{session.id}-usage-empty")
+    end
+  end
+
+  describe "the sessions list" do
+    test "is reachable from the app navigation", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/")
+      assert html =~ ~s(href="/sessions")
+    end
+
+    test "shows an empty state when nothing has ever been launched", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#sessions-empty")
+      refute has_element?(view, "#sessions-list")
+    end
+
+    test "lists sessions newest first, each openable in the dock", %{conn: conn} do
+      older = launch!()
+      newer = launch!()
+
+      {:ok, view, html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#session-#{older.id}")
+      assert has_element?(view, "#session-#{newer.id}")
+
+      # No link to a session page: there isn't one any more (bd-a292yj). The
+      # row opens the session in the dock, on this page.
+      refute html =~ ~s(href="/sessions/#{newer.id}")
+      assert has_element?(view, "#open-in-dock-#{newer.id}")
+      assert has_element?(view, "#open-in-dock-button-#{newer.id}")
+
+      assert [first, second] =
+               Regex.scan(~r/id="session-([-0-9a-f]+)"/, html, capture: :all_but_first)
+
+      assert first == [newer.id]
+      assert second == [older.id]
+    end
+
+    test "shows the resolved display name, and the id stays reachable (bd-o2vtsz)", %{conn: conn} do
+      named = launch!(name: "refinement session")
+      unnamed = launch!()
+
+      {:ok, view, html} = live(conn, ~p"/sessions")
+
+      assert html =~ "refinement session"
+
+      assert has_element?(
+               view,
+               "#session-#{named.id}-short-id",
+               Arbiter.Sessions.DisplayName.short_id(named.id)
+             )
+
+      assert has_element?(
+               view,
+               "#session-#{unnamed.id}-short-id",
+               Arbiter.Sessions.DisplayName.short_id(unnamed.id)
+             )
+    end
+
+    test "an ended session is shown as ended, with the reason it ended", %{conn: conn} do
+      session = launch!()
+      {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "killed by hand")
+
+      {:ok, view, html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#session-#{session.id}")
+      assert html =~ "killed by hand"
+    end
+
+    test "a session ending on its own (no Kill click) updates the list live, via PubSub (bd-bsdeb2)",
+         %{conn: conn} do
+      session = launch!()
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#session-#{session.id}", "running")
+
+      # Simulate the Stream noticing a dead pane, or the periodic reaper
+      # noticing a vanished scope — either way `mark_ended/2` is the one
+      # place that runs, no Kill click involved.
+      {:ok, _ended} = Sessions.mark_ended(session, "exited")
+
+      assert render(view) =~ "exited"
+      assert has_element?(view, "#session-#{session.id}", "ended")
+    end
+  end
+
+  describe "launching" do
+    # bd-a292yj: launching no longer navigates. There is nowhere to navigate
+    # *to* — the session's window opens in the dock, which is already on this
+    # page, so a redirect would only have thrown away what was on screen.
+    test "the launch button provisions a session with the phase-5 defaults and opens it in the dock",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#launch-session")
+
+      # Launching is slow and no longer redirects, so the button stays under
+      # the cursor for the whole call. Without this a second click starts a
+      # second real session (review finding 1).
+      assert has_element?(view, ~s(#launch-session[phx-disable-with]))
+
+      view |> form("#launch-session-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert_push_event(view, "session-dock:open", %{id: opened})
+      assert opened == session.id
+
+      # §10.1 / the phase-5 scope: mode B, cross-workspace, dispatch off. The
+      # full pre-launch options UI is phase 11.
+      assert session.auth_mode == :seeded_credentials
+      assert session.workspace_id == nil
+      assert session.can_dispatch == false
+      assert session.status == :running
+      assert session.name == nil
+    end
+
+    test "an operator-supplied name reaches the session row (bd-o2vtsz)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"name" => "refinement session"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.name == "refinement session"
+    end
+
+    test "a blank name launches with no name, same as leaving it empty", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view |> form("#launch-session-form", %{"name" => "   "}) |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.name == nil
+    end
+
+    test "a failed launch reports why and leaves the operator on the list", %{conn: conn} do
+      put_env(:sessions_runner, Arbiter.Test.FailingSessionRunner)
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      html = view |> form("#launch-session-form") |> render_submit()
+
+      assert html =~ "Could not launch"
+      assert has_element?(view, "#launch-session")
+    end
+  end
+
+  describe "Remote Control gating in the launch form (§8.3)" do
+    test "mode B (the default) leaves the Remote Control checkbox enabled, no reason shown",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      refute has_element?(view, "#launch-session-remote-control[disabled]")
+      refute has_element?(view, "#launch-session-remote-control-reason")
+    end
+
+    test "selecting mode A disables the checkbox and shows the reason", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      html =
+        view
+        |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+        |> render_change()
+
+      assert html =~ ~s(id="launch-session-remote-control-reason")
+
+      assert has_element?(view, "#launch-session-remote-control[disabled]")
+    end
+
+    test "switching back to mode B re-enables the checkbox", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-remote-control[disabled]")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
+
+      refute has_element?(view, "#launch-session-remote-control[disabled]")
+    end
+
+    test "launching under mode B with the box checked records remote_control: true",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{
+        "auth_mode" => "seeded_credentials",
+        "remote_control" => "true"
+      })
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.auth_mode == :seeded_credentials
+      assert session.remote_control == true
+    end
+
+    test "a submission that spoofs remote_control under mode A is still refused server-side",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      # The disabled attribute stops a normal click, but `render_submit/1`
+      # posts whatever params it is given — proving `launch_defaults/1`'s own
+      # clamp (not just the disabled checkbox) is what keeps this from ever
+      # reaching a row. Mode A has no configured token in this test env, so
+      # the launch itself fails (a pre-existing gap of this phase-5 form, not
+      # this test's concern) — what matters is that `remote_control` was
+      # never `true` on the row it left behind.
+      view
+      |> form("#launch-session-form", %{
+        "auth_mode" => "oauth_token",
+        "remote_control" => "true"
+      })
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.auth_mode == :oauth_token
+      assert session.remote_control == false
+    end
+  end
+
+  describe "killing" do
+    test "kill asks for confirmation first and does nothing until it gets one", %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      refute has_element?(view, "#kill-session-modal")
+
+      view |> element("#kill-session-#{session.id}") |> render_click()
+      assert has_element?(view, "#kill-session-modal")
+
+      # Still running: opening the confirmation is not the action.
+      assert {:ok, %{status: :running}} = Sessions.get(session.id)
+
+      view |> element("#cancel-kill") |> render_click()
+      refute has_element?(view, "#kill-session-modal")
+      assert {:ok, %{status: :running}} = Sessions.get(session.id)
+    end
+
+    test "confirming the kill ends the session and says so in the list", %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view |> element("#kill-session-#{session.id}") |> render_click()
+      html = view |> element("#confirm-kill") |> render_click()
+
+      assert {:ok, %{status: :ended}} = Sessions.get(session.id)
+      refute has_element?(view, "#kill-session-modal")
+      assert html =~ "ended"
     end
   end
 end

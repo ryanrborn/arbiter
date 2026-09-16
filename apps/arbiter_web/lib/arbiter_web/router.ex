@@ -102,8 +102,14 @@ defmodule ArbiterWeb.Router do
       # Browser-hosted coordinator sessions (bd-c76fu9). The terminal itself
       # rides the separate `/session` socket declared in the endpoint, not
       # this live_session.
+      #
+      # There is deliberately no `/sessions/:id`. Phase 3 of the session dock
+      # (bd-a292yj) moved every per-session control — keep_alive, detach, kill,
+      # the metadata, live cost, the terminal — into the dock's window, which
+      # is on *every* page, and deleted the page they used to live on rather
+      # than leave a route whose controls had moved away. `/sessions` is the
+      # index; the dock is the session.
       live("/sessions", SessionIndexLive)
-      live("/sessions/:id", SessionLive)
 
       live("/workers", WorkerIndexLive)
       live("/workers/history", RunIndexLive)
