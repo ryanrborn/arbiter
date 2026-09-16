@@ -151,7 +151,9 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
 
   describe "worker spend in the header for an epic" do
     defp epic!(ws) do
-      {:ok, epic} = Ash.create(Issue, %{title: "epic subject", workspace_id: ws.id, issue_type: :epic})
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "epic subject", workspace_id: ws.id, issue_type: :epic})
+
       epic
     end
 

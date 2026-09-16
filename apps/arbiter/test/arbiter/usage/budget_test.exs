@@ -187,7 +187,9 @@ defmodule Arbiter.Usage.BudgetTest do
   # ---- assess_epic/2 ------------------------------------------------------
 
   defp epic!(ws) do
-    {:ok, epic} = Ash.create(Issue, %{title: "epic subject", workspace_id: ws.id, issue_type: :epic})
+    {:ok, epic} =
+      Ash.create(Issue, %{title: "epic subject", workspace_id: ws.id, issue_type: :epic})
+
     epic
   end
 
@@ -273,7 +275,12 @@ defmodule Arbiter.Usage.BudgetTest do
       ws: ws
     } do
       epic = epic!(ws)
-      ready_child!(ws, epic, %{difficulty: 4, issue_type: :chore, acceptance_waived: "test fixture"})
+
+      ready_child!(ws, epic, %{
+        difficulty: 4,
+        issue_type: :chore,
+        acceptance_waived: "test fixture"
+      })
 
       assert %{estimate: nil, state: :no_estimate} = Budget.assess_epic(epic, now: @now)
     end
