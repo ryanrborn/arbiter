@@ -267,19 +267,6 @@ defmodule ArbiterWeb.UsageLive do
 
   defp sum_rows(rollup), do: Enum.reduce(rollup, 0, fn r, acc -> acc + (r.rows || 0) end)
 
-  defp format_tokens(nil), do: "—"
-  defp format_tokens(n) when n in [0, 0.0], do: "0"
-
-  defp format_tokens(n) when is_integer(n) and n >= 1_000_000 do
-    "#{Float.round(n / 1_000_000, 2)}M"
-  end
-
-  defp format_tokens(n) when is_integer(n) and n >= 1_000 do
-    "#{Float.round(n / 1_000, 1)}k"
-  end
-
-  defp format_tokens(n) when is_integer(n), do: Integer.to_string(n)
-
   # ---- render ----
 
   @impl true
