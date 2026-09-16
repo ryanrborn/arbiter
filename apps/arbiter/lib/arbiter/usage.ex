@@ -252,31 +252,28 @@ defmodule Arbiter.Usage do
   end
 
   defp base_filter(query, opts) do
-    query =
-      case Keyword.get(opts, :since) do
-        nil -> query
-        %DateTime{} = dt -> Ash.Query.filter(query, occurred_at >= ^dt)
-      end
-
-    query =
-      case Keyword.get(opts, :until) do
-        nil -> query
-        %DateTime{} = dt -> Ash.Query.filter(query, occurred_at <= ^dt)
-      end
-
-    query =
-      case Keyword.get(opts, :workspace_id) do
-        nil -> query
-        "" -> query
-        ws -> Ash.Query.filter(query, workspace_id == ^ws)
-      end
-
-    case Keyword.get(opts, :session_ids) do
-      nil -> query
-      [] -> query
-      ids when is_list(ids) -> Ash.Query.filter(query, session_id in ^ids)
-    end
+    query
+    |> filter_since(Keyword.get(opts, :since))
+    |> filter_until(Keyword.get(opts, :until))
+    |> filter_workspace_id(Keyword.get(opts, :workspace_id))
+    |> filter_session_ids(Keyword.get(opts, :session_ids))
   end
+
+  defp filter_since(query, nil), do: query
+  defp filter_since(query, %DateTime{} = dt), do: Ash.Query.filter(query, occurred_at >= ^dt)
+
+  defp filter_until(query, nil), do: query
+  defp filter_until(query, %DateTime{} = dt), do: Ash.Query.filter(query, occurred_at <= ^dt)
+
+  defp filter_workspace_id(query, nil), do: query
+  defp filter_workspace_id(query, ""), do: query
+  defp filter_workspace_id(query, ws), do: Ash.Query.filter(query, workspace_id == ^ws)
+
+  defp filter_session_ids(query, nil), do: query
+  defp filter_session_ids(query, []), do: query
+
+  defp filter_session_ids(query, ids) when is_list(ids),
+    do: Ash.Query.filter(query, session_id in ^ids)
 
   # Group events by the requested dimension. For :epic we resolve each
   # event's task's `:parent_of` parents at read time (a join would be cleaner
