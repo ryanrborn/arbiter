@@ -179,6 +179,9 @@ defmodule Arbiter.Sessions.StreamTest do
       ScriptedPty.emit(id, " world")
       assert_stdout(id, " world")
 
+      # A write below the redaction tail buffer's size (finding 2) is held
+      # back rather than written immediately; `Stream.stop/1` flushes it.
+      :ok = Stream.stop(id)
       assert File.read!(Transcript.path_for(id)) == "hello world"
     end
 
@@ -192,6 +195,7 @@ defmodule Arbiter.Sessions.StreamTest do
       ScriptedPty.emit(id, "token=super-secret-value here")
       assert_stdout(id, "token=super-secret-value here")
 
+      :ok = Stream.stop(id)
       assert File.read!(Transcript.path_for(id)) == "token=[REDACTED] here"
     end
 
@@ -205,6 +209,31 @@ defmodule Arbiter.Sessions.StreamTest do
       ScriptedPty.emit(id, "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz")
       assert_stdout(id, "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz")
 
+      :ok = Stream.stop(id)
+      assert File.read!(Transcript.path_for(id)) == "ANTHROPIC_API_KEY=[REDACTED]"
+    end
+
+    test "a secret split across two poll ticks is still redacted (bd-5pelo2 finding 2)", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+
+      # Simulate an operator *typing* a key rather than pasting it: paced
+      # slower than `poll_interval_ms` so the reader genuinely reads it back
+      # one byte per tick — no single chunk ever contains the full
+      # `sk-ant-…` match on its own.
+      "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz"
+      |> String.graphemes()
+      |> Enum.each(fn ch ->
+        ScriptedPty.emit(id, ch)
+        Process.sleep(10)
+      end)
+
+      collect_stdout(id, byte_size("ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz"))
+
+      :ok = Stream.stop(id)
       assert File.read!(Transcript.path_for(id)) == "ANTHROPIC_API_KEY=[REDACTED]"
     end
   end
@@ -553,25 +582,26 @@ defmodule Arbiter.Sessions.StreamTest do
   end
 
   describe "detach (AC 2)" do
-    test "the last detach drops the reader and closes the pipe, not the session", %{
+    test "the last detach drops the subscriber but keeps the reader (and the pipe) running", %{
       session: session,
       id: id,
       opts: opts
     } do
       {:ok, _} = attach(session, opts)
       pid = Stream.whereis(id)
-      ref = Process.monitor(pid)
 
       :ok = Stream.detach(id, self())
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
-      # The Registry drops the entry when it handles the reader's DOWN, which
-      # is not ordered against *our* DOWN.
-      wait_until(fn -> Stream.whereis(id) == nil end)
-
-      # The pipe was closed; nothing killed the terminal.
-      assert {:stop_stream} in ScriptedPty.calls(id)
+      # bd-5pelo2 finding 1: the reader used to stop here, closing the pipe —
+      # which meant an unattended session stopped being captured. It must now
+      # stay up, still owned by the same pid, still piping.
+      refute {:stop_stream} in ScriptedPty.calls(id)
+      assert Stream.whereis(id) == pid
       assert ScriptedPty.fetch(id).alive?
+
+      # And it keeps capturing with nobody attached.
+      ScriptedPty.emit(id, "while unattended")
+      wait_until(fn -> match?(%{seq: 16}, Stream.stats(id)) end)
     end
 
     test "reattaching after a detach continues the same seq space", %{
@@ -584,11 +614,11 @@ defmodule Arbiter.Sessions.StreamTest do
       assert assert_stdout(id, "before") == 6
 
       :ok = Stream.detach(id, self())
-      wait_until(fn -> Stream.whereis(id) == nil end)
 
-      # Output produced while detached lands in the pipe file, and is covered
-      # by the snapshot rather than replayed as frames (§4.5).
+      # Output produced while detached is picked up by the same, still-running
+      # reader rather than requiring a reattach to notice it.
       ScriptedPty.emit(id, "while away")
+      wait_until(fn -> match?(%{seq: 16}, Stream.stats(id)) end)
 
       {:ok, attached} = attach(session, opts)
       assert attached.seq == 16
@@ -599,20 +629,15 @@ defmodule Arbiter.Sessions.StreamTest do
   end
 
   describe "reader lifecycle races" do
-    test "reattaching the instant the previous reader stops always succeeds", %{
+    test "concurrent attach/detach cycles against the one long-lived reader always succeed", %{
       session: session,
       id: id,
       opts: opts
     } do
-      # A browser reload, or a second tab opening as the first closes: the
-      # registry entry for a reader outlives its reply by however long the
-      # Registry takes to handle the DOWN, so `attach/2` can resolve a pid that
-      # is already terminating and the call to it exits `:noproc`.
-      #
-      # A stress test rather than a deterministic one — the window is the
-      # registry's handling of a single `:DOWN` and cannot be opened on demand
-      # — so it is run from several processes at once to widen it, and every
-      # attach must still come back `{:ok, _}` rather than an exit.
+      # The reader no longer stops between detaches (bd-5pelo2 finding 1), so
+      # this mainly exercises concurrent attach/detach against a shared
+      # subs map — retried a few times from several processes at once for
+      # good measure.
       tasks =
         for _ <- 1..8 do
           Task.async(fn ->

@@ -686,8 +686,10 @@ per attached browser". tmux makes that impossible: `pipe-pane` is a property
 of the pane, singular — issuing it twice replaces the first pipe. It is also
 the wrong shape for §5.3, which wants one `seq` space and one ring *per
 session* so two clients resuming from different points are talking about the
-same numbers. The property §4.3 actually cares about is untouched: a detach or
-an `arbiter` restart drops the reader, never the session.
+same numbers. The property §4.3 actually cares about is untouched: an `arbiter`
+restart drops the reader, never the session. A detach does not even drop the
+reader — it keeps running, unattended, for as long as the session does, since
+it is also what owns §11's raw capture (bd-5pelo2, round 2).
 
 **3. `seq` is a byte offset into the pipe file, not a counter.** This falls
 out of `pipe-pane -O 'cat >> <path>'` and is the most useful invariant in the
@@ -1578,7 +1580,27 @@ principle; apply the archive's existing `max_bytes` cap.
 **Redaction.** The raw stream captures whatever the screen showed, which can
 include a token the operator pasted or a command that echoed a secret. Scrub on
 write, and treat the transcript directory as mode-0700 operator-only data. This is
-the same posture `docs/worker-security.md` takes.
+the same posture `docs/worker-security.md` takes. Because the PTY only hands
+bytes over in whatever-sized chunks a poll tick catches, a secret can straddle
+two chunks — an operator *typing* a key delivers it a few bytes per tick, so no
+single chunk contains a full match. `Arbiter.Sessions.Stream` holds back a small
+tail of unwritten bytes and joins it against the next chunk before redacting, so
+a match is never evaluated against less than that held-back window of what
+follows it (bd-5pelo2, round 2, finding 2).
+
+**Known deferral: capture starts at first attach, not at session launch.**
+`tmux pipe-pane -O` is started by `Arbiter.Sessions.Stream` the first time a
+browser attaches, and (since bd-5pelo2 round 2) is kept running for the rest of
+the session's life from then on — a detach no longer stops it, so a session a
+browser has opened at least once is captured in full, attended or not. A
+session **nobody ever opens in a browser** is not yet captured at all: the pipe
+is never started, because nothing currently starts it outside the attach path.
+Closing that gap means starting the reader from session launch
+(`Arbiter.Sessions.launch/1`) and from the boot-time adoption sweep
+(`Arbiter.Sessions.Adoption`) rather than from `ArbiterWeb.SessionChannel`,
+which is a wider change touching both call paths and their test suites — left
+for a follow-up rather than folded into this round, to keep the fix that *is*
+landing (capture surviving detach) reviewable on its own.
 
 ## 12. Open questions and edge cases
 

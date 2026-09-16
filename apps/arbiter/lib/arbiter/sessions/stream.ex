@@ -18,9 +18,28 @@ defmodule Arbiter.Sessions.Stream do
   wrong shape for §5.3, which wants one `seq` space and one ring per *session*
   so that two clients resuming from different points are talking about the
   same numbers. So: one reader per session, shared by every attached client,
-  started on first attach and stopped when the last client leaves. The
-  property the RFC actually cares about is preserved exactly — a detach or an
-  `arbiter` restart drops the reader, never the session.
+  started on first attach.
+
+  Unlike earlier revisions of this module, the reader is **not** stopped when
+  the last client detaches — detaching only drops that client's subscriber
+  entry (bd-5pelo2 finding 1). §11's raw transcript (`Arbiter.Sessions.Transcript`)
+  is written from this same reader's poll loop, so a reader that stopped at
+  the last detach meant nothing was captured while a session ran unattended,
+  which inverts the whole point of the artefact. The reader now runs for the
+  rest of the session's life — through every detach, with zero subscribers if
+  need be — and is only stopped by a genuine session end (`:alive` finding
+  the pane gone, or an `arbiter` restart, which drops the reader but never the
+  session: the pipe keeps writing to its file regardless, and a fresh reader
+  adopts it on the next attach).
+
+  This closes the gap for any session a browser attaches to at least once.
+  It does **not** yet cover a session nobody ever attaches to at all — the
+  pipe is only started by the first `attach/2`, same as before. That
+  remaining gap is a deliberate, documented deferral (see
+  `docs/browser-hosted-coordinator-sessions.md` §11); closing it needs the
+  reader started from session launch/adoption rather than from the channel,
+  which touches enough of the launch and adoption call paths to be its own
+  change.
 
   ## `seq` is a byte offset, not a counter
 
@@ -88,7 +107,6 @@ defmodule Arbiter.Sessions.Stream do
         poll_interval_ms: 25,
         alive_interval_ms: 1_000,
         usage_poll_interval_ms: 2_000, # live cost HUD cadence (§7.5, phase 7)
-        linger_ms: 5_000,             # reader lifetime after the last detach
         snapshot_lines: 2_000
 
   Every key is also accepted as an option to `attach/2`, which is how the
@@ -171,8 +189,7 @@ defmodule Arbiter.Sessions.Stream do
     read_chunk_bytes: 65_536,
     poll_interval_ms: 25,
     alive_interval_ms: 1_000,
-    usage_poll_interval_ms: 2_000,
-    linger_ms: 5_000
+    usage_poll_interval_ms: 2_000
   ]
 
   # Rounds `attach/2` will re-resolve the reader over before giving up. Three
@@ -265,9 +282,10 @@ defmodule Arbiter.Sessions.Stream do
   @doc """
   Detach a subscriber. The session keeps running (AC 2).
 
-  When the last subscriber leaves, the reader closes the pipe and stops —
-  after `:linger_ms`, so that a browser reload reattaches to the same `seq`
-  space instead of being repainted.
+  The reader itself keeps running too, even once the last subscriber leaves —
+  it still owns the §11 raw-transcript capture, which must not stop just
+  because nobody is watching (bd-5pelo2 finding 1). A later reattach picks
+  the same `seq` space back up directly, with nothing to repaint.
   """
   @spec detach(String.t(), pid()) :: :ok
   def detach(session_id, subscriber \\ self()) do
@@ -384,7 +402,8 @@ defmodule Arbiter.Sessions.Stream do
       title: "",
       pending_snapshot: nil,
       open_error: nil,
-      linger_timer: nil,
+      transcript_handle: nil,
+      transcript_tail: <<>>,
       last_turn_touch_ms: nil,
       usage_task_ref: nil,
       usage_file_stat: nil,
@@ -418,8 +437,6 @@ defmodule Arbiter.Sessions.Stream do
   end
 
   def handle_call({:attach, pid, last_seq, cols, rows}, _from, state) do
-    state = cancel_linger(state)
-
     state =
       if Map.has_key?(state.subs, pid) do
         state
@@ -460,13 +477,7 @@ defmodule Arbiter.Sessions.Stream do
   end
 
   def handle_call({:detach, pid}, _from, state) do
-    state = drop_subscriber(state, pid)
-
-    if map_size(state.subs) == 0 and state.config.linger_ms == 0 do
-      {:stop, :normal, :ok, close_stream(state)}
-    else
-      {:reply, :ok, maybe_linger(state)}
-    end
+    {:reply, :ok, drop_subscriber(state, pid)}
   end
 
   def handle_call({:input, pid, bytes}, _from, state) do
@@ -565,14 +576,6 @@ defmodule Arbiter.Sessions.Stream do
     {:noreply, poll_usage(state)}
   end
 
-  def handle_info(:linger_expired, state) do
-    if map_size(state.subs) == 0 do
-      {:stop, :normal, close_stream(state)}
-    else
-      {:noreply, %{state | linger_timer: nil}}
-    end
-  end
-
   # The in-flight usage-read Task, landing. Matched (and demonitored) before
   # the subscriber `:DOWN` clause below, which would otherwise also match this
   # shape.
@@ -596,13 +599,7 @@ defmodule Arbiter.Sessions.Stream do
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    state = drop_subscriber(state, pid)
-
-    if map_size(state.subs) == 0 and state.config.linger_ms == 0 do
-      {:stop, :normal, close_stream(state)}
-    else
-      {:noreply, maybe_linger(state)}
-    end
+    {:noreply, drop_subscriber(state, pid)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -629,8 +626,25 @@ defmodule Arbiter.Sessions.Stream do
          | fd: fd,
            seq: base,
            ring_base: base,
-           pending_snapshot: snapshot
+           pending_snapshot: snapshot,
+           transcript_handle: open_transcript(state.id)
        }}
+    end
+  end
+
+  # Best-effort, same posture as the old per-tick `Transcript.append/3`: a
+  # transcript file that fails to open must never stop the pane from working.
+  # Opened once here instead of once per poll tick (bd-5pelo2 finding 3) — the
+  # fd, and the one-time `0600`/`0700` mode set, are held in reader state for
+  # the reader's lifetime.
+  defp open_transcript(id) do
+    case Transcript.open(id) do
+      {:ok, handle} ->
+        handle
+
+      {:error, reason} ->
+        Logger.warning("Sessions.Stream #{id}: transcript open failed: #{inspect(reason)}")
+        nil
     end
   end
 
@@ -648,12 +662,40 @@ defmodule Arbiter.Sessions.Stream do
     end
   end
 
-  defp close_stream(%{fd: nil} = state), do: state
+  # No `terminal.stop_stream/2` call here: the tmux pipe is no longer this
+  # reader's to close (bd-5pelo2 finding 1). It is a session-lifetime
+  # resource now — it keeps writing to `state.path` for as long as the
+  # session itself is running, including every stretch this reader is not
+  # (an `arbiter` restart, or simply nobody attached), and a later reader
+  # adopts it via `start_or_adopt/1` rather than re-piping. The pane's own
+  # teardown (`tmux kill-session`, in `Arbiter.Sessions.kill/2` and the
+  # dead-session detection below) is what actually ends it.
+  defp close_stream(%{fd: nil} = state), do: flush_transcript(state)
 
   defp close_stream(state) do
-    _ = state.terminal.stop_stream(state.session, state.opts)
     _ = :file.close(state.fd)
-    %{state | fd: nil}
+    flush_transcript(%{state | fd: nil})
+  end
+
+  # The redaction tail buffer (bd-5pelo2 finding 2) can be holding up to
+  # `@redact_tail_bytes` unwritten bytes — flush them, as-is, since nothing
+  # more is coming for this reader to join them against.
+  defp flush_transcript(state) do
+    handle =
+      if state.transcript_tail == <<>> do
+        state.transcript_handle
+      else
+        write_transcript(state.transcript_handle, state.transcript_tail, state.redact_values)
+      end
+
+    if handle, do: Transcript.close(handle)
+    %{state | transcript_handle: nil, transcript_tail: <<>>}
+  end
+
+  defp write_transcript(nil, _data, _redact_values), do: nil
+
+  defp write_transcript(handle, data, redact_values) do
+    Transcript.append_open(handle, data, redact_values)
   end
 
   defp pump(%{fd: nil} = state), do: state
@@ -678,13 +720,45 @@ defmodule Arbiter.Sessions.Stream do
   defp push_frame(state, data) do
     seq = state.seq + byte_size(data)
     frame = Frame.encode(seq, data)
-    _ = Transcript.append(state.id, data, state.redact_values)
 
     state
+    |> record_transcript(data)
     |> Map.put(:seq, seq)
     |> ring_push(seq, data)
     |> deliver(frame)
     |> touch_turn()
+  end
+
+  # A secret can straddle a poll tick's chunk boundary — an operator *typing*
+  # (rather than pasting) a token delivers it a few bytes per 25ms tick, so no
+  # single chunk ever contains a full match (bd-5pelo2 finding 2; the same
+  # hazard `Arbiter.Worker.SessionArchive` already documents and avoids for
+  # the JSONL side by reading the whole file before redacting — impossible
+  # here, since the PTY chunking is unavoidable). Redact against the *joined*
+  # tail-plus-new-data instead: hold back the trailing `@redact_tail_bytes` of
+  # every write and prepend it to the next chunk before redacting, so a match
+  # is never evaluated against less than that much of what follows it. The
+  # remainder is flushed as-is on reader shutdown (`flush_transcript/1`).
+  @redact_tail_bytes 512
+  defp record_transcript(state, data) do
+    combined = state.transcript_tail <> data
+    {writable, tail} = split_tail(combined, @redact_tail_bytes)
+
+    handle =
+      if writable == <<>> do
+        state.transcript_handle
+      else
+        write_transcript(state.transcript_handle, writable, state.redact_values)
+      end
+
+    %{state | transcript_handle: handle, transcript_tail: tail}
+  end
+
+  defp split_tail(data, n) when byte_size(data) <= n, do: {<<>>, data}
+
+  defp split_tail(data, n) do
+    cut = byte_size(data) - n
+    {:binary.part(data, 0, cut), :binary.part(data, cut, n)}
   end
 
   # The idle-deadline's other input (§4.6 item 2): the pane actually produced
@@ -1105,19 +1179,4 @@ defmodule Arbiter.Sessions.Stream do
 
   defp schedule(_message, interval) when interval in [nil, :never], do: nil
   defp schedule(message, interval), do: Process.send_after(self(), message, interval)
-
-  defp maybe_linger(state) do
-    if map_size(state.subs) == 0 and is_nil(state.linger_timer) do
-      %{state | linger_timer: schedule(:linger_expired, state.config.linger_ms)}
-    else
-      state
-    end
-  end
-
-  defp cancel_linger(%{linger_timer: nil} = state), do: state
-
-  defp cancel_linger(state) do
-    Process.cancel_timer(state.linger_timer)
-    %{state | linger_timer: nil}
-  end
 end

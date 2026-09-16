@@ -8,10 +8,22 @@ defmodule Arbiter.Sessions.Transcript do
   bytes — not a second `pipe-pane`: tmux's own docs and `Stream`'s moduledoc
   both note pipe-pane is a property of the pane, singular, so a second
   capture path has to read what the first already receives rather than issue
-  its own. `Stream`'s `push_frame/2` calls `append/3` with every chunk it
-  reads off the pipe file, so the persistent copy exists for exactly as long
-  as `Stream`'s reader is alive for that session — the same lifetime the
-  transport pipe already has.
+  its own. `Stream` opens a handle with `open/1` once, for its own lifetime
+  (not per attach — see `Stream`'s moduledoc, bd-5pelo2 finding 1), and feeds
+  every chunk it reads off the pipe file through `append_open/3`.
+
+  ## Two entry points
+
+  `append/3` is the simple, stateless form: opens the file, redacts and
+  writes `data`, closes it again. Fine for a one-shot call (tests, anything
+  outside the 25ms PTY poll).
+
+  `open/1` + `append_open/3` + `close/1` are the form `Stream` actually uses
+  on its hot path: `open/1` creates the file (mode `0600`, parent `0700`) and
+  returns a handle holding an already-open append fd and the file's current
+  size, so a caller writing many times — once per poll tick — pays the
+  `File.open`/`mkdir_p`/`chmod` cost once rather than on every write
+  (bd-5pelo2 finding 3).
 
   ## Two redaction passes
 
@@ -103,67 +115,112 @@ defmodule Arbiter.Sessions.Transcript do
     end
   end
 
-  @doc """
-  Redact and append `data` to `id`'s raw transcript file, creating it (mode
-  `0600`, parent `0700`) on first write.
+  @typedoc "A handle from `open/1`: an already-open append fd plus the file's running size."
+  @type handle :: %{fd: :file.io_device(), size: non_neg_integer(), path: String.t()}
 
-  Silently drops the bytes once the file is at or past `max_bytes/0` — this
-  must never be the reason a session's pane stops working. Any write failure
-  is logged and swallowed for the same reason.
+  @doc """
+  Open `id`'s raw transcript file for repeated appends via `append_open/3`,
+  creating it (mode `0600`, parent `0700`) if it does not exist yet.
+
+  The returned handle's `size` is the file's size at open time and is
+  maintained by `append_open/3` from then on, so a long-lived caller (`Stream`)
+  never needs to re-`File.stat` the file on its own hot path.
+  """
+  @spec open(String.t()) :: {:ok, handle()} | {:error, term()}
+  def open(id) when is_binary(id) and id != "" do
+    path = path_for(id)
+    dir = Path.dirname(path)
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- chmod(dir, 0o700),
+         {:ok, fd} <- :file.open(path, [:append, :raw, :binary]),
+         :ok <- chmod(path, 0o600) do
+      {:ok, %{fd: fd, size: file_size(path), path: path}}
+    end
+  end
+
+  @doc """
+  Redact and append `data` through an already-open `handle` (from `open/1`),
+  returning the updated handle.
+
+  Silently drops the bytes once `handle.size` is at or past `max_bytes/0` —
+  this must never be the reason a session's pane stops working. A write
+  failure is logged and swallowed for the same reason, returning `handle`
+  unchanged.
 
   `redact_values` are the session's own workspace secrets (see
   `Arbiter.Worker.WorkerEnv.secret_values/1` for the run-side analogue);
-  `Arbiter.Redaction.redact_patterns/1` runs unconditionally after.
+  `Arbiter.Redaction.redact_patterns/1` runs unconditionally after. Redaction
+  only sees exactly the bytes in `data` — a caller writing in chunks (as
+  `Stream` does, every poll tick) is responsible for not splitting a secret
+  across two calls; `Stream` itself holds a tail buffer back for this reason.
+  """
+  @spec append_open(handle(), binary(), [String.t() | nil]) :: handle()
+  def append_open(%{size: size} = handle, data, redact_values \\ [])
+      when is_binary(data) do
+    if size < max_bytes() do
+      scrubbed =
+        data
+        |> Redaction.redact(redact_values)
+        |> Redaction.redact_patterns()
+
+      case :file.write(handle.fd, scrubbed) do
+        :ok ->
+          %{handle | size: size + byte_size(scrubbed)}
+
+        {:error, reason} ->
+          Logger.warning(
+            "Sessions.Transcript: append failed path=#{handle.path}: #{inspect(reason)}"
+          )
+
+          handle
+      end
+    else
+      handle
+    end
+  end
+
+  @doc "Close a handle opened with `open/1`."
+  @spec close(handle()) :: :ok
+  def close(%{fd: fd}) do
+    _ = :file.close(fd)
+    :ok
+  end
+
+  @doc """
+  Redact and append `data` to `id`'s raw transcript file in one call —
+  `open/1` + `append_open/3` + `close/1`, for a caller that only writes once
+  (tests, anything outside `Stream`'s hot path).
   """
   @spec append(String.t(), binary(), [String.t() | nil]) :: :ok
   def append(id, data, redact_values \\ [])
 
   def append(id, data, redact_values)
       when is_binary(id) and id != "" and is_binary(data) do
-    path = path_for(id)
+    case open(id) do
+      {:ok, handle} ->
+        _ = append_open(handle, data, redact_values)
+        close(handle)
 
-    with {:ok, size} <- current_size(path),
-         true <- size < max_bytes() do
-      scrubbed =
-        data
-        |> Redaction.redact(redact_values)
-        |> Redaction.redact_patterns()
-
-      write(path, scrubbed)
-    else
-      _ -> :ok
+      {:error, reason} ->
+        Logger.warning("Sessions.Transcript: open failed id=#{id}: #{inspect(reason)}")
+        :ok
     end
   end
 
   def append(_id, _data, _redact_values), do: :ok
 
-  defp current_size(path) do
-    case File.stat(path) do
-      {:ok, %File.Stat{size: size}} -> {:ok, size}
-      {:error, :enoent} -> {:ok, 0}
-      {:error, reason} -> {:error, reason}
+  defp chmod(path, mode) do
+    case File.chmod(path, mode) do
+      :ok -> :ok
+      {:error, _reason} -> :ok
     end
   end
 
-  defp write(path, bytes) do
-    dir = Path.dirname(path)
-
-    case File.mkdir_p(dir) do
-      :ok ->
-        case File.write(path, bytes, [:append]) do
-          :ok ->
-            _ = File.chmod(dir, 0o700)
-            _ = File.chmod(path, 0o600)
-            :ok
-
-          {:error, reason} ->
-            Logger.warning("Sessions.Transcript: append failed path=#{path}: #{inspect(reason)}")
-            :ok
-        end
-
-      {:error, reason} ->
-        Logger.warning("Sessions.Transcript: mkdir_p failed dir=#{dir}: #{inspect(reason)}")
-        :ok
+  defp file_size(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{size: size}} -> size
+      {:error, _} -> 0
     end
   end
 
