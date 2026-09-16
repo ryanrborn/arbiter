@@ -919,6 +919,66 @@ defmodule Arbiter.Mergers.Github do
   defp diff_range(_opts), do: nil
 
   @impl true
+  def ancestor?(mr_ref, ancestor, descendant) when is_binary(mr_ref) do
+    with {:ok, ancestor} <- validate_sha(ancestor),
+         {:ok, descendant} <- validate_sha(descendant) do
+      if ancestor == descendant do
+        # Git's own answer (`merge-base --is-ancestor X X` is true), and one
+        # fewer forge call on a path that runs per merge poll.
+        {:ok, true}
+      else
+        compare_ancestry(mr_ref, ancestor, descendant)
+      end
+    end
+  end
+
+  # bd-df3zlo / #1736. `compare/{base}...{head}` reports `status` relative to
+  # `base`: `ahead` means every commit of `base` is reachable from `head`, which
+  # is exactly "base is an ancestor of head". `per_page=1` because the commit
+  # list is never read — only `status` is — and the default page would carry up
+  # to 250 commits per probe.
+  #
+  # Anything that is not one of GitHub's four documented statuses is an
+  # `{:error, _}`, never a `false`: `Arbiter.Reviews.Coverage`'s rule 2 treats
+  # an error as "could not tell" and pauses, and treats a `false` as proof that
+  # the head is not our own push arriving late.
+  defp compare_ancestry(mr_ref, ancestor, descendant) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <-
+           handle_json(
+             request(cfg, :get, "/repos/#{owner}/#{repo}/compare/#{ancestor}...#{descendant}",
+               params: [per_page: 1]
+             )
+           ) do
+      compare_status(body)
+    end
+  end
+
+  defp compare_status(%{"status" => status}) when status in ["ahead", "identical"],
+    do: {:ok, true}
+
+  defp compare_status(%{"status" => status}) when status in ["behind", "diverged"],
+    do: {:ok, false}
+
+  defp compare_status(%{"status" => status}), do: {:error, {:unexpected_compare_status, status}}
+  defp compare_status(body), do: {:error, {:unexpected_compare_status, body}}
+
+  # A 40-hex commit id and nothing else. A branch name or `HEAD~1` would still
+  # *resolve* on the forge, but the coverage model compares shas for equality,
+  # so a symbolic ref would make the probe answer a question about a moving
+  # target. Mirrored in the GitLab adapter.
+  defp validate_sha(sha) when is_binary(sha) do
+    if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, sha) do
+      {:ok, String.downcase(sha)}
+    else
+      {:error, {:invalid_sha, sha}}
+    end
+  end
+
+  defp validate_sha(sha), do: {:error, {:invalid_sha, sha}}
+
+  @impl true
   def post_inline_comment(mr_ref, finding, opts)
       when is_binary(mr_ref) and is_map(finding) do
     with {:ok, cfg} <- Config.resolve(),

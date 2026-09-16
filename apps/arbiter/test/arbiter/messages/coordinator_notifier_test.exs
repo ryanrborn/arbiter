@@ -353,6 +353,22 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       assert body =~ "fix the failing checks"
     end
 
+    test "a coverage-unknown park says what it is and how to clear it (bd-df3zlo)" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               CoordinatorNotifier.merge_blocked(
+                 %{task_id: task_id, workspace_id: ws},
+                 "#1736",
+                 :coverage_unknown
+               )
+
+      body = only_merge_escalation(ws).body
+      assert body =~ "could not be established"
+      assert body =~ "arb review cover"
+    end
+
     test "a non-author-approval block names the human-reviewer remediation (bd-c3lchp)" do
       ws = uniq("ws")
       task_id = uniq("bd")

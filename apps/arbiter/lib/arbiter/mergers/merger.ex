@@ -502,7 +502,37 @@ defmodule Arbiter.Mergers.Merger do
   @callback batch_pr_signals(refs :: [mr_ref()]) ::
               {:ok, %{optional(mr_ref()) => pr_signals()}} | {:error, term()}
 
+  @doc """
+  Is `ancestor` an ancestor of `descendant` in the repo this MR lives in?
+
+  The ancestry *proof* `Arbiter.Reviews.Coverage`'s rule 2 needs (P4 of
+  `docs/review-coverage-and-guard-policy.md`, bd-df3zlo / #1736): a head the
+  forge reports that is an ancestor of the head we pushed is the forge lagging
+  our own push, and the merge must wait rather than refuse. A head that is a
+  *descendant* — a post-approval fix-pass commit — is not a lag, and the
+  difference between the two is not visible from the shas alone.
+
+  Both arguments are full 40-hex commit ids; a symbolic ref is rejected rather
+  than resolved, because the coverage model compares shas for equality.
+
+  Three answers, and the difference between the last two is load-bearing:
+
+    * `{:ok, true}` — proven ancestor (a commit is its own ancestor).
+    * `{:ok, false}` — proven *not* an ancestor: unrelated, or a descendant.
+    * `{:error, reason}` — could not tell (API error, timeout, unknown commit).
+      Never collapse this into `{:ok, false}`: the reader treats a `false` as
+      permission to go on and decide the merge on content, and an error as a
+      reason to pause.
+
+  Optional — an adapter with no repo to ask (e.g. `Direct`) simply does not
+  implement it, and callers guard with `function_exported?/3`. A caller that
+  cannot ask supplies no probe at all, which leaves rule 2 unreachable.
+  """
+  @callback ancestor?(mr_ref, ancestor :: String.t(), descendant :: String.t()) ::
+              {:ok, boolean()} | {:error, term()}
+
   @optional_callbacks update_branch: 1,
+                      ancestor?: 3,
                       failing_check_logs: 1,
                       rerun_ci: 2,
                       ref_for_pr: 2,

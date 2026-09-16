@@ -214,6 +214,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers
+  alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
@@ -236,6 +237,14 @@ defmodule Arbiter.Workflows.MergeQueue do
   # clock or a malformed header could park an item for hours with no further
   # log trace, the exact silent-stranding mode bd-6w7j8h exists to prevent.
   @max_rate_limit_park_ms 30 * 60_000
+
+  # bd-df3zlo / #1736 (P4, AC4). The queue's mirror of
+  # `Arbiter.Worker.Watchdog`'s `@coverage_unknown_grace_polls`: how many
+  # consecutive ticks a `{:unknown, _}` coverage answer is waited out before the
+  # item parks and the coordinator is paged once. Every `{:unknown, _}` is
+  # either transient or an operator's problem; what it must never be is a wait
+  # with no end (§5.1's I1).
+  @coverage_unknown_grace_ticks 5
 
   @typedoc "Status atom for an in-flight item."
   @type status ::
@@ -267,7 +276,10 @@ defmodule Arbiter.Workflows.MergeQueue do
           base_updated_at: DateTime.t() | nil,
           last_handled_review_id: term() | nil,
           retry_not_before: DateTime.t() | nil,
-          phantom_conflicts: non_neg_integer()
+          phantom_conflicts: non_neg_integer(),
+          coverage_unknown_polls: non_neg_integer(),
+          coverage_unknown_head: String.t() | nil,
+          coverage_parked?: boolean()
         }
 
   defmodule State do
@@ -338,6 +350,14 @@ defmodule Arbiter.Workflows.MergeQueue do
   def tick(server \\ __MODULE__) do
     GenServer.call(server, :tick)
   end
+
+  @doc """
+  How many consecutive `{:unknown, _}` coverage answers the queue waits out
+  before parking the item and paging the coordinator once (bd-df3zlo / #1736,
+  P4 AC4).
+  """
+  @spec coverage_unknown_grace_ticks() :: pos_integer()
+  def coverage_unknown_grace_ticks, do: @coverage_unknown_grace_ticks
 
   # ---- GenServer callbacks ------------------------------------------------
 
@@ -1325,54 +1345,247 @@ defmodule Arbiter.Workflows.MergeQueue do
   # locally when the head this queue last observed has moved past the reviewed
   # baseline, and otherwise hand that baseline to the forge as an atomic
   # precondition so the residual poll→merge window closes too.
+  # bd-df3zlo / #1736 (P4): which predicate produces the refusal is a workspace
+  # switch. Flag off — the default — this is P3 unchanged: `ReviewedSha` decides
+  # and `Coverage.decide/3` shadows. Flag on, the two swap roles. Returns
+  # `{result, item}`: the coverage path carries a bounded wait on the item, and
+  # a bound that lived in a local variable would reset every tick.
   defp merge_guarded(state, item) do
-    decision = Mergers.ReviewedSha.check(item_reviewed_sha(item), Map.get(item, :last_head_sha))
-    observe_coverage_shadow(state, item, decision)
+    head = Map.get(item, :last_head_sha)
 
-    case decision do
-      {:ok, expected_sha} ->
-        state.adapter.merge(item.mr_ref, expected_sha)
+    cond do
+      coverage_parked_on?(item, head) ->
+        # Terminal for this head (AC4): already waited out and paged. Issue no
+        # merge and spend no forge call until the head moves.
+        {{:error, {:coverage_unknown, :parked}}, item}
 
-      {:error, {:stale_reviewed_sha, reviewed, head}} = err ->
-        Logger.warning(
-          "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
-            "branch advanced past the reviewed commit (reviewed=#{reviewed} head=#{head})"
-        )
+      Workspace.coverage_enabled?(state.workspace) ->
+        coverage_merge_decision(state, item, head)
 
-        err
+      true ->
+        legacy = legacy_merge_decision(item, head)
+        observe_coverage(state, item, coverage_shadow_answer(legacy), head, nil)
+        {apply_legacy_decision(state, item, legacy), item}
     end
   end
 
-  # bd-b0fqcl / #1649 — P3 shadow mode (design #1635 §3.4/§6.3), the queue's
-  # half. `decision` above is still the one acted on; this only records whether
-  # `Arbiter.Reviews.Coverage.decide/3` would have said the same thing, so P4
-  # has evidence before it flips the read path over.
+  defp legacy_merge_decision(item, head),
+    do: Mergers.ReviewedSha.check(item_reviewed_sha(item), head)
+
+  defp apply_legacy_decision(state, item, {:ok, expected_sha}),
+    do: state.adapter.merge(item.mr_ref, expected_sha)
+
+  defp apply_legacy_decision(_state, item, {:error, {:stale_reviewed_sha, reviewed, head}} = err) do
+    Logger.warning(
+      "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; " <>
+        "branch advanced past the reviewed commit (reviewed=#{reviewed} head=#{head})"
+    )
+
+    err
+  end
+
+  # The flipped path. The legacy guard still runs — its answer is what the
+  # disagreement log compares against, and it is the fallback when the coverage
+  # table itself cannot be read, which is a fault in the new path rather than a
+  # verdict from it.
+  defp coverage_merge_decision(%State{} = state, item, head) do
+    legacy = legacy_merge_decision(item, head)
+    old = coverage_shadow_answer(legacy)
+
+    case safe_coverage(item) do
+      {:ok, coverage} ->
+        {new, mechanical} = Coverage.decide_with_record(coverage, head, coverage_ctx(state, item))
+
+        observe_coverage(state, item, old, head, new)
+        # §3.4's adopter obligation, which P3 deliberately left unmet.
+        record_mechanical(item, mechanical)
+        apply_coverage_decision(state, item, new, head)
+
+      :error ->
+        observe_coverage(state, item, old, head, nil)
+        {apply_legacy_decision(state, item, legacy), item}
+    end
+  end
+
+  defp apply_coverage_decision(state, item, {:covered, sha}, _head),
+    do: {state.adapter.merge(item.mr_ref, sha), clear_coverage_wait(item)}
+
+  defp apply_coverage_decision(_state, item, {:uncovered, reason}, head) do
+    Logger.warning(
+      "MergeQueue: refusing merge for task=#{item.task_id} mr=#{item.mr_ref}; no review " <>
+        "covers head #{head} (#{reason}) — merging would integrate commits no reviewer saw"
+    )
+
+    {{:error, {:uncovered_head, head, reason}}, clear_coverage_wait(item)}
+  end
+
+  defp apply_coverage_decision(state, item, {:unknown, reason}, head),
+    do: wait_for_coverage(state, item, reason, head)
+
+  # AC4. `{:unknown, _}` is §3.2's pause, and a pause needs a bound: wait it out
+  # for `@coverage_unknown_grace_ticks`, then park — one page, no further merge
+  # attempts, no further forge calls — until the head moves.
+  defp wait_for_coverage(%State{} = state, item, reason, head) do
+    item = reset_coverage_episode(item, head)
+    polls = item.coverage_unknown_polls + 1
+    err = {:error, {:coverage_unknown, reason}}
+
+    if polls < @coverage_unknown_grace_ticks do
+      Logger.info(
+        "MergeQueue: task=#{item.task_id} mr=#{item.mr_ref} coverage is undecided (#{reason}) " <>
+          "at head #{head} (#{polls}/#{@coverage_unknown_grace_ticks} ticks), waiting"
+      )
+
+      {err, %{item | coverage_unknown_polls: polls}}
+    else
+      Logger.warning(
+        "MergeQueue: parking task=#{item.task_id} mr=#{item.mr_ref} on coverage_unknown " <>
+          "(#{reason}) at head #{head} after #{polls} ticks; paging the coordinator once and " <>
+          "issuing no further merge for this head"
+      )
+
+      safe_notify_coverage_block(state, item)
+
+      {err, %{item | coverage_unknown_polls: polls, coverage_parked?: true}}
+    end
+  end
+
+  defp coverage_parked_on?(item, head),
+    do: Map.get(item, :coverage_parked?) == true and Map.get(item, :coverage_unknown_head) == head
+
+  defp reset_coverage_episode(%{coverage_unknown_head: head} = item, head), do: item
+
+  defp reset_coverage_episode(item, head),
+    do: %{item | coverage_unknown_head: head, coverage_unknown_polls: 0, coverage_parked?: false}
+
+  defp clear_coverage_wait(%{coverage_unknown_polls: 0, coverage_parked?: false} = item), do: item
+
+  defp clear_coverage_wait(item),
+    do: %{item | coverage_unknown_polls: 0, coverage_unknown_head: nil, coverage_parked?: false}
+
+  defp safe_notify_coverage_block(%State{} = state, item) do
+    Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+      %{task_id: item.task_id, workspace_id: state.workspace_id},
+      item.mr_ref,
+      :coverage_unknown
+    )
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "MergeQueue.safe_notify_coverage_block: swallowed exception for task=#{item.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp safe_coverage(item) do
+    {:ok, Coverage.for_mr(item.mr_ref)}
+  rescue
+    e ->
+      Logger.warning(
+        "MergeQueue: task=#{item.task_id} mr=#{item.mr_ref} could not read the coverage table " <>
+          "(#{Exception.message(e)}); this tick falls back to the last_reviewed_sha guard"
+      )
+
+      :error
+  catch
+    :exit, _ -> :error
+  end
+
+  defp record_mechanical(_item, nil), do: :ok
+
+  defp record_mechanical(item, attrs) do
+    case Coverage.record(attrs) do
+      {:ok, _entry} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "MergeQueue: task=#{item.task_id} mr=#{item.mr_ref} could not record the mechanical " <>
+            "coverage row for #{Map.get(attrs, :head_sha)}: #{inspect(reason)}"
+        )
+    end
+  end
+
+  # bd-b0fqcl / #1649 — shadow mode (design #1635 §3.4/§6.3), the queue's half.
+  # Both predicates are evaluated on every guarded merge and their answers
+  # recorded; `new` names the coverage answer when this workspace has flipped
+  # and the call site has already computed it, `nil` when `observe/1` should
+  # compute it.
   #
   # `CoverageShadow.observe/1` returns `:ok` for every input and rescues
   # everything it calls, including the `ctx` lookups — a forge error inside the
   # shadow's diff fetch must not touch an item the queue has already decided
-  # about. As in the Watchdog, no `:ancestor?` probe is supplied, so rule 2 is
-  # unreachable and the gap is counted rather than hidden.
-  defp observe_coverage_shadow(%State{} = state, item, decision) do
-    base = Map.get(item, :base) || state.base
-
-    CoverageShadow.observe(%{
+  # about.
+  defp observe_coverage(%State{} = state, item, old, head, new) do
+    %{
       site: :merge_queue,
       task_id: item.task_id,
       mr_ref: item.mr_ref,
       workspace_id: state.workspace_id,
-      head: Map.get(item, :last_head_sha),
-      old: coverage_shadow_answer(decision),
-      ctx: fn ->
-        %{
-          base_ref: base,
-          fetch_diff: fn diff_base, head ->
-            state.adapter.get_diff(item.mr_ref, %{base: diff_base, head: head})
-          end,
-          source: :watchdog
-        }
-      end
-    })
+      head: head,
+      old: old,
+      ctx: fn -> coverage_ctx(state, item) end
+    }
+    |> with_coverage_answer(new)
+    |> CoverageShadow.observe()
+  end
+
+  # `CoverageShadow.observation()` types `:new` as an `answer()` and nothing
+  # else, and its *absence* is what tells `observe/1` to compute one. Shadow
+  # mode therefore omits the key rather than setting it to `nil` — see the
+  # twin comment in `Arbiter.Worker.Watchdog`.
+  defp with_coverage_answer(obs, nil), do: obs
+
+  defp with_coverage_answer(obs, new),
+    do: obs |> Map.put(:new, new) |> Map.put(:authoritative, :new)
+
+  # bd-df3zlo / #1736 closes P3's declared gap on the queue side too.
+  #
+  # `:local_head_sha` is the task's own recorded review baseline — the head a
+  # reviewing site stamped, which it could only stamp for a commit the fleet had
+  # pushed. Rule 2 then reads: "the stamped head is covered, the PR reports a
+  # different one, and the one it reports is an ancestor of ours" — the forge
+  # lagging our push, which is the #1709 shape as the queue sees it. The queue's
+  # own latch is deliberately NOT used: it is seeded from whatever head the
+  # first approved poll reported, which is the forge's view, not ours.
+  defp coverage_ctx(%State{} = state, item) do
+    ctx = %{
+      local_head_sha: Map.get(item, :last_reviewed_sha),
+      base_ref: Map.get(item, :base) || state.base,
+      fetch_diff: fn diff_base, head ->
+        state.adapter.get_diff(item.mr_ref, %{base: diff_base, head: head})
+      end,
+      source: :watchdog
+    }
+
+    if ancestry_probe?(state.adapter) do
+      Map.put(ctx, :ancestor?, fn ancestor, descendant ->
+        safe_ancestor?(state, item, ancestor, descendant)
+      end)
+    else
+      ctx
+    end
+  end
+
+  defp ancestry_probe?(adapter),
+    do: is_atom(adapter) and function_exported?(adapter, :ancestor?, 3)
+
+  defp safe_ancestor?(%State{} = state, item, ancestor, descendant) do
+    case state.adapter.ancestor?(item.mr_ref, ancestor, descendant) do
+      {:ok, answer} when is_boolean(answer) -> {:ok, answer}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:bad_return, other}}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # §3.4's answer shapes, as `ReviewedSha.check/2` already produces them. The
@@ -1457,7 +1670,9 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp try_merge(state, item) do
     Mergers.prepare_with_repo(state.workspace, item.repo)
 
-    case merge_guarded(state, item) do
+    {result, item} = merge_guarded(state, item)
+
+    case result do
       :ok ->
         item = %{item | status: :merging}
         # Synchronously finalize. adapter.merge/2 returning :ok is the merge
@@ -1486,6 +1701,16 @@ defmodule Arbiter.Workflows.MergeQueue do
         # a re-review (or the fleet's own clear_reviewed_latch/1 on its next
         # rebase/resolve pass) can legitimately clear this, and :failed has
         # no way back in.
+        {%{item | last_error: reason}, state}
+
+      # bd-df3zlo / #1736. The coverage path's two refusals, both non-terminal
+      # for the item for the same reason as the stale clause above: a re-review
+      # or an operator coverage row clears the first, and the second is a pause
+      # that its own bound (`wait_for_coverage/4`) already terminates.
+      {:error, {:uncovered_head, _head, _reason} = reason} ->
+        {%{item | last_error: reason}, state}
+
+      {:error, {:coverage_unknown, _reason} = reason} ->
         {%{item | last_error: reason}, state}
 
       {:error, reason} ->
@@ -1635,6 +1860,12 @@ defmodule Arbiter.Workflows.MergeQueue do
       # Holds the latch off until the head moves off this value, which is the
       # only observable proof that the queue's own commit has landed.
       latch_suspended_at_head: nil,
+      # bd-df3zlo / #1736. The coverage read path's bounded wait, keyed on the
+      # head it is waiting about: a new head is a new question, so both the
+      # count and the one-page-per-episode latch reset.
+      coverage_unknown_polls: 0,
+      coverage_unknown_head: nil,
+      coverage_parked?: false,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,
