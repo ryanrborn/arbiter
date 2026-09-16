@@ -689,6 +689,27 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert {:ok, %{keep_alive: false}} = Sessions.get(expanded.id)
     end
 
+    # One click can raise both the open window's click-away and another
+    # window's toggle, and the order is not ours to decide — so a close that
+    # names the window it is closing is the only one that cannot close the
+    # menu that click just opened.
+    test "closing one window's overflow never closes another's", %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+
+      {_view, dock} = dock(conn)
+      render_hook(dock, "restore", %{"open" => [a.id, b.id], "expanded" => nil})
+
+      open_menu!(dock, b)
+      assert has_element?(dock, "#session-dock-menu-panel-#{b.id}")
+
+      render_hook(dock, "close_menu", %{"id" => a.id})
+      assert has_element?(dock, "#session-dock-menu-panel-#{b.id}")
+
+      render_hook(dock, "close_menu", %{"id" => b.id})
+      refute has_element?(dock, "#session-dock-menu-panel-#{b.id}")
+    end
+
     test "an ended session's window offers neither kill nor keep_alive", %{conn: conn} do
       session = launch!()
       {_view, dock} = dock(conn)

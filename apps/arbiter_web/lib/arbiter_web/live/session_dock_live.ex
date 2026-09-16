@@ -284,6 +284,14 @@ defmodule ArbiterWeb.SessionDockLive do
     {:noreply, assign(socket, :menu_id, if(socket.assigns.menu_id == id, do: nil, else: id))}
   end
 
+  # Carries the id it is closing, and closes nothing else. One click can raise
+  # both this (from the open window's click-away) and `toggle_menu` (from
+  # another window's button), and the order the two arrive in is not ours to
+  # decide — so "close A" must not be able to close the B that was just opened.
+  def handle_event("close_menu", %{"id" => id}, socket) do
+    if socket.assigns.menu_id == id, do: {:noreply, close_menu(socket)}, else: {:noreply, socket}
+  end
+
   def handle_event("close_menu", _params, socket), do: {:noreply, close_menu(socket)}
 
   # The info side of a window: the session's metadata and the ledger's
@@ -1320,7 +1328,17 @@ defmodule ArbiterWeb.SessionDockLive do
 
   defp window_menu(assigns) do
     ~H"""
-    <div class="relative shrink-0">
+    <%!-- The click-away sits on the *wrapper*, not on the panel, and only
+          while the menu is open. On the panel it would fire for a click on
+          this window's own toggle button — which is outside the panel — and
+          race the toggle into re-opening what the operator meant to close.
+          Absent while closed, so an idle dock costs the page no listener and
+          no event per click. --%>
+    <div
+      class="relative shrink-0"
+      phx-click-away={if @open?, do: "close_menu"}
+      phx-value-id={@session.id}
+    >
       <button
         type="button"
         id={"session-dock-menu-#{@session.id}"}
@@ -1341,7 +1359,6 @@ defmodule ArbiterWeb.SessionDockLive do
         :if={@open?}
         id={"session-dock-menu-panel-#{@session.id}"}
         role="menu"
-        phx-click-away="close_menu"
         class={[
           "absolute bottom-full right-0 mb-1 z-40 w-[13rem] py-1",
           "rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)]",
