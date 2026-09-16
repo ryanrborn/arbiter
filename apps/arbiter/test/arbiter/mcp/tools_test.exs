@@ -31,6 +31,44 @@ defmodule Arbiter.MCP.ToolsTest do
     {:ok, ws: ws, task: task, worker: worker, coordinator: coordinator}
   end
 
+  # bd-31ylsv: block until the `Arbiter.Worker.Driver` GenServer that owns
+  # `worktree_path` has actually terminated — or confirm it already has.
+  # Callers use this before doing their own filesystem teardown of a tree the
+  # Driver's `:DOWN`-triggered `maybe_cleanup_worktree/1` might still be
+  # mutating (a `git worktree remove` + `File.rm_rf`), which otherwise races a
+  # caller-side `File.rm_rf!` on an overlapping path. A driver not found is a
+  # safe no-op: a `Driver` processes its `:DOWN` handler (cleanup included)
+  # to completion before it stops, so if it's gone, the cleanup already ran.
+  defp wait_for_driver_settled(worktree_path) do
+    case find_driver_pid(worktree_path) do
+      nil ->
+        :ok
+
+      pid ->
+        ref = Process.monitor(pid)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+    end
+  end
+
+  defp find_driver_pid(worktree_path) do
+    Arbiter.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.find_value(fn {_, pid, _, _} -> driver_owning?(pid, worktree_path) end)
+  end
+
+  defp driver_owning?(pid, worktree_path) when is_pid(pid) do
+    case :sys.get_state(pid, 200) do
+      %{worktree_path: ^worktree_path} -> pid
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp driver_owning?(_pid, _worktree_path), do: nil
+
   defp create_usage_event!(ctx, attrs) do
     base = %{
       task_id: ctx.task.id,
@@ -3675,13 +3713,29 @@ defmodule Arbiter.MCP.ToolsTest do
       worktree_path = data.worktree_path
       assert is_binary(worktree_path)
 
-      # Give the async worker a moment to reach the MCP-config-injection step.
-      Process.sleep(200)
-
+      # `maybe_write_mcp_config/3` (Worker.Dispatch) runs synchronously inside
+      # `Dispatch.dispatch/2`, before `ClaudeSession.start/1` — the file is
+      # already on disk the moment `worker_dispatch/2` returns, so there is
+      # nothing async to wait for here.
       assert File.exists?(Path.join(worktree_path, ".codex/config.toml")),
              "provider: \"codex\" dispatch must write .codex/config.toml, not fall back to .mcp.json"
 
       refute File.exists?(Path.join(worktree_path, ".mcp.json"))
+
+      # The stub `codex` binary exits immediately, so the just-spawned worker
+      # dies almost as soon as it starts. That fires `Worker.Driver`'s `:DOWN`
+      # handler, which runs its own worktree cleanup (`maybe_cleanup_worktree/1`
+      # — a `git worktree remove` plus `File.rm_rf`) asynchronously, in the
+      # Driver's own process. Left alone, that races the `on_exit` below, which
+      # `File.rm_rf!`s the whole `tmp` tree the worktree lives under —
+      # including the repo's `.git/worktrees/...` administrative directory the
+      # Driver's `git worktree remove` also touches. Two independent recursive
+      # deletes on overlapping paths is exactly what produced the flaky
+      # `** (File.Error) ... file already exists` teardown failures (bd-31ylsv,
+      # CI runs 34943777241 / 34989855343 / 34998217553 / 35021857096) — not
+      # the `/tmp` collision d58adb43 fixed. Waiting for the Driver to actually
+      # finish (or confirming it already has) makes the teardown deterministic.
+      wait_for_driver_settled(worktree_path)
     end
   end
 
