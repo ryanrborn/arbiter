@@ -446,8 +446,12 @@ defmodule Arbiter.Tasks.Workspace do
 
   Accepts both a real boolean and the string `"true"`/`"false"` that round-trip
   through JSON workspace config. Anything else is treated as `false`.
+
+  Accepts a loaded `%Workspace{}`, a bare map, or `nil` — the Watchdog and the
+  MergeQueue both hold a lane's workspace in an untyped state field, and a lane
+  can be started without one at all.
   """
-  @spec coverage_enabled?(t()) :: boolean()
+  @spec coverage_enabled?(t() | map() | nil) :: boolean()
   def coverage_enabled?(workspace) do
     case get_in(safe_config(workspace), ["merge", "coverage_enabled"]) do
       true -> true

@@ -176,7 +176,7 @@ inventory cannot silently rot.
 | W17 | Auto-resolve attempts (`behind_base`, `ci_failed`) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1841` (`maybe_escalate_unresolved`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:265` (`default_max_auto_resolve_attempts`) | #354 Phase 2a | Two failed attempts paid before escalating | Escalate, `max_polls: :infinity`, re-page per cadence (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2035` (`escalate_unresolved_block`)) | 3 |
 | W18 | Conflict-resolution attempts | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2219` (`drive_conflict_resolution`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:299` (`default_max_conflict_attempts`) | #354 Phase 2b | A phantom conflict spends two resolver workers | One escalation (`apps/arbiter/lib/arbiter/worker/watchdog.ex:2253` (`escalate_conflict_exhausted`)) | 2 |
 | W19 | Park heartbeat | `apps/arbiter/lib/arbiter/worker/watchdog.ex:1865` (`park_heartbeat_due?`) | bd-5mzzww: a PR parked 19h on one page | Re-pages a park that is being worked | Re-page every 720 polls | 1 |
-| W20 | Coverage-unknown bounded wait | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3210` (`wait_for_coverage`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:308` (`coverage_unknown_grace_polls`) | bd-df3zlo/#1736: an `{:unknown, _}` coverage answer waited on forever | A forge whose compare API is down parks an otherwise mergeable PR after 5 polls | Park + one page (`:coverage_unknown`), no further merge for that head; a new head reopens it | 1 |
+| W20 | Coverage-unknown bounded wait | `apps/arbiter/lib/arbiter/worker/watchdog.ex:3210` (`wait_for_coverage`), bound `apps/arbiter/lib/arbiter/worker/watchdog.ex:308` (`coverage_unknown_grace_polls`) | bd-df3zlo/#1736: an `{:unknown, _}` coverage answer waited on forever | A forge whose compare API is down parks an otherwise mergeable PR after 5 polls | Park + one page (`:coverage_unknown`), no further merge for that head, and the `auto_merge` poll ceiling lifted to `:infinity` so the park cannot decay into an `{:awaiting_review_timeout, _}` re-review; a new head reopens it and restores the ceiling | 1 |
 
 ### 2.3 `apps/arbiter/lib/arbiter/workflows/merge_queue.ex` — the out-of-process queue
 
@@ -807,15 +807,21 @@ MIX_ENV=prod mix run --no-start -e \
 ```
 
 It answers `%{merges:, agreements:, blocking:, deferred:,
-deferred_observations:, pass?:}` where `:merges` counts only observations the
-old guard decided, `:blocking` must be empty, and `:deferred` holds the two
-documented exceptions (`deferred_reasons/0`), listed observation by observation
-so they can be eyeballed rather than trusted:
+deferred_observations:, truncated?:, pass?:}` where `:merges` counts only
+observations the old guard decided, `:blocking` must be empty, `:truncated?`
+must be false (the read is capped at 10 000 rows, newest `seq` first; a gate
+cannot pass on evidence it knows is partial), and `:deferred` holds the **one**
+documented exception #1736's AC3 authorises (`deferred_reasons/0`), listed
+observation by observation so it can be eyeballed rather than trusted:
 
 * `covered->uncovered` — the post-approval `fix_pass` class of §4.5, P7's
   ticket. The old guard merged a commit no review covers; `decide/3` refused
   it. Five live observations at the time of the P4 flip (#1702, #1723, #1725,
   #1731, #1735).
+
+Every other disagreement is **blocking**, including one that is benign on
+inspection:
+
 * `unknown->covered` — the W2 grace window. The old guard is still waiting out
   "have we seen our own push echoed yet" while the head the PR actually reports
   already has a coverage row, so rule 1 answers on the first poll instead of
@@ -823,7 +829,11 @@ so they can be eyeballed rather than trusted:
   still pins the merge to that exact head, so a PR resource lagging a *newer*
   push cannot be merged out from under it — the forge rejects the call. One
   live observation (bd-2jkrqu / #1707). P5 deletes the latch that produces the
-  `unknown` half.
+  `unknown` half. It is counted as blocking anyway: AC3 defers one class and
+  this is not it, and widening a stated acceptance criterion is the
+  coordinator's call on the evidence, not the gate's to make for them. An
+  operator who reads the observation and agrees it is this shape can flip on
+  that judgement; the gate will not do it silently.
 
 The live P3 evidence read, immediately before P4 landed: 31 `covered->covered`
 and 1 `uncovered->uncovered` agreements, 5 `covered->uncovered`, 3

@@ -900,6 +900,12 @@ defmodule Arbiter.Worker.Watchdog do
         coverage_unknown_polls: 0,
         coverage_unknown_head: nil,
         coverage_parked?: false,
+        # `poll_count` as it stood when the coverage park lifted `max_polls` to
+        # `:infinity`, so the lift can be unwound without the parked polls
+        # counting against the merge timeout. `nil` whenever no coverage park
+        # holds a lift — which is also how `restore_poll_ceiling/1` knows the
+        # lift in effect is not ours to revoke.
+        coverage_park_poll: nil,
         interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
         max_polls: Keyword.get(opts, :max_polls, default_max_polls),
         # The configured ceiling as passed at start (before any indefinite-park
@@ -3249,20 +3255,76 @@ defmodule Arbiter.Worker.Watchdog do
           )
         end)
 
-        {:wait, %{state | coverage_unknown_polls: polls, coverage_parked?: true}}
+        # "No further merge for this head" has to include `reschedule/1`'s poll
+        # ceiling, or the park is not terminal at all: on an `auto_merge` lane
+        # the remaining polls simply run out, `handle_review_timeout/2` fails
+        # the worker with `{:awaiting_review_timeout, cap}` and auto-resumes a
+        # fresh review round — buying precisely the re-review a pause is not
+        # supposed to buy, and turning a forge-compare outage into a re-review
+        # per parked PR. Lift it to the indefinite park-and-watch the other
+        # paged parks already use (`handle_nonauthor_approval/2`,
+        # `do_maybe_escalate_merge_block/2`, the merge stall in
+        # `do_apply_approved_auto_merge/1`).
+        #
+        # Deliberately WITHOUT setting `park_reason`, unlike the two block-path
+        # parks and exactly like the merge-stall one: `maybe_escalate_merge_block/2`
+        # runs on every poll (`handle_info(:poll, _)`), and
+        # `do_maybe_escalate_merge_block/2`'s recovery branch revokes any
+        # `park_reason` — restoring `base_max_polls` with it — on the first poll
+        # that shows the PR approved and unblocked. That is *every* poll of a
+        # coverage park (the park is only ever reached from the approved path),
+        # so naming this park there would revoke its own lift on the next tick.
+        {:wait,
+         %{
+           state
+           | coverage_unknown_polls: polls,
+             coverage_parked?: true,
+             coverage_park_poll: state.poll_count,
+             max_polls: :infinity
+         }}
     end
   end
 
   defp reset_coverage_episode(%{coverage_unknown_head: head} = state, head), do: state
 
-  defp reset_coverage_episode(state, head),
-    do: %{state | coverage_unknown_head: head, coverage_unknown_polls: 0, coverage_parked?: false}
+  defp reset_coverage_episode(state, head) do
+    %{
+      restore_poll_ceiling(state)
+      | coverage_unknown_head: head,
+        coverage_unknown_polls: 0,
+        coverage_parked?: false
+    }
+  end
 
   defp clear_coverage_wait(%{coverage_unknown_polls: 0, coverage_parked?: false} = state),
     do: state
 
-  defp clear_coverage_wait(state),
-    do: %{state | coverage_unknown_polls: 0, coverage_unknown_head: nil, coverage_parked?: false}
+  defp clear_coverage_wait(state) do
+    %{
+      restore_poll_ceiling(state)
+      | coverage_unknown_polls: 0,
+        coverage_unknown_head: nil,
+        coverage_parked?: false
+    }
+  end
+
+  # Unwind the park's own `max_polls` lift, and only its own: another episode
+  # may hold `max_polls: :infinity` for its own reasons and that lift is not
+  # ours to revoke, so `coverage_park_poll` (set only by the park branch above)
+  # is what says the one in effect is.
+  #
+  # `poll_count` rewinds to where the park began rather than resetting to zero:
+  # it is monotonic across the worker's life, so putting a finite cap back under
+  # a count that kept climbing through the park would trip the ceiling on the
+  # very next poll — while resetting it to zero would strand
+  # `last_escalated_poll` and `last_merge_stall_poll` *above* it, and both
+  # cadences read `poll_count - <latch>` (bd-krg7ci round 3's shape). Rewinding
+  # leaves every counter consistent with the one it was recorded against: the
+  # parked polls simply do not count.
+  defp restore_poll_ceiling(%{coverage_park_poll: nil} = state), do: state
+
+  defp restore_poll_ceiling(%{coverage_park_poll: poll} = state),
+    do: %{state | max_polls: state.base_max_polls, poll_count: poll, coverage_park_poll: nil}
 
   defp record_mechanical(_state, nil), do: :ok
 
@@ -3292,18 +3354,29 @@ defmodule Arbiter.Worker.Watchdog do
   # and rescues everything it calls, so it can neither change nor break the
   # decision it is handed.
   defp observe_coverage(state, old, head, new) do
-    CoverageShadow.observe(%{
+    %{
       site: :watchdog,
       task_id: state.task_id,
       mr_ref: state.mr_ref,
       workspace_id: workspace_id(state),
       head: head,
       old: old,
-      new: new,
-      authoritative: if(new, do: :new, else: :old),
       ctx: fn -> coverage_ctx(state) end
-    })
+    }
+    |> with_coverage_answer(new)
+    |> CoverageShadow.observe()
   end
+
+  # `CoverageShadow.observation()` types `:new` as an `answer()` and nothing
+  # else, and its *absence* is what tells `observe/1` to compute one. So in
+  # shadow mode the key is omitted rather than set to `nil`: passing a literal
+  # `nil` typechecked as "an answer that cannot exist", which made dialyzer
+  # prove `observe_coverage/4` never returns and then report the whole flag-off
+  # branch (`apply_legacy_decision`) as dead code (#1736 review round 1).
+  defp with_coverage_answer(obs, nil), do: obs
+
+  defp with_coverage_answer(obs, new),
+    do: obs |> Map.put(:new, new) |> Map.put(:authoritative, :new)
 
   # §3.4's three answer shapes, as the legacy guard already produces them.
   defp coverage_shadow_inputs({:merge, expected_sha, state}),

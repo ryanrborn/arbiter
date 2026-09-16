@@ -179,7 +179,12 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
       assert head == sha("fixpass")
     end
 
-    test "the W2 grace-window class is deferred too, and says why" do
+    test "the W2 grace-window class is NOT deferred — AC3 does not authorise it" do
+      # `unknown->covered` is the coverage predicate being right (the old guard
+      # is still waiting out its own push echo while rule 1 already answers),
+      # but #1736's AC3 defers exactly one class and this is not it. Widening
+      # the criterion is the coordinator's call, so the gate surfaces it as
+      # blocking and refuses rather than deciding for them.
       for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("ok3-#{i}")})
 
       seed("disagree", "unknown", "covered", %{
@@ -189,11 +194,11 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
 
       gate = CoverageShadow.preflip_gate()
 
-      assert gate.deferred["unknown->covered"] == 1
-      assert gate.blocking == %{}
-      assert gate.pass?
+      assert gate.blocking == %{"unknown->covered" => 1}
+      assert gate.deferred == %{}
+      refute gate.pass?
 
-      assert CoverageShadow.deferred_reasons()["unknown->covered"] =~ "grace window"
+      assert CoverageShadow.deferred_reasons() |> Map.keys() == ["covered->uncovered"]
       assert CoverageShadow.deferred_reasons()["covered->uncovered"] =~ "fix_pass"
     end
 
@@ -216,6 +221,29 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
       gate = CoverageShadow.preflip_gate()
 
       assert gate.merges == 0
+      refute gate.pass?
+    end
+
+    test "a clean gate reports it read the whole topic" do
+      for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("whole-#{i}")})
+
+      gate = CoverageShadow.preflip_gate()
+
+      refute gate.truncated?
+      assert gate.pass?
+    end
+
+    test "a read that hits the row cap cannot pass, however clean it looks" do
+      # The cap drops rows, and a dropped row could be the one blocking
+      # disagreement. `preflip_gate/0` is a safety gate, so partial evidence is
+      # a refusal rather than a pass (#1736 review round 1, finding 4).
+      for i <- 1..25, do: seed("agree", "covered", "covered", %{head: sha("cap-#{i}")})
+
+      gate = CoverageShadow.preflip_gate(20, 20)
+
+      assert gate.merges >= 20
+      assert gate.blocking == %{}
+      assert gate.truncated?
       refute gate.pass?
     end
   end

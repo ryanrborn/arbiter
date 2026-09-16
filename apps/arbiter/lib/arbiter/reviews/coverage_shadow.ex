@@ -92,33 +92,35 @@ defmodule Arbiter.Reviews.CoverageShadow do
 
   @topic "coverage_shadow"
 
-  # Deduped rows only, under a 7-day retention window — a full read is cheap
-  # and this is an operator affordance, not a hot path. The cap is belt and
-  # braces against a pathological install.
+  # Deduped rows only, and `Arbiter.Events.Retention` sweeps the topic, so a
+  # full read is cheap and this is an operator affordance, not a hot path. The
+  # cap is belt and braces against a pathological install; `durable_rows/0`
+  # reads newest-first so hitting it keeps the rows that matter, and
+  # `preflip_gate/0` refuses to pass at all once it is hit.
   @count_limit 10_000
 
   # §6.3's "≥20 real merges" (P4 / bd-df3zlo, #1736 AC3).
   @preflip_min_merges 20
 
-  # The disagreement classes that do NOT block the flip, each because the new
-  # predicate is the one that is right. They are listed observation by
-  # observation, never silently dropped.
+  # The ONE disagreement class that does not block the flip, listed observation
+  # by observation and never silently dropped: §4.5's post-approval `fix_pass`
+  # class, which P7 owns — the old guard merged a commit no review covers (live:
+  # #1702, #1723, #1725, #1731, #1735) and `decide/3` refused it.
   #
-  #   * `covered->uncovered` — §4.5's post-approval `fix_pass` class, which P7
-  #     owns: the old guard merged a commit no review covers (live: #1702,
-  #     #1723, #1725, #1731, #1735) and `decide/3` refused it.
-  #   * `unknown->covered` — the W2 grace window: the old guard is still
-  #     waiting out "have we seen our own push echoed yet" (up to 5 polls)
-  #     while the head the PR actually reports already has a coverage row, so
-  #     rule 1 answers on the first poll. §3.2 states that improvement as the
-  #     point of rule 2's ancestry, and the merge is still pinned to that head
-  #     by W7's `expected_sha`, so a PR resource lagging a *newer* push cannot
-  #     be merged out from under it — the forge rejects the call. Live: one
-  #     observation, bd-2jkrqu / #1707. P5 removes the grace latch that
-  #     produces the `unknown` half.
+  # This list is exactly what #1736's AC3 authorises ("zero disagreements other
+  # than the documented post-approval fix_pass class") and is deliberately not
+  # one entry longer. `unknown->covered` — the W2 grace window, where the old
+  # guard is still waiting out "have we seen our own push echoed yet" while the
+  # head the PR reports already has a coverage row, so rule 1 answers on the
+  # first poll — is the coverage predicate being *right* (§3.2 states that
+  # improvement as rule 2's point, and W7's `expected_sha` still pins the merge
+  # to that exact head), and there is one live observation of it, bd-2jkrqu /
+  # #1707. It is still counted as **blocking** here: widening a stated
+  # acceptance criterion is the coordinator's call, not this module's, so the
+  # operator sees it in `:blocking` and decides. P5 removes the grace latch that
+  # produces the `unknown` half, after which the class stops occurring at all.
   @deferred_transitions %{
-    "covered->uncovered" => "post-approval fix_pass (§4.5, P7)",
-    "unknown->covered" => "W2 grace window; rule 1 answers on the first poll (§3.2, P5)"
+    "covered->uncovered" => "post-approval fix_pass (§4.5, P7)"
   }
 
   @typedoc """
@@ -227,22 +229,29 @@ defmodule Arbiter.Reviews.CoverageShadow do
   §6.3's rollout gate, as a query rather than a paragraph (P4 / bd-df3zlo,
   #1736 AC3): **may `merge.coverage_enabled` be turned on?**
 
-  Reads the durable `coverage_shadow` rows over the retention window and
-  answers with the three numbers the decision rests on:
+  Reads the `#{@count_limit}` most recent durable `coverage_shadow` rows —
+  newest `seq` first, whatever `Arbiter.Events.Retention` has left on the topic
+  — and answers with the numbers the decision rests on:
 
     * `:merges` — distinct observations where the guard actually merged
       (`old = "covered"`) *while the old guard was still authoritative*. A
       workspace that has already flipped stops producing evidence about the
       flip, so its rows are excluded.
     * `:blocking` — disagreements per `old->new` transition that must be zero.
-    * `:deferred` / `:deferred_observations` — the two documented exceptions,
-      `covered->uncovered` (§4.5's post-approval `fix_pass` class, P7's
-      ticket) and `unknown->covered` (the W2 grace window, P5's), both of them
-      the coverage predicate being right rather than the old guard. Listed
-      individually rather than summed, so the operator can confirm each one
-      really is that shape before flipping. `deferred_reasons/0` names them.
+    * `:deferred` / `:deferred_observations` — the one documented exception
+      #1736's AC3 authorises: `covered->uncovered`, §4.5's post-approval
+      `fix_pass` class, P7's ticket. Listed observation by observation rather
+      than summed, so the operator can confirm each one really is that shape
+      before flipping. `deferred_reasons/0` names it. Every other disagreement
+      — including the benign `unknown->covered` grace-window class — counts as
+      blocking, because relaxing AC3 is the coordinator's call to make on the
+      evidence, not this function's to make for them.
+    * `:truncated?` — whether the read hit `#{@count_limit}` rows and so may not
+      be the whole topic. A gate cannot pass on evidence it knows is partial, so
+      this forces `:pass?` false.
 
-  `:pass?` is `merges >= min_merges` (default 20) with `blocking` empty.
+  `:pass?` is `merges >= min_merges` (default 20) with `blocking` empty and
+  `truncated?` false.
 
   Run it against the install's database:
 
@@ -251,18 +260,30 @@ defmodule Arbiter.Reviews.CoverageShadow do
 
   Never raises: an unreadable events table answers "not yet", which is the
   safe direction for a gate.
+
+  The second argument is the row cap, and exists so the truncation refusal can
+  be exercised without seeding `#{@count_limit}` rows. Leave it at its default.
   """
-  @spec preflip_gate(pos_integer()) :: %{
+  @spec preflip_gate(pos_integer(), pos_integer()) :: %{
           merges: non_neg_integer(),
           agreements: non_neg_integer(),
           blocking: %{optional(String.t()) => non_neg_integer()},
           deferred: %{optional(String.t()) => non_neg_integer()},
           deferred_observations: [map()],
           min_merges: pos_integer(),
+          truncated?: boolean(),
           pass?: boolean()
         }
-  def preflip_gate(min_merges \\ @preflip_min_merges) do
-    rows = Enum.filter(durable_rows(), &shadow_evidence?/1)
+  def preflip_gate(min_merges \\ @preflip_min_merges, limit \\ @count_limit) do
+    read = durable_rows(limit)
+
+    # `durable_counts/0` can live with a capped read; a safety gate cannot. The
+    # cap drops rows, and a dropped row could be the one blocking disagreement,
+    # so a read that hit the cap is evidence this function knows is partial and
+    # must refuse on. (The read is newest-first, so the rows it *does* hold are
+    # at least the most recent ones, which is what an operator would look at.)
+    truncated? = length(read) >= limit
+    rows = Enum.filter(read, &shadow_evidence?/1)
 
     merges = Enum.count(rows, &(payload(&1, "old") == "covered"))
     agreements = Enum.count(rows, &(payload(&1, "result") == "agree"))
@@ -277,7 +298,8 @@ defmodule Arbiter.Reviews.CoverageShadow do
       deferred: Enum.frequencies_by(deferred, &transition/1),
       deferred_observations: Enum.map(deferred, &observation_summary/1),
       min_merges: min_merges,
-      pass?: merges >= min_merges and blocking == []
+      truncated?: truncated?,
+      pass?: merges >= min_merges and blocking == [] and not truncated?
     }
   end
 
@@ -288,12 +310,17 @@ defmodule Arbiter.Reviews.CoverageShadow do
   # --- internals -----------------------------------------------------------
 
   defp durable_counts,
-    do: Enum.frequencies_by(durable_rows(), &(payload(&1, "result") || "unknown"))
+    do: Enum.frequencies_by(durable_rows(@count_limit), &(payload(&1, "result") || "unknown"))
 
-  defp durable_rows do
+  # Newest first: `seq` is the resource's autoincrementing primary key, so a
+  # capped read keeps the *recent* rows rather than an arbitrary (in practice
+  # oldest-first) subset. `preflip_gate/0` additionally refuses to pass when the
+  # cap was hit at all — see `truncated?` there.
+  defp durable_rows(limit) do
     Events.Record
     |> Ash.Query.filter(topic == @topic)
-    |> Ash.Query.limit(@count_limit)
+    |> Ash.Query.sort(seq: :desc)
+    |> Ash.Query.limit(limit)
     |> Ash.read!()
   rescue
     _ -> []

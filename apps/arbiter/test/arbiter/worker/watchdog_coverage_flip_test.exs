@@ -124,6 +124,31 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
     do_wait(fun, deadline)
   end
 
+  # `wait_until` + a follow-up `:sys.get_state` races the poll loop: the state
+  # that satisfied the condition is not necessarily the one read back. This
+  # returns the snapshot that matched, so a whole set of assertions can be made
+  # against one consistent view of the Watchdog.
+  defp wait_for_state(pid, fun, timeout \\ 3_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_state(pid, fun, deadline)
+  end
+
+  defp do_wait_state(pid, fun, deadline) do
+    state = :sys.get_state(pid)
+
+    cond do
+      fun.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("watchdog state condition not met within timeout")
+
+      true ->
+        Process.sleep(5)
+        do_wait_state(pid, fun, deadline)
+    end
+  end
+
   defp do_wait(fun, deadline) do
     cond do
       fun.() ->
@@ -390,23 +415,34 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
         %{status: :open, approved: true, head_sha: forge_head, base_ref: "main"}
       ])
 
+      # A ceiling low enough that an un-lifted park would run it out inside the
+      # test: the grace is 5 polls, so the lane has 3 left after parking.
+      cap = Watchdog.coverage_unknown_grace_polls() + 3
+
       log =
         capture_log(fn ->
           wpid =
             start_watchdog(pid, task.id, mr_ref, ws,
               last_reviewed_sha: local,
-              local_head_sha: local
+              local_head_sha: local,
+              max_polls: cap
             )
-
-          wait_until(fn -> :sys.get_state(wpid).coverage_parked? end)
 
           # Bounded: the park arrives after a finite number of polls, and the
           # counter stops there rather than climbing forever.
-          state = :sys.get_state(wpid)
+          state = wait_for_state(wpid, & &1.coverage_parked?)
           assert state.coverage_unknown_polls == Watchdog.coverage_unknown_grace_polls()
 
-          Process.sleep(60)
-          assert :sys.get_state(wpid).coverage_unknown_polls == state.coverage_unknown_polls
+          # ...and TERMINAL: the park lifts the poll ceiling, so the lane keeps
+          # watching instead of running the remaining polls out into
+          # `{:awaiting_review_timeout, cap}` and an auto-resumed re-review.
+          assert state.max_polls == :infinity
+          assert state.coverage_park_poll < cap
+
+          # Well past the ceiling an un-lifted park would have hit.
+          later = wait_for_state(wpid, &(&1.poll_count > cap * 2))
+          assert Process.alive?(wpid), "the park must not fail the lane at the ceiling"
+          assert later.coverage_unknown_polls == state.coverage_unknown_polls
         end)
 
       assert StubMerger.merge_count(mr_ref) == 0,
@@ -415,8 +451,74 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       assert StubAutoResumeDispatcher.resume_count() == 0,
              "a probe failure must not buy a re-review either — it is a pause"
 
+      assert Worker.state(pid).status != :failed,
+             "the park must not fail the worker: no {:awaiting_review_timeout, _}"
+
+      refute log =~ "without a terminal outcome",
+             "the auto_merge poll ceiling must not fire while the lane is coverage-parked"
+
       parked = for line <- String.split(log, "\n"), line =~ "coverage_unknown", do: line
       assert length(parked) == 1, "the park must escalate exactly once per episode"
+    end
+
+    test "the lifted ceiling is unwound — and rewound — once the head moves" do
+      # The park is terminal *for that head*. A new head is a new question, so
+      # the configured ceiling comes back, and it comes back against the poll
+      # count the park began at: the parked polls do not count against the
+      # merge timeout, and `last_escalated_poll` stays consistent with it.
+      local = sha("flip-probe-unpark-local")
+      forge_head = sha("flip-probe-unpark-head")
+      next_head = sha("flip-probe-unpark-next")
+      mr_ref = "!flipprobeunpark"
+      ws = workspace(true)
+
+      {pid, task} = running_task(ws, %{last_reviewed_sha: local})
+      record_reviewed(task.id, mr_ref, local, NetDiff.fingerprint(@reviewed_diff))
+      StubMerger.set_ancestor(mr_ref, {forge_head, local}, {:error, :timeout})
+      StubMerger.set_ancestor(mr_ref, {next_head, local}, {:error, :timeout})
+      StubMerger.set_diff(mr_ref, forge_head, @reviewed_diff)
+      StubMerger.set_diff(mr_ref, next_head, @reviewed_diff)
+
+      # Roomy enough that the restored ceiling is not re-tripped before the
+      # assertions run: the new head gets its own budget and re-parks after
+      # another `grace` polls.
+      cap = Watchdog.coverage_unknown_grace_polls() * 4
+
+      capture_log(fn ->
+        StubMerger.queue_get(mr_ref, [
+          %{status: :open, approved: true, head_sha: forge_head, base_ref: "main"}
+        ])
+
+        wpid =
+          start_watchdog(pid, task.id, mr_ref, ws,
+            last_reviewed_sha: local,
+            local_head_sha: local,
+            max_polls: cap
+          )
+
+        parked = wait_for_state(wpid, & &1.coverage_parked?)
+        assert parked.max_polls == :infinity
+
+        # Sit parked well past the configured ceiling, then move the head.
+        wait_for_state(wpid, &(&1.poll_count > cap * 2))
+
+        StubMerger.queue_get(mr_ref, [
+          %{status: :open, approved: true, head_sha: next_head, base_ref: "main"}
+        ])
+
+        state = wait_for_state(wpid, &(&1.coverage_unknown_head == next_head))
+
+        assert state.max_polls == cap, "the configured ceiling comes back with the new head"
+        assert state.coverage_park_poll == nil
+
+        assert state.poll_count < cap,
+               "the parked polls do not count against the restored ceiling"
+
+        assert Process.alive?(wpid)
+      end)
+
+      assert StubMerger.merge_count(mr_ref) == 0
+      assert StubAutoResumeDispatcher.resume_count() == 0
     end
   end
 end

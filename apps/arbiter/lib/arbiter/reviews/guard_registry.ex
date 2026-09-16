@@ -827,9 +827,11 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:polls, {:config, :coverage_unknown_grace_polls}},
       episode: {:task, :mr_ref, :head_sha},
       terminal: :escalated_once,
-      sites: [{Watchdog, :wait_for_coverage, 3}],
-      anchors: ["@coverage_unknown_grace_polls", ":coverage_unknown"],
-      summary: "an `unknown` coverage answer waits, bounded, then parks and pages once"
+      sites: [{Watchdog, :wait_for_coverage, 3}, {Watchdog, :restore_poll_ceiling, 1}],
+      anchors: ["@coverage_unknown_grace_polls", ":coverage_unknown", "coverage_park_poll"],
+      summary:
+        "an `unknown` coverage answer waits, bounded, then parks and pages once — with the " <>
+          "`auto_merge` poll ceiling lifted so the park cannot decay into a re-review"
     },
     %{
       id: :queue_baseline_precedence,

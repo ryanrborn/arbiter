@@ -1523,18 +1523,27 @@ defmodule Arbiter.Workflows.MergeQueue do
   # shadow's diff fetch must not touch an item the queue has already decided
   # about.
   defp observe_coverage(%State{} = state, item, old, head, new) do
-    CoverageShadow.observe(%{
+    %{
       site: :merge_queue,
       task_id: item.task_id,
       mr_ref: item.mr_ref,
       workspace_id: state.workspace_id,
       head: head,
       old: old,
-      new: new,
-      authoritative: if(new, do: :new, else: :old),
       ctx: fn -> coverage_ctx(state, item) end
-    })
+    }
+    |> with_coverage_answer(new)
+    |> CoverageShadow.observe()
   end
+
+  # `CoverageShadow.observation()` types `:new` as an `answer()` and nothing
+  # else, and its *absence* is what tells `observe/1` to compute one. Shadow
+  # mode therefore omits the key rather than setting it to `nil` — see the
+  # twin comment in `Arbiter.Worker.Watchdog`.
+  defp with_coverage_answer(obs, nil), do: obs
+
+  defp with_coverage_answer(obs, new),
+    do: obs |> Map.put(:new, new) |> Map.put(:authoritative, :new)
 
   # bd-df3zlo / #1736 closes P3's declared gap on the queue side too.
   #
