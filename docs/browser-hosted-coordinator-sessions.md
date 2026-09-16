@@ -1557,6 +1557,9 @@ remote-auth scheme is designed here; off-LAN access is Remote Control (§8) or a
 SSH port-forward (`ssh -L 4848:127.0.0.1:4848 <host>`), which is why Amendment 2
 makes it required rather than optional.
 
+For temporary single-machine access over a network, forward the port using SSH
+tunneling: see [docs/remote-access.md](remote-access.md).
+
 ## 11. Transcript persistence (research task 7)
 
 Two different artefacts, both wanted, and conflating them is a mistake:

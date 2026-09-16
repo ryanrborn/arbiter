@@ -335,7 +335,7 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, "#toggle-keep-alive")
     end
 
-    test "a non-loopback peer sees a notice instead of an inert terminal, and is told Remote Control works (mode B, launched with --remote-control, bd-2zskbb)",
+    test "a non-loopback peer sees a notice instead of an inert terminal, with SSH tunnel as primary option and Remote Control as alternative (mode B, launched with --remote-control, bd-2zskbb)",
          %{conn: conn} do
       session = launch!(auth_mode: :seeded_credentials, remote_control: true)
 
@@ -352,7 +352,13 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(
                view,
                "#terminal-remote-notice",
-               "Reach it from another device via Remote Control"
+               "ssh -L"
+             )
+
+      assert has_element?(
+               view,
+               "#terminal-remote-notice",
+               "Remote Control"
              )
     end
 
@@ -367,16 +373,16 @@ defmodule ArbiterWeb.SessionLiveTest do
 
       refute has_element?(view, "#session-terminal-#{session.id}")
       assert has_element?(view, "#terminal-remote-notice")
-      assert has_element?(view, "#terminal-remote-notice", "this one was not launched with it")
+      assert has_element?(view, "#terminal-remote-notice", "ssh -L")
 
-      refute has_element?(
+      assert has_element?(
                view,
                "#terminal-remote-notice",
-               "Reach it from another device via Remote Control."
+               "not enabled on this session"
              )
     end
 
-    test "a non-loopback peer under a workspace token (mode A) is told Remote Control will not work either (bd-2zskbb)",
+    test "a non-loopback peer under a workspace token (mode A) is told to use SSH tunneling (bd-2zskbb)",
          %{conn: conn} do
       session =
         launch!(auth_mode: :oauth_token, oauth_token: "sk-ant-oat01-SESSION-LIVE-TEST-TOKEN")
@@ -388,7 +394,8 @@ defmodule ArbiterWeb.SessionLiveTest do
 
       refute has_element?(view, "#session-terminal-#{session.id}")
       assert has_element?(view, "#terminal-remote-notice")
-      assert has_element?(view, "#terminal-remote-notice", "does not support Remote Control")
+      assert has_element?(view, "#terminal-remote-notice", "ssh -L")
+      assert has_element?(view, "#terminal-remote-notice", "workspace token")
     end
 
     test "a non-loopback peer never sees the stall banner alongside the remote notice (bd-2zskbb)",

@@ -254,19 +254,34 @@ defmodule ArbiterWeb.SessionLive do
               :if={@session.auth_mode == :seeded_credentials and @session.remote_control}
               class="text-[var(--text-label)]"
             >
-              Reach it from another device via Remote Control.
+              Forward the port over SSH: <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
+              (<.link
+                href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
+                target="_blank"
+                class="underline"
+              >docs</.link>),
+              or use Remote Control.
             </p>
             <p
               :if={@session.auth_mode == :seeded_credentials and not @session.remote_control}
               class="text-[var(--text-label)]"
             >
-              Remote Control (mode B, launched with <code>--remote-control</code>) is the
-              supported way to reach a session from another device — this one was not launched
-              with it.
+              Forward the port over SSH: <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
+              (<.link
+                href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
+                target="_blank"
+                class="underline"
+              >docs</.link>).
+              Remote Control (mode B, launched with <code>--remote-control</code>) is not enabled on this session.
             </p>
             <p :if={@session.auth_mode != :seeded_credentials} class="text-[var(--text-label)]">
-              This session runs under a workspace token (mode A), which does not support
-              Remote Control. Reach it from this machine directly.
+              This session runs under a workspace token (mode A). Forward the port over SSH:
+              <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
+              (<.link
+                href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
+                target="_blank"
+                class="underline"
+              >docs</.link>).
             </p>
           </div>
 
