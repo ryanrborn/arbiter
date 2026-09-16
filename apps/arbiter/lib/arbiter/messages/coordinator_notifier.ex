@@ -1020,6 +1020,12 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     do:
       "a required approval from a reviewer other than the author (the fleet cannot self-approve)"
 
+  # bd-df3zlo / #1736 (P4). The merge paths' `{:unknown, _}` coverage answer,
+  # waited out and then parked: not a refusal (nothing says the head is
+  # unreviewed) and not a merge (nothing says it is reviewed either).
+  defp block_label(:coverage_unknown),
+    do: "review coverage for the current head could not be established"
+
   defp block_label(:draft), do: "the PR is still a draft"
   defp block_label(:blocked_other), do: "a forge merge rule is unsatisfied"
   defp block_label(other), do: "merge is blocked (#{other})"
@@ -1046,6 +1052,16 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         "itself, force a full pipeline re-run (`ci_rerun` with mode all_jobs or " <>
         "workflow, NOT a failed-jobs re-run, which reuses the same broken upstream " <>
         "artifact), or force-merge if the failing check is genuinely unrelated."
+
+  defp block_remediation(:coverage_unknown, _auto_merge?),
+    do:
+      "the merge guard asked whether this head is covered by a review and could not get an " <>
+        "answer — usually a forge compare/ancestry call failing, or a base branch it could " <>
+        "not read. Check the forge's status and the PR's base branch: a re-review or a new " <>
+        "push reopens the decision, and the lane stays parked and watched until one of those " <>
+        "happens (nothing merges in the meantime). Merging by hand is the escape hatch until " <>
+        "the operator override lands — `arb review cover <task> <sha> --reason \"…\"`, P11 " <>
+        "of docs/review-coverage-and-guard-policy.md."
 
   defp block_remediation(:needs_approval, auto_merge?),
     do:

@@ -48,7 +48,9 @@ defmodule Arbiter.Test.StubMerger do
         submitted_reviews: [],
         get_counts: %{},
         diffs: %{},
-        diff_calls: []
+        diff_calls: [],
+        ancestors: %{},
+        ancestor_calls: []
       }
     end)
 
@@ -285,6 +287,37 @@ defmodule Arbiter.Test.StubMerger do
     ensure_started()
     Agent.update(@name, fn s -> put_in(s, [:diffs, {ref, head}], diff) end)
     :ok
+  end
+
+  @doc """
+  Register the answer `ancestor?/3` gives for one `{ancestor, descendant}` pair.
+
+  `result` is whatever the probe should return — `{:ok, true}`, `{:ok, false}`
+  or an `{:error, reason}` (bd-df3zlo / #1736: a probe that cannot answer is
+  not a probe that answers "no"). An unregistered pair answers `{:ok, false}`,
+  which is what "nothing is an ancestor of anything" looks like.
+  """
+  def set_ancestor(ref, {ancestor, descendant}, result) when is_binary(ref) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:ancestors, {ref, ancestor, descendant}], result) end)
+    :ok
+  end
+
+  @doc "Every `ancestor?/3` call as `{ref, ancestor, descendant}`, oldest first."
+  def ancestor_calls do
+    ensure_started()
+    Agent.get(@name, fn s -> Enum.reverse(Map.get(s, :ancestor_calls, [])) end)
+  end
+
+  @impl true
+  def ancestor?(ref, ancestor, descendant) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      call = {ref, ancestor, descendant}
+      s = Map.update(s, :ancestor_calls, [call], &[call | &1])
+      {Map.get(Map.get(s, :ancestors, %{}), call, {:ok, false}), s}
+    end)
   end
 
   @doc "Every `get_diff/2` call as `{ref, base, head}`, oldest first."
