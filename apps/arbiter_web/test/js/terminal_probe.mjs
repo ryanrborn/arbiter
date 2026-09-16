@@ -434,6 +434,29 @@ async function remountChecks() {
     socket.pushesFor("redraw").length === 1
   )
 
+  // -- AC 4: a window resize while the page is open still refits -----------
+  //
+  // The settle only covers the mount. Widening the pane afterwards is the
+  // `ResizeObserver` path, and it has to keep working: this is the drag the
+  // debounce exists for, and the one bd-3r2otb's fit arithmetic serves.
+  second.el.style.width = "500px"
+  second.el.style.height = "300px"
+
+  for (let i = 0; i < 60 && socket.pushesFor("resize").length < 2; i++) await frame()
+
+  const afterResize = socket.pushesFor("resize").at(-1)
+  check(
+    "a-window-resize-refits-and-tells-the-pane",
+    afterResize
+      ? `${JSON.stringify(afterResize.payload)} term ${handle.term.cols}x${handle.term.rows}`
+      : "no second resize",
+    afterResize &&
+      afterResize.payload.cols < fitted.cols &&
+      afterResize.payload.rows < fitted.rows &&
+      afterResize.payload.cols === handle.term.cols &&
+      afterResize.payload.rows === handle.term.rows
+  )
+
   handle.dispose()
 
   // A join that changed nothing must not churn the pane every client shares.
