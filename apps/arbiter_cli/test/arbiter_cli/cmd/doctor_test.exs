@@ -146,7 +146,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 6
+    assert length(checks) == 7
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -500,6 +500,64 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] repos resolved"
       assert out =~ "no workspaces"
+    end
+  end
+
+  # ---- bind address check (bd-1c4pg3) --------------------------------------
+  #
+  # The dashboard's auth model is "a loopback peer is trusted; there is no
+  # login" — a server bound off-loopback exposes unauthenticated pages to
+  # anyone who can reach the port. This check warns (never fails the exit
+  # code) when that's the case.
+
+  describe "bind address check" do
+    test "loopback bind is green" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/bind_address"}, {%{"ip" => "127.0.0.1", "loopback" => true}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] bind address is loopback"
+      assert out =~ "127.0.0.1"
+    end
+
+    test "non-loopback bind shows [fail] but is non-fatal and does not block deploy readiness" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/bind_address"}, {%{"ip" => "0.0.0.0", "loopback" => false}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] bind address is loopback"
+      assert out =~ "0.0.0.0"
+      assert out =~ "no login"
+      assert out =~ "ARB_BIND_ADDRESS"
+      assert Doctor.green?() == true
+    end
+
+    # A server predating this check (or an unreachable one) returns something
+    # this check can't interpret — must never spuriously fail doctor over it.
+    test "server without the bind_address endpoint (404) does not fail doctor" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/bind_address"}, {%{}, 404}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] bind address is loopback"
     end
   end
 end

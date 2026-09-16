@@ -1550,9 +1550,12 @@ Env vars, not proxy-injected headers — the proxy is gone (§2), and it is what
 
 ### 10.4 Loopback only (decision 8)
 
-Bind the session socket to `127.0.0.1:4848` like the rest of the dashboard. No new
-remote-auth scheme is designed here; off-LAN access is Remote Control (§8), which
-is why Amendment 2 makes it required rather than optional.
+Bind the session socket to `127.0.0.1:4848` like the rest of the dashboard — this
+is the default (bd-1c4pg3); an operator who overrides it with `ARB_BIND_ADDRESS`
+gets a boot WARNING, since the socket has no login of its own. No new
+remote-auth scheme is designed here; off-LAN access is Remote Control (§8) or an
+SSH port-forward (`ssh -L 4848:127.0.0.1:4848 <host>`), which is why Amendment 2
+makes it required rather than optional.
 
 ## 11. Transcript persistence (research task 7)
 

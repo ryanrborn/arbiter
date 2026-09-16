@@ -283,6 +283,33 @@ old release) rather than a green-wait timeout, the message says the new
 release's migrations *may* have been applied rather than claiming they were —
 a release that never booted never ran its boot migrator.
 
+### Server bind address (`ARB_BIND_ADDRESS`)
+
+The dashboard's auth model is "a loopback peer is trusted; there is no login" —
+LiveView pages, including a terminal into every worker session, have no
+credential check beyond "did this request come from the same box". Because of
+that, **the server binds to `127.0.0.1:4848` by default** in both dev and
+prod/release, in dev and runtime config alike.
+
+**Upgrade note:** before this change, the default was `0.0.0.0`
+(dev)/`[::]` (prod) — reachable from the LAN, or the internet on a cloud host
+with a permissive security group. An install that relied on that for remote
+access will stop being reachable after upgrading. Use an SSH port-forward
+instead (`ssh -L 4848:127.0.0.1:4848 <host>`), which needs no server-side
+change; or, if off-loopback really is required, set `ARB_BIND_ADDRESS`
+explicitly (below) — `arb server doctor` will keep warning about it every time
+as a reminder of the exposure.
+
+To bind elsewhere, set `ARB_BIND_ADDRESS` to any address `:inet.parse_address/1`
+accepts (e.g. `0.0.0.0`, `::`, a specific interface IP):
+
+```sh
+echo "ARB_BIND_ADDRESS=0.0.0.0" >> ~/.arbiter/arbiter.env
+```
+
+Any non-loopback value logs a boot `WARNING` naming the exposure, and
+`arb server doctor` reports a non-fatal warning check pointing back here.
+
 ### Remote `arb` — access Arbiter over VPN
 
 By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback). To point `arb` at a remote Arbiter server:
@@ -313,7 +340,13 @@ By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback).
    ```
 
 - **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) requires no `ARB_TOKEN` — the server exempts localhost.
-- **Remote access** requires both `ARB_HOST` and `ARB_TOKEN`.
+- **Remote access** requires both `ARB_HOST` and `ARB_TOKEN`, *and* the server
+  must be reachable at that address in the first place — since the server now
+  binds loopback-only by default (above), that means either `ARB_BIND_ADDRESS`
+  set server-side, or reaching it through an SSH port-forward / VPN tunnel that
+  terminates on `127.0.0.1` locally. The API's own token check is unaffected
+  either way; only the dashboard's login-free LiveView pages are the reason to
+  prefer a tunnel over a raw `ARB_BIND_ADDRESS` override.
 
 ### Encryption key (`ARBITER_CLOAK_KEY`) — required
 

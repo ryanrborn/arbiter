@@ -26,8 +26,24 @@ if config_env() == :prod do
     System.get_env("SECRET_KEY_BASE") ||
       raise "environment variable SECRET_KEY_BASE is missing."
 
+  # The dashboard's auth model is "a loopback peer is trusted; there is no
+  # login" (see ArbiterWeb.Loopback) — bind loopback-only by default
+  # (bd-1c4pg3). ARB_BIND_ADDRESS overrides it explicitly; ArbiterWeb.Application
+  # logs a WARNING at boot if the result isn't loopback.
+  bind_ip =
+    case System.get_env("ARB_BIND_ADDRESS") do
+      addr when addr in [nil, ""] ->
+        {127, 0, 0, 1}
+
+      addr ->
+        case :inet.parse_address(String.to_charlist(addr)) do
+          {:ok, parsed} -> parsed
+          {:error, _} -> raise "ARB_BIND_ADDRESS is not a valid IP address: #{inspect(addr)}"
+        end
+    end
+
   config :arbiter_web, ArbiterWeb.Endpoint,
-    http: [ip: {0, 0, 0, 0, 0, 0, 0, 0}],
+    http: [ip: bind_ip],
     secret_key_base: secret_key_base,
     server: true,
     url: [
