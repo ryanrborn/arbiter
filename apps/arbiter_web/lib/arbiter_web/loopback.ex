@@ -2,10 +2,16 @@ defmodule ArbiterWeb.Loopback do
   @moduledoc """
   Is this peer on the box? The one predicate behind the dashboard's auth model.
 
-  Arbiter binds directly to `127.0.0.1:4848` with no reverse proxy in front,
-  so `conn.remote_ip` / `peer_data.address` is always the real peer and
-  `X-Forwarded-For` is never to be trusted. Loopback covers the three shapes a
-  same-box peer actually arrives as:
+  Arbiter binds directly to `127.0.0.1:4848` by default, with no reverse proxy
+  in front, so `conn.remote_ip` / `peer_data.address` is always the real peer
+  and `X-Forwarded-For` is never to be trusted. An operator can override the
+  bind address with `ARB_BIND_ADDRESS` (`ArbiterWeb.Boot.BindAddressCheck`
+  logs a boot WARNING when that override isn't loopback, since every
+  unauthenticated LiveView page becomes reachable by anyone who can reach the
+  port). The worker-session terminal stays gated by this module's
+  `loopback?/1` regardless of the bind address, so it is the one page that
+  does *not* become reachable off-loopback. Loopback covers the three shapes
+  a same-box peer actually arrives as:
 
     * IPv4 `127.0.0.0/8`
     * IPv6 `::1`

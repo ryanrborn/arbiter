@@ -32,7 +32,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_active_workspace(),
       check_repos(),
       check_versions(),
-      check_migrations()
+      check_migrations(),
+      check_bind_address()
     ]
   end
 
@@ -455,6 +456,53 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           name: "migrations up to date",
           status: :fail,
           detail: "could not check migration status",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-1c4pg3: the dashboard's auth model is "a loopback peer is trusted;
+  # there is no login", so a server reachable off-loopback exposes
+  # unauthenticated LiveView pages to anyone who can reach the port. This is
+  # purely informational — never fatal, never blocks readiness — and any
+  # ambiguous response (server predates this endpoint, transient error, etc.)
+  # is treated as green rather than risking a spurious [fail] on installs
+  # that are already fine.
+  defp check_bind_address do
+    case Client.get("/api/server/bind_address") do
+      {:ok, %{"loopback" => true, "ip" => ip}} ->
+        %Result{
+          name: "bind address is loopback",
+          status: :ok,
+          detail: ip,
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"loopback" => false, "ip" => ip}} ->
+        %Result{
+          name: "bind address is loopback",
+          status: :fail,
+          detail:
+            "bound to #{ip} — the dashboard has no login; " <>
+              "anyone who can reach this address gets full access to its " <>
+              "unauthenticated pages",
+          hint:
+            "Off-loopback peers get no terminal. If this is intentional " <>
+              "(e.g. a VPN-reachable install), unset ARB_BIND_ADDRESS to fall " <>
+              "back to loopback-only and use SSH port-forwarding instead " <>
+              "(`ssh -L 4848:127.0.0.1:4848 <host>`), or leave it set only if " <>
+              "you understand the exposure.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _other ->
+        %Result{
+          name: "bind address is loopback",
+          status: :ok,
+          detail: "could not determine — skipping",
           fatal: false,
           blocks_readiness: false
         }

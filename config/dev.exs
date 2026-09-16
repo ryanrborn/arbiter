@@ -17,8 +17,24 @@ config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-worker-logs")
 # dev-only; the rest of the Repo config is covered by the runtime block.
 config :arbiter, Arbiter.Repo, stacktrace: true
 
+# The dashboard's auth model is "a loopback peer is trusted; there is no
+# login" (see ArbiterWeb.Loopback) — bind loopback-only by default (bd-1c4pg3).
+# ARB_BIND_ADDRESS overrides it explicitly; ArbiterWeb.Application logs a
+# WARNING at boot if the result isn't loopback.
+bind_ip =
+  case System.get_env("ARB_BIND_ADDRESS") do
+    addr when addr in [nil, ""] ->
+      {127, 0, 0, 1}
+
+    addr ->
+      case :inet.parse_address(String.to_charlist(addr)) do
+        {:ok, parsed} -> parsed
+        {:error, _} -> raise "ARB_BIND_ADDRESS is not a valid IP address: #{inspect(addr)}"
+      end
+  end
+
 config :arbiter_web, ArbiterWeb.Endpoint,
-  http: [ip: {0, 0, 0, 0}, port: String.to_integer(System.get_env("PORT") || "4848")],
+  http: [ip: bind_ip, port: String.to_integer(System.get_env("PORT") || "4848")],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
