@@ -373,12 +373,12 @@ defmodule ArbiterWeb.SessionLiveTest do
 
       refute has_element?(view, "#session-terminal-#{session.id}")
       assert has_element?(view, "#terminal-remote-notice")
-      assert has_element?(view, "#terminal-remote-notice", "this one was not launched with it")
+      assert has_element?(view, "#terminal-remote-notice", "ssh -L")
 
-      refute has_element?(
+      assert has_element?(
                view,
                "#terminal-remote-notice",
-               "Reach it from another device via Remote Control."
+               "not enabled on this session"
              )
     end
 
@@ -394,7 +394,8 @@ defmodule ArbiterWeb.SessionLiveTest do
 
       refute has_element?(view, "#session-terminal-#{session.id}")
       assert has_element?(view, "#terminal-remote-notice")
-      assert has_element?(view, "#terminal-remote-notice", "does not support Remote Control")
+      assert has_element?(view, "#terminal-remote-notice", "ssh -L")
+      assert has_element?(view, "#terminal-remote-notice", "workspace token")
     end
 
     test "a non-loopback peer never sees the stall banner alongside the remote notice (bd-2zskbb)",
