@@ -4,6 +4,10 @@ defmodule ArbiterWeb.Api.ServerController do
 
   Routes:
     * `GET /api/server/migrations` — check for pending database migrations
+    * `GET /api/server/bind_address` — what address the HTTP listener is
+      actually bound to (bd-1c4pg3). `arb server doctor` uses this to warn
+      when a server — possibly remote, via `ARB_HOST` — is reachable
+      off-loopback despite the dashboard's no-login auth model.
   """
 
   use ArbiterWeb, :controller
@@ -30,4 +34,20 @@ defmodule ArbiterWeb.Api.ServerController do
         })
     end
   end
+
+  def bind_address(conn, _params) do
+    ip =
+      :arbiter_web
+      |> Application.get_env(ArbiterWeb.Endpoint, [])
+      |> Keyword.get(:http, [])
+      |> Keyword.get(:ip)
+
+    json(conn, %{
+      ip: format_ip(ip),
+      loopback: ArbiterWeb.Loopback.loopback?(ip)
+    })
+  end
+
+  defp format_ip(nil), do: nil
+  defp format_ip(ip), do: ip |> :inet.ntoa() |> to_string()
 end

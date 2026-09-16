@@ -186,6 +186,7 @@ defmodule ArbiterWeb.Router do
 
     # Server health (migrations, etc.)
     get("/server/migrations", ServerController, :migrations)
+    get("/server/bind_address", ServerController, :bind_address)
 
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)

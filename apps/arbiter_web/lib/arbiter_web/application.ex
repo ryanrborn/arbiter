@@ -11,6 +11,8 @@ defmodule ArbiterWeb.Application do
     # the currently-checked-out commit, not a stale compile-time value.
     Application.put_env(:arbiter_web, :runtime_git_sha, resolve_git_sha())
 
+    warn_if_bound_off_loopback()
+
     children = [
       ArbiterWeb.Telemetry,
       # Outbound HTTP pool for the Anthropic proxy (bd-5boun6) — forwards Claude
@@ -29,6 +31,16 @@ defmodule ArbiterWeb.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: ArbiterWeb.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp warn_if_bound_off_loopback do
+    ip =
+      :arbiter_web
+      |> Application.get_env(ArbiterWeb.Endpoint, [])
+      |> Keyword.get(:http, [])
+      |> Keyword.get(:ip)
+
+    if ip, do: ArbiterWeb.Boot.BindAddressCheck.warn_if_off_loopback(ip)
   end
 
   defp resolve_git_sha do
