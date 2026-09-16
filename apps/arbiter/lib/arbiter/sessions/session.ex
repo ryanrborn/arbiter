@@ -67,7 +67,9 @@ defmodule Arbiter.Sessions.Session do
       mode Remote Control works under) or `:oauth_token` (mode A, a revocable
       per-workspace token, no Remote Control). See §8.1.
     * `remote_control` — whether the session was launched with
-      `--remote-control` (§8). Phase 8 sets it; phase 1 only records it.
+      `--remote-control` (§8). Refused at create time unless `auth_mode` is
+      `:seeded_credentials` (see `validations`) — §8.3 measured mode A
+      accepting the flag and starting normally with no bridge ever coming up.
     * `started_at` / `ended_at` / `last_client_at` — lifecycle. `last_client_at`
       is the idle-deadline input for phase 10's reaper (§4.6 item 2).
     * `last_turn_at` — a turn happened (JSONL rollover, a usage event), which is
@@ -288,6 +290,27 @@ defmodule Arbiter.Sessions.Session do
 
       accept [:name]
       require_atomic? false
+    end
+  end
+
+  validations do
+    # §8.3's spike: `--remote-control` under mode A starts normally and never
+    # establishes a bridge — no error, no bridge-session record, ever. A row
+    # that recorded `remote_control: true` under `:oauth_token` would be
+    # exactly the "offering a toggle that silently does nothing" outcome the
+    # RFC calls the worst one, so it is refused at the row rather than left
+    # to the UI's disable-with-reason alone.
+    validate fn changeset, _context ->
+      remote_control = Ash.Changeset.get_attribute(changeset, :remote_control)
+      auth_mode = Ash.Changeset.get_attribute(changeset, :auth_mode)
+
+      if remote_control == true and auth_mode != :seeded_credentials do
+        {:error,
+         field: :remote_control,
+         message: "requires auth_mode: :seeded_credentials (mode B) — see RFC §8.3"}
+      else
+        :ok
+      end
     end
   end
 

@@ -179,6 +179,85 @@ defmodule ArbiterWeb.SessionLiveTest do
     end
   end
 
+  describe "Remote Control gating in the launch form (§8.3)" do
+    test "mode B (the default) leaves the Remote Control checkbox enabled, no reason shown",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      refute has_element?(view, "#launch-session-remote-control[disabled]")
+      refute has_element?(view, "#launch-session-remote-control-reason")
+    end
+
+    test "selecting mode A disables the checkbox and shows the reason", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      html =
+        view
+        |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+        |> render_change()
+
+      assert html =~ ~s(id="launch-session-remote-control-reason")
+
+      assert has_element?(view, "#launch-session-remote-control[disabled]")
+    end
+
+    test "switching back to mode B re-enables the checkbox", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-remote-control[disabled]")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
+
+      refute has_element?(view, "#launch-session-remote-control[disabled]")
+    end
+
+    test "launching under mode B with the box checked records remote_control: true",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert {:error, {:live_redirect, _}} =
+               view
+               |> form("#launch-session-form", %{
+                 "auth_mode" => "seeded_credentials",
+                 "remote_control" => "true"
+               })
+               |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.auth_mode == :seeded_credentials
+      assert session.remote_control == true
+    end
+
+    test "a submission that spoofs remote_control under mode A is still refused server-side",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      # The disabled attribute stops a normal click, but `render_submit/1`
+      # posts whatever params it is given — proving `launch_defaults/1`'s own
+      # clamp (not just the disabled checkbox) is what keeps this from ever
+      # reaching a row. Mode A has no configured token in this test env, so
+      # the launch itself fails (a pre-existing gap of this phase-5 form, not
+      # this test's concern) — what matters is that `remote_control` was
+      # never `true` on the row it left behind.
+      view
+      |> form("#launch-session-form", %{
+        "auth_mode" => "oauth_token",
+        "remote_control" => "true"
+      })
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.auth_mode == :oauth_token
+      assert session.remote_control == false
+    end
+  end
+
   describe "killing" do
     test "kill asks for confirmation first and does nothing until it gets one", %{conn: conn} do
       session = launch!()

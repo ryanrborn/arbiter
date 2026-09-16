@@ -168,6 +168,9 @@ defmodule ArbiterWeb.SessionChannel do
   def handle_info({:session_usage, _id, _payload} = message, socket),
     do: stream_event(message, socket)
 
+  def handle_info({:session_error, _id, _payload} = message, socket),
+    do: stream_event(message, socket)
+
   def handle_info(:touch_client, socket) do
     case Sessions.get(socket.assigns.session_id) do
       {:ok, session} -> Sessions.touch_client(session)
@@ -350,6 +353,14 @@ defmodule ArbiterWeb.SessionChannel do
 
   defp dispatch({:session_usage, _session_id, payload}, socket) do
     push(socket, "usage", payload)
+    {:noreply, socket}
+  end
+
+  # §8.3's bridge-verification failure (`Arbiter.Sessions.broadcast_error/2`)
+  # arrives the same way a live `usage` payload does — see the moduledoc
+  # table's `error` row.
+  defp dispatch({:session_error, _session_id, payload}, socket) do
+    push(socket, "error", payload)
     {:noreply, socket}
   end
 
