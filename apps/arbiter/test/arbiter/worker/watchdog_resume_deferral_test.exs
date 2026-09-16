@@ -181,6 +181,72 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
     end
   end
 
+  # ---- the budget the retry inherits --------------------------------------
+
+  describe "the auto-resume budget across a deferred retry" do
+    test "a retry keeps the attempt count it inherited instead of restarting the budget at 1",
+         %{worker: pid, task_id: task_id, ws: ws} do
+      # Two auto-resumes already spent on this task. The counter lives on the
+      # worker's meta because each round mints a fresh worker + Watchdog.
+      :ok = Worker.report(pid, :awaiting_review_resume_attempts, 2)
+
+      blocker = fixpass_worker()
+      StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
+
+      wpid =
+        start_watchdog(pid, task_id, "!strand6", ws,
+          interval_ms: 60_000,
+          max_auto_resumes: 3,
+          max_resume_deferrals: 10
+        )
+
+      wref = Process.monitor(wpid)
+      wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 1 end, 5_000)
+      assert [%{attempt: 3}] = StubAutoResumeDispatcher.resumes()
+
+      # The deferred attempt's own `stop_prior_worker/1` kills the primary, so
+      # the retry can no longer read the counter off the worker's meta — the
+      # snapshot fallback carries none. It must not read that as a fresh budget.
+      stop_quietly(pid)
+
+      StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker), 0)
+      send(blocker, :finish)
+
+      wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 2 end, 5_000)
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+
+      # Still attempt 3 — the deferral never spent one, and it never gave one
+      # back either. Resuming as attempt 1 here would re-stamp 1 onto the new
+      # run's meta and make the cap unbindable on exactly this path.
+      assert [%{attempt: 3}, %{attempt: 3}] = StubAutoResumeDispatcher.resumes()
+      assert StubAutoResumeDispatcher.escalations() == []
+    end
+
+    test "the escalation from a deferral that ran out reports the inherited attempt count, not 0",
+         %{worker: pid, task_id: task_id, ws: ws} do
+      :ok = Worker.report(pid, :awaiting_review_resume_attempts, 2)
+
+      blocker = fixpass_worker()
+      StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
+
+      wpid =
+        start_watchdog(pid, task_id, "!strand7", ws,
+          interval_ms: 20,
+          max_auto_resumes: 3,
+          max_resume_deferrals: 2
+        )
+
+      wref = Process.monitor(wpid)
+      wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 1 end, 5_000)
+      stop_quietly(pid)
+
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+
+      assert [{^task_id, _ws_id, "!strand7", 2, {:resume_blocked, _blocked_by, 2}}] =
+               StubAutoResumeDispatcher.escalations()
+    end
+  end
+
   # ---- acceptance 2: both terminal arms park + page exactly once ------------
 
   describe "the terminal arms park the task and page once (class E)" do

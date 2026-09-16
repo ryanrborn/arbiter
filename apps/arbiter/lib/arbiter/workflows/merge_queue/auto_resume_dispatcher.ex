@@ -88,11 +88,17 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
       Watchdog deferred and retried on its poll interval; after `deferrals`
       retries the blocker was *still* live, which is no longer plausibly
       transient. `reason` carries the blocking registry key.
+    * `{:resume_blocker_vanished, reason, deferrals}` — bd-985tkl. Same refusal,
+      but the pass named by it is already dead, twice running: nothing can ever
+      signal its completion, so no later retry will clear the block. Taken well
+      inside the deferral budget rather than sitting out the remaining ticks in
+      silence. `reason` carries the blocking registry key.
   """
   @type give_up_reason ::
           :budget_exhausted
           | {:resume_failed, term()}
           | {:resume_blocked, term(), non_neg_integer()}
+          | {:resume_blocker_vanished, term(), non_neg_integer()}
 
   @doc """
   Page the coordinator that the Watchdog has stopped auto-resuming this task.

@@ -1014,6 +1014,22 @@ defmodule Arbiter.Worker.Watchdog do
         resume_blocker_ref: nil,
         resume_blocker_missing: 0,
         resume_retry_token: 0,
+        #   resume_attempts_seen   — the highest auto-resume count this episode
+        #                            has ever read off the worker's meta. The
+        #                            meta is still the source of truth ACROSS
+        #                            episodes (see `max_auto_resumes` above),
+        #                            but WITHIN one it has to survive the
+        #                            primary's death: a deferred retry runs
+        #                            after `stop_prior_worker/1` killed the
+        #                            worker, so `snapshot/1` falls back to a
+        #                            meta-less map and the count would read 0.
+        #                            Without this floor every deferred retry
+        #                            would resume as "attempt 1" and re-stamp
+        #                            1 onto the new run's meta, so the
+        #                            auto-resume cap would never bind on the
+        #                            exact path — CI-red → fix_pass → defer —
+        #                            that makes deferrals happen at all.
+        resume_attempts_seen: 0,
         # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
         # a notification fires once when the count first hits the threshold, then
         # is suppressed until the counter resets and re-hits the threshold.
@@ -2537,9 +2553,17 @@ defmodule Arbiter.Worker.Watchdog do
   # ceiling and once from every deferred retry. Returns `{:stop, state}` when the
   # episode is finished (resumed, or paged) and `{:defer, state}` when the resume
   # could not start for a reason that a later retry can clear.
+  #
+  # The budget is read from the worker's meta, which is authoritative across
+  # episodes — but on a deferred retry the worker is gone (the deferred attempt's
+  # own `stop_prior_worker/1` killed it) and `snapshot/1`'s fallback map carries
+  # no meta, so that read returns 0. `resume_attempts_seen` is the within-episode
+  # floor that keeps the cap binding across the retry; see the state comment.
+  # It also keeps the `attempts` reported by both escalation paths honest.
   defp attempt_auto_resume(state) do
     snap = snapshot(state)
-    attempts = awaiting_review_resume_attempts(snap)
+    attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
+    state = %{state | resume_attempts_seen: attempts}
 
     if attempts < state.max_auto_resumes do
       auto_resume(state, attempts + 1)
