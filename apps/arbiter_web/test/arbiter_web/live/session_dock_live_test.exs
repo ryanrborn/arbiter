@@ -71,6 +71,17 @@ defmodule ArbiterWeb.SessionDockLiveTest do
 
       assert has_element?(view, "#session-dock-offset")
     end
+
+    # The dock rides the live layout, which only wraps `live_session :default`.
+    # A dead controller page therefore gets neither the dock nor the bottom
+    # offset it exists to make room for — and must not get one without the
+    # other, which is how a page ends up with a gap under nothing.
+    test "is absent, offset and all, from dead controller pages", %{conn: conn} do
+      html = conn |> get(~p"/about") |> html_response(200)
+
+      refute html =~ ~s(id="session-dock")
+      refute html =~ ~s(id="session-dock-offset")
+    end
   end
 
   describe "the roster" do

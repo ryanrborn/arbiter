@@ -64,8 +64,7 @@ defmodule ArbiterWeb.SessionDockLive do
      |> assign(:roster_open?, false)
      |> assign(:open_ids, [])
      |> assign(:expanded_id, nil)
-     |> load_sessions(),
-     layout: false}
+     |> load_sessions(), layout: false}
   end
 
   # -- events -----------------------------------------------------------------
@@ -347,14 +346,12 @@ defmodule ArbiterWeb.SessionDockLive do
       >
       </div>
 
-      <div
-        class={[
-          "flex items-center gap-1.5 pl-3 pr-1 h-[var(--session-dock-strip-height)]",
-          "border border-b-0 border-solid border-[var(--border-default)]",
-          "bg-[var(--surface-chrome)]",
-          not @expanded? && "rounded-t-[var(--radius-panel)]"
-        ]}
-      >
+      <div class={[
+        "flex items-center gap-1.5 pl-3 pr-1 h-[var(--session-dock-strip-height)]",
+        "border border-b-0 border-solid border-[var(--border-default)]",
+        "bg-[var(--surface-chrome)]",
+        not @expanded? && "rounded-t-[var(--radius-panel)]"
+      ]}>
         <span
           class={[
             "size-1.5 rounded-full shrink-0",
