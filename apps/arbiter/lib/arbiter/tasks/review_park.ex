@@ -67,6 +67,7 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :commit_gate_uncommitted
           | :empty_diff
           | :head_not_pushed
+          | :resume_blocked
           | :review_rerun
 
   @reasons %{
@@ -87,7 +88,11 @@ defmodule Arbiter.Tasks.ReviewPark do
     head_not_pushed:
       "the head to be reviewed is not on the remote branch the merge request points at, " <>
         "and could not be pushed there — reviewing it would judge code the MR does not " <>
-        "carry (G18)"
+        "carry (G18)",
+    resume_blocked:
+      "the Watchdog could not restart the run after its awaiting-review timeout because " <>
+        "another pass on the same task (`<task>:fixpass` / `<task>:conflict`) still holds " <>
+        "the worker registry slot (W14)"
   }
 
   # The phrase each reason contributes to the escalation subject. These are
@@ -105,7 +110,8 @@ defmodule Arbiter.Tasks.ReviewPark do
     commit_gate_no_changes: "fix round produced no changes",
     commit_gate_uncommitted: "implementer left uncommitted work",
     empty_diff: "the target branch already absorbed these commits",
-    head_not_pushed: "the branch is not pushed and could not be"
+    head_not_pushed: "the branch is not pushed and could not be",
+    resume_blocked: "auto-resume is blocked by another pass on the same task"
   }
 
   @doc """

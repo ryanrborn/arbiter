@@ -12,7 +12,9 @@ defmodule Arbiter.Test.StubMerger do
       StubMerger.queue_get("!1", [%{status: :open, approved: false}, %{status: :merged}])
 
   Each `get/1` pops the next queued result for that ref; once the queue is
-  drained the last result repeats. `merge/2` records the call (assert via
+  drained the last result repeats. A queued entry may also be an
+  `{:error, reason}` tuple, which `get/1` returns verbatim — that is how a test
+  injects a transport failure (e.g. a `:network` "socket closed"). `merge/2` records the call (assert via
   `merge_count/1`, and on the `expected_sha` it was guarded with via
   `last_merge/0`). `open/4` records its args (assert via `last_open/0`) and
   returns the ref from `next_open_ref/0` (default `"!stub"`).
@@ -185,13 +187,20 @@ defmodule Arbiter.Test.StubMerger do
         s = update_in(s, [:get_counts, ref], &((&1 || 0) + 1))
 
         case Map.get(s.gets, ref, []) do
-          [only] -> {Map.merge(defaults, only), s}
-          [head | rest] -> {Map.merge(defaults, head), put_in(s, [:gets, ref], rest)}
-          [] -> {defaults, s}
+          [only] -> {only, s}
+          [head | rest] -> {head, put_in(s, [:gets, ref], rest)}
+          [] -> {%{}, s}
         end
       end)
 
-    {:ok, result}
+    # A queued `{:error, reason}` is returned verbatim, so a case can drive the
+    # transport failures the real adapter surfaces (`%Mergers.Github.Error{kind:
+    # :network}` — the "socket closed" bd-985tkl saw 22 times in three hours)
+    # rather than only happy-path result maps.
+    case result do
+      {:error, _reason} = err -> err
+      %{} = attrs -> {:ok, Map.merge(defaults, attrs)}
+    end
   end
 
   @impl true
