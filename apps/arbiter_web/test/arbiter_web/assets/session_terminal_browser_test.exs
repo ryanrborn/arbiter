@@ -3,6 +3,10 @@ defmodule ArbiterWeb.SessionTerminalBrowserTest do
   The claims that only a real browser can settle (bd-c76fu9, phase 5
   acceptance criteria 2, 5 and 6).
 
+  It also covers bd-14b11h's remount: mount -> dispose -> mount on a pane that
+  has no box yet, which is what a LiveView navigation back to /sessions/<id>
+  does, and which used to join at xterm's 80x24 default and garble the pane.
+
   `mix test` covers the page chrome, the channel and the resume protocol;
   `ArbiterWeb.SessionTransportSocketTest` covers resume over a real socket.
   None of that touches a renderer. This shells out to
@@ -51,6 +55,18 @@ defmodule ArbiterWeb.SessionTerminalBrowserTest do
         assert output =~ "CHECK binary-write: PASS"
         assert output =~ "CHECK split-utf8-reassembled: PASS"
         assert output =~ "CHECK plain-ctrl-c-is-still-sigint: PASS"
+
+        # bd-14b11h: the LiveView navigation remount. It needs a real layout
+        # engine to produce the 0x0 pane, a real xterm to have a construction
+        # default to fall back to, and a real frame loop to settle — so this is
+        # the only place the claim can be made.
+        assert output =~ "CHECK remount-waits-for-a-box-before-joining: PASS"
+        assert output =~ "CHECK remount-joins-with-the-fitted-geometry-not-xterms-default: PASS"
+        assert output =~ "CHECK remount-renders-at-the-fitted-geometry: PASS"
+        assert output =~ "CHECK remount-sends-its-geometry-to-the-pane: PASS"
+        assert output =~ "CHECK a-join-that-resized-the-pane-forces-a-redraw: PASS"
+        assert output =~ "CHECK a-window-resize-refits-and-tells-the-pane: PASS"
+        assert output =~ "CHECK a-tab-that-never-paints-still-attaches: PASS"
         refute output =~ ": FAIL"
 
       other ->
