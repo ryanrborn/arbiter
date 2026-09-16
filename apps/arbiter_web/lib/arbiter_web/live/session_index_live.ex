@@ -36,6 +36,14 @@ defmodule ArbiterWeb.SessionIndexLive do
   this is "the next sweep shows up without a reload", not sub-second — see
   the "estimated" marker on figures still riding on `ClaudePricing`'s
   token-priced fallback rather than a real `cost-state` record.
+
+  The row keys on `session.provider_session_id`, which a `--resume` or
+  compaction rollover **replaces** rather than appends to
+  (`Session.record_provider_session/2`). A rolled-over session's row only
+  ever reflects spend under its *current* provider id — pre-rollover spend
+  under the old id is real, ledgered, and reachable via `arb usage --by
+  session`, but this column under-reports it. `Sessions.usage_events/1` has
+  the same limitation already.
   """
 
   use ArbiterWeb, :live_view
@@ -69,9 +77,10 @@ defmodule ArbiterWeb.SessionIndexLive do
     socket =
       socket
       |> assign(:kill_candidate, nil)
+      |> assign(:usage_refresh_ref, nil)
       |> refresh()
 
-    {:ok, schedule_usage_refresh(socket)}
+    {:ok, socket}
   end
 
   @impl true
@@ -122,10 +131,12 @@ defmodule ArbiterWeb.SessionIndexLive do
   end
 
   # bd-9mrzti: the periodic re-pull of the usage ledger — see the module doc.
-  # Rescheduled from here rather than left as a fixed `:timer.send_interval`
-  # so it stops entirely once nothing is running (`schedule_usage_refresh/1`).
+  # Rescheduled from `refresh/1` itself (not left as a fixed
+  # `:timer.send_interval`) so it stops once nothing is running and — unlike
+  # an earlier revision — reliably restarts from *any* lifecycle event that
+  # calls `refresh/1`, not just this handler.
   def handle_info(:refresh_session_usage, socket) do
-    {:noreply, socket |> refresh() |> schedule_usage_refresh()}
+    {:noreply, refresh(socket)}
   end
 
   # `ArbiterWeb.LiveHooks` subscribes every view to the coordinator mailbox and
@@ -135,11 +146,13 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp refresh(socket) do
     sessions = Sessions.list()
+    running_count = Enum.count(sessions, &(&1.status == :running))
 
     socket
     |> assign(:sessions, sessions)
-    |> assign(:running_count, Enum.count(sessions, &(&1.status == :running)))
+    |> assign(:running_count, running_count)
     |> assign(:usage_by_session, usage_by_session(sessions))
+    |> schedule_usage_refresh(running_count)
   end
 
   # One rollup query for the whole list — not one JSONL tailer per row — keyed
@@ -154,11 +167,9 @@ defmodule ArbiterWeb.SessionIndexLive do
         %{}
 
       _ ->
-        case Usage.summarize(by: :session) do
+        case Usage.summarize(by: :session, session_ids: provider_ids) do
           {:ok, rollups} ->
-            rollups
-            |> Enum.filter(&(&1.group in provider_ids))
-            |> Map.new(&{&1.group, &1})
+            Map.new(rollups, &{&1.group, &1})
 
           {:error, reason} ->
             Logger.error("SessionIndexLive: usage summarize failed: #{inspect(reason)}")
@@ -167,12 +178,23 @@ defmodule ArbiterWeb.SessionIndexLive do
     end
   end
 
-  defp schedule_usage_refresh(socket) do
-    if connected?(socket) and socket.assigns.running_count > 0 do
-      Process.send_after(self(), :refresh_session_usage, @usage_refresh_ms)
+  # Re-armed on every `refresh/1` (mount, kill, a lifecycle broadcast, or its
+  # own tick) rather than only from the tick handler, so a session that starts
+  # running again after the timer had stopped (nothing was running) gets
+  # polling back — see the moduledoc's cost/tokens section and bd-9mrzti
+  # finding 3. Cancels any prior ref first so lifecycle events firing in a
+  # burst can't stack duplicate timers.
+  defp schedule_usage_refresh(socket, running_count) do
+    if ref = socket.assigns[:usage_refresh_ref] do
+      Process.cancel_timer(ref)
     end
 
-    socket
+    ref =
+      if connected?(socket) and running_count > 0 do
+        Process.send_after(self(), :refresh_session_usage, @usage_refresh_ms)
+      end
+
+    assign(socket, :usage_refresh_ref, ref)
   end
 
   # Phase 5's defaults; phase 11 replaces this with the options UI. `:name` is

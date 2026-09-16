@@ -119,6 +119,22 @@ defmodule Arbiter.Sessions.UsageIngest do
   (`ARBITER_COORDINATOR_SESSION_DIRS`, or `config :arbiter,
   :coordinator_session_dirs`). It defaults to **empty**, so an install that has
   not opted in ingests nothing and this module is inert.
+
+  ## Browser-hosted sessions (bd-9mrzti)
+
+  A browser-hosted `Arbiter.Sessions.Session` writes its transcript under its
+  own `config_dir` (`<config_dir>/projects/<slug>/<provider_session_id>.jsonl`
+  — see `Sessions.Stream`'s discovery of the CLI's own project-slug
+  directory), not under `coordinator_session_dirs`, which only ever pointed at
+  the CLI coordinator's own config dir. Every non-ended `Arbiter.Sessions.list/0`
+  row is therefore swept too, on the same cadence, into the same
+  `:coordinator_session` rows — so `arb usage --by session` and the `/sessions`
+  list column (`ArbiterWeb.SessionIndexLive`) both read one ledger regardless
+  of which kind of session produced the spend. `Sessions.mark_ended/2` also
+  triggers one final single-session sweep synchronously (`dirs: [],
+  sessions: [ended]`) so a session's last few turns land before the next
+  periodic pass — otherwise up to `interval_ms` of real spend could sit
+  unswept on a row nothing will read again.
   """
 
   use GenServer
@@ -155,6 +171,11 @@ defmodule Arbiter.Sessions.UsageIngest do
     * `:dirs` — directories to sweep, overriding
       `Arbiter.Config.Paths.coordinator_session_dirs/0`. Mainly for tests and
       one-off backfills.
+    * `:sessions` — `Arbiter.Sessions.Session` structs to sweep (their
+      `config_dir`'s `projects/*/*.jsonl`), overriding `Arbiter.Sessions.list/0`
+      filtered to non-ended. Passing this explicitly (as `mark_ended/2` does,
+      with a single already-ended session) skips that status filter — the
+      caller has already decided which sessions it wants read.
 
   Returns `{:ok, report}`. Individual file failures are counted in
   `:errors` and logged rather than aborting the sweep — one unreadable JSONL
@@ -164,9 +185,17 @@ defmodule Arbiter.Sessions.UsageIngest do
   def ingest(opts \\ []) when is_list(opts) do
     dirs = Keyword.get_lazy(opts, :dirs, &Paths.coordinator_session_dirs/0)
 
+    sessions =
+      Keyword.get_lazy(opts, :sessions, fn ->
+        Enum.reject(Arbiter.Sessions.list(), &(&1.status == :ended))
+      end)
+
+    files =
+      (Enum.flat_map(dirs, &session_files/1) ++ Enum.flat_map(sessions, &browser_session_files/1))
+      |> Enum.uniq()
+
     report =
-      dirs
-      |> Enum.flat_map(&session_files/1)
+      files
       |> Enum.reduce(%{files: 0, rows_written: 0, errors: 0}, fn path, acc ->
         %{rows: rows, errors: errors} = ingest_file(path)
 
@@ -191,6 +220,19 @@ defmodule Arbiter.Sessions.UsageIngest do
   end
 
   defp session_files(_dir), do: []
+
+  # A browser-hosted session's transcript lives two levels deeper than a
+  # coordinator dir — `<config_dir>/projects/<slug>/<sid>.jsonl` — because the
+  # CLI names the middle directory after the project path, not the session.
+  defp browser_session_files(%{config_dir: config_dir})
+       when is_binary(config_dir) and config_dir != "" do
+    [config_dir, "projects", "*", "*.jsonl"]
+    |> Path.join()
+    |> Path.wildcard()
+    |> Enum.sort()
+  end
+
+  defp browser_session_files(_session), do: []
 
   defp ingest_file(path) do
     session_id = Path.basename(path, ".jsonl")

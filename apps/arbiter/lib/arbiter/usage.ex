@@ -82,6 +82,14 @@ defmodule Arbiter.Usage do
           required(:cache_creation_tokens) => non_neg_integer(),
           required(:cache_read_tokens) => non_neg_integer(),
           required(:duration_ms) => non_neg_integer(),
+          # Meaningful only for `:by :session` groups. `estimated_event?/1`
+          # reads `raw["arb_usage_source"]["cost_source"]`, which only
+          # `Sessions.UsageIngest` ever stamps; the worker (`Worker`) and
+          # `Reconciler` ingest paths never set `cost_source`, so every other
+          # grouping (`:task`, `:day`, `:workspace`, …) always reports
+          # `estimated: false` regardless of whether the underlying cost was a
+          # real `cost-state`/API figure or an unmarked token-priced guess.
+          # Read `false` there as "provenance unknown", not "exact".
           required(:estimated) => boolean()
         }
 
@@ -101,6 +109,11 @@ defmodule Arbiter.Usage do
       deprecated alias for `:epic`). Required.
     * `:since` — `%DateTime{}` filter on `occurred_at`. Optional.
     * `:workspace_id` — restrict to one workspace. Optional.
+    * `:session_ids` — restrict to a list of `session_id` values, pushed into
+      the query as `session_id in ^ids` rather than filtered after the read.
+      `Event` indexes `:session_id`, so this keeps a `:by :session` rollup for
+      a handful of known sessions (e.g. `/sessions`' live-refresh tick) an
+      indexed lookup instead of a full-table read. Optional.
     * `:limit` — cap the returned rows (after sort). Optional.
 
   Returns `{:ok, [rollup]}` or `{:error, reason}`. Rows are sorted by
@@ -251,10 +264,17 @@ defmodule Arbiter.Usage do
         %DateTime{} = dt -> Ash.Query.filter(query, occurred_at <= ^dt)
       end
 
-    case Keyword.get(opts, :workspace_id) do
+    query =
+      case Keyword.get(opts, :workspace_id) do
+        nil -> query
+        "" -> query
+        ws -> Ash.Query.filter(query, workspace_id == ^ws)
+      end
+
+    case Keyword.get(opts, :session_ids) do
       nil -> query
-      "" -> query
-      ws -> Ash.Query.filter(query, workspace_id == ^ws)
+      [] -> query
+      ids when is_list(ids) -> Ash.Query.filter(query, session_id in ^ids)
     end
   end
 

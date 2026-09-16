@@ -263,6 +263,57 @@ defmodule Arbiter.UsageTest do
       assert session_rollup.estimated == false
     end
 
+    test "session_ids restricts the rollup to the given sessions without a full-table read" do
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-ids-a",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 1.0,
+        tokens_in: 10,
+        tokens_out: 5,
+        occurred_at: DateTime.utc_now()
+      })
+
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-ids-b",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 2.0,
+        tokens_in: 20,
+        tokens_out: 10,
+        occurred_at: DateTime.utc_now()
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :session, session_ids: ["sess-ids-a"])
+
+      assert [session_rollup] = rollups
+      assert session_rollup.group == "sess-ids-a"
+    end
+
+    test "an empty session_ids list behaves like no filter at all" do
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-ids-c",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 1.0,
+        tokens_in: 10,
+        tokens_out: 5,
+        occurred_at: DateTime.utc_now()
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :session, session_ids: [])
+      assert Enum.any?(rollups, &(&1.group == "sess-ids-c"))
+    end
+
     test "by step splits work vs review" do
       {:ok, rollups} = Usage.summarize(by: :step, workspace_id: "ws-usage")
       by_step = Map.new(rollups, &{&1.group, &1})
