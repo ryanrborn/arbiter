@@ -24,8 +24,7 @@ defmodule Arbiter.Sessions.StreamTest do
   @opts [
     terminal: ScriptedPty,
     poll_interval_ms: 5,
-    alive_interval_ms: 20,
-    linger_ms: 0
+    alive_interval_ms: 20
   ]
 
   setup %{tmp_dir: tmp_dir} do
@@ -235,6 +234,43 @@ defmodule Arbiter.Sessions.StreamTest do
 
       :ok = Stream.stop(id)
       assert File.read!(Transcript.path_for(id)) == "ANTHROPIC_API_KEY=[REDACTED]"
+    end
+
+    test "a typed secret is redacted in steady state, not just at shutdown flush (bd-5pelo2 round 2 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      # Prime past any fixed-size hold-back window (the bug: `writable` was
+      # `combined` minus a fixed 512-byte tail, so the held-back bytes were
+      # never look-ahead for a match — a key still in flight when the reader
+      # stops was the only case that ever got redacted). Filler both before
+      # and after the typed key so the assertion exercises the reader while
+      # it is still running, not the shutdown flush.
+      filler = String.duplicate("x", 600)
+      key = "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"
+
+      ScriptedPty.emit(id, filler <> "\n")
+      collect_stdout(id, byte_size(filler) + 1)
+
+      key
+      |> String.graphemes()
+      |> Enum.each(fn ch ->
+        ScriptedPty.emit(id, ch)
+        Process.sleep(10)
+      end)
+
+      collect_stdout(id, byte_size(key))
+
+      ScriptedPty.emit(id, "\n" <> filler)
+      collect_stdout(id, byte_size(filler) + 1)
+
+      # Assert against the file *while the reader is still alive* — no
+      # shutdown flush has happened yet.
+      transcript = File.read!(Transcript.path_for(id))
+      refute transcript =~ "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"
+      assert transcript =~ "ANTHROPIC_API_KEY=[REDACTED]"
+
+      :ok = Stream.stop(id)
     end
   end
 

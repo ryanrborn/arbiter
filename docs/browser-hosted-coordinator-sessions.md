@@ -1583,10 +1583,16 @@ write, and treat the transcript directory as mode-0700 operator-only data. This 
 the same posture `docs/worker-security.md` takes. Because the PTY only hands
 bytes over in whatever-sized chunks a poll tick catches, a secret can straddle
 two chunks — an operator *typing* a key delivers it a few bytes per tick, so no
-single chunk contains a full match. `Arbiter.Sessions.Stream` holds back a small
-tail of unwritten bytes and joins it against the next chunk before redacting, so
-a match is never evaluated against less than that held-back window of what
-follows it (bd-5pelo2, round 2, finding 2).
+single chunk contains a full match. A fixed-size hold-back window doesn't fix
+this: redaction only ever sees the *written* portion, so bytes held back are
+never look-ahead for a match starting in what was already written — a token
+typed slowly enough outlives any fixed window one byte at a time (bd-5pelo2,
+round 2, finding 1). Instead `Arbiter.Sessions.Stream` cuts only at a byte that
+cannot appear inside a credential (every pattern is built from an unbroken
+run of token characters, so a separator boundary can never fall inside a
+match), holding everything from the last such separator onward and writing
+everything before it — bounded by a hard cap so a run with no separator at
+all still drains eventually (bd-5pelo2, round 2, finding 1).
 
 **Known deferral: capture starts at first attach, not at session launch.**
 `tmux pipe-pane -O` is started by `Arbiter.Sessions.Stream` the first time a
@@ -1601,6 +1607,19 @@ Closing that gap means starting the reader from session launch
 which is a wider change touching both call paths and their test suites — left
 for a follow-up rather than folded into this round, to keep the fix that *is*
 landing (capture surviving detach) reviewable on its own.
+
+**Known gap: an `arbiter` restart drops the bytes written while no reader was
+alive.** The moduledoc's claim that a restart "drops the reader but never the
+session" is true of the pipe file (`tmux pipe-pane` keeps appending to it
+regardless of whether anything is reading) but not of the durable transcript:
+`open_stream/1` seeks to the pipe file's *current* size before adopting it, so
+whatever the pane wrote between the old reader dying and the new one adopting
+never reaches `<id>.raw`. This is the same class of hole as the never-attached
+deferral above, just triggered by a restart instead of a session nobody opens.
+Closing it means persisting the last transcribed pipe offset alongside the
+transcript handle and replaying `old_offset..new_base` on adopt, rather than
+always starting from the pipe file's current size — left for the same
+follow-up as the deferral above (bd-5pelo2, round 2, finding 3).
 
 ## 12. Open questions and edge cases
 

@@ -70,7 +70,15 @@ defmodule Arbiter.Sessions.Terminal do
   @callback start_stream(Session.t(), path :: String.t(), opts()) ::
               {:ok, %{snapshot: binary()}} | {:error, term()}
 
-  @doc "Stop piping. Best-effort: a session that is already gone is still `:ok`."
+  @doc """
+  Stop piping. Best-effort: a session that is already gone is still `:ok`.
+
+  Nothing in the reader path calls this any more (bd-5pelo2, round 2 finding
+  1): the pipe is a session-lifetime resource now, outliving every detach and
+  every `arbiter` restart, and only the pane's own teardown ends it. This
+  primitive is kept for a future kill path that wants to close the pipe
+  explicitly — do not assume detach still calls it.
+  """
   @callback stop_stream(Session.t(), opts()) :: :ok
 
   @doc """

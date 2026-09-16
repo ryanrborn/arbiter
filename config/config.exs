@@ -205,8 +205,6 @@ config :exqlite, force_build: true
 #                     dropped to snapshot mode
 #   read_chunk_bytes  ceiling on one frame's payload, i.e. how much a burst
 #                     coalesces into before it is shipped
-#   linger_ms         how long a reader outlives its last client, so a browser
-#                     reload resumes instead of repainting
 config :arbiter, Arbiter.Sessions.Stream,
   ring_bytes: 2_097_152,
   max_replay_bytes: 2_097_152,
@@ -214,8 +212,7 @@ config :arbiter, Arbiter.Sessions.Stream,
   low_water_bytes: 65_536,
   read_chunk_bytes: 65_536,
   poll_interval_ms: 25,
-  alive_interval_ms: 1_000,
-  linger_ms: 5_000
+  alive_interval_ms: 1_000
 
 # Scrollback lines a `snapshot` reaches back for. tmux's pane history is
 # 30,000 lines (§12 item 2); shipping all of it on every attach is a lot of

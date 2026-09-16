@@ -41,6 +41,15 @@ defmodule Arbiter.Sessions.Stream do
   which touches enough of the launch and adoption call paths to be its own
   change.
 
+  It also does not yet cover the bytes a pane writes to its pipe file *while*
+  no reader is alive — the `arbiter` restart window above. `open_stream/1`
+  seeks to the pipe file's current size before adopting it (for the resume
+  transport seam, §4.5 — the client-facing snapshot covers that gap
+  visually), which means the durable transcript (`Arbiter.Sessions.Transcript`)
+  silently skips whatever the pane wrote during the dead stretch. Same class
+  of documented gap as the never-attached case above, just restart-triggered
+  (bd-5pelo2, round 2, finding 3; see `docs/browser-hosted-coordinator-sessions.md` §11).
+
   ## `seq` is a byte offset, not a counter
 
       seq == byte offset into the session's pipe file
@@ -677,9 +686,9 @@ defmodule Arbiter.Sessions.Stream do
     flush_transcript(%{state | fd: nil})
   end
 
-  # The redaction tail buffer (bd-5pelo2 finding 2) can be holding up to
-  # `@redact_tail_bytes` unwritten bytes — flush them, as-is, since nothing
-  # more is coming for this reader to join them against.
+  # The redaction hold-back buffer (bd-5pelo2 finding 2, round 2 finding 1)
+  # can be holding up to `@max_hold_bytes` unwritten bytes — flush them,
+  # as-is, since nothing more is coming for this reader to join them against.
   defp flush_transcript(state) do
     handle =
       if state.transcript_tail == <<>> do
@@ -734,15 +743,29 @@ defmodule Arbiter.Sessions.Stream do
   # single chunk ever contains a full match (bd-5pelo2 finding 2; the same
   # hazard `Arbiter.Worker.SessionArchive` already documents and avoids for
   # the JSONL side by reading the whole file before redacting — impossible
-  # here, since the PTY chunking is unavoidable). Redact against the *joined*
-  # tail-plus-new-data instead: hold back the trailing `@redact_tail_bytes` of
-  # every write and prepend it to the next chunk before redacting, so a match
-  # is never evaluated against less than that much of what follows it. The
-  # remainder is flushed as-is on reader shutdown (`flush_transcript/1`).
-  @redact_tail_bytes 512
+  # here, since the PTY chunking is unavoidable). A *fixed-size* tail window
+  # doesn't fix this (bd-5pelo2 round 2 finding 1): redaction only ever sees
+  # `writable` = combined-minus-tail, so the held-back bytes are never
+  # look-ahead for a match starting in `writable` — a token that outlives the
+  # window one byte at a time is never whole in either write.
+  #
+  # Instead, cut only at a byte that cannot appear *inside* a credential —
+  # every pattern `Arbiter.Redaction.redact_patterns/1` matches is built from
+  # `@token_bytes` with no embedded whitespace/separator, so a cut placed at
+  # a separator can never fall inside a match. Hold everything from the last
+  # separator onward (it may still be mid-token) and write everything before
+  # it. Bounded by `@max_hold_bytes` so a pathological run with no separator
+  # (huge base64 blob, binary noise) still drains instead of buffering
+  # forever — the tiny residual risk of a split match is accepted only past
+  # that bound, same as the flush-on-shutdown residual already documented
+  # for the never-attached case.
+  @max_hold_bytes 8192
+  @token_bytes ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.:/+="
+  @separator_patterns for b <- 0..255, b not in @token_bytes, do: <<b>>
+
   defp record_transcript(state, data) do
     combined = state.transcript_tail <> data
-    {writable, tail} = split_tail(combined, @redact_tail_bytes)
+    {writable, tail} = split_tail(combined)
 
     handle =
       if writable == <<>> do
@@ -754,11 +777,40 @@ defmodule Arbiter.Sessions.Stream do
     %{state | transcript_handle: handle, transcript_tail: tail}
   end
 
-  defp split_tail(data, n) when byte_size(data) <= n, do: {<<>>, data}
+  defp split_tail(data) do
+    case last_separator_index(data) do
+      nil ->
+        force_cut(data)
 
-  defp split_tail(data, n) do
-    cut = byte_size(data) - n
-    {:binary.part(data, 0, cut), :binary.part(data, cut, n)}
+      idx ->
+        hold_size = byte_size(data) - (idx + 1)
+
+        if hold_size > @max_hold_bytes do
+          force_cut(data)
+        else
+          {:binary.part(data, 0, idx + 1), :binary.part(data, idx + 1, hold_size)}
+        end
+    end
+  end
+
+  defp force_cut(data) when byte_size(data) <= @max_hold_bytes, do: {<<>>, data}
+
+  defp force_cut(data) do
+    cut = byte_size(data) - @max_hold_bytes
+    {:binary.part(data, 0, cut), :binary.part(data, cut, @max_hold_bytes)}
+  end
+
+  # Rightmost byte outside `@token_bytes` — a boundary no credential pattern
+  # can straddle. `nil` when the whole buffer is one unbroken token-shaped run.
+  # `:binary.matches/2` over the (compile-time, ~186-entry) separator set runs
+  # its own optimized multi-pattern search rather than materializing `data`
+  # as an Erlang list, which is what blew the reader's heap under sustained
+  # high-throughput panes before this rewrite.
+  defp last_separator_index(data) do
+    case :binary.matches(data, @separator_patterns) do
+      [] -> nil
+      matches -> matches |> List.last() |> elem(0)
+    end
   end
 
   # The idle-deadline's other input (§4.6 item 2): the pane actually produced

@@ -39,7 +39,7 @@ defmodule Arbiter.Integration.SessionTmuxTest do
   # print, and exits when asked — which is every lifecycle this file needs.
   @payload "sh"
 
-  @opts [poll_interval_ms: 10, alive_interval_ms: 100, linger_ms: 0]
+  @opts [poll_interval_ms: 10, alive_interval_ms: 100]
 
   setup do
     id = Ash.UUID.generate()
