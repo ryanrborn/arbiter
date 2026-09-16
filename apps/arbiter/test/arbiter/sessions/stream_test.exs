@@ -15,6 +15,8 @@ defmodule Arbiter.Sessions.StreamTest do
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Stream
+  alias Arbiter.Sessions.Transcript
+  alias Arbiter.Test.MismatchedTerminal
   alias Arbiter.Test.ScriptedPty
 
   @moduletag :tmp_dir
@@ -23,8 +25,7 @@ defmodule Arbiter.Sessions.StreamTest do
   @opts [
     terminal: ScriptedPty,
     poll_interval_ms: 5,
-    alive_interval_ms: 20,
-    linger_ms: 0
+    alive_interval_ms: 20
   ]
 
   setup %{tmp_dir: tmp_dir} do
@@ -162,6 +163,199 @@ defmodule Arbiter.Sessions.StreamTest do
 
       ScriptedPty.emit(id, "NEW")
       assert assert_stdout(id, "NEW") == 13
+    end
+  end
+
+  describe "persisted transcript (§11, phase 9)" do
+    test "every pumped byte is also appended to the durable raw transcript", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+
+      ScriptedPty.emit(id, "hello")
+      assert_stdout(id, "hello")
+      ScriptedPty.emit(id, " world")
+      assert_stdout(id, " world")
+
+      # A write below the redaction tail buffer's size (finding 2) is held
+      # back rather than written immediately; `Stream.stop/1` flushes it.
+      :ok = Stream.stop(id)
+      assert File.read!(Transcript.path_for(id)) == "hello world"
+    end
+
+    test "redacts a known secret before it reaches the durable transcript", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, Keyword.put(opts, :redact_values, ["super-secret-value"]))
+
+      ScriptedPty.emit(id, "token=super-secret-value here")
+      assert_stdout(id, "token=super-secret-value here")
+
+      :ok = Stream.stop(id)
+      assert File.read!(Transcript.path_for(id)) == "token=[REDACTED] here"
+    end
+
+    test "redacts a credential-shaped token even when it is not a registered secret", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+
+      ScriptedPty.emit(id, "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz")
+      assert_stdout(id, "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz")
+
+      :ok = Stream.stop(id)
+      assert File.read!(Transcript.path_for(id)) == "ANTHROPIC_API_KEY=[REDACTED]"
+    end
+
+    test "a secret split across two poll ticks is still redacted (bd-5pelo2 finding 2)", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+
+      # Simulate an operator *typing* a key rather than pasting it: paced
+      # slower than `poll_interval_ms` so the reader genuinely reads it back
+      # one byte per tick — no single chunk ever contains the full
+      # `sk-ant-…` match on its own.
+      "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz"
+      |> String.graphemes()
+      |> Enum.each(fn ch ->
+        ScriptedPty.emit(id, ch)
+        Process.sleep(10)
+      end)
+
+      collect_stdout(id, byte_size("ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz"))
+
+      :ok = Stream.stop(id)
+      assert File.read!(Transcript.path_for(id)) == "ANTHROPIC_API_KEY=[REDACTED]"
+    end
+
+    test "a typed secret is redacted in steady state, not just at shutdown flush (bd-5pelo2 round 2 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      # Prime past any fixed-size hold-back window (the bug: `writable` was
+      # `combined` minus a fixed 512-byte tail, so the held-back bytes were
+      # never look-ahead for a match — a key still in flight when the reader
+      # stops was the only case that ever got redacted). Filler both before
+      # and after the typed key so the assertion exercises the reader while
+      # it is still running, not the shutdown flush.
+      filler = String.duplicate("x", 600)
+      key = "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"
+
+      ScriptedPty.emit(id, filler <> "\n")
+      collect_stdout(id, byte_size(filler) + 1)
+
+      key
+      |> String.graphemes()
+      |> Enum.each(fn ch ->
+        ScriptedPty.emit(id, ch)
+        Process.sleep(10)
+      end)
+
+      collect_stdout(id, byte_size(key))
+
+      ScriptedPty.emit(id, "\n" <> filler)
+      collect_stdout(id, byte_size(filler) + 1)
+
+      # Assert against the file *while the reader is still alive* — no
+      # shutdown flush has happened yet.
+      transcript = File.read!(Transcript.path_for(id))
+      refute transcript =~ "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"
+      assert transcript =~ "ANTHROPIC_API_KEY=[REDACTED]"
+
+      :ok = Stream.stop(id)
+    end
+
+    test "a typed Bearer token is redacted even split across ticks (bd-5pelo2 round 3 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      filler = String.duplicate("x", 600)
+      header = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"
+
+      ScriptedPty.emit(id, filler <> "\n")
+      collect_stdout(id, byte_size(filler) + 1)
+
+      header
+      |> String.graphemes()
+      |> Enum.each(fn ch ->
+        ScriptedPty.emit(id, ch)
+        Process.sleep(10)
+      end)
+
+      collect_stdout(id, byte_size(header))
+
+      ScriptedPty.emit(id, "\n" <> filler)
+      collect_stdout(id, byte_size(filler) + 1)
+
+      transcript = File.read!(Transcript.path_for(id))
+      refute transcript =~ "abcdefghijklmnopqrstuvwxyz012345"
+      assert transcript =~ "Authorization: [REDACTED]"
+
+      :ok = Stream.stop(id)
+    end
+
+    test "a PEM private key block is redacted even emitted line by line (bd-5pelo2 round 3 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      filler = String.duplicate("x", 600)
+
+      lines = [
+        "-----BEGIN RSA PRIVATE KEY-----\n",
+        "MIIEpAIBAAKCAQEA1234567890\n",
+        "-----END RSA PRIVATE KEY-----\n"
+      ]
+
+      ScriptedPty.emit(id, filler <> "\n")
+      collect_stdout(id, byte_size(filler) + 1)
+
+      Enum.each(lines, fn line ->
+        ScriptedPty.emit(id, line)
+        collect_stdout(id, byte_size(line))
+      end)
+
+      ScriptedPty.emit(id, filler)
+      collect_stdout(id, byte_size(filler))
+
+      transcript = File.read!(Transcript.path_for(id))
+      refute transcript =~ "MIIEpAIBAAKCAQEA1234567890"
+      refute transcript =~ "-----BEGIN RSA PRIVATE KEY-----"
+      assert transcript =~ "[REDACTED]"
+
+      :ok = Stream.stop(id)
+    end
+
+    test "bytes written to the pipe while no reader is alive are caught up on the next open (bd-5pelo2 round 4 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      ScriptedPty.emit(id, "hello\n")
+      assert_stdout(id, "hello\n")
+      :ok = Stream.stop(id)
+      assert File.read!(Transcript.path_for(id)) == "hello\n"
+
+      # Simulate the "arbiter restart" window: the pane's own pipe-pane
+      # keeps appending straight to the pipe file while no reader (and no
+      # `Stream` process at all) is alive to see it — `ScriptedPty`'s
+      # `streaming?` flag stays `true` across `Stream.stop/1`, matching the
+      # real tmux pipe's session-lifetime scope (bd-5pelo2 finding 1).
+      pipe_path = ScriptedPty.path(id)
+      File.write!(pipe_path, "goodbye\n", [:append, :binary])
+
+      {:ok, _} = attach(session, opts)
+
+      assert File.read!(Transcript.path_for(id)) == "hello\ngoodbye\n"
+
+      :ok = Stream.stop(id)
     end
   end
 
@@ -509,25 +703,26 @@ defmodule Arbiter.Sessions.StreamTest do
   end
 
   describe "detach (AC 2)" do
-    test "the last detach drops the reader and closes the pipe, not the session", %{
+    test "the last detach drops the subscriber but keeps the reader (and the pipe) running", %{
       session: session,
       id: id,
       opts: opts
     } do
       {:ok, _} = attach(session, opts)
       pid = Stream.whereis(id)
-      ref = Process.monitor(pid)
 
       :ok = Stream.detach(id, self())
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
-      # The Registry drops the entry when it handles the reader's DOWN, which
-      # is not ordered against *our* DOWN.
-      wait_until(fn -> Stream.whereis(id) == nil end)
-
-      # The pipe was closed; nothing killed the terminal.
-      assert {:stop_stream} in ScriptedPty.calls(id)
+      # bd-5pelo2 finding 1: the reader used to stop here, closing the pipe —
+      # which meant an unattended session stopped being captured. It must now
+      # stay up, still owned by the same pid, still piping.
+      refute {:stop_stream} in ScriptedPty.calls(id)
+      assert Stream.whereis(id) == pid
       assert ScriptedPty.fetch(id).alive?
+
+      # And it keeps capturing with nobody attached.
+      ScriptedPty.emit(id, "while unattended")
+      wait_until(fn -> match?(%{seq: 16}, Stream.stats(id)) end)
     end
 
     test "reattaching after a detach continues the same seq space", %{
@@ -540,11 +735,11 @@ defmodule Arbiter.Sessions.StreamTest do
       assert assert_stdout(id, "before") == 6
 
       :ok = Stream.detach(id, self())
-      wait_until(fn -> Stream.whereis(id) == nil end)
 
-      # Output produced while detached lands in the pipe file, and is covered
-      # by the snapshot rather than replayed as frames (§4.5).
+      # Output produced while detached is picked up by the same, still-running
+      # reader rather than requiring a reattach to notice it.
       ScriptedPty.emit(id, "while away")
+      wait_until(fn -> match?(%{seq: 16}, Stream.stats(id)) end)
 
       {:ok, attached} = attach(session, opts)
       assert attached.seq == 16
@@ -555,20 +750,15 @@ defmodule Arbiter.Sessions.StreamTest do
   end
 
   describe "reader lifecycle races" do
-    test "reattaching the instant the previous reader stops always succeeds", %{
+    test "concurrent attach/detach cycles against the one long-lived reader always succeed", %{
       session: session,
       id: id,
       opts: opts
     } do
-      # A browser reload, or a second tab opening as the first closes: the
-      # registry entry for a reader outlives its reply by however long the
-      # Registry takes to handle the DOWN, so `attach/2` can resolve a pid that
-      # is already terminating and the call to it exits `:noproc`.
-      #
-      # A stress test rather than a deterministic one — the window is the
-      # registry's handling of a single `:DOWN` and cannot be opened on demand
-      # — so it is run from several processes at once to widen it, and every
-      # attach must still come back `{:ok, _}` rather than an exit.
+      # The reader no longer stops between detaches (bd-5pelo2 finding 1), so
+      # this mainly exercises concurrent attach/detach against a shared
+      # subs map — retried a few times from several processes at once for
+      # good measure.
       tasks =
         for _ <- 1..8 do
           Task.async(fn ->
@@ -654,6 +844,53 @@ defmodule Arbiter.Sessions.StreamTest do
 
       assert {:error, {:tmux_failed, 1, "no server running"}} = attach(session, opts)
       wait_until(fn -> Stream.whereis(id) == nil end)
+    end
+  end
+
+  describe "ensure_reader/2 and terminal reconfiguration (bd-5pelo2 round 4 finding 2)" do
+    test "a later attach/2 reconfigures a reader ensure_reader/2 started under the wrong terminal",
+         %{session: session, id: id, opts: opts, tmp_dir: tmp_dir} do
+      :ok = Stream.ensure_reader(session, terminal: MismatchedTerminal, pipe_dir: tmp_dir)
+      wait_until(fn -> Stream.whereis(id) != nil end)
+
+      assert {:ok, attached} = attach(session, opts)
+      assert attached.snapshot == "SNAPSHOT"
+
+      ScriptedPty.emit(id, "hello")
+      assert assert_stdout(id, "hello") == 5
+    end
+
+    test "ensure_reader/2 is a no-op once a reader is already running", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+      pid = Stream.whereis(id)
+
+      :ok = Stream.ensure_reader(session, opts)
+
+      assert Stream.whereis(id) == pid
+    end
+
+    test "reconfiguration is skipped once a real client is already attached", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+      pid = Stream.whereis(id)
+
+      # A second attach asking for a different terminal must not reset the
+      # `seq` space out from under the client already streaming.
+      assert {:ok, _} =
+               attach(session, Keyword.put(opts, :terminal, MismatchedTerminal),
+                 subscriber: spawn(fn -> Process.sleep(:infinity) end)
+               )
+
+      assert Stream.whereis(id) == pid
+      ScriptedPty.emit(id, "hello")
+      assert assert_stdout(id, "hello") == 5
     end
   end
 

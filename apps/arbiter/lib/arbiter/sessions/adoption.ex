@@ -102,7 +102,7 @@ defmodule Arbiter.Sessions.Adoption do
 
     with {:ok, units} <- live_units(runner) do
       sockets = live_sockets(runner)
-      reconcile(units, sockets, context, now, launch_grace_ms)
+      reconcile(units, sockets, context, now, launch_grace_ms, opts)
     end
   end
 
@@ -202,7 +202,7 @@ defmodule Arbiter.Sessions.Adoption do
 
   # -- reconciliation ---------------------------------------------------------
 
-  defp reconcile(units, sockets, context, now, launch_grace_ms) do
+  defp reconcile(units, sockets, context, now, launch_grace_ms, opts) do
     unit_set = MapSet.new(units)
     socket_set = MapSet.new(sockets)
 
@@ -215,7 +215,13 @@ defmodule Arbiter.Sessions.Adoption do
       for session <- adopted, reduce: [] do
         acc ->
           case Sessions.mark_running(session) do
-            {:ok, _} ->
+            {:ok, running} ->
+              # Same rationale as `Sessions.start_scope/2` (bd-5pelo2 round
+              # 5 finding 1): a re-adopted session is exactly as capturable
+              # as a freshly launched one, and this is the other call path
+              # the §11 raw transcript needs to start from, not from a
+              # browser's first `attach/2`.
+              _ = Arbiter.Sessions.Stream.ensure_reader(running, opts)
               [session.id | acc]
 
             {:error, reason} ->

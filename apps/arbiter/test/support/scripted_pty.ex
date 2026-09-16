@@ -173,14 +173,21 @@ defmodule Arbiter.Test.ScriptedPty do
 
   def handle_call({:start_stream, id, path}, _from, sessions) do
     state = Map.get(sessions, id, @defaults)
-    state = %{state | path: path, streaming?: true, calls: [{:start_stream, path} | state.calls]}
+    state = %{state | path: path, calls: [{:start_stream, path} | state.calls]}
 
     case state.start_stream_result do
       :ok ->
         File.touch!(path)
+        state = %{state | streaming?: true}
         {:reply, {:ok, %{snapshot: state.snapshot}}, Map.put(sessions, id, state)}
 
       {:error, _} = error ->
+        # The real `Terminal.Tmux.streaming?/2` re-queries tmux every call
+        # rather than remembering an attempt, so a pane that failed to start
+        # piping reports `false` from then on, same as one that was never
+        # asked. A retried `start_stream/3` (`Stream`'s open_error retry,
+        # bd-5pelo2 round 5 finding 1a) must see the same failure again
+        # here, not silently succeed via the adopt path.
         {:reply, error, Map.put(sessions, id, state)}
     end
   end

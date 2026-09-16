@@ -39,7 +39,7 @@ defmodule Arbiter.Integration.SessionTmuxTest do
   # print, and exits when asked — which is every lifecycle this file needs.
   @payload "sh"
 
-  @opts [poll_interval_ms: 10, alive_interval_ms: 100, linger_ms: 0]
+  @opts [poll_interval_ms: 10, alive_interval_ms: 100]
 
   setup do
     id = Ash.UUID.generate()
@@ -165,7 +165,7 @@ defmodule Arbiter.Integration.SessionTmuxTest do
     assert await_output(id, &String.contains?(&1, "after")) =~ "after"
   end
 
-  test "detaching drops the reader and leaves the tmux session alive (AC 2)", %{
+  test "detaching drops the subscriber but keeps the reader and the pipe alive (AC 2)", %{
     id: id,
     session: session,
     socket: socket,
@@ -173,16 +173,17 @@ defmodule Arbiter.Integration.SessionTmuxTest do
   } do
     {:ok, _attached} = Stream.attach(session, opts)
     reader = Stream.whereis(id)
-    ref = Process.monitor(reader)
 
     assert tmux(socket, ["display-message", "-p", "-t", "coord", "\#{pane_pipe}"]) == {"1", 0}
 
     :ok = Stream.detach(id, self())
-    assert_receive {:DOWN, ^ref, :process, ^reader, :normal}, 2_000
 
-    # The session outlives its reader — which is the whole point.
+    # bd-5pelo2 finding 1: the reader (and the pipe it owns for §11's raw
+    # transcript) must survive a detach, so an unattended session keeps being
+    # captured. Only a genuine session end stops it.
+    assert Stream.whereis(id) == reader
+    assert tmux(socket, ["display-message", "-p", "-t", "coord", "\#{pane_pipe}"]) == {"1", 0}
     assert {_out, 0} = tmux(socket, ["has-session", "-t", "coord"])
-    assert tmux(socket, ["display-message", "-p", "-t", "coord", "\#{pane_pipe}"]) == {"0", 0}
     assert Tmux.alive?(session)
   end
 

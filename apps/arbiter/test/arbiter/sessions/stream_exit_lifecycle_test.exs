@@ -22,8 +22,7 @@ defmodule Arbiter.Sessions.StreamExitLifecycleTest do
   @opts [
     terminal: ScriptedPty,
     poll_interval_ms: 5,
-    alive_interval_ms: 20,
-    linger_ms: 0
+    alive_interval_ms: 20
   ]
 
   setup %{tmp_dir: tmp_dir} do

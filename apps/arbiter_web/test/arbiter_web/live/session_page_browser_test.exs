@@ -52,7 +52,7 @@ defmodule ArbiterWeb.SessionPageBrowserTest do
     put_env(:sessions_runtime_dir, tmp_dir)
     put_env(:sessions_terminal, ScriptedPty)
     put_env(:sessions_runner, NoopRunner)
-    put_env(Arbiter.Sessions.Stream, poll_interval_ms: 5, alive_interval_ms: 50, linger_ms: 0)
+    put_env(Arbiter.Sessions.Stream, poll_interval_ms: 5, alive_interval_ms: 50)
 
     :ok
   end

@@ -42,4 +42,45 @@ defmodule Arbiter.RedactionTest do
                "nothing sensitive here"
     end
   end
+
+  describe "redact_patterns/1" do
+    test "redacts an Anthropic API key by shape, no registered secret needed" do
+      assert Redaction.redact_patterns(
+               "export ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz"
+             ) ==
+               "export ANTHROPIC_API_KEY=[REDACTED]"
+    end
+
+    test "redacts a GitHub personal access token" do
+      assert Redaction.redact_patterns("token: ghp_1234567890abcdefghijklmnopqrstuvwxyz") ==
+               "token: [REDACTED]"
+    end
+
+    test "redacts an AWS access key id" do
+      assert Redaction.redact_patterns("AKIAIOSFODNN7EXAMPLE") == "[REDACTED]"
+    end
+
+    test "redacts a bearer token header" do
+      assert Redaction.redact_patterns("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345") ==
+               "Authorization: [REDACTED]"
+    end
+
+    test "redacts a PEM private key block" do
+      pem = """
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEpAIBAAKCAQEA1234567890
+      -----END RSA PRIVATE KEY-----
+      """
+
+      assert Redaction.redact_patterns(pem) == "[REDACTED]\n"
+    end
+
+    test "leaves ordinary text untouched" do
+      assert Redaction.redact_patterns("nothing sensitive here") == "nothing sensitive here"
+    end
+
+    test "a non-binary input is returned unchanged" do
+      assert Redaction.redact_patterns(nil) == nil
+    end
+  end
 end

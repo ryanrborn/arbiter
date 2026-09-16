@@ -66,8 +66,7 @@ defmodule ArbiterWeb.SessionTransportSocketTest do
 
     put_env(Arbiter.Sessions.Stream,
       poll_interval_ms: 5,
-      alive_interval_ms: 50,
-      linger_ms: 0
+      alive_interval_ms: 50
     )
 
     {:ok, session} = Sessions.launch(cwd: tmp_dir, runner: NoopRunner)
