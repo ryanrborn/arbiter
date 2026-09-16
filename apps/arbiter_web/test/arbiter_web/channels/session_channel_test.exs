@@ -26,11 +26,16 @@ defmodule ArbiterWeb.SessionChannelTest do
 
     put_env(Arbiter.Sessions.Stream,
       poll_interval_ms: 5,
-      alive_interval_ms: 50,
-      linger_ms: 0
+      alive_interval_ms: 50
     )
 
-    {:ok, session} = Sessions.launch(cwd: tmp_dir, runner: NoopRunner)
+    # This file drives several deliberate races against the reader's *first*
+    # `open_stream/1` via `ScriptedPty`'s `on_start_stream` hook, which fires
+    # exactly once, on whichever call opens the reader first. An eager
+    # `ensure_reader/2` background start (bd-5pelo2 round 5 finding 1) would
+    # win that race non-deterministically instead of the test's own
+    # `join_session/2` call, so it's disabled here — see `Sessions.launch/1`.
+    {:ok, session} = Sessions.launch(cwd: tmp_dir, runner: NoopRunner, ensure_reader: false)
     ScriptedPty.install(session.id, snapshot: "SNAP", cols: 80, rows: 24, title: "scripted")
 
     on_exit(fn -> Stream.stop(session.id) end)

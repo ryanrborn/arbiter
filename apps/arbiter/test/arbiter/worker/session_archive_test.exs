@@ -198,4 +198,66 @@ defmodule Arbiter.Worker.SessionArchiveTest do
       refute SessionArchive.archived?(ctx.run_id)
     end
   end
+
+  describe "archive_session/4 — session-keyed entry point (§11, phase 9)" do
+    test "archives under the coordinator session id, not the provider session id", ctx do
+      coordinator_session_id = "88888888-8888-8888-8888-888888888888"
+      provider_session_id = "99999999-9999-9999-9999-999999999999"
+
+      seed_session(ctx.config_dir, provider_session_id, [
+        %{"type" => "assistant", "via" => "coordinator_session"}
+      ])
+
+      assert {:ok, %{status: :ok}} =
+               SessionArchive.archive_session(
+                 coordinator_session_id,
+                 ctx.config_dir,
+                 provider_session_id
+               )
+
+      assert SessionArchive.archived?(coordinator_session_id)
+      refute SessionArchive.archived?(provider_session_id)
+
+      assert gunzip_at!(SessionArchive.path_for(coordinator_session_id)) =~
+               ~s("via":"coordinator_session")
+    end
+
+    test "walks the provider session's subagent transcripts", ctx do
+      coordinator_session_id = "10101010-1010-1010-1010-101010101010"
+      provider_session_id = "20202020-2020-2020-2020-202020202020"
+
+      seed_session(
+        ctx.config_dir,
+        provider_session_id,
+        [%{"type" => "assistant"}],
+        [
+          {"agent-sub1.jsonl", ~s({"type":"assistant","sub":true}\n)},
+          {"agent-sub1.meta.json", ~s({"name":"Explore"})}
+        ]
+      )
+
+      assert {:ok, report} =
+               SessionArchive.archive_session(
+                 coordinator_session_id,
+                 ctx.config_dir,
+                 provider_session_id
+               )
+
+      assert report.subagents == 1
+
+      sub =
+        Path.join(
+          SessionArchive.subagents_dir_for(coordinator_session_id),
+          "agent-sub1.jsonl.gz"
+        )
+
+      assert File.regular?(sub)
+      assert gunzip_at!(sub) =~ ~s("sub":true)
+    end
+
+    test "no provider session id yet reports :no_session_id", ctx do
+      assert {:ok, %{status: :no_session_id}} =
+               SessionArchive.archive_session("session-id", ctx.config_dir, nil)
+    end
+  end
 end

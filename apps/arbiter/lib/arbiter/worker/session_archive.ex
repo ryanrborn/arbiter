@@ -219,6 +219,76 @@ defmodule Arbiter.Worker.SessionArchive do
     archive(Map.get(run, :id), Map.get(run, :config_dir), Map.get(run, :session_id), opts)
   end
 
+  @doc """
+  `archive/4`'s session-keyed analogue (§11, phase 9 of
+  `docs/browser-hosted-coordinator-sessions.md`): a browser-hosted
+  coordinator session has no `Run` row to key its archive off, so this
+  archives under the coordinator session's own id
+  (`Arbiter.Sessions.Session.id`) instead — the RFC's "it's keyed by run id
+  today, needs a session-keyed entry point" gap.
+
+  `provider_session_id` is still what locates the file:
+  `ClaudeSessionFile.locate/2` globs `projects/*/<sid>.jsonl` by the CLI's own
+  session id, which is a *different* id than `session_id` here (the CLI mints
+  its own; `Arbiter.Sessions.Session.provider_session_id` is nullable until
+  discovered). Subagent transcripts are walked exactly as `archive/4` already
+  does, via `archive_subagents/3` deriving the provider session id from the
+  located path.
+
+  The returned `report()`'s `:run_id` field holds `session_id` here, not a
+  run id — this entry point reuses `archive/4`'s report shape rather than
+  defining a session-specific one. Archived files also land under the same
+  `OutputLog.root()` namespace `archive/4` writes run archives into, keyed by
+  whichever id was passed in; a session id colliding with a run id would
+  overwrite one with the other. Both are UUIDs, so this is not a practical
+  risk, but it is why nothing here checks for the collision.
+  """
+  @spec archive_session(String.t(), String.t() | nil, String.t() | nil, keyword()) ::
+          {:ok, report()}
+  def archive_session(session_id, config_dir, provider_session_id, opts \\ [])
+
+  def archive_session(session_id, config_dir, provider_session_id, opts)
+      when is_binary(session_id) and session_id != "" do
+    dispatch_archive(session_id, config_dir, provider_session_id, opts)
+  rescue
+    e ->
+      Logger.warning(
+        "SessionArchive.archive_session/4 raised for session=#{session_id}: " <>
+          Exception.message(e)
+      )
+
+      {:ok, %{blank(session_id, :error) | reason: Exception.message(e)}}
+  end
+
+  def archive_session(session_id, _config_dir, _provider_session_id, _opts) do
+    {:ok, %{blank(to_string(session_id), :error) | reason: :invalid_session_id}}
+  end
+
+  @doc """
+  `archive_session/4` for an `Arbiter.Sessions.Session` struct (or any map
+  carrying `:id`, `:config_dir`, `:provider_session_id` and `:workspace_id`).
+
+  `:redact_values` defaults to the session's workspace secrets
+  (`Arbiter.Sessions.Transcript.redact_values_for/1`) — `[]` for a
+  cross-workspace session, the coordinator's normal shape.
+  """
+  @spec archive_coordinator_session(map(), keyword()) :: {:ok, report()}
+  def archive_coordinator_session(session, opts \\ []) do
+    opts =
+      Keyword.put_new_lazy(opts, :redact_values, fn ->
+        Arbiter.Sessions.Transcript.redact_values_for(%{
+          workspace_id: Map.get(session, :workspace_id)
+        })
+      end)
+
+    archive_session(
+      Map.get(session, :id),
+      Map.get(session, :config_dir),
+      Map.get(session, :provider_session_id),
+      opts
+    )
+  end
+
   # ---- internals ---------------------------------------------------------
 
   # Session id first: a workflow-mode (bookkeeping-only) run has neither

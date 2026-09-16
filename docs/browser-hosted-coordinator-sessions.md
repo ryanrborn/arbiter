@@ -687,8 +687,10 @@ per attached browser". tmux makes that impossible: `pipe-pane` is a property
 of the pane, singular — issuing it twice replaces the first pipe. It is also
 the wrong shape for §5.3, which wants one `seq` space and one ring *per
 session* so two clients resuming from different points are talking about the
-same numbers. The property §4.3 actually cares about is untouched: a detach or
-an `arbiter` restart drops the reader, never the session.
+same numbers. The property §4.3 actually cares about is untouched: an `arbiter`
+restart drops the reader, never the session. A detach does not even drop the
+reader — it keeps running, unattended, for as long as the session does, since
+it is also what owns §11's raw capture (bd-5pelo2, round 2).
 
 **3. `seq` is a byte offset into the pipe file, not a counter.** This falls
 out of `pipe-pane -O 'cat >> <path>'` and is the most useful invariant in the
@@ -1586,7 +1588,66 @@ principle; apply the archive's existing `max_bytes` cap.
 **Redaction.** The raw stream captures whatever the screen showed, which can
 include a token the operator pasted or a command that echoed a secret. Scrub on
 write, and treat the transcript directory as mode-0700 operator-only data. This is
-the same posture `docs/worker-security.md` takes.
+the same posture `docs/worker-security.md` takes. Because the PTY only hands
+bytes over in whatever-sized chunks a poll tick catches, a secret can straddle
+two chunks — an operator *typing* a key delivers it a few bytes per tick, so no
+single chunk contains a full match. A fixed-size hold-back window doesn't fix
+this: redaction only ever sees the *written* portion, so bytes held back are
+never look-ahead for a match starting in what was already written — a token
+typed slowly enough outlives any fixed window one byte at a time (bd-5pelo2,
+round 2, finding 1). Cutting at *any* separator byte isn't safe either: two of
+the seven patterns aren't unbroken token runs — `Bearer\s+<token>` contains a
+space, and a PEM block spans newlines by construction — so a cut at, say, the
+space inside `Bearer <token>` splits exactly the match it exists to protect
+(bd-5pelo2, round 3, finding 1). Instead `Arbiter.Sessions.Stream` cuts only at
+a **newline**: no supported pattern except the PEM block spans one, so a
+same-line match (including `Bearer <token>`) is always wholly before the cut
+or wholly after it. The PEM block gets its own guard on top — if the
+candidate writable portion contains a `-----BEGIN` with no matching
+`-----END` after it, the cut is pulled back to the start of that marker.
+Both are bounded by the same hard cap so a run with no newline at all still
+drains eventually (bd-5pelo2, round 2 finding 1; round 3 finding 1).
+
+**Closed: capture now starts at session launch/adoption, not just first
+attach.** `tmux pipe-pane -O` used to be started by `Arbiter.Sessions.Stream`
+only on a browser's first attach, so a session nobody ever opened was never
+captured at all. Round 3 attempted the obvious fix (`Stream.ensure_reader/2`,
+called right after `mark_running/1` from both `Arbiter.Sessions.launch/1` and
+`Arbiter.Sessions.Adoption`) and reverted it: `Arbiter.Sessions.Stream`'s
+config — including which `Terminal` it uses — used to be fixed by whichever
+call started the reader first, for the reader's whole life, so several
+existing tests (`StreamTurnActivityTest` among them) that launch first and
+only attach with `terminal: Arbiter.Test.ScriptedPty` afterwards broke: the
+eager start locked the reader onto the real `Terminal.Tmux`, and the later
+scripted `attach/2` talked to that already-wrong-terminal reader instead of
+configuring a new one. Round 4 removed that constraint —
+`reconfigure_if_mismatched/2` lets a reader started under one terminal be
+reopened under another, as long as nobody has attached yet — which is what
+makes it safe for `Arbiter.Sessions.start_scope/2` and `Arbiter.Sessions.Adoption`'s
+reconcile loop to call `ensure_reader/2` right after `mark_running/1` again
+(bd-5pelo2 round 5 finding 1): the launch-first-attach-with-a-different-terminal
+tests above now pass because the later real `attach/2` reconfigures the eager
+reader instead of being stuck behind it. An eager start that fails to open
+(tmux not reachable yet at launch) is retried by the first real `attach/2`
+rather than surfacing as a stale error to a caller who didn't cause it.
+
+**Closed: an `arbiter` restart no longer drops the bytes written while no
+reader was alive.** The moduledoc's claim that a restart "drops the reader
+but never the session" is true of the pipe file (`tmux pipe-pane` keeps
+appending to it regardless of whether anything is reading) but used to not be
+true of the durable transcript: `open_stream/1` seeks to the pipe file's
+*current* size before adopting it, so whatever the pane wrote between the old
+reader dying and the new one adopting never reached `<id>.raw`.
+`Arbiter.Sessions.Transcript.write_offset/2` (a sidecar file,
+`<id>.raw.offset`) now persists the last pipe-file position the transcript
+capture actually reached, and `Stream.catch_up_transcript/2` replays
+`old_offset..new_base` through redaction before the reader goes live —
+closing the gap for both a restart and a session's first-ever reader
+(bd-5pelo2, round 4, finding 1). The persisted offset is the *written*
+position, not the pipe position: the redaction hold-back buffer can be
+sitting on up to 8 KB of not-yet-written tail at any given tick, and
+persisting past it would claim those bytes were captured when they were not
+(bd-5pelo2, round 5, finding 3).
 
 ## 12. Open questions and edge cases
 

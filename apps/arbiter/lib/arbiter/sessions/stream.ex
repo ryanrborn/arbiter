@@ -18,9 +18,42 @@ defmodule Arbiter.Sessions.Stream do
   wrong shape for §5.3, which wants one `seq` space and one ring per *session*
   so that two clients resuming from different points are talking about the
   same numbers. So: one reader per session, shared by every attached client,
-  started on first attach and stopped when the last client leaves. The
-  property the RFC actually cares about is preserved exactly — a detach or an
-  `arbiter` restart drops the reader, never the session.
+  started on first attach.
+
+  Unlike earlier revisions of this module, the reader is **not** stopped when
+  the last client detaches — detaching only drops that client's subscriber
+  entry (bd-5pelo2 finding 1). §11's raw transcript (`Arbiter.Sessions.Transcript`)
+  is written from this same reader's poll loop, so a reader that stopped at
+  the last detach meant nothing was captured while a session ran unattended,
+  which inverts the whole point of the artefact. The reader now runs for the
+  rest of the session's life — through every detach, with zero subscribers if
+  need be — and is only stopped by a genuine session end (`:alive` finding
+  the pane gone, or an `arbiter` restart, which drops the reader but never the
+  session: the pipe keeps writing to its file regardless, and a fresh reader
+  adopts it on the next attach).
+
+  This closed the gap for any session a browser attaches to at least once,
+  but not the one nobody ever attaches to at all — the pipe was still only
+  started by the first `attach/2`. `ensure_reader/2` (bd-5pelo2 round 4
+  finding 2) closes that one too: `Arbiter.Sessions.start_scope/2` calls it
+  right after `mark_running/1`, and so does `Arbiter.Sessions.Adoption`'s
+  reconcile loop after re-adopting a session, so every session gets a reader
+  — and therefore §11 capture — from the moment it is confirmed running,
+  whether or not a browser ever opens it (bd-5pelo2 round 5 finding 1).
+  `reconfigure_if_mismatched/2` below is what makes that safe for tests that
+  launch first and only attach with a scripted terminal afterwards: the
+  eager start's terminal is swapped out for the real `attach/2`'s, as long as
+  nobody has attached yet.
+
+  It also covers the bytes a pane writes to its pipe file *while* no reader
+  is alive — the `arbiter` restart window. `open_stream/1` seeks to the pipe
+  file's current size before adopting it (for the resume transport seam,
+  §4.5 — the client-facing snapshot covers that gap visually), so a fresh
+  reader's own read position starts past whatever the pane wrote during the
+  dead stretch; `catch_up_transcript/2` is the separate step that feeds that
+  stretch through redaction into the durable transcript before the reader
+  goes live, using the pipe-offset sidecar (`Arbiter.Sessions.Transcript.write_offset/2`)
+  to know where the last reader left off (bd-5pelo2, round 4, finding 1).
 
   ## `seq` is a byte offset, not a counter
 
@@ -88,7 +121,6 @@ defmodule Arbiter.Sessions.Stream do
         poll_interval_ms: 25,
         alive_interval_ms: 1_000,
         usage_poll_interval_ms: 2_000, # live cost HUD cadence (§7.5, phase 7)
-        linger_ms: 5_000,             # reader lifetime after the last detach
         snapshot_lines: 2_000
 
   Every key is also accepted as an option to `attach/2`, which is how the
@@ -155,6 +187,7 @@ defmodule Arbiter.Sessions.Stream do
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Session
+  alias Arbiter.Sessions.Transcript
   alias Arbiter.Usage.ClaudeSessionFile
 
   require Logger
@@ -170,8 +203,7 @@ defmodule Arbiter.Sessions.Stream do
     read_chunk_bytes: 65_536,
     poll_interval_ms: 25,
     alive_interval_ms: 1_000,
-    usage_poll_interval_ms: 2_000,
-    linger_ms: 5_000
+    usage_poll_interval_ms: 2_000
   ]
 
   # Rounds `attach/2` will re-resolve the reader over before giving up. Three
@@ -243,6 +275,38 @@ defmodule Arbiter.Sessions.Stream do
   @spec attach(Session.t(), keyword()) :: {:ok, attached()} | {:error, term()}
   def attach(%Session{} = session, opts \\ []), do: attach(session, opts, @attach_attempts)
 
+  @doc """
+  Best-effort start of `session`'s reader with no subscriber attached
+  (bd-5pelo2 round 4 finding 2) — closes the "a session nobody ever attaches
+  to is never captured" gap in §11's raw transcript by letting
+  `Sessions.launch/1` (and, later, `Sessions.Adoption`) start capture up
+  front instead of waiting on a browser's first `attach/2`.
+
+  Whatever `:terminal` this call resolves (production default, or a test's)
+  need not be the one a later real `attach/2` asks for — `attach/2` detects
+  the mismatch and reopens the reader with the caller's config, as long as
+  nobody has attached yet (see `reconfigure_if_mismatched/2`). So this is
+  safe to call with the launch/adoption call sites' own opts rather than
+  needing to predict the eventual terminal.
+
+  Fire-and-forget: a failure to start is logged, not raised or returned —
+  the same posture `open_transcript/1` and the rest of this module's
+  best-effort paths already take. A session whose reader could not be
+  started this way still gets one from the first real `attach/2`, same as
+  before this function existed.
+  """
+  @spec ensure_reader(Session.t(), keyword()) :: :ok
+  def ensure_reader(%Session{} = session, opts \\ []) do
+    case ensure_started(session, opts) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Sessions.Stream #{session.id}: ensure_reader failed: #{inspect(reason)}")
+        :ok
+    end
+  end
+
   # A reader replies to `detach` and *then* terminates, and the registry drops
   # its entry only when it handles the resulting `:DOWN` — which is not ordered
   # against anything the caller can see. So `ensure_started/2` can hand back a
@@ -251,12 +315,13 @@ defmodule Arbiter.Sessions.Stream do
   # first closes, so it is retried rather than surfaced as a crash.
   defp attach(session, opts, attempts) do
     subscriber = Keyword.get(opts, :subscriber, self())
+    requested = %{terminal: Sessions.terminal(opts), path: safe_pipe_path(session, opts)}
 
     with {:ok, pid} <- ensure_started(session, opts) do
       GenServer.call(
         pid,
         {:attach, subscriber, Keyword.get(opts, :last_seq), Keyword.get(opts, :cols),
-         Keyword.get(opts, :rows)}
+         Keyword.get(opts, :rows), requested}
       )
     end
   catch
@@ -273,9 +338,10 @@ defmodule Arbiter.Sessions.Stream do
   @doc """
   Detach a subscriber. The session keeps running (AC 2).
 
-  When the last subscriber leaves, the reader closes the pipe and stops —
-  after `:linger_ms`, so that a browser reload reattaches to the same `seq`
-  space instead of being repainted.
+  The reader itself keeps running too, even once the last subscriber leaves —
+  it still owns the §11 raw-transcript capture, which must not stop just
+  because nobody is watching (bd-5pelo2 finding 1). A later reattach picks
+  the same `seq` space back up directly, with nothing to repaint.
   """
   @spec detach(String.t(), pid()) :: :ok
   def detach(session_id, subscriber \\ self()) do
@@ -396,6 +462,13 @@ defmodule Arbiter.Sessions.Stream do
   def init({session, opts}) do
     config = config(opts)
 
+    # A `DynamicSupervisor` shutdown (app stop, `terminate_child`) sends a
+    # plain `:shutdown` exit signal; without trapping it this process dies
+    # before `terminate/2` runs, so `flush_transcript/1` never gets to write
+    # the held-back redaction tail or the corrected final offset (bd-5pelo2
+    # round 5 finding 3).
+    Process.flag(:trap_exit, true)
+
     state = %{
       session: session,
       id: session.id,
@@ -403,6 +476,7 @@ defmodule Arbiter.Sessions.Stream do
       opts: opts,
       config: config,
       path: pipe_path(session, opts),
+      redact_values: redact_values(session, opts),
       fd: nil,
       seq: 0,
       ring: :queue.new(),
@@ -414,7 +488,9 @@ defmodule Arbiter.Sessions.Stream do
       title: "",
       pending_snapshot: nil,
       open_error: nil,
-      linger_timer: nil,
+      transcript_handle: nil,
+      transcript_tail: <<>>,
+      transcript_offset_fd: nil,
       last_turn_touch_ms: nil,
       usage_task_ref: nil,
       usage_file_stat: nil,
@@ -442,63 +518,40 @@ defmodule Arbiter.Sessions.Stream do
   end
 
   @impl GenServer
-  def handle_call({:attach, _pid, _last_seq, _cols, _rows}, _from, %{open_error: error} = state)
+  def handle_call(
+        {:attach, pid, last_seq, cols, rows, requested},
+        _from,
+        %{open_error: error} = state
+      )
       when not is_nil(error) do
-    {:stop, :normal, {:error, error}, state}
+    # An `ensure_reader/2` eager start can fail to open (tmux not reachable
+    # yet at launch) before any real client ever attaches. Surfacing that
+    # stale failure straight to the first real `attach/2` would blame this
+    # call for a problem it didn't cause, and stop a reader a plain retry
+    # could open successfully. Nobody has attached yet in this state — there
+    # is nothing to lose by retrying under the requested terminal instead of
+    # trusting an earlier failure is still true (bd-5pelo2 round 5 finding
+    # 1a).
+    state = %{state | terminal: requested.terminal, path: requested.path || state.path}
+
+    case open_stream(state) do
+      {:ok, opened} ->
+        do_attach(pid, last_seq, cols, rows, refresh_geometry(%{opened | open_error: nil}))
+
+      {:error, reason} ->
+        {:stop, :normal, {:error, reason}, %{state | open_error: reason}}
+    end
   end
 
-  def handle_call({:attach, pid, last_seq, cols, rows}, _from, state) do
-    state = cancel_linger(state)
-
-    state =
-      if Map.has_key?(state.subs, pid) do
-        state
-      else
-        ref = Process.monitor(pid)
-
-        state =
-          put_in(state.subs[pid], %{
-            ref: ref,
-            inflight: 0,
-            mode: :live,
-            needs_snapshot: false
-          })
-
-        # A joining client (first attach, or reattach after the reader
-        # restarted) has never seen a `usage` event. The `{size, mtime}` skip
-        # in `maybe_read_usage/3` is reader-global, so without this the next
-        # tick would still skip an unchanged file and leave this client's HUD
-        # blank indefinitely. Clearing it forces one re-read on the next tick,
-        # which `publish_usage/2` broadcasts to every attached client.
-        %{state | usage_file_stat: nil}
-      end
-
-    # `0` is truthy in Elixir, and a browser really does report it: xterm.js's
-    # fit addon measures 0×0 for a terminal whose container has not been laid
-    # out yet — a background tab, or a join before first paint. Handing that to
-    # `Terminal.resize/4`, whose contract (and every implementation's guard) is
-    # `pos_integer()`, would kill the reader *every other client shares*. Same
-    # check as `resize/4`'s own guard.
-    resized? = geometry?(cols, rows) and {cols, rows} != {state.cols, state.rows}
-    state = if geometry?(cols, rows), do: apply_resize(state, cols, rows), else: state
-    {resume, state} = resume(state, last_seq)
-
-    # Everyone *else* learns the client count changed; the joiner is told in
-    # its own reply, so its mailbox holds exactly one meta for this event.
-    broadcast_meta(state, except: pid)
-
-    {:reply, {:ok, resume |> Map.put(:resized, resized?) |> Map.put(:meta, meta_payload(state))},
-     state}
+  def handle_call({:attach, pid, last_seq, cols, rows, requested}, _from, state) do
+    case reconfigure_if_mismatched(state, requested) do
+      {:ok, state} -> do_attach(pid, last_seq, cols, rows, state)
+      {:error, reason} -> {:stop, :normal, {:error, reason}, state}
+    end
   end
 
   def handle_call({:detach, pid}, _from, state) do
-    state = drop_subscriber(state, pid)
-
-    if map_size(state.subs) == 0 and state.config.linger_ms == 0 do
-      {:stop, :normal, :ok, close_stream(state)}
-    else
-      {:reply, :ok, maybe_linger(state)}
-    end
+    {:reply, :ok, drop_subscriber(state, pid)}
   end
 
   def handle_call({:input, pid, bytes}, _from, state) do
@@ -546,6 +599,99 @@ defmodule Arbiter.Sessions.Stream do
        attached_clients: map_size(state.subs),
        subscribers: subscribers
      }, state}
+  end
+
+  # `ensure_reader/2` can start a reader before anyone has picked a terminal
+  # for it — the moduledoc's "configuration is fixed by the first attach"
+  # promise otherwise means whichever terminal `ensure_reader/2` resolved
+  # (production default, or a test's fabricated default) is stuck for the
+  # reader's whole life, and the *real* first attach (a browser, or a test
+  # naming `ScriptedPty`) can never actually drive it. Reconfiguring in place
+  # — rather than requiring every caller to predict the eventual terminal —
+  # is what lets `ensure_reader/2` be called from `Sessions.launch/1` and
+  # `Sessions.Adoption` without breaking that convention (bd-5pelo2 round 4
+  # finding 2). Only done with nobody attached yet: a real client already
+  # streaming from this reader must never have its `seq` space and ring
+  # reset out from under it.
+  defp reconfigure_if_mismatched(state, %{terminal: terminal})
+       when terminal == state.terminal do
+    {:ok, state}
+  end
+
+  defp reconfigure_if_mismatched(state, %{terminal: terminal, path: path})
+       when map_size(state.subs) == 0 do
+    Logger.info(
+      "Sessions.Stream #{state.id}: reopening for requested terminal #{inspect(terminal)} " <>
+        "(was #{inspect(state.terminal)})"
+    )
+
+    state = close_stream(state)
+
+    # The old ring holds frames keyed to the byte space of whatever stream
+    # (possibly a different `path`) was just closed. Carrying it into the
+    # reopened stream would serve `replay_from_ring/2` entries at the wrong
+    # offsets and leave `ring_bytes` overcounted (bd-5pelo2 round 5 finding
+    # 2) — safe to drop outright since `map_size(state.subs) == 0` here,
+    # so nothing has ever been replayed from it.
+    state = %{
+      state
+      | terminal: terminal,
+        path: path || state.path,
+        ring: :queue.new(),
+        ring_bytes: 0
+    }
+
+    case open_stream(state) do
+      {:ok, opened} -> {:ok, refresh_geometry(opened)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Somebody is already attached under the terminal this reader started
+  # with — too late to reconfigure safely. Proceed with the reader as-is
+  # rather than disrupt a live subscriber's `seq` space.
+  defp reconfigure_if_mismatched(state, _requested), do: {:ok, state}
+
+  defp do_attach(pid, last_seq, cols, rows, state) do
+    state =
+      if Map.has_key?(state.subs, pid) do
+        state
+      else
+        ref = Process.monitor(pid)
+
+        state =
+          put_in(state.subs[pid], %{
+            ref: ref,
+            inflight: 0,
+            mode: :live,
+            needs_snapshot: false
+          })
+
+        # A joining client (first attach, or reattach after the reader
+        # restarted) has never seen a `usage` event. The `{size, mtime}` skip
+        # in `maybe_read_usage/3` is reader-global, so without this the next
+        # tick would still skip an unchanged file and leave this client's HUD
+        # blank indefinitely. Clearing it forces one re-read on the next tick,
+        # which `publish_usage/2` broadcasts to every attached client.
+        %{state | usage_file_stat: nil}
+      end
+
+    # `0` is truthy in Elixir, and a browser really does report it: xterm.js's
+    # fit addon measures 0×0 for a terminal whose container has not been laid
+    # out yet — a background tab, or a join before first paint. Handing that to
+    # `Terminal.resize/4`, whose contract (and every implementation's guard) is
+    # `pos_integer()`, would kill the reader *every other client shares*. Same
+    # check as `resize/4`'s own guard.
+    resized? = geometry?(cols, rows) and {cols, rows} != {state.cols, state.rows}
+    state = if geometry?(cols, rows), do: apply_resize(state, cols, rows), else: state
+    {resume, state} = resume(state, last_seq)
+
+    # Everyone *else* learns the client count changed; the joiner is told in
+    # its own reply, so its mailbox holds exactly one meta for this event.
+    broadcast_meta(state, except: pid)
+
+    {:reply, {:ok, resume |> Map.put(:resized, resized?) |> Map.put(:meta, meta_payload(state))},
+     state}
   end
 
   @impl GenServer
@@ -605,14 +751,6 @@ defmodule Arbiter.Sessions.Stream do
     {:noreply, poll_usage(state)}
   end
 
-  def handle_info(:linger_expired, state) do
-    if map_size(state.subs) == 0 do
-      {:stop, :normal, close_stream(state)}
-    else
-      {:noreply, %{state | linger_timer: nil}}
-    end
-  end
-
   # The in-flight usage-read Task, landing. Matched (and demonitored) before
   # the subscriber `:DOWN` clause below, which would otherwise also match this
   # shape.
@@ -636,13 +774,7 @@ defmodule Arbiter.Sessions.Stream do
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    state = drop_subscriber(state, pid)
-
-    if map_size(state.subs) == 0 and state.config.linger_ms == 0 do
-      {:stop, :normal, close_stream(state)}
-    else
-      {:noreply, maybe_linger(state)}
-    end
+    {:noreply, drop_subscriber(state, pid)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -663,6 +795,14 @@ defmodule Arbiter.Sessions.Stream do
     with {:ok, %{snapshot: snapshot}} <- start_or_adopt(state),
          {:ok, fd} <- :file.open(state.path, [:read, :binary, :raw]),
          {:ok, _} <- :file.position(fd, base) do
+      state = %{
+        state
+        | transcript_handle: open_transcript(state.id),
+          transcript_offset_fd: open_transcript_offset(state.id)
+      }
+
+      state = catch_up_transcript(state, base)
+
       {:ok,
        %{
          state
@@ -671,6 +811,84 @@ defmodule Arbiter.Sessions.Stream do
            ring_base: base,
            pending_snapshot: snapshot
        }}
+    end
+  end
+
+  # The restart-window gap (bd-5pelo2 round 4 finding 1): between whatever
+  # offset the last reader persisted and `base` (the pipe file's size right
+  # now) is exactly the stretch nobody was transcribing — an `arbiter`
+  # restart, or simply the first reader this session has ever had. Feed those
+  # bytes through `record_transcript/2` (redaction and all) before going
+  # live, so the durable transcript has no hole there. Can't use the
+  # transcript file's own size as that offset: redaction shrinks matches to
+  # `[REDACTED]`, so it is not a stable position in the *pipe* file the way
+  # `Transcript.write_offset/2`'s sidecar is.
+  defp catch_up_transcript(%{transcript_handle: nil} = state, _base), do: state
+
+  defp catch_up_transcript(state, base) do
+    with offset when is_integer(offset) and offset >= 0 and offset < base <-
+           Transcript.read_offset(state.id),
+         {:ok, data} <- read_pipe_range(state.path, offset, base - offset),
+         true <- byte_size(data) > 0 do
+      state = record_transcript(state, data)
+      # `base` includes whatever this catch-up just handed to the redaction
+      # hold-back buffer (`record_transcript/2`) and is not yet on disk —
+      # persist the position actually written, same correction as
+      # `persist_transcript_offset/1` (bd-5pelo2 round 5 finding 3).
+      persist_offset(state, base - byte_size(state.transcript_tail))
+      state
+    else
+      _ -> state
+    end
+  end
+
+  defp read_pipe_range(path, offset, length) do
+    case :file.open(path, [:read, :binary, :raw]) do
+      {:ok, fd} ->
+        result =
+          case :file.position(fd, offset) do
+            {:ok, _} -> :file.read(fd, length)
+            error -> error
+          end
+
+        _ = :file.close(fd)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  # Best-effort, same posture as the old per-tick `Transcript.append/3`: a
+  # transcript file that fails to open must never stop the pane from working.
+  # Opened once here instead of once per poll tick (bd-5pelo2 finding 3) — the
+  # fd, and the one-time `0600`/`0700` mode set, are held in reader state for
+  # the reader's lifetime.
+  defp open_transcript(id) do
+    case Transcript.open(id) do
+      {:ok, handle} ->
+        handle
+
+      {:error, reason} ->
+        Logger.warning("Sessions.Stream #{id}: transcript open failed: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  # Opened once per reader lifetime, same rationale as `open_transcript/1`
+  # (bd-5pelo2 finding 3): the offset sidecar used to pay `File.mkdir_p` plus
+  # an open/write/close on *every* pumped chunk — up to 40/s on the 25ms poll
+  # path (bd-5pelo2 round 5 finding 4). `persist_offset/2` now reuses this fd
+  # with `:file.pwrite/3` instead.
+  defp open_transcript_offset(id) do
+    case Transcript.open_offset(id) do
+      {:ok, fd} ->
+        fd
+
+      {:error, reason} ->
+        Logger.warning("Sessions.Stream #{id}: transcript offset open failed: #{inspect(reason)}")
+
+        nil
     end
   end
 
@@ -688,12 +906,46 @@ defmodule Arbiter.Sessions.Stream do
     end
   end
 
-  defp close_stream(%{fd: nil} = state), do: state
+  # No `terminal.stop_stream/2` call here: the tmux pipe is no longer this
+  # reader's to close (bd-5pelo2 finding 1). It is a session-lifetime
+  # resource now — it keeps writing to `state.path` for as long as the
+  # session itself is running, including every stretch this reader is not
+  # (an `arbiter` restart, or simply nobody attached), and a later reader
+  # adopts it via `start_or_adopt/1` rather than re-piping. The pane's own
+  # teardown (`tmux kill-session`, in `Arbiter.Sessions.kill/2` and the
+  # dead-session detection below) is what actually ends it.
+  defp close_stream(%{fd: nil} = state), do: flush_transcript(state)
 
   defp close_stream(state) do
-    _ = state.terminal.stop_stream(state.session, state.opts)
     _ = :file.close(state.fd)
-    %{state | fd: nil}
+    flush_transcript(%{state | fd: nil})
+  end
+
+  # The redaction hold-back buffer (bd-5pelo2 finding 2, round 2 finding 1)
+  # can be holding up to `@max_hold_bytes` unwritten bytes — flush them,
+  # as-is, since nothing more is coming for this reader to join them against.
+  defp flush_transcript(state) do
+    handle =
+      if state.transcript_tail == <<>> do
+        state.transcript_handle
+      else
+        write_transcript(state.transcript_handle, state.transcript_tail, state.redact_values)
+      end
+
+    if handle, do: Transcript.close(handle)
+
+    # Everything up to `seq` is now on disk — the tail this flush just wrote,
+    # as-is, has nothing left held back.
+    persist_offset(state, state.seq)
+    if state.transcript_offset_fd, do: Transcript.close_offset(state.transcript_offset_fd)
+
+    %{state | transcript_handle: nil, transcript_tail: <<>>, transcript_offset_fd: nil}
+  end
+
+  defp write_transcript(nil, _data, _redact_values), do: nil
+
+  defp write_transcript(handle, data, redact_values) do
+    Transcript.append_open(handle, data, redact_values)
   end
 
   defp pump(%{fd: nil} = state), do: state
@@ -720,10 +972,155 @@ defmodule Arbiter.Sessions.Stream do
     frame = Frame.encode(seq, data)
 
     state
+    |> record_transcript(data)
     |> Map.put(:seq, seq)
+    |> persist_transcript_offset()
     |> ring_push(seq, data)
     |> deliver(frame)
     |> touch_turn()
+  end
+
+  # `state.seq` after `record_transcript/2` has run for this chunk is the
+  # pipe file's position, not the transcript's — `record_transcript/2` can be
+  # holding up to `@max_hold_bytes` of it back in `transcript_tail` pending a
+  # safe (newline, or closed-PEM) cut. Persisting `seq` as-is claims those
+  # unwritten bytes were transcribed; an `arbiter` restart before they
+  # actually are then makes `catch_up_transcript/2` start past them, losing
+  # them for good (bd-5pelo2 round 5 finding 3). Persist the position
+  # actually written instead.
+  defp persist_transcript_offset(state) do
+    persist_offset(state, state.seq - byte_size(state.transcript_tail))
+    state
+  end
+
+  defp persist_offset(%{transcript_offset_fd: nil}, _value), do: :ok
+
+  defp persist_offset(%{transcript_offset_fd: fd}, value) do
+    Transcript.write_offset_fd(fd, value)
+  end
+
+  # A secret can straddle a poll tick's chunk boundary — an operator *typing*
+  # (rather than pasting) a token delivers it a few bytes per 25ms tick, so no
+  # single chunk ever contains a full match (bd-5pelo2 finding 2; the same
+  # hazard `Arbiter.Worker.SessionArchive` already documents and avoids for
+  # the JSONL side by reading the whole file before redacting — impossible
+  # here, since the PTY chunking is unavoidable). A *fixed-size* tail window
+  # doesn't fix this (bd-5pelo2 round 2 finding 1): redaction only ever sees
+  # `writable` = combined-minus-tail, so the held-back bytes are never
+  # look-ahead for a match starting in `writable` — a token that outlives the
+  # window one byte at a time is never whole in either write.
+  #
+  # Cutting at *any* separator byte doesn't fix this either (bd-5pelo2 round 3
+  # finding 1): two of `Arbiter.Redaction.redact_patterns/1`'s patterns are
+  # not unbroken token runs — `Bearer\s+<token>` contains a space, and a PEM
+  # block spans newlines by construction — so a cut at, say, the space inside
+  # `Bearer <token>` splits exactly the match it was meant to protect.
+  #
+  # Cut at a **newline** instead. No supported pattern except the PEM block
+  # spans a newline, so a same-line match (including `Bearer <token>`) is
+  # always either wholly before the cut or wholly after it — never split.
+  # Bounded by `@max_hold_bytes` so a pathological run with no newline (huge
+  # base64 blob, binary noise) still drains instead of buffering forever.
+  #
+  # The PEM block is the one pattern a newline cut cannot protect on its own,
+  # so it gets its own guard: if the candidate writable portion contains a
+  # `-----BEGIN` with no matching `-----END` after it, the cut is pulled back
+  # to the start of that marker and everything from there is held instead —
+  # same `@max_hold_bytes` bound applies.
+  @max_hold_bytes 8192
+  @pem_begin "-----BEGIN"
+  @pem_end "-----END"
+
+  defp record_transcript(state, data) do
+    combined = state.transcript_tail <> data
+    {writable, tail} = split_tail(combined)
+
+    handle =
+      if writable == <<>> do
+        state.transcript_handle
+      else
+        write_transcript(state.transcript_handle, writable, state.redact_values)
+      end
+
+    %{state | transcript_handle: handle, transcript_tail: tail}
+  end
+
+  defp split_tail(data) do
+    case last_newline_index(data) do
+      nil ->
+        force_cut(data)
+
+      idx ->
+        # `last_newline_index/1` only ever returns an `idx` within
+        # `@max_hold_bytes` of the end (it returns `nil` otherwise), so the
+        # resulting hold can never exceed the bound here — unlike the
+        # identical-looking check in `adjust_for_open_pem/2`, which *is*
+        # reachable because a PEM marker can push the cut earlier than the
+        # newline did (bd-5pelo2 round 4 finding 5).
+        adjust_for_open_pem(data, idx + 1)
+    end
+  end
+
+  defp force_cut(data) when byte_size(data) <= @max_hold_bytes, do: {<<>>, data}
+
+  defp force_cut(data) do
+    cut = byte_size(data) - @max_hold_bytes
+    {:binary.part(data, 0, cut), :binary.part(data, cut, @max_hold_bytes)}
+  end
+
+  defp adjust_for_open_pem(data, cut) do
+    candidate = :binary.part(data, 0, cut)
+
+    case open_pem_start(candidate) do
+      nil ->
+        {candidate, :binary.part(data, cut, byte_size(data) - cut)}
+
+      begin_idx ->
+        hold_size = byte_size(data) - begin_idx
+
+        if hold_size > @max_hold_bytes do
+          force_cut(data)
+        else
+          {:binary.part(data, 0, begin_idx), :binary.part(data, begin_idx, hold_size)}
+        end
+    end
+  end
+
+  # Byte offset of a `-----BEGIN` marker in `data` with no matching
+  # `-----END` after it, or `nil` if the buffer holds no unterminated PEM
+  # marker. Only the last `-----BEGIN` needs checking: valid PEM blocks don't
+  # overlap, so if the last one is closed, every earlier one is too.
+  defp open_pem_start(data) do
+    case :binary.matches(data, @pem_begin) do
+      [] ->
+        nil
+
+      matches ->
+        {begin_idx, _len} = List.last(matches)
+        rest = :binary.part(data, begin_idx, byte_size(data) - begin_idx)
+
+        if :binary.match(rest, @pem_end) == :nomatch, do: begin_idx, else: nil
+    end
+  end
+
+  # Rightmost newline in `data` — the one boundary no supported credential
+  # pattern (other than the separately-guarded PEM block) can straddle.
+  # `nil` when there is none within `@max_hold_bytes` of the end. Scans
+  # backward from the end instead of collecting every newline's position
+  # (bd-5pelo2 round 3 finding 3) — O(hold size), not O(chunk size), and
+  # allocates nothing.
+  defp last_newline_index(data) do
+    limit = max(byte_size(data) - @max_hold_bytes - 1, -1)
+    scan_back_newline(data, byte_size(data) - 1, limit)
+  end
+
+  defp scan_back_newline(_data, i, limit) when i <= limit, do: nil
+
+  defp scan_back_newline(data, i, limit) do
+    case :binary.at(data, i) do
+      ?\n -> i
+      _ -> scan_back_newline(data, i - 1, limit)
+    end
   end
 
   # The idle-deadline's other input (§4.6 item 2): the pane actually produced
@@ -1139,6 +1536,30 @@ defmodule Arbiter.Sessions.Stream do
     end
   end
 
+  # Same as `pipe_path/2`, but for the client-side `attach/2`, which must
+  # never raise just because it computed a comparison value ahead of the
+  # `ensure_started/2` call that is about to surface the same failure
+  # properly (as `{:error, reason}`, via `init/1`'s own `pipe_path/2` call).
+  # `nil` here just means `reconfigure_if_mismatched/2` keeps whatever path
+  # the reader already has.
+  defp safe_pipe_path(session, opts) do
+    pipe_path(session, opts)
+  rescue
+    ArgumentError -> nil
+  end
+
+  # Resolved once, at reader start, and reused for every frame's transcript
+  # write (`Arbiter.Sessions.Transcript.append/3`) rather than re-fetched: a
+  # DB round trip per PTY poll tick would compete with the tick's own 25ms
+  # budget. `:redact_values` is a test seam so a suite need not fixture a
+  # whole workspace to assert redaction.
+  defp redact_values(session, opts) do
+    case Keyword.fetch(opts, :redact_values) do
+      {:ok, values} -> values
+      :error -> Transcript.redact_values_for(session)
+    end
+  end
+
   defp file_size(path) do
     case File.stat(path) do
       {:ok, %File.Stat{size: size}} -> size
@@ -1148,19 +1569,4 @@ defmodule Arbiter.Sessions.Stream do
 
   defp schedule(_message, interval) when interval in [nil, :never], do: nil
   defp schedule(message, interval), do: Process.send_after(self(), message, interval)
-
-  defp maybe_linger(state) do
-    if map_size(state.subs) == 0 and is_nil(state.linger_timer) do
-      %{state | linger_timer: schedule(:linger_expired, state.config.linger_ms)}
-    else
-      state
-    end
-  end
-
-  defp cancel_linger(%{linger_timer: nil} = state), do: state
-
-  defp cancel_linger(state) do
-    Process.cancel_timer(state.linger_timer)
-    %{state | linger_timer: nil}
-  end
 end
