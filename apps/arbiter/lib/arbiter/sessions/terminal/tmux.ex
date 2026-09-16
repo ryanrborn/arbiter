@@ -191,9 +191,17 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   # rewrites bare `\n` to `\r\n`, and appends a CUP escape for the cursor —
   # see the moduledoc comment above `start_stream/3` for why all three happen
   # together, in one place, for both callers.
+  #
+  # `capture-pane -p` terminates *every* line with `\n`, including the last
+  # visible row. Left in place, that final `\n` fires after xterm's `reset()`
+  # has already parked the cursor on the bottom row, scrolling the repaint
+  # one line and pushing the pane's top row into scrollback — the CUP below
+  # is computed in pane coordinates, so it would then address a row that no
+  # longer holds the content it was meant for. Drop exactly one trailing
+  # newline before normalizing so the capture ends on its last real row.
   defp finalize_capture(out) do
     {pane, cursor} = split_cursor(out)
-    text = normalize_line_endings(pane)
+    text = pane |> String.replace_suffix("\n", "") |> normalize_line_endings()
 
     case cursor do
       {x, y} -> text <> cup(x, y)
@@ -207,7 +215,12 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
          [x, y] <- String.split(position, "\t", parts: 2),
          {x, ""} <- Integer.parse(x),
          {y, ""} <- Integer.parse(y) do
-      {pane, {x, y}}
+      # `display-message -p` (which produced the cursor-position preamble)
+      # appends its own trailing `\n` before the pane text begins, same as
+      # everywhere else this module talks to `display-message` (see
+      # `streaming?/2`, `parse_geometry/1`). Left in, it becomes a spurious
+      # blank line at the top of the repainted scrollback.
+      {String.replace_prefix(pane, "\n", ""), {x, y}}
     else
       _ -> {out, nil}
     end

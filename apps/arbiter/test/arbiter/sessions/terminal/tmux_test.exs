@@ -40,7 +40,7 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
       session: session
     } do
       SessionRunnerStub.script(fn "tmux", _args, _opts ->
-        {"\x011\t2\x02scrollback\e[0m", 0}
+        {"\x011\t2\x02\nscrollback\e[0m\n", 0}
       end)
 
       assert {:ok, %{snapshot: "scrollback\e[0m\e[3;2H"}} =
@@ -72,10 +72,16 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
     end
 
     test "rewrites bare LFs to CRLF so a repaint doesn't staircase", %{session: session} do
-      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x010\t0\x02one\ntwo\n", 0} end)
+      # `\n` right after the \x02 marker is `display-message`'s own trailing
+      # newline (same as everywhere else this command talks to
+      # `display-message`); the `\n` terminating the last line is
+      # `capture-pane`'s — real tmux emits both, and finalize_capture must
+      # drop each rather than let it become a spurious blank line or an
+      # extra scroll on repaint.
+      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x010\t0\x02\none\ntwo\n", 0} end)
 
       assert {:ok, %{snapshot: snapshot}} = Tmux.start_stream(session, @pipe, opts())
-      assert snapshot == "one\r\ntwo\r\n\e[1;1H"
+      assert snapshot == "one\r\ntwo\e[1;1H"
     end
 
     test "leaves the snapshot untouched when the cursor query is unparseable", %{
@@ -158,7 +164,9 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
 
   describe "snapshot/2" do
     test "captures with escape sequences preserved and the cursor restored", %{session: session} do
-      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x0110\t3\x02\e[31mred\e[0m", 0} end)
+      SessionRunnerStub.script(fn "tmux", _args, _opts ->
+        {"\x0110\t3\x02\n\e[31mred\e[0m\n", 0}
+      end)
 
       assert {:ok, "\e[31mred\e[0m\e[4;11H"} =
                Tmux.snapshot(session, opts() ++ [snapshot_lines: 100])
@@ -183,13 +191,15 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
     end
 
     test "rewrites bare LFs to CRLF so a repaint doesn't staircase", %{session: session} do
-      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x010\t0\x02first\nsecond\n", 0} end)
+      SessionRunnerStub.script(fn "tmux", _args, _opts ->
+        {"\x010\t0\x02\nfirst\nsecond\n", 0}
+      end)
 
-      assert {:ok, "first\r\nsecond\r\n\e[1;1H"} = Tmux.snapshot(session, opts())
+      assert {:ok, "first\r\nsecond\e[1;1H"} = Tmux.snapshot(session, opts())
     end
 
     test "does not touch an already-CRLF line ending", %{session: session} do
-      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x010\t0\x02a\r\nb", 0} end)
+      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x010\t0\x02\na\r\nb\n", 0} end)
 
       assert {:ok, "a\r\nb\e[1;1H"} = Tmux.snapshot(session, opts())
     end
