@@ -19,8 +19,17 @@ re-mounted.
 `#session-dock-offset` is the page's bottom breathing room. The strip is
 `position: fixed`, so without it the last rows of a long page would sit
 underneath the dock.
+
+`loopback?` is handed down rather than read by the dock: `get_connect_info/2`
+is root-and-mount only, and the dock is a nested child. It decides whether the
+expanded window mounts a terminal at all (§10.4 / bd-2zskbb) — off loopback the
+`/session` socket refuses a browser that has no token to send.
 --%>
 <div id="session-dock-offset" class="pb-[var(--session-dock-strip-height)]">
   {@inner_content}
 </div>
-{live_render(@socket, ArbiterWeb.SessionDockLive, id: "session-dock", sticky: true)}
+{live_render(@socket, ArbiterWeb.SessionDockLive,
+  id: "session-dock",
+  sticky: true,
+  session: %{"loopback?" => @loopback?}
+)}

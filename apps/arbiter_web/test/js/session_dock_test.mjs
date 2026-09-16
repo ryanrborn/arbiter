@@ -196,3 +196,88 @@ test("restore skips regions that are no longer in the dock, and never throws", (
   assert.doesNotThrow(() => restoreScroll(null, tops))
   assert.doesNotThrow(() => restoreScroll(fakeRoot([panel]), null))
 })
+
+// -- the resume book (bd-9myzv8, session dock phase 2) ------------------------
+//
+// Collapsing a window disposes the xterm *and* the `SessionStream` that held
+// `last_seq`, so the offset the next expand has to resume from cannot live in
+// either. It lives here, in memory, for as long as the tab does — never in
+// `localStorage`: a reload has no terminal to resume onto, and resuming a
+// blank screen from a stale byte offset would replay a delta with nothing
+// under it.
+
+import { forgetResume, rememberResume, resumeFrom } from "../../assets/js/session_dock.mjs"
+
+test("a remembered resume point comes back for that session and no other", () => {
+  rememberResume("sess-a", 4096)
+  rememberResume("sess-b", 12)
+
+  assert.equal(resumeFrom("sess-a"), 4096)
+  assert.equal(resumeFrom("sess-b"), 12)
+  assert.equal(resumeFrom("sess-never-opened"), null)
+
+  forgetResume("sess-a")
+  forgetResume("sess-b")
+})
+
+test("resume points only ever move forward, so a late dispose cannot rewind one", () => {
+  rememberResume("sess-c", 900)
+  rememberResume("sess-c", 100)
+
+  assert.equal(resumeFrom("sess-c"), 900)
+
+  forgetResume("sess-c")
+})
+
+test("anything that is not a byte offset is not remembered", () => {
+  for (const bad of [null, undefined, -1, 2.5, "40", NaN]) {
+    rememberResume("sess-d", bad)
+    assert.equal(resumeFrom("sess-d"), null, `resume point: ${String(bad)}`)
+  }
+})
+
+test("zero is a real resume point — the very start of the stream", () => {
+  rememberResume("sess-e", 0)
+  assert.equal(resumeFrom("sess-e"), 0)
+  forgetResume("sess-e")
+})
+
+test("dismissing a session forgets it, so re-opening starts from a snapshot", () => {
+  rememberResume("sess-f", 77)
+  forgetResume("sess-f")
+
+  assert.equal(resumeFrom("sess-f"), null)
+})
+
+// -- the handover from /sessions/:id (bd-9myzv8) -------------------------------
+//
+// `SessionLive` hands its session to the dock with a `push_event`, which
+// reaches the client as a `window` event. On a *live navigation* the dock's
+// hook is already mounted and catches it directly — but on a cold load of
+// `/sessions/:id` the parent view joins and dispatches before its sticky
+// children have joined at all, and the event would land on nothing. So it is
+// remembered by a listener installed at import time and claimed by whichever
+// comes first.
+
+import { rememberOpenRequest, takeOpenRequest } from "../../assets/js/session_dock.mjs"
+
+test("an open request that arrives before the hook mounts is claimed by the mount", () => {
+  rememberOpenRequest({ id: "sess-early" })
+
+  assert.equal(takeOpenRequest(), "sess-early")
+})
+
+test("claiming an open request consumes it, so a later rejoin does not re-open it", () => {
+  rememberOpenRequest({ id: "sess-once" })
+
+  assert.equal(takeOpenRequest(), "sess-once")
+  assert.equal(takeOpenRequest(), null)
+})
+
+test("a malformed open request is no request at all", () => {
+  for (const detail of [null, undefined, {}, { id: 7 }, { id: "" }, "sess-x"]) {
+    rememberOpenRequest({ id: "sess-good" })
+    rememberOpenRequest(detail)
+    assert.equal(takeOpenRequest(), null, `detail: ${JSON.stringify(detail)}`)
+  }
+})

@@ -19,6 +19,13 @@ defmodule ArbiterWeb.SessionPageBrowserTest do
   container at three window sizes, press a **trusted** `Ctrl+Shift+C`/`+V`, and
   kill the session while the page is open.
 
+  Since bd-9myzv8 the terminal lives in the session dock, so that is the pane
+  these four criteria are measured against: landing on `/sessions/<id>` hands
+  the session to the dock and the dock's expanded window is what connects. The
+  claims are unchanged; only the element ids moved. What the dock adds on top
+  — resume across a collapse, survival across navigation — is
+  `ArbiterWeb.SessionDockTerminalBrowserTest`.
+
   The page is served from the real bundle, so the bundle has to be current: a
   stale `priv/static/assets` would test the JS of whatever commit last built
   it, which is the failure mode of the bug itself. It is rebuilt here by

@@ -266,6 +266,12 @@ export async function probe(el) {
     check("remount-probe", String((error && error.stack) || error), false)
   }
 
+  try {
+    await dockChecks()
+  } catch (error) {
+    check("dock-probe", String((error && error.stack) || error), false)
+  }
+
   return { checks }
 }
 
@@ -296,12 +302,13 @@ class ProbeSocket {
     this.pushes = []
     this.joins = []
     this.events = {}
+    this.disconnected = false
     this.reconnectTimer = { scheduleTimeout: () => {} }
   }
   onError() {}
   onClose() {}
   connect() {}
-  disconnect() {}
+  disconnect() { this.disconnected = true }
   channel(topic, params) {
     this.topic = topic
     const socket = this
@@ -500,6 +507,164 @@ async function remountChecks() {
   stuck.parent.remove()
   second.parent.remove()
   third.parent.remove()
+}
+
+// -- bd-9myzv8: the session dock's collapse / expand cycle --------------------
+//
+// In the dock the terminal is not merely re-mounted on navigation — it is
+// *destroyed* on every collapse and built again on every expand, because the
+// acceptance criterion is that a strip of collapsed windows holds zero xterm
+// instances and zero live sockets. Three things have to survive that:
+//
+//   * the resume point, handed back in as `lastSeq`, so the expand replays
+//     what the window missed instead of re-snapshotting;
+//   * the screen: a resumed replay is a *delta*, and a delta painted onto a
+//     terminal that has just been constructed has nothing under it, so the
+//     agent has to be asked to repaint;
+//   * the scroll offset, which a sticky view's re-parent zeroes.
+//
+// And the keyboard rule: an expanded terminal takes every key, so the one way
+// out of it has to work and must never reach the agent.
+
+// A key event for a named key. The probe's own `keydown` helper spells
+// `code`/`keyCode` from a single character, and xterm resolves a keystroke to
+// bytes from `keyCode` — a synthetic event without one produces nothing at all,
+// which would make every check below pass vacuously.
+const KEY_CODES = { Escape: 27, Enter: 13, Tab: 9 }
+
+function rawKeydown(term, key, { ctrl = false, shift = false, meta = false } = {}) {
+  const target = term.element.querySelector(".xterm-helper-textarea") || term.element
+  target.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key,
+      code: key,
+      keyCode: KEY_CODES[key],
+      which: KEY_CODES[key],
+      ctrlKey: ctrl,
+      shiftKey: shift,
+      metaKey: meta,
+      bubbles: true,
+      cancelable: true
+    })
+  )
+}
+
+function stdinText(socket) {
+  return socket
+    .pushesFor("stdin")
+    .map((p) => {
+      const decoded = decodeFrame(p.payload)
+      return decoded ? new TextDecoder().decode(decoded.payload) : ""
+    })
+    .join("")
+}
+
+async function dockChecks() {
+  // -- expanding a window resumes from where the last one stopped -----------
+  const pane = hiddenPane()
+  pane.parent.style.display = "block"
+
+  const socket = new ProbeSocket()
+  const released = []
+  const handle = createSessionTerminal(pane.el, {
+    sessionId: "dock",
+    socket,
+    lastSeq: 4096,
+    onReleaseFocus: () => released.push(true)
+  })
+
+  for (let i = 0; i < 30 && socket.joins.length === 0; i++) await frame()
+  const join = socket.joins[0]
+  if (!join) {
+    check("expand-resumes-from-the-remembered-offset", "never joined", false)
+    return
+  }
+
+  check(
+    "expand-resumes-from-the-remembered-offset",
+    `last_seq=${join.params.last_seq}`,
+    join.params.last_seq === 4096
+  )
+
+  // A resumed replay onto a screen that has just been constructed is a delta
+  // with nothing under it. The geometry did not change — `resized: false` —
+  // so nothing else would ask, and the window would come back holding a
+  // fragment of a repaint.
+  join.push.reply("ok", { seq: 4096, mode: "resumed", resized: false })
+  for (let i = 0; i < 10; i++) await frame()
+
+  check(
+    "a-resumed-join-onto-a-fresh-terminal-forces-a-redraw",
+    `redraws=${socket.pushesFor("redraw").length}`,
+    socket.pushesFor("redraw").length === 1
+  )
+
+  // -- the keyboard rule ----------------------------------------------------
+  rawKeydown(handle.term, "Escape")
+  await tick()
+
+  check(
+    "a-plain-escape-reaches-the-agent",
+    JSON.stringify(stdinText(socket)),
+    stdinText(socket).includes("\u001b") && released.length === 0
+  )
+
+  handle.focus()
+  const beforeRelease = document.activeElement
+  rawKeydown(handle.term, "Escape", { ctrl: true, shift: true })
+  await tick()
+
+  check(
+    "ctrl-shift-escape-releases-focus-and-never-reaches-the-agent",
+    `released=${released.length} stdin=${JSON.stringify(stdinText(socket))}`,
+    released.length === 1 && stdinText(socket) === "\u001b"
+  )
+
+  check(
+    "releasing-focus-really-blurs-the-terminal",
+    `was ${beforeRelease && beforeRelease.className}, now ${document.activeElement && document.activeElement.className}`,
+    !handle.term.element.contains(document.activeElement)
+  )
+
+  // -- the scroll offset across a sticky re-parent --------------------------
+  //
+  // `LiveSocket.replaceMain` moves the dock through a *detached* container, and
+  // detaching an element zeroes `scrollTop` on every scrollable node inside it
+  // — xterm's viewport included, which scrolls the buffer to the top of the
+  // scrollback. `phx:navigate` fires while xterm still holds the right value
+  // (the browser has not dispatched the resulting `scroll` event yet), which
+  // is the one moment it can be captured.
+  await writeAsync(handle.term, new TextEncoder().encode("line\r\n".repeat(400)))
+  handle.term.scrollToBottom()
+  for (let i = 0; i < 5; i++) await frame()
+
+  const bottom = handle.term.buffer.active.viewportY
+  handle.rememberScroll()
+
+  const viewport = pane.el.querySelector(".xterm-viewport")
+  viewport.scrollTop = 0
+  for (let i = 0; i < 5 && handle.term.buffer.active.viewportY !== 0; i++) await frame()
+  const disturbed = handle.term.buffer.active.viewportY
+
+  handle.restoreScroll()
+  for (let i = 0; i < 5; i++) await frame()
+
+  check(
+    "a-reparent-does-not-leave-the-terminal-scrolled-to-the-top",
+    `bottom=${bottom} after the reparent=${disturbed} restored=${handle.term.buffer.active.viewportY}`,
+    bottom > 0 && disturbed === 0 && handle.term.buffer.active.viewportY === bottom
+  )
+
+  // -- collapsing holds nothing ---------------------------------------------
+  handle.dispose()
+
+  check(
+    "collapsing-tears-down-the-xterm-and-closes-the-socket",
+    `xterms in the pane=${pane.el.querySelectorAll(".xterm").length} disconnected=${socket.disconnected}`,
+    pane.el.querySelectorAll(".xterm").length === 0 && socket.disconnected === true
+  )
+
+  pane.parent.remove()
 }
 
 window.__arbProbe = probe

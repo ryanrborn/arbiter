@@ -28,6 +28,11 @@
 //      the one claim `pb-[var(--session-dock-strip-height)]` can quietly stop
 //      making if Tailwind ever fails to compile the arbitrary value.
 //
+// Since phase 2 (bd-9myzv8) the expanded window holds a terminal. What that
+// terminal does — connect, resume, survive navigation, lay itself out — is
+// `scripts/verify_session_dock_terminal.mjs`'s business; this file only keeps
+// the strip's own invariant, that there is never more than one of them.
+//
 // Output is one `CHECK <name>: PASS|FAIL — <detail>` line per claim and a
 // final `RESULT: PASS|FAIL`. `ArbiterWeb.SessionDockBrowserTest` runs it
 // against a Bandit listener as part of `mix test`; exit 3 means SKIP.
@@ -241,13 +246,18 @@ async function run(page) {
 
   await screenshot("expanded")
 
+  // Phase 2 (bd-9myzv8) fills the frame: one terminal, for the expanded window
+  // only. Which one it is, that it connects, resumes and survives navigation
+  // is `scripts/verify_session_dock_terminal.mjs`'s business — here it is only
+  // the invariant this file has always been about, that the strip holds
+  // exactly one of them.
   check(
-    "the-frame-is-empty-no-terminal-in-phase-1",
+    "the-expanded-window-holds-the-one-terminal",
     await page.eval(
-      `document.getElementById("session-dock-frame-${sessionId}").children.length === 0 &&
-       document.querySelectorAll("#session-dock .xterm").length === 0`
+      `!!document.getElementById("session-dock-terminal-${sessionId}") &&
+       document.querySelectorAll("#session-dock .xterm").length <= 1`
     ),
-    "no xterm inside the dock"
+    "one terminal, in the expanded window"
   )
 
   // Re-scroll: opening the session closed the roster, and the panel is
@@ -431,6 +441,14 @@ async function run(page) {
     "no-console-errors",
     consoleErrors.length === 0,
     consoleErrors.length ? JSON.stringify(consoleErrors.slice(0, 3)) : "the page logged none"
+  )
+
+  // Every window here is collapsed except one, and the strip is the only
+  // thing that can hold a terminal — so a full strip still holds at most one.
+  check(
+    "a-full-strip-still-holds-at-most-one-terminal",
+    (await page.eval(`document.querySelectorAll("[id^='session-dock-terminal-']").length`)) <= 1,
+    `${await page.eval(`document.querySelectorAll("[id^='session-dock-terminal-']").length`)} terminal(s) across ${full.windows} windows`
   )
 
   console.log(`SESSION ${sessionId}`)

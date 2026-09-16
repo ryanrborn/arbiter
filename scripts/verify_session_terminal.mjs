@@ -177,13 +177,42 @@ try {
   // Exact-PID teardown only. Never a pattern-matching kill: this repo has an
   // incident class around one reaching the live coordinator.
   browser.kill("SIGTERM")
-  rmSync(work, { recursive: true, force: true })
+
+  // And *wait* for it before removing its profile directory. A browser that
+  // has been signalled is still writing there, and an `ENOTEMPTY` raised out
+  // of this `finally` block throws away a whole run's worth of green checks —
+  // which is exactly what it did once the probe grew long enough to matter.
+  await exited(browser)
+
+  try {
+    rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  } catch (error) {
+    console.log(`NOTE: could not remove ${work}: ${error && error.message}`)
+  }
 }
 
 console.log(`RESULT: ${failed ? "FAIL" : "PASS"}`)
 process.exit(failed ? 1 : 0)
 
 // -- helpers ------------------------------------------------------------------
+
+// Resolves on the child's exit, or after a grace period if it will not go — a
+// hung browser must not hang the verification.
+function exited(child, graceMs = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL")
+      resolve()
+    }, graceMs)
+    child.once("exit", done)
+  })
+}
 
 async function waitForDevToolsPort(file) {
   for (let i = 0; i < 100; i++) {

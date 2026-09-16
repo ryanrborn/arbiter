@@ -1,8 +1,8 @@
 defmodule ArbiterWeb.SessionDockLiveTest do
   @moduledoc """
-  The session dock (bd-dlc136, phase 1 of the session dock epic) — the shell
-  only: the sticky bottom strip, its roster, the collapsed title bars and the
-  empty expanded frame. No terminal; phase 2 (bd-14b11h) fills the frame.
+  The session dock (bd-dlc136 phase 1, bd-9myzv8 phase 2): the sticky bottom
+  strip, its roster, the collapsed title bars, and — since phase 2 — the one
+  terminal that lives in whichever window is expanded.
 
   What this file can and cannot prove: `Phoenix.LiveViewTest` drives the dock
   as a real, separate LiveView process (`find_live_child/2`), so every
@@ -186,9 +186,9 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert has_element?(dock, "#session-dock-title-#{session.id}")
     end
 
-    # Phase 1's deliverable is the frame, not what goes in it. A terminal
-    # appearing here early would mean phase 2 landed in the wrong phase.
-    test "the expanded window is an empty frame — no xterm, no /session socket",
+    # Phase 2 (bd-9myzv8): the frame is no longer empty. The terminal hook's
+    # lifecycle is the dock's now, and it is the *expansion* that mounts it.
+    test "the expanded window hosts the terminal hook, aimed at that session",
          %{conn: conn} do
       session = launch!()
       {_view, dock} = dock(conn)
@@ -196,11 +196,241 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       render_click(element(dock, "#session-dock-open-#{session.id}"))
 
       html = render(dock)
+      pane = "#session-dock-terminal-#{session.id}"
 
-      assert has_element?(dock, "#session-dock-frame-#{session.id}")
-      refute html =~ "xterm"
-      refute html =~ "SessionTerminal"
-      refute html =~ "phx-update=\"ignore\""
+      # A colocated hook is rendered under its module-qualified name.
+      assert has_element?(dock, pane)
+      assert html =~ ~s(phx-hook="ArbiterWeb.SessionDockLive.SessionTerminal")
+      assert html =~ ~s(data-session-id="#{session.id}")
+
+      # The hook owns this subtree; LiveView must never diff into it.
+      assert has_element?(dock, ~s(#{pane}[phx-update="ignore"]))
+
+      # And it is marked as a terminal, so window-level key handling elsewhere
+      # on the dashboard can tell a keystroke meant for the agent from one
+      # meant for the page.
+      assert has_element?(dock, ~s(#{pane}[data-arb-terminal]))
+    end
+
+    test "the expanded window carries the hook-owned status strip", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      strip = "#session-dock-status-#{session.id}"
+
+      assert has_element?(dock, strip)
+      assert has_element?(dock, ~s(#{strip}[phx-update="ignore"]))
+      assert has_element?(dock, ~s(#{strip} [data-role="state"]))
+      assert has_element?(dock, ~s(#{strip} [data-role="usage"]))
+      assert has_element?(dock, ~s(#{strip} [data-role="meta"]))
+    end
+
+    # The acceptance criterion the whole phase turns on: collapsing is what
+    # tears the xterm down and closes the socket, and it does that by the pane
+    # ceasing to exist — LiveView calls the hook's `destroyed()` for it.
+    test "collapsing removes the terminal element entirely", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+
+      render_click(element(dock, "#session-dock-title-#{session.id}"))
+
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+      refute has_element?(dock, "#session-dock-status-#{session.id}")
+      assert has_element?(dock, "#session-dock-title-#{session.id}")
+    end
+
+    test "a strip of eight windows still holds exactly one terminal", %{conn: conn} do
+      sessions = for n <- 1..8, do: launch!(name: "s#{n}")
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => Enum.map(sessions, & &1.id),
+        "expanded" => List.last(sessions).id
+      })
+
+      html = render(dock)
+
+      assert length(Regex.scan(~r/id="session-dock-window-/, html)) == 8
+      assert length(Regex.scan(~r/id="session-dock-terminal-/, html)) == 1
+      assert has_element?(dock, "#session-dock-terminal-#{List.last(sessions).id}")
+    end
+
+    test "expanding another window moves the one terminal to it", %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{"open" => [a.id, b.id], "expanded" => a.id})
+
+      assert has_element?(dock, "#session-dock-terminal-#{a.id}")
+      refute has_element?(dock, "#session-dock-terminal-#{b.id}")
+
+      render_click(element(dock, "#session-dock-title-#{b.id}"))
+
+      refute has_element?(dock, "#session-dock-terminal-#{a.id}")
+      assert has_element?(dock, "#session-dock-terminal-#{b.id}")
+    end
+
+    # §10.4 / bd-2zskbb, now on every page rather than only on /sessions/:id:
+    # `ArbiterWeb.SessionSocket` trusts a loopback peer and the browser sends
+    # no token, so off loopback a terminal here would be an inert pane that
+    # silently never attaches.
+    test "off loopback the window says so instead of mounting an inert terminal",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+      refute has_element?(dock, "#session-dock-status-#{session.id}")
+      assert has_element?(dock, "#session-dock-remote-#{session.id}", "loopback-only")
+    end
+
+    test "an ended session's window has nothing to attach to", %{conn: conn} do
+      session = launch!(name: "over")
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+
+      {:ok, _ended} = Sessions.kill(session.id)
+      render(dock)
+
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert has_element?(dock, "#session-dock-inactive-#{session.id}")
+    end
+
+    # §6.3, moved here with the terminal: a terminal cannot reflow meaningfully
+    # below ~80 columns, so a squeezed window scrolls its own container
+    # sideways rather than shrinking the pane to illegibility. The *page* never
+    # scrolls sideways — the dock is `position: fixed`, and one that overflowed
+    # would give every page a horizontal scrollbar it never had.
+    test "a squeezed window scrolls the terminal, not the page (§6.3)", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      assert has_element?(dock, "#session-dock-scroller-#{session.id}.overflow-x-auto")
+
+      # `scripts/verify_session_terminal.mjs` checks in a real browser that
+      # this floor really does fit 80 columns.
+      assert has_element?(
+               dock,
+               ~s(#session-dock-terminal-#{session.id}[class*="min-w-[640px]"])
+             )
+    end
+
+    # Moved here from `SessionLive` with the hook it watches. The failure it
+    # exists for has no other symptom: a tab running an asset bundle from
+    # before a deploy has no `.SessionTerminal` hook at all, so nothing mounts,
+    # nothing connects, and the hook-painted strip sits on its server-rendered
+    # "connecting…" forever.
+    test "says so when the terminal never connects", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      refute has_element?(dock, "#session-dock-stalled-#{session.id}")
+
+      send(dock.pid, {:terminal_stall_check, session.id})
+      assert has_element?(dock, "#session-dock-stalled-#{session.id}")
+
+      # A late join clears it: the message is advisory, not a verdict.
+      render_hook(dock, "terminal_live", %{"id" => session.id})
+      refute has_element?(dock, "#session-dock-stalled-#{session.id}")
+    end
+
+    test "a terminal that connected in time never mentions a stall", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      render_hook(dock, "terminal_live", %{"id" => session.id})
+      send(dock.pid, {:terminal_stall_check, session.id})
+
+      refute has_element?(dock, "#session-dock-stalled-#{session.id}")
+    end
+
+    # The stall check is armed by expanding, so a check for a window that is
+    # no longer the expanded one must not fire a banner over the one that is.
+    test "a stall check for a window that has since collapsed says nothing",
+         %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{"open" => [a.id, b.id], "expanded" => a.id})
+      render_click(element(dock, "#session-dock-title-#{b.id}"))
+
+      send(dock.pid, {:terminal_stall_check, a.id})
+
+      refute has_element?(dock, "#session-dock-stalled-#{a.id}")
+      refute has_element?(dock, "#session-dock-stalled-#{b.id}")
+    end
+
+    # Off loopback there is no hook to stall — the window already explains
+    # why, and a "Reload the page" banner on top of that cannot help
+    # (bd-2zskbb).
+    test "off loopback the stall banner never fires alongside the remote notice",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      send(dock.pid, {:terminal_stall_check, session.id})
+
+      refute has_element?(dock, "#session-dock-stalled-#{session.id}")
+      assert has_element?(dock, "#session-dock-remote-#{session.id}")
+    end
+
+    # Dismiss is "forget this window", so the resume point goes with it: the
+    # client's in-memory book is told, and re-opening later is a fresh
+    # snapshot rather than a replay onto a screen nothing painted.
+    test "dismissing tells the client to forget the resume point", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      render_click(element(dock, "#session-dock-dismiss-#{session.id}"))
+
+      assert_push_event(dock, "session-dock:forget", %{id: id})
+      assert id == session.id
+    end
+
+    # The hook reports the channel's `exit` event up, because the row may not
+    # be marked ended yet — the same reason `SessionLive` did (bd-bsdeb2).
+    test "an agent that exits under the hook flips the window without a reload",
+         %{conn: conn} do
+      session = launch!(name: "exits")
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+      render_click(element(dock, "#session-dock-open-#{session.id}"))
+
+      render_hook(dock, "terminal_exited", %{"id" => session.id, "code" => 1})
+
+      refute has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert has_element?(dock, "#session-dock-inactive-#{session.id}")
     end
 
     test "dismissing removes the window without touching the session", %{conn: conn} do
@@ -327,8 +557,41 @@ defmodule ArbiterWeb.SessionDockLiveTest do
 
       {:ok, page, html} = live(conn, ~p"/sessions/#{session.id}")
       assert has_element?(page, "#session-dock")
-      # The terminal and its colocated hook are phase 2's problem, untouched.
-      assert html =~ "SessionTerminal"
+
+      # Phase 2 moved the terminal: the page renders no second copy of the
+      # hook, and with nothing expanded in the dock there is no terminal in
+      # the document at all.
+      refute html =~ "SessionTerminal"
+      refute has_element?(page, "#session-terminal-#{session.id}")
+      assert has_element?(page, "#terminal-in-dock")
+    end
+
+    # bd-9myzv8: `/sessions/:id` hands the session to the dock rather than
+    # growing a terminal of its own, so clicking a session in the list still
+    # ends with a terminal in front of the operator.
+    test "the session page asks the dock to open the session it is showing",
+         %{conn: conn} do
+      session = launch!(name: "handed over")
+
+      {:ok, page, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      assert_push_event(page, "session-dock:open", %{id: id})
+      assert id == session.id
+
+      # And a discoverable way to ask again after dismissing it.
+      assert has_element?(page, "#open-in-dock")
+      render_click(element(page, "#open-in-dock"))
+      assert_push_event(page, "session-dock:open", %{id: ^id})
+    end
+
+    test "an ended session is not pushed into the dock", %{conn: conn} do
+      session = launch!(name: "over")
+      {:ok, _ended} = Sessions.kill(session.id)
+
+      {:ok, page, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute_push_event(page, "session-dock:open", %{})
+      refute has_element?(page, "#open-in-dock")
     end
   end
 end
