@@ -157,15 +157,82 @@ arb install service
 
 This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/arbiter start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`.
 
-### Production deploys — OTP releases
+`arb install service` only writes the release-shaped unit above. There is no
+CLI command yet for a dev-mode unit (one whose `ExecStart` runs
+`mix phx.server` instead of a release binary) — on a source checkout you hand-write
+that unit file yourself; see [Deploying: pick the path for your install
+shape](#deploying-pick-the-path-for-your-install-shape) below.
 
-Production runs are self-contained OTP releases unpacked under `~/.arbiter/releases/<tag>/`, with `~/.arbiter/current` symlinked atomically to the active one — no source checkout or Elixir/Mix toolchain needed on the box. Deploy a specific version (or `latest`) with:
+### Deploying: pick the path for your install shape
+
+Arbiter supports two install shapes, and the deploy command differs between
+them:
+
+- **Source checkout (dev mode)** — a git clone with `mix phx.server` run
+  directly (by hand, or supervised by a systemd user unit that points
+  `ExecStart` at `mix phx.server` rather than a release binary). This is how
+  the "Install (development)" section above sets things up, and how this
+  repo's own coordinator instance runs today — the releases strategy is
+  scoped but not yet built (see #754 for the history: `arb server deploy`
+  used to hard-require `ARB_RELEASE_REPO` and dead-end on a dev-mode install;
+  it now detects the missing env var and falls back automatically).
+- **OTP release install** — a built release artifact unpacked under
+  `~/.arbiter/releases/<tag>/`, installed via `arb install service`. No
+  source checkout or Elixir/Mix toolchain on the box.
+
+If you're on a source checkout, use the sequence below. If you have a release
+artifact installed, skip to [OTP-release installs](#production-deploys-otp-release-installs).
+
+#### Source checkout (dev mode)
+
+```sh
+git fetch origin main
+git diff --name-only HEAD origin/main -- mix.lock   # non-empty → deps changed; see note below
+arb server deploy --git-pull
+arb server doctor     # confirm CLI and server report the same version
+```
+
+`arb server deploy --git-pull` does the pull → rebuild → restart → migrate
+sequence for you: `git pull --ff-only` on `main`, rebuild and install the CLI
+escript if `apps/arbiter_cli` changed, then restart Phoenix — via
+`systemctl --user restart arbiter` when the systemd unit is present, a plain
+process bounce otherwise. The restart's boot sequence (`Boot.Migrator`)
+applies any pending migrations before the endpoint opens, so migrations are
+never run against the live server. **Do not `git pull` by hand first** — the
+command diffs `before_sha`/`after_sha` itself and treats an already-current
+tree as "nothing to deploy," skipping the restart and escript rebuild
+entirely.
+
+It also does **not** run `mix deps.get` for you. If the pre-check above
+printed a `mix.lock` line, the pulled tree needs new deps that the restart
+will not have — running `mix deps.get` *before* the pull is a no-op, since
+`git fetch` doesn't move `HEAD` and the old lockfile is still checked out.
+Instead, either run `mix deps.get && arb server restart` immediately *after*
+the deploy, or skip `--git-pull` and do the whole thing manually: `git pull
+--ff-only origin main` → `mix deps.get` → `(cd apps/arbiter_cli && mix
+escript.build && cp arb ~/.local/bin/arb)` if `apps/arbiter_cli` changed →
+`arb server restart` → `arb server doctor`. The manual form is the safer
+choice when deps changed, since it never restarts against unfetched deps.
+
+A bare `arb server deploy` (no flags) does the same git-pull fallback
+automatically whenever `ARB_RELEASE_REPO` is unset, but prefer the explicit
+`--git-pull` form on a source checkout so the command's behavior doesn't
+depend silently on an environment variable you may not have set on purpose.
+
+#### Production deploys: OTP-release installs
+
+This subsection only applies once you have a built release artifact
+installed (`arb install service`, or manually under
+`~/.arbiter/releases/<tag>/`) — **not** to a source checkout; use
+[the sequence above](#source-checkout-dev-mode) for that. `~/.arbiter/current`
+is symlinked atomically to the active release. Deploy a specific version (or
+`latest`) with:
 
 ```sh
 arb server deploy --version v1.2.3
 ```
 
-This downloads the release tarball + checksum from GitHub Releases (`ARB_RELEASE_REPO`), verifies the SHA-256, unpacks it, atomically swaps `current`, restarts the service, and health-checks it — auto-rolling back to the last-known-good release if it doesn't come back green. In a dev checkout with no `ARB_RELEASE_REPO` set, `arb server deploy` falls back to a `git pull --ff-only` + rebuild path instead.
+This downloads the release tarball + checksum from GitHub Releases (`ARB_RELEASE_REPO`), verifies the SHA-256, unpacks it, atomically swaps `current`, restarts the service, and health-checks it — auto-rolling back to the last-known-good release if it doesn't come back green.
 
 #### Migration ordering, and rollback across a migration
 
@@ -179,7 +246,7 @@ lock so only one node ever migrates. The real ordering is therefore:
 
     stop the old server  →  new release boots  →  migrate  →  serve
 
-— one writer at every instant, and the same path `arb restart`,
+— one writer at every instant, and the same path `arb server restart`,
 `arb server migrate` and dev `mix phx.server` already take. The dev-mode
 fallback (`arb server deploy --git-pull`) obeys the same ordering: with the
 server up it pulls and restarts, and the pulled migrations are applied by that
@@ -404,6 +471,7 @@ commands you'll reach for most.
 | `arb message inbox` | Read (and mark read) the coordinator's escalation mailbox |
 | `arb server start` | Boot the stack (no-op if already up) |
 | `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases (auto-rollback on failure, refused across a migration) |
+| `arb server deploy --git-pull` | Source-checkout deploy: `git pull --ff-only`, rebuild the CLI if changed, restart (see [Deploying](#deploying-pick-the-path-for-your-install-shape)) |
 | `arb server doctor` | Health-check the server and database |
 | `arb config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
 | `arb mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |
