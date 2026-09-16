@@ -119,7 +119,7 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
     # disagreements other than the post-approval fix_pass class, which §4.5
     # leaves to P7. This is the query the PR names as its evidence, so it is
     # tested rather than described.
-    defp seed(result, old, new, overrides \\ %{}) do
+    defp seed(result, old, new, overrides) do
       Events.broadcast(
         workspace_id(),
         CoverageShadow.topic(),
