@@ -27,7 +27,8 @@ defmodule ArbiterWeb.SessionStreamNodeTest do
   @suites [
     "apps/arbiter_web/test/js/session_stream_test.mjs",
     "apps/arbiter_web/test/js/session_fit_test.mjs",
-    "apps/arbiter_web/test/js/session_keys_test.mjs"
+    "apps/arbiter_web/test/js/session_keys_test.mjs",
+    "apps/arbiter_web/test/js/session_dock_test.mjs"
   ]
 
   test "node --test apps/arbiter_web/test/js passes" do
