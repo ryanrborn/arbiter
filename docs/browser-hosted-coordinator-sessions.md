@@ -1608,47 +1608,46 @@ candidate writable portion contains a `-----BEGIN` with no matching
 Both are bounded by the same hard cap so a run with no newline at all still
 drains eventually (bd-5pelo2, round 2 finding 1; round 3 finding 1).
 
-**Known deferral: capture starts at first attach, not at session launch.**
-`tmux pipe-pane -O` is started by `Arbiter.Sessions.Stream` the first time a
-browser attaches, and (since bd-5pelo2 round 2) is kept running for the rest of
-the session's life from then on — a detach no longer stops it, so a session a
-browser has opened at least once is captured in full, attended or not. A
-session **nobody ever opens in a browser** is not yet captured at all: the pipe
-is never started, because nothing currently starts it outside the attach path.
-Closing that gap means starting the reader from session launch
-(`Arbiter.Sessions.launch/1`) and from the boot-time adoption sweep
-(`Arbiter.Sessions.Adoption`) rather than from `ArbiterWeb.SessionChannel`.
-This was attempted in round 3 (`Stream.ensure_reader/2`, called from both
-call paths right after `mark_running/1`) and reverted after it reproduced a
-concrete regression rather than a hypothetical one: several existing tests
-(e.g. `StreamTurnActivityTest`) launch a session with a bare runner stub and
-only *afterwards* attach with `terminal: Arbiter.Test.ScriptedPty` to drive a
-scripted pane. `Arbiter.Sessions.Stream`'s config — including which
-`Terminal` it uses — is fixed by whichever call starts the reader first, for
-the reader's whole life (see "Configuration" above). Starting the reader
-eagerly at launch time locks it onto the real `Terminal.Tmux` (there is no
-scripted pane yet to point it at), and the later `attach/2` with `ScriptedPty`
-then talks to that already-started, already-wrong-terminal reader instead of
-configuring a new one — reproduced directly: `StreamTurnActivityTest` fails
-with `ScriptedPty` never receiving a `start_stream` call at all. Fixing that
-for real means auditing and updating every test across both call paths that
-relies on "launch first, pick the test terminal on the first attach", not
-just adding the two call sites — the wider change the round-1 implementer
-already flagged as out of scope, now with a concrete failure attached rather
-than a projected one. Left for a follow-up that budgets for that audit.
+**Closed: capture now starts at session launch/adoption, not just first
+attach.** `tmux pipe-pane -O` used to be started by `Arbiter.Sessions.Stream`
+only on a browser's first attach, so a session nobody ever opened was never
+captured at all. Round 3 attempted the obvious fix (`Stream.ensure_reader/2`,
+called right after `mark_running/1` from both `Arbiter.Sessions.launch/1` and
+`Arbiter.Sessions.Adoption`) and reverted it: `Arbiter.Sessions.Stream`'s
+config — including which `Terminal` it uses — used to be fixed by whichever
+call started the reader first, for the reader's whole life, so several
+existing tests (`StreamTurnActivityTest` among them) that launch first and
+only attach with `terminal: Arbiter.Test.ScriptedPty` afterwards broke: the
+eager start locked the reader onto the real `Terminal.Tmux`, and the later
+scripted `attach/2` talked to that already-wrong-terminal reader instead of
+configuring a new one. Round 4 removed that constraint —
+`reconfigure_if_mismatched/2` lets a reader started under one terminal be
+reopened under another, as long as nobody has attached yet — which is what
+makes it safe for `Arbiter.Sessions.start_scope/2` and `Arbiter.Sessions.Adoption`'s
+reconcile loop to call `ensure_reader/2` right after `mark_running/1` again
+(bd-5pelo2 round 5 finding 1): the launch-first-attach-with-a-different-terminal
+tests above now pass because the later real `attach/2` reconfigures the eager
+reader instead of being stuck behind it. An eager start that fails to open
+(tmux not reachable yet at launch) is retried by the first real `attach/2`
+rather than surfacing as a stale error to a caller who didn't cause it.
 
-**Known gap: an `arbiter` restart drops the bytes written while no reader was
-alive.** The moduledoc's claim that a restart "drops the reader but never the
-session" is true of the pipe file (`tmux pipe-pane` keeps appending to it
-regardless of whether anything is reading) but not of the durable transcript:
-`open_stream/1` seeks to the pipe file's *current* size before adopting it, so
-whatever the pane wrote between the old reader dying and the new one adopting
-never reaches `<id>.raw`. This is the same class of hole as the never-attached
-deferral above, just triggered by a restart instead of a session nobody opens.
-Closing it means persisting the last transcribed pipe offset alongside the
-transcript handle and replaying `old_offset..new_base` on adopt, rather than
-always starting from the pipe file's current size — left for the same
-follow-up as the deferral above (bd-5pelo2, round 2, finding 3).
+**Closed: an `arbiter` restart no longer drops the bytes written while no
+reader was alive.** The moduledoc's claim that a restart "drops the reader
+but never the session" is true of the pipe file (`tmux pipe-pane` keeps
+appending to it regardless of whether anything is reading) but used to not be
+true of the durable transcript: `open_stream/1` seeks to the pipe file's
+*current* size before adopting it, so whatever the pane wrote between the old
+reader dying and the new one adopting never reached `<id>.raw`.
+`Arbiter.Sessions.Transcript.write_offset/2` (a sidecar file,
+`<id>.raw.offset`) now persists the last pipe-file position the transcript
+capture actually reached, and `Stream.catch_up_transcript/2` replays
+`old_offset..new_base` through redaction before the reader goes live —
+closing the gap for both a restart and a session's first-ever reader
+(bd-5pelo2, round 4, finding 1). The persisted offset is the *written*
+position, not the pipe position: the redaction hold-back buffer can be
+sitting on up to 8 KB of not-yet-written tail at any given tick, and
+persisting past it would claim those bytes were captured when they were not
+(bd-5pelo2, round 5, finding 3).
 
 ## 12. Open questions and edge cases
 

@@ -135,6 +135,11 @@ defmodule Arbiter.Sessions.Transcript do
   Persist `offset` (a byte position in `id`'s pipe file) as the point its
   transcript capture has reached. Best-effort: a write failure is logged and
   swallowed, same posture as `append_open/3`.
+
+  A one-shot open/write/close, for a caller that only writes once (tests,
+  anything outside `Stream`'s hot path). `Stream` itself uses `open_offset/1`
+  + `write_offset_fd/2` instead, to avoid paying this cost on every pumped
+  chunk.
   """
   @spec write_offset(String.t(), non_neg_integer()) :: :ok
   def write_offset(id, offset) when is_binary(id) and id != "" and is_integer(offset) do
@@ -151,6 +156,54 @@ defmodule Arbiter.Sessions.Transcript do
 
         :ok
     end
+  end
+
+  @doc """
+  Open `id`'s pipe-offset sidecar for repeated `write_offset_fd/2` writes,
+  creating its parent directory if needed.
+
+  For a caller (`Stream`) that persists the offset once per pumped chunk —
+  up to ~40 times a second on the default 25ms poll — paying `File.mkdir_p`
+  plus an open/write/close on every call is the same per-write cost round 1
+  removed for the transcript fd itself (see the moduledoc). This opens the
+  fd once; `write_offset_fd/2` reuses it with `:file.pwrite/3`.
+  """
+  @spec open_offset(String.t()) :: {:ok, :file.io_device()} | {:error, term()}
+  def open_offset(id) when is_binary(id) and id != "" do
+    path = offset_path_for(id)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)) do
+      :file.open(path, [:read, :write, :raw, :binary])
+    end
+  end
+
+  @doc """
+  Persist `offset` through an already-open sidecar fd from `open_offset/1`.
+
+  Always overwrites at position 0 rather than appending or truncating: the
+  offset persisted here only ever grows (it tracks how far a monotonically
+  growing pipe file has been transcribed), so its decimal width never
+  shrinks between writes and the file is always left holding exactly one
+  well-formed integer for `read_offset/1`. Best-effort, same posture as
+  `write_offset/2`.
+  """
+  @spec write_offset_fd(:file.io_device(), non_neg_integer()) :: :ok
+  def write_offset_fd(fd, offset) when is_integer(offset) and offset >= 0 do
+    case :file.pwrite(fd, 0, Integer.to_string(offset)) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Sessions.Transcript: offset pwrite failed: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  @doc "Close a sidecar fd opened with `open_offset/1`."
+  @spec close_offset(:file.io_device()) :: :ok
+  def close_offset(fd) do
+    _ = :file.close(fd)
+    :ok
   end
 
   @doc """

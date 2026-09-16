@@ -97,7 +97,8 @@ defmodule Arbiter.Sessions do
           provision: boolean(),
           cols: pos_integer(),
           rows: pos_integer(),
-          runner: module()
+          runner: module(),
+          ensure_reader: boolean()
         ]
 
   @doc """
@@ -133,6 +134,14 @@ defmodule Arbiter.Sessions do
       lifecycle tests that assert only the command). Default `true`.
     * `:cols` / `:rows` — initial pane geometry (default #{@default_cols}x#{@default_rows}).
     * `:runner` — command runner module, for tests. See `Arbiter.Sessions.Runner`.
+    * `:ensure_reader` — `false` skips the eager `Arbiter.Sessions.Stream.ensure_reader/2`
+      call this function otherwise makes right after `mark_running/1` (§11's
+      raw-transcript capture, bd-5pelo2 round 5 finding 1). Default `true`.
+      A test that needs precise, deterministic control over exactly when and
+      under what terminal the *first* `open_stream/1` happens — driving that
+      race itself rather than racing an eager background start — wants
+      `false` here (see `ArbiterWeb.SessionChannelTest`'s `on_start_stream`
+      hook, which only fires once, on whichever call opens the reader first).
   """
   @spec launch(launch_opts()) :: {:ok, Session.t()} | {:error, term()}
   def launch(opts \\ []) do
@@ -287,14 +296,19 @@ defmodule Arbiter.Sessions do
     with {:ok, ended} <- Ash.update(current, %{end_reason: reason}, action: :mark_ended) do
       Phoenix.PubSub.broadcast(Arbiter.PubSub, lifecycle_topic(), {:session_ended, ended.id})
       _ = archive_session_jsonl(ended)
+      _ = purge_transcript_pipe(ended)
       {:ok, ended}
     end
   end
 
-  # Best-effort, and never on the caller's critical path: `archive_session/4`
-  # already reduces every failure mode to `{:ok, report}` (see its moduledoc),
-  # so this can only fail by raising, which is exactly what the `rescue` is
-  # for — a session ending must never be blocked by its own archival.
+  # Best-effort: `archive_session/4` already reduces every failure mode to
+  # `{:ok, report}` (see its moduledoc), so this can only fail by raising,
+  # which is exactly what the `rescue` is for — a session ending must never
+  # be blocked by its own archival. Synchronous by design, not "never on the
+  # caller's critical path" as an earlier revision of this comment claimed:
+  # it runs inline inside `mark_ended/2`, which is on the Kill path, the
+  # adoption/orphan sweeps, and (§11's own reader) `Stream`'s `:alive`
+  # handler.
   defp archive_session_jsonl(%Session{} = session) do
     Arbiter.Worker.SessionArchive.archive_coordinator_session(session)
   rescue
@@ -305,6 +319,39 @@ defmodule Arbiter.Sessions do
       )
 
       :ok
+  end
+
+  # The tmux pipe file (`Naming.pipe_path/1`) lives on tmpfs and is no longer
+  # closed when the last client detaches (`Stream`'s moduledoc, bd-5pelo2
+  # finding 1) — nothing else deletes it once a session is truly over, so
+  # without this it sits in RAM for the whole `TranscriptRetention` window
+  # even though the durable, redacted `<id>.raw` already holds its content
+  # (bd-5pelo2 round 5 finding 5). Safe here: every path that reaches
+  # `mark_ended/2` (Kill, the `:alive` exit handler, the adoption/orphan
+  # sweeps) has already established the pane's writer is gone before calling
+  # it. Best-effort — a missing or unremovable file must never block the row
+  # from ending.
+  defp purge_transcript_pipe(%Session{id: id}) do
+    case Naming.pipe_path(id) do
+      {:ok, path} ->
+        case File.rm(path) do
+          :ok ->
+            :ok
+
+          {:error, :enoent} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Sessions.mark_ended: pipe purge failed path=#{path}: #{inspect(reason)}"
+            )
+
+            :ok
+        end
+
+      {:error, _reason} ->
+        :ok
+    end
   end
 
   @doc """
@@ -466,7 +513,21 @@ defmodule Arbiter.Sessions do
 
     case run(runner(opts), command, args, env: Provider.env(session)) do
       {_out, 0} ->
-        mark_running(session)
+        with {:ok, running} <- mark_running(session) do
+          # Starts §11's raw-transcript capture up front instead of waiting
+          # on a browser's first `attach/2` — a session nobody ever opens
+          # would otherwise never be captured at all (bd-5pelo2 round 5
+          # finding 1). Fire-and-forget: `ensure_reader/2` logs and swallows
+          # its own failures, and a session whose eager start failed still
+          # gets a reader from the first real `attach/2`. Skippable via
+          # `:ensure_reader` (see `launch/1`'s doc) for a test that needs to
+          # drive the first `open_stream/1` itself.
+          if Keyword.get(opts, :ensure_reader, true) do
+            _ = Arbiter.Sessions.Stream.ensure_reader(running, opts)
+          end
+
+          {:ok, running}
+        end
 
       {out, status} ->
         reason = "launch failed (#{command} exited #{status}): #{summarize(out)}"

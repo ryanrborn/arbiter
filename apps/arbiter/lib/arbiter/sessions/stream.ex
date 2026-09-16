@@ -32,23 +32,28 @@ defmodule Arbiter.Sessions.Stream do
   session: the pipe keeps writing to its file regardless, and a fresh reader
   adopts it on the next attach).
 
-  This closes the gap for any session a browser attaches to at least once.
-  It does **not** yet cover a session nobody ever attaches to at all — the
-  pipe is only started by the first `attach/2`, same as before. That
-  remaining gap is a deliberate, documented deferral (see
-  `docs/browser-hosted-coordinator-sessions.md` §11); closing it needs the
-  reader started from session launch/adoption rather than from the channel,
-  which touches enough of the launch and adoption call paths to be its own
-  change.
+  This closed the gap for any session a browser attaches to at least once,
+  but not the one nobody ever attaches to at all — the pipe was still only
+  started by the first `attach/2`. `ensure_reader/2` (bd-5pelo2 round 4
+  finding 2) closes that one too: `Arbiter.Sessions.start_scope/2` calls it
+  right after `mark_running/1`, and so does `Arbiter.Sessions.Adoption`'s
+  reconcile loop after re-adopting a session, so every session gets a reader
+  — and therefore §11 capture — from the moment it is confirmed running,
+  whether or not a browser ever opens it (bd-5pelo2 round 5 finding 1).
+  `reconfigure_if_mismatched/2` below is what makes that safe for tests that
+  launch first and only attach with a scripted terminal afterwards: the
+  eager start's terminal is swapped out for the real `attach/2`'s, as long as
+  nobody has attached yet.
 
-  It also does not yet cover the bytes a pane writes to its pipe file *while*
-  no reader is alive — the `arbiter` restart window above. `open_stream/1`
-  seeks to the pipe file's current size before adopting it (for the resume
-  transport seam, §4.5 — the client-facing snapshot covers that gap
-  visually), which means the durable transcript (`Arbiter.Sessions.Transcript`)
-  silently skips whatever the pane wrote during the dead stretch. Same class
-  of documented gap as the never-attached case above, just restart-triggered
-  (bd-5pelo2, round 2, finding 3; see `docs/browser-hosted-coordinator-sessions.md` §11).
+  It also covers the bytes a pane writes to its pipe file *while* no reader
+  is alive — the `arbiter` restart window. `open_stream/1` seeks to the pipe
+  file's current size before adopting it (for the resume transport seam,
+  §4.5 — the client-facing snapshot covers that gap visually), so a fresh
+  reader's own read position starts past whatever the pane wrote during the
+  dead stretch; `catch_up_transcript/2` is the separate step that feeds that
+  stretch through redaction into the durable transcript before the reader
+  goes live, using the pipe-offset sidecar (`Arbiter.Sessions.Transcript.write_offset/2`)
+  to know where the last reader left off (bd-5pelo2, round 4, finding 1).
 
   ## `seq` is a byte offset, not a counter
 
@@ -457,6 +462,13 @@ defmodule Arbiter.Sessions.Stream do
   def init({session, opts}) do
     config = config(opts)
 
+    # A `DynamicSupervisor` shutdown (app stop, `terminate_child`) sends a
+    # plain `:shutdown` exit signal; without trapping it this process dies
+    # before `terminate/2` runs, so `flush_transcript/1` never gets to write
+    # the held-back redaction tail or the corrected final offset (bd-5pelo2
+    # round 5 finding 3).
+    Process.flag(:trap_exit, true)
+
     state = %{
       session: session,
       id: session.id,
@@ -478,6 +490,7 @@ defmodule Arbiter.Sessions.Stream do
       open_error: nil,
       transcript_handle: nil,
       transcript_tail: <<>>,
+      transcript_offset_fd: nil,
       last_turn_touch_ms: nil,
       usage_task_ref: nil,
       usage_file_stat: nil,
@@ -506,12 +519,28 @@ defmodule Arbiter.Sessions.Stream do
 
   @impl GenServer
   def handle_call(
-        {:attach, _pid, _last_seq, _cols, _rows, _requested},
+        {:attach, pid, last_seq, cols, rows, requested},
         _from,
         %{open_error: error} = state
       )
       when not is_nil(error) do
-    {:stop, :normal, {:error, error}, state}
+    # An `ensure_reader/2` eager start can fail to open (tmux not reachable
+    # yet at launch) before any real client ever attaches. Surfacing that
+    # stale failure straight to the first real `attach/2` would blame this
+    # call for a problem it didn't cause, and stop a reader a plain retry
+    # could open successfully. Nobody has attached yet in this state — there
+    # is nothing to lose by retrying under the requested terminal instead of
+    # trusting an earlier failure is still true (bd-5pelo2 round 5 finding
+    # 1a).
+    state = %{state | terminal: requested.terminal, path: requested.path || state.path}
+
+    case open_stream(state) do
+      {:ok, opened} ->
+        do_attach(pid, last_seq, cols, rows, refresh_geometry(%{opened | open_error: nil}))
+
+      {:error, reason} ->
+        {:stop, :normal, {:error, reason}, %{state | open_error: reason}}
+    end
   end
 
   def handle_call({:attach, pid, last_seq, cols, rows, requested}, _from, state) do
@@ -597,7 +626,20 @@ defmodule Arbiter.Sessions.Stream do
     )
 
     state = close_stream(state)
-    state = %{state | terminal: terminal, path: path || state.path}
+
+    # The old ring holds frames keyed to the byte space of whatever stream
+    # (possibly a different `path`) was just closed. Carrying it into the
+    # reopened stream would serve `replay_from_ring/2` entries at the wrong
+    # offsets and leave `ring_bytes` overcounted (bd-5pelo2 round 5 finding
+    # 2) — safe to drop outright since `map_size(state.subs) == 0` here,
+    # so nothing has ever been replayed from it.
+    state = %{
+      state
+      | terminal: terminal,
+        path: path || state.path,
+        ring: :queue.new(),
+        ring_bytes: 0
+    }
 
     case open_stream(state) do
       {:ok, opened} -> {:ok, refresh_geometry(opened)}
@@ -753,7 +795,12 @@ defmodule Arbiter.Sessions.Stream do
     with {:ok, %{snapshot: snapshot}} <- start_or_adopt(state),
          {:ok, fd} <- :file.open(state.path, [:read, :binary, :raw]),
          {:ok, _} <- :file.position(fd, base) do
-      state = %{state | transcript_handle: open_transcript(state.id)}
+      state = %{
+        state
+        | transcript_handle: open_transcript(state.id),
+          transcript_offset_fd: open_transcript_offset(state.id)
+      }
+
       state = catch_up_transcript(state, base)
 
       {:ok,
@@ -784,7 +831,11 @@ defmodule Arbiter.Sessions.Stream do
          {:ok, data} <- read_pipe_range(state.path, offset, base - offset),
          true <- byte_size(data) > 0 do
       state = record_transcript(state, data)
-      Transcript.write_offset(state.id, base)
+      # `base` includes whatever this catch-up just handed to the redaction
+      # hold-back buffer (`record_transcript/2`) and is not yet on disk —
+      # persist the position actually written, same correction as
+      # `persist_transcript_offset/1` (bd-5pelo2 round 5 finding 3).
+      persist_offset(state, base - byte_size(state.transcript_tail))
       state
     else
       _ -> state
@@ -820,6 +871,23 @@ defmodule Arbiter.Sessions.Stream do
 
       {:error, reason} ->
         Logger.warning("Sessions.Stream #{id}: transcript open failed: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  # Opened once per reader lifetime, same rationale as `open_transcript/1`
+  # (bd-5pelo2 finding 3): the offset sidecar used to pay `File.mkdir_p` plus
+  # an open/write/close on *every* pumped chunk — up to 40/s on the 25ms poll
+  # path (bd-5pelo2 round 5 finding 4). `persist_offset/2` now reuses this fd
+  # with `:file.pwrite/3` instead.
+  defp open_transcript_offset(id) do
+    case Transcript.open_offset(id) do
+      {:ok, fd} ->
+        fd
+
+      {:error, reason} ->
+        Logger.warning("Sessions.Stream #{id}: transcript offset open failed: #{inspect(reason)}")
+
         nil
     end
   end
@@ -865,7 +933,13 @@ defmodule Arbiter.Sessions.Stream do
       end
 
     if handle, do: Transcript.close(handle)
-    %{state | transcript_handle: nil, transcript_tail: <<>>}
+
+    # Everything up to `seq` is now on disk — the tail this flush just wrote,
+    # as-is, has nothing left held back.
+    persist_offset(state, state.seq)
+    if state.transcript_offset_fd, do: Transcript.close_offset(state.transcript_offset_fd)
+
+    %{state | transcript_handle: nil, transcript_tail: <<>>, transcript_offset_fd: nil}
   end
 
   defp write_transcript(nil, _data, _redact_values), do: nil
@@ -906,13 +980,23 @@ defmodule Arbiter.Sessions.Stream do
     |> touch_turn()
   end
 
-  # `state.seq` after `record_transcript/2` has run for this chunk is exactly
-  # how far into the pipe file the transcript capture has reached — the
-  # offset a later reader's `catch_up_transcript/2` needs (bd-5pelo2 round 4
-  # finding 1).
+  # `state.seq` after `record_transcript/2` has run for this chunk is the
+  # pipe file's position, not the transcript's — `record_transcript/2` can be
+  # holding up to `@max_hold_bytes` of it back in `transcript_tail` pending a
+  # safe (newline, or closed-PEM) cut. Persisting `seq` as-is claims those
+  # unwritten bytes were transcribed; an `arbiter` restart before they
+  # actually are then makes `catch_up_transcript/2` start past them, losing
+  # them for good (bd-5pelo2 round 5 finding 3). Persist the position
+  # actually written instead.
   defp persist_transcript_offset(state) do
-    if state.transcript_handle, do: Transcript.write_offset(state.id, state.seq)
+    persist_offset(state, state.seq - byte_size(state.transcript_tail))
     state
+  end
+
+  defp persist_offset(%{transcript_offset_fd: nil}, _value), do: :ok
+
+  defp persist_offset(%{transcript_offset_fd: fd}, value) do
+    Transcript.write_offset_fd(fd, value)
   end
 
   # A secret can straddle a poll tick's chunk boundary — an operator *typing*
