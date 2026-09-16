@@ -113,3 +113,86 @@ test("writing a malformed state does not poison the store", () => {
 
   assert.deepEqual(readDockState(store), EMPTY)
 })
+
+// -- scroll survival ----------------------------------------------------------
+//
+// `sticky: true` keeps the dock's process and its DOM node across a
+// `live_redirect`, but the client gets there by *re-parenting* the node into
+// the incoming main container (`LiveSocket.replaceMain`'s
+// `stickies.forEach(el => newMainEl.appendChild(el))`). Detaching an element,
+// even for one frame, resets `scrollTop` on every scrollable node inside it —
+// so "the dock survives navigation" and "the dock's scroll position survives
+// navigation" are two different claims, and only the first is free.
+//
+// The browser check (`scripts/verify_session_dock.mjs`) measures the real
+// thing. These cover the bookkeeping either side of it.
+
+import { DOCK_SCROLL_ATTR, rememberScroll, restoreScroll } from "../../assets/js/session_dock.mjs"
+
+function scrollable(id, top = 0, marked = true) {
+  return {
+    id,
+    scrollTop: top,
+    hasAttribute: (name) => marked && name === DOCK_SCROLL_ATTR
+  }
+}
+
+function fakeRoot(children) {
+  return {
+    querySelector: (selector) => {
+      const id = selector.replace(/^\[id="/, "").replace(/"\]$/, "")
+      return children.find((c) => c.id === id) || null
+    }
+  }
+}
+
+test("a scroll on a marked region is remembered by id", () => {
+  const tops = new Map()
+  rememberScroll(tops, scrollable("session-dock-roster-panel", 60))
+
+  assert.deepEqual([...tops], [["session-dock-roster-panel", 60]])
+})
+
+test("scrolls on unmarked, id-less or non-element targets are ignored", () => {
+  const tops = new Map()
+
+  rememberScroll(tops, scrollable("unmarked", 10, false))
+  rememberScroll(tops, scrollable("", 10))
+  rememberScroll(tops, null)
+  rememberScroll(tops, {})
+  rememberScroll(tops, document_like())
+
+  assert.equal(tops.size, 0)
+
+  function document_like() {
+    return { id: "x", scrollTop: 5 }
+  }
+})
+
+test("restore puts every remembered offset back onto the element it came from", () => {
+  const panel = scrollable("session-dock-roster-panel", 0)
+  const frame = scrollable("session-dock-frame-abc", 0)
+  const tops = new Map([
+    ["session-dock-roster-panel", 60],
+    ["session-dock-frame-abc", 900]
+  ])
+
+  restoreScroll(fakeRoot([panel, frame]), tops)
+
+  assert.equal(panel.scrollTop, 60)
+  assert.equal(frame.scrollTop, 900)
+})
+
+test("restore skips regions that are no longer in the dock, and never throws", () => {
+  const panel = scrollable("session-dock-roster-panel", 0)
+  const tops = new Map([
+    ["session-dock-roster-panel", 60],
+    ["session-dock-frame-gone", 12]
+  ])
+
+  assert.doesNotThrow(() => restoreScroll(fakeRoot([panel]), tops))
+  assert.equal(panel.scrollTop, 60)
+
+  assert.doesNotThrow(() => restoreScroll(null, tops))
+  assert.doesNotThrow(() => restoreScroll(fakeRoot([panel]), null))
+})

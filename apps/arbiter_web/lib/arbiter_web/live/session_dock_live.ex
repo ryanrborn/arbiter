@@ -233,6 +233,7 @@ defmodule ArbiterWeb.SessionDockLive do
       <div
         :if={@open?}
         id="session-dock-roster-panel"
+        data-dock-scroll
         class={[
           "mb-1 max-h-[min(58vh,420px)] overflow-y-auto",
           "rounded-t-[var(--radius-panel)] border border-solid border-[var(--border-default)]",
@@ -328,7 +329,10 @@ defmodule ArbiterWeb.SessionDockLive do
       <%!--
       Phase 1's deliverable: a correctly-sized, empty frame. Phase 2 (bd-14b11h)
       mounts the terminal inside it — deliberately not here, so the hook
-      lifecycle and the geometry are somebody else's one problem.
+      lifecycle and the geometry are somebody else's one problem. When it
+      does, the scrollback container wants `data-dock-scroll` on it, the same
+      as the roster panel: a sticky view is re-parented on every live
+      navigation, and that is what resets a scroll offset.
       --%>
       <div
         :if={@expanded?}

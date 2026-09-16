@@ -20,6 +20,10 @@
 
 export const DOCK_STORAGE_KEY = "arbiter:session-dock"
 
+// Regions inside the dock whose scroll offset has to survive a live
+// navigation. See `rememberScroll`/`restoreScroll` for why that is not free.
+export const DOCK_SCROLL_ATTR = "data-dock-scroll"
+
 const EMPTY = Object.freeze({ open: [], expanded: null })
 
 // `window.localStorage` can throw on access, so even getting hold of the
@@ -77,12 +81,76 @@ function normalize(state) {
   return { open, expanded }
 }
 
+// -- scroll survival ----------------------------------------------------------
+//
+// `sticky: true` keeps the dock's process and its DOM node across a
+// `live_redirect`, but the client gets there by *re-parenting* the node:
+// `LiveSocket.replaceMain` does `stickies.forEach(el =>
+// newMainEl.appendChild(el))` before swapping the main container in. Detaching
+// an element, even for the one frame that takes, resets `scrollTop` on every
+// scrollable node inside it — so the dock coming through navigation intact and
+// the dock's *scroll position* coming through it are two different claims, and
+// only the first one is free.
+//
+// So the dock keeps its own book of offsets, written on every scroll inside a
+// marked region and read back when LiveView says it has navigated. Phase 2's
+// terminal frame carries the same attribute and gets the same treatment.
+
+export function rememberScroll(tops, target) {
+  if (!tops || !target || typeof target.hasAttribute !== "function") return tops
+  if (!target.id || typeof target.scrollTop !== "number") return tops
+  if (!target.hasAttribute(DOCK_SCROLL_ATTR)) return tops
+
+  tops.set(target.id, target.scrollTop)
+  return tops
+}
+
+export function restoreScroll(root, tops) {
+  if (!root || !tops || typeof root.querySelector !== "function") return
+
+  for (const [id, top] of tops) {
+    // An attribute selector rather than `#id`: ids here embed session UUIDs,
+    // and `CSS.escape` is not something this module should have to assume.
+    const el = root.querySelector(`[id="${id}"]`)
+    if (el) el.scrollTop = top
+  }
+}
+
 // The hook itself. It owns no DOM — the dock's markup is entirely
 // server-rendered — so it needs no `phx-update="ignore"`; it is only the
 // bridge between `localStorage` and the LiveView.
 export const SessionDock = {
   mounted() {
     this.store = dockStorage(window)
+    this.scrollTops = new Map()
+    this.restoring = false
+
+    // Capture phase: `scroll` does not bubble, but a capture listener on an
+    // ancestor still sees it on the way down to the target. The guard is what
+    // stops the book being overwritten by the zeroes our own restore causes.
+    this.onScroll = (event) => {
+      if (!this.restoring) rememberScroll(this.scrollTops, event.target)
+    }
+    this.el.addEventListener("scroll", this.onScroll, true)
+
+    // `phx:navigate` is dispatched from inside `replaceMain`'s DOM update, one
+    // statement *before* the incoming view's join patch runs — and it is that
+    // patch, re-inserting the preserved dock node, that zeroes the offsets. So
+    // restoring here directly is always too early: it lands, the patch wipes
+    // it, and the resulting `scroll` events write the zeroes back into the
+    // book. Wait a frame for the patch, restore, then wait one more for the
+    // `scroll` events our own write produces before listening again.
+    this.onNavigate = () => {
+      this.restoring = true
+
+      requestAnimationFrame(() => {
+        restoreScroll(this.el, this.scrollTops)
+        requestAnimationFrame(() => {
+          this.restoring = false
+        })
+      })
+    }
+    window.addEventListener("phx:navigate", this.onNavigate)
 
     this.handleEvent("session-dock:persist", (state) => writeDockState(this.store, state))
 
@@ -90,5 +158,9 @@ export const SessionDock = {
     // actually exist and pushes back whatever survived, which is also how a
     // stale id gets swept out of storage.
     this.pushEvent("restore", readDockState(this.store))
+  },
+
+  destroyed() {
+    window.removeEventListener("phx:navigate", this.onNavigate)
   }
 }
