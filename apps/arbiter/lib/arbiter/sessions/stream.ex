@@ -684,6 +684,27 @@ defmodule Arbiter.Sessions.Stream do
     # check as `resize/4`'s own guard.
     resized? = geometry?(cols, rows) and {cols, rows} != {state.cols, state.rows}
     state = if geometry?(cols, rows), do: apply_resize(state, cols, rows), else: state
+
+    # A `pending_snapshot` was captured by `open_stream/1` when this reader
+    # (re)started — before *this* attach's geometry, if it differs, was ever
+    # applied. `take_snapshot/1` prefers it outright, so a fresh reader (the
+    # first join after a linger timeout, or this session's very first) whose
+    # joiner brings a different size would otherwise repaint text the pane
+    # laid out for the old geometry rather than the one it was just resized to.
+    # This is a narrow, secondary cleanup, not the fix for bd-c5udkj's
+    # reported symptom: the client already calls `stream.redraw()` on join
+    # exactly when `resized?` is true (`session_terminal.mjs`), which nudges
+    # Claude Code into repainting regardless of what this branch does. The
+    # bug's actual repro — a same-geometry reload — leaves `resized?` false,
+    # so this drop doesn't fire there; that path is fixed by normalizing line
+    # endings and restoring the cursor in the snapshot itself (tmux.ex).
+    # Dropping the stale snapshot here just avoids compounding a real resize
+    # with stale-geometry text while the redraw catches up. Note also that the
+    # forced re-capture below runs immediately after `resize-window`, before
+    # the pane's program has necessarily processed SIGWINCH, so it can still
+    # capture a mid-reflow frame — pre-existing on the non-pending path too,
+    # not something this branch introduces or fixes.
+    state = if resized?, do: %{state | pending_snapshot: nil}, else: state
     {resume, state} = resume(state, last_seq)
 
     # Everyone *else* learns the client count changed; the joiner is told in

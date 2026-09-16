@@ -39,9 +39,11 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
     test "enables pipe-pane and captures the snapshot in one tmux command list", %{
       session: session
     } do
-      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"scrollback\e[0m", 0} end)
+      SessionRunnerStub.script(fn "tmux", _args, _opts ->
+        {"\x011\t2\x02\nscrollback\e[0m\n", 0}
+      end)
 
-      assert {:ok, %{snapshot: "scrollback\e[0m"}} =
+      assert {:ok, %{snapshot: "scrollback\e[0m\e[3;2H"}} =
                Tmux.start_stream(session, @pipe, opts() ++ [snapshot_lines: 500])
 
       assert last_args() == [
@@ -53,6 +55,12 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
                "coord",
                "cat >> '#{@pipe}'",
                ";",
+               "display-message",
+               "-p",
+               "-t",
+               "coord",
+               "\x01\#{cursor_x}\t\#{cursor_y}\x02",
+               ";",
                "capture-pane",
                "-p",
                "-e",
@@ -61,6 +69,28 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
                "-t",
                "coord"
              ]
+    end
+
+    test "rewrites bare LFs to CRLF so a repaint doesn't staircase", %{session: session} do
+      # `\n` right after the \x02 marker is `display-message`'s own trailing
+      # newline (same as everywhere else this command talks to
+      # `display-message`); the `\n` terminating the last line is
+      # `capture-pane`'s — real tmux emits both, and finalize_capture must
+      # drop each rather than let it become a spurious blank line or an
+      # extra scroll on repaint.
+      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x010\t0\x02\none\ntwo\n", 0} end)
+
+      assert {:ok, %{snapshot: snapshot}} = Tmux.start_stream(session, @pipe, opts())
+      assert snapshot == "one\r\ntwo\e[1;1H"
+    end
+
+    test "leaves the snapshot untouched when the cursor query is unparseable", %{
+      session: session
+    } do
+      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"no cursor marker here", 0} end)
+
+      assert {:ok, %{snapshot: "no cursor marker here"}} =
+               Tmux.start_stream(session, @pipe, opts())
     end
 
     test "does not merge stderr into the snapshot bytes", %{session: session} do
@@ -133,14 +163,23 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
   end
 
   describe "snapshot/2" do
-    test "captures with escape sequences preserved", %{session: session} do
-      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\e[31mred\e[0m", 0} end)
+    test "captures with escape sequences preserved and the cursor restored", %{session: session} do
+      SessionRunnerStub.script(fn "tmux", _args, _opts ->
+        {"\x0110\t3\x02\n\e[31mred\e[0m\n", 0}
+      end)
 
-      assert {:ok, "\e[31mred\e[0m"} = Tmux.snapshot(session, opts() ++ [snapshot_lines: 100])
+      assert {:ok, "\e[31mred\e[0m\e[4;11H"} =
+               Tmux.snapshot(session, opts() ++ [snapshot_lines: 100])
 
       assert last_args() == [
                "-S",
                @socket,
+               "display-message",
+               "-p",
+               "-t",
+               "coord",
+               "\x01\#{cursor_x}\t\#{cursor_y}\x02",
+               ";",
                "capture-pane",
                "-p",
                "-e",
@@ -149,6 +188,25 @@ defmodule Arbiter.Sessions.Terminal.TmuxTest do
                "-t",
                "coord"
              ]
+    end
+
+    test "rewrites bare LFs to CRLF so a repaint doesn't staircase", %{session: session} do
+      SessionRunnerStub.script(fn "tmux", _args, _opts ->
+        {"\x010\t0\x02\nfirst\nsecond\n", 0}
+      end)
+
+      assert {:ok, "first\r\nsecond\e[1;1H"} = Tmux.snapshot(session, opts())
+    end
+
+    test "does not touch an already-CRLF line ending", %{session: session} do
+      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"\x010\t0\x02\na\r\nb\n", 0} end)
+
+      assert {:ok, "a\r\nb\e[1;1H"} = Tmux.snapshot(session, opts())
+    end
+
+    test "errors on a non-zero exit", %{session: session} do
+      SessionRunnerStub.script(fn "tmux", _args, _opts -> {"no server running", 1} end)
+      assert {:error, {:tmux_failed, 1, "no server running"}} = Tmux.snapshot(session, opts())
     end
   end
 

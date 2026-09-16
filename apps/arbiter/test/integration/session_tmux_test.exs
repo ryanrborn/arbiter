@@ -115,6 +115,17 @@ defmodule Arbiter.Integration.SessionTmuxTest do
     assert attached.meta.cols == 80
     assert attached.meta.rows == 24
 
+    # Against a real tmux server (not the scripted runner in tmux_test.exs):
+    # the display-message/capture-pane framing bytes (\x01 cursor prefix,
+    # \x02 separator) must never leak into the snapshot xterm renders. The
+    # byte-level shape of the trailing-newline strip and cursor restore
+    # (bd-c5udkj) is covered precisely in tmux_test.exs against scripted
+    # tmux output; a real pane's content is non-deterministic (blank rows
+    # legitimately produce CRLF right up to the CUP), so this integration
+    # test only guards against the framing bytes leaking through.
+    refute attached.snapshot =~ "\x01"
+    refute attached.snapshot =~ "\x02"
+
     type(id, "printf 'phase-four-ok\\n'")
 
     output = await_output(id, &String.contains?(&1, "phase-four-ok"))
