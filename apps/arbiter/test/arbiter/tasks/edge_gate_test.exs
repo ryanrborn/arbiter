@@ -76,7 +76,13 @@ defmodule Arbiter.Tasks.EdgeGateTest do
   describe "blockers/2" do
     test "depends_on targets and blocks sources that are not closed" do
       deps = [dep(:depends_on, "bd-1", "bd-2"), dep(:blocks, "bd-3", "bd-4")]
-      issues = [issue("bd-1", :open), issue("bd-4", :open), issue("bd-2", :open), issue("bd-3", :open)]
+
+      issues = [
+        issue("bd-1", :open),
+        issue("bd-4", :open),
+        issue("bd-2", :open),
+        issue("bd-3", :open)
+      ]
 
       assert EdgeGate.blockers(deps, issues) == %{"bd-1" => ["bd-2"], "bd-4" => ["bd-3"]}
     end

@@ -94,7 +94,9 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
         )
 
       assert board.promote == nil
-      assert %{state: :blocked, reason: "blocked — conflicts with bd-7 (running)"} = entry(board, "bd-1")
+
+      assert %{state: :blocked, reason: "blocked — conflicts with bd-7 (running)"} =
+               entry(board, "bd-1")
     end
 
     for {status, state} <- [
@@ -139,7 +141,9 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       board =
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
-          workers: [worker("bd-7#impl2", :running, %{meta: %{role: :implementer, revises: "bd-7"}})],
+          workers: [
+            worker("bd-7#impl2", :running, %{meta: %{role: :implementer, revises: "bd-7"}})
+          ],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
@@ -232,7 +236,9 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
         )
 
       assert second.promote == nil
-      assert %{reason: "blocked — conflicts with bd-1c4pg3 (running)"} = entry(second, "bd-7srf5d")
+
+      assert %{reason: "blocked — conflicts with bd-1c4pg3 (running)"} =
+               entry(second, "bd-7srf5d")
 
       # …and once it closes, the second one goes.
       third =

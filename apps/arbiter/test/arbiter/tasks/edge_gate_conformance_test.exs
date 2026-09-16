@@ -189,7 +189,8 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
     end
 
     parked =
-      Map.new(Map.get(scenario, :closed, []), &{&1, close(by_key[&1])}) |> Map.merge(
+      Map.new(Map.get(scenario, :closed, []), &{&1, close(by_key[&1])})
+      |> Map.merge(
         Map.new(Map.get(scenario, :awaiting_verification, []), &{&1, await(by_key[&1])})
       )
 
