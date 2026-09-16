@@ -5,6 +5,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   import ExUnit.CaptureLog
 
+  require Ash.Query
+
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow.Tally
@@ -54,6 +56,19 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   @ws_github %{
     "merge" => %{
       "strategy" => "github",
+      "config" => %{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "test-token-abc123"
+      }
+    }
+  }
+
+  # P4 (bd-df3zlo / #1736): the same GitHub workspace with the read-path flip on.
+  @ws_github_coverage %{
+    "merge" => %{
+      "strategy" => "github",
+      "coverage_enabled" => true,
       "config" => %{
         "owner" => "octo",
         "repo" => "widget",
@@ -959,6 +974,219 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       assert %{disagreements: 1} = Tally.snapshot()
       assert Tally.snapshot().by_transition["covered->unknown"] == 1
+    end
+
+    # --- P4 (bd-df3zlo / #1736): the read-path flip -----------------------
+    #
+    # The queue's half of the switch. Flag off, the ReviewedSha guard decides
+    # (every test above this block); flag on, `Coverage.decide/3` does.
+
+    @tag workspace_config: @ws_github_coverage
+    test "flag on: merges a covered head the ReviewedSha guard would refuse", %{
+      workspace: ws,
+      task: task
+    } do
+      Tally.reset()
+      on_exit(&Tally.reset/0)
+
+      head = String.duplicate("1a", 20)
+      # The task row still carries an older stamp — the exact shape that used
+      # to buy a whole re-review (and, in the queue, an unbounded retry).
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: "older-stamp"}, action: :update)
+
+      test_pid = self()
+      sha_stub(80, head, test_pid)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      %{items: [item]} = MergeQueue.state(name)
+
+      {:ok, _} =
+        Coverage.record(%{
+          task_id: task.id,
+          mr_ref: item.mr_ref,
+          head_sha: head,
+          base_ref: "main",
+          net_diff_id: "fp-mq-flip",
+          kind: :reviewed,
+          source: :review_gate
+        })
+
+      log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
+
+      assert_received {:merge_sha, ^head}
+      assert Ash.get!(Issue, task.id).status == :closed
+      assert log =~ "old=uncovered"
+      assert log =~ "new=covered"
+      assert log =~ "coverage predicate's answer (covered) is the one acted on"
+    end
+
+    @tag workspace_config: @ws_github_coverage
+    test "flag on: refuses a head with no coverage that the old guard would merge", %{
+      workspace: ws,
+      task: task
+    } do
+      Tally.reset()
+      on_exit(&Tally.reset/0)
+
+      head = String.duplicate("2b", 20)
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: head}, action: :update)
+
+      test_pid = self()
+      sha_stub(81, head, test_pid)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      capture_log(fn -> :ok = MergeQueue.tick(name) end)
+
+      refute_received {:merge_sha, _}
+      assert Ash.get!(Issue, task.id).status == :open
+    end
+
+    @tag workspace_config: @ws_github_coverage
+    test "flag on: a forge-lagging head waits on rule 2 instead of refusing", %{
+      workspace: ws,
+      task: task
+    } do
+      Tally.reset()
+      on_exit(&Tally.reset/0)
+
+      stamped = String.duplicate("3c", 20)
+      forge_head = String.duplicate("4d", 20)
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: stamped}, action: :update)
+
+      test_pid = self()
+
+      stub(fn conn ->
+        cond do
+          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 82})
+
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews_payload("APPROVED"))
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/compare/") ->
+            send(test_pid, {:compared, conn.request_path})
+
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"status" => "ahead"})
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/82") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => 82, "head" => %{"sha" => forge_head}}))
+
+          conn.method == "PUT" and String.ends_with?(conn.request_path, "/merge") ->
+            send(test_pid, {:merge_sha, :unexpected})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      %{items: [item]} = MergeQueue.state(name)
+
+      {:ok, _} =
+        Coverage.record(%{
+          task_id: task.id,
+          mr_ref: item.mr_ref,
+          head_sha: stamped,
+          base_ref: "main",
+          net_diff_id: "fp-mq-lag",
+          kind: :reviewed,
+          source: :review_gate
+        })
+
+      capture_log(fn -> :ok = MergeQueue.tick(name) end)
+
+      assert_received {:compared, path}
+      assert path =~ "/compare/#{forge_head}...#{stamped}"
+      refute_received {:merge_sha, _}
+      assert Tally.snapshot().by_transition["uncovered->unknown"] == 1
+
+      assert [event] =
+               Arbiter.Events.Record
+               |> Ash.Query.filter(topic == "coverage_shadow")
+               |> Ash.read!()
+
+      assert event.payload["new"] == "unknown"
+      assert event.payload["new_reason"] == "forge_lagging"
+      assert event.payload["authoritative"] == "new"
+    end
+
+    @tag workspace_config: @ws_github_coverage
+    test "flag on: a probe that cannot answer waits, bounded, then parks once", %{
+      workspace: ws,
+      task: task
+    } do
+      Tally.reset()
+      on_exit(&Tally.reset/0)
+
+      stamped = String.duplicate("5e", 20)
+      forge_head = String.duplicate("6f", 20)
+      {:ok, task} = Ash.update(task, %{last_reviewed_sha: stamped}, action: :update)
+
+      test_pid = self()
+
+      stub(fn conn ->
+        cond do
+          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 83})
+
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews_payload("APPROVED"))
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/compare/") ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "boom"})
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/83") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => 83, "head" => %{"sha" => forge_head}}))
+
+          conn.method == "PUT" and String.ends_with?(conn.request_path, "/merge") ->
+            send(test_pid, {:merge_sha, :unexpected})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      %{items: [item]} = MergeQueue.state(name)
+
+      {:ok, _} =
+        Coverage.record(%{
+          task_id: task.id,
+          mr_ref: item.mr_ref,
+          head_sha: stamped,
+          base_ref: "main",
+          net_diff_id: "fp-mq-probe-fail",
+          kind: :reviewed,
+          source: :review_gate
+        })
+
+      ticks = MergeQueue.coverage_unknown_grace_ticks() + 2
+
+      log =
+        capture_log(fn ->
+          for _ <- 1..ticks, do: :ok = MergeQueue.tick(name)
+        end)
+
+      refute_received {:merge_sha, _}
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert item.coverage_parked?
+      assert item.coverage_unknown_polls == MergeQueue.coverage_unknown_grace_ticks()
+      assert item.status != :failed, "an unknown answer is a pause, not a failure"
+
+      parked = for line <- String.split(log, "\n"), line =~ "coverage_unknown", do: line
+      assert length(parked) == 1, "the park must page the coordinator exactly once"
     end
 
     @tag workspace_config: @ws_github

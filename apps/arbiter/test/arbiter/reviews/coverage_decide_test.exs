@@ -194,18 +194,53 @@ defmodule Arbiter.Reviews.CoverageDecideTest do
       assert Coverage.decide(coverage, sha("s2"), ctx) == {:uncovered, :authored_content}
     end
 
-    test "an ancestry probe that fails is not an ancestry proof" do
+    # P4 (bd-df3zlo / #1736), AC4. A probe that is *present* and cannot answer
+    # is not the same thing as a probe that answers "no": the first leaves the
+    # forge-lag question open, and the rule-3/4 fall-through would then decide a
+    # merge on a head whose provenance we could not establish. So an unavailable
+    # probe stops at rule 2 with its own `unknown` reason — a pause, never a
+    # merge and never a re-review.
+    test "an ancestry probe that cannot answer yields unknown, not a fall-through" do
       coverage = [entry(%{head_sha: sha("s2")})]
 
       for probe <- [
             fn _a, _d -> {:error, :not_a_git_repo} end,
             fn _a, _d -> :error end,
-            fn _a, _d -> raise "git exploded" end
+            fn _a, _d -> raise "git exploded" end,
+            fn _a, _d -> :yes end
           ] do
         ctx = ctx(%{local_head_sha: sha("s2"), ancestor?: probe})
 
-        assert Coverage.decide(coverage, sha("s1"), ctx) == {:uncovered, :authored_content}
+        assert Coverage.decide(coverage, sha("s1"), ctx) == {:unknown, :ancestry_unavailable}
       end
+    end
+
+    test "an unavailable probe never buys a rule-3 `covered`" do
+      # The head's net diff matches a reviewed row, so rule 3 would answer
+      # `covered` — but rule 2 was asked first and could not answer, and AC4
+      # says a probe failure yields `unknown` and never `covered`.
+      coverage = [entry(%{head_sha: sha("s2"), net_diff_id: @fp_a})]
+
+      ctx =
+        ctx(%{
+          local_head_sha: sha("s2"),
+          ancestor?: fn _a, _d -> {:error, :timeout} end,
+          fetch_diff: fn _base, _head -> {:ok, @diff_a_after_base_merge} end
+        })
+
+      assert Coverage.decide_with_record(coverage, sha("s1"), ctx) ==
+               {{:unknown, :ancestry_unavailable}, nil}
+    end
+
+    test "an absent probe is still an unreachable rule 2, not an unavailable one" do
+      # A ctx that supplies no probe at all has declared it cannot ask — the
+      # P3 shape, and the one every non-merge caller uses. That falls through
+      # to the content rules exactly as before; only a probe that was asked and
+      # failed is an `:ancestry_unavailable`.
+      coverage = [entry(%{head_sha: sha("s2")})]
+      ctx = Map.delete(ctx(%{local_head_sha: sha("s2")}), :ancestor?)
+
+      assert Coverage.decide(coverage, sha("s1"), ctx) == {:uncovered, :authored_content}
     end
 
     test "an ancestry probe may answer {:ok, boolean}" do

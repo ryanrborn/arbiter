@@ -1325,6 +1325,71 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "ancestor?/3 (bd-df3zlo / #1736)" do
+    # P4 AC1: the ancestry proof `Coverage.decide/3`'s rule 2 needs before it
+    # will call a head "the forge lagging our own push". GitHub answers it
+    # directly — `compare/{base}...{head}` reports `status` relative to `base`.
+    @ancestor String.duplicate("a", 40)
+    @descendant String.duplicate("b", 40)
+
+    test "`ahead` means the descendant is ahead of the ancestor => true" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/repos/octo/widget/compare/#{@ancestor}...#{@descendant}"
+        # The commit list is irrelevant — only `status` is read — so the page
+        # size is pinned at 1 rather than pulling up to 250 commits per probe.
+        assert conn.query_string =~ "per_page=1"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"status" => "ahead", "ahead_by" => 3, "behind_by" => 0})
+      end)
+
+      assert Github.ancestor?(@ref, @ancestor, @descendant) == {:ok, true}
+    end
+
+    test "`behind` and `diverged` are both a definitive false" do
+      for status <- ["behind", "diverged"] do
+        stub(fn conn ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"status" => status})
+        end)
+
+        assert Github.ancestor?(@ref, @ancestor, @descendant) == {:ok, false}
+      end
+    end
+
+    test "an HTTP failure is an error, never a `false`" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found}} = Github.ancestor?(@ref, @ancestor, @descendant)
+    end
+
+    test "an unrecognised status is an error, never a `false`" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"status" => "sideways"})
+      end)
+
+      assert {:error, {:unexpected_compare_status, "sideways"}} =
+               Github.ancestor?(@ref, @ancestor, @descendant)
+    end
+
+    test "identical commits are ancestors of themselves, with no request at all" do
+      stub(fn _conn -> flunk("ancestor?/3 must not call the forge for an identical pair") end)
+
+      assert Github.ancestor?(@ref, @ancestor, @ancestor) == {:ok, true}
+    end
+
+    test "a malformed sha is rejected without a request" do
+      stub(fn _conn -> flunk("ancestor?/3 must not call the forge with a non-sha") end)
+
+      assert {:error, {:invalid_sha, "HEAD~1"}} = Github.ancestor?(@ref, "HEAD~1", @descendant)
+    end
+  end
+
   describe "merge/2" do
     test "PUTs /merge with the configured merge_method" do
       stub(fn conn ->
