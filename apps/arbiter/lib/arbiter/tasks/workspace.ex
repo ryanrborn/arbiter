@@ -429,6 +429,40 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  Whether the merge paths read `Arbiter.Reviews.Coverage.decide/3` as the
+  **authoritative** answer, from `config["merge"]["coverage_enabled"]`.
+
+  P4 of `docs/review-coverage-and-guard-policy.md` (bd-df3zlo / #1736). When
+  `false` (the **default**), the `issues.last_reviewed_sha` guard decides every
+  merge exactly as it did in P3 and the coverage predicate only shadows it —
+  counting and logging disagreements, acting on nothing. When `true` the two
+  swap roles: `decide/3` decides, the old guard shadows, and the disagreement
+  log line names the coverage answer as the one acted on.
+
+  Off by default on purpose: §6.3's rollout gate is "zero disagreements over
+  ≥20 real merges *with the probe in place*", which is evidence a workspace can
+  only produce by running shadow mode first
+  (`Arbiter.Reviews.CoverageShadow.preflip_gate/0`).
+
+  Accepts both a real boolean and the string `"true"`/`"false"` that round-trip
+  through JSON workspace config. Anything else is treated as `false`.
+  """
+  @spec coverage_enabled?(t()) :: boolean()
+  def coverage_enabled?(workspace) do
+    case get_in(safe_config(workspace), ["merge", "coverage_enabled"]) do
+      true -> true
+      "true" -> true
+      _ -> false
+    end
+  end
+
+  # Every other reader here is handed a loaded `%Workspace{}`; this one is
+  # called from the Watchdog and the MergeQueue, which may hold `nil` (a lane
+  # started without a workspace) or a bare map.
+  defp safe_config(%{config: %{} = config}), do: config
+  defp safe_config(_workspace), do: %{}
+
+  @doc """
   Whether a successful merge to a repo's default branch should fast-forward
   that repo's *primary* local checkout (the shared directory registered in
   `repo_paths` — not a worker's isolated worktree) to the new

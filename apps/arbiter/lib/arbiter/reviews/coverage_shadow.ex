@@ -99,10 +99,19 @@ defmodule Arbiter.Reviews.CoverageShadow do
 
     * `:site` — `:watchdog` or `:merge_queue`.
     * `:old` — the existing guard's answer, normalised to `t:answer/0` by the
-      call site. This is the answer that is acted on.
+      call site.
+    * `:new` — the coverage predicate's answer, when the call site has already
+      computed it (P4's flipped path, which acts on it and must not evaluate
+      it twice). Omitted, this module computes it from `:ctx`.
+    * `:authoritative` — which of the two was acted on: `:old` (P3, and P4
+      with `merge.coverage_enabled` off) or `:new` (P4, flag on). Defaults to
+      `:old`. It changes no arithmetic — both answers are recorded and compared
+      the same way either way — only which one the log line and the event name
+      as load-bearing.
     * `:ctx` — `Coverage.ctx/0`, or a 0-arity function returning one. The
       function form is what keeps a forge lookup off the guard path until the
       shadow actually needs it, and inside this module's rescue when it runs.
+      Ignored when `:new` is supplied.
     * `:coverage` — optional pre-loaded rows; omitted, they are read for
       `:mr_ref`.
   """
@@ -112,6 +121,8 @@ defmodule Arbiter.Reviews.CoverageShadow do
           required(:mr_ref) => String.t() | nil,
           required(:head) => String.t() | nil,
           required(:old) => answer(),
+          optional(:new) => answer(),
+          optional(:authoritative) => :old | :new,
           optional(:workspace_id) => String.t() | nil,
           optional(:ctx) => Coverage.ctx() | (-> Coverage.ctx()),
           optional(:coverage) => [Entry.t()]
@@ -134,10 +145,18 @@ defmodule Arbiter.Reviews.CoverageShadow do
     head = Map.get(obs, :head)
     mr_ref = Map.get(obs, :mr_ref)
 
-    coverage = Map.get_lazy(obs, :coverage, fn -> Coverage.for_mr(mr_ref) end)
-    ctx = resolve_ctx(Map.get(obs, :ctx))
+    {new, mechanical} =
+      case Map.get(obs, :new) do
+        nil ->
+          coverage = Map.get_lazy(obs, :coverage, fn -> Coverage.for_mr(mr_ref) end)
+          Coverage.decide_with_record(coverage, head, resolve_ctx(Map.get(obs, :ctx)))
 
-    {new, mechanical} = Coverage.decide_with_record(coverage, head, ctx)
+        answer ->
+          # The flipped path decided on this answer already; re-deriving it
+          # here would double the forge traffic and could even disagree with
+          # the decision that was acted on.
+          {normalise(answer), nil}
+      end
 
     maybe_record_mechanical(mechanical)
     record_outcome(obs, old, new)
@@ -193,7 +212,9 @@ defmodule Arbiter.Reviews.CoverageShadow do
   defp resolve_ctx(ctx), do: Map.new(ctx || %{})
 
   # §3.4 says the adopter persists the row a rule-3 match implies. P3 is not
-  # that adopter — see the moduledoc.
+  # that adopter — see the moduledoc. P4's flipped path is, but it holds the
+  # row itself (it computed the decision), so what reaches this function is
+  # always a shadow-mode row.
   defp maybe_record_mechanical(nil), do: :ok
 
   defp maybe_record_mechanical(attrs) do
@@ -226,8 +247,8 @@ defmodule Arbiter.Reviews.CoverageShadow do
           "Reviews.CoverageShadow: DISAGREEMENT site=#{site} task=#{Map.get(obs, :task_id)} " <>
             "mr=#{Map.get(obs, :mr_ref)} head=#{Map.get(obs, :head)} " <>
             "old=#{old_class} old_detail=#{short(old_detail)} " <>
-            "new=#{new_class} new_reason=#{short(new_detail)} — shadow only, the existing " <>
-            "last_reviewed_sha guard's answer (#{old_class}) is the one acted on"
+            "new=#{new_class} new_reason=#{short(new_detail)} — " <>
+            acted_on(obs, old_class, new_class)
         )
 
         persist(obs, "disagree", old_class, old_detail, new_class, new_detail)
@@ -235,6 +256,28 @@ defmodule Arbiter.Reviews.CoverageShadow do
     end
 
     :ok
+  end
+
+  # The same line in both modes, differing only in which answer it names as
+  # load-bearing — the one fact an operator reading a disagreement needs and
+  # cannot infer from the two classes.
+  defp acted_on(obs, old_class, new_class) do
+    case authoritative(obs) do
+      :new ->
+        "the coverage predicate's answer (#{new_class}) is the one acted on; the " <>
+          "last_reviewed_sha guard now shadows it"
+
+      :old ->
+        "shadow only, the existing last_reviewed_sha guard's answer (#{old_class}) " <>
+          "is the one acted on"
+    end
+  end
+
+  defp authoritative(obs) do
+    case Map.get(obs, :authoritative) do
+      :new -> :new
+      _ -> :old
+    end
   end
 
   # One report per distinct observation, not one per poll: the MergeQueue
@@ -252,6 +295,10 @@ defmodule Arbiter.Reviews.CoverageShadow do
   defp persist(obs, result, old_class, old_detail, new_class, new_detail) do
     Events.broadcast(Map.get(obs, :workspace_id), @topic, %{
       result: result,
+      # Which predicate decided this merge. The pre-flip gate counts only rows
+      # the old guard decided (`"old"`); once a workspace has flipped, its
+      # rows are no longer evidence about whether it may flip.
+      authoritative: to_string(authoritative(obs)),
       site: to_string(Map.get(obs, :site)),
       task_id: Map.get(obs, :task_id),
       mr_ref: Map.get(obs, :mr_ref),
