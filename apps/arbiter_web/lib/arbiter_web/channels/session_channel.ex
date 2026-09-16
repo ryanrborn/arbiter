@@ -17,6 +17,7 @@ defmodule ArbiterWeb.SessionChannel do
   | `join` | `%{last_seq \\| nil, cols, rows}` | session id comes from the topic |
   | `stdin` | `{:binary, frame}` | `Arbiter.Sessions.Frame`; raw bytes |
   | `resize` | `%{cols, rows}` | debounced client-side |
+  | `redraw` | `%{}` | make the agent repaint; see `Arbiter.Sessions.Stream.redraw/2` |
   | `detach` | `%{}` | leave the session running; the reader is dropped |
   | `kill` | `%{confirm: true}` | via `Arbiter.Sessions.kill/2` |
   | `ping` | `%{ts}` | liveness/RTT for the HUD |
@@ -105,7 +106,16 @@ defmodule ArbiterWeb.SessionChannel do
 
       send(self(), :after_join)
 
-      {:ok, %{seq: attached.seq, mode: Atom.to_string(attached.mode)}, socket}
+      {:ok,
+       %{
+         seq: attached.seq,
+         mode: Atom.to_string(attached.mode),
+         # Whether *this* join changed the pane's size. The snapshot below was
+         # captured in the same breath as that resize, so a `true` here means
+         # the client is about to paint content the pane reflowed rather than
+         # content the agent redrew (bd-14b11h).
+         resized: attached.resized
+       }, socket}
     else
       {:error, :session_gone} ->
         {:error, %{code: "session_gone", detail: "no live session #{session_id}"}}
@@ -217,6 +227,17 @@ defmodule ArbiterWeb.SessionChannel do
   def handle_in("resize", _payload, socket) do
     {:reply, {:error, %{code: "bad_payload", detail: "resize needs positive cols and rows"}},
      socket}
+  end
+
+  # The client is showing bytes the pane laid out for a geometry it no longer
+  # has — a browser terminal whose join resized the pane (`resized` in the join
+  # reply, bd-14b11h). Nothing it can do on its own fixes that: the content has
+  # to come from the agent again.
+  def handle_in("redraw", _payload, socket) do
+    case Stream.redraw(socket.assigns.session_id) do
+      :ok -> {:reply, :ok, socket}
+      {:error, reason} -> {:reply, {:error, %{code: error_code(reason)}}, socket}
+    end
   end
 
   def handle_in("detach", _payload, socket) do

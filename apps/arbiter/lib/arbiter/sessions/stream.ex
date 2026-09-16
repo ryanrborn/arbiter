@@ -192,6 +192,7 @@ defmodule Arbiter.Sessions.Stream do
           mode: :resumed | :snapshot,
           snapshot: binary() | nil,
           replay: [binary()],
+          resized: boolean(),
           meta: meta()
         }
 
@@ -223,6 +224,14 @@ defmodule Arbiter.Sessions.Stream do
   range — `replay` then holds exactly the missed frames, in order, and
   `snapshot` is `nil`. Otherwise `mode` is `:snapshot`, `snapshot` holds
   ANSI-preserving scrollback, and the client resets its sequence to `seq`.
+
+  `resized` says whether this attach's `:cols`/`:rows` changed the pane
+  (bd-14b11h). It matters because the resize and the snapshot happen in the
+  same call: what the pane hands back is content *it* reflowed for the new
+  geometry, not content the agent has redrawn at it, so a client that sees
+  `resized: true` knows the screen it is about to paint is stale and can ask
+  for `redraw/2`. It cannot work this out from `meta`, which by then already
+  reports the size the client itself just asked for.
 
   Subscribers then receive, until they detach or die:
 
@@ -284,6 +293,29 @@ defmodule Arbiter.Sessions.Stream do
   def resize(session_id, cols, rows, subscriber \\ self())
       when is_integer(cols) and cols > 0 and is_integer(rows) and rows > 0 do
     call(session_id, {:resize, subscriber, cols, rows}, {:error, :session_gone})
+  end
+
+  @doc """
+  Make the pane's agent repaint the whole screen (bd-14b11h).
+
+  A terminal application redraws when it is told its size changed, and
+  `SIGWINCH` is the only lever a pane gives us for that — there is no "repaint"
+  command to send an arbitrary TUI, and anything written to stdin would be
+  typed at it rather than acted on. So the nudge is a resize one row short and
+  straight back: two `Terminal.resize/4` calls, ending at the geometry the pane
+  really has, with one `meta` at the end rather than one per step so no other
+  client ever sees the intermediate size.
+
+  This is what a client asks for when it knows the bytes it is showing were
+  laid out for a geometry the pane no longer has — the browser terminal after a
+  LiveView navigation re-mounts it and its join resizes the pane (`resized` in
+  `t:attached/0`).
+
+  A one-row pane has no room to nudge; it is left alone and still answers `:ok`.
+  """
+  @spec redraw(String.t(), pid()) :: :ok | {:error, term()}
+  def redraw(session_id, subscriber \\ self()) do
+    call(session_id, {:redraw, subscriber}, {:error, :session_gone})
   end
 
   @doc """
@@ -447,6 +479,7 @@ defmodule Arbiter.Sessions.Stream do
     # `Terminal.resize/4`, whose contract (and every implementation's guard) is
     # `pos_integer()`, would kill the reader *every other client shares*. Same
     # check as `resize/4`'s own guard.
+    resized? = geometry?(cols, rows) and {cols, rows} != {state.cols, state.rows}
     state = if geometry?(cols, rows), do: apply_resize(state, cols, rows), else: state
     {resume, state} = resume(state, last_seq)
 
@@ -454,7 +487,8 @@ defmodule Arbiter.Sessions.Stream do
     # its own reply, so its mailbox holds exactly one meta for this event.
     broadcast_meta(state, except: pid)
 
-    {:reply, {:ok, Map.put(resume, :meta, meta_payload(state))}, state}
+    {:reply, {:ok, resume |> Map.put(:resized, resized?) |> Map.put(:meta, meta_payload(state))},
+     state}
   end
 
   def handle_call({:detach, pid}, _from, state) do
@@ -480,6 +514,14 @@ defmodule Arbiter.Sessions.Stream do
       state = apply_resize(state, cols, rows)
       broadcast_meta(state)
       {:reply, :ok, state}
+    else
+      {:reply, {:error, :not_attached}, state}
+    end
+  end
+
+  def handle_call({:redraw, pid}, _from, state) do
+    if Map.has_key?(state.subs, pid) do
+      {:reply, :ok, nudge(state)}
     else
       {:reply, {:error, :not_attached}, state}
     end
@@ -877,6 +919,22 @@ defmodule Arbiter.Sessions.Stream do
       end
     end
   end
+
+  # One SIGWINCH away from the pane's real size and one back. `apply_resize`
+  # skips a no-op resize, so both steps have to be a real change for the agent
+  # to see anything — which is why a one-row pane is left alone rather than
+  # nudged to zero rows, a size `Terminal.resize/4` refuses anyway.
+  defp nudge(%{rows: rows} = state) when rows > 1 do
+    state =
+      state
+      |> apply_resize(state.cols, rows - 1)
+      |> apply_resize(state.cols, rows)
+
+    broadcast_meta(state)
+    state
+  end
+
+  defp nudge(state), do: state
 
   defp refresh_geometry(state) do
     case state.terminal.geometry(state.session, state.opts) do
