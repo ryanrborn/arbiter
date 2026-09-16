@@ -520,4 +520,16 @@ defmodule Arbiter.Tasks.IssueTest do
       assert task.id in ids
     end
   end
+
+  describe "ready/1 excludes non-dispatchable issue types" do
+    test "an epic with satisfied dependencies is excluded; a non-epic is included", %{ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "epic", workspace_id: ws.id, issue_type: :epic})
+      {:ok, task} = Ash.create(Issue, %{title: "task", workspace_id: ws.id, issue_type: :task})
+
+      ids = Issue.ready(workspace_id: ws.id) |> Enum.map(& &1.id)
+
+      refute epic.id in ids
+      assert task.id in ids
+    end
+  end
 end
