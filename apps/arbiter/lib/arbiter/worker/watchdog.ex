@@ -185,6 +185,43 @@ defmodule Arbiter.Worker.Watchdog do
   resume again. Only *transient* refusals defer — `:no_outpost` and friends
   still page on the first failure, unchanged.
 
+  ### Making the deferral actually survive (bd-985tkl)
+
+  bd-di4t6d's retry loop was unreachable in the exact case it was written for.
+  `Dispatch.resume/2` calls `stop_prior_worker/1` **before** `Worker.start/1`'s
+  family check refuses, so the primary worker this Watchdog monitors exits as a
+  direct consequence of the resume attempt that was just deferred — and the
+  `:DOWN` clause below then stopped the Watchdog, taking the
+  `:retry_review_resume` timer with it. bd-3qkbch/#1724 and bd-bsdeb2/#1732 both
+  logged `deferral=1/30` and then nothing at all for 70+ minutes, on approved,
+  CI-green, `MERGEABLE CLEAN` PRs a coordinator had to resume by hand.
+
+  Three things make the episode self-contained:
+
+    * **It outlives its own worker.** While `resume_deferred` is set, the failed
+      primary's `:DOWN` no longer stops the Watchdog. There is nothing left to
+      watch *but* the registry slot, and the worker is already `:failed`.
+    * **It re-fires on the blocker, not just the clock.** The pid named by the
+      refusal is monitored, so a pass that exits (crashes, or is reaped by
+      `Worker.start_or_reap_terminal/1`) re-attempts the resume immediately.
+      The interval tick stays as the backstop, because a pass that finishes
+      *normally* lingers in a terminal status without exiting (bd-8lq2g7). A
+      monotonic token on the tick keeps the two paths from ever running two
+      retry chains at once.
+    * **A forge hiccup is inert.** Once deferred, this Watchdog is no longer a
+      merge poller, so stray `:poll` messages are dropped rather than landing
+      back on the poll ceiling — which would re-fail the worker, re-defer, and
+      leave a second retry chain draining the budget at 2x. The incident logged
+      `Github.Error kind: :network "socket closed"` 22 times in three hours.
+
+  Both terminal arms — the deferral budget running out, and a blocker that is
+  already dead two refusals running (`{:resume_blocker_vanished, _, _}`; nothing
+  can ever signal its completion) — **park** the task with
+  `review_park_reason: resume_blocked` and page the coordinator exactly once,
+  the park row being the claim. That is guard class E's terminal in
+  `docs/review-coverage-and-guard-policy.md` §5.3: fail open, one escalation,
+  parked and still watched. The run is not re-failed and nothing is merged.
+
   A refusal that names the task's *own* primary key rather than a subordinate
   one is a third outcome: something already re-dispatched this task (a coordinator's
   manual `worker_resume`/`worker_review`, the reconciler, a racing dispatch), so
@@ -950,6 +987,49 @@ defmodule Arbiter.Worker.Watchdog do
         # is still written exactly once, on the first pass (bd-8tjcms).
         max_resume_deferrals: max_resume_deferrals,
         resume_deferrals: 0,
+        # bd-985tkl: everything the deferral episode needs to survive on its own.
+        #   resume_deferred        — a deferral is in flight. While it is, this
+        #                            Watchdog is no longer a merge poller: the
+        #                            merge lane is finished with this worker and
+        #                            what we are waiting on is the registry slot.
+        #                            Stray `:poll` messages are dropped so a
+        #                            transient forge error cannot re-enter the
+        #                            poll ceiling and mint a SECOND retry chain.
+        #   resume_blocker_*       — the subordinate pass named by the refusal.
+        #                            We monitor its pid so the retry fires the
+        #                            moment it finishes, instead of waiting out
+        #                            an interval that, in the incident, never
+        #                            came at all.
+        #   resume_blocker_missing — consecutive refusals naming a blocker that
+        #                            is already dead. Nothing can ever signal
+        #                            completion for one of those, so two in a
+        #                            row is the terminal, not the 30th deferral.
+        #   resume_retry_token     — monotonic tag on the retry timer. A retry
+        #                            triggered early by the blocker's `:DOWN`
+        #                            invalidates the pending tick, so the two
+        #                            paths can never run the chain twice.
+        resume_deferred: false,
+        resume_blocker_key: nil,
+        resume_blocker_pid: nil,
+        resume_blocker_ref: nil,
+        resume_blocker_missing: 0,
+        resume_retry_token: 0,
+        #   resume_attempts_seen   — the highest auto-resume count this episode
+        #                            has ever read off the worker's meta. The
+        #                            meta is still the source of truth ACROSS
+        #                            episodes (see `max_auto_resumes` above),
+        #                            but WITHIN one it has to survive the
+        #                            primary's death: a deferred retry runs
+        #                            after `stop_prior_worker/1` killed the
+        #                            worker, so `snapshot/1` falls back to a
+        #                            meta-less map and the count would read 0.
+        #                            Without this floor every deferred retry
+        #                            would resume as "attempt 1" and re-stamp
+        #                            1 onto the new run's meta, so the
+        #                            auto-resume cap would never bind on the
+        #                            exact path — CI-red → fix_pass → defer —
+        #                            that makes deferrals happen at all.
+        resume_attempts_seen: 0,
         # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
         # a notification fires once when the count first hits the threshold, then
         # is suppressed until the counter resets and re-hits the threshold.
@@ -1067,7 +1147,25 @@ defmodule Arbiter.Worker.Watchdog do
     {:reply, state.park_reason, state}
   end
 
+  # bd-985tkl acceptance 3. Once a resume deferral is in flight this Watchdog has
+  # stopped being a merge poller — `handle_review_timeout/2` already failed the
+  # worker and the only thing left to wait on is the registry slot. A `:poll`
+  # that still arrives (an in-flight tick, a `retry_auto_resolve` re-arm, or the
+  # `Github.Error kind: :network` "socket closed" the incident logged 22 times in
+  # three hours) would otherwise land back on the poll ceiling, re-fail the
+  # worker, re-defer, and leave a SECOND `:retry_review_resume` chain running —
+  # draining the deferral budget at 2x and paging twice. Drop it instead: the
+  # deferral state is neither cleared nor duplicated by a forge hiccup.
   @impl true
+  def handle_info(:poll, %{resume_deferred: true} = state) do
+    Logger.debug(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} dropping a poll while a " <>
+        "resume deferral is in flight (deferral=#{state.resume_deferrals}/#{state.max_resume_deferrals})"
+    )
+
+    {:noreply, state}
+  end
+
   def handle_info(:poll, state) do
     case safe_get(state) do
       {:ok, result} when is_map(result) ->
@@ -1090,24 +1188,70 @@ defmodule Arbiter.Worker.Watchdog do
   # failed with `{:awaiting_review_timeout, N}` on the first pass, so this does
   # NOT re-fail it (and does not re-poll the MR — the merge lane is finished with
   # this worker; what we are waiting on is the registry slot).
+  #
+  # bd-985tkl tags each tick with the token that was current when it was armed.
+  # A blocker `:DOWN` re-fires the chain early and bumps the token, so the tick
+  # it pre-empted arrives stale and is discarded rather than running a second,
+  # parallel retry chain.
   @impl true
-  def handle_info(:retry_review_resume, state) do
+  def handle_info({:retry_review_resume, token}, %{resume_retry_token: token} = state) do
+    retry_deferred_resume(state)
+  end
+
+  def handle_info({:retry_review_resume, _stale_token}, state), do: {:noreply, state}
+
+  # bd-985tkl acceptance 1. The blocking pass finished (its process exited —
+  # it crashed, or `start_or_reap_terminal/1` reaped it to free the key). Retry
+  # NOW rather than sitting out the rest of the interval: the whole failure this
+  # fixes is a resume waiting on a tick that never came.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{resume_blocker_ref: ref} = state)
+      when is_reference(ref) do
+    Logger.info(
+      "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+        "transition=auto_resume outcome=blocker_finished blocked_by=#{inspect(state.resume_blocker_key)} " <>
+        "(#{inspect(reason)}); re-attempting the deferred resume immediately"
+    )
+
+    state
+    |> forget_resume_blocker()
+    |> retry_deferred_resume()
+  end
+
+  # bd-985tkl root cause. `Dispatch.resume/2` calls `stop_prior_worker/1` BEFORE
+  # `Worker.start/1`'s family check refuses, so the primary worker this Watchdog
+  # monitors exits as a direct consequence of the resume attempt we just
+  # deferred. Stopping here is what stranded bd-3qkbch / #1724 and bd-bsdeb2 /
+  # #1732: the `:retry_review_resume` timer died with the process, the log
+  # showed `deferral=1/30` and then nothing for 70+ minutes on an approved,
+  # CI-green, MERGEABLE PR. A deferral in flight outlives its own worker — the
+  # worker is already `:failed` and there is nothing left to watch *but* the
+  # registry slot.
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{worker_pid: pid} = state) do
+    if state.resume_deferred do
+      Logger.info(
+        "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+          "transition=auto_resume outcome=worker_slot_freed; the failed primary exited (the " <>
+          "resume's own stop_prior_worker), keeping the deferral alive"
+      )
+
+      {:noreply, state}
+    else
+      # Worker died — nothing left to watch.
+      {:stop, :normal, state}
+    end
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp retry_deferred_resume(state) do
     case attempt_auto_resume(state) do
       {:defer, state} ->
-        schedule_resume_retry(state)
-        {:noreply, state}
+        {:noreply, schedule_resume_retry(state)}
 
       {:stop, state} ->
         {:stop, :normal, state}
     end
   end
-
-  # Worker died — nothing left to watch.
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{worker_pid: pid} = state) do
-    {:stop, :normal, state}
-  end
-
-  def handle_info(_msg, state), do: {:noreply, state}
 
   # The ReviewGate gate approves in-process — hosted-forge adapters never see
   # that approval on the PR/MR itself, so `classify/1` would forever return
@@ -2364,7 +2508,7 @@ defmodule Arbiter.Worker.Watchdog do
 
     case handle_review_timeout(state, cap) do
       {:defer, state} ->
-        schedule_resume_retry(state)
+        state = schedule_resume_retry(state)
         {:noreply, %{state | poll_count: count + 1}}
 
       {:stop, state} ->
@@ -2409,9 +2553,17 @@ defmodule Arbiter.Worker.Watchdog do
   # ceiling and once from every deferred retry. Returns `{:stop, state}` when the
   # episode is finished (resumed, or paged) and `{:defer, state}` when the resume
   # could not start for a reason that a later retry can clear.
+  #
+  # The budget is read from the worker's meta, which is authoritative across
+  # episodes — but on a deferred retry the worker is gone (the deferred attempt's
+  # own `stop_prior_worker/1` killed it) and `snapshot/1`'s fallback map carries
+  # no meta, so that read returns 0. `resume_attempts_seen` is the within-episode
+  # floor that keeps the cap binding across the retry; see the state comment.
+  # It also keeps the `attempts` reported by both escalation paths honest.
   defp attempt_auto_resume(state) do
     snap = snapshot(state)
-    attempts = awaiting_review_resume_attempts(snap)
+    attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
+    state = %{state | resume_attempts_seen: attempts}
 
     if attempts < state.max_auto_resumes do
       auto_resume(state, attempts + 1)
@@ -2492,15 +2644,39 @@ defmodule Arbiter.Worker.Watchdog do
 
       state.resume_deferrals < state.max_resume_deferrals ->
         deferrals = state.resume_deferrals + 1
+        state = track_resume_blocker(%{state | resume_deferrals: deferrals}, reason)
 
-        Logger.warning(
-          "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
-            "transition=auto_resume outcome=deferred blocked_by=#{inspect(resume_blocker(reason))} " <>
-            "deferral=#{deferrals}/#{state.max_resume_deferrals} — the resume never started, " <>
-            "so it does not burn the auto-resume budget; retrying in #{state.interval_ms}ms"
-        )
+        if blocker_vanished?(state) do
+          # bd-985tkl acceptance 2, second arm. The refusal named a pass that is
+          # already dead, twice running. No `:DOWN` can ever arrive for it and no
+          # later retry will see it finish, so waiting out the remaining budget
+          # is 30 ticks of silence. Take the terminal now.
+          Logger.warning(
+            "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+              "transition=auto_resume outcome=blocker_vanished " <>
+              "blocked_by=#{inspect(resume_blocker(reason))} " <>
+              "deferrals=#{deferrals}/#{state.max_resume_deferrals}; the blocking pass is gone " <>
+              "but the resume is still refused — parking and escalating to the coordinator"
+          )
 
-        {:defer, %{state | resume_deferrals: deferrals}}
+          park_and_escalate_resume_block(
+            state,
+            attempt - 1,
+            {:resume_blocker_vanished, reason, deferrals}
+          )
+
+          {:stop, state}
+        else
+          Logger.warning(
+            "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+              "transition=auto_resume outcome=deferred blocked_by=#{inspect(resume_blocker(reason))} " <>
+              "deferral=#{deferrals}/#{state.max_resume_deferrals} — the resume never started, " <>
+              "so it does not burn the auto-resume budget; retrying when the blocker finishes " <>
+              "or in #{state.interval_ms}ms, whichever comes first"
+          )
+
+          {:defer, state}
+        end
 
       true ->
         Logger.warning(
@@ -2508,12 +2684,11 @@ defmodule Arbiter.Worker.Watchdog do
             "transition=auto_resume outcome=deferral_bound_hit " <>
             "blocked_by=#{inspect(resume_blocker(reason))} " <>
             "deferrals=#{state.resume_deferrals}/#{state.max_resume_deferrals}; " <>
-            "escalating to the coordinator"
+            "parking and escalating to the coordinator"
         )
 
-        escalate_auto_resume_give_up(
+        park_and_escalate_resume_block(
           state,
-          snapshot(state),
           attempt - 1,
           {:resume_blocked, reason, state.resume_deferrals}
         )
@@ -2521,6 +2696,69 @@ defmodule Arbiter.Worker.Watchdog do
         {:stop, state}
     end
   end
+
+  # bd-985tkl acceptance 1. Latch onto the pass named by the refusal so its
+  # completion, not the clock, drives the next attempt.
+  #
+  # A finished pass does NOT necessarily exit — `Worker` leaves a terminal
+  # `:failed`/`:completed` process alive holding its key until task `:close`
+  # (bd-8lq2g7), which is why the interval tick stays as the backstop. What the
+  # monitor buys is the other half: a pass that crashes or is reaped frees the
+  # slot immediately, and `interval_ms` is 60s in production.
+  #
+  # Monitoring is per-pid and idempotent: re-deferring against the same blocker
+  # keeps the existing monitor rather than stacking one per tick.
+  defp track_resume_blocker(state, reason) do
+    key = resume_blocker(reason)
+    pid = resume_blocker_pid(reason)
+
+    cond do
+      is_pid(pid) and pid == state.resume_blocker_pid and is_reference(state.resume_blocker_ref) ->
+        %{state | resume_blocker_key: key, resume_blocker_missing: 0}
+
+      is_pid(pid) and Process.alive?(pid) ->
+        state = forget_resume_blocker(state)
+
+        %{
+          state
+          | resume_blocker_key: key,
+            resume_blocker_pid: pid,
+            resume_blocker_ref: Process.monitor(pid),
+            resume_blocker_missing: 0
+        }
+
+      true ->
+        # Either the refusal carried no pid, or it named one that is already
+        # gone. Count it: a single miss is a plausible race (the pass exited
+        # between the refusal and this lookup, and the next retry will simply
+        # succeed), two in a row is not.
+        state = forget_resume_blocker(state)
+
+        %{
+          state
+          | resume_blocker_key: key,
+            resume_blocker_missing: state.resume_blocker_missing + 1
+        }
+    end
+  end
+
+  # Two consecutive refusals naming a blocker that is not there. One is a race;
+  # two means the refusal is standing and nothing will ever announce the
+  # blocker's completion.
+  defp blocker_vanished?(%{resume_blocker_missing: n}), do: n >= 2
+
+  defp forget_resume_blocker(%{resume_blocker_ref: ref} = state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    %{state | resume_blocker_pid: nil, resume_blocker_ref: nil}
+  end
+
+  defp forget_resume_blocker(state),
+    do: %{state | resume_blocker_pid: nil, resume_blocker_ref: nil}
+
+  # The blocking worker's pid, as `Worker.start/1`'s refusal reports it.
+  defp resume_blocker_pid({:worker_start_failed, inner}), do: resume_blocker_pid(inner)
+  defp resume_blocker_pid({:task_worker_live, %{pid: pid}}) when is_pid(pid), do: pid
+  defp resume_blocker_pid(_other), do: nil
 
   # bd-di4t6d. A refusal that names the task's OWN primary key, rather than a
   # `:fixpass` / `:conflict` sibling, is not a blocker to wait out — it is the
@@ -2571,8 +2809,16 @@ defmodule Arbiter.Worker.Watchdog do
   defp deferral_suffix(%{resume_deferrals: n, max_resume_deferrals: max}),
     do: ", after #{n}/#{max} deferred retries"
 
-  defp schedule_resume_retry(state),
-    do: Process.send_after(self(), :retry_review_resume, state.interval_ms)
+  # bd-985tkl. Arming the tick is also what marks the episode "deferral in
+  # flight" — the flag `handle_info(:poll, _)` reads to stay out of the way, and
+  # the flag that keeps the Watchdog alive when its own resume attempt stops the
+  # worker it monitors. The token invalidates any tick a blocker `:DOWN` has
+  # already pre-empted.
+  defp schedule_resume_retry(state) do
+    token = state.resume_retry_token + 1
+    Process.send_after(self(), {:retry_review_resume, token}, state.interval_ms)
+    %{state | resume_deferred: true, resume_retry_token: token}
+  end
 
   defp safe_resume(state, args) do
     state.auto_resume_dispatcher.resume(args)
@@ -2586,6 +2832,61 @@ defmodule Arbiter.Worker.Watchdog do
   # way this always did, PLUS an addressed mailbox escalation that names the
   # attempt count and why we stopped, so "we already tried resuming N times"
   # doesn't have to be re-derived from `worker_show`.
+  # bd-985tkl acceptance 2, both arms. Guard class E's terminal, from
+  # `docs/review-coverage-and-guard-policy.md` §5.3: fail open (the run is NOT
+  # re-failed and nothing is merged), park with a named reason, and page the
+  # coordinator exactly ONCE.
+  #
+  # The park row IS the claim (invariant I3, the same mechanism
+  # `Worker.park_review_gate/3` uses): `ReviewPark.park/2` answers
+  # `:already_parked` when the same reason is on file, so the two arms of this
+  # terminal — budget spent, blocker vanished — can never buy two pages for one
+  # episode. The single page is `escalate_exhausted/5`, which names the task, the
+  # PR and the blocking registry key; `escalate_watchdog/1`'s generic
+  # "awaiting_review is stuck" notification is deliberately NOT also sent here,
+  # because the whole point of this arm is one actionable message.
+  defp park_and_escalate_resume_block(state, attempts, reason) do
+    case safe(fn -> Arbiter.Tasks.ReviewPark.park(state.task_id, :resume_blocked) end) do
+      {:ok, :already_parked, _issue} ->
+        Logger.info(
+          "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
+            "park(resume_blocked) is already claimed; not paging the coordinator again"
+        )
+
+        :ok
+
+      {:ok, :claimed, _issue} ->
+        page_resume_block(state, attempts, reason)
+
+      other ->
+        # The park could not be written (a DB hiccup, or a task row that is not
+        # there). A silent terminal is the failure this whole ticket is about,
+        # so page anyway.
+        Logger.warning(
+          "Worker.Watchdog: could not park task=#{state.task_id} as resume_blocked " <>
+            "(#{inspect_short(other)}); paging the coordinator regardless"
+        )
+
+        page_resume_block(state, attempts, reason)
+    end
+  end
+
+  defp page_resume_block(state, attempts, reason) do
+    snap = snapshot(state)
+
+    safe(fn ->
+      state.auto_resume_dispatcher.escalate_exhausted(
+        state.task_id,
+        Map.get(snap, :workspace_id) || workspace_id(state),
+        state.mr_ref,
+        attempts,
+        reason
+      )
+    end)
+
+    :ok
+  end
+
   defp escalate_auto_resume_give_up(state, snap, attempts, reason) do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} not auto-resumed " <>

@@ -2751,6 +2751,44 @@ defmodule Arbiter.Worker.DispatchTest do
       assert new_run.resumed_from_run_id == prior_run.id
     end
 
+    # bd-985tkl — the ordering that stranded bd-3qkbch/#1724 and bd-bsdeb2/#1732.
+    #
+    # `ensure_not_active/1` only ever resolves the EXACT task key, so a live
+    # `<task>:fixpass` sibling sails past it; the refusal comes later, from
+    # `Worker.start/1`'s family check inside `dispatch/2`. By then
+    # `stop_prior_worker/1` has already run, so the failed primary — the process
+    # `Worker.Watchdog` monitors — is dead by the time the caller sees the
+    # error. The Watchdog's deferral has to survive that `:DOWN`; this pins the
+    # fact it has to survive, so a reordering here cannot silently un-fix it.
+    test "a resume refused by a live :fixpass sibling has ALREADY stopped the prior worker",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "resume blocked by fixpass", workspace_id: ws.id})
+      first = stop_worker_with_outpost(task.id)
+
+      {:ok, fixpass} =
+        Worker.start(
+          task_id: task.id,
+          repo: "rs/repo",
+          workspace_id: ws.id,
+          registry_key: task.id <> ":fixpass"
+        )
+
+      :ok = Worker.advance(fixpass, :implement)
+      on_exit(fn -> if Process.alive?(fixpass), do: GenServer.stop(fixpass, :normal) end)
+
+      assert {:error,
+              {:worker_start_failed,
+               {:task_worker_live, %{registry_key: blocker_key, pid: blocker_pid}}}} =
+               Dispatch.resume(task.id, start_driver: false, claude_command: ["true"])
+
+      assert blocker_key == task.id <> ":fixpass"
+      assert blocker_pid == fixpass
+
+      # The refusal's cost: the prior worker is gone, taking any `:DOWN`-driven
+      # watcher with it unless that watcher is deliberately holding on.
+      refute Process.alive?(first.worker_pid)
+    end
+
     # bd-8eheb6: the Watchdog's auto-resume budget is enforced from a counter on
     # the WORKER's meta, because every auto-resume mints a fresh worker and a
     # fresh Watchdog. If resume/2 didn't re-stamp it, the next Watchdog would
