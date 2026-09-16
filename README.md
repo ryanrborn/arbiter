@@ -157,6 +157,12 @@ arb install service
 
 This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/arbiter start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`.
 
+`arb install service` only writes the release-shaped unit above. There is no
+CLI command yet for a dev-mode unit (one whose `ExecStart` runs
+`mix phx.server` instead of a release binary) — on a source checkout you hand-write
+that unit file yourself; see [Deploying: pick the path for your install
+shape](#deploying-pick-the-path-for-your-install-shape) below.
+
 ### Deploying: pick the path for your install shape
 
 Arbiter supports two install shapes, and the deploy command differs between
@@ -180,8 +186,9 @@ artifact installed, skip to [OTP-release installs](#production-deploys-otp-relea
 #### Source checkout (dev mode)
 
 ```sh
-git pull
-mix deps.get          # only if deps changed
+git fetch origin main
+git diff --name-only HEAD origin/main -- mix.lock   # non-empty output → run mix deps.get first
+mix deps.get                                         # only if the line above printed something
 arb server deploy --git-pull
 arb server doctor     # confirm CLI and server report the same version
 ```
@@ -192,8 +199,11 @@ escript if `apps/arbiter_cli` changed, then restart Phoenix — via
 `systemctl --user restart arbiter` when the systemd unit is present, a plain
 process bounce otherwise. The restart's boot sequence (`Boot.Migrator`)
 applies any pending migrations before the endpoint opens, so migrations are
-never run against the live server. It does **not** run `mix deps.get` for
-you — run that yourself first if the pulled commits touched `mix.lock`.
+never run against the live server. **Do not `git pull` by hand first** — the
+command diffs `before_sha`/`after_sha` itself and treats an already-current
+tree as "nothing to deploy," skipping the restart and escript rebuild
+entirely. It also does **not** run `mix deps.get` for you, so check for a
+`mix.lock` change (above) before running it, not after.
 
 A bare `arb server deploy` (no flags) does the same git-pull fallback
 automatically whenever `ARB_RELEASE_REPO` is unset, but prefer the explicit
