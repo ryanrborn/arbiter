@@ -433,13 +433,25 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       Application.put_env(:arbiter, :test_dispatch_pid, self())
       on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
 
-      # Chosen so PreflightHold's retry_not_before (reset_at + the 60s escalation
-      # buffer) lands ~200ms in the future — short enough to observe the timer
-      # fire for real inside the test's timeout budget (round-2 finding 1).
-      now = DateTime.utc_now()
-      reset_at = DateTime.add(now, -59_800, :millisecond)
-      Application.put_env(:arbiter, :test_quota_reset_at, reset_at)
+      # PreflightHold's retry_not_before is reset_at + the 60s escalation buffer,
+      # and `schedule_reset_drain/1` arms a timer only while that is still in the
+      # future (`delay > 0`) — a hold whose window has already rolled is
+      # deliberately not re-armed. So the offset has to be measured from the
+      # drain that *computes* the hold, not from the top of the test: seeding the
+      # workspace, the quota rows, the queue and the task is several SQLite
+      # round-trips, and on a loaded CI box they can eat a 200ms lead outright,
+      # leaving no timer to observe and the assertion below waiting for a message
+      # nothing will ever send. Set immediately before that drain, with enough
+      # margin for the drain's own DB work, and short enough to still observe the
+      # timer fire for real inside the budget (round-2 finding 1).
+      hold_lead_ms = 400
       on_exit(fn -> Application.delete_env(:arbiter, :test_quota_reset_at) end)
+
+      Application.put_env(
+        :arbiter,
+        :test_quota_reset_at,
+        DateTime.add(DateTime.utc_now(), hold_lead_ms - 60_000, :millisecond)
+      )
 
       ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
@@ -451,6 +463,13 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
+
+      # Re-base the lead on *now*: this drain is the one whose hold arms the timer.
+      Application.put_env(
+        :arbiter,
+        :test_quota_reset_at,
+        DateTime.add(DateTime.utc_now(), hold_lead_ms - 60_000, :millisecond)
+      )
 
       :ok = DispatchQueue.drain(pid)
       assert_receive {:dispatch_attempt, task_id}, 500
