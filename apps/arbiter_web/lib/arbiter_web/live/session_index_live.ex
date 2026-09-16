@@ -28,10 +28,12 @@ defmodule ArbiterWeb.SessionIndexLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Sessions
+  alias Arbiter.Sessions.DisplayName
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
+  alias ArbiterWeb.CoreComponents.Forms
   alias ArbiterWeb.CoreComponents.Navigation
 
   require Logger
@@ -49,8 +51,8 @@ defmodule ArbiterWeb.SessionIndexLive do
   end
 
   @impl true
-  def handle_event("launch", _params, socket) do
-    case Sessions.launch(launch_defaults()) do
+  def handle_event("launch", params, socket) do
+    case Sessions.launch(launch_defaults(params)) do
       {:ok, session} ->
         {:noreply, push_navigate(socket, to: ~p"/sessions/#{session.id}")}
 
@@ -108,10 +110,26 @@ defmodule ArbiterWeb.SessionIndexLive do
     |> assign(:running_count, Enum.count(sessions, &(&1.status == :running)))
   end
 
-  # Phase 5's defaults; phase 11 replaces this with the options UI.
-  defp launch_defaults do
-    [auth_mode: :seeded_credentials, workspace_id: nil, can_dispatch: false]
+  # Phase 5's defaults; phase 11 replaces this with the options UI. `:name` is
+  # the one option this page's operator can already set (bd-o2vtsz) — an empty
+  # or missing field launches with no name, same as before this option existed.
+  defp launch_defaults(params) do
+    [
+      auth_mode: :seeded_credentials,
+      workspace_id: nil,
+      can_dispatch: false,
+      name: launch_name(params)
+    ]
   end
+
+  defp launch_name(%{"name" => name}) when is_binary(name) do
+    case String.trim(name) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp launch_name(_params), do: nil
 
   defp describe({:provisioning_failed, reason}), do: "provisioning failed (#{inspect(reason)})"
   defp describe({:launch_failed, status, _out}), do: "the launch command exited #{status}"
@@ -137,10 +155,20 @@ defmodule ArbiterWeb.SessionIndexLive do
           subtitle="Coordinator sessions Arbiter hosts. They live in their own systemd scope, so they survive an arbiter restart."
         >
           <:actions>
-            <Core.button id="launch-session" variant="primary" phx-click="launch">
-              <:icon><.icon name="hero-plus" class="size-4" /></:icon>
-              Launch session
-            </Core.button>
+            <form id="launch-session-form" phx-submit="launch" class="flex items-center gap-2">
+              <Forms.input
+                type="text"
+                name="name"
+                id="launch-session-name"
+                placeholder="Session name (optional)"
+                mono={false}
+                size="sm"
+              />
+              <Core.button id="launch-session" type="submit" variant="primary">
+                <:icon><.icon name="hero-plus" class="size-4" /></:icon>
+                Launch session
+              </Core.button>
+            </form>
           </:actions>
         </Domain.index_header>
 
@@ -168,10 +196,17 @@ defmodule ArbiterWeb.SessionIndexLive do
 
               <.link
                 navigate={~p"/sessions/#{session.id}"}
-                class="font-[family-name:var(--font-mono)] text-[12px] text-[var(--text-link)] no-underline hover:underline"
+                class="text-[13px] font-medium text-[var(--text-primary)] no-underline hover:underline"
+              >
+                {DisplayName.resolve(session)}
+              </.link>
+
+              <span
+                id={"session-#{session.id}-short-id"}
+                class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
               >
                 {short_id(session.id)}
-              </.link>
+              </span>
 
               <span class="text-[12px] text-[var(--text-secondary)] truncate max-w-[26rem]">
                 {session.cwd}

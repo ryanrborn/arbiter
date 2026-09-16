@@ -90,6 +90,7 @@ defmodule Arbiter.Sessions do
           workspace_id: String.t() | nil,
           config_dir: String.t() | nil,
           cwd: String.t(),
+          name: String.t() | nil,
           auth_mode: atom(),
           remote_control: boolean(),
           can_dispatch: boolean(),
@@ -120,6 +121,10 @@ defmodule Arbiter.Sessions do
     * `:workspace_id` — `nil` (default) means cross-workspace.
     * `:config_dir` — override the session's `CLAUDE_CONFIG_DIR`; defaults to
       the scaffolded one.
+    * `:name` — an operator-supplied display name (bd-o2vtsz). Passed through
+      as `claude --name`, shell-quoted, in the generated `launch.sh`
+      (`Arbiter.Sessions.Provisioning`). `nil` (default) leaves `launch.sh`
+      exec'ing a bare `claude`, unchanged from before this option existed.
     * `:auth_mode` — `:seeded_credentials` (default, mode B — Amendment 2) or
       `:oauth_token` (mode A).
     * `:can_dispatch` — default `false` (§10.1).
@@ -330,6 +335,20 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
+  Change a session's operator-supplied display name (bd-o2vtsz).
+
+  Arbiter-side only: a session already running keeps whatever `--name` gave it
+  at launch (or none), because there is no safe way to rewrite a live
+  session's own `sessions/<pid>.json` from outside — see the `name` attribute
+  doc on `Arbiter.Sessions.Session`. `nil` clears an operator name, dropping
+  display back to the `ai-title` rung of `Arbiter.Sessions.DisplayName`.
+  """
+  @spec rename(Session.t(), String.t() | nil) :: {:ok, Session.t()} | {:error, term()}
+  def rename(%Session{} = session, name) when is_binary(name) or is_nil(name) do
+    Ash.update(session, %{name: name}, action: :rename)
+  end
+
+  @doc """
   The usage-ledger rows attributable to a session, oldest first.
 
   Joined **by string** on the provider session id, not by foreign key (§7.4
@@ -415,6 +434,7 @@ defmodule Arbiter.Sessions do
       workspace_id: Keyword.get(opts, :workspace_id),
       config_dir: Keyword.get(opts, :config_dir),
       cwd: Keyword.get(opts, :cwd),
+      name: Keyword.get(opts, :name),
       auth_mode: Keyword.get(opts, :auth_mode, :seeded_credentials),
       remote_control: Keyword.get(opts, :remote_control, false),
       can_dispatch: Keyword.get(opts, :can_dispatch, false)

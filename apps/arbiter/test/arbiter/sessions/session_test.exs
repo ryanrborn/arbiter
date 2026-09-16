@@ -95,6 +95,20 @@ defmodule Arbiter.Sessions.SessionTest do
     test "an unknown provider is rejected" do
       assert {:error, _} = Ash.create(Session, %{provider: :telepathy, cwd: "/tmp/x"})
     end
+
+    test "name is nullable, settable at create, and updatable afterwards (bd-o2vtsz)" do
+      unnamed = create!(%{})
+      assert unnamed.name == nil
+
+      named = create!(%{name: "refinement session"})
+      assert named.name == "refinement session"
+
+      {:ok, renamed} = Sessions.rename(named, "second pass")
+      assert renamed.name == "second pass"
+
+      {:ok, cleared} = Sessions.rename(renamed, nil)
+      assert cleared.name == nil
+    end
   end
 
   describe "the migrated table (AC 1)" do
@@ -123,6 +137,7 @@ defmodule Arbiter.Sessions.SessionTest do
                {"last_client_at", false, false},
                {"last_turn_at", false, false},
                {"mcp_token_revoked_at", false, false},
+               {"name", false, false},
                {"provider", true, false},
                {"provider_session_id", false, false},
                {"remote_control", true, false},
