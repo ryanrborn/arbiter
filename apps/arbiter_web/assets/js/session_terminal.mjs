@@ -119,7 +119,10 @@ export function createSessionTerminal(el, options = {}) {
   // No connect params. The dashboard is loopback-only by design (§10.4) and
   // `ArbiterWeb.SessionSocket` trusts a loopback peer without a token, so the
   // page has none to send; reaching the dashboard from elsewhere is Remote
-  // Control's job (§8), not a second auth scheme here. The socket also accepts
+  // Control's job (§8), not a second auth scheme here. `SessionLive` now
+  // checks the peer server-side and skips mounting this hook at all off
+  // loopback (bd-2zskbb), so by the time this file runs, a connect attempt
+  // here is never a doomed one. The socket also accepts
   // a `caller_session_id` for §10.1's self-kill guard, but a *browser* is not
   // running inside a coordinator session and has nothing truthful to declare
   // there - the clients that do (an agent's own tooling) pass it themselves.
