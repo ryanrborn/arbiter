@@ -24,6 +24,7 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/arbiter_web"
 import topbar from "../vendor/topbar"
+import {SessionDock} from "./session_dock.mjs"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
@@ -33,6 +34,9 @@ const Hooks = {
     beforeUpdate() { this.wasOpen = this.el.open },
     updated() { if (this.wasOpen) this.el.open = true },
   },
+  // bd-dlc136: the session dock's localStorage bridge. It lives in a module of
+  // its own so its storage guards can be unit-tested without a browser.
+  SessionDock,
 }
 
 const liveSocket = new LiveSocket("/live", Socket, {

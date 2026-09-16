@@ -1,0 +1,26 @@
+<%!--
+The layout every LiveView in `live_session :default` is wrapped in, and the
+only reason it exists: it is the one place a *sticky* nested LiveView can be
+rendered from (bd-dlc136).
+
+`live_render/3` needs a `%Phoenix.LiveView.Socket{}`, and the root layout does
+not have one — it is rendered by `Phoenix.Controller` off the conn, so `@socket`
+there is nil. This layout is rendered by the LiveView process itself
+(`Phoenix.LiveView.Renderer`), which passes `:socket` in the render assigns, so
+`live_render(@socket, ..., sticky: true)` works here and nowhere else in the
+chrome.
+
+Being re-rendered per LiveView is exactly what `sticky: true` is for: on a
+`live_redirect` the client moves the existing dock element into the incoming
+main container and diffs the new markup against it, so the dock's process, DOM
+node, hooks and scroll position all survive the navigation instead of being
+re-mounted.
+
+`#session-dock-offset` is the page's bottom breathing room. The strip is
+`position: fixed`, so without it the last rows of a long page would sit
+underneath the dock.
+--%>
+<div id="session-dock-offset" class="pb-[var(--session-dock-strip-height)]">
+  {@inner_content}
+</div>
+{live_render(@socket, ArbiterWeb.SessionDockLive, id: "session-dock", sticky: true)}
