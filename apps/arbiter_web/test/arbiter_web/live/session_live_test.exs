@@ -382,7 +382,7 @@ defmodule ArbiterWeb.SessionLiveTest do
              )
     end
 
-    test "a non-loopback peer under a workspace token (mode A) is told Remote Control will not work either (bd-2zskbb)",
+    test "a non-loopback peer under a workspace token (mode A) is told to use SSH tunneling (bd-2zskbb)",
          %{conn: conn} do
       session =
         launch!(auth_mode: :oauth_token, oauth_token: "sk-ant-oat01-SESSION-LIVE-TEST-TOKEN")

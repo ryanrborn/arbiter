@@ -256,7 +256,7 @@ defmodule ArbiterWeb.SessionLive do
             >
               Forward the port over SSH: <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
               (<.link
-                href="https://github.com/anthropics/arbiter/blob/main/docs/remote-access.md"
+                href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
                 target="_blank"
                 class="underline"
               >docs</.link>),
@@ -268,7 +268,7 @@ defmodule ArbiterWeb.SessionLive do
             >
               Forward the port over SSH: <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
               (<.link
-                href="https://github.com/anthropics/arbiter/blob/main/docs/remote-access.md"
+                href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
                 target="_blank"
                 class="underline"
               >docs</.link>).
@@ -278,7 +278,7 @@ defmodule ArbiterWeb.SessionLive do
               This session runs under a workspace token (mode A). Forward the port over SSH:
               <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
               (<.link
-                href="https://github.com/anthropics/arbiter/blob/main/docs/remote-access.md"
+                href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
                 target="_blank"
                 class="underline"
               >docs</.link>).
