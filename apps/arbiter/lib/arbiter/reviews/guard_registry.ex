@@ -690,10 +690,23 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:deferrals, {:config, :default_max_resume_deferrals}},
       episode: {:task, :mr_ref},
-      terminal: :escalated_once,
-      sites: [{Watchdog, :handle_resume_error, 3}],
-      anchors: ["@default_max_resume_deferrals", ":resume_blocked"],
-      summary: "a resume refused by the task's own fix pass is deferred, not retried forever"
+      # bd-985tkl: class E's terminal is "parked and still watched", and the
+      # park row is what claims the one page (invariant I3). Both arms of the
+      # terminal — the deferral budget running out, and a blocker that is
+      # already dead — go through `park_and_escalate_resume_block/3`.
+      terminal: :parked,
+      sites: [
+        {Watchdog, :handle_resume_error, 3},
+        {Watchdog, :park_and_escalate_resume_block, 3}
+      ],
+      anchors: [
+        "@default_max_resume_deferrals",
+        ":resume_blocked",
+        ":resume_blocker_vanished"
+      ],
+      summary:
+        "a resume refused by the task's own fix pass is deferred until that pass finishes, " <>
+          "then parked with one page — never retried forever and never dropped"
     },
     %{
       id: :nonauthor_approval_park,

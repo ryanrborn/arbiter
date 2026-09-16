@@ -204,6 +204,9 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
   defp subject(task_id, _attempts, {:resume_blocked, _reason, deferrals}),
     do: "#{task_id}: auto-resume BLOCKED after #{deferrals} deferred retries (awaiting_review)"
 
+  defp subject(task_id, _attempts, {:resume_blocker_vanished, _reason, _deferrals}),
+    do: "#{task_id}: auto-resume BLOCKED by a pass that is already gone (awaiting_review)"
+
   defp body(task_id, mr_ref, attempts, :budget_exhausted) do
     """
     Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and
@@ -248,6 +251,33 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
     first: `worker_show #{task_id}` and look for a run whose worker_type is fix_pass or
     conflict and whose status is still `running`. Stopping or finishing that pass frees
     the slot; a `worker_resume #{task_id}` will then take.
+
+    The task is PARKED (`review_park_reason: resume_blocked`), not failed — the work is
+    committed, the PR is open and nothing was merged. The resume clears the park.
+
+    #{diagnosis(task_id)}
+    """
+  end
+
+  defp body(task_id, mr_ref, _attempts, {:resume_blocker_vanished, reason, deferrals}) do
+    """
+    Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and the
+    Watchdog could not auto-resume it: #{inspect(reason)}.
+
+    This is the bd-985tkl arm of the bd-di4t6d condition. The refusal names a
+    subordinate pass on this task (`<task>:fixpass` / `<task>:conflict`) that holds the
+    worker registry slot — but that process is already dead, and it was still dead on
+    the next retry (#{deferrals} deferral(s) used). Nothing will ever signal its
+    completion, so the Watchdog stopped deferring rather than spending the rest of its
+    budget in silence.
+
+    The task is PARKED (`review_park_reason: resume_blocked`), not failed: the work is
+    committed, the PR is open and nothing was merged. Clearing the park is a plain
+    `worker_resume #{task_id}` once the slot is free.
+
+    Check the slot first: `worker_show #{task_id}`, and look for a run whose worker_type
+    is fix_pass or conflict. If nothing is running, the key is being held by a terminal
+    worker that was never reaped — stopping it (`arb worker stop #{task_id}`) frees it.
 
     #{diagnosis(task_id)}
     """
