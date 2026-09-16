@@ -17,6 +17,17 @@ defmodule ArbiterCli.Cmd.DepTest do
     assert out =~ "b"
   end
 
+  # bd-6bax7s: `conflicts_with` is honoured by both schedulers now, and the
+  # help is where a coordinator at a terminal finds that out.
+  test "dep --help documents the edge types and who honours the mutex" do
+    {out, _err, exit_code} = capture(fn -> Dep.run(["--help"]) end)
+
+    assert exit_code == 0
+    assert out =~ "conflicts_with"
+    assert out =~ "Autopilot"
+    assert out =~ "Conductor"
+  end
+
   test "dep rm hits DELETE" do
     stub_delete("/api/dependencies/a/b", "", 204)
 

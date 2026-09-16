@@ -108,6 +108,53 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     assert_receive {:dispatched, ^blocker_id}
   end
 
+  # bd-6bax7s / #1780. The real incident: two tasks that both edit RFC §10.4,
+  # joined by `conflicts_with` while still in Backlog, then both promoted. The
+  # board dispatched both, 19 seconds apart.
+  test "two conflicting Ready cards are dispatched one at a time", %{ws: ws} do
+    bind = issue(ws, "bind address", %{priority: 0})
+    docs = issue(ws, "remote-access docs", %{priority: 1})
+
+    {:ok, _} =
+      Ash.create(Dependency, %{
+        from_issue_id: docs.id,
+        to_issue_id: bind.id,
+        type: :conflicts_with
+      })
+
+    pid = start_autopilot()
+
+    # The higher-priority one goes; its counterpart is held, not queued.
+    assert {:ok, first} = Autopilot.tick(pid)
+    assert first == bind.id
+    assert_receive {:dispatched, ^first}
+
+    board = Autopilot.board(pid, [])
+    entry = Enum.find(board.ready, &(&1.id == docs.id))
+    assert entry.state == :blocked
+    assert entry.reason == "blocked — conflicts with #{bind.id} (dispatching)"
+
+    # Dispatch flips the issue to :in_progress before its worker registers —
+    # the exact 19-second window the incident dispatched the second task into.
+    {:ok, running} = Ash.update(bind, %{status: :in_progress})
+
+    docs_id = docs.id
+    assert Autopilot.tick(pid) == :idle
+    refute_receive {:dispatched, ^docs_id}, 50
+
+    board = Autopilot.board(pid, [])
+    entry = Enum.find(board.ready, &(&1.id == docs.id))
+    assert entry.state == :blocked
+    assert entry.reason == "blocked — conflicts with #{bind.id} (dispatching)"
+
+    # …and once the counterpart lands, the second one goes.
+    {:ok, _} = Ash.update(running, %{reason: "merged"}, action: :close)
+
+    assert {:ok, second} = Autopilot.tick(pid)
+    assert second == docs.id
+    assert_receive {:dispatched, ^second}
+  end
+
   test "a paused autopilot reads the same world and dispatches nothing", %{ws: ws} do
     task = issue(ws, "ready but held", %{priority: 0})
 

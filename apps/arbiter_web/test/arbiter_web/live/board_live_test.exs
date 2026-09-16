@@ -473,6 +473,27 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "blocked"
       assert html =~ blocker.id
     end
+
+    # bd-6bax7s acceptance 3: a card held by a `conflicts_with` mutex reads the
+    # same way a dependency-held one does, and names the counterpart's state so
+    # an operator knows what they are waiting on.
+    test "a conflict-blocked card names the counterpart and its state", %{conn: conn, ws: ws} do
+      first = issue(ws, "holds the mutex", %{priority: 1})
+      second = issue(ws, "waits for it", %{priority: 3})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: second.id,
+          to_issue_id: first.id,
+          type: :conflicts_with
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "conflicts with #{first.id}"
+      assert html =~ "(dispatching)"
+      refute html =~ "1 ahead in queue"
+    end
   end
 
   describe "hand-ranking Ready" do
