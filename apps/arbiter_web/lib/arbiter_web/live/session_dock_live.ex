@@ -228,7 +228,7 @@ defmodule ArbiterWeb.SessionDockLive do
 
   defp roster(assigns) do
     ~H"""
-    <div class="pointer-events-auto flex flex-col justify-end w-[268px] shrink-0">
+    <div class="pointer-events-auto flex flex-col justify-end shrink basis-[268px] min-w-[8.5rem] max-w-[268px]">
       <div
         :if={@open?}
         id="session-dock-roster-panel"
@@ -323,7 +323,20 @@ defmodule ArbiterWeb.SessionDockLive do
     <div
       id={"session-dock-window-#{@session.id}"}
       data-expanded={to_string(@expanded?)}
-      class="pointer-events-auto flex flex-col justify-end w-[min(28rem,80vw)] shrink-0"
+      class={
+        [
+          "pointer-events-auto flex flex-col justify-end grow-0 shrink",
+          # A full strip has to compress rather than run off the edge of the
+          # page: a fixed-width row of eight windows plus the roster overflows
+          # any laptop, and a `position: fixed` row that overflows takes the
+          # whole document's horizontal scrollbar with it. Widths are a basis
+          # and a ceiling, and the titles already truncate.
+          if(@expanded?,
+            do: "basis-[28rem] max-w-[28rem] min-w-[13rem]",
+            else: "basis-[11rem] max-w-[11rem] min-w-[5rem]"
+          )
+        ]
+      }
     >
       <%!--
       Phase 1's deliverable: a correctly-sized, empty frame. Phase 2 (bd-14b11h)

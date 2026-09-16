@@ -95,7 +95,8 @@ defmodule ArbiterWeb.SessionDockBrowserTest do
         # `localhost`, not `127.0.0.1`: Phoenix checks the socket's Origin
         # against the endpoint's configured host, and a browser sends the one
         # it was pointed at.
-        [@script, "--url", "http://localhost:#{port}", "--seconds", "30"],
+        [@script, "--url", "http://localhost:#{port}", "--seconds", "30"] ++
+          screenshot_args(),
         cd: @root,
         stderr_to_stdout: true
       )
@@ -115,6 +116,16 @@ defmodule ArbiterWeb.SessionDockBrowserTest do
 
       _other ->
         flunk("verify_session_dock.mjs failed:\n\n#{output}")
+    end
+  end
+
+  # `ARB_DOCK_SCREENSHOT=/path/to.png mix test ...` leaves a picture of the
+  # full strip behind. Nothing asserts on it; it is for looking at the dock
+  # without booting a server by hand.
+  defp screenshot_args do
+    case System.get_env("ARB_DOCK_SCREENSHOT") do
+      nil -> []
+      path -> ["--screenshot", path]
     end
   end
 

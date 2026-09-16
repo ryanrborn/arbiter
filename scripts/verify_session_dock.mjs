@@ -36,7 +36,7 @@
 // is the Chrome DevTools Protocol over Node's built-in `WebSocket` and `fetch`.
 
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs"
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -55,6 +55,10 @@ const CHROME_CANDIDATES = [
 const options = parseArgs(process.argv.slice(2))
 const BASE = (options.url || "http://localhost:4848").replace(/\/$/, "")
 const DEADLINE_MS = Number(options.seconds || 30) * 1000
+// `--screenshot <path>` writes a PNG of the full strip at the end of the run.
+// Nothing asserts on it; it is there so a human (or the next phase) can look
+// at what the dock actually renders without booting a server by hand.
+const SCREENSHOT = options.screenshot || null
 
 const WIDTH = 1280
 const HEIGHT = 900
@@ -87,6 +91,7 @@ const browser = spawn(
 )
 
 let cdp = null
+let cdpSessionId = null
 
 try {
   const port = await waitForDevToolsPort(path.join(profile, "DevToolsActivePort"))
@@ -110,6 +115,7 @@ try {
   await cdp.send("Runtime.enable", {}, sessionId)
   await cdp.send("Page.enable", {}, sessionId)
 
+  cdpSessionId = sessionId
   await run(pageDriver(cdp, sessionId))
 } catch (error) {
   check("harness", false, (error && error.stack) || String(error))
@@ -233,6 +239,8 @@ async function run(page) {
     `${frame.w}x${frame.h}, bottom=${frame.bottom} viewport=${HEIGHT}`
   )
 
+  await screenshot("expanded")
+
   check(
     "the-frame-is-empty-no-terminal-in-phase-1",
     await page.eval(
@@ -354,6 +362,71 @@ async function run(page) {
     "launch + list + dock all present on /sessions"
   )
 
+  // -- a full strip ------------------------------------------------------------
+  //
+  // The dock is `position: fixed` and spans the viewport, so a row of windows
+  // that does not compress does not simply look cramped — it pushes the
+  // document's own scrollWidth past the window and gives every page a
+  // horizontal scrollbar it never had before.
+
+  await page.eval(`document.getElementById("session-dock-roster-toggle").click()`)
+  await page.poll(`!!document.getElementById("session-dock-roster-panel")`, "the roster never opened")
+
+  const opened = await page.pollValue(
+    `(() => {
+       const buttons = [...document.querySelectorAll("[id^='session-dock-open-']")]
+       return buttons.length ? buttons.length : null
+     })()`,
+    "the roster listed nothing to open"
+  )
+
+  for (let i = 0; i < Math.min(opened, 10); i++) {
+    await page.eval(
+      `(() => {
+         const panel = document.getElementById("session-dock-roster-panel")
+         if (!panel) document.getElementById("session-dock-roster-toggle").click()
+       })()`
+    )
+    await page.poll(`!!document.getElementById("session-dock-roster-panel")`, "the roster never reopened")
+    const clicked = await page.eval(
+      `(() => {
+         const next = [...document.querySelectorAll("[id^='session-dock-open-']")]
+           .find((b) => b.textContent.trim() === "Open")
+         if (!next) return false
+         next.click()
+         return true
+       })()`
+    )
+    if (!clicked) break
+    await page.settle(150)
+  }
+
+  const full = await page.json(`(() => {
+    const windows = document.querySelectorAll("[id^='session-dock-window-']")
+    const root = document.getElementById("session-dock-root")
+    return {
+      windows: windows.length,
+      documentOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      rootOverflow: Math.round(root.getBoundingClientRect().right) - window.innerWidth,
+      narrowest: Math.min(...[...windows].map((w) => Math.round(w.getBoundingClientRect().width)))
+    }
+  })()`)
+
+  check(
+    "a-full-strip-compresses-instead-of-overflowing-the-page",
+    full.windows > 1 && full.documentOverflow <= 1 && full.rootOverflow <= 1,
+    `${full.windows} windows, narrowest=${full.narrowest}px, ` +
+      `document scrollWidth-innerWidth=${full.documentOverflow}px, strip right-innerWidth=${full.rootOverflow}px`
+  )
+
+  check(
+    "the-cap-stops-a-strip-growing-without-bound",
+    full.windows <= 8,
+    `${full.windows} windows open after clicking Open ${Math.min(opened, 10)} times`
+  )
+
+  await screenshot("full-strip")
+
   check(
     "no-console-errors",
     consoleErrors.length === 0,
@@ -361,6 +434,17 @@ async function run(page) {
   )
 
   console.log(`SESSION ${sessionId}`)
+}
+
+// Nothing asserts on these; they are there so a human (or the next phase) can
+// look at what the dock actually renders without booting a server by hand.
+async function screenshot(label) {
+  if (!SCREENSHOT) return
+
+  const { data } = await cdp.send("Page.captureScreenshot", { format: "png" }, cdpSessionId)
+  const target = SCREENSHOT.replace(/(\.png)?$/, `-${label}.png`)
+  writeFileSync(target, Buffer.from(data, "base64"))
+  console.log(`SCREENSHOT ${target}`)
 }
 
 // -- the page driver ----------------------------------------------------------
