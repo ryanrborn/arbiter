@@ -84,6 +84,12 @@ defmodule ArbiterWeb.TaskDetailLive do
   @tasks_topic "tasks"
   @workers_topic "workers"
 
+  # Mirrors `Budget.epic_estimate_basis/0`, inlined as a literal (rather than
+  # called at compile time) so this module-attribute guard doesn't turn every
+  # edit to `budget.ex` into a recompile of this LiveView. Pinned by
+  # `ArbiterWeb.TaskDetailBudgetTest`'s assertion that the two stay in sync.
+  @epic_estimate_basis "epic_children"
+
   # The expanded transcript of a *running* run cannot come from
   # `Run.output_lines`: that column is written exactly twice — `[]` at run
   # start and the captured tail at run finish — so mid-run it is always
@@ -875,20 +881,23 @@ defmodule ArbiterWeb.TaskDetailLive do
   # it is read against, and which of the three threshold states that lands in.
   # Best-effort on purpose — a ledger read that fails costs the header its
   # cost line, not the page.
-  defp refresh_budget(%{assigns: %{task: %Issue{} = task}} = socket) do
-    budget =
-      try do
-        Budget.assess(task)
-      rescue
-        e ->
-          Logger.warning("Failed to assess spend for #{task.id}: #{inspect(e)}")
-          nil
-      end
+  defp refresh_budget(%{assigns: %{task: %Issue{issue_type: :epic} = task}} = socket) do
+    assign(socket, :budget, assess_budget(task, fn -> Budget.assess_epic(task) end))
+  end
 
-    assign(socket, :budget, budget)
+  defp refresh_budget(%{assigns: %{task: %Issue{} = task}} = socket) do
+    assign(socket, :budget, assess_budget(task, fn -> Budget.assess(task) end))
   end
 
   defp refresh_budget(socket), do: assign(socket, :budget, nil)
+
+  defp assess_budget(task, fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning("Failed to assess spend for #{task.id}: #{inspect(e)}")
+      nil
+  end
 
   # The effective post-layering skill set (workspace -> repo -> issue) a
   # dispatch of this issue would carry right now — the same resolution the
@@ -1057,6 +1066,11 @@ defmodule ArbiterWeb.TaskDetailLive do
     # mini-board above — a child's lifecycle event is exactly what should
     # move the epic's cost rollup too.
     |> assign(:epic_cost_rollup, Usage.epic_cost_rollup(epic))
+    # bd-byp30z: the header's aggregate spend/estimate reads the same child
+    # set as the rollup above, so it has to ride the same trigger — otherwise
+    # a child's ledger update repaints the panel but leaves the header's
+    # figure stale until a full reload or an event on the epic row itself.
+    |> refresh_budget()
   end
 
   defp refresh_children_by_status(socket, _groups) do
@@ -1889,7 +1903,7 @@ defmodule ArbiterWeb.TaskDetailLive do
           >
             <span
               id="task-spend-figure"
-              title="Worker spend: this issue's agent sessions and their review / fix-pass rounds. Excludes coordinator session overhead, which is metered per session and belongs to no single issue."
+              title={spend_figure_title(@task.issue_type)}
               class="text-[var(--text-label)]"
             >
               worker spend
@@ -3543,24 +3557,57 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp present?(v) when is_binary(v), do: String.trim(v) != ""
   defp present?(_), do: false
 
-  # ---- worker spend (bd-8j9i9p) --------------------------------------------
+  # ---- worker spend (bd-8j9i9p, epic rollup bd-byp30z) ---------------------
+
+  defp spend_figure_title(:epic),
+    do:
+      "Worker spend: this epic's own agent sessions (almost always none) plus every direct " <>
+        "child's, across every bucket. Excludes coordinator session overhead, which is metered " <>
+        "per session and belongs to no single issue."
+
+  defp spend_figure_title(_issue_type),
+    do:
+      "Worker spend: this issue's agent sessions and their review / fix-pass rounds. Excludes " <>
+        "coordinator session overhead, which is metered per session and belongs to no single issue."
 
   # `Estimate: $3.00–$8.00 (p90 $9.00) · difficulty+type, n=77`. Basis and n
   # ride along always, not just on the coarse rungs: a `global, n=11` range and
   # a `difficulty+type, n=214` range should not read the same.
+  #
+  # An epic's estimate is a sum of its children's own ranges, not a
+  # peer-group rung — `basis, n=` would misread as a sample size, so it says
+  # how many children are behind the number instead
+  # (`Budget.epic_estimate_basis/0`).
   defp estimate_label(nil), do: "no estimate yet"
+
+  defp estimate_label(%{basis: basis} = est) when basis == @epic_estimate_basis do
+    "Estimate: #{money(est.p25)}\u2013#{money(est.p75)} (p90 #{money(est.p90)}) " <>
+      "\u00b7 #{est.n} #{child_noun(est.n)}"
+  end
 
   defp estimate_label(est) do
     "Estimate: #{money(est.p25)}\u2013#{money(est.p75)} (p90 #{money(est.p90)}) " <>
       "\u00b7 #{est.basis}, n=#{est.n}"
   end
 
+  defp child_noun(1), do: "child"
+  defp child_noun(_n), do: "children"
+
   defp spend_chip_label(:running_high), do: "running high"
   defp spend_chip_label(:over_budget), do: "over budget"
   defp spend_chip_label(_state), do: nil
 
+  defp spend_chip_title(%{state: :running_high, estimate: %{basis: @epic_estimate_basis} = est}),
+    do:
+      "Past the p75 of what this epic's children cost together (#{money(est.p75)}) — informational."
+
   defp spend_chip_title(%{state: :running_high, estimate: est}),
     do: "Past the p75 of what issues like this cost (#{money(est.p75)}) — informational."
+
+  defp spend_chip_title(%{state: :over_budget, estimate: %{basis: @epic_estimate_basis} = est}),
+    do:
+      "Past the p90 of what this epic's children cost together (#{money(est.p90)}). " <>
+        "Nothing has been stopped; the coordinator has been told once."
 
   defp spend_chip_title(%{state: :over_budget, estimate: est}),
     do:
