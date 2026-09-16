@@ -924,14 +924,21 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
 
     test "an HTTP failure is an error, never a `false`" do
-      stub(fn conn ->
-        conn
-        |> Plug.Conn.put_status(404)
-        |> Req.Test.json(%{"message" => "404 Merge Base Not Found"})
-      end)
+      # Both shapes GitLab actually returns, verified against gitlab.com:
+      # 400 `Could not find ref` for a sha the server has not seen — which is
+      # the forge-lag case itself, where the answer must be "could not tell"
+      # rather than "unrelated" — and 404 when the two commits have no merge
+      # base at all.
+      for {status, message, kind} <- [
+            {400, "Could not find ref: #{@descendant}", :validation_failed},
+            {404, "404 Merge Base Not Found", :not_found}
+          ] do
+        stub(fn conn ->
+          conn |> Plug.Conn.put_status(status) |> Req.Test.json(%{"message" => message})
+        end)
 
-      assert {:error, %Error{kind: :not_found}} =
-               Gitlab.ancestor?(@ref, @ancestor, @descendant)
+        assert {:error, %Error{kind: ^kind}} = Gitlab.ancestor?(@ref, @ancestor, @descendant)
+      end
     end
 
     test "a body with no commit id is an error, never a `false`" do

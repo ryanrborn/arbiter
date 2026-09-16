@@ -389,10 +389,12 @@ defmodule Arbiter.Mergers.Gitlab do
   # `refs[]` has to appear twice, which Req's `:params` cannot express (it
   # de-duplicates keys), so the query is written into the path already encoded.
   #
-  # Every non-2xx is an `{:error, _}`, including the 404 GitLab returns both for
-  # "no merge base" and for a commit it has not seen yet — and the second is the
-  # forge-lag case itself, where `Arbiter.Reviews.Coverage` must pause rather
-  # than conclude the head is unrelated to our push.
+  # Every non-2xx is an `{:error, _}` — notably the 400 `Could not find ref`
+  # GitLab returns for a commit it has not seen yet (verified against
+  # gitlab.com), which is the forge-lag case itself: `Arbiter.Reviews.Coverage`
+  # must pause there rather than conclude the head is unrelated to our push.
+  # A 404 (`no merge base`) is treated the same way; unrelated histories are
+  # rare enough that paying a bounded wait for one is the cheaper mistake.
   defp merge_base_ancestry(ancestor, descendant) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, body} <-
