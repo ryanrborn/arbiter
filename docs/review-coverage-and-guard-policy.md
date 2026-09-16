@@ -808,10 +808,28 @@ MIX_ENV=prod mix run --no-start -e \
 
 It answers `%{merges:, agreements:, blocking:, deferred:,
 deferred_observations:, pass?:}` where `:merges` counts only observations the
-old guard decided, `:blocking` must be empty, and `:deferred` is the one
-documented exception — `covered->uncovered`, the post-approval `fix_pass` class,
-which is P7's ticket and is listed observation by observation so it can be
-eyeballed rather than trusted.
+old guard decided, `:blocking` must be empty, and `:deferred` holds the two
+documented exceptions (`deferred_reasons/0`), listed observation by observation
+so they can be eyeballed rather than trusted:
+
+* `covered->uncovered` — the post-approval `fix_pass` class of §4.5, P7's
+  ticket. The old guard merged a commit no review covers; `decide/3` refused
+  it. Five live observations at the time of the P4 flip (#1702, #1723, #1725,
+  #1731, #1735).
+* `unknown->covered` — the W2 grace window. The old guard is still waiting out
+  "have we seen our own push echoed yet" while the head the PR actually reports
+  already has a coverage row, so rule 1 answers on the first poll instead of
+  the sixth. That improvement is rule 2's stated point, and W7's `expected_sha`
+  still pins the merge to that exact head, so a PR resource lagging a *newer*
+  push cannot be merged out from under it — the forge rejects the call. One
+  live observation (bd-2jkrqu / #1707). P5 deletes the latch that produces the
+  `unknown` half.
+
+The live P3 evidence read, immediately before P4 landed: 31 `covered->covered`
+and 1 `uncovered->uncovered` agreements, 5 `covered->uncovered`, 3
+`unknown(forge_lagging)->uncovered` (vs-2bvq9u !224, vs-5bxd80 !229, bd-3ymdvi
+#1709 — the class the `:ancestor?` probe closes, and the reason the gate is
+re-run *after* the probe is live) and 1 `unknown->covered`.
 
 ---
 

@@ -100,11 +100,26 @@ defmodule Arbiter.Reviews.CoverageShadow do
   # §6.3's "≥20 real merges" (P4 / bd-df3zlo, #1736 AC3).
   @preflip_min_merges 20
 
-  # The one disagreement class §4.5 hands to P7 rather than to this phase: the
-  # old guard merged a post-approval `fix_pass` commit that no review covers,
-  # and `decide/3` refused it. It is the new predicate being RIGHT, so it must
-  # not block the flip — but it is listed, never silently dropped.
-  @deferred_transition "covered->uncovered"
+  # The disagreement classes that do NOT block the flip, each because the new
+  # predicate is the one that is right. They are listed observation by
+  # observation, never silently dropped.
+  #
+  #   * `covered->uncovered` — §4.5's post-approval `fix_pass` class, which P7
+  #     owns: the old guard merged a commit no review covers (live: #1702,
+  #     #1723, #1725, #1731, #1735) and `decide/3` refused it.
+  #   * `unknown->covered` — the W2 grace window: the old guard is still
+  #     waiting out "have we seen our own push echoed yet" (up to 5 polls)
+  #     while the head the PR actually reports already has a coverage row, so
+  #     rule 1 answers on the first poll. §3.2 states that improvement as the
+  #     point of rule 2's ancestry, and the merge is still pinned to that head
+  #     by W7's `expected_sha`, so a PR resource lagging a *newer* push cannot
+  #     be merged out from under it — the forge rejects the call. Live: one
+  #     observation, bd-2jkrqu / #1707. P5 removes the grace latch that
+  #     produces the `unknown` half.
+  @deferred_transitions %{
+    "covered->uncovered" => "post-approval fix_pass (§4.5, P7)",
+    "unknown->covered" => "W2 grace window; rule 1 answers on the first poll (§3.2, P5)"
+  }
 
   @typedoc """
   The three-valued answer both predicates are normalised to before they are
@@ -220,11 +235,12 @@ defmodule Arbiter.Reviews.CoverageShadow do
       workspace that has already flipped stops producing evidence about the
       flip, so its rows are excluded.
     * `:blocking` — disagreements per `old->new` transition that must be zero.
-    * `:deferred` / `:deferred_observations` — the one documented exception:
-      `covered->uncovered`, the post-approval `fix_pass` class (§4.5), which
-      is `decide/3` correctly refusing what the old guard merged and is P7's
-      ticket, not this phase's. Listed individually rather than summed, so the
-      operator can confirm each one really is that shape.
+    * `:deferred` / `:deferred_observations` — the two documented exceptions,
+      `covered->uncovered` (§4.5's post-approval `fix_pass` class, P7's
+      ticket) and `unknown->covered` (the W2 grace window, P5's), both of them
+      the coverage predicate being right rather than the old guard. Listed
+      individually rather than summed, so the operator can confirm each one
+      really is that shape before flipping. `deferred_reasons/0` names them.
 
   `:pass?` is `merges >= min_merges` (default 20) with `blocking` empty.
 
@@ -291,7 +307,14 @@ defmodule Arbiter.Reviews.CoverageShadow do
 
   defp transition(record), do: "#{payload(record, "old")}->#{payload(record, "new")}"
 
-  defp deferred_class?(record), do: transition(record) == @deferred_transition
+  defp deferred_class?(record), do: Map.has_key?(@deferred_transitions, transition(record))
+
+  @doc """
+  The disagreement transitions `preflip_gate/0` does not treat as blocking, and
+  why each one is on the list.
+  """
+  @spec deferred_reasons() :: %{optional(String.t()) => String.t()}
+  def deferred_reasons, do: @deferred_transitions
 
   defp observation_summary(record) do
     %{

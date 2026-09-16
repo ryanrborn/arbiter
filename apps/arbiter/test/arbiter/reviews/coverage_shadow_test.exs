@@ -179,6 +179,24 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
       assert head == sha("fixpass")
     end
 
+    test "the W2 grace-window class is deferred too, and says why" do
+      for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("ok3-#{i}")})
+
+      seed("disagree", "unknown", "covered", %{
+        head: sha("gracewindow"),
+        old_detail: "forge_lagging"
+      })
+
+      gate = CoverageShadow.preflip_gate()
+
+      assert gate.deferred["unknown->covered"] == 1
+      assert gate.blocking == %{}
+      assert gate.pass?
+
+      assert CoverageShadow.deferred_reasons()["unknown->covered"] =~ "grace window"
+      assert CoverageShadow.deferred_reasons()["covered->uncovered"] =~ "fix_pass"
+    end
+
     test "any other disagreement blocks the flip" do
       for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("ok2-#{i}")})
       seed("disagree", "unknown", "uncovered", %{head: sha("laggy")})
