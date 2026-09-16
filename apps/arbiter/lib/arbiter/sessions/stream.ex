@@ -684,6 +684,16 @@ defmodule Arbiter.Sessions.Stream do
     # check as `resize/4`'s own guard.
     resized? = geometry?(cols, rows) and {cols, rows} != {state.cols, state.rows}
     state = if geometry?(cols, rows), do: apply_resize(state, cols, rows), else: state
+
+    # A `pending_snapshot` was captured by `open_stream/1` when this reader
+    # (re)started — before *this* attach's geometry, if it differs, was ever
+    # applied. `take_snapshot/1` prefers it outright, so a fresh reader (the
+    # first join after a linger timeout, or this session's very first) whose
+    # joiner brings a different size would otherwise repaint text the pane
+    # laid out for the old geometry rather than the one it was just resized to
+    # (bd-c5udkj). Dropping it here forces a live re-capture, now that the
+    # resize above has taken effect.
+    state = if resized?, do: %{state | pending_snapshot: nil}, else: state
     {resume, state} = resume(state, last_seq)
 
     # Everyone *else* learns the client count changed; the joiner is told in

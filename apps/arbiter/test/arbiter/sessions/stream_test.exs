@@ -164,6 +164,51 @@ defmodule Arbiter.Sessions.StreamTest do
       ScriptedPty.emit(id, "NEW")
       assert assert_stdout(id, "NEW") == 13
     end
+
+    test "drops a stale pending_snapshot when the join resizes the pane (bd-c5udkj)", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      # The reader's own opening capture ("OLD LAYOUT") happens before this
+      # attach's geometry is applied — `on_start_stream` fires from inside
+      # that same window and changes what the terminal would now report, the
+      # same way a pane redraws between a reader restart and a joiner's
+      # resize landing. A joiner whose geometry differs from the reader's
+      # startup geometry must see the fresh layout, not the stale one.
+      ScriptedPty.install(id,
+        snapshot: "OLD LAYOUT",
+        cols: 80,
+        rows: 24,
+        title: "scripted",
+        on_start_stream: fn _opts -> ScriptedPty.put(id, snapshot: "NEW LAYOUT") end
+      )
+
+      assert {:ok, attached} = attach(session, opts, cols: 120, rows: 40)
+
+      assert attached.resized == true
+      assert attached.mode == :snapshot
+      assert attached.snapshot == "NEW LAYOUT"
+    end
+
+    test "reuses the pending_snapshot when the join's geometry already matches", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      ScriptedPty.install(id,
+        snapshot: "OPENING SNAPSHOT",
+        cols: 80,
+        rows: 24,
+        title: "scripted",
+        on_start_stream: fn _opts -> ScriptedPty.put(id, snapshot: "LIVE SNAPSHOT") end
+      )
+
+      assert {:ok, attached} = attach(session, opts, cols: 80, rows: 24)
+
+      assert attached.resized == false
+      assert attached.snapshot == "OPENING SNAPSHOT"
+    end
   end
 
   describe "persisted transcript (§11, phase 9)" do

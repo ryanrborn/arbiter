@@ -48,6 +48,27 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
 
   @default_snapshot_lines 2_000
 
+  # `capture-pane -p` is plain text: it carries neither the pane's cursor
+  # position nor a `\r` before each `\n` (tmux's own line buffer has no `\r`,
+  # only line boundaries). xterm is constructed with `convertEol: false`
+  # (`session_terminal.mjs`) so it never supplies the missing `\r` on its own,
+  # and without the cursor a repaint leaves xterm's cursor wherever the last
+  # written byte put it rather than where tmux's own cursor sits — Claude
+  # Code's next escape-relative redraw then lands in the wrong place (bd-c5udkj).
+  #
+  # Both are fixed here, once, so every snapshot caller (a fresh reader's
+  # opening capture in `start_stream/3`, and a live re-capture in `snapshot/2`)
+  # gets the same treatment: `finalize_capture/1` rewrites bare `\n` to `\r\n`
+  # and appends a CUP escape built from the pane's cursor position. The cursor
+  # is fetched in the *same* tmux invocation as the capture (chained with `;`,
+  # same trick `start_stream/3` already used to pair `pipe-pane` with its
+  # opening capture) rather than a second shell-out, so there is no seam for
+  # the pane to move its cursor in between. It is prefixed with SOH/STX
+  # (`\x01`/`\x02`) — control bytes no real terminal output uses — so it can be
+  # split off the front of the capture unambiguously.
+  @cursor_prefix "\x01"
+  @cursor_suffix "\x02"
+
   @impl true
   def start_stream(%Session{} = session, path, opts \\ []) do
     lines = snapshot_lines(opts)
@@ -55,10 +76,12 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
     args =
       base(session) ++
         ["pipe-pane", "-O", "-t", Naming.tmux_session(), "cat >> #{shell_quote(path)}", ";"] ++
+        cursor_args() ++
+        [";"] ++
         capture_args(lines)
 
     case run(args, opts) do
-      {snapshot, 0} -> {:ok, %{snapshot: snapshot}}
+      {out, 0} -> {:ok, %{snapshot: finalize_capture(out)}}
       {out, status} -> {:error, {:tmux_failed, status, String.trim(out)}}
     end
   end
@@ -83,8 +106,10 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
 
   @impl true
   def snapshot(%Session{} = session, opts \\ []) do
-    case run(base(session) ++ capture_args(snapshot_lines(opts)), opts) do
-      {snapshot, 0} -> {:ok, snapshot}
+    args = base(session) ++ cursor_args() ++ [";"] ++ capture_args(snapshot_lines(opts))
+
+    case run(args, opts) do
+      {out, 0} -> {:ok, finalize_capture(out)}
       {out, status} -> {:error, {:tmux_failed, status, String.trim(out)}}
     end
   end
@@ -153,6 +178,51 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   defp capture_args(lines) do
     ["capture-pane", "-p", "-e", "-S", "-#{lines}", "-t", Naming.tmux_session()]
   end
+
+  # 0-based, relative to the top of the pane's *visible* area — the same frame
+  # `capture-pane`'s un-scrolled-back lines land in, so a CUP built from these
+  # coordinates addresses the right row once xterm has replayed the capture.
+  defp cursor_args do
+    format = @cursor_prefix <> "\#{cursor_x}\t\#{cursor_y}" <> @cursor_suffix
+    ["display-message", "-p", "-t", Naming.tmux_session(), format]
+  end
+
+  # Splits the `cursor_args/0` prefix off the front of a combined capture,
+  # rewrites bare `\n` to `\r\n`, and appends a CUP escape for the cursor —
+  # see the moduledoc comment above `start_stream/3` for why all three happen
+  # together, in one place, for both callers.
+  defp finalize_capture(out) do
+    {pane, cursor} = split_cursor(out)
+    text = normalize_line_endings(pane)
+
+    case cursor do
+      {x, y} -> text <> cup(x, y)
+      nil -> text
+    end
+  end
+
+  defp split_cursor(out) do
+    with @cursor_prefix <> rest <- out,
+         [position, pane] <- String.split(rest, @cursor_suffix, parts: 2),
+         [x, y] <- String.split(position, "\t", parts: 2),
+         {x, ""} <- Integer.parse(x),
+         {y, ""} <- Integer.parse(y) do
+      {pane, {x, y}}
+    else
+      _ -> {out, nil}
+    end
+  end
+
+  defp cup(x, y), do: "\e[#{y + 1};#{x + 1}H"
+
+  # tmux's pane buffer has no `\r` — it is a grid of lines, not a byte stream —
+  # so `capture-pane -p` prints a bare `\n` between them. xterm is constructed
+  # with `convertEol: false` (so genuine output is never silently rewritten),
+  # which means nothing downstream turns that into a carriage return, and a
+  # repaint staircases: every line starts one column further right than the
+  # last. A `\n` already preceded by `\r` (there should not be one in
+  # `capture-pane` output, but a defensive check costs nothing) is left alone.
+  defp normalize_line_endings(data), do: String.replace(data, ~r/(?<!\r)\n/, "\r\n")
 
   defp snapshot_lines(opts) do
     Keyword.get(opts, :snapshot_lines) ||
