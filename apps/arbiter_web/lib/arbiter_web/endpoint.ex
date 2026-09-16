@@ -11,9 +11,13 @@ defmodule ArbiterWeb.Endpoint do
     same_site: "Lax"
   ]
 
+  # `:peer_data` lets `SessionLive` tell a loopback peer from a LAN one
+  # server-side, mirroring the `/session` socket below — it needs the same
+  # input to say up front that the terminal is loopback-only (bd-2zskbb),
+  # rather than let a doomed `/session` connect attempt fail silently.
   socket "/live", Phoenix.LiveView.Socket,
-    websocket: [connect_info: [session: @session_options]],
-    longpoll: [connect_info: [session: @session_options]]
+    websocket: [connect_info: [:peer_data, session: @session_options]],
+    longpoll: [connect_info: [:peer_data, session: @session_options]]
 
   # Browser-hosted coordinator sessions (bd-3ymdvi, RFC §5.1): a terminal byte
   # stream is the wrong shape for LiveView's diffing, and the topic has to be

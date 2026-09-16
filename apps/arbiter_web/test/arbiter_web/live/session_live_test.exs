@@ -237,6 +237,48 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, ~s(#terminal-status [data-role="usage"]))
     end
 
+    test "a non-loopback peer sees a notice instead of an inert terminal, and is told Remote Control works (mode B, bd-2zskbb)",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials)
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute has_element?(view, "#session-terminal-#{session.id}")
+      refute has_element?(view, "#terminal-status")
+      assert has_element?(view, "#terminal-remote-notice")
+      assert has_element?(view, "#terminal-remote-notice", "loopback-only")
+      assert has_element?(view, "#terminal-remote-notice", "Remote Control")
+    end
+
+    test "a non-loopback peer under a workspace token (mode A) is told Remote Control will not work either (bd-2zskbb)",
+         %{conn: conn} do
+      session =
+        launch!(auth_mode: :oauth_token, oauth_token: "sk-ant-oat01-SESSION-LIVE-TEST-TOKEN")
+
+      conn =
+        Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute has_element?(view, "#session-terminal-#{session.id}")
+      assert has_element?(view, "#terminal-remote-notice")
+      assert has_element?(view, "#terminal-remote-notice", "does not support Remote Control")
+    end
+
+    test "a loopback peer attaches exactly as before, with no extra banner (bd-2zskbb)", %{
+      conn: conn
+    } do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      assert has_element?(view, "#session-terminal-#{session.id}")
+      refute has_element?(view, "#terminal-remote-notice")
+    end
+
     test "a narrow viewport scrolls the terminal, not the page (§6.3)", %{conn: conn} do
       session = launch!()
 
