@@ -410,6 +410,15 @@ async function run(page) {
   // both the fact that it is frozen and the text it held, the operator's
   // ended window would quietly become "its output is unavailable".
 
+  // The pane that is about to be destroyed is branded first, so the poll below
+  // cannot be satisfied by it. Without this the check races the wipe: a first
+  // tick that lands before the dock's post-rejoin re-render sees the *old*
+  // element, still read-only and still holding the marker, and passes without
+  // the rebuild ever having happened.
+  await page.eval(
+    `document.getElementById("session-dock-terminal-${sessionId}").dataset.arbPreRejoin = "1"`
+  )
+
   await page.eval(`
     window.__arbRejoined2 = false
     window.liveSocket.disconnect(() => {
@@ -424,7 +433,7 @@ async function run(page) {
     survived = await page.pollValue(
       `(() => {
          const pane = document.getElementById("session-dock-terminal-${sessionId}")
-         if (!pane) return null
+         if (!pane || pane.dataset.arbPreRejoin) return null
          const term = pane.__arbTerminal
          if (!term || !term.readOnly()) return null
          return term.snapshot().includes("ARB-SCROLLBACK-MARKER") ? "survived" : null
@@ -453,12 +462,29 @@ async function run(page) {
   )
 
   // ...and dismissing it is the one thing that takes it away.
-  await page.eval(`document.getElementById("session-dock-dismiss-${sessionId}").click()`)
-
+  //
+  // Clicked from inside the poll rather than once up front. This lands right
+  // after a rejoin, and a `phx-click` on a view that has not finished joining
+  // is dropped on the floor by LiveView with no sign of it — so the click is
+  // re-issued until the window goes. Dismiss is idempotent and view-only, so
+  // repeating it is free (unlike Launch above). `__arbDismissClicked` is what
+  // keeps this honest: an absent window only counts as "gone" once this check
+  // has actually clicked something, never because the DOM happened to be
+  // mid-rebuild on the first tick.
   let dismissed = null
   try {
     dismissed = await page.pollValue(
-      `document.getElementById("session-dock-window-${sessionId}") ? null : "gone"`,
+      `(() => {
+         const win = document.getElementById("session-dock-window-${sessionId}")
+         if (!win) return window.__arbDismissClicked ? "gone" : null
+
+         const button = document.getElementById("session-dock-dismiss-${sessionId}")
+         if (button) {
+           window.__arbDismissClicked = true
+           button.click()
+         }
+         return null
+       })()`,
       "the dismissed window stayed in the dock"
     )
   } catch (_error) {
