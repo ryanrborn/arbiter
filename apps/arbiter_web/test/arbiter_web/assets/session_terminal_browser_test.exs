@@ -66,6 +66,7 @@ defmodule ArbiterWeb.SessionTerminalBrowserTest do
         assert output =~ "CHECK remount-sends-its-geometry-to-the-pane: PASS"
         assert output =~ "CHECK a-join-that-resized-the-pane-forces-a-redraw: PASS"
         assert output =~ "CHECK a-window-resize-refits-and-tells-the-pane: PASS"
+        assert output =~ "CHECK a-tab-that-never-paints-still-attaches: PASS"
         refute output =~ ": FAIL"
 
       other ->

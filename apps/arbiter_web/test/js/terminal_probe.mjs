@@ -476,6 +476,28 @@ async function remountChecks() {
   )
 
   quietHandle.dispose()
+
+  // A tab that never paints never runs a frame callback. The settle cannot be
+  // the only thing deciding when this terminal connects — the page's own stall
+  // notice arms at 8s and would tell the operator to reload a working session.
+  const stuck = hiddenPane()
+  const stuckSocket = new ProbeSocket()
+  const stuckHandle = createSessionTerminal(stuck.el, {
+    sessionId: "probe",
+    socket: stuckSocket,
+    schedule: () => {}
+  })
+
+  await new Promise((resolve) => setTimeout(resolve, 1400))
+
+  check(
+    "a-tab-that-never-paints-still-attaches",
+    `joins=${stuckSocket.joins.length}`,
+    stuckSocket.joins.length === 1
+  )
+
+  stuckHandle.dispose()
+  stuck.parent.remove()
   second.parent.remove()
   third.parent.remove()
 }
