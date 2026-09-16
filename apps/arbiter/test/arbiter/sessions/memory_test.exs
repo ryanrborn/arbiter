@@ -62,7 +62,9 @@ defmodule Arbiter.Sessions.MemoryTest do
       shared = Layout.memory_shared_dir(s.id)
       assert File.read_link(Path.join([shared, "user", "user-fact.md"])) |> elem(0) == :ok
       assert File.read_link(Path.join([shared, "feedback", "feedback-fact.md"])) |> elem(0) == :ok
-      assert File.read_link(Path.join([shared, "reference", "reference-fact.md"])) |> elem(0) == :ok
+
+      assert File.read_link(Path.join([shared, "reference", "reference-fact.md"])) |> elem(0) ==
+               :ok
     end
 
     test "cross-workspace session receives no project memories", %{memory_root: root} do
