@@ -35,6 +35,24 @@ defmodule Arbiter.Sessions.ProvisioningTest do
     session
   end
 
+  defp tmp_dir!(tag) do
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "bd-o2vtsz-#{tag}-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
+  # Same single-quote escaping `Arbiter.Sessions.Provisioning` uses internally
+  # — asserted independently here (rather than by calling the private
+  # function) so the test proves the *shape* an injection-safe quoting scheme
+  # must have, not merely that the implementation agrees with itself.
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
+
   defp session_settings!(session),
     do:
       session.id
@@ -92,6 +110,47 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       assert body =~ "exec claude"
       assert {:ok, %{mode: mode}} = File.stat(script)
       assert Bitwise.band(mode, 0o077) == 0
+    end
+
+    test "no name supplied → launch.sh execs a bare claude, unchanged (bd-o2vtsz)" do
+      session = launch!()
+      body = File.read!(Layout.launch_script_path(session.id))
+
+      assert body =~ "exec claude\n"
+      refute body =~ "--name"
+    end
+
+    test "an operator-supplied name becomes claude --name <name>, single-quoted (bd-o2vtsz)" do
+      session = launch!(name: "refinement session")
+      body = File.read!(Layout.launch_script_path(session.id))
+
+      assert body =~ "exec claude --name 'refinement session'\n"
+    end
+
+    test "a name with a quote, space, $ and ; is shell-quoted and injects nothing (bd-o2vtsz)" do
+      bin_dir = tmp_dir!("stub-claude-bin")
+      marker = Path.join(bin_dir, "injected-marker")
+      capture = Path.join(bin_dir, "captured-argv")
+
+      File.write!(Path.join(bin_dir, "claude"), """
+      #!/bin/sh
+      printf '%s\\n' "$@" > #{shell_quote(capture)}
+      """)
+
+      File.chmod!(Path.join(bin_dir, "claude"), 0o755)
+
+      malicious = "o'Brien's $HOME; touch #{marker}"
+      session = launch!(name: malicious)
+      script = Layout.launch_script_path(session.id)
+
+      body = File.read!(script)
+      assert body =~ "exec claude --name " <> shell_quote(malicious) <> "\n"
+
+      path = "#{bin_dir}:#{System.get_env("PATH")}"
+      assert {_out, 0} = System.cmd("sh", [script], env: [{"PATH", path}], stderr_to_stdout: true)
+
+      assert File.read!(capture) |> String.split("\n", trim: true) == ["--name", malicious]
+      refute File.exists?(marker), "the ; inside the name must never run as a command"
     end
 
     test "only the §9.4 mount points ship — no promotion, no mounted layers yet" do
