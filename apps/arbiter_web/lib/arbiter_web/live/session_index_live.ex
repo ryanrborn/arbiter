@@ -23,12 +23,26 @@ defmodule ArbiterWeb.SessionIndexLive do
   `Arbiter.Sessions.kill/2` stops a real tmux server inside a real systemd
   scope; whatever the agent was mid-turn on is gone. So it is a two-step, and
   the confirmation names the session rather than asking "are you sure?".
+
+  ## Cost/tokens column (bd-9mrzti)
+
+  Each row's cost and token totals come from `Arbiter.Usage.summarize(by:
+  :session)` — the same rollup `arb usage --by session` and the session
+  detail page's initial load use — rather than a second computation. A
+  running session's row is not backed by its own JSONL tailer: the page
+  polls that one aggregate query on `@usage_refresh_ms`, so N running
+  sessions cost one query per tick, not N. The ledger itself
+  (`Arbiter.Sessions.UsageIngest`) only sweeps every 5 minutes by default, so
+  this is "the next sweep shows up without a reload", not sub-second — see
+  the "estimated" marker on figures still riding on `ClaudePricing`'s
+  token-priced fallback rather than a real `cost-state` record.
   """
 
   use ArbiterWeb, :live_view
 
   alias Arbiter.Sessions
   alias Arbiter.Sessions.DisplayName
+  alias Arbiter.Usage
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.CoreComponents.Domain
@@ -38,16 +52,26 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   require Logger
 
+  # How often a running session's row re-pulls the usage ledger (bd-9mrzti).
+  # `Arbiter.Sessions.UsageIngest` only sweeps every 5 minutes by default, so
+  # polling faster than that buys nothing; this just needs to be "a page left
+  # open eventually catches the next sweep" rather than instant. A single
+  # `Usage.summarize(by: :session)` call for the whole list, not one tailer
+  # per row — see the module doc.
+  @usage_refresh_ms 30_000
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.lifecycle_topic())
     end
 
-    {:ok,
-     socket
-     |> assign(:kill_candidate, nil)
-     |> refresh()}
+    socket =
+      socket
+      |> assign(:kill_candidate, nil)
+      |> refresh()
+
+    {:ok, schedule_usage_refresh(socket)}
   end
 
   @impl true
@@ -97,6 +121,13 @@ defmodule ArbiterWeb.SessionIndexLive do
     {:noreply, refresh(socket)}
   end
 
+  # bd-9mrzti: the periodic re-pull of the usage ledger — see the module doc.
+  # Rescheduled from here rather than left as a fixed `:timer.send_interval`
+  # so it stops entirely once nothing is running (`schedule_usage_refresh/1`).
+  def handle_info(:refresh_session_usage, socket) do
+    {:noreply, socket |> refresh() |> schedule_usage_refresh()}
+  end
+
   # `ArbiterWeb.LiveHooks` subscribes every view to the coordinator mailbox and
   # quota topics and lets their messages fall through (`:cont`), so any page
   # with a `handle_info/2` of its own has to tolerate them.
@@ -108,6 +139,40 @@ defmodule ArbiterWeb.SessionIndexLive do
     socket
     |> assign(:sessions, sessions)
     |> assign(:running_count, Enum.count(sessions, &(&1.status == :running)))
+    |> assign(:usage_by_session, usage_by_session(sessions))
+  end
+
+  # One rollup query for the whole list — not one JSONL tailer per row — keyed
+  # by `provider_session_id` because that's what `Arbiter.Usage.Event.session_id`
+  # holds (`Arbiter.Sessions.UsageIngest` writes rows keyed by the JSONL's own
+  # basename, not the Ash session id).
+  defp usage_by_session(sessions) do
+    provider_ids = sessions |> Enum.map(& &1.provider_session_id) |> Enum.filter(&is_binary/1)
+
+    case provider_ids do
+      [] ->
+        %{}
+
+      _ ->
+        case Usage.summarize(by: :session) do
+          {:ok, rollups} ->
+            rollups
+            |> Enum.filter(&(&1.group in provider_ids))
+            |> Map.new(&{&1.group, &1})
+
+          {:error, reason} ->
+            Logger.error("SessionIndexLive: usage summarize failed: #{inspect(reason)}")
+            %{}
+        end
+    end
+  end
+
+  defp schedule_usage_refresh(socket) do
+    if connected?(socket) and socket.assigns.running_count > 0 do
+      Process.send_after(self(), :refresh_session_usage, @usage_refresh_ms)
+    end
+
+    socket
   end
 
   # Phase 5's defaults; phase 11 replaces this with the options UI. `:name` is
@@ -218,6 +283,11 @@ defmodule ArbiterWeb.SessionIndexLive do
                 )}
               </span>
 
+              <.usage_cell
+                session_id={session.id}
+                usage={@usage_by_session[session.provider_session_id]}
+              />
+
               <span :if={session.end_reason} class="text-[11px] text-[var(--text-label)] italic">
                 {session.end_reason}
               </span>
@@ -296,6 +366,32 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp workspace_label(%{workspace_id: nil}), do: "cross-workspace"
   defp workspace_label(%{workspace_id: id}), do: id
+
+  # A session row's cost/tokens, or an explicit empty state — never a silent
+  # `$0.00` for a session the ledger has no rows for yet (bd-9mrzti).
+  attr :session_id, :string, required: true
+  attr :usage, :any, required: true, doc: "an `Arbiter.Usage.summarize/1` rollup, or nil"
+
+  defp usage_cell(assigns) do
+    ~H"""
+    <span
+      :if={@usage}
+      id={"session-#{@session_id}-usage"}
+      class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+    >
+      {Data.format_tokens(@usage.tokens_in)} in / {Data.format_tokens(@usage.tokens_out)} out · {Data.format_usd(
+        @usage.total_cost_usd
+      )}<span :if={@usage.estimated}> (estimated)</span>
+    </span>
+    <span
+      :if={!@usage}
+      id={"session-#{@session_id}-usage-empty"}
+      class="text-[11px] text-[var(--text-label)] italic"
+    >
+      no usage data
+    </span>
+    """
+  end
 
   defp dispatch_label(%{can_dispatch: true}), do: " · can dispatch"
   defp dispatch_label(_session), do: ""

@@ -207,6 +207,62 @@ defmodule Arbiter.UsageTest do
       assert_in_delta session_rollup.total_cost_usd, 7.5, 0.001
     end
 
+    test "by session flags a rollup as estimated when any row's cost is derived" do
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-hud-est",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 1.0,
+        tokens_in: 100,
+        tokens_out: 50,
+        occurred_at: DateTime.utc_now(),
+        raw: %{"arb_usage_source" => %{"cost_source" => "cost_state"}}
+      })
+
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-hud-est",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 2.0,
+        tokens_in: 200,
+        tokens_out: 100,
+        occurred_at: DateTime.utc_now(),
+        raw: %{"arb_usage_source" => %{"cost_source" => "estimated"}}
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :session, workspace_id: "ws-usage")
+
+      assert [session_rollup] = rollups
+      assert session_rollup.estimated == true
+    end
+
+    test "by session does not flag a rollup as estimated when every row's cost-state is real" do
+      create_event!(%{
+        task_id: nil,
+        source: :coordinator_session,
+        session_id: "sess-hud-real",
+        step: :other,
+        model: "claude-opus-4-7",
+        provider: "claude",
+        cost_usd: 1.0,
+        tokens_in: 100,
+        tokens_out: 50,
+        occurred_at: DateTime.utc_now(),
+        raw: %{"arb_usage_source" => %{"cost_source" => "cost_state"}}
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :session, workspace_id: "ws-usage")
+
+      assert [session_rollup] = rollups
+      assert session_rollup.estimated == false
+    end
+
     test "by step splits work vs review" do
       {:ok, rollups} = Usage.summarize(by: :step, workspace_id: "ws-usage")
       by_step = Map.new(rollups, &{&1.group, &1})

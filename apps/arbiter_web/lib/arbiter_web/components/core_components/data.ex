@@ -303,4 +303,28 @@ defmodule ArbiterWeb.CoreComponents.Data do
       true -> "$#{:erlang.float_to_binary(f, decimals: 2)}"
     end
   end
+
+  @doc """
+  Formats a token count for compact display (`"1.2k"`, `"3.4M"`).
+
+  ## Examples
+
+      iex> ArbiterWeb.CoreComponents.Data.format_tokens(nil)
+      "—"
+
+      iex> ArbiterWeb.CoreComponents.Data.format_tokens(1500)
+      "1.5k"
+  """
+  def format_tokens(nil), do: "—"
+  def format_tokens(n) when n in [0, 0.0], do: "0"
+
+  def format_tokens(n) when is_integer(n) and n >= 1_000_000 do
+    "#{Float.round(n / 1_000_000, 2)}M"
+  end
+
+  def format_tokens(n) when is_integer(n) and n >= 1_000 do
+    "#{Float.round(n / 1_000, 1)}k"
+  end
+
+  def format_tokens(n) when is_integer(n), do: Integer.to_string(n)
 end

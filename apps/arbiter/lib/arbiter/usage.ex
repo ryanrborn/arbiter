@@ -81,7 +81,8 @@ defmodule Arbiter.Usage do
           required(:tokens_out) => non_neg_integer(),
           required(:cache_creation_tokens) => non_neg_integer(),
           required(:cache_read_tokens) => non_neg_integer(),
-          required(:duration_ms) => non_neg_integer()
+          required(:duration_ms) => non_neg_integer(),
+          required(:estimated) => boolean()
         }
 
   @valid_by ~w(day task epic workspace repo model step provider source session)a
@@ -352,7 +353,8 @@ defmodule Arbiter.Usage do
       tokens_out: 0,
       cache_creation_tokens: 0,
       cache_read_tokens: 0,
-      duration_ms: 0
+      duration_ms: 0,
+      estimated: false
     }
 
     Enum.reduce(events, init, fn ev, acc ->
@@ -364,10 +366,21 @@ defmodule Arbiter.Usage do
           tokens_out: acc.tokens_out + (ev.tokens_out || 0),
           cache_creation_tokens: acc.cache_creation_tokens + (ev.cache_creation_tokens || 0),
           cache_read_tokens: acc.cache_read_tokens + (ev.cache_read_tokens || 0),
-          duration_ms: acc.duration_ms + (ev.duration_ms || 0)
+          duration_ms: acc.duration_ms + (ev.duration_ms || 0),
+          estimated: acc.estimated or estimated_event?(ev)
       }
     end)
   end
+
+  # `Sessions.UsageIngest` stamps `raw["arb_usage_source"]["cost_source"]`
+  # with the same `:cost_state | :estimated | none` provenance
+  # `ClaudeSessionFile` reports live (see `ClaudePricing`'s moduledoc) — this
+  # is the persisted mirror of that marker, so a rollup can carry it forward
+  # without recomputing an estimate itself.
+  defp estimated_event?(%{raw: %{"arb_usage_source" => %{"cost_source" => "estimated"}}}),
+    do: true
+
+  defp estimated_event?(_ev), do: false
 
   defp sort_rollups(rollups, :day), do: Enum.sort_by(rollups, & &1.group)
 
