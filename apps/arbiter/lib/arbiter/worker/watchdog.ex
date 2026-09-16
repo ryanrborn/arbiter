@@ -2709,7 +2709,12 @@ defmodule Arbiter.Worker.Watchdog do
         # between the refusal and this lookup, and the next retry will simply
         # succeed), two in a row is not.
         state = forget_resume_blocker(state)
-        %{state | resume_blocker_key: key, resume_blocker_missing: state.resume_blocker_missing + 1}
+
+        %{
+          state
+          | resume_blocker_key: key,
+            resume_blocker_missing: state.resume_blocker_missing + 1
+        }
     end
   end
 
@@ -2723,7 +2728,8 @@ defmodule Arbiter.Worker.Watchdog do
     %{state | resume_blocker_pid: nil, resume_blocker_ref: nil}
   end
 
-  defp forget_resume_blocker(state), do: %{state | resume_blocker_pid: nil, resume_blocker_ref: nil}
+  defp forget_resume_blocker(state),
+    do: %{state | resume_blocker_pid: nil, resume_blocker_ref: nil}
 
   # The blocking worker's pid, as `Worker.start/1`'s refusal reports it.
   defp resume_blocker_pid({:worker_start_failed, inner}), do: resume_blocker_pid(inner)
