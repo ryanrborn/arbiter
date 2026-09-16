@@ -488,6 +488,21 @@ defmodule ArbiterWeb.SessionChannelTest do
 
       assert_push "usage", %{tokens_in: 10, tokens_out: 20, model: "claude-opus-5"}
     end
+
+    test "a bridge_unavailable broadcast (§8.3) reaches the client as an error event", %{
+      session: session,
+      topic: topic
+    } do
+      {:ok, _reply, _socket} = join_session(topic)
+
+      Sessions.broadcast_error(session.id, %{
+        code: "bridge_unavailable",
+        detail: "no bridge-session record within 15000ms"
+      })
+
+      assert_push "error", %{code: "bridge_unavailable", detail: detail}
+      assert detail =~ "bridge-session"
+    end
   end
 
   # -- helpers ----------------------------------------------------------------
