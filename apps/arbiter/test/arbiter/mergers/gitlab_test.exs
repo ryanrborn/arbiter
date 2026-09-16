@@ -893,6 +893,68 @@ defmodule Arbiter.Mergers.GitlabTest do
   # honoured `%{base:, head:}`; GitLab's silently ignored its opts and always
   # answered with the whole-MR diff, which would have made every comparison
   # trivially equal and the guard useless.
+  describe "ancestor?/3" do
+    # P4 (bd-df3zlo / #1736) AC1. `Coverage.decide/3`'s rule 2 needs an
+    # ancestry *proof* before it will call a head "the forge lagging our own
+    # push", and until this existed no adapter could supply one.
+    @ancestor String.duplicate("a", 40)
+    @descendant String.duplicate("b", 40)
+
+    test "true when the merge base of the two commits IS the ancestor" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/api/v4/projects/#{@project}/repository/merge_base"
+        assert conn.query_string =~ "refs%5B%5D=#{@ancestor}"
+        assert conn.query_string =~ "refs%5B%5D=#{@descendant}"
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => @ancestor})
+      end)
+
+      assert Gitlab.ancestor?(@ref, @ancestor, @descendant) == {:ok, true}
+    end
+
+    test "false when the merge base is some earlier commit (the two diverged)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"id" => String.duplicate("c", 40)})
+      end)
+
+      assert Gitlab.ancestor?(@ref, @ancestor, @descendant) == {:ok, false}
+    end
+
+    test "an HTTP failure is an error, never a `false`" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"message" => "404 Merge Base Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found}} =
+               Gitlab.ancestor?(@ref, @ancestor, @descendant)
+    end
+
+    test "a body with no commit id is an error, never a `false`" do
+      stub(fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"nope" => true}) end)
+
+      assert {:error, {:unexpected_merge_base, _}} =
+               Gitlab.ancestor?(@ref, @ancestor, @descendant)
+    end
+
+    test "identical commits are ancestors of themselves, with no request at all" do
+      stub(fn _conn -> flunk("ancestor?/3 must not call the forge for an identical pair") end)
+
+      assert Gitlab.ancestor?(@ref, @ancestor, @ancestor) == {:ok, true}
+    end
+
+    test "a malformed sha is rejected without a request" do
+      stub(fn _conn -> flunk("ancestor?/3 must not call the forge with a non-sha") end)
+
+      assert {:error, {:invalid_sha, "main"}} =
+               Gitlab.ancestor?(@ref, "main", @descendant)
+    end
+  end
+
   describe "get_diff/2" do
     test "with no range, returns the MR's own changes" do
       stub(fn conn ->

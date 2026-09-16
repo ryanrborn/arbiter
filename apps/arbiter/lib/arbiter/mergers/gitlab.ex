@@ -369,6 +369,61 @@ defmodule Arbiter.Mergers.Gitlab do
   defp diff_range(_opts), do: nil
 
   @impl true
+  def ancestor?(mr_ref, ancestor, descendant) when is_binary(mr_ref) do
+    with {:ok, ancestor} <- validate_sha(ancestor),
+         {:ok, descendant} <- validate_sha(descendant) do
+      if ancestor == descendant do
+        {:ok, true}
+      else
+        merge_base_ancestry(ancestor, descendant)
+      end
+    end
+  end
+
+  # bd-df3zlo / #1736. GitLab has no `status` field on its compare response, so
+  # ancestry is read off `repository/merge_base` instead: the merge base of two
+  # commits IS the older one exactly when the older one is an ancestor of the
+  # newer. It is also the cheaper of the two endpoints — `repository/compare`
+  # would carry the whole diff payload for a question that needs one sha.
+  #
+  # `refs[]` has to appear twice, which Req's `:params` cannot express (it
+  # de-duplicates keys), so the query is written into the path already encoded.
+  #
+  # Every non-2xx is an `{:error, _}`, including the 404 GitLab returns both for
+  # "no merge base" and for a commit it has not seen yet — and the second is the
+  # forge-lag case itself, where `Arbiter.Reviews.Coverage` must pause rather
+  # than conclude the head is unrelated to our push.
+  defp merge_base_ancestry(ancestor, descendant) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, body} <-
+           handle_json(
+             request(
+               cfg,
+               :get,
+               "/repository/merge_base?refs%5B%5D=#{ancestor}&refs%5B%5D=#{descendant}",
+               []
+             )
+           ) do
+      case body do
+        %{"id" => id} when is_binary(id) -> {:ok, String.downcase(id) == ancestor}
+        other -> {:error, {:unexpected_merge_base, other}}
+      end
+    end
+  end
+
+  # Mirrors the GitHub adapter's helper of the same name: a 40-hex commit id and
+  # nothing else, so the probe can never answer about a moving symbolic ref.
+  defp validate_sha(sha) when is_binary(sha) do
+    if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, sha) do
+      {:ok, String.downcase(sha)}
+    else
+      {:error, {:invalid_sha, sha}}
+    end
+  end
+
+  defp validate_sha(sha), do: {:error, {:invalid_sha, sha}}
+
+  @impl true
   def post_inline_comment(mr_ref, finding, _opts)
       when is_binary(mr_ref) and is_map(finding) do
     with {:ok, cfg} <- Config.resolve(),

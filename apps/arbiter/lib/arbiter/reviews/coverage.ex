@@ -103,8 +103,14 @@ defmodule Arbiter.Reviews.Coverage do
     * `:base_ref` — what the net diff is taken against. Missing or blank
       resolves to `{:unknown, :no_base_ref}` at rule 4.
     * `:ancestor?` — `(ancestor, descendant -> boolean | {:ok, boolean})`.
-      Anything else, including a raise, reads as "not proven", never as
-      proven: rule 2 needs an ancestry *proof*.
+      A `true` is the only thing that proves rule 2's lag. Anything that is
+      neither a `true` nor a `false` — an `{:error, _}`, a raise, a timeout, a
+      shape we do not recognise — is a probe that was **asked and could not
+      answer**, and resolves to `{:unknown, :ancestry_unavailable}` rather
+      than falling through to the content rules (P4/#1736 AC4: a probe failure
+      yields `unknown`, never `covered`). Omitting the key entirely is
+      different: that caller has declared it cannot ask, so rule 2 is simply
+      unreachable and rules 3-6 decide.
     * `:fetch_diff` — `(base_ref, head -> {:ok, diff} | diff | {:error, _})`,
       the three-dot compare `NetDiff` fingerprints. Absent, failing or
       unfingerprintable resolves to `{:unknown, :diff_unavailable}`.
@@ -127,7 +133,12 @@ defmodule Arbiter.Reviews.Coverage do
   @type decision ::
           {:covered, String.t()}
           | {:uncovered, :authored_content | :no_coverage}
-          | {:unknown, :forge_lagging | :diff_unavailable | :no_base_ref | :no_head}
+          | {:unknown,
+             :forge_lagging
+             | :ancestry_unavailable
+             | :diff_unavailable
+             | :no_base_ref
+             | :no_head}
 
   @default_source :watchdog
 
@@ -146,7 +157,10 @@ defmodule Arbiter.Reviews.Coverage do
        `{:unknown, :forge_lagging}`. The forge is behind our own push.
        Ancestry is the whole safety argument: an unrelated head, or a
        *descendant* of our covered head (a fix-pass commit — §4.5), is not a
-       lag and must not wait.
+       lag and must not wait. A probe that is asked and cannot answer stops
+       here too, as `{:unknown, :ancestry_unavailable}` — with the lag
+       question open, the content rules below would be answering a different
+       question than the one that was asked.
     3. `NetDiff.fingerprint(base...head)` is in `coverage` → `{:covered, head}`.
        The head carries content that was already reviewed under a different
        sha: a base merge, a rebase-forward, an identical force-push (§4.2).
@@ -185,13 +199,17 @@ defmodule Arbiter.Reviews.Coverage do
     coverage = List.wrap(coverage)
     ctx = Map.new(ctx || %{})
 
-    cond do
+    if covered_head?(coverage, head) do
       # Rule 1.
-      covered_head?(coverage, head) -> {{:covered, head}, nil}
-      # Rule 2.
-      forge_lagging?(coverage, head, ctx) -> {{:unknown, :forge_lagging}, nil}
-      # Rules 3 and 4.
-      true -> decide_on_content(coverage, head, ctx)
+      {{:covered, head}, nil}
+    else
+      case forge_lag(coverage, head, ctx) do
+        # Rule 2.
+        :lagging -> {{:unknown, :forge_lagging}, nil}
+        :unavailable -> {{:unknown, :ancestry_unavailable}, nil}
+        # Rules 3 to 6.
+        :not_lagging -> decide_on_content(coverage, head, ctx)
+      end
     end
   end
 
@@ -202,24 +220,38 @@ defmodule Arbiter.Reviews.Coverage do
   # head must differ from it (otherwise rule 1 already answered), and the
   # forge's head must be an ancestor of ours (otherwise it is not our push
   # arriving late — it is somebody else's commit, or our own later one).
-  defp forge_lagging?(coverage, head, ctx) do
+  #
+  # Three-valued, because "the probe said no" and "the probe could not say"
+  # are different facts about the same head and only the first one may fall
+  # through to the content rules.
+  @spec forge_lag([Entry.t()], String.t(), map()) :: :lagging | :not_lagging | :unavailable
+  defp forge_lag(coverage, head, ctx) do
     local_head = Map.get(ctx, :local_head_sha)
 
-    is_binary(local_head) and local_head != head and covered_head?(coverage, local_head) and
-      ancestor?(ctx, head, local_head)
+    if is_binary(local_head) and local_head != head and covered_head?(coverage, local_head) do
+      ancestry(ctx, head, local_head)
+    else
+      :not_lagging
+    end
   end
 
-  defp ancestor?(ctx, ancestor, descendant) do
+  # A `true` proves the lag; a `false` disproves it; everything else — an
+  # `{:error, _}` from a forge probe, a raise, a shape we do not recognise — is
+  # a question that went unanswered, which is neither. No probe at all is the
+  # caller saying it cannot ask, which leaves rule 2 unreachable as before.
+  defp ancestry(ctx, ancestor, descendant) do
     case Map.get(ctx, :ancestor?) do
       fun when is_function(fun, 2) ->
         case safely(fn -> fun.(ancestor, descendant) end) do
-          {:ok, true} -> true
-          {:ok, {:ok, true}} -> true
-          _ -> false
+          {:ok, true} -> :lagging
+          {:ok, {:ok, true}} -> :lagging
+          {:ok, false} -> :not_lagging
+          {:ok, {:ok, false}} -> :not_lagging
+          _ -> :unavailable
         end
 
       _ ->
-        false
+        :not_lagging
     end
   end
 
