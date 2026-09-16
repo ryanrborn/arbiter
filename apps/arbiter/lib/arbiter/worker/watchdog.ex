@@ -256,7 +256,9 @@ defmodule Arbiter.Worker.Watchdog do
   require Logger
 
   alias Arbiter.Mergers
+  alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: PRegistry
 
@@ -295,6 +297,15 @@ defmodule Arbiter.Worker.Watchdog do
   # all must fall through to the normal unreviewed-head handling rather than
   # parking the lane forever.
   @head_lag_grace_polls 5
+
+  # bd-df3zlo / #1736 (P4, AC4). How many consecutive polls a `{:unknown, _}`
+  # coverage answer is waited out before the lane parks and pages the
+  # coordinator once. `{:unknown, _}` is §3.2's pause — the forge lagging our
+  # push, a diff we could not fetch, an ancestry probe that would not answer —
+  # and every one of those is either transient (the next poll resolves it) or
+  # an operator's problem. What it must never be is an unbounded wait: that is
+  # exactly the class-A violation §5.1's I1 exists to forbid.
+  @coverage_unknown_grace_polls 5
 
   # Consecutive auto-resolve attempts (#354, Phase 2a) before the Watchdog stops
   # mechanically resolving a block and escalates to the coordinator with the
@@ -455,6 +466,13 @@ defmodule Arbiter.Worker.Watchdog do
   @doc "Default watchdog cap for `auto_merge: false` (manual-merge) lanes."
   @spec default_max_polls_manual() :: :infinity
   def default_max_polls_manual, do: @default_max_polls_manual
+
+  @doc """
+  How many consecutive `{:unknown, _}` coverage answers are waited out before
+  the lane parks and pages the coordinator once (bd-df3zlo / #1736, AC4).
+  """
+  @spec coverage_unknown_grace_polls() :: pos_integer()
+  def coverage_unknown_grace_polls, do: @coverage_unknown_grace_polls
 
   @doc "Default bounded rebase attempts before a `:conflict` block escalates (Phase 2b)."
   @spec default_max_conflict_attempts() :: pos_integer()
@@ -873,6 +891,21 @@ defmodule Arbiter.Worker.Watchdog do
         local_head_sha: normalize_sha(Keyword.get(opts, :local_head_sha)),
         forge_saw_local_head?: false,
         head_lag_polls: 0,
+        # bd-df3zlo / #1736. The coverage read path's own bounded wait, kept
+        # separate from `head_lag_polls` because it counts a different thing:
+        # every `{:unknown, _}` answer `Arbiter.Reviews.Coverage.decide/3`
+        # gives, not just the forge-lag latch. The episode is keyed on the head
+        # (`coverage_unknown_head`) — a new head is a new question, so the
+        # count and the one-page-per-episode latch both reset.
+        coverage_unknown_polls: 0,
+        coverage_unknown_head: nil,
+        coverage_parked?: false,
+        # `poll_count` as it stood when the coverage park lifted `max_polls` to
+        # `:infinity`, so the lift can be unwound without the parked polls
+        # counting against the merge timeout. `nil` whenever no coverage park
+        # holds a lift — which is also how `restore_poll_ceiling/1` knows the
+        # lift in effect is not ours to revoke.
+        coverage_park_poll: nil,
         interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
         max_polls: Keyword.get(opts, :max_polls, default_max_polls),
         # The configured ceiling as passed at start (before any indefinite-park
@@ -3063,7 +3096,42 @@ defmodule Arbiter.Worker.Watchdog do
   # `do_apply_approved_auto_merge/1`'s existing retry-and-page path: the lane
   # stays parked and the coordinator is paged, rather than the worker merging
   # commits nobody reviewed or dying silently.
+  #
+  # bd-df3zlo / #1736 (P4): which predicate produces that refusal is now a
+  # workspace switch. With `merge.coverage_enabled` off — the default — this is
+  # the P3 arrangement unchanged: the `last_reviewed_sha` guard below decides
+  # and `Arbiter.Reviews.Coverage.decide/3` shadows it. With the flag on the two
+  # swap roles. The legacy guard still runs either way, because its answer is
+  # what the disagreement log compares against, and because it is the fallback
+  # when the coverage table itself cannot be read.
   defp guarded_merge_decision(state) do
+    if coverage_parked_on?(state, state.last_head_sha) do
+      # Terminal for this head (AC4): the coverage answer was waited out and
+      # the coordinator has been paged. Keep watching — a new head, or an
+      # operator's coverage row, re-enters the decision below — but issue no
+      # merge and spend no forge call on it.
+      {:wait, state}
+    else
+      do_guarded_merge_decision(state)
+    end
+  end
+
+  defp coverage_parked_on?(state, head),
+    do: state.coverage_parked? and state.coverage_unknown_head == head
+
+  defp do_guarded_merge_decision(state) do
+    legacy = legacy_merge_decision(state)
+    {old, head, state} = coverage_shadow_inputs(legacy)
+
+    if Workspace.coverage_enabled?(state.workspace) do
+      coverage_merge_decision(state, old, head, legacy)
+    else
+      observe_coverage(state, old, head, nil)
+      legacy
+    end
+  end
+
+  defp legacy_merge_decision(state) do
     decision =
       if forge_head_lagging?(state) do
         Logger.info(
@@ -3084,41 +3152,237 @@ defmodule Arbiter.Worker.Watchdog do
         end
       end
 
-    observe_coverage_shadow(decision)
     decision
   end
 
-  # bd-b0fqcl / #1649 — P3 shadow mode (design #1635 §3.4/§6.3). Run
-  # `Arbiter.Reviews.Coverage.decide/3` over the same head the decision above
-  # was made on, and record whether the two agree.
-  #
-  # This is evidence gathering, nothing more. `CoverageShadow.observe/1`
-  # returns `:ok` for every input it can be given and rescues everything it
-  # calls, so the value returned to `do_apply_approved_auto_merge/1` is the one
-  # `decide_guarded_merge/1` produced, unmodified — P4 is where the coverage
-  # answer starts being acted on.
-  #
-  # Note what the ctx does NOT carry: an `:ancestor?` probe. No adapter exposes
-  # one and the Watchdog has no local checkout to ask, so rule 2 is unreachable
-  # here and a forge-lag `{:wait, …}` poll registers as an `unknown->uncovered`
-  # disagreement. That is a real, declared gap in the evidence rather than a
-  # hidden one: P4 must supply the probe before it flips, and the tally's
-  # per-transition breakdown is what makes the gap countable.
-  defp observe_coverage_shadow(decision) do
-    {old, head, state} = coverage_shadow_inputs(decision)
+  # bd-df3zlo / #1736 — P4's flipped read path (design #1635 §3.4/§6.3).
+  # `decide/3` decides; the legacy answer is recorded beside it and acted on
+  # only if the coverage table itself could not be read, which is a fault in
+  # the new path rather than a verdict from it.
+  defp coverage_merge_decision(state, old, head, legacy) do
+    case safe_coverage(state) do
+      {:ok, coverage} ->
+        {new, mechanical} =
+          Coverage.decide_with_record(coverage, head, coverage_ctx(state))
 
-    CoverageShadow.observe(%{
+        observe_coverage(state, old, head, new)
+        # §3.4's adopter obligation, which P3 deliberately left unmet: persist
+        # the row a rule-3 match implies, so the NEXT poll answers at rule 1
+        # instead of re-fetching and re-fingerprinting the same diff.
+        record_mechanical(state, mechanical)
+        apply_coverage_decision(state, new, head)
+
+      :error ->
+        observe_coverage(state, old, head, nil)
+        legacy
+    end
+  end
+
+  defp safe_coverage(state) do
+    {:ok, Coverage.for_mr(state.mr_ref)}
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not read the coverage " <>
+          "table (#{Exception.message(e)}); this poll falls back to the last_reviewed_sha guard"
+      )
+
+      :error
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not read the coverage " <>
+          "table (#{inspect_short(reason)}); this poll falls back to the last_reviewed_sha guard"
+      )
+
+      :error
+  end
+
+  # §3.2's three answers, mapped onto the three the merge loop already knows:
+  # merge pinned to the head coverage covers, the bounded wait every
+  # `{:unknown, _}` gets, and the re-review route an uncovered head has always
+  # taken (`resolve_stale_reviewed_head/3`, W6).
+  defp apply_coverage_decision(state, {:covered, sha}, _head),
+    do: {:merge, sha, clear_coverage_wait(state)}
+
+  defp apply_coverage_decision(state, {:uncovered, reason}, head) do
+    Logger.warning(
+      "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} mr=#{state.mr_ref}; " <>
+        "no review covers head #{head} (#{reason}) — merging would integrate commits no " <>
+        "reviewer saw"
+    )
+
+    {:stale, reviewed_sha(state) || head, head, clear_coverage_wait(state)}
+  end
+
+  defp apply_coverage_decision(state, {:unknown, reason}, head),
+    do: wait_for_coverage(state, reason, head)
+
+  # AC4. `{:unknown, _}` is a pause, and a pause needs a bound: wait it out for
+  # `@coverage_unknown_grace_polls`, then park — one page, no further merge
+  # attempts — and keep watching, so a probe that starts answering again (or an
+  # operator's coverage row) is still picked up. A new head is a new question
+  # and resets both the count and the page latch.
+  defp wait_for_coverage(state, reason, head) do
+    state = reset_coverage_episode(state, head)
+    polls = state.coverage_unknown_polls + 1
+
+    cond do
+      polls < @coverage_unknown_grace_polls ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} coverage is undecided " <>
+            "(#{reason}) at head #{head} (#{polls}/#{@coverage_unknown_grace_polls} polls), " <>
+            "waiting"
+        )
+
+        {:wait, %{state | coverage_unknown_polls: polls}}
+
+      state.coverage_parked? ->
+        {:wait, state}
+
+      true ->
+        Logger.warning(
+          "Worker.Watchdog: parking task=#{state.task_id} mr=#{state.mr_ref} on " <>
+            "coverage_unknown (#{reason}) at head #{head} after #{polls} polls; paging the " <>
+            "coordinator once and issuing no further merge for this head"
+        )
+
+        safe(fn ->
+          Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+            snapshot(state),
+            state.mr_ref,
+            :coverage_unknown
+          )
+        end)
+
+        # "No further merge for this head" has to include `reschedule/1`'s poll
+        # ceiling, or the park is not terminal at all: on an `auto_merge` lane
+        # the remaining polls simply run out, `handle_review_timeout/2` fails
+        # the worker with `{:awaiting_review_timeout, cap}` and auto-resumes a
+        # fresh review round — buying precisely the re-review a pause is not
+        # supposed to buy, and turning a forge-compare outage into a re-review
+        # per parked PR. Lift it to the indefinite park-and-watch the other
+        # paged parks already use (`handle_nonauthor_approval/2`,
+        # `do_maybe_escalate_merge_block/2`, the merge stall in
+        # `do_apply_approved_auto_merge/1`).
+        #
+        # Deliberately WITHOUT setting `park_reason`, unlike the two block-path
+        # parks and exactly like the merge-stall one: `maybe_escalate_merge_block/2`
+        # runs on every poll (`handle_info(:poll, _)`), and
+        # `do_maybe_escalate_merge_block/2`'s recovery branch revokes any
+        # `park_reason` — restoring `base_max_polls` with it — on the first poll
+        # that shows the PR approved and unblocked. That is *every* poll of a
+        # coverage park (the park is only ever reached from the approved path),
+        # so naming this park there would revoke its own lift on the next tick.
+        {:wait,
+         lift_poll_ceiling(%{state | coverage_unknown_polls: polls, coverage_parked?: true})}
+    end
+  end
+
+  # Only when a finite ceiling is actually in force. If another episode already
+  # holds `max_polls: :infinity` for its own reasons — the merge stall in
+  # `do_apply_approved_auto_merge/1`, a block park — that lift is neither ours
+  # to take over nor, later, ours to give back, so nothing is recorded and
+  # `restore_poll_ceiling/1` leaves it alone.
+  defp lift_poll_ceiling(%{max_polls: cap} = state) when is_integer(cap),
+    do: %{state | max_polls: :infinity, coverage_park_poll: state.poll_count}
+
+  defp lift_poll_ceiling(state), do: state
+
+  defp reset_coverage_episode(%{coverage_unknown_head: head} = state, head), do: state
+
+  defp reset_coverage_episode(state, head) do
+    %{
+      restore_poll_ceiling(state)
+      | coverage_unknown_head: head,
+        coverage_unknown_polls: 0,
+        coverage_parked?: false
+    }
+  end
+
+  defp clear_coverage_wait(%{coverage_unknown_polls: 0, coverage_parked?: false} = state),
+    do: state
+
+  defp clear_coverage_wait(state) do
+    %{
+      restore_poll_ceiling(state)
+      | coverage_unknown_polls: 0,
+        coverage_unknown_head: nil,
+        coverage_parked?: false
+    }
+  end
+
+  # Unwind the park's own `max_polls` lift, and only its own: another episode
+  # may hold `max_polls: :infinity` for its own reasons and that lift is not
+  # ours to revoke, so `coverage_park_poll` (set only by the park branch above)
+  # is what says the one in effect is.
+  #
+  # `poll_count` rewinds to where the park began rather than resetting to zero:
+  # it is monotonic across the worker's life, so putting a finite cap back under
+  # a count that kept climbing through the park would trip the ceiling on the
+  # very next poll — while resetting it to zero would strand
+  # `last_escalated_poll` and `last_merge_stall_poll` *above* it, and both
+  # cadences read `poll_count - <latch>` (bd-krg7ci round 3's shape). Rewinding
+  # leaves every counter consistent with the one it was recorded against: the
+  # parked polls simply do not count.
+  defp restore_poll_ceiling(%{coverage_park_poll: nil} = state), do: state
+
+  defp restore_poll_ceiling(%{coverage_park_poll: poll} = state),
+    do: %{state | max_polls: state.base_max_polls, poll_count: poll, coverage_park_poll: nil}
+
+  defp record_mechanical(_state, nil), do: :ok
+
+  defp record_mechanical(state, attrs) do
+    case Coverage.record(attrs) do
+      {:ok, _entry} ->
+        :ok
+
+      {:error, reason} ->
+        # A row that fails to persist costs the next poll a re-fingerprint, not
+        # a wrong answer: the decision it was derived from has already been made
+        # and rule 3 will reach the same one again.
+        Logger.warning(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not record the " <>
+            "mechanical coverage row for #{Map.get(attrs, :head_sha)}: #{inspect_short(reason)}"
+        )
+    end
+  end
+
+  # bd-b0fqcl / #1649 — shadow mode (design #1635 §3.4/§6.3). Both predicates
+  # are evaluated on every guarded-merge decision and their answers recorded;
+  # `new` names the coverage answer when this workspace has flipped and the
+  # call site has already computed it, and `nil` when this is still P3's
+  # arrangement and `observe/1` should compute it.
+  #
+  # `CoverageShadow.observe/1` returns `:ok` for every input it can be given
+  # and rescues everything it calls, so it can neither change nor break the
+  # decision it is handed.
+  defp observe_coverage(state, old, head, new) do
+    %{
       site: :watchdog,
       task_id: state.task_id,
       mr_ref: state.mr_ref,
       workspace_id: workspace_id(state),
       head: head,
       old: old,
-      ctx: fn -> coverage_shadow_ctx(state) end
-    })
+      ctx: fn -> coverage_ctx(state) end
+    }
+    |> with_coverage_answer(new)
+    |> CoverageShadow.observe()
   end
 
-  # §3.4's three answer shapes, as the existing guard already produces them.
+  # `CoverageShadow.observation()` types `:new` as an `answer()` and nothing
+  # else, and its *absence* is what tells `observe/1` to compute one. So in
+  # shadow mode the key is omitted rather than set to `nil`: passing a literal
+  # `nil` typechecked as "an answer that cannot exist", which made dialyzer
+  # prove `observe_coverage/4` never returns and then report the whole flag-off
+  # branch as dead code (#1736 review round 1).
+  defp with_coverage_answer(obs, nil), do: obs
+
+  defp with_coverage_answer(obs, new),
+    do: obs |> Map.put(:new, new) |> Map.put(:authoritative, :new)
+
+  # §3.4's three answer shapes, as the legacy guard already produces them.
   defp coverage_shadow_inputs({:merge, expected_sha, state}),
     do: {{:covered, expected_sha}, state.last_head_sha, state}
 
@@ -3128,13 +3392,43 @@ defmodule Arbiter.Worker.Watchdog do
   defp coverage_shadow_inputs({:stale, reviewed, head, state}),
     do: {{:uncovered, {:stale_reviewed_sha, reviewed}}, head, state}
 
-  defp coverage_shadow_ctx(state) do
-    %{
+  # bd-df3zlo / #1736 closes P3's declared gap: the ctx now carries an
+  # `:ancestor?` probe, so §3.2's rule 2 is reachable and a PR resource that
+  # still reports the pre-push head is a lag to wait out rather than an
+  # uncovered head to re-review. An adapter with no repo to ask (`Direct`, and
+  # every test double that predates the callback) supplies no probe at all,
+  # which leaves rule 2 exactly as unreachable as it was — deliberately NOT the
+  # same thing as a probe that fails, which is an `{:unknown, _}`.
+  defp coverage_ctx(state) do
+    ctx = %{
       local_head_sha: state.local_head_sha,
       base_ref: state.mr_base_ref,
       fetch_diff: fn base, head -> safe_get_diff(state, base, head) end,
       source: :watchdog
     }
+
+    if ancestry_probe?(state.adapter) do
+      Map.put(ctx, :ancestor?, fn ancestor, descendant ->
+        safe_ancestor?(state, ancestor, descendant)
+      end)
+    else
+      ctx
+    end
+  end
+
+  defp ancestry_probe?(adapter),
+    do: is_atom(adapter) and function_exported?(adapter, :ancestor?, 3)
+
+  defp safe_ancestor?(%{adapter: adapter, mr_ref: mr_ref}, ancestor, descendant) do
+    case adapter.ancestor?(mr_ref, ancestor, descendant) do
+      {:ok, answer} when is_boolean(answer) -> {:ok, answer}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:bad_return, other}}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # bd-ch9pmk / #1614. Is the head this poll reported provably older than what

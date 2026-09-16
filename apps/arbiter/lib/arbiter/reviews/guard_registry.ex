@@ -523,9 +523,20 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:evaluations, 1},
       episode: {:task, :mr_ref, :head_sha},
       terminal: :parked,
-      sites: [{Watchdog, :guarded_merge_decision, 1}],
-      anchors: [":stale_reviewed_sha"],
-      summary: "reviewed-SHA merge decision; routes to W2–W6"
+      # P4 (bd-df3zlo / #1736) split the decision in two: the workspace flag
+      # picks which predicate is authoritative, `legacy_merge_decision/1` is
+      # the `last_reviewed_sha` guard that routes to W2–W6, and
+      # `apply_coverage_decision/3` maps §3.2's three answers onto the same
+      # three outcomes (merge / W20's bounded wait / W6's re-review route).
+      sites: [
+        {Watchdog, :guarded_merge_decision, 1},
+        {Watchdog, :legacy_merge_decision, 1},
+        {Watchdog, :apply_coverage_decision, 3}
+      ],
+      anchors: [":stale_reviewed_sha", "coverage_enabled?"],
+      summary:
+        "merge-coverage decision: `decide/3` under `merge.coverage_enabled`, else the " <>
+          "reviewed-SHA guard; routes to W2–W6 and W20"
     },
     %{
       id: :forge_head_lag_latch,
@@ -795,9 +806,32 @@ defmodule Arbiter.Reviews.GuardRegistry do
       bound: {:evaluations, 1},
       episode: {:item, :mr_ref, :head_sha},
       terminal: :parked,
-      sites: [{MergeQueue, :merge_guarded, 2}],
-      anchors: [":stale_reviewed_sha"],
-      summary: "the queue's reviewed-SHA refusal, with none of W2–W6's recovery"
+      sites: [
+        {MergeQueue, :merge_guarded, 2},
+        {MergeQueue, :apply_legacy_decision, 3},
+        {MergeQueue, :apply_coverage_decision, 4}
+      ],
+      anchors: [":stale_reviewed_sha", "coverage_enabled?"],
+      summary:
+        "the queue's merge refusal: `decide/3` under `merge.coverage_enabled`, else the " <>
+          "reviewed-SHA guard — with none of W2–W6's recovery either way"
+    },
+    %{
+      id: :coverage_unknown_wait,
+      doc_ref: "W20",
+      class: :a,
+      class_source: :inferred,
+      class_note:
+        "§5.3 lists W1–W7 under class A; this is the wait W1's own `{:unknown, _}` " <>
+          "answer resolves to under P4, so it is classed with it.",
+      bound: {:polls, {:config, :coverage_unknown_grace_polls}},
+      episode: {:task, :mr_ref, :head_sha},
+      terminal: :escalated_once,
+      sites: [{Watchdog, :wait_for_coverage, 3}, {Watchdog, :restore_poll_ceiling, 1}],
+      anchors: ["@coverage_unknown_grace_polls", ":coverage_unknown", "coverage_park_poll"],
+      summary:
+        "an `unknown` coverage answer waits, bounded, then parks and pages once — with the " <>
+          "`auto_merge` poll ceiling lifted so the park cannot decay into a re-review"
     },
     %{
       id: :queue_baseline_precedence,
@@ -900,6 +934,22 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "review coverage. A spent nudge budget means the work really was never " <>
           "committed, so `Run.status = :failed` is the honest record, not an I2 " <>
           "violation. Git errors still fail open."
+    },
+    %{
+      id: :queue_coverage_unknown_wait,
+      doc_ref: "M8",
+      class: :a,
+      class_source: :inferred,
+      class_note: "The queue's mirror of W20; classed with it.",
+      bound: {:polls, {:config, :coverage_unknown_grace_ticks}},
+      episode: {:item, :mr_ref, :head_sha},
+      terminal: :escalated_once,
+      sites: [
+        {MergeQueue, :wait_for_coverage, 4},
+        {MergeQueue, :safe_notify_coverage_block, 2}
+      ],
+      anchors: ["@coverage_unknown_grace_ticks", ":coverage_unknown"],
+      summary: "an `unknown` coverage answer waits, bounded, then parks and pages once"
     },
     %{
       id: :rejection_parking,

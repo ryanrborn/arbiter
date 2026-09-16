@@ -57,7 +57,21 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
     put_app_env(:arbiter, :worktree_root, worktree_root)
     put_app_env(:arbiter, :repo_paths, %{"ar/repo" => repo})
 
-    on_exit(fn -> File.rm_rf!(tmp) end)
+    # bd-31ylsv's shape, on this file: the resumed worker carries a real
+    # `Arbiter.Worker.Driver`, and stopping that worker (the per-test `on_exit`s
+    # below, which run *before* this one) fires the Driver's `:DOWN` handler.
+    # That handler runs `maybe_cleanup_worktree/1` — a `git worktree remove`
+    # plus a `File.rm_rf` — asynchronously, in the Driver's own process, on a
+    # path underneath `tmp`. Blanket-deleting `tmp` while that is in flight is
+    # two independent recursive deletes over overlapping paths, and it raises
+    # `** (File.Error) ... file already exists` out of this very callback (CI
+    # run 35050008350). So settle the Drivers first; production never
+    # blanket-deletes a live repo+worktree tree, so this is a test artifact, not
+    # a cleanup-path bug.
+    on_exit(fn ->
+      wait_for_drivers_settled(worktree_root)
+      File.rm_rf!(tmp)
+    end)
 
     {:ok, ws} =
       Ash.create(Workspace, %{
@@ -67,6 +81,47 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
 
     {:ok, ws: ws}
   end
+
+  # Block until every live `Arbiter.Worker.Driver` holding a worktree under
+  # `root` has terminated. A Driver runs its `:DOWN` handler — cleanup included
+  # — to completion before it stops, so one that is already gone needs no wait.
+  defp wait_for_drivers_settled(root) do
+    for pid <- driver_pids_under(root) do
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        5_000 -> Process.demonitor(ref, [:flush])
+      end
+    end
+
+    :ok
+  end
+
+  defp driver_pids_under(root) do
+    Arbiter.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.filter(fn {_, pid, _, _} -> driver_under?(pid, root) end)
+    |> Enum.map(fn {_, pid, _, _} -> pid end)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp driver_under?(pid, root) when is_pid(pid) do
+    case :sys.get_state(pid, 200) do
+      %{worktree_path: path} when is_binary(path) -> String.starts_with?(path, root)
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp driver_under?(_pid, _root), do: false
 
   defp wait_until(fun, timeout \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
