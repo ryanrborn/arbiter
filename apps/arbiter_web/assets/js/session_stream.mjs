@@ -228,6 +228,22 @@ export class SessionStream {
     }, this.resizeDebounceMs)
   }
 
+  /**
+   * Ask the pane to make the agent repaint the whole screen (bd-14b11h).
+   *
+   * A `resize` only helps if the geometry actually changed; when a mount fits
+   * to a size the pane is already at, nothing signals the agent and whatever
+   * the snapshot captured — content the pane reflowed for a geometry the agent
+   * has not redrawn at — stays on screen until the agent happens to repaint on
+   * its own. This is the explicit ask, and the server owns how to deliver it.
+   */
+  redraw() {
+    if (!this.channel || this.finished) return false
+
+    this.channel.push("redraw", {})
+    return true
+  }
+
   /** Leave the session running, drop this client's reader. */
   detach() {
     if (this.channel) this.channel.push("detach", {})

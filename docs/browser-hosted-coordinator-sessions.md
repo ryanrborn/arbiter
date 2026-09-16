@@ -593,6 +593,7 @@ a size, and a lifecycle.
 | `join` | `%{session_id, last_seq \| nil, cols, rows}` | `last_seq` requests resume; `nil` requests full snapshot |
 | `stdin` | `{:binary, bytes}` | raw bytes, never JSON-wrapped — no UTF-8 mangling of partial sequences |
 | `resize` | `%{cols, rows}` | debounced client-side (~100 ms) |
+| `redraw` | `%{}` | make the agent repaint; a SIGWINCH nudge, not a pane command (bd-14b11h) |
 | `detach` | `%{}` | leave the session running; server drops the reader |
 | `kill` | `%{confirm: true}` | terminate the agent; scope self-reaps |
 | `ping` | `%{ts}` | liveness/RTT for the HUD |
@@ -844,7 +845,14 @@ construction fails.
   terminal would fight `FitAddon` for rows and shift reflow on every update. The
   HUD is LiveView-rendered (cheap, infrequent), the terminal is hook-owned
   (`phx-update="ignore"`); they never contend.
-- **Fit.** `FitAddon` on a `ResizeObserver`, debounced, emitting `resize`.
+- **Fit.** `FitAddon` on a `ResizeObserver`, debounced, emitting `resize`. The
+  *mount* fit is not the observer's: it measures until the pane has a box and
+  the hook joins only then (bd-14b11h). A LiveView navigation mounts the hook
+  inside the DOM patch, where the pane can still be 0x0, and the geometry a
+  mount brings is what the join resizes the shared pane to — xterm's 80x24
+  construction default is not a safe thing to send. When the join reply says it
+  *did* resize the pane, the snapshot that came with it was reflowed by the pane
+  rather than redrawn by the agent, so the client asks for a `redraw`.
 
 The repo already has the colocated-hook precedent for terminal-ish UI:
 `.LogStreamStick` in `core_components/domain.ex:578` does scroll-pinning for the
