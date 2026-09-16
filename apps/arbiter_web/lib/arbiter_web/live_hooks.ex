@@ -40,6 +40,19 @@ defmodule ArbiterWeb.LiveHooks do
 
   Once these are fixed, remove them from @hidden_providers and this comment.
 
+  ## `:loopback`
+
+  Assigns `:loopback?` — whether the browser on the other end is on this box.
+  It is the input to §10.4's one auth rule, and two pages need it: the session
+  dock, whose terminal rides a `/session` socket that trusts a loopback peer
+  and nothing else (bd-2zskbb), and `SessionLive`, which says the same thing
+  about the session it is showing.
+
+  It has to be a *root* view's hook. `get_connect_info/2` is root-and-mount
+  only, and `ArbiterWeb.SessionDockLive` is a nested, sticky child — so the
+  dock is handed the answer through `live_render(..., session: ...)` in
+  `layouts/live.html.heex` rather than reading it itself.
+
   ## `:coordinator_inbox`
 
   Lifted off `BoardLive` (bd-3kgb0e) so the coordinator's mailbox — the
@@ -79,6 +92,19 @@ defmodule ArbiterWeb.LiveHooks do
 
   def on_mount(:live, _params, _session, socket) do
     {:cont, assign(socket, :live, connected?(socket))}
+  end
+
+  def on_mount(:loopback, _params, _session, socket) do
+    loopback? =
+      case Phoenix.LiveView.get_connect_info(socket, :peer_data) do
+        %{address: address} -> ArbiterWeb.Loopback.loopback?(address)
+        # No `:peer_data` means no transport to ask — a dead render under
+        # `Phoenix.ConnTest` with none put on the conn. Treating that as
+        # loopback keeps the default the same one the dashboard runs under.
+        _ -> true
+      end
+
+    {:cont, assign(socket, :loopback?, loopback?)}
   end
 
   def on_mount(:quota, _params, _session, socket) do

@@ -7,6 +7,12 @@ defmodule ArbiterWeb.SessionTerminalBrowserTest do
   has no box yet, which is what a LiveView navigation back to /sessions/<id>
   does, and which used to join at xterm's 80x24 default and garble the pane.
 
+  And, since bd-9myzv8, the session dock's collapse/expand cycle: the resume
+  point handed back into a *fresh* terminal, the redraw a replayed delta needs
+  because there is no screen under it, the scroll offset a sticky re-parent
+  zeroes, and the `Ctrl/Cmd+Shift+Escape` way out of a pane that otherwise
+  takes every key.
+
   `mix test` covers the page chrome, the channel and the resume protocol;
   `ArbiterWeb.SessionTransportSocketTest` covers resume over a real socket.
   None of that touches a renderer. This shells out to
@@ -67,6 +73,24 @@ defmodule ArbiterWeb.SessionTerminalBrowserTest do
         assert output =~ "CHECK a-join-that-resized-the-pane-forces-a-redraw: PASS"
         assert output =~ "CHECK a-window-resize-refits-and-tells-the-pane: PASS"
         assert output =~ "CHECK a-tab-that-never-paints-still-attaches: PASS"
+
+        # bd-9myzv8: the session dock's collapse/expand cycle. Destroying and
+        # rebuilding the terminal on every expand is the phase's whole design,
+        # and three things have to survive it — the resume point, the screen
+        # the replayed delta needs under it, and the scroll offset a sticky
+        # re-parent zeroes — plus the keyboard rule that makes an expanded
+        # terminal escapable.
+        assert output =~ "CHECK expand-resumes-from-the-remembered-offset: PASS"
+        assert output =~ "CHECK a-resumed-join-onto-a-fresh-terminal-forces-a-redraw: PASS"
+        assert output =~ "CHECK a-plain-escape-reaches-the-agent: PASS"
+
+        assert output =~
+                 "CHECK ctrl-shift-escape-releases-focus-and-never-reaches-the-agent: PASS"
+
+        assert output =~ "CHECK releasing-focus-really-blurs-the-terminal: PASS"
+        assert output =~ "CHECK a-reparent-does-not-leave-the-terminal-scrolled-to-the-top: PASS"
+        assert output =~ "CHECK collapsing-tears-down-the-xterm-and-closes-the-socket: PASS"
+
         refute output =~ ": FAIL"
 
       other ->

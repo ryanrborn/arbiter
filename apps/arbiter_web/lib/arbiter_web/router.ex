@@ -69,6 +69,7 @@ defmodule ArbiterWeb.Router do
       on_mount: [
         {ArbiterWeb.LiveHooks, :current_path},
         {ArbiterWeb.LiveHooks, :live},
+        {ArbiterWeb.LiveHooks, :loopback},
         {ArbiterWeb.LiveHooks, :quota},
         {ArbiterWeb.LiveHooks, :coordinator_inbox}
       ] do

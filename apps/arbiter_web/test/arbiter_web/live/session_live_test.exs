@@ -292,28 +292,47 @@ defmodule ArbiterWeb.SessionLiveTest do
   end
 
   describe "the session page" do
-    test "hosts a hook-owned terminal that names the session it attaches to", %{conn: conn} do
+    # bd-9myzv8: the terminal moved into the dock, and there is deliberately
+    # no second copy here — two hooks would be two xterms and two `/session`
+    # sockets for one pane. `ArbiterWeb.SessionDockLiveTest` owns the terminal
+    # itself now; this page owns the handover.
+    test "has no terminal of its own — the session is handed to the dock", %{conn: conn} do
       session = launch!()
 
       {:ok, view, html} = live(conn, ~p"/sessions/#{session.id}")
 
-      terminal = "#session-terminal-#{session.id}"
-      assert has_element?(view, terminal)
+      refute has_element?(view, "#session-terminal-#{session.id}")
+      refute has_element?(view, "#terminal-status")
+      refute html =~ "SessionTerminal"
 
-      # The hook owns this subtree; LiveView must never diff into it.
-      assert html =~ ~s(phx-update="ignore")
-      assert html =~ ~s(data-session-id="#{session.id}")
-      assert html =~ "SessionTerminal"
+      assert has_element?(view, "#terminal-in-dock")
+      assert_push_event(view, "session-dock:open", %{id: id})
+      assert id == session.id
+    end
 
-      # §6.3: page chrome must not fight the terminal for space, and a narrow
-      # viewport scrolls the terminal rather than the page.
-      assert has_element?(view, "#terminal-scroller")
-      assert has_element?(view, "#terminal-status")
+    test "Show it asks the dock again, for a window that was dismissed", %{conn: conn} do
+      session = launch!()
 
-      # The live cost HUD slot (§7.5, phase 7): hook-owned, same as the rest
-      # of the strip, updated from `usage` channel events rather than a
-      # LiveView diff.
-      assert has_element?(view, ~s(#terminal-status [data-role="usage"]))
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+      assert_push_event(view, "session-dock:open", %{id: _})
+
+      render_click(element(view, "#open-in-dock"))
+
+      assert_push_event(view, "session-dock:open", %{id: id})
+      assert id == session.id
+    end
+
+    # The terminal client moved, and Detach was a terminal-client action:
+    # "drop my reader, leave the session running". Collapsing or dismissing
+    # the dock window is what does that now.
+    test "no longer offers Detach, which belonged to the terminal", %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute has_element?(view, "#detach-session")
+      assert has_element?(view, "#kill-session")
+      assert has_element?(view, "#toggle-keep-alive")
     end
 
     test "a non-loopback peer sees a notice instead of an inert terminal, and is told Remote Control works (mode B, launched with --remote-control, bd-2zskbb)",
@@ -391,49 +410,20 @@ defmodule ArbiterWeb.SessionLiveTest do
       refute has_element?(view, "#terminal-stalled")
     end
 
-    test "a loopback peer attaches exactly as before, with no extra banner (bd-2zskbb)", %{
+    test "a loopback peer is pointed at the dock, with no extra banner (bd-2zskbb)", %{
       conn: conn
     } do
       session = launch!()
 
       {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
 
-      assert has_element?(view, "#session-terminal-#{session.id}")
+      assert has_element?(view, "#terminal-in-dock")
       refute has_element?(view, "#terminal-remote-notice")
-    end
-
-    test "a narrow viewport scrolls the terminal, not the page (§6.3)", %{conn: conn} do
-      session = launch!()
-
-      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
-
-      # The container scrolls sideways...
-      assert has_element?(view, "#terminal-scroller.overflow-x-auto")
-
-      # ...and the pane keeps a floor width rather than shrinking the font to
-      # illegibility. A terminal cannot reflow meaningfully below ~80 columns;
-      # `scripts/verify_session_terminal.mjs` checks in a real browser that
-      # this floor really does fit 80 of them.
-      assert has_element?(
-               view,
-               ~s(#session-terminal-#{session.id}[class*="min-w-[640px]"])
-             )
     end
 
     test "a session that no longer exists redirects back to the list", %{conn: conn} do
       assert {:error, {:live_redirect, %{to: "/sessions"}}} =
                live(conn, ~p"/sessions/00000000-0000-0000-0000-000000000000")
-    end
-
-    test "detach leaves the session running and returns to the list", %{conn: conn} do
-      session = launch!()
-
-      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
-
-      assert {:error, {:live_redirect, %{to: "/sessions"}}} =
-               view |> element("#detach-session") |> render_click()
-
-      assert {:ok, %{status: :running}} = Sessions.get(session.id)
     end
 
     test "keep_alive can be pinned and unpinned from the session page (§4.6 item 2)", %{
@@ -467,118 +457,56 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert {:ok, %{status: :ended}} = Sessions.get(session.id)
     end
 
-    test "the page shows that the agent exited, and with what code", %{conn: conn} do
-      session = launch!()
-
-      {:ok, view, html} = live(conn, ~p"/sessions/#{session.id}")
-      refute html =~ "Agent exited"
-
-      # The hook forwards the channel's `exit` event; the row itself is only
-      # updated by whatever reaps the session, which may be much later.
-      html = render_hook(view, "agent_exited", %{"code" => 137, "reason" => "killed"})
-
-      assert html =~ "Agent exited"
-      assert html =~ "137"
-      assert has_element?(view, "#session-exit")
-    end
-
-    test "the page's own status chip flips to ended too, when the row was already ended by the time the exit event arrives (bd-bsdeb2)",
-         %{conn: conn} do
+    # The page's only notice that a session ended, now that no hook here
+    # forwards the channel's own `exit` event: `Sessions.mark_ended/2`
+    # broadcasts on the lifecycle topic (bd-bsdeb2 finding 4). An agent that
+    # exits on its own lands here exactly as a Kill or the orphan reaper does.
+    test "the page shows that the agent exited, live, without a reload", %{conn: conn} do
       session = launch!()
 
       {:ok, view, html} = live(conn, ~p"/sessions/#{session.id}")
       assert html =~ "running"
+      refute html =~ "Agent exited"
+      assert has_element?(view, "#terminal-in-dock")
 
-      # `Arbiter.Sessions.Stream` now runs `mark_ended/2` before broadcasting
-      # the exit, so by the time the channel's `exit` event reaches the hook
-      # and the hook forwards `agent_exited`, the row is already `:ended`.
       {:ok, _ended} = Sessions.mark_ended(session, "exited")
 
-      html = render_hook(view, "agent_exited", %{"code" => nil, "reason" => "exited"})
+      html = render(view)
 
+      assert html =~ "Agent exited"
       assert html =~ "ended"
       assert html =~ "exited"
-    end
-
-    test "an exit replaces the terminal with the nothing-to-attach-to state",
-         %{conn: conn} do
-      session = launch!()
-
-      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
-      assert has_element?(view, "#session-terminal-#{session.id}")
-
-      render_hook(view, "agent_exited", %{"code" => 0, "reason" => nil})
-
-      # bd-3r2otb: the page used to keep the dead pane mounted, so an operator
-      # who killed a session was left looking at a terminal that no longer did
-      # anything. Removing the element is also what closes the channel: the
-      # hook's `destroyed()` disposes the socket.
-      refute has_element?(view, "#session-terminal-#{session.id}")
-      assert has_element?(view, "#terminal-inactive")
-
-      # The strip is hook-owned, and there is no hook left to own it.
-      refute has_element?(view, "#terminal-status")
-
-      # ...and there is nothing left to detach from.
-      refute has_element?(view, "#detach-session")
-    end
-
-    test "killing from the page replaces the terminal without a reload", %{conn: conn} do
-      session = launch!()
-
-      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
-      assert has_element?(view, "#session-terminal-#{session.id}")
-
-      view |> element("#kill-session") |> render_click()
-      view |> element("#confirm-kill") |> render_click()
-
-      assert has_element?(view, "#terminal-inactive")
-      refute has_element?(view, "#session-terminal-#{session.id}")
       assert has_element?(view, "#session-exit")
+
+      # bd-3r2otb: nothing to attach to, so the page stops pointing at a dock
+      # window that could only say the same.
+      refute has_element?(view, "#terminal-in-dock")
+      assert has_element?(view, "#terminal-inactive")
     end
 
-    test "says so when the terminal never connects", %{conn: conn} do
-      session = launch!()
-
-      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
-      refute has_element?(view, "#terminal-stalled")
-
-      # The check the LiveView schedules for itself at mount. The live failure
-      # this covers was a page whose hook never started at all — a tab running
-      # an asset bundle from before the deploy — which the hook-painted status
-      # strip reports as "connecting…" forever, with nothing to click and
-      # nothing in the page to say why.
-      send(view.pid, :terminal_stall_check)
-      assert has_element?(view, "#terminal-stalled")
-
-      # A late join clears it: the message is advisory, not a verdict.
-      render_hook(view, "terminal_live", %{})
-      refute has_element?(view, "#terminal-stalled")
-    end
-
-    test "a terminal that connected in time never mentions a stall", %{conn: conn} do
-      session = launch!()
-
-      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
-
-      render_hook(view, "terminal_live", %{})
-      send(view.pid, :terminal_stall_check)
-
-      refute has_element?(view, "#terminal-stalled")
-    end
-
-    test "a session that was already over shows no hook-owned status strip",
-         %{conn: conn} do
+    test "an ended session is never handed to the dock", %{conn: conn} do
       session = launch!()
       {:ok, _} = Sessions.kill(session.id, runner: NoopRunner, reason: "reaped")
 
       {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
 
-      # The strip's text is painted by the hook, and no hook mounts here, so a
-      # rendered strip would read "connecting…" forever directly above the
-      # "nothing to attach to" placeholder.
-      refute has_element?(view, "#terminal-status")
+      refute_push_event(view, "session-dock:open", %{})
+      refute has_element?(view, "#open-in-dock")
       assert has_element?(view, "#terminal-inactive")
+    end
+
+    test "killing from the page replaces the handover without a reload", %{conn: conn} do
+      session = launch!()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+      assert has_element?(view, "#terminal-in-dock")
+
+      view |> element("#kill-session") |> render_click()
+      view |> element("#confirm-kill") |> render_click()
+
+      assert has_element?(view, "#terminal-inactive")
+      refute has_element?(view, "#terminal-in-dock")
+      assert has_element?(view, "#session-exit")
     end
 
     test "a session whose row is already ended says so without needing the hook",
@@ -590,8 +518,8 @@ defmodule ArbiterWeb.SessionLiveTest do
 
       assert has_element?(view, "#session-exit")
       assert html =~ "reaped"
-      # Nothing to attach to, so no terminal and no dangling channel.
-      refute has_element?(view, "#session-terminal-#{session.id}")
+      # Nothing to attach to, so nothing points at the dock either.
+      refute has_element?(view, "#terminal-in-dock")
     end
   end
 end

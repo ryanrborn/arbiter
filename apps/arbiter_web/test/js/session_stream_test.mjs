@@ -487,3 +487,57 @@ test("an exit event ends the stream rather than reconnecting into a dead session
   socket.closeHandler({ code: 1000 })
   assert.equal(socket.scheduledReconnects, 0, "a finished session must not be rejoined")
 })
+
+// -- a seeded resume point (bd-9myzv8, session dock phase 2) ------------------
+//
+// The dock tears the xterm and the socket down on collapse, so the stream
+// object that held `last_seq` is gone by the time the operator expands the
+// window again. The resume point has to be handed back in, or every expand
+// would re-snapshot from wherever the ring happens to start.
+
+test("a seeded lastSeq is the resume point the very first join carries", () => {
+  const socket = new FakeSocket()
+  const stream = new SessionStream({
+    socket,
+    sessionId: "sess-1",
+    geometry: () => ({ cols: 100, rows: 30 }),
+    lastSeq: 4096
+  })
+
+  assert.equal(stream.lastSeq, 4096)
+
+  stream.connect()
+
+  assert.deepEqual(socket.channel0.joins[0].params, { last_seq: 4096, cols: 100, rows: 30 })
+})
+
+test("a resumed replay onto a seeded offset drops the bytes already rendered", () => {
+  const socket = new FakeSocket()
+  const rec = recorder()
+  const stream = new SessionStream({
+    socket,
+    sessionId: "sess-1",
+    geometry: () => ({ cols: 80, rows: 24 }),
+    sink: rec.sink,
+    lastSeq: 5
+  })
+  stream.connect()
+  const channel = socket.channel0
+  channel.joins[0].push.reply("ok", { seq: 5, mode: "resumed" })
+
+  // The ring re-sent a frame boundary that starts before the seeded offset.
+  channel.emit("stdout", serverFrame(11, "hello world".slice(0, 11)))
+
+  assert.equal(rec.text(), " world")
+  assert.equal(stream.lastSeq, 11)
+})
+
+test("a nonsense lastSeq is ignored rather than put on the wire", () => {
+  for (const bad of [null, undefined, -1, 1.5, "12", NaN]) {
+    const socket = new FakeSocket()
+    const stream = new SessionStream({ socket, sessionId: "s", lastSeq: bad })
+    stream.connect()
+    assert.equal(stream.lastSeq, null, `lastSeq: ${String(bad)}`)
+    assert.equal(socket.channel0.joins[0].params.last_seq, null, `lastSeq: ${String(bad)}`)
+  }
+})

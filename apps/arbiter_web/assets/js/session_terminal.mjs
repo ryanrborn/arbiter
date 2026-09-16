@@ -60,11 +60,17 @@ export function createSessionTerminal(el, options = {}) {
   const {
     sessionId,
     endpoint = "/session",
+    // The byte offset a *previous* terminal for this session stopped at
+    // (bd-9myzv8). The dock disposes the xterm on every collapse, so a fresh
+    // one has no resume point of its own; handing it back in is what makes an
+    // expand replay what the window missed instead of re-snapshotting.
+    lastSeq = null,
     onStatus = () => {},
     onExit = () => {},
     onMeta = () => {},
     onUsage = () => {},
     onError = () => {},
+    onReleaseFocus = () => {},
     schedule = (cb) => requestAnimationFrame(cb)
   } = options
 
@@ -133,9 +139,16 @@ export function createSessionTerminal(el, options = {}) {
       reconnectAfterMs: (tries) => [100, 250, 500, 1000, 2000][tries - 1] || 2000
     })
 
+  // Did this terminal start from a resume point rather than from nothing? If
+  // it did, the first join's reply is a *delta* for a screen that does not
+  // exist yet, which is the one case below that has to ask for a repaint.
+  const resumed = Number.isInteger(lastSeq) && lastSeq >= 0
+  let primed = false
+
   const stream = new SessionStream({
     socket,
     sessionId,
+    lastSeq,
     geometry: () => ({ cols: term.cols, rows: term.rows }),
     sink: {
       // Straight from the socket into xterm: the bytes are never decoded in
@@ -159,7 +172,20 @@ export function createSessionTerminal(el, options = {}) {
       // the garble a LiveView navigation back to this page produced
       // (bd-14b11h). Only the agent can fix it, so it is asked to.
       joined: (reply) => {
-        if (reply && reply.resized) stream.redraw()
+        if (reply && reply.resized) {
+          stream.redraw()
+        } else if (!primed && resumed && reply && reply.mode === "resumed") {
+          // A dock window that was collapsed and is now open again. The server
+          // replays exactly the bytes this client missed, which is right for
+          // the *stream* and wrong for the *screen*: the xterm underneath was
+          // constructed a moment ago and holds nothing for those bytes to be
+          // a delta against. Only the agent can draw the rest, so it is asked
+          // — once, on the first join, never on the reconnects after it, where
+          // the screen is already there.
+          stream.redraw()
+        }
+
+        primed = true
       },
       status: onStatus,
       meta: (meta) => onMeta(meta),
@@ -182,7 +208,13 @@ export function createSessionTerminal(el, options = {}) {
       // A blocked clipboard is reported rather than swallowed: "Ctrl+Shift+V
       // did nothing" is the one outcome an operator cannot debug.
       onClipboardError: (error) =>
-        onError({ code: "clipboard_blocked", detail: String((error && error.message) || error) })
+        onError({ code: "clipboard_blocked", detail: String((error && error.message) || error) }),
+      // The way out of the keyboard trap. Blurring is this module's job — it
+      // owns the terminal; *where* focus goes next is the host's.
+      onReleaseFocus: () => {
+        term.blur()
+        onReleaseFocus()
+      }
     })
   )
 
@@ -193,6 +225,35 @@ export function createSessionTerminal(el, options = {}) {
   el.addEventListener("mousedown", (event) => {
     if (event.button === 0 && !term.hasSelection()) term.focus()
   })
+
+  // xterm's viewport is an ordinary scrollable div, and the dock is a *sticky*
+  // LiveView: `LiveSocket.replaceMain` moves it into the incoming main
+  // container through a node that is detached for a frame. Detaching zeroes
+  // `scrollTop` on every scrollable descendant, and xterm's own scroll handler
+  // dutifully follows it to the top of the scrollback — so the operator
+  // navigates to another page and comes back to a terminal showing output from
+  // ten minutes ago.
+  //
+  // The saved offset cannot simply be tracked on every scroll: the reset *is*
+  // a scroll, and would overwrite the value needed to undo it. It is captured
+  // on demand instead, which works because `phx:navigate` fires while xterm
+  // still holds the right value — the browser dispatches the `scroll` event
+  // that follows the move asynchronously, a frame later.
+  let savedScroll = null
+
+  const rememberScroll = () => {
+    const buffer = term.buffer.active
+    savedScroll = { viewportY: buffer.viewportY, atBottom: buffer.viewportY >= buffer.baseY }
+  }
+
+  const restoreScroll = () => {
+    if (!savedScroll) return
+    // "At the bottom" is a position that moves: output that arrived in the
+    // meantime must not leave the terminal parked a few lines above the
+    // prompt, which is the one place an operator never wants to be.
+    if (savedScroll.atBottom) term.scrollToBottom()
+    else term.scrollToLine(savedScroll.viewportY)
+  }
 
   let disposed = false
   let fitTimer = null
@@ -305,8 +366,11 @@ export function createSessionTerminal(el, options = {}) {
     stream,
     renderer,
     focus: () => term.focus(),
+    blur: () => term.blur(),
     fit: applyFit,
     refit: scheduleFit,
+    rememberScroll,
+    restoreScroll,
     detach: () => stream.detach(),
     kill: () => stream.kill(),
     applyTheme,
