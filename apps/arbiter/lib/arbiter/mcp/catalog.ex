@@ -576,7 +576,11 @@ defmodule Arbiter.MCP.Catalog do
           "depends_on, relates_to, discovered_from, parent_of, conflicts_with. Use `parent_of` " <>
           "(from = parent, to = child) to attach a child to a parent task — that is how " <>
           "grouping/epics work; the parent then rolls up child progress and can auto-close. " <>
-          "`conflicts_with` is a symmetric mutex: the Conductor will not co-dispatch the pair. " <>
+          "`conflicts_with` is a symmetric mutex honoured by BOTH schedulers — the board's " <>
+          "Autopilot and the graph Conductor will not co-dispatch the pair, in either edge " <>
+          "direction, while one of them is in flight (running, in review, awaiting review or " <>
+          "in a fix pass). The held card reads `blocked — conflicts with <id> (<state>)` and " <>
+          "goes once the counterpart merges, closes or is parked. " <>
           "Only blocks/depends_on gate readiness, and a gating edge that would close a cycle " <>
           "is rejected with the cycle named.",
       input_schema: %{
@@ -1912,8 +1916,8 @@ defmodule Arbiter.MCP.Catalog do
         "Add a dependency edge between two directives in a Graph. " <>
           "`type` must be one of `depends_on`, `blocks`, or `conflicts_with`. " <>
           "`depends_on` and `blocks` gate execution order; `conflicts_with` prevents " <>
-          "co-dispatch (symmetric mutex, non-gating). Both directives must be in the " <>
-          "graph's workspace.",
+          "co-dispatch (symmetric mutex, non-gating — honoured by both the Conductor and " <>
+          "the board's Autopilot). Both directives must be in the graph's workspace.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

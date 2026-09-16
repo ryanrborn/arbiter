@@ -46,6 +46,18 @@ defmodule Arbiter.MCP.CatalogTest do
         assert description =~ Atom.to_string(type)
       end
     end
+
+    # bd-6bax7s: the description promised the *Conductor* would not co-dispatch
+    # the pair, which a coordinator reasonably read as a general guarantee —
+    # and almost all dispatch goes through Autopilot, which ignored the edge.
+    # Now both honour it, and the description has to say so.
+    test "dep_add names both schedulers as honouring conflicts_with" do
+      %{description: description} =
+        @coordinator |> Catalog.visible() |> Enum.find(&(&1.name == "dep_add"))
+
+      assert description =~ "Autopilot"
+      assert description =~ "Conductor"
+    end
   end
 
   describe "visible/1" do

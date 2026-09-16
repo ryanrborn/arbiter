@@ -32,13 +32,18 @@ defmodule Arbiter.Board.Scheduler do
   send them to free a slot for nothing.
 
     1. an open dependency — `blocked — waiting on bd-9`
-    2. file overlap with in-flight work — `blocked — lib/a.ex in flight on bd-7`
-    3. scheduler paused — `scheduler paused`
-    4. quota — `blocked — quota exhausted`
-    5. no free worker slot — `blocked — no free worker slot`
+    2. a `conflicts_with` counterpart in flight — `blocked — conflicts with
+       bd-7 (running)`
+    3. file overlap with in-flight work — `blocked — lib/a.ex in flight on bd-7`
+    4. scheduler paused — `scheduler paused`
+    5. quota — `blocked — quota exhausted`
+    6. no free worker slot — `blocked — no free worker slot`
 
   Quota outranks the slot count deliberately: a free slot you may not use is
-  not the fact worth showing.
+  not the fact worth showing. A declared mutex outranks a file overlap for the
+  same kind of reason: the overlap is an inference from two scopes, the mutex
+  is a human saying "not at the same time", and only one of those is worth
+  showing when both are true.
 
   Only the *head* of the queue carries a board-wide hold — with one exception.
   Cards behind the head show their queue position (`2 ahead in queue`) — they
@@ -52,18 +57,37 @@ defmodule Arbiter.Board.Scheduler do
   reads `scheduler paused`, not just the head. Card-specific blocks still win
   over it — a paused board should not hide the fact that a card is also
   waiting on a dependency.
+
+  ## The mutex (bd-6bax7s)
+
+  `:conflicts_with` used to be the Graph Conductor's alone, so a coordinator
+  who set the edge on two board cards got both dispatched anyway. Both
+  schedulers now ask `Arbiter.Tasks.EdgeGate.gate/1` the same question; this
+  module only supplies the inputs and phrases the answer.
+
+  Two of those inputs are the caller's to compute, because purity forbids this
+  module from going and looking: `card.conflicts_with` is the card's
+  counterparts (symmetric — `EdgeGate` has already folded both edge
+  directions), and `:conflict_claims` is `%{task_id => state}` for everything
+  in flight, the state being what the card says in parentheses. The card
+  promoted in *this* pass joins that map as `dispatching`, which is what makes
+  a freshly-promoted pair serialize rather than both going out — the same
+  within-pass claim the file-overlap check already does.
   """
 
   alias Arbiter.Board.FileScope
+  alias Arbiter.Tasks.EdgeGate
 
   @typedoc """
-  One Ready card. `scope` is its declared file scope (`FileScope.declared_paths/1`)
-  and `blocked_by` the ids of its still-open gating dependencies.
+  One Ready card. `scope` is its declared file scope (`FileScope.declared_paths/1`),
+  `blocked_by` the ids of its still-open gating dependencies and
+  `conflicts_with` the ids it may not run alongside.
   """
   @type card :: %{
           required(:id) => String.t(),
           optional(:scope) => FileScope.scope(),
           optional(:blocked_by) => [String.t()],
+          optional(:conflicts_with) => [String.t()],
           optional(any()) => any()
         }
 
@@ -77,9 +101,19 @@ defmodule Arbiter.Board.Scheduler do
   @typedoc "`:ok`, or a hold carrying the phrase to show the operator."
   @type quota :: :ok | nil | {:hold, String.t()}
 
+  @typedoc """
+  What is in flight for mutex purposes, and what to call it on a card:
+  `%{task_id => "running"}`. Wider than `:running`, which only carries the
+  slot-holding workers whose *files* are claimed — a task at
+  `:awaiting_review` holds an open MR rather than a slot, and is still very
+  much something a `conflicts_with` counterpart must not run beside.
+  """
+  @type conflict_claims :: %{optional(String.t()) => String.t()}
+
   @type input :: %{
           optional(:ready) => [card()],
           optional(:running) => [in_flight()],
+          optional(:conflict_claims) => conflict_claims() | [String.t()],
           optional(:slots_free) => integer(),
           optional(:quota) => quota(),
           optional(:paused) => boolean()
@@ -100,6 +134,14 @@ defmodule Arbiter.Board.Scheduler do
 
   @type t :: %{promote: String.t() | nil, entries: [entry()]}
 
+  # What a card promoted in this very pass is called when it holds a mutex
+  # against a card further down the queue.
+  @dispatching_state "dispatching"
+
+  # A claim the caller named without a state. Never reached on the live board
+  # (`Arbiter.Board.Snapshot` always labels), but a hand-built plan may.
+  @unlabelled_state "in flight"
+
   @next_reason "next up — dispatching..."
   @paused_reason "scheduler paused"
   @no_slot_reason "blocked — no free worker slot"
@@ -119,7 +161,15 @@ defmodule Arbiter.Board.Scheduler do
 
     hold = board_hold(paused?, Map.get(input, :quota), Map.get(input, :slots_free, 0))
     in_flight = Enum.map(running, &{&1.task_id, scope_of(&1)})
-    seed = %{promote: nil, held?: false, ahead: 0, in_flight: in_flight, claimed: nil}
+
+    seed = %{
+      promote: nil,
+      held?: false,
+      ahead: 0,
+      in_flight: in_flight,
+      claimed: nil,
+      mutex: conflict_claims(Map.get(input, :conflict_claims))
+    }
 
     {entries, acc} =
       Enum.map_reduce(ready, seed, fn card, acc -> step(card, hold, paused?, acc) end)
@@ -133,7 +183,7 @@ defmodule Arbiter.Board.Scheduler do
   # already been shown on the card it actually applies to; `acc.ahead` counts
   # the cards genuinely queued in front of this one.
   defp step(card, hold, paused?, acc) do
-    case card_block(card, claims(acc)) do
+    case card_block(card, claims(acc), acc.mutex) do
       # A card's own block never advances the queue position: the card behind
       # it is still next in line.
       {:blocked, reason} ->
@@ -152,7 +202,13 @@ defmodule Arbiter.Board.Scheduler do
 
   # The head of the queue: it either goes, or it carries the hold that stopped it.
   defp decide(card, nil, acc) do
-    acc = %{acc | promote: card.id, claimed: {card.id, scope_of(card)}}
+    acc = %{
+      acc
+      | promote: card.id,
+        claimed: {card.id, scope_of(card)},
+        mutex: Map.put(acc.mutex, card.id, @dispatching_state)
+    }
+
     {entry(card, :next, @next_reason), bump(acc)}
   end
 
@@ -182,18 +238,34 @@ defmodule Arbiter.Board.Scheduler do
   defp board_hold(_paused, _quota, slots) when is_integer(slots) and slots > 0, do: nil
   defp board_hold(_paused, _quota, _slots), do: @no_slot_reason
 
-  defp card_block(card, claimed) do
-    with nil <- dependency_block(card) do
-      overlap_block(card, claimed)
+  # The edge question is `EdgeGate`'s (shared with the Conductor); the file
+  # overlap is the board's alone, and only gets asked once the edges are clear.
+  defp card_block(card, claimed, mutex) do
+    gate =
+      EdgeGate.gate(%{
+        blocked_by: Map.get(card, :blocked_by),
+        conflicts: Map.get(card, :conflicts_with),
+        claimed: mutex
+      })
+
+    case gate do
+      :ok -> overlap_block(card, claimed)
+      {:blocked, block} -> {:blocked, "blocked — " <> phrase(block, mutex)}
     end
   end
 
-  defp dependency_block(card) do
-    case card |> Map.get(:blocked_by) |> List.wrap() |> Enum.uniq() |> Enum.sort() do
-      [] -> nil
-      ids -> {:blocked, "blocked — waiting on #{Enum.join(ids, ", ")}"}
-    end
-  end
+  # The counterpart's state is the half of the reason `EdgeGate` cannot know:
+  # it answers *whether* the mutex holds, the board says what is holding it.
+  defp phrase({:conflicts_with, peer} = block, mutex),
+    do: "#{EdgeGate.describe(block)} (#{Map.get(mutex, peer, @unlabelled_state)})"
+
+  defp phrase(block, _mutex), do: EdgeGate.describe(block)
+
+  # A bare list of ids is accepted so a caller that has no states to report
+  # still gets the mutex honoured, just with a vaguer reason.
+  defp conflict_claims(nil), do: %{}
+  defp conflict_claims(claims) when is_map(claims), do: claims
+  defp conflict_claims(ids) when is_list(ids), do: Map.new(ids, &{&1, @unlabelled_state})
 
   defp overlap_block(card, claimed) do
     scope = scope_of(card)

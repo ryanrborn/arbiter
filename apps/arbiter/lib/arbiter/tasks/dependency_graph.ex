@@ -86,6 +86,15 @@ defmodule Arbiter.Tasks.DependencyGraph do
   def normalize({:blocks, from, to}), do: {to, from}
 
   @doc """
+  Filter-and-normalise in one pass: `[edge]` for a gating row, `[]` for every
+  non-gating one. Handy in a `flat_map` over a mixed set of rows — callers that
+  classify by hand are how `:conflicts_with` gets mistaken for an ordering edge.
+  """
+  @spec normalize_gating(map()) :: [edge()]
+  def normalize_gating(%{type: type} = dep) when type in @gating_types, do: [normalize(dep)]
+  def normalize_gating(_dep), do: []
+
+  @doc """
   Look for a cycle among `vertices` given normalised `edges`.
 
   Returns `:ok`, or `{:error, {:cyclic, cycle}}` where `cycle` is the closed

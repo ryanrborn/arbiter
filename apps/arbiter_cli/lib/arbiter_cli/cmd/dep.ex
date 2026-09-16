@@ -4,6 +4,24 @@ defmodule ArbiterCli.Cmd.Dep do
 
       arb dep add <from> <type> <to>
       arb dep rm  <from> <to> [--type T]
+
+  Edge types:
+
+      depends_on       <from> waits until <to> is closed. Gates dispatch.
+      blocks           the mirror image: <to> waits until <from> is closed.
+      conflicts_with   symmetric mutex — never run the two at the same time.
+                       Honoured by BOTH schedulers: the board's Autopilot and
+                       the graph Conductor. A card held by it says
+                       `blocked — conflicts with bd-1c4pg3 (running)`, and
+                       dispatches once the counterpart merges, closes or is
+                       parked.
+      parent_of        <from> is the parent (epic) of <to>. Rolls up child
+                       progress; does not gate.
+      relates_to       informational cross-reference; does not gate.
+      discovered_from  <from> was found while working <to>; does not gate.
+
+  A `depends_on` / `blocks` edge that would close a cycle is refused, with the
+  cycle named.
   """
 
   alias ArbiterCli.{Client, Output}
