@@ -554,7 +554,6 @@ defmodule ArbiterWeb.SessionDockLive do
   defp clear_dock_error(socket), do: assign(socket, :error_message, nil)
 
   defp describe(%{__exception__: true} = error), do: Exception.message(error)
-  defp describe(reason) when is_binary(reason), do: reason
   defp describe(reason), do: inspect(reason)
 
   defp load_info_usage(socket) do
