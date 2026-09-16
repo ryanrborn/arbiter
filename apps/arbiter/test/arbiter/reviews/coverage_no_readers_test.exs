@@ -1,24 +1,25 @@
 defmodule Arbiter.Reviews.CoverageNoReadersTest do
   @moduledoc """
-  Acceptance 5 of bd-203cl5 (#1648), narrowed by P3 (bd-b0fqcl / #1649).
+  Acceptance 5 of bd-203cl5 (#1648), narrowed by P3 (bd-b0fqcl / #1649) and
+  widened by exactly two modules in P4 (bd-df3zlo / #1736).
 
-  P1 wired the **writers** of `review_coverage` and nothing else. P3 adds
-  exactly one reader — `Arbiter.Reviews.CoverageShadow`, which computes
-  `Coverage.decide/3` *beside* the existing guard and only counts and logs the
-  result. `issues.last_reviewed_sha` is still the authoritative input to every
-  merge decision; the read-path flip is P4, behind `merge.coverage_enabled`.
+  P1 wired the **writers** of `review_coverage` and nothing else. P3 added one
+  reader — `Arbiter.Reviews.CoverageShadow` — which computed `decide/3` beside
+  the existing guard and acted on nothing. P4 flips the read path: the two
+  merge paths now call the predicate themselves, behind
+  `merge.coverage_enabled`, and act on its answer when that flag is on.
 
-  So the scan below still runs, with the shadow as its one new exemption: the
-  Watchdog and the MergeQueue may reach coverage only *through* the shadow, and
-  neither may call the predicate — or touch the `Entry` resource — itself.
-  That is what keeps "shadow mode" an honest description of what shipped
-  rather than a claim in a PR body.
+  So the scan below still runs, and the list of modules allowed to reach the
+  predicate is still *closed* — the shadow plus the two merge paths, each of
+  which must also still route its observation through the shadow (the
+  disagreement log is what P5/P6 will be gated on). Nothing else may call the
+  predicate, and nothing but the writer may touch the `Entry` resource.
 
   This is a source scan rather than a prose promise: a reader added by a later
   phase without also landing the predicate fails here, which is exactly the
   "guard-begets-guard" drift the design doc's §5 enforcement exists to stop.
-  Comments are stripped before scanning, so documenting what P4 will add is
-  still allowed — only real call sites count.
+  Comments are stripped before scanning, so documenting what a later phase will
+  add is still allowed — only real call sites count.
   """
 
   use ExUnit.Case, async: true
@@ -47,7 +48,8 @@ defmodule Arbiter.Reviews.CoverageNoReadersTest do
     "arbiter/reviews/external_review.ex"
   ]
 
-  # P3's two adopters (§3.4).
+  # §3.4's two adopters: the shadow's callers in P3, the predicate's callers in
+  # P4.
   @merge_paths [
     "arbiter/worker/watchdog.ex",
     "arbiter/workflows/merge_queue.ex"
@@ -79,10 +81,21 @@ defmodule Arbiter.Reviews.CoverageNoReadersTest do
         do: rel
   end
 
-  test "no module outside the shadow calls the coverage predicate" do
-    assert offenders(~r/Coverage\.decide/) == [],
-           "only `Arbiter.Reviews.CoverageShadow` may call `Coverage.decide/3` " <>
-             "or `decide_with_record/3` until P4 flips the read path."
+  test "no module outside the shadow and the two merge paths calls the predicate" do
+    assert offenders(~r/Coverage\.decide/) -- @merge_paths == [],
+           "only `Arbiter.Reviews.CoverageShadow` and the two merge paths may call " <>
+             "`Coverage.decide/3` or `decide_with_record/3` (P4, §3.4)."
+  end
+
+  test "each merge path's call to the predicate is behind merge.coverage_enabled" do
+    sources = Map.new(lib_sources())
+
+    for path <- @merge_paths do
+      source = code_only(Map.fetch!(sources, path))
+
+      assert source =~ "Workspace.coverage_enabled?",
+             "#{path} acts on `decide/3`, so it must read the flag that says it may (P4)"
+    end
   end
 
   test "no module outside the writer and the shadow touches the Coverage.Entry resource" do

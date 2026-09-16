@@ -429,15 +429,15 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
-  Whether the merge paths read `Arbiter.Reviews.Coverage.decide/3` as the
+  Whether the merge paths read `Arbiter.Reviews.Coverage`'s `decide/3` as the
   **authoritative** answer, from `config["merge"]["coverage_enabled"]`.
 
   P4 of `docs/review-coverage-and-guard-policy.md` (bd-df3zlo / #1736). When
   `false` (the **default**), the `issues.last_reviewed_sha` guard decides every
   merge exactly as it did in P3 and the coverage predicate only shadows it —
   counting and logging disagreements, acting on nothing. When `true` the two
-  swap roles: `decide/3` decides, the old guard shadows, and the disagreement
-  log line names the coverage answer as the one acted on.
+  swap roles: the predicate decides, the old guard shadows, and the
+  disagreement log line names the coverage answer as the one acted on.
 
   Off by default on purpose: §6.3's rollout gate is "zero disagreements over
   ≥20 real merges *with the probe in place*", which is evidence a workspace can

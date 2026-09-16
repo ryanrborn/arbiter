@@ -85,6 +85,15 @@ defmodule Arbiter.Reviews.CoverageShadow do
   # braces against a pathological install.
   @count_limit 10_000
 
+  # §6.3's "≥20 real merges" (P4 / bd-df3zlo, #1736 AC3).
+  @preflip_min_merges 20
+
+  # The one disagreement class §4.5 hands to P7 rather than to this phase: the
+  # old guard merged a post-approval `fix_pass` commit that no review covers,
+  # and `decide/3` refused it. It is the new predicate being RIGHT, so it must
+  # not block the flip — but it is listed, never silently dropped.
+  @deferred_transition "covered->uncovered"
+
   @typedoc """
   The three-valued answer both predicates are normalised to before they are
   compared. Only the *class* is compared; the second element is detail, logged
@@ -187,20 +196,98 @@ defmodule Arbiter.Reviews.CoverageShadow do
   @spec report() :: %{durable: %{optional(String.t()) => non_neg_integer()}, since_boot: map()}
   def report, do: %{durable: durable_counts(), since_boot: Tally.snapshot()}
 
+  @doc """
+  §6.3's rollout gate, as a query rather than a paragraph (P4 / bd-df3zlo,
+  #1736 AC3): **may `merge.coverage_enabled` be turned on?**
+
+  Reads the durable `coverage_shadow` rows over the retention window and
+  answers with the three numbers the decision rests on:
+
+    * `:merges` — distinct observations where the guard actually merged
+      (`old = "covered"`) *while the old guard was still authoritative*. A
+      workspace that has already flipped stops producing evidence about the
+      flip, so its rows are excluded.
+    * `:blocking` — disagreements per `old->new` transition that must be zero.
+    * `:deferred` / `:deferred_observations` — the one documented exception:
+      `covered->uncovered`, the post-approval `fix_pass` class (§4.5), which
+      is `decide/3` correctly refusing what the old guard merged and is P7's
+      ticket, not this phase's. Listed individually rather than summed, so the
+      operator can confirm each one really is that shape.
+
+  `:pass?` is `merges >= min_merges` (default 20) with `blocking` empty.
+
+  Run it against the install's database:
+
+      MIX_ENV=prod mix run --no-start -e \
+        'IO.inspect(Arbiter.Reviews.CoverageShadow.preflip_gate(), pretty: true)'
+
+  Never raises: an unreadable events table answers "not yet", which is the
+  safe direction for a gate.
+  """
+  @spec preflip_gate(pos_integer()) :: %{
+          merges: non_neg_integer(),
+          agreements: non_neg_integer(),
+          blocking: %{optional(String.t()) => non_neg_integer()},
+          deferred: %{optional(String.t()) => non_neg_integer()},
+          deferred_observations: [map()],
+          min_merges: pos_integer(),
+          pass?: boolean()
+        }
+  def preflip_gate(min_merges \\ @preflip_min_merges) do
+    rows = Enum.filter(durable_rows(), &shadow_evidence?/1)
+
+    merges = Enum.count(rows, &(payload(&1, "old") == "covered"))
+    agreements = Enum.count(rows, &(payload(&1, "result") == "agree"))
+    disagreements = Enum.filter(rows, &(payload(&1, "result") == "disagree"))
+
+    {deferred, blocking} = Enum.split_with(disagreements, &deferred_class?/1)
+
+    %{
+      merges: merges,
+      agreements: agreements,
+      blocking: Enum.frequencies_by(blocking, &transition/1),
+      deferred: Enum.frequencies_by(deferred, &transition/1),
+      deferred_observations: Enum.map(deferred, &observation_summary/1),
+      min_merges: min_merges,
+      pass?: merges >= min_merges and blocking == []
+    }
+  end
+
   @doc "The PubSub/event topic the durable counter is written on."
   @spec topic() :: String.t()
   def topic, do: @topic
 
   # --- internals -----------------------------------------------------------
 
-  defp durable_counts do
+  defp durable_counts, do: Enum.frequencies_by(durable_rows(), &(payload(&1, "result") || "unknown"))
+
+  defp durable_rows do
     Events.Record
     |> Ash.Query.filter(topic == @topic)
     |> Ash.Query.limit(@count_limit)
     |> Ash.read!()
-    |> Enum.frequencies_by(&(Map.get(&1.payload || %{}, "result") || "unknown"))
   rescue
-    _ -> %{}
+    _ -> []
+  end
+
+  defp payload(record, key), do: Map.get(record.payload || %{}, key)
+
+  # Rows written while the OLD guard was the authoritative one. P3's rows carry
+  # no `authoritative` key at all, and they are exactly that.
+  defp shadow_evidence?(record), do: payload(record, "authoritative") in [nil, "old"]
+
+  defp transition(record), do: "#{payload(record, "old")}->#{payload(record, "new")}"
+
+  defp deferred_class?(record), do: transition(record) == @deferred_transition
+
+  defp observation_summary(record) do
+    %{
+      site: payload(record, "site"),
+      task_id: payload(record, "task_id"),
+      mr_ref: payload(record, "mr_ref"),
+      head: payload(record, "head"),
+      new_reason: payload(record, "new_reason")
+    }
   end
 
   defp normalise({class, _detail} = answer) when class in [:covered, :unknown, :uncovered],

@@ -113,6 +113,95 @@ defmodule Arbiter.Reviews.CoverageShadowTest do
     |> Ash.read!()
   end
 
+  describe "preflip_gate/0 (P4 / bd-df3zlo #1736, AC3)" do
+    # The gate a workspace has to pass before `merge.coverage_enabled` may be
+    # turned on: ≥20 real merges observed in shadow mode with zero
+    # disagreements other than the post-approval fix_pass class, which §4.5
+    # leaves to P7. This is the query the PR names as its evidence, so it is
+    # tested rather than described.
+    defp seed(result, old, new, overrides \\ %{}) do
+      Events.broadcast(
+        workspace_id(),
+        CoverageShadow.topic(),
+        Map.merge(
+          %{
+            result: result,
+            authoritative: "old",
+            site: "watchdog",
+            task_id: "bd-df3zlo",
+            mr_ref: "ryanrborn/arbiter#1736",
+            head: sha(result <> old <> new <> inspect(overrides)),
+            old: old,
+            old_detail: "",
+            new: new,
+            new_reason: ""
+          },
+          overrides
+        )
+      )
+    end
+
+    test "20 clean merges pass" do
+      for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("clean-#{i}")})
+
+      gate = CoverageShadow.preflip_gate()
+
+      assert gate.merges == 20
+      assert gate.blocking == %{}
+      assert gate.pass?
+    end
+
+    test "fewer than 20 merges does not pass, however clean" do
+      for i <- 1..19, do: seed("agree", "covered", "covered", %{head: sha("thin-#{i}")})
+
+      gate = CoverageShadow.preflip_gate()
+
+      assert gate.merges == 19
+      refute gate.pass?
+      assert gate.blocking == %{}
+    end
+
+    test "the post-approval fix_pass class is deferred to P7, not blocking" do
+      for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("ok-#{i}")})
+
+      seed("disagree", "covered", "uncovered", %{
+        head: sha("fixpass"),
+        new_reason: "authored_content"
+      })
+
+      gate = CoverageShadow.preflip_gate()
+
+      assert gate.deferred["covered->uncovered"] == 1
+      assert gate.blocking == %{}
+      assert gate.pass?
+
+      assert [%{head: head}] = gate.deferred_observations
+      assert head == sha("fixpass")
+    end
+
+    test "any other disagreement blocks the flip" do
+      for i <- 1..20, do: seed("agree", "covered", "covered", %{head: sha("ok2-#{i}")})
+      seed("disagree", "unknown", "uncovered", %{head: sha("laggy")})
+
+      gate = CoverageShadow.preflip_gate()
+
+      assert gate.blocking == %{"unknown->uncovered" => 1}
+      refute gate.pass?
+    end
+
+    test "rows a flipped workspace produced are not evidence for flipping" do
+      # Once `decide/3` is authoritative, its agreement with the old guard is
+      # no longer an independent observation of it.
+      for i <- 1..20,
+          do: seed("agree", "covered", "covered", %{head: sha("post-#{i}"), authoritative: "new"})
+
+      gate = CoverageShadow.preflip_gate()
+
+      assert gate.merges == 0
+      refute gate.pass?
+    end
+  end
+
   describe "agreement" do
     test "an exact-match head agrees, counts, and logs nothing" do
       mr_ref = "ryanrborn/arbiter#1649"

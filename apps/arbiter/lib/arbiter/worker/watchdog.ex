@@ -3099,6 +3099,21 @@ defmodule Arbiter.Worker.Watchdog do
   # what the disagreement log compares against, and because it is the fallback
   # when the coverage table itself cannot be read.
   defp guarded_merge_decision(state) do
+    if coverage_parked_on?(state, state.last_head_sha) do
+      # Terminal for this head (AC4): the coverage answer was waited out and
+      # the coordinator has been paged. Keep watching — a new head, or an
+      # operator's coverage row, re-enters the decision below — but issue no
+      # merge and spend no forge call on it.
+      {:wait, state}
+    else
+      do_guarded_merge_decision(state)
+    end
+  end
+
+  defp coverage_parked_on?(state, head),
+    do: state.coverage_parked? and state.coverage_unknown_head == head
+
+  defp do_guarded_merge_decision(state) do
     legacy = legacy_merge_decision(state)
     {old, head, state} = coverage_shadow_inputs(legacy)
 
