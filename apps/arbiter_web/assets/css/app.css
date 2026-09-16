@@ -238,6 +238,10 @@
 
   --nav-height: 46px;
   --toolbar-height: 44px;
+  /* bd-dlc136: the session dock's collapsed strip. Title bars and the roster
+     toggle are this tall, and every page reserves this much room at its
+     bottom so the strip never covers the last row of content. */
+  --session-dock-strip-height: 34px;
 
   --measure-prose: 74ch;
   --measure-narrow: 62ch;

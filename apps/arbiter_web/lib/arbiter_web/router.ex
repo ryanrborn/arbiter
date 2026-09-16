@@ -61,6 +61,11 @@ defmodule ArbiterWeb.Router do
     get("/about", PageController, :home)
 
     live_session :default,
+      # bd-dlc136: every route here is wrapped in the live layout, whose only
+      # job is to render the sticky session dock. It has to be a layout the
+      # LiveView itself renders — the root layout has no `@socket` to hand
+      # `live_render/3`.
+      layout: {ArbiterWeb.Layouts, :live},
       on_mount: [
         {ArbiterWeb.LiveHooks, :current_path},
         {ArbiterWeb.LiveHooks, :live},
