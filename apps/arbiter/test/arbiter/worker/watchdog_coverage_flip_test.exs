@@ -21,6 +21,8 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
 
   import ExUnit.CaptureLog
 
+  require Ash.Query
+
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow.Tally
@@ -136,6 +138,12 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
     end
   end
 
+  defp shadow_events do
+    Arbiter.Events.Record
+    |> Ash.Query.filter(topic == "coverage_shadow")
+    |> Ash.read!()
+  end
+
   defp record_reviewed(task_id, mr_ref, head, fingerprint) do
     {:ok, entry} =
       Coverage.record(%{
@@ -186,9 +194,18 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       assert StubMerger.ancestor_calls() == [{mr_ref, forge_head, local}],
              "rule 2 must ask the adapter whether the forge's head is behind our push"
 
-      assert Tally.snapshot().by_transition["unknown->uncovered"] == nil
+      assert Tally.snapshot().by_transition["unknown->uncovered"] == nil,
+             "P3 counted this poll as a disagreement; with the probe it is rule 2's answer"
+
       refute log =~ "DISAGREEMENT"
       assert StubMerger.merge_count(mr_ref) == 0
+
+      # The durable row names the reason, so "it agreed" cannot be agreement on
+      # some other answer.
+      assert [event] = shadow_events()
+      assert event.payload["result"] == "agree"
+      assert event.payload["new"] == "unknown"
+      assert event.payload["new_reason"] == "forge_lagging"
     end
   end
 

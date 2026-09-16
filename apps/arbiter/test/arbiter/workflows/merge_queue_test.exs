@@ -5,6 +5,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   import ExUnit.CaptureLog
 
+  require Ash.Query
+
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow.Tally
@@ -1104,6 +1106,15 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert path =~ "/compare/#{forge_head}...#{stamped}"
       refute_received {:merge_sha, _}
       assert Tally.snapshot().by_transition["uncovered->unknown"] == 1
+
+      assert [event] =
+               Arbiter.Events.Record
+               |> Ash.Query.filter(topic == "coverage_shadow")
+               |> Ash.read!()
+
+      assert event.payload["new"] == "unknown"
+      assert event.payload["new_reason"] == "forge_lagging"
+      assert event.payload["authoritative"] == "new"
     end
 
     @tag workspace_config: @ws_github_coverage
