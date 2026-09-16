@@ -187,8 +187,7 @@ artifact installed, skip to [OTP-release installs](#production-deploys-otp-relea
 
 ```sh
 git fetch origin main
-git diff --name-only HEAD origin/main -- mix.lock   # non-empty output → run mix deps.get first
-mix deps.get                                         # only if the line above printed something
+git diff --name-only HEAD origin/main -- mix.lock   # non-empty → deps changed; see note below
 arb server deploy --git-pull
 arb server doctor     # confirm CLI and server report the same version
 ```
@@ -202,8 +201,18 @@ applies any pending migrations before the endpoint opens, so migrations are
 never run against the live server. **Do not `git pull` by hand first** — the
 command diffs `before_sha`/`after_sha` itself and treats an already-current
 tree as "nothing to deploy," skipping the restart and escript rebuild
-entirely. It also does **not** run `mix deps.get` for you, so check for a
-`mix.lock` change (above) before running it, not after.
+entirely.
+
+It also does **not** run `mix deps.get` for you. If the pre-check above
+printed a `mix.lock` line, the pulled tree needs new deps that the restart
+will not have — running `mix deps.get` *before* the pull is a no-op, since
+`git fetch` doesn't move `HEAD` and the old lockfile is still checked out.
+Instead, either run `mix deps.get && arb server restart` immediately *after*
+the deploy, or skip `--git-pull` and do the whole thing manually: `git pull
+--ff-only origin main` → `mix deps.get` → `(cd apps/arbiter_cli && mix
+escript.build && cp arb ~/.local/bin/arb)` if `apps/arbiter_cli` changed →
+`arb server restart` → `arb server doctor`. The manual form is the safer
+choice when deps changed, since it never restarts against unfetched deps.
 
 A bare `arb server deploy` (no flags) does the same git-pull fallback
 automatically whenever `ARB_RELEASE_REPO` is unset, but prefer the explicit
