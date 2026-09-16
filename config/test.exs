@@ -174,6 +174,16 @@ config :arbiter, :sessions_transcript_retention, enabled: false
 # a 100 MB default three times over (bd-5pelo2 round 4 finding 4).
 config :arbiter, :sessions_transcript, max_bytes: 1024
 
+# §8.3's bridge-verification poll (`Arbiter.Sessions.verify_bridge/2`, phase
+# 8) defaults to a 15s timeout, backgrounded on every `launch/1` call with
+# `remote_control: true` — a real 15s poll under the default settings would
+# otherwise run, unwatched, behind every such test that does not override it
+# itself. Small enough here that a test asserting the "bridge never came up"
+# path (the common case: nothing in a test's throwaway config dir ever writes
+# a `bridge-session` record) settles in milliseconds instead.
+config :arbiter, :sessions_bridge_verify_timeout_ms, 50
+config :arbiter, :sessions_bridge_verify_poll_interval_ms, 10
+
 # Disable the Stage 3 canary ticker in test — it would otherwise walk every
 # workspace a test creates on a timer, off the sandbox connection. Tests drive
 # `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.

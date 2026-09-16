@@ -449,6 +449,13 @@ defmodule Arbiter.Sessions.Provisioning do
   name is operator text landing in a generated `sh` script that is `exec`'d,
   so unescaped it would be command injection running as the operator. No name
   → a bare `claude`, unchanged from before this option existed.
+
+  `session.remote_control` (§8) appends `--remote-control <id>`, single-quoted
+  the same way — the session's own id, per design consequence 3 (§8.3), not
+  the operator name, so a claude.ai session is traceable back to the row that
+  launched it regardless of what (or whether) the operator named it. The
+  `Session` resource's validation already refuses `remote_control: true`
+  outside mode B (§8.3), so this never needs to check `auth_mode` itself.
   """
   @spec agent_command(Session.t(), keyword()) :: String.t()
   def agent_command(%Session{} = session, opts \\ []) do
@@ -457,14 +464,27 @@ defmodule Arbiter.Sessions.Provisioning do
       default_agent_command(session)
   end
 
-  defp default_agent_command(%Session{name: name}) when is_binary(name) do
+  defp default_agent_command(%Session{} = session) do
+    ["claude"]
+    |> append_name(session)
+    |> append_remote_control(session)
+    |> Enum.join(" ")
+  end
+
+  defp append_name(parts, %Session{name: name}) when is_binary(name) do
     case String.trim(name) do
-      "" -> "claude"
-      trimmed -> "claude --name " <> shell_quote(trimmed)
+      "" -> parts
+      trimmed -> parts ++ ["--name", shell_quote(trimmed)]
     end
   end
 
-  defp default_agent_command(%Session{}), do: "claude"
+  defp append_name(parts, %Session{}), do: parts
+
+  defp append_remote_control(parts, %Session{remote_control: true, id: id}) do
+    parts ++ ["--remote-control", shell_quote(id)]
+  end
+
+  defp append_remote_control(parts, %Session{}), do: parts
 
   @doc """
   The dead-man's switch grace window, in seconds (§4.6 item 3, suggested 1h).
