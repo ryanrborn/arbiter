@@ -955,8 +955,12 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
-  defp compare_status(%{"status" => status}) when status in ["ahead", "identical"], do: {:ok, true}
-  defp compare_status(%{"status" => status}) when status in ["behind", "diverged"], do: {:ok, false}
+  defp compare_status(%{"status" => status}) when status in ["ahead", "identical"],
+    do: {:ok, true}
+
+  defp compare_status(%{"status" => status}) when status in ["behind", "diverged"],
+    do: {:ok, false}
+
   defp compare_status(%{"status" => status}), do: {:error, {:unexpected_compare_status, status}}
   defp compare_status(body), do: {:error, {:unexpected_compare_status, body}}
 

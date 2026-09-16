@@ -271,7 +271,8 @@ defmodule Arbiter.Reviews.CoverageShadow do
 
   # --- internals -----------------------------------------------------------
 
-  defp durable_counts, do: Enum.frequencies_by(durable_rows(), &(payload(&1, "result") || "unknown"))
+  defp durable_counts,
+    do: Enum.frequencies_by(durable_rows(), &(payload(&1, "result") || "unknown"))
 
   defp durable_rows do
     Events.Record
