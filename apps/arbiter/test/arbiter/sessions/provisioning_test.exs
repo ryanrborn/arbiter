@@ -387,6 +387,20 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       assert instructions =~ "read-only"
     end
 
+    # bd-5v8f8l — the role doctrine is prompt-only, so the one thing that can
+    # break it is the file on disk not carrying it. `Arbiter.Sessions.Instructions`
+    # is unit-tested; this is the production path that actually writes it.
+    test "layer 4: the file a real launch writes carries the file-it-don't-fix-it rule" do
+      session = launch!()
+      instructions = session.id |> Layout.instructions_path() |> File.read!()
+
+      assert instructions =~ "task_create"
+      assert instructions =~ "Research discipline"
+      # The worktree recipe is present but no longer the standing workflow.
+      assert instructions =~ "worktree add"
+      refute instructions =~ "the same discipline every dispatched worker follows"
+    end
+
     test "the generated instructions never carry the session's own token" do
       session = launch!()
 
