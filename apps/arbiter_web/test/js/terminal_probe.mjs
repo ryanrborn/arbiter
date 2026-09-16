@@ -260,7 +260,246 @@ export async function probe(el) {
 
   handle.dispose()
 
+  try {
+    await remountChecks()
+  } catch (error) {
+    check("remount-probe", String((error && error.stack) || error), false)
+  }
+
   return { checks }
+}
+
+// -- bd-14b11h: the LiveView navigation remount -------------------------------
+//
+// Navigate away from /sessions/<id> and back and LiveView tears the hook down
+// and mounts a fresh one — inside the DOM patch, before the browser has laid
+// the new page out. The mount-time fit was a single synchronous measurement:
+// a pane with no box yet measured `null`, the fit gave up, and xterm stayed on
+// the 80x24 it constructs with. That default is what the join's `cols`/`rows`
+// then carried, so the remount resized the pane every client shares and the
+// snapshot captured in the same call was reflowed for a geometry the agent had
+// not redrawn at. That is the garbled terminal in #1733.
+//
+// A real browser is the only place this can be checked: it needs a real layout
+// engine to produce the 0x0, a real xterm to have a construction default, and
+// a real frame loop to settle. The socket is faked — the claim is about what
+// the hook says, not about a server.
+
+class ProbePush {
+  constructor() { this.handlers = {} }
+  receive(status, cb) { (this.handlers[status] ||= []).push(cb); return this }
+  reply(status, payload) { (this.handlers[status] || []).forEach((cb) => cb(payload)) }
+}
+
+class ProbeSocket {
+  constructor() {
+    this.pushes = []
+    this.joins = []
+    this.events = {}
+    this.reconnectTimer = { scheduleTimeout: () => {} }
+  }
+  onError() {}
+  onClose() {}
+  connect() {}
+  disconnect() {}
+  channel(topic, params) {
+    this.topic = topic
+    const socket = this
+    return {
+      on(event, cb) { (socket.events[event] ||= []).push(cb) },
+      onError() {},
+      join() {
+        const push = new ProbePush()
+        socket.joins.push({ params: params(), push })
+        return push
+      },
+      push(event, payload) {
+        socket.pushes.push({ event, payload })
+        return new ProbePush()
+      }
+    }
+  }
+  emit(event, payload) { (this.events[event] || []).forEach((cb) => cb(payload)) }
+  pushesFor(event) { return this.pushes.filter((p) => p.event === event) }
+}
+
+const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()))
+
+// A pane shaped like the dashboard's: fixed height, `p-2`, and — the part that
+// matters — inside a parent that has no box at all when the hook mounts.
+function hiddenPane() {
+  const parent = document.createElement("div")
+  parent.style.display = "none"
+  const el = document.createElement("div")
+  el.style.width = "800px"
+  el.style.height = "400px"
+  el.style.padding = "8px"
+  parent.appendChild(el)
+  document.body.appendChild(parent)
+  return { parent, el }
+}
+
+async function remountChecks() {
+  // -- a first mount, on a pane that is already laid out --------------------
+  const first = hiddenPane()
+  first.parent.style.display = "block"
+
+  const firstSocket = new ProbeSocket()
+  const firstHandle = createSessionTerminal(first.el, {
+    sessionId: "probe",
+    socket: firstSocket
+  })
+
+  await frame()
+  const firstJoin = firstSocket.joins[0]
+  check(
+    "first-mount-joins-with-a-fitted-geometry",
+    firstJoin ? `${firstJoin.params.cols}x${firstJoin.params.rows}` : "never joined",
+    firstJoin && firstJoin.params.cols > 0 && firstJoin.params.rows > 0
+  )
+
+  if (!firstJoin) return
+
+  const fitted = { cols: firstJoin.params.cols, rows: firstJoin.params.rows }
+
+  firstJoin.push.reply("ok", { seq: 0, mode: "snapshot", resized: false })
+  firstSocket.emit("snapshot", { seq: 0, data: "first" })
+
+  // Navigate away.
+  firstHandle.dispose()
+  first.parent.remove()
+
+  // -- and back: mounted before the page has been laid out ------------------
+  const second = hiddenPane()
+  const socket = new ProbeSocket()
+  const handle = createSessionTerminal(second.el, {
+    sessionId: "probe",
+    socket
+  })
+
+  check(
+    "remount-waits-for-a-box-before-joining",
+    `joins=${socket.joins.length}`,
+    socket.joins.length === 0
+  )
+
+  // The layout settles a frame later, exactly as a LiveView patch does.
+  second.parent.style.display = "block"
+
+  for (let i = 0; i < 30 && socket.joins.length === 0; i++) await frame()
+
+  const join = socket.joins[0]
+  if (!join) {
+    check("remount-joins-with-the-fitted-geometry-not-xterms-default", "never joined", false)
+    return
+  }
+
+  check(
+    "remount-joins-with-the-fitted-geometry-not-xterms-default",
+    join
+      ? `join ${join.params.cols}x${join.params.rows}, fitted ${fitted.cols}x${fitted.rows}`
+      : "never joined",
+    join && join.params.cols === fitted.cols && join.params.rows === fitted.rows
+  )
+
+  check(
+    "remount-renders-at-the-fitted-geometry",
+    `term ${handle.term.cols}x${handle.term.rows}, fitted ${fitted.cols}x${fitted.rows}`,
+    handle.term.cols === fitted.cols && handle.term.rows === fitted.rows
+  )
+
+  // The pane is told outright rather than only through the join params: a
+  // resumed join replays bytes for whatever geometry the pane has, so the
+  // remount has to re-announce its own alongside the replay.
+  join.push.reply("ok", { seq: 12, mode: "resumed", resized: true })
+  socket.emit("meta", { cols: fitted.cols, rows: fitted.rows, attached_clients: 1 })
+
+  for (let i = 0; i < 30 && socket.pushesFor("resize").length === 0; i++) await frame()
+
+  const resizes = socket.pushesFor("resize")
+  check(
+    "remount-sends-its-geometry-to-the-pane",
+    resizes.length ? JSON.stringify(resizes[0].payload) : "no resize pushed",
+    resizes.length > 0 &&
+      resizes[0].payload.cols === fitted.cols &&
+      resizes[0].payload.rows === fitted.rows
+  )
+
+  // The join said it resized the pane, so the snapshot/replay it is about to
+  // paint was laid out for the old geometry. Nothing the client can do fixes
+  // that; the agent has to repaint.
+  check(
+    "a-join-that-resized-the-pane-forces-a-redraw",
+    `redraws=${socket.pushesFor("redraw").length}`,
+    socket.pushesFor("redraw").length === 1
+  )
+
+  // -- AC 4: a window resize while the page is open still refits -----------
+  //
+  // The settle only covers the mount. Widening the pane afterwards is the
+  // `ResizeObserver` path, and it has to keep working: this is the drag the
+  // debounce exists for, and the one bd-3r2otb's fit arithmetic serves.
+  second.el.style.width = "500px"
+  second.el.style.height = "300px"
+
+  for (let i = 0; i < 60 && socket.pushesFor("resize").length < 2; i++) await frame()
+
+  const afterResize = socket.pushesFor("resize").at(-1)
+  check(
+    "a-window-resize-refits-and-tells-the-pane",
+    afterResize
+      ? `${JSON.stringify(afterResize.payload)} term ${handle.term.cols}x${handle.term.rows}`
+      : "no second resize",
+    afterResize &&
+      afterResize.payload.cols < fitted.cols &&
+      afterResize.payload.rows < fitted.rows &&
+      afterResize.payload.cols === handle.term.cols &&
+      afterResize.payload.rows === handle.term.rows
+  )
+
+  handle.dispose()
+
+  // A join that changed nothing must not churn the pane every client shares.
+  const third = hiddenPane()
+  third.parent.style.display = "block"
+  const quiet = new ProbeSocket()
+  const quietHandle = createSessionTerminal(third.el, { sessionId: "probe", socket: quiet })
+
+  for (let i = 0; i < 30 && quiet.joins.length === 0; i++) await frame()
+  quiet.joins[0].push.reply("ok", { seq: 12, mode: "resumed", resized: false })
+  for (let i = 0; i < 10; i++) await frame()
+
+  check(
+    "a-join-that-changed-nothing-does-not-redraw",
+    `redraws=${quiet.pushesFor("redraw").length}`,
+    quiet.pushesFor("redraw").length === 0
+  )
+
+  quietHandle.dispose()
+
+  // A tab that never paints never runs a frame callback. The settle cannot be
+  // the only thing deciding when this terminal connects — the page's own stall
+  // notice arms at 8s and would tell the operator to reload a working session.
+  const stuck = hiddenPane()
+  const stuckSocket = new ProbeSocket()
+  const stuckHandle = createSessionTerminal(stuck.el, {
+    sessionId: "probe",
+    socket: stuckSocket,
+    schedule: () => {}
+  })
+
+  await new Promise((resolve) => setTimeout(resolve, 1400))
+
+  check(
+    "a-tab-that-never-paints-still-attaches",
+    `joins=${stuckSocket.joins.length}`,
+    stuckSocket.joins.length === 1
+  )
+
+  stuckHandle.dispose()
+  stuck.parent.remove()
+  second.parent.remove()
+  third.parent.remove()
 }
 
 window.__arbProbe = probe

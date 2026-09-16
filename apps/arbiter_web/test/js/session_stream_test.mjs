@@ -401,6 +401,62 @@ test("a resize that does not change the geometry is not pushed at all", async ()
   assert.equal(channel.pushesFor("resize").length, 1, "the pane already has this size")
 })
 
+// -- remount / redraw (bd-14b11h) ---------------------------------------------
+
+test("a remounted stream re-announces its geometry even when the pane already has it", async () => {
+  // Navigating away disposes the stream; navigating back builds a new one. The
+  // "the pane already has this size" suppression above is *per client*, and a
+  // fresh client has pushed nothing — if it stayed quiet because the geometry
+  // happens to match what it fitted, the pane would never be told which client
+  // is driving it and #1733's disagreement would go unreconciled.
+  const first = connected()
+  first.stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(first.channel.pushesFor("resize").length, 1)
+  first.stream.dispose()
+
+  const second = connected()
+  second.stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  assert.deepEqual(second.channel.pushesFor("resize").map((p) => p.payload), [
+    { cols: 100, rows: 30 }
+  ])
+})
+
+test("the join reply reaches the sink so a mount can see whether it resized the pane", () => {
+  const socket = new FakeSocket()
+  const joins = []
+  const rec = recorder()
+  const stream = new SessionStream({
+    socket,
+    sessionId: "sess-1",
+    geometry: () => ({ cols: 96, rows: 30 }),
+    sink: { ...rec.sink, joined: (reply) => joins.push(reply) }
+  })
+
+  stream.connect()
+  socket.channel0.joins[0].push.reply("ok", { seq: 12, mode: "snapshot", resized: true })
+
+  assert.deepEqual(joins, [{ seq: 12, mode: "snapshot", resized: true }])
+})
+
+test("redraw asks the pane to make the agent repaint", () => {
+  const { channel, stream } = connected()
+
+  assert.equal(stream.redraw(), true)
+  assert.deepEqual(channel.pushesFor("redraw").map((p) => p.payload), [{}])
+})
+
+test("redraw is not pushed into a stream that has finished", () => {
+  const { channel, stream } = connected()
+
+  stream.detach()
+
+  assert.equal(stream.redraw(), false)
+  assert.equal(channel.pushesFor("redraw").length, 0)
+})
+
 // -- detach / kill / exit ------------------------------------------------------
 
 test("detach leaves the session running and stops the client reconnecting", () => {
