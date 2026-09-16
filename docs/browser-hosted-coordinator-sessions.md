@@ -1444,7 +1444,7 @@ launch and ends the row rather than starting a pane that would hang.
 | 9.1 layout | `Arbiter.Sessions.Layout` (pure paths) + `Arbiter.Sessions.Provisioning` (creation) |
 | 9.2 onboarding gates | `Arbiter.Agents.Claude.ConfigDir.Interactive` — merges into `.claude.json` rather than overwriting it, so Claude Code's own state (incl. `bridgeOauth*`) survives a re-provision |
 | 9.3 MCP | `Arbiter.MCP.Scope.mint_session/2`; `.mcp.json` written mode `0600` into the session **cwd** via the existing `AgentConfig.Claude.write_mcp_config/2` |
-| 9.4 memory | mount points only (`memory/shared`, `memory/candidates`), plus the read-only doctrine in the generated `CLAUDE.md`. No promotion — phase 12 |
+| 9.4 memory | phase 3 shipped mount points only. **Phase 12** (bd-6dkpf1) fills them: `Arbiter.Sessions.Memory` mounts `memory/shared/<type>/` read-only by `metadata.type` — `user`/`feedback`/`reference` for every session, `project` filtered to the session's bound workspace, none for a cross-workspace session — reading a flat, frontmatter-tagged `*.md` source dir (`Arbiter.Config.Paths.memory_root/0`). Writes still land only in `memory/candidates/`. Promotion, staleness checking and distillation remain out of scope (§13) |
 | generated instructions | `Arbiter.Sessions.Instructions` |
 
 Two decisions worth carrying forward:
@@ -1711,7 +1711,7 @@ Each phase is scoped to one child ticket.
 | 9 | **Transcript persistence** | `pipe-pane` raw capture + redaction; session-keyed entry point on `SessionArchive`; subagent walk; retention. | 2 | 2 |
 | 10 | **Orphan reaping + CLI fallback** — *shipped (§4.10)* | Idle-deadline sweep; in-scope dead-man's switch; `arb session list/attach` (§4.7). | 2 | 2 |
 | 11 | **Pre-launch UI** | The §9.5 option set; guardrail defaults (`can_dispatch` off). | 3 | 2 |
-| 12 | **Memory candidate space** | Type-scoped mounts + per-session candidate dir (§9.4) — scaffold only. | 2 | 2 |
+| 12 | **Memory candidate space** — *shipped (§9.6)* | Type-scoped mounts + per-session candidate dir (§9.4) — scaffold only. | 2 | 2 |
 | 13 | **Memory promotion + staleness checker** | *Separate ticket.* Promotion queue (`loop_pending_list`/`loop_pending_apply` as UI precedent), `file:line` verification, quarantine-not-serve. | 3 | 4 |
 | 14 | **Transcript distillation** | *Separate ticket, later.* Candidate generator only, never a direct writer (Amendment 3.5). Depends on 9 + 13. | 4 | 4 |
 

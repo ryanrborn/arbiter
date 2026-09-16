@@ -16,10 +16,11 @@ defmodule Arbiter.Sessions.Provisioning do
       (§9.3), written mode `0600` **into the session's cwd**, which is the
       only place Claude Code loads it from;
     * a generated `CLAUDE.md` (`Arbiter.Sessions.Instructions`);
-    * `memory/shared` + `memory/candidates` — §9.4's **mount points only**.
-      Phase 12 mounts the layers and implements promotion; creating the
-      directories now is what lets the generated instructions describe a
-      stable shape;
+    * `memory/shared/<type>/` — the §9.4 read-only mounts, type-scoped
+      (`Arbiter.Sessions.Memory`) — `user`/`feedback`/`reference` for every
+      session, `project` filtered to the session's bound workspace — plus
+      `memory/candidates`, the session's own write space (still just a mount
+      point; promotion is a later phase);
     * `launch.sh`, the session's single argv token, and `auth.env` (mode
       `0600`, mode A only) — see "Secrets";
     * `watchdog.sh` — the §4.6 item 3 in-scope dead-man's switch. `launch.sh`
@@ -62,6 +63,7 @@ defmodule Arbiter.Sessions.Provisioning do
   alias Arbiter.MCP.AgentConfig.Claude, as: ClaudeMCP
   alias Arbiter.Sessions.Instructions
   alias Arbiter.Sessions.Layout
+  alias Arbiter.Sessions.Memory
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Session
 
@@ -109,6 +111,7 @@ defmodule Arbiter.Sessions.Provisioning do
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
          :ok <- write_instructions(session, paths, opts),
+         :ok <- mount_memory(session, opts),
          :ok <- seed_config_dir(session, config_dir, cwd, opts),
          :ok <- write_auth_env(session, paths, opts),
          {:ok, mcp_config} <- write_mcp_config(session, cwd, opts),
@@ -204,6 +207,14 @@ defmodule Arbiter.Sessions.Provisioning do
       :ok -> :ok
       {:error, reason} -> {:error, {:write_failed, paths.instructions, reason}}
     end
+  end
+
+  # §9.4 — mounts read-only into memory/shared/<type>/, filtered by
+  # `metadata.type` and (for `project`) the session's bound workspace.
+  # Best-effort: `Memory.mount/2` never fails provisioning over an absent or
+  # unreadable memory root, since memory is additive context.
+  defp mount_memory(session, opts) do
+    Memory.mount(session, Keyword.take(opts, [:memory_root]))
   end
 
   defp seed_config_dir(session, config_dir, cwd, opts) do

@@ -189,10 +189,12 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       refute body =~ "--remote-control"
     end
 
-    test "only the §9.4 mount points ship — no promotion, no mounted layers yet" do
+    test "no memory root configured → type-scoped shared dirs exist but stay empty" do
       session = launch!()
 
-      assert File.ls!(Layout.memory_shared_dir(session.id)) == []
+      shared = Layout.memory_shared_dir(session.id)
+      assert File.ls!(shared) |> Enum.sort() == ~w(feedback project reference user)
+      for type <- ~w(feedback project reference user), do: assert(File.ls!(Path.join(shared, type)) == [])
       assert File.ls!(Layout.memory_candidates_dir(session.id)) == []
     end
 
@@ -209,6 +211,51 @@ defmodule Arbiter.Sessions.ProvisioningTest do
 
       assert {:ok, _} = Provisioning.provision(session)
       assert Jason.decode!(File.read!(claude_json))["bridgeOauthDeadExpiresAt"] == 123
+    end
+  end
+
+  describe "the §9.4 memory mounts (bd-6dkpf1, AC 1 and 3)" do
+    defp write_memory_fixture!(root, filename, type, extra \\ "") do
+      File.mkdir_p!(root)
+
+      File.write!(Path.join(root, filename), """
+      ---
+      name: #{Path.rootname(filename)}
+      description: fixture
+      metadata:
+        type: #{type}
+      #{extra}---
+
+      Fixture body.
+      """)
+    end
+
+    test "launch/1 mounts user/feedback/reference for a cross-workspace session, and no project",
+         %{root: root} do
+      memory_root = Path.join(root, "memory")
+      write_memory_fixture!(memory_root, "user-fact.md", "user")
+      write_memory_fixture!(memory_root, "feedback-fact.md", "feedback")
+      write_memory_fixture!(memory_root, "reference-fact.md", "reference")
+      write_memory_fixture!(memory_root, "arbiter-internals.md", "project", "  workspace_id: ws-arbiter\n")
+
+      session = launch!(memory_root: memory_root)
+      shared = Layout.memory_shared_dir(session.id)
+
+      assert File.ls!(Path.join(shared, "user")) == ["user-fact.md"]
+      assert File.ls!(Path.join(shared, "feedback")) == ["feedback-fact.md"]
+      assert File.ls!(Path.join(shared, "reference")) == ["reference-fact.md"]
+      assert File.ls!(Path.join(shared, "project")) == []
+    end
+
+    test "launch/1 scopes project memories to the session's bound workspace", %{root: root} do
+      memory_root = Path.join(root, "memory")
+      write_memory_fixture!(memory_root, "arbiter-internals.md", "project", "  workspace_id: ws-arbiter\n")
+      write_memory_fixture!(memory_root, "vstim-fact.md", "project", "  workspace_id: ws-vstim\n")
+
+      session = launch!(memory_root: memory_root, workspace_id: "ws-vstim")
+      shared = Layout.memory_shared_dir(session.id)
+
+      assert File.ls!(Path.join(shared, "project")) == ["vstim-fact.md"]
     end
   end
 
