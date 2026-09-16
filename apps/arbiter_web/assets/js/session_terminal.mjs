@@ -16,7 +16,7 @@ import { CanvasAddon } from "../vendor/xterm/addon-canvas.js"
 import { Socket } from "phoenix"
 
 import { SessionStream } from "./session_stream.mjs"
-import { fitGeometry } from "./session_fit.mjs"
+import { fitGeometry, settleFit } from "./session_fit.mjs"
 import { handleTerminalKey } from "./session_keys.mjs"
 
 // §6.3: the server holds 30k lines and the transcript holds everything, so the
@@ -46,6 +46,9 @@ const RESET = "[0m"
  * Callbacks, all optional: `onStatus(state)` with "connecting" | "live" |
  * "reconnecting" | "detached" | "ended", `onExit(payload)`, `onMeta(meta)`,
  * `onUsage(payload)` (§7.5, phase 7 — the live cost HUD feed), `onError(err)`.
+ *
+ * `socket` and `schedule` are test seams: `apps/arbiter_web/test/js/terminal_probe.mjs`
+ * drives the real hook against a phoenix.js stand-in and a real frame loop.
  */
 export function createSessionTerminal(el, options = {}) {
   const {
@@ -55,7 +58,8 @@ export function createSessionTerminal(el, options = {}) {
     onExit = () => {},
     onMeta = () => {},
     onUsage = () => {},
-    onError = () => {}
+    onError = () => {},
+    schedule = (cb) => requestAnimationFrame(cb)
   } = options
 
   const term = new Terminal({
@@ -106,8 +110,6 @@ export function createSessionTerminal(el, options = {}) {
     return geometry
   }
 
-  applyFit()
-
   // No connect params. The dashboard is loopback-only by design (§10.4) and
   // `ArbiterWeb.SessionSocket` trusts a loopback peer without a token, so the
   // page has none to send; reaching the dashboard from elsewhere is Remote
@@ -115,10 +117,12 @@ export function createSessionTerminal(el, options = {}) {
   // a `caller_session_id` for §10.1's self-kill guard, but a *browser* is not
   // running inside a coordinator session and has nothing truthful to declare
   // there - the clients that do (an agent's own tooling) pass it themselves.
-  const socket = new Socket(endpoint, {
-    // Reconnect briskly: the point is to be back before the operator is.
-    reconnectAfterMs: (tries) => [100, 250, 500, 1000, 2000][tries - 1] || 2000
-  })
+  const socket =
+    options.socket ||
+    new Socket(endpoint, {
+      // Reconnect briskly: the point is to be back before the operator is.
+      reconnectAfterMs: (tries) => [100, 250, 500, 1000, 2000][tries - 1] || 2000
+    })
 
   const stream = new SessionStream({
     socket,
@@ -138,6 +142,15 @@ export function createSessionTerminal(el, options = {}) {
           term.writeln("")
           term.writeln(DIM + "-- reattached; the scrollback above was repainted --" + RESET)
         }
+      },
+      // The reply to *our* join: `resized` is the server saying that the
+      // cols/rows we brought changed the pane. The snapshot (or the replay) we
+      // are about to paint was therefore laid out by the pane for the old
+      // geometry rather than redrawn by the agent for the new one — exactly
+      // the garble a LiveView navigation back to this page produced
+      // (bd-14b11h). Only the agent can fix it, so it is asked to.
+      joined: (reply) => {
+        if (reply && reply.resized) stream.redraw()
       },
       status: onStatus,
       meta: (meta) => onMeta(meta),
@@ -235,7 +248,35 @@ export function createSessionTerminal(el, options = {}) {
     typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null
   if (colorScheme && colorScheme.addEventListener) colorScheme.addEventListener("change", applyTheme)
 
-  stream.connect()
+  // §6.3 / bd-14b11h: connect only once the pane has a box.
+  //
+  // This is deliberately not `applyFit(); stream.connect()`. A LiveView
+  // navigation back to this page mounts the hook *inside* the DOM patch, and
+  // the pane it is handed can still measure 0x0; `fitGeometry` rightly refuses
+  // to size that, and a single synchronous attempt therefore left xterm on the
+  // 80x24 it constructs with. That default is not inert — it is what the join
+  // params carry, so it resized the pane every attached client shares and the
+  // snapshot captured in the same call came back reflowed for a geometry the
+  // agent had not redrawn at.
+  //
+  // So: measure until there is something to measure, then join with the real
+  // geometry, then tell the pane outright. The join params alone are not
+  // enough — a `resumed` join replays bytes for whatever size the pane is
+  // already at, and re-announcing is what reconciles the two.
+  const cancelSettle = settleFit({
+    measure: applyFit,
+    schedule,
+    onSettled: (geometry) => {
+      if (disposed) return
+
+      stream.connect()
+
+      // `null` means the budget ran out on a pane that never laid out — a
+      // background tab. It still attaches; it just leaves the pane's geometry
+      // alone until the `ResizeObserver` above sees a box.
+      if (geometry) stream.resize(geometry.cols, geometry.rows)
+    }
+  })
 
   return {
     term,
@@ -249,6 +290,7 @@ export function createSessionTerminal(el, options = {}) {
     applyTheme,
     dispose() {
       disposed = true
+      cancelSettle()
       if (fitTimer) clearTimeout(fitTimer)
       if (observer) observer.disconnect()
       if (themeObserver) themeObserver.disconnect()
