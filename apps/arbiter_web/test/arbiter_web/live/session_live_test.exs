@@ -335,7 +335,7 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, "#toggle-keep-alive")
     end
 
-    test "a non-loopback peer sees a notice instead of an inert terminal, and is told Remote Control works (mode B, launched with --remote-control, bd-2zskbb)",
+    test "a non-loopback peer sees a notice instead of an inert terminal, with SSH tunnel as primary option and Remote Control as alternative (mode B, launched with --remote-control, bd-2zskbb)",
          %{conn: conn} do
       session = launch!(auth_mode: :seeded_credentials, remote_control: true)
 
@@ -352,7 +352,13 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(
                view,
                "#terminal-remote-notice",
-               "Reach it from another device via Remote Control"
+               "ssh -L"
+             )
+
+      assert has_element?(
+               view,
+               "#terminal-remote-notice",
+               "Remote Control"
              )
     end
 
