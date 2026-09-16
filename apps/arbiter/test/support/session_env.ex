@@ -16,7 +16,9 @@ defmodule Arbiter.Test.SessionEnv do
     :primary_checkout,
     :sessions_credentials_source,
     :sessions_agent_command,
-    :sessions_launch_command
+    :sessions_launch_command,
+    :sessions_bridge_verify_timeout_ms,
+    :sessions_bridge_verify_poll_interval_ms
   ]
 
   @doc """

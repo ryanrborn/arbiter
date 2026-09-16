@@ -54,3 +54,16 @@ properties broke the first deploy:
 2. **It straddles midnight UTC** (2026-09-13T23:47 → 2026-09-14T00:09), which
    is what `read_totals/2`'s per-UTC-day split and the ingest's one-row-per-day
    dating are tested against.
+
+## `bridge_session_sample.jsonl`
+
+One `assistant` line (the same shape and values as the first line of
+`coordinator_session_v2_1_270.jsonl` above — no prompt, no model output, no
+credential) followed by one `bridge-session` record, in the shape §8.3's
+spike measured: `type / sessionId / bridgeSessionId / lastSequenceNum /
+ownerAccountUuid / ownerOrganizationUuid`. The ids are synthetic (an
+all-zeros UUID, a made-up `cse_…` bridge session id) — this fixture proves
+`Arbiter.Sessions.BridgeVerification` recognizes the record shape, not that
+it round-trips a real one. Used by `bridge_verification_test.exs`'s
+"bridge came up" case; the absent case just polls an empty/assistant-only
+file.

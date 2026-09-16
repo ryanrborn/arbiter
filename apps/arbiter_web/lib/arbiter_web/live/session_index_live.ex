@@ -9,14 +9,21 @@ defmodule ArbiterWeb.SessionIndexLive do
   action — drop this browser's reader, leave the agent running — rather than a
   fleet one.
 
-  ## Launch takes no options, deliberately
+  ## Launch takes almost no options, deliberately
 
-  Phase 11 owns the pre-launch options UI. This page launches with the
-  defaults phase 3 already treats as the safe ones: mode B (seeded
-  credentials, Amendment 2), cross-workspace, and `can_dispatch` **off** —
-  §10.1's rule that a session cannot start workers until an operator says so.
-  A button that quietly launched something with dispatch rights would be the
-  wrong default to ship first.
+  Phase 11 owns the full pre-launch options UI (workspace, `can_dispatch`,
+  …). This page launches with the defaults phase 3 already treats as the
+  safe ones: cross-workspace and `can_dispatch` **off** — §10.1's rule that a
+  session cannot start workers until an operator says so. A button that
+  quietly launched something with dispatch rights would be the wrong default
+  to ship first.
+
+  Auth mode and Remote Control (§8) are the two exceptions, pulled forward
+  from phase 11 because §8.3's design consequence 1 is a hard UI rule, not
+  an option that can wait: "`--remote-control` must be disabled in the UI
+  when mode A is selected, with the reason shown. Offering a toggle that
+  silently does nothing is the worst outcome." Mode B (seeded credentials,
+  Amendment 2) is still the default.
 
   ## Kill is confirmed, and says what it takes with it
 
@@ -78,12 +85,17 @@ defmodule ArbiterWeb.SessionIndexLive do
       socket
       |> assign(:kill_candidate, nil)
       |> assign(:usage_refresh_ref, nil)
+      |> assign(:launch_auth_mode, "seeded_credentials")
       |> refresh()
 
     {:ok, socket}
   end
 
   @impl true
+  def handle_event("validate_launch", params, socket) do
+    {:noreply, assign(socket, :launch_auth_mode, launch_auth_mode_param(params))}
+  end
+
   def handle_event("launch", params, socket) do
     case Sessions.launch(launch_defaults(params)) do
       {:ok, session} ->
@@ -197,17 +209,34 @@ defmodule ArbiterWeb.SessionIndexLive do
     assign(socket, :usage_refresh_ref, ref)
   end
 
-  # Phase 5's defaults; phase 11 replaces this with the options UI. `:name` is
-  # the one option this page's operator can already set (bd-o2vtsz) — an empty
-  # or missing field launches with no name, same as before this option existed.
+  # Phase 5's defaults, plus §8's auth mode / Remote Control pulled forward
+  # from phase 11 (see moduledoc). `:name` is the other option this page's
+  # operator can already set (bd-o2vtsz) — an empty or missing field launches
+  # with no name, same as before this option existed.
   defp launch_defaults(params) do
+    auth_mode = launch_auth_mode_param(params)
+
     [
-      auth_mode: :seeded_credentials,
+      auth_mode: launch_auth_mode(auth_mode),
+      # Mode A can never carry Remote Control (§8.3) — enforced again here
+      # (on top of the disabled checkbox and the `Session` resource's own
+      # validation) so a submission that bypassed the disabled attribute
+      # still cannot request it.
+      remote_control: auth_mode == "seeded_credentials" and launch_remote_control?(params),
       workspace_id: nil,
       can_dispatch: false,
       name: launch_name(params)
     ]
   end
+
+  defp launch_auth_mode_param(%{"auth_mode" => "oauth_token"}), do: "oauth_token"
+  defp launch_auth_mode_param(_params), do: "seeded_credentials"
+
+  defp launch_auth_mode("oauth_token"), do: :oauth_token
+  defp launch_auth_mode(_mode), do: :seeded_credentials
+
+  defp launch_remote_control?(%{"remote_control" => "true"}), do: true
+  defp launch_remote_control?(_params), do: false
 
   defp launch_name(%{"name" => name}) when is_binary(name) do
     case String.trim(name) do
@@ -242,7 +271,12 @@ defmodule ArbiterWeb.SessionIndexLive do
           subtitle="Coordinator sessions Arbiter hosts. They live in their own systemd scope, so they survive an arbiter restart."
         >
           <:actions>
-            <form id="launch-session-form" phx-submit="launch" class="flex items-center gap-2">
+            <form
+              id="launch-session-form"
+              phx-submit="launch"
+              phx-change="validate_launch"
+              class="flex items-center gap-2"
+            >
               <Forms.input
                 type="text"
                 name="name"
@@ -251,6 +285,32 @@ defmodule ArbiterWeb.SessionIndexLive do
                 mono={false}
                 size="sm"
               />
+              <Forms.select
+                name="auth_mode"
+                id="launch-session-auth-mode"
+                size="sm"
+                value={@launch_auth_mode}
+                options={[
+                  {"Mode B — seeded credentials", "seeded_credentials"},
+                  {"Mode A — workspace token", "oauth_token"}
+                ]}
+              />
+              <span class="flex items-center gap-1.5">
+                <Forms.checkbox
+                  name="remote_control"
+                  id="launch-session-remote-control"
+                  value="true"
+                  disabled={@launch_auth_mode != "seeded_credentials"}
+                  label="Remote Control"
+                />
+                <span
+                  :if={@launch_auth_mode != "seeded_credentials"}
+                  id="launch-session-remote-control-reason"
+                  class="text-[11px] text-[var(--text-label)]"
+                >
+                  needs mode B — a workspace token (mode A) never bridges (§8.3)
+                </span>
+              </span>
               <Core.button id="launch-session" type="submit" variant="primary">
                 <:icon><.icon name="hero-plus" class="size-4" /></:icon>
                 Launch session
@@ -302,7 +362,7 @@ defmodule ArbiterWeb.SessionIndexLive do
               <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
                 {session.provider} · {session.auth_mode} · {workspace_label(session)}{dispatch_label(
                   session
-                )}
+                )}{remote_control_label(session)}
               </span>
 
               <.usage_cell
@@ -417,4 +477,7 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp dispatch_label(%{can_dispatch: true}), do: " · can dispatch"
   defp dispatch_label(_session), do: ""
+
+  defp remote_control_label(%{remote_control: true}), do: " · remote control"
+  defp remote_control_label(_session), do: ""
 end

@@ -314,6 +314,79 @@ defmodule Arbiter.SessionsTest do
     end
   end
 
+  describe "remote control bridge verification (§8.3)" do
+    test "remote_control: true starts a background verify against config_dir, and a failure broadcasts bridge_unavailable" do
+      session =
+        launch!(
+          remote_control: true,
+          bridge_verify_fun: fn _dir, _opts -> {:error, :bridge_unavailable} end
+        )
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(session.id))
+
+      assert_receive {:session_error, session_id, %{code: "bridge_unavailable"}}, 1_000
+      assert session_id == session.id
+    end
+
+    test "a bridge that comes up broadcasts nothing" do
+      session = launch!(remote_control: true, bridge_verify_fun: fn _dir, _opts -> :ok end)
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(session.id))
+
+      refute_receive {:session_error, _id, _payload}, 200
+    end
+
+    test "the verify function receives the session's own config_dir and the configured timeouts" do
+      test_pid = self()
+
+      session =
+        launch!(
+          config_dir: "/tmp/some-config-dir",
+          remote_control: true,
+          bridge_verify_timeout_ms: 1234,
+          bridge_verify_poll_interval_ms: 56,
+          bridge_verify_fun: fn dir, opts ->
+            send(test_pid, {:verify_called, dir, opts})
+            :ok
+          end
+        )
+
+      assert_receive {:verify_called, dir, opts}, 1_000
+      assert dir == session.config_dir
+      assert opts[:timeout_ms] == 1234
+      assert opts[:poll_interval_ms] == 56
+    end
+
+    test "remote_control: false never starts a verify" do
+      test_pid = self()
+
+      launch!(
+        remote_control: false,
+        bridge_verify_fun: fn _dir, _opts ->
+          send(test_pid, :verify_called)
+          :ok
+        end
+      )
+
+      refute_receive :verify_called, 200
+    end
+
+    test "verify_bridge: false skips verification even under remote_control: true" do
+      test_pid = self()
+
+      launch!(
+        remote_control: true,
+        verify_bridge: false,
+        bridge_verify_fun: fn _dir, _opts ->
+          send(test_pid, :verify_called)
+          :ok
+        end
+      )
+
+      refute_receive :verify_called, 200
+    end
+  end
+
   # The argv token following `flag`, so a shape assertion reads like the
   # command rather than like an index calculation.
   defp argv_after(args, flag) do

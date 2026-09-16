@@ -109,6 +109,21 @@ defmodule Arbiter.Sessions.SessionTest do
       {:ok, cleared} = Sessions.rename(renamed, nil)
       assert cleared.name == nil
     end
+
+    test "remote_control under mode A (oauth_token) is refused (§8.3)" do
+      assert {:error, error} =
+               Ash.create(
+                 Session,
+                 %{cwd: "/tmp/session-cwd", auth_mode: :oauth_token, remote_control: true}
+               )
+
+      assert Exception.message(error) =~ "remote_control"
+    end
+
+    test "remote_control under mode B (seeded_credentials) is allowed" do
+      session = create!(%{auth_mode: :seeded_credentials, remote_control: true})
+      assert session.remote_control == true
+    end
   end
 
   describe "the migrated table (AC 1)" do

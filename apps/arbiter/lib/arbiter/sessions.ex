@@ -66,6 +66,7 @@ defmodule Arbiter.Sessions do
 
   use Ash.Domain
 
+  alias Arbiter.Sessions.BridgeVerification
   alias Arbiter.Sessions.Guards
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Provider
@@ -84,6 +85,8 @@ defmodule Arbiter.Sessions do
 
   @default_cols 200
   @default_rows 50
+  @default_bridge_verify_timeout_ms 15_000
+  @default_bridge_verify_poll_interval_ms 500
 
   @type launch_opts :: [
           provider: atom(),
@@ -98,7 +101,11 @@ defmodule Arbiter.Sessions do
           cols: pos_integer(),
           rows: pos_integer(),
           runner: module(),
-          ensure_reader: boolean()
+          ensure_reader: boolean(),
+          verify_bridge: boolean(),
+          bridge_verify_fun: (String.t(), keyword() -> :ok | {:error, :bridge_unavailable}),
+          bridge_verify_timeout_ms: pos_integer(),
+          bridge_verify_poll_interval_ms: pos_integer()
         ]
 
   @doc """
@@ -142,6 +149,17 @@ defmodule Arbiter.Sessions do
       race itself rather than racing an eager background start — wants
       `false` here (see `ArbiterWeb.SessionChannelTest`'s `on_start_stream`
       hook, which only fires once, on whichever call opens the reader first).
+    * `:verify_bridge` — `false` skips the §8.3 bridge-verification poll this
+      function otherwise starts (in the background, via `Arbiter.TaskSupervisor`)
+      when `remote_control: true`. Default `true`. A row with `remote_control:
+      false` never starts one regardless of this option — there is no bridge
+      to verify.
+    * `:bridge_verify_fun` — override for `Arbiter.Sessions.BridgeVerification.verify/2`,
+      for tests that want to control the outcome without waiting on a poll.
+    * `:bridge_verify_timeout_ms` / `:bridge_verify_poll_interval_ms` — passed
+      straight through to the verifier (defaults
+      #{@default_bridge_verify_timeout_ms}ms / #{@default_bridge_verify_poll_interval_ms}ms).
+      A test asserting the timeout path wants both small.
   """
   @spec launch(launch_opts()) :: {:ok, Session.t()} | {:error, term()}
   def launch(opts \\ []) do
@@ -482,6 +500,32 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
+  Publish an out-of-band error to a session's attached clients — currently
+  just §8.3's `bridge_unavailable` (`verify_bridge/2`).
+
+  On the same topic `broadcast_usage/2` uses: `usage_topic/1`'s doc already
+  says it is "the transport for the HUD feed… without deciding what goes in
+  it", and `ArbiterWeb.SessionChannel` already subscribes there on join, so a
+  second producer needs no new subscription. `ArbiterWeb.SessionChannel`
+  forwards this as the channel's own `error` event (`%{code, detail}}`),
+  which is the one already wired end-to-end to the terminal's error surface
+  — no client-side change needed.
+
+  A session with no attached client when this fires never sees it: there is
+  nothing to persist to (§8.3's verification is a best-effort live signal),
+  and an operator opening the session page later gets a working terminal —
+  same as any other channel-only notification this transport already has.
+  """
+  @spec broadcast_error(String.t(), map()) :: :ok | {:error, term()}
+  def broadcast_error(session_id, payload) when is_binary(session_id) and is_map(payload) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      usage_topic(session_id),
+      {:session_error, session_id, payload}
+    )
+  end
+
+  @doc """
   The command runner module in force: `:runner` option, then application
   config, then the real one.
   """
@@ -546,6 +590,10 @@ defmodule Arbiter.Sessions do
             _ = Arbiter.Sessions.Stream.ensure_reader(running, opts)
           end
 
+          if running.remote_control do
+            verify_bridge(running, opts)
+          end
+
           {:ok, running}
         end
 
@@ -600,6 +648,59 @@ defmodule Arbiter.Sessions do
 
   defp run(runner, command, args, opts \\ []) do
     runner.run(command, args, Keyword.put_new(opts, :stderr_to_stdout, true))
+  end
+
+  # §8.3 design consequence 2: never report "reachable remotely" on the
+  # strength of having passed `--remote-control` — poll the JSONL for the
+  # bridge-session record instead. Backgrounded so a launch that requested
+  # Remote Control does not block the caller for up to
+  # `:bridge_verify_timeout_ms`; `broadcast_error/2` is how the result reaches
+  # an already-attached client, same transport `broadcast_usage/2` uses.
+  defp verify_bridge(session, opts) do
+    if Keyword.get(opts, :verify_bridge, true) do
+      verify_fun = Keyword.get(opts, :bridge_verify_fun, &BridgeVerification.verify/2)
+
+      # `:bridge_verify_timeout_ms` / `:bridge_verify_poll_interval_ms` fall
+      # through to application config — same resolution `Provisioning`'s
+      # `agent_command/2` uses for `:sessions_agent_command` — so a caller
+      # that never sees `launch/1`'s opts (a LiveView `handle_event`) can
+      # still pin this down for a test without threading options through it.
+      verify_opts = [
+        timeout_ms:
+          Keyword.get(opts, :bridge_verify_timeout_ms) ||
+            Application.get_env(
+              :arbiter,
+              :sessions_bridge_verify_timeout_ms,
+              @default_bridge_verify_timeout_ms
+            ),
+        poll_interval_ms:
+          Keyword.get(opts, :bridge_verify_poll_interval_ms) ||
+            Application.get_env(
+              :arbiter,
+              :sessions_bridge_verify_poll_interval_ms,
+              @default_bridge_verify_poll_interval_ms
+            )
+      ]
+
+      Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn ->
+        case verify_fun.(session.config_dir, verify_opts) do
+          :ok ->
+            :ok
+
+          {:error, :bridge_unavailable} ->
+            Logger.warning(
+              "Arbiter.Sessions: remote control bridge never came up for #{session.id}"
+            )
+
+            broadcast_error(session.id, %{
+              code: "bridge_unavailable",
+              detail: "no bridge-session record within #{verify_opts[:timeout_ms]}ms"
+            })
+        end
+      end)
+    end
+
+    :ok
   end
 
   defp summarize(out) when is_binary(out) do

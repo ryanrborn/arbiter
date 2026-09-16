@@ -153,6 +153,42 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       refute File.exists?(marker), "the ; inside the name must never run as a command"
     end
 
+    test "remote_control: true appends --remote-control <id>, single-quoted (§8)" do
+      session =
+        launch!(
+          remote_control: true,
+          bridge_verify_timeout_ms: 50,
+          bridge_verify_poll_interval_ms: 10
+        )
+
+      body = File.read!(Layout.launch_script_path(session.id))
+
+      assert body =~ "exec claude --remote-control " <> shell_quote(session.id) <> "\n"
+    end
+
+    test "remote_control and a name both land, name first (§8, bd-o2vtsz)" do
+      session =
+        launch!(
+          name: "afk session",
+          remote_control: true,
+          bridge_verify_timeout_ms: 50,
+          bridge_verify_poll_interval_ms: 10
+        )
+
+      body = File.read!(Layout.launch_script_path(session.id))
+
+      assert body =~
+               "exec claude --name 'afk session' --remote-control " <>
+                 shell_quote(session.id) <> "\n"
+    end
+
+    test "no remote_control → launch.sh never mentions the flag" do
+      session = launch!()
+      body = File.read!(Layout.launch_script_path(session.id))
+
+      refute body =~ "--remote-control"
+    end
+
     test "only the §9.4 mount points ship — no promotion, no mounted layers yet" do
       session = launch!()
 
