@@ -117,7 +117,7 @@ anyway and rejects it on those grounds.
 ```
   browser (xterm.js)                    BEAM — arbiter.service
  ┌──────────────────────┐             ┌──────────────────────────────────┐
- │ SessionLive          │  Phoenix    │ SessionRegistry  (Registry)      │
+ │ SessionDockLive      │  Phoenix    │ SessionRegistry  (Registry)      │
  │  ├ xterm + canvas    │◄─ Channel ─►│ SessionAttach    (GenServer/sess)│
  │  └ cost HUD          │  /socket    │  ├ tmux control ops (exec)       │
  └──────────────────────┘   ws        │  ├ pipe-pane reader (raw bytes)  │
@@ -137,6 +137,11 @@ anyway and rejects it on those grounds.
                              │ tmux attach (fallback)   │ --remote-control
                           operator CLI                claude.ai (AFK)
 ```
+
+The browser-side box was `SessionLive` (`/sessions/:id`) through phase 2. Phase 3
+(bd-a292yj) deleted that page and moved the terminal, its controls and the cost
+HUD into the dock, which is the sticky `SessionDockLive` present on every page —
+see §6.5. The channel below it is unchanged.
 
 The load-bearing property is the **restart boundary**: everything below it lives
 in a cgroup that is a *sibling* of `arbiter.service`, so `systemctl --user restart

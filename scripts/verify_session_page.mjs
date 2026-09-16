@@ -174,23 +174,25 @@ async function run(page) {
     })
   `)
 
-  // The click is re-issued every poll until a window appears, so a click lost
-  // to any residual race costs 100ms rather than the whole deadline. It cannot
-  // launch a second session: LiveView marks the clicked element with
-  // `data-phx-ref-src` + `phx-click-loading` for exactly as long as the server
-  // has that event in flight, and both are gone only once the reply has been
-  // applied — and by then the dock window it asked for is in the DOM.
+  // Clicked exactly once, then polled. The in-flight markers
+  // (`data-phx-ref-src`, `phx-click-loading`) do *not* bound this wait: they
+  // clear when the reply to `launch` is applied, and since phase 3 that reply
+  // is a `push_event` rather than the old `push_navigate`, so the window only
+  // appears a further round trip later (client → `session-dock:open` → the
+  // dock's own LiveView → `open`). In that gap the button is idle and there is
+  // no window yet, so a re-clicking poll launches a *second real session*
+  // whose window then steals the expanded slot — which is what made this check
+  // fail ~40% of the time (bd-a292yj review, finding 1).
   const sessionId = await page.pollValue(
     `(() => {
        const window_ = document.querySelector('[id^="session-dock-window-"]')
        if (window_) return window_.id.replace("session-dock-window-", "")
 
        const button = document.getElementById("launch-session")
-       const inFlight =
-         !button ||
-         button.hasAttribute("data-phx-ref-src") ||
-         button.classList.contains("phx-click-loading")
-       if (!inFlight) button.click()
+       if (button && !window.__arbLaunchClicked) {
+         window.__arbLaunchClicked = true
+         button.click()
+       }
        return null
      })()`,
     "the launch never opened a session window in the dock"

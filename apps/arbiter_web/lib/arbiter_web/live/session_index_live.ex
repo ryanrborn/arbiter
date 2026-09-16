@@ -318,7 +318,18 @@ defmodule ArbiterWeb.SessionIndexLive do
                   needs mode B — a workspace token (mode A) never bridges (§8.3)
                 </span>
               </span>
-              <Core.button id="launch-session" type="submit" variant="primary">
+              <%!-- Launching is slow (a systemd scope, a `claude` process) and
+                    since phase 3 it no longer redirects, so the button stays
+                    on screen and under the cursor throughout — without this a
+                    second click during the launch starts a second real
+                    session, whose dock window steals the expanded slot from
+                    the first (bd-a292yj review, finding 1). --%>
+              <Core.button
+                id="launch-session"
+                type="submit"
+                variant="primary"
+                phx-disable-with="Launching…"
+              >
                 <:icon><.icon name="hero-plus" class="size-4" /></:icon>
                 Launch session
               </Core.button>

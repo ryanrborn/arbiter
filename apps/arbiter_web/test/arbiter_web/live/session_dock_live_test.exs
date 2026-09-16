@@ -773,6 +773,30 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert has_element?(dock, "#session-dock-usage-empty-#{session.id}")
     end
 
+    # The panel is an overlay on the window's *frame*, and a collapsed window
+    # has no frame on screen — so Info has to bring the window it was invoked
+    # on with it, rather than arming a panel nobody can see (review finding 3).
+    test "info on a collapsed window expands that window and shows its panel",
+         %{conn: conn} do
+      first = launch!(name: "collapsed")
+      second = launch!(name: "expanded")
+
+      {_view, dock} = dock(conn)
+      open!(dock, first)
+      open!(dock, second)
+
+      # The second open took the expanded slot, so `first` is a title bar only.
+      assert has_element?(dock, "#session-dock-window-#{second.id}[data-expanded=true]")
+      assert has_element?(dock, "#session-dock-window-#{first.id}[data-expanded=false]")
+
+      open_menu!(dock, first)
+      render_click(element(dock, "#session-dock-info-#{first.id}"))
+
+      assert has_element?(dock, "#session-dock-window-#{first.id}[data-expanded=true]")
+      assert has_element?(dock, "#session-dock-info-panel-#{first.id}")
+      refute has_element?(dock, "#session-dock-info-panel-#{second.id}")
+    end
+
     # The info side is an *overlay*, never a replacement: unmounting the pane
     # would dispose the xterm and throw the scrollback away for the sake of
     # reading a config dir.
@@ -790,6 +814,45 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       open_menu!(dock, session)
       render_click(element(dock, "#session-dock-info-#{session.id}"))
       refute has_element?(dock, "#session-dock-info-panel-#{session.id}")
+    end
+  end
+
+  # The dock mounts `layout: false` and renders no flash group, and a nested
+  # LiveView's flash never reaches the host page's `<Layouts.app>` — so an
+  # action that fails has to say so here or it says nothing at all (review
+  # finding 2).
+  describe "an action that fails" do
+    test "a failed kill is reported in the dock, not swallowed", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-error")
+
+      # The id no longer resolves — the same shape a kill takes when the row is
+      # gone by the time the confirmation is answered.
+      render_click(dock, "kill", %{"id" => Ecto.UUID.generate()})
+
+      assert has_element?(dock, "#session-dock-error")
+      refute has_element?(dock, "#kill-session-modal")
+
+      render_click(element(dock, "#session-dock-error-dismiss"))
+      refute has_element?(dock, "#session-dock-error")
+    end
+
+    test "a later success clears the notice", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_click(dock, "kill", %{"id" => Ecto.UUID.generate()})
+      assert has_element?(dock, "#session-dock-error")
+
+      open_menu!(dock, session)
+      render_click(element(dock, "#session-dock-keep-alive-#{session.id}"))
+
+      assert {:ok, %{keep_alive: true}} = Sessions.get(session.id)
+      refute has_element?(dock, "#session-dock-error")
     end
   end
 

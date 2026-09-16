@@ -169,6 +169,11 @@ defmodule ArbiterWeb.SessionDockLive do
      |> assign(:info_usage, nil)
      |> assign(:usage_refresh_ref, nil)
      |> assign(:kill_candidate, nil)
+     # The dock's own error notice. It cannot use `put_flash/3`: this view
+     # mounts `layout: false` and a nested LiveView's flash never reaches the
+     # host page's `<Layouts.app flash={@flash}>`, so a failed kill would
+     # otherwise be silent (bd-a292yj review, finding 2).
+     |> assign(:error_message, nil)
      |> assign(:loopback?, Map.get(session, "loopback?", true))
      |> assign(:terminal_live?, false)
      |> assign(:terminal_stalled?, false)
@@ -304,6 +309,17 @@ defmodule ArbiterWeb.SessionDockLive do
     if socket.assigns.info_id == id do
       {:noreply, close_info(socket)}
     else
+      # The panel is an overlay on the window's own frame, and a collapsed
+      # window has no frame on screen. So Info expands the window it was
+      # invoked on rather than arming a panel nobody can see and a "Hide info"
+      # label for it (bd-a292yj review, finding 3).
+      socket =
+        if id in socket.assigns.open_ids and socket.assigns.expanded_id != id do
+          socket |> expand_window(id) |> persist()
+        else
+          socket
+        end
+
       {:noreply,
        socket
        |> assign(:info_id, id)
@@ -337,15 +353,19 @@ defmodule ArbiterWeb.SessionDockLive do
     {:noreply, assign(socket, :kill_candidate, nil)}
   end
 
+  def handle_event("dismiss_error", _params, socket) do
+    {:noreply, clear_dock_error(socket)}
+  end
+
   def handle_event("kill", %{"id" => id}, socket) do
     socket =
       case Sessions.kill(id) do
         {:ok, _ended} ->
-          socket
+          clear_dock_error(socket)
 
         {:error, reason} ->
           Logger.error("SessionDockLive: kill #{id} failed: #{inspect(reason)}")
-          put_flash(socket, :error, "Could not end that session: #{inspect(reason)}")
+          put_dock_error(socket, "Could not end that session: #{describe(reason)}")
       end
 
     # Freeze *before* re-reading: `live_pane?/2` asks whether there was a pane
@@ -518,13 +538,24 @@ defmodule ArbiterWeb.SessionDockLive do
   defp set_keep_alive(socket, session) do
     case Sessions.set_keep_alive(session, not session.keep_alive) do
       {:ok, _updated} ->
-        load_sessions(socket)
+        socket |> clear_dock_error() |> load_sessions()
 
       {:error, reason} ->
         Logger.error("SessionDockLive: set_keep_alive #{session.id} failed: #{inspect(reason)}")
-        put_flash(socket, :error, "Could not update keep_alive: #{inspect(reason)}")
+        put_dock_error(socket, "Could not update keep_alive: #{describe(reason)}")
     end
   end
+
+  # An error the operator has to see, said where they are looking: in the dock
+  # itself. See the `:error_message` assign in `mount/3` for why this is not a
+  # flash.
+  defp put_dock_error(socket, message), do: assign(socket, :error_message, message)
+
+  defp clear_dock_error(socket), do: assign(socket, :error_message, nil)
+
+  defp describe(%{__exception__: true} = error), do: Exception.message(error)
+  defp describe(reason) when is_binary(reason), do: reason
+  defp describe(reason), do: inspect(reason)
 
   defp load_info_usage(socket) do
     session = Map.get(socket.assigns.sessions_by_id, socket.assigns.info_id)
@@ -572,6 +603,35 @@ defmodule ArbiterWeb.SessionDockLive do
       phx-hook="SessionDock"
       class="fixed bottom-0 left-0 right-0 z-30 flex items-end justify-start gap-2 px-3 pointer-events-none"
     >
+      <%!-- Out of the flex row on purpose (`absolute`, so it sits above the
+            strip rather than becoming another window in it) and
+            `pointer-events-auto`, since the root is not — otherwise its
+            dismiss button would be unclickable. --%>
+      <div
+        :if={@error_message}
+        id="session-dock-error"
+        role="alert"
+        class={[
+          "pointer-events-auto absolute bottom-full left-3 mb-2 max-w-[32rem] z-40",
+          "flex items-start gap-2 px-2.5 py-1.5",
+          "rounded-[var(--radius-panel)] border border-solid border-[var(--arb-fail-edge)]",
+          "bg-[var(--arb-fail-wash)] shadow-lg",
+          "text-[11.5px] text-[var(--arb-fail-text)]"
+        ]}
+      >
+        <.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+        <span class="grow">{@error_message}</span>
+        <button
+          type="button"
+          id="session-dock-error-dismiss"
+          phx-click="dismiss_error"
+          aria-label="Dismiss error"
+          class="shrink-0 flex items-center justify-center size-[18px] rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-current opacity-70 hover:opacity-100"
+        >
+          <.icon name="hero-x-mark-micro" class="size-4" />
+        </button>
+      </div>
+
       <.roster
         open?={@roster_open?}
         sessions={@sessions}

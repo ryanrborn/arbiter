@@ -230,6 +230,11 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
       assert has_element?(view, "#launch-session")
 
+      # Launching is slow and no longer redirects, so the button stays under
+      # the cursor for the whole call. Without this a second click starts a
+      # second real session (review finding 1).
+      assert has_element?(view, ~s(#launch-session[phx-disable-with]))
+
       view |> form("#launch-session-form") |> render_submit()
 
       assert [session] = Sessions.list()
