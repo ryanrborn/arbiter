@@ -488,6 +488,23 @@ test("an exit event ends the stream rather than reconnecting into a dead session
   assert.equal(socket.scheduledReconnects, 0, "a finished session must not be rejoined")
 })
 
+// A window whose session ended stays in the dock, read-only, with its final
+// scrollback (bd-a292yj, session dock phase 3). The pane surviving is the
+// point; the *stream* surviving is not — nothing typed into a dead pane may
+// reach the server, and this is the layer that guarantees it regardless of
+// what xterm does.
+
+test("stdin typed into a session that has exited never reaches the wire", () => {
+  const { channel, stream } = connected()
+
+  channel.emit("exit", { code: 0, reason: "agent exited" })
+  const before = channel.pushesFor("stdin").length
+
+  assert.equal(stream.send("rm -rf /\r"), false)
+  assert.equal(stream.sendBytes(new Uint8Array([3])), false)
+  assert.equal(channel.pushesFor("stdin").length, before)
+})
+
 // -- a seeded resume point (bd-9myzv8, session dock phase 2) ------------------
 //
 // The dock tears the xterm and the socket down on collapse, so the stream

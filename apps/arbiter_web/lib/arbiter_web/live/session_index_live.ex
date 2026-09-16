@@ -5,9 +5,24 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   Every browser-hosted coordinator session Arbiter has ever launched, newest
   first, with the three fleet-level things an operator does to one: launch,
-  open, and kill. Detach lives on the session page, because it is a *client*
-  action — drop this browser's reader, leave the agent running — rather than a
-  fleet one.
+  open, and kill.
+
+  ## What this page owns, and what the dock owns (phase 3, bd-a292yj)
+
+  This page is the **index**: the whole history, launching, naming at launch,
+  and reviewing sessions that are long over. It is deliberately the only other
+  surface, because `/sessions/:id` is gone — phase 3 moved every per-session
+  control into `ArbiterWeb.SessionDockLive`'s window (keep_alive, detach, kill,
+  the metadata, live cost, the terminal) and deleted the page they used to live
+  on rather than leaving a route whose controls had moved away.
+
+  So "open" here does not navigate anywhere: it hands the session to the dock,
+  which is on this page too and on every other one. Launching does the same,
+  which is why it no longer redirects.
+
+  Kill is the one control that is deliberately on both surfaces — ending a
+  session is a fleet act as much as a window act — and both of them go through
+  `kill_modal/1` below, so there is one confirmation, not two that can drift.
 
   ## Launch takes almost no options, deliberately
 
@@ -33,9 +48,10 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   ## Cost/tokens column (bd-9mrzti)
 
-  Each row's cost and token totals come from `Arbiter.Usage.summarize(by:
-  :session)` — the same rollup `arb usage --by session` and the session
-  detail page's initial load use — rather than a second computation. A
+  Each row's cost and token totals come from `ArbiterWeb.SessionUsage`, which
+  is `Arbiter.Usage.summarize(by: :session)` — the same rollup `arb usage --by
+  session` and the dock window's info view read — rather than a second
+  computation. A
   running session's row is not backed by its own JSONL tailer: the page
   polls that one aggregate query on `@usage_refresh_ms`, so N running
   sessions cost one query per tick, not N. The ledger itself
@@ -57,13 +73,13 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   alias Arbiter.Sessions
   alias Arbiter.Sessions.DisplayName
-  alias Arbiter.Usage
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.CoreComponents.Domain
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Forms
   alias ArbiterWeb.CoreComponents.Navigation
+  alias ArbiterWeb.SessionUsage
 
   require Logger
 
@@ -99,7 +115,10 @@ defmodule ArbiterWeb.SessionIndexLive do
   def handle_event("launch", params, socket) do
     case Sessions.launch(launch_defaults(params)) do
       {:ok, session} ->
-        {:noreply, push_navigate(socket, to: ~p"/sessions/#{session.id}")}
+        # Straight into the dock rather than off to a page of its own: the
+        # terminal is in the strip at the bottom of every page, and a redirect
+        # would only have thrown away whatever the operator was reading.
+        {:noreply, socket |> refresh() |> open_in_dock(session.id)}
 
       {:error, reason} ->
         Logger.error("SessionIndexLive: launch failed: #{inspect(reason)}")
@@ -109,6 +128,15 @@ defmodule ArbiterWeb.SessionIndexLive do
          |> put_flash(:error, "Could not launch a session: #{describe(reason)}")
          |> refresh()}
     end
+  end
+
+  # `push_event/3` reaches the client as a `window` `phx:` event, which is
+  # exactly how a LiveView hook's `handleEvent` listens — so the `SessionDock`
+  # hook picks this up even though the dock is a *sibling* sticky view with its
+  # own process and its own assigns. It answers by pushing `open` to that
+  # process, the same path the roster's own Open button takes.
+  def handle_event("open_in_dock", %{"id" => id}, socket) do
+    {:noreply, open_in_dock(socket, id)}
   end
 
   def handle_event("confirm_kill", %{"id" => id}, socket) do
@@ -163,32 +191,11 @@ defmodule ArbiterWeb.SessionIndexLive do
     socket
     |> assign(:sessions, sessions)
     |> assign(:running_count, running_count)
-    |> assign(:usage_by_session, usage_by_session(sessions))
+    |> assign(:usage_by_session, SessionUsage.for_sessions(sessions))
     |> schedule_usage_refresh(running_count)
   end
 
-  # One rollup query for the whole list — not one JSONL tailer per row — keyed
-  # by `provider_session_id` because that's what `Arbiter.Usage.Event.session_id`
-  # holds (`Arbiter.Sessions.UsageIngest` writes rows keyed by the JSONL's own
-  # basename, not the Ash session id).
-  defp usage_by_session(sessions) do
-    provider_ids = sessions |> Enum.map(& &1.provider_session_id) |> Enum.filter(&is_binary/1)
-
-    case provider_ids do
-      [] ->
-        %{}
-
-      _ ->
-        case Usage.summarize(by: :session, session_ids: provider_ids) do
-          {:ok, rollups} ->
-            Map.new(rollups, &{&1.group, &1})
-
-          {:error, reason} ->
-            Logger.error("SessionIndexLive: usage summarize failed: #{inspect(reason)}")
-            %{}
-        end
-    end
-  end
+  defp open_in_dock(socket, id), do: push_event(socket, "session-dock:open", %{id: id})
 
   # Re-armed on every `refresh/1` (mount, kill, a lifecycle broadcast, or its
   # own tick) rather than only from the tick handler, so a session that starts
@@ -311,7 +318,18 @@ defmodule ArbiterWeb.SessionIndexLive do
                   needs mode B — a workspace token (mode A) never bridges (§8.3)
                 </span>
               </span>
-              <Core.button id="launch-session" type="submit" variant="primary">
+              <%!-- Launching is slow (a systemd scope, a `claude` process) and
+                    since phase 3 it no longer redirects, so the button stays
+                    on screen and under the cursor throughout — without this a
+                    second click during the launch starts a second real
+                    session, whose dock window steals the expanded slot from
+                    the first (bd-a292yj review, finding 1). --%>
+              <Core.button
+                id="launch-session"
+                type="submit"
+                variant="primary"
+                phx-disable-with="Launching…"
+              >
                 <:icon><.icon name="hero-plus" class="size-4" /></:icon>
                 Launch session
               </Core.button>
@@ -341,12 +359,15 @@ defmodule ArbiterWeb.SessionIndexLive do
             >
               <Data.status_chip status={session.status} />
 
-              <.link
-                navigate={~p"/sessions/#{session.id}"}
-                class="text-[13px] font-medium text-[var(--text-primary)] no-underline hover:underline"
+              <button
+                type="button"
+                id={"open-in-dock-#{session.id}"}
+                phx-click="open_in_dock"
+                phx-value-id={session.id}
+                class="text-[13px] font-medium text-[var(--text-primary)] text-left cursor-pointer bg-transparent border-0 hover:underline"
               >
                 {DisplayName.resolve(session)}
-              </.link>
+              </button>
 
               <span
                 id={"session-#{session.id}-short-id"}
@@ -375,11 +396,19 @@ defmodule ArbiterWeb.SessionIndexLive do
               </span>
 
               <span class="ml-auto flex items-center gap-2">
-                <.link navigate={~p"/sessions/#{session.id}"} class="no-underline">
-                  <Core.button size="sm" variant="secondary">
-                    {if session.status == :running, do: "Open", else: "View"}
-                  </Core.button>
-                </.link>
+                <%!-- Not a navigation: the window opens in the dock, on this
+                      page. An ended session opens too — its window carries the
+                      metadata and cost, and says plainly that the output it
+                      never watched is not available (bd-a292yj). --%>
+                <Core.button
+                  id={"open-in-dock-button-#{session.id}"}
+                  size="sm"
+                  variant="secondary"
+                  phx-click="open_in_dock"
+                  phx-value-id={session.id}
+                >
+                  {if session.status == :running, do: "Open in dock", else: "View in dock"}
+                </Core.button>
 
                 <Core.button
                   :if={session.status == :running}
@@ -405,10 +434,14 @@ defmodule ArbiterWeb.SessionIndexLive do
   end
 
   @doc """
-  The kill confirmation, shared with `ArbiterWeb.SessionLive`.
+  The kill confirmation, shared with `ArbiterWeb.SessionDockLive`.
 
-  Both pages can end a session and both must ask first, and a second copy of
-  this markup is a second chance for one of them to stop asking.
+  Both surfaces can end a session and both must ask first, and a second copy of
+  this markup is a second chance for one of them to stop asking. The dock's
+  need for it is if anything sharper: its Kill sits in a title bar that is on
+  screen on every page, which a page you navigated to deliberately is not.
+
+  Both views implement `cancel_kill` and a `kill` carrying `phx-value-id`.
   """
   attr :session, :any, required: true, doc: "the session to kill, or nil when closed"
 

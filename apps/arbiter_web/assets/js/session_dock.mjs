@@ -81,19 +81,21 @@ function normalize(state) {
   return { open, expanded }
 }
 
-// -- the handover from /sessions/:id ------------------------------------------
+// -- the handover from another view -------------------------------------------
 //
-// `ArbiterWeb.SessionLive` hands its session to the dock with a `push_event`,
-// which LiveView delivers as a `window` event — so a *sibling* sticky view
-// hears it even though it shares no assigns with the page that sent it.
+// `ArbiterWeb.SessionIndexLive` hands a session to the dock with a
+// `push_event` — on Launch, and from any row's Open — which LiveView delivers
+// as a `window` event, so a *sibling* sticky view hears it even though it
+// shares no assigns with the page that sent it. (Before bd-a292yj deleted it,
+// `/sessions/:id` did the same thing on mount.)
 //
-// On a live navigation the dock's hook is already mounted and catches it
-// directly. On a **cold load** of `/sessions/:id` it is not: the parent view
-// joins, applies its patch and dispatches its events before its sticky
-// children have joined at all, and the request would land on nothing. So it is
-// also remembered here, by a listener installed when this module is imported —
-// which `app.js` does before `liveSocket.connect()` — and claimed by whichever
-// of the two gets there first.
+// When the dock's hook is already mounted it catches the event directly. On a
+// **cold load** it may not be: the parent view joins, applies its patch and
+// dispatches its events before its sticky children have joined at all, and the
+// request would land on nothing. So it is also remembered here, by a listener
+// installed when this module is imported — which `app.js` does before
+// `liveSocket.connect()` — and claimed by whichever of the two gets there
+// first.
 let pendingOpen = null
 
 export function rememberOpenRequest(detail) {
@@ -144,6 +146,56 @@ export function resumeFrom(sessionId) {
 
 export function forgetResume(sessionId) {
   resumePoints.delete(sessionId)
+}
+
+// -- the last screen of a session that ended (bd-a292yj) ----------------------
+//
+// A window whose session ended keeps its pane, read-only, until the operator
+// dismisses it. That survives collapsing (the server keeps rendering the
+// element) but it cannot survive a **LiveView rejoin**: a rejoin re-renders
+// the dock from an empty `mount/3`, which removes every window element and
+// disposes every xterm before `restore` puts them back. A live pane recovers
+// by replaying its stream from `lastSeq`; a dead one has no stream left.
+//
+// So the text is kept here, alongside the resume book and for the same reason:
+// in memory, never in `localStorage` — after a full reload there is no window
+// to restore it into, and the honest answer there is "this ended before this
+// browser session", which is exactly what an empty book produces.
+const finalScreens = new Map()
+
+export function rememberFinalScreen(sessionId, text) {
+  if (!sessionId || typeof text !== "string") return
+  finalScreens.set(sessionId, text)
+}
+
+export function finalScreenFor(sessionId) {
+  const text = finalScreens.get(sessionId)
+  return text === undefined ? null : text
+}
+
+export function forgetFinalScreen(sessionId) {
+  finalScreens.delete(sessionId)
+}
+
+// Which windows are frozen is server state a rejoin resets, the same way
+// `open`/`expanded` are — and it needs the same answer: the client says so in
+// `restore`. It cannot be read off the DOM at that moment, which was the
+// tempting spelling: `reconnected()` runs *after* the join reply has been
+// patched in, and that patch — rendered from a fresh `mount/3` with nothing
+// open — has already removed every pane there was to read.
+const frozenSessions = new Set()
+
+export function markFrozen(sessionId) {
+  if (typeof sessionId === "string" && sessionId !== "") frozenSessions.add(sessionId)
+}
+
+export function forgetFrozen(sessionId) {
+  frozenSessions.delete(sessionId)
+}
+
+/** The sessions this browser knows have ended under an open window. */
+export function frozenIds() {
+  return Array.from(frozenSessions)
 }
 
 // -- scroll survival ----------------------------------------------------------
@@ -219,6 +271,13 @@ export const SessionDock = {
 
     this.handleEvent("session-dock:persist", (state) => writeDockState(this.store, state))
 
+    // Dismiss is "forget this window", and an ended window's last screen — and
+    // the note that it ended at all — are part of what is being forgotten.
+    this.handleEvent("session-dock:forget", ({ id }) => {
+      forgetFinalScreen(id)
+      forgetFrozen(id)
+    })
+
     // The handover from `/sessions/:id`. Claimed here too so that a later
     // remount — a LiveView rejoin re-runs every `mounted()` — cannot re-open a
     // window the operator has since dismissed.
@@ -230,7 +289,7 @@ export const SessionDock = {
     // Told, not asked: the server re-validates this against the sessions that
     // actually exist and pushes back whatever survived, which is also how a
     // stale id gets swept out of storage.
-    this.pushEvent("restore", readDockState(this.store))
+    this.pushEvent("restore", this.dockState())
 
     // ...and then, in that order, whatever arrived before this hook existed:
     // `restore` decides which windows are open, `open` adds one to them.
@@ -248,7 +307,15 @@ export const SessionDock = {
   // purpose, and the operator is meant to see "reconnecting…" and get their
   // terminal back — not an empty strip.
   reconnected() {
-    this.pushEvent("restore", readDockState(this.store))
+    this.pushEvent("restore", this.dockState())
+  },
+
+  // Storage owns which windows are open; the DOM owns which of them are
+  // holding a dead pane. Both have to reach a re-mounted server view, or a
+  // rejoin quietly turns an ended window into "its output is unavailable"
+  // while its pane is still on screen.
+  dockState() {
+    return { ...readDockState(this.store), frozen: frozenIds() }
   },
 
   destroyed() {
