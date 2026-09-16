@@ -9,6 +9,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
 
   import Phoenix.LiveViewTest
 
+  alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event
@@ -145,6 +146,84 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
 
       assert render(view) =~ "$30.00"
       assert has_element?(view, "#task-spend-chip[data-state=over_budget]")
+    end
+  end
+
+  describe "worker spend in the header for an epic" do
+    defp epic!(ws) do
+      {:ok, epic} = Ash.create(Issue, %{title: "epic subject", workspace_id: ws.id, issue_type: :epic})
+      epic
+    end
+
+    defp attach!(epic, child), do: {:ok, _} = Dependencies.add(epic.id, child.id, :parent_of)
+
+    defp ready_child!(ws, epic, attrs) do
+      issue = task!(ws, Map.merge(%{issue_type: :task}, attrs))
+      ready = Ash.update!(issue, %{}, action: :promote_to_ready)
+      attach!(epic, ready)
+      ready
+    end
+
+    setup %{ws: ws} do
+      history!(ws)
+      :ok
+    end
+
+    test "aggregates spend over the epic's direct children, and reads differently from a standalone issue",
+         %{conn: conn, ws: ws} do
+      epic = epic!(ws)
+      backlog = task!(ws, %{difficulty: 2, issue_type: :feature})
+      attach!(epic, backlog)
+      spend!(backlog.id, ws, 1.5)
+
+      ready = ready_child!(ws, epic, %{difficulty: 2})
+      spend!(ready.id, ws, 2.5)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#task-spend")
+      assert render(view) =~ "$4.00"
+
+      figure = view |> element("#task-spend-figure") |> render()
+      assert figure =~ "worker spend"
+      assert figure =~ "Excludes coordinator session overhead"
+      # An epic's tooltip talks about the epic's children, not a single
+      # issue's own sessions — that is the standalone-path wording.
+      refute figure =~ "this issue's agent sessions"
+
+      estimate = view |> element("#task-spend-estimate") |> render()
+      assert estimate =~ "Estimate:"
+      # Both children have their own peer-group history here, so both
+      # contribute — the label counts contributing children, not a
+      # peer-group sample size ("basis, n=").
+      assert estimate =~ "2 children"
+      refute estimate =~ ", n="
+    end
+
+    test "a childless epic shows $0.00 and 'no estimate yet' without crashing", %{
+      conn: conn,
+      ws: ws
+    } do
+      epic = epic!(ws)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert render(view) =~ "$0.00"
+      assert view |> element("#task-spend-estimate") |> render() =~ "no estimate yet"
+    end
+
+    test "the over-budget chip on an epic refers to its children, not 'issues like this'",
+         %{conn: conn, ws: ws} do
+      epic = epic!(ws)
+      ready = ready_child!(ws, epic, %{difficulty: 2})
+      spend!(ready.id, ws, 30.0)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#task-spend-chip[data-state=over_budget]")
+      title = view |> element("#task-spend-chip") |> render()
+      assert title =~ "this epic&#39;s children"
+      refute title =~ "issues like this"
     end
   end
 

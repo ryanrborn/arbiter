@@ -8,6 +8,7 @@ defmodule Arbiter.Usage.BudgetTest do
   # concurrent test writing usage rows would leak into this one's sample.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Budget
@@ -180,6 +181,110 @@ defmodule Arbiter.Usage.BudgetTest do
       event!(task.id, %{cost_usd: 500.0})
 
       assert %{state: :no_estimate, estimate: nil, spend: 500.0} = Budget.assess(task, now: @now)
+    end
+  end
+
+  # ---- assess_epic/2 ------------------------------------------------------
+
+  defp epic!(ws) do
+    {:ok, epic} = Ash.create(Issue, %{title: "epic subject", workspace_id: ws.id, issue_type: :epic})
+    epic
+  end
+
+  defp attach!(epic, child), do: {:ok, _} = Dependencies.add(epic.id, child.id, :parent_of)
+
+  defp ready_child!(ws, epic, attrs) do
+    {waived, attrs} = Map.pop(attrs, :acceptance_waived)
+    issue = open_issue!(ws, Map.merge(%{issue_type: :task}, attrs))
+    promote_params = if waived, do: %{acceptance_waived: waived}, else: %{}
+    ready = Ash.update!(issue, promote_params, action: :promote_to_ready)
+    attach!(epic, ready)
+    ready
+  end
+
+  defp running_child!(ws, epic, attrs) do
+    ready = ready_child!(ws, epic, attrs)
+    Ash.update!(ready, %{status: :in_progress})
+  end
+
+  describe "assess_epic/2" do
+    test "sums spend across mixed-bucket children plus the epic's own rows", %{ws: ws} do
+      epic = epic!(ws)
+
+      backlog = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      attach!(epic, backlog)
+      event!(backlog.id, %{cost_usd: 1.0})
+
+      ready = ready_child!(ws, epic, %{difficulty: 2})
+      event!(ready.id, %{cost_usd: 2.0})
+
+      closed = closed_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      attach!(epic, closed)
+      event!(closed.id, %{cost_usd: 8.0})
+
+      event!(epic.id, %{cost_usd: 0.5})
+
+      assert %{spend: 11.5} = Budget.assess_epic(epic, now: @now)
+    end
+
+    test "includes an in-flight (running) child's spend", %{ws: ws} do
+      epic = epic!(ws)
+      running = running_child!(ws, epic, %{difficulty: 2})
+      event!(running.id, %{cost_usd: 4.0})
+
+      assert %{spend: 4.0} = Budget.assess_epic(epic, now: @now)
+    end
+
+    test "sums children's own estimates percentile-for-percentile", %{ws: ws} do
+      seeded_history!(ws)
+      epic = epic!(ws)
+      ready_child!(ws, epic, %{difficulty: 2})
+      ready_child!(ws, epic, %{difficulty: 2})
+
+      %{estimate: est} = Budget.assess_epic(epic, now: @now)
+
+      assert est.p25 == 6.0
+      assert est.median == 10.0
+      assert est.p75 == 16.0
+      assert est.p90 == 18.0
+      assert est.n == 2
+      # Marked distinctly from a peer-group basis so a surface can tell an
+      # aggregate range apart from `Estimate.for_issue/2`'s own.
+      assert est.basis == Budget.epic_estimate_basis()
+    end
+
+    test "skips sub-epic children from the estimate", %{ws: ws} do
+      seeded_history!(ws)
+      epic = epic!(ws)
+      ready_child!(ws, epic, %{difficulty: 2})
+
+      {:ok, sub_epic} =
+        Ash.create(Issue, %{title: "sub-epic", workspace_id: ws.id, issue_type: :epic})
+
+      sub_epic = Ash.update!(sub_epic, %{}, action: :promote_to_ready)
+      attach!(epic, sub_epic)
+
+      %{estimate: est} = Budget.assess_epic(epic, now: @now)
+
+      assert est.n == 1
+    end
+
+    test "skips a child the estimator has no history for, rather than fabricating a range", %{
+      ws: ws
+    } do
+      epic = epic!(ws)
+      ready_child!(ws, epic, %{difficulty: 4, issue_type: :chore, acceptance_waived: "test fixture"})
+
+      assert %{estimate: nil, state: :no_estimate} = Budget.assess_epic(epic, now: @now)
+    end
+
+    test "a childless epic renders with no spend and no estimate", %{ws: ws} do
+      epic = epic!(ws)
+
+      assert %{spend: spend, estimate: nil, state: :no_estimate} =
+               Budget.assess_epic(epic, now: @now)
+
+      assert spend == 0.0
     end
   end
 

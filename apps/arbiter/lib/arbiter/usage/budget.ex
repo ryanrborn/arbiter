@@ -53,6 +53,12 @@ defmodule Arbiter.Usage.Budget do
   # an unbounded `in` list runs into first (~1000 ids).
   @id_chunk 200
 
+  # `Estimate.t().basis` sentinel for `assess_epic/2`'s summed range, so a
+  # surface can tell an aggregate apart from a peer-group basis
+  # ("difficulty+type", "difficulty", "global", "unrated_as_d2") without a
+  # second field.
+  @epic_estimate_basis "epic_children"
+
   @type state :: :normal | :running_high | :over_budget | :no_estimate
 
   @type assessment :: %{
@@ -157,6 +163,114 @@ defmodule Arbiter.Usage.Budget do
     state = state(spend, estimate)
 
     %{spend: spend, estimate: estimate, state: state, over_budget?: state == :over_budget}
+  end
+
+  @doc "The `Estimate.t().basis` sentinel `assess_epic/2` marks its summed range with."
+  @spec epic_estimate_basis() :: String.t()
+  def epic_estimate_basis, do: @epic_estimate_basis
+
+  @doc """
+  `assess/2`'s epic counterpart: nothing dispatches an epic itself, so its own
+  ledger is empty and `Estimate.for_issue/2` would only ever hand it a
+  peer-group range built out of costs it has nothing to do with. This instead
+  rolls both halves up over the epic's direct children (design bd-9jj5lf, per
+  bd-byp30z):
+
+    * **spend** — the epic's own worker spend (almost always none) plus every
+      direct child's, across *all* buckets — backlog, ready, running,
+      waiting, closed — not just closed ones. One
+      `Arbiter.Tasks.EpicRollup.children_with_status/1` call for membership,
+      one `spend_by_task/2` read over `[epic.id | child_ids]`.
+    * **estimate** — each non-epic child's own `Estimate.for_issue/2` range,
+      summed percentile-for-percentile (p25+p25, median+median, …) over one
+      shared `Estimate.sample/1`. Sub-epic children are skipped (their peer
+      group is the same fiction this function exists to avoid) and so are
+      children the estimator has no history for (`:insufficient_data`
+      contributes nothing, same as a task-level `estimate: nil`). `nil` when
+      no child contributes anything. `basis` is `epic_estimate_basis/0`
+      rather than a peer-group basis, and `n` counts contributing children,
+      not sample rows.
+
+  One ledger read and one estimator sample cover an N-child epic, same as
+  `Estimate.epic_cost_rollup/2`.
+
+  **The summed range overstates the tails.** The p90 of a sum sits below the
+  sum of the children's individual p90s unless every child runs hot at once,
+  so `state/2` fires `:running_high` / `:over_budget` later than a "true"
+  epic-level p90 would. That is the safer direction to be wrong in — it costs
+  a late flag, not a false one — but it does mean the aggregate range reads
+  wider than an epic's real spread.
+
+  **This is not `Estimate.epic_cost_rollup/2`'s number.** The COST ROLLUP
+  panel's `spent` is closed children only, so its "spent · to go" sentence
+  holds together; this `spend` is everything so far, in-flight children
+  included, because a header answering "what has this epic cost" should not
+  hide money still being spent. The two are expected to disagree on the same
+  page.
+
+  `state/2` unchanged: `assess/2`'s per-issue semantics stay on `assess/2`
+  and `Arbiter.Usage.BudgetPatrol`, which already passes `:spend` explicitly.
+  """
+  @spec assess_epic(Issue.t(), keyword()) :: assessment()
+  def assess_epic(%Issue{issue_type: :epic} = epic, opts \\ []) do
+    children = Arbiter.Tasks.EpicRollup.children_with_status(epic)
+    child_issues = Enum.map(children, & &1.issue)
+    ids = [epic.id | Enum.map(child_issues, & &1.id)]
+
+    spend =
+      ids
+      |> spend_by_task(opts)
+      |> Map.values()
+      |> Enum.reduce(0.0, &+/2)
+      |> money()
+
+    estimate = epic_estimate(child_issues, opts)
+    state = state(spend, estimate)
+
+    %{spend: spend, estimate: estimate, state: state, over_budget?: state == :over_budget}
+  end
+
+  defp epic_estimate(children, opts) do
+    children
+    |> Enum.reject(&(&1.issue_type == :epic))
+    |> case do
+      [] ->
+        nil
+
+      candidates ->
+        opts = Keyword.put_new_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
+
+        candidates
+        |> Enum.map(&Estimate.for_issue(&1, opts))
+        |> Enum.reject(&(&1 == :insufficient_data))
+        |> sum_estimates()
+    end
+  end
+
+  defp sum_estimates([]), do: nil
+
+  defp sum_estimates(estimates) do
+    zero = %{p25: 0.0, median: 0.0, p75: 0.0, p90: 0.0}
+
+    totals =
+      Enum.reduce(estimates, zero, fn est, acc ->
+        %{
+          p25: acc.p25 + est.p25,
+          median: acc.median + est.median,
+          p75: acc.p75 + est.p75,
+          p90: acc.p90 + est.p90
+        }
+      end)
+
+    %{
+      p25: money(totals.p25),
+      median: money(totals.median),
+      p75: money(totals.p75),
+      p90: money(totals.p90),
+      n: length(estimates),
+      basis: @epic_estimate_basis,
+      fallback_level: 0
+    }
   end
 
   @doc """
