@@ -679,6 +679,7 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       other = launch!(name: "other")
 
       {_view, dock} = dock(conn)
+
       render_hook(dock, "restore", %{"open" => [expanded.id, other.id], "expanded" => expanded.id})
 
       open_menu!(dock, other)

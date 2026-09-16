@@ -218,8 +218,7 @@ defmodule ArbiterWeb.SessionDockLive do
     socket =
       if expanded_id, do: expand_window(socket, expanded_id), else: collapse_window(socket)
 
-    {:noreply,
-     socket |> assign(:open_ids, open_ids) |> assign(:frozen, frozen) |> persist()}
+    {:noreply, socket |> assign(:open_ids, open_ids) |> assign(:frozen, frozen) |> persist()}
   end
 
   def handle_event("toggle_roster", _params, socket) do
@@ -926,7 +925,10 @@ defmodule ArbiterWeb.SessionDockLive do
       # A frozen pane outlives collapsing on purpose: the acceptance is "until
       # explicitly dismissed", and a collapse is not that. It holds no socket,
       # so eight of them cost eight xterms and zero connections.
-      |> assign(:pane?, (assigns.expanded? and assigns.attachable? and assigns.loopback?) or assigns.frozen?)
+      |> assign(
+        :pane?,
+        (assigns.expanded? and assigns.attachable? and assigns.loopback?) or assigns.frozen?
+      )
       |> assign(:name, DisplayName.resolve(assigns.session))
       |> assign(:running?, assigns.session.status == :running and not assigns.frozen?)
 
@@ -1108,8 +1110,7 @@ defmodule ArbiterWeb.SessionDockLive do
               href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
               target="_blank"
               class="underline"
-            >docs</.link>). Remote Control (mode B, launched with
-            <code>--remote-control</code>) is not enabled on this session.
+            >docs</.link>). Remote Control (mode B, launched with <code>--remote-control</code>) is not enabled on this session.
           </p>
           <p :if={@session.auth_mode != :seeded_credentials} class="text-[var(--text-label)]">
             This session runs under a workspace token (mode A). Forward the port over SSH:
@@ -1369,7 +1370,9 @@ defmodule ArbiterWeb.SessionDockLive do
           class={menu_item_class()}
         >
           <.icon
-            name={if @session.keep_alive, do: "hero-bookmark-slash-micro", else: "hero-bookmark-micro"}
+            name={
+              if @session.keep_alive, do: "hero-bookmark-slash-micro", else: "hero-bookmark-micro"
+            }
             class="size-4 shrink-0"
           />
           {if @session.keep_alive, do: "Unpin keep_alive", else: "Pin keep_alive"}
@@ -1401,8 +1404,7 @@ defmodule ArbiterWeb.SessionDockLive do
           phx-value-id={@session.id}
           class={[menu_item_class(), "text-[var(--text-danger,#e5484d)]"]}
         >
-          <.icon name="hero-power-micro" class="size-4 shrink-0" />
-          Kill…
+          <.icon name="hero-power-micro" class="size-4 shrink-0" /> Kill…
         </button>
       </div>
     </div>
