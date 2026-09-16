@@ -194,6 +194,13 @@ defmodule Arbiter.Usage.Budget do
   One ledger read and one estimator sample cover an N-child epic, same as
   `Estimate.epic_cost_rollup/2`.
 
+  Unlike `assess/2`, this does **not** accept a `:spend` option. `assess/2`'s
+  `:spend` lets a caller supply an already-computed *per-issue* total to skip
+  a ledger read; here the total is a rollup over the epic plus every direct
+  child by definition, so there is no single precomputed number a caller
+  could sensibly hand in instead — passing `:spend` is silently ignored
+  rather than honoured.
+
   **The summed range overstates the tails.** The p90 of a sum sits below the
   sum of the children's individual p90s unless every child runs hot at once,
   so `state/2` fires `:running_high` / `:over_budget` later than a "true"

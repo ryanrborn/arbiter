@@ -61,6 +61,10 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
     end)
   end
 
+  test "the LiveView's inlined epic-estimate-basis literal stays in sync with Budget" do
+    assert Arbiter.Usage.Budget.epic_estimate_basis() == "epic_children"
+  end
+
   describe "worker spend in the header" do
     setup %{ws: ws} do
       history!(ws)
@@ -212,6 +216,27 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
 
       assert render(view) =~ "$0.00"
       assert view |> element("#task-spend-estimate") |> render() =~ "no estimate yet"
+    end
+
+    test "the header figure updates live when a child's ledger grows, same as the cost rollup panel",
+         %{conn: conn, ws: ws} do
+      epic = epic!(ws)
+      ready = ready_child!(ws, epic, %{difficulty: 2})
+      spend!(ready.id, ws, 1.0)
+
+      {:ok, view, html} = live(conn, ~p"/tasks/#{epic.id}")
+      assert html =~ "$1.00"
+
+      spend!(ready.id, ws, 29.0)
+
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "workers",
+        {:worker_lifecycle, :completed, %{task_id: ready.id}}
+      )
+
+      assert render(view) =~ "$30.00"
+      assert has_element?(view, "#task-spend-chip[data-state=over_budget]")
     end
 
     test "the over-budget chip on an epic refers to its children, not 'issues like this'",

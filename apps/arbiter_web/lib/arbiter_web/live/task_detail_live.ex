@@ -84,9 +84,11 @@ defmodule ArbiterWeb.TaskDetailLive do
   @tasks_topic "tasks"
   @workers_topic "workers"
 
-  # `Budget.epic_estimate_basis/0`, inlined as a literal so it can anchor a
-  # function-head guard.
-  @epic_estimate_basis Budget.epic_estimate_basis()
+  # Mirrors `Budget.epic_estimate_basis/0`, inlined as a literal (rather than
+  # called at compile time) so this module-attribute guard doesn't turn every
+  # edit to `budget.ex` into a recompile of this LiveView. Pinned by
+  # `ArbiterWeb.TaskDetailBudgetTest`'s assertion that the two stay in sync.
+  @epic_estimate_basis "epic_children"
 
   # The expanded transcript of a *running* run cannot come from
   # `Run.output_lines`: that column is written exactly twice — `[]` at run
@@ -1064,6 +1066,11 @@ defmodule ArbiterWeb.TaskDetailLive do
     # mini-board above — a child's lifecycle event is exactly what should
     # move the epic's cost rollup too.
     |> assign(:epic_cost_rollup, Usage.epic_cost_rollup(epic))
+    # bd-byp30z: the header's aggregate spend/estimate reads the same child
+    # set as the rollup above, so it has to ride the same trigger — otherwise
+    # a child's ledger update repaints the panel but leaves the header's
+    # figure stale until a full reload or an event on the epic row itself.
+    |> refresh_budget()
   end
 
   defp refresh_children_by_status(socket, _groups) do
