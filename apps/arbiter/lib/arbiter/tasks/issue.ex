@@ -76,6 +76,11 @@ defmodule Arbiter.Tasks.Issue do
   # are the reviewable, PR-producing types those guards actually score.
   @gated_issue_types ~w(bug feature chore)a
 
+  # An epic is a rollup of children, never a unit a worker (or a graph) can
+  # be handed directly. `Arbiter.Board.Snapshot` reads this same list rather
+  # than redeclaring it — see `non_dispatchable_types/0`.
+  @non_dispatchable_types ~w(epic)a
+
   sqlite do
     table "issues"
     repo Arbiter.Repo
@@ -1183,6 +1188,14 @@ defmodule Arbiter.Tasks.Issue do
   def gated_type?(issue_type), do: issue_type in @gated_issue_types
 
   @doc """
+  Issue types that are never dispatchable — to a worker directly, or as a
+  graph directive. Currently just `epic`: a rollup of children, not a unit of
+  work in its own right. The canonical list; `Arbiter.Board.Snapshot` reads it
+  instead of keeping its own copy.
+  """
+  def non_dispatchable_types, do: @non_dispatchable_types
+
+  @doc """
   Every task the ReviewGate has parked (bd-9zuvbh), oldest park first.
 
   The oldest wait leads for the same reason it does in the post-merge
@@ -1246,6 +1259,16 @@ defmodule Arbiter.Tasks.Issue do
   > If those two ever need to agree, the change belongs here rather than in
   > `Arbiter.Board.Snapshot`, and it is a behaviour change for three public
   > surfaces, not a filter tweak.
+  >
+  > `refined` is the only thing this helper still declines to check. Issue
+  > *type* is different: an epic is a rollup of children, never a unit of work
+  > any caller — board, Autopilot, or a graph's own admission — can hand to a
+  > worker. `Arbiter.Tasks.Graph`'s members are "directives", i.e. individually
+  > dispatchable work, so there is no legitimate graph that wants an epic
+  > admitted as a member either. So since bd-cnfwtr this helper excludes
+  > `Issue.non_dispatchable_types/0` (currently just `epic`) up front, and all
+  > four callers (`Arbiter.Workflows.Conductor`, `task_ready`,
+  > `GET /api/issues?ready=true`, `graph_status`) inherit that exclusion.
   """
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -1258,7 +1281,8 @@ defmodule Arbiter.Tasks.Issue do
       __MODULE__
       |> Ash.read!()
       |> Enum.filter(fn i ->
-        i.status == :open and (is_nil(workspace_id) or i.workspace_id == workspace_id)
+        i.status == :open and i.issue_type not in @non_dispatchable_types and
+          (is_nil(workspace_id) or i.workspace_id == workspace_id)
       end)
 
     if open_issues == [] do

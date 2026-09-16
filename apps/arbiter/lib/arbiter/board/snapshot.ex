@@ -116,13 +116,6 @@ defmodule Arbiter.Board.Snapshot do
   # `auto_resolvable?/1`. Everything else needs a person today.
   @auto_resolving_block_reasons [:behind_base, :ci_failed]
 
-  # Board-level dispatch is per-issue, so containers never queue: an epic is a
-  # rollup of children, not something a worker can be handed. bd-38of5i
-  # extended the same exclusion to Closed-today, the one column they still
-  # leaked into; epics now live on `/epics` and reach the board only as the
-  # `↳` chip a child card carries.
-  @non_dispatchable_types [:epic]
-
   @default_system_max 16
 
   # Dispatch flips an issue to :in_progress before the worker is registered
@@ -452,8 +445,19 @@ defmodule Arbiter.Board.Snapshot do
   # decides which side of it a card falls on.
   defp queueable?(issue, worked) do
     issue.status == :open and
-      Map.get(issue, :issue_type) not in @non_dispatchable_types and
+      not dispatchable_type_excluded?(issue) and
       not MapSet.member?(worked, issue.id)
+  end
+
+  # Board-level dispatch is per-issue, so containers never queue: an epic is a
+  # rollup of children, not something a worker can be handed. bd-38of5i
+  # extended the same exclusion to Closed-today, the one column they still
+  # leaked into; epics now live on `/epics` and reach the board only as the
+  # `↳` chip a child card carries. bd-cnfwtr: the list itself lives on
+  # `Arbiter.Tasks.Issue`, which `ready/1` also reads, so the two surfaces
+  # can't drift apart.
+  defp dispatchable_type_excluded?(issue) do
+    Map.get(issue, :issue_type) in Arbiter.Tasks.Issue.non_dispatchable_types()
   end
 
   # Absent reads as unrefined. A hand-built map that predates the flag, or a
@@ -688,7 +692,7 @@ defmodule Arbiter.Board.Snapshot do
 
   defp orphaned?(issue, worked, now) do
     issue.status == :in_progress and
-      Map.get(issue, :issue_type) not in @non_dispatchable_types and
+      not dispatchable_type_excluded?(issue) and
       not MapSet.member?(worked, issue.id) and
       DateTime.diff(now, Map.get(issue, :updated_at) || created_at(issue)) >=
         @orphan_grace_seconds
@@ -824,7 +828,7 @@ defmodule Arbiter.Board.Snapshot do
     issues
     |> Enum.filter(fn issue ->
       issue.status == :closed and
-        Map.get(issue, :issue_type) not in @non_dispatchable_types and
+        not dispatchable_type_excluded?(issue) and
         closed_within_24h?(
           Map.get(issue, :closed_at),
           Map.get(issue, :updated_at),
