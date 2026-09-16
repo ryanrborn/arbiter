@@ -65,6 +65,14 @@ export function createSessionTerminal(el, options = {}) {
     // one has no resume point of its own; handing it back in is what makes an
     // expand replay what the window missed instead of re-snapshotting.
     lastSeq = null,
+    // A pane for a session that is already over (bd-a292yj). It opens no
+    // `/session` socket at all — there is nothing on the other end of one —
+    // and paints `restoredText` instead, which is what the dock's previous
+    // xterm for this session left behind before a LiveView rejoin tore it
+    // down. Without this a frozen window rebuilt by a rejoin would try to
+    // join a dead session's channel and sit at "reconnecting…".
+    readOnly: startReadOnly = false,
+    restoredText = null,
     onStatus = () => {},
     onExit = () => {},
     onMeta = () => {},
@@ -145,7 +153,8 @@ export function createSessionTerminal(el, options = {}) {
   const resumed = Number.isInteger(lastSeq) && lastSeq >= 0
   let primed = false
 
-  const stream = new SessionStream({
+  const liveStream = () =>
+    new SessionStream({
     socket,
     sessionId,
     lastSeq,
@@ -194,6 +203,8 @@ export function createSessionTerminal(el, options = {}) {
       error: (err) => onError(err)
     }
   })
+
+  const stream = startReadOnly ? inertStream() : liveStream()
 
   term.onData((data) => stream.send(data))
   // Some sequences (a mouse report, a bracketed paste of binary) arrive as a
@@ -354,12 +365,13 @@ export function createSessionTerminal(el, options = {}) {
   // timer. Anything else gets one: a tab that never paints never runs a frame
   // callback, and a terminal that waits for one would sit at "connecting…"
   // until the operator looked at it.
-  const settleDeadline = attached
-    ? null
-    : setTimeout(() => {
-        cancelSettle()
-        attach(applyFit())
-      }, SETTLE_DEADLINE_MS)
+  const settleDeadline =
+    attached || startReadOnly
+      ? null
+      : setTimeout(() => {
+          cancelSettle()
+          attach(applyFit())
+        }, SETTLE_DEADLINE_MS)
 
   // The pane an agent left behind (bd-a292yj). The session dock keeps a window
   // whose session has ended, with its final scrollback, until the operator
@@ -383,11 +395,37 @@ export function createSessionTerminal(el, options = {}) {
     term.blur()
   }
 
+  // The buffer as text, for the one case a frozen pane cannot survive on its
+  // own: a LiveView rejoin re-renders the dock, which destroys every window
+  // element and with it every xterm. A live pane recovers from that by
+  // replaying its stream from `lastSeq`; a dead one has no stream left, so the
+  // bytes have to have been kept. Text only — the styling goes, and the
+  // restored pane says so rather than passing itself off as the original.
+  const snapshot = () => {
+    const buffer = term.buffer.active
+    const lines = []
+
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i)
+      lines.push(line ? line.translateToString(true) : "")
+    }
+
+    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+    return lines.join("\r\n")
+  }
+
+  if (startReadOnly) {
+    if (restoredText) term.write(restoredText + "\r\n")
+    term.writeln(DIM + "-- the session had ended; scrollback restored as plain text --" + RESET)
+    setReadOnly()
+  }
+
   return {
     term,
     stream,
     renderer,
     setReadOnly,
+    snapshot,
     readOnly: () => readOnly,
     focus: () => {
       if (!readOnly) term.focus()
@@ -413,6 +451,25 @@ export function createSessionTerminal(el, options = {}) {
       stream.dispose()
       term.dispose()
     }
+  }
+}
+
+// A stand-in for `SessionStream` in a pane that must never open a socket: the
+// read-only rebuild of a window whose session is already over. Every call site
+// in this module goes through it, so "read-only" is one construction decision
+// rather than a guard repeated at each of them.
+function inertStream() {
+  return {
+    lastSeq: null,
+    finished: true,
+    connect: () => {},
+    send: () => false,
+    sendBytes: () => false,
+    resize: () => {},
+    redraw: () => {},
+    detach: () => {},
+    kill: () => null,
+    dispose: () => {}
   }
 }
 

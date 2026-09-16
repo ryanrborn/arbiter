@@ -61,6 +61,19 @@ defmodule ArbiterWeb.SessionDockLive do
   "until dismissed" means what it says. It holds no socket, so eight of them
   cost eight xterms and zero connections.
 
+  A **LiveView rejoin** is the one thing a frozen pane cannot ride out on its
+  own: a rejoin re-runs `mount/3`, renders the dock empty, and that patch
+  destroys every window element and every xterm in one before `restore` puts
+  them back. A live pane recovers from that by replaying its stream from
+  `last_seq`; a dead one has no stream left. So the client keeps both halves —
+  which sessions are frozen and the text their pane held — in
+  `assets/js/session_dock.mjs`, alongside the resume book and for the same
+  reason (in memory, never `localStorage`: after a full reload there is no
+  window to restore into, and "this ended before this browser session" is then
+  the true answer). `restore` carries the frozen list and re-validates it like
+  everything else in that payload, and a pane rebuilt frozen opens no socket at
+  all — it is painted from the kept text and says the styling is gone.
+
   This is the one thing the dock cannot serve alone. A session that ended in a
   *previous* browser session has no scrollback here to show and none to fetch
   until transcript persistence lands (bd-5pelo2, phase 9). Its window says so
@@ -186,10 +199,27 @@ defmodule ArbiterWeb.SessionDockLive do
         _other -> nil
       end
 
+    # Which windows are holding a *dead* pane is the other half of the state a
+    # rejoin resets (bd-a292yj). The client reads it off the panes themselves
+    # and says so here; without it a rejoin would quietly relabel an ended
+    # window "its output is unavailable" while its scrollback was on screen.
+    # Trusted no further than the rest of this payload: it has to be an open
+    # window, and the row has to actually be over.
+    frozen =
+      params
+      |> Map.get("frozen", [])
+      |> List.wrap()
+      |> Enum.filter(fn id ->
+        is_binary(id) and id in open_ids and
+          not attachable?(Map.fetch!(socket.assigns.sessions_by_id, id), MapSet.new())
+      end)
+      |> MapSet.new()
+
     socket =
       if expanded_id, do: expand_window(socket, expanded_id), else: collapse_window(socket)
 
-    {:noreply, socket |> assign(:open_ids, open_ids) |> persist()}
+    {:noreply,
+     socket |> assign(:open_ids, open_ids) |> assign(:frozen, frozen) |> persist()}
   end
 
   def handle_event("toggle_roster", _params, socket) do
@@ -566,7 +596,14 @@ defmodule ArbiterWeb.SessionDockLive do
 
     <script :type={Phoenix.LiveView.ColocatedHook} name=".SessionTerminal">
       import { createSessionTerminal } from "@/js/session_terminal.mjs"
-      import { forgetResume, rememberResume, resumeFrom } from "@/js/session_dock.mjs"
+      import {
+        finalScreenFor,
+        forgetResume,
+        markFrozen,
+        rememberFinalScreen,
+        rememberResume,
+        resumeFrom
+      } from "@/js/session_dock.mjs"
 
       // The states the hook paints into the window's status strip.
       // "reconnecting" is the one that matters: it is what an operator sees
@@ -590,10 +627,21 @@ defmodule ArbiterWeb.SessionDockLive do
         mounted() {
           this.sessionId = this.el.dataset.sessionId
           this.statusEl = document.getElementById(`session-dock-status-${this.sessionId}`)
-          this.state = "connecting"
+
+          // The server already knows this window is a record rather than a
+          // client: its session ended under a previous xterm and a LiveView
+          // rejoin has just rebuilt the element. Opening a `/session` socket
+          // for it would only sit at "reconnecting…" against a dead session,
+          // so this one is built read-only, painted from what the previous
+          // xterm left behind, and never connects.
+          const frozen = !!this.el.dataset.readonly
+          this.state = frozen ? "ended" : "connecting"
+          if (frozen) markFrozen(this.sessionId)
 
           this.terminal = createSessionTerminal(this.el, {
             sessionId: this.sessionId,
+            readOnly: frozen,
+            restoredText: frozen ? finalScreenFor(this.sessionId) : null,
             // The resume point the *previous* xterm for this session left
             // behind. A fresh terminal has none of its own — this is the
             // whole reason a window collapsed for ten minutes replays what it
@@ -616,6 +664,7 @@ defmodule ArbiterWeb.SessionDockLive do
               // what is worth reading — but nothing typed into it can reach a
               // process that is gone (bd-a292yj).
               this.terminal.setReadOnly()
+              markFrozen(this.sessionId)
               this.pushEvent("terminal_exited", { ...(payload || {}), id: this.sessionId })
             },
             onError: (err) => this.setMeta({ error: (err && err.code) || "error" }),
@@ -663,12 +712,7 @@ defmodule ArbiterWeb.SessionDockLive do
           // xterm rather than about a stand-in.
           this.el.__arbTerminal = this.terminal
 
-          // A window restored straight into the frozen state — `restore` can
-          // re-render a pane the server already knows is read-only before this
-          // hook ever sees an `exit`.
-          if (this.el.dataset.readonly) this.terminal.setReadOnly()
-
-          this.terminal.focus()
+          if (!frozen) this.terminal.focus()
         },
 
         // LiveView merges `data-*` attributes onto a `phx-update="ignore"`
@@ -677,7 +721,10 @@ defmodule ArbiterWeb.SessionDockLive do
         // killed from the dock's own title bar, or reaped elsewhere, goes
         // read-only even when the channel never delivered an `exit`.
         updated() {
-          if (this.terminal && this.el.dataset.readonly) this.terminal.setReadOnly()
+          if (!this.terminal || !this.el.dataset.readonly) return
+
+          this.terminal.setReadOnly()
+          markFrozen(this.sessionId)
         },
 
         // A LiveView rejoin re-runs `mount/3` — the strip is server-rendered as
@@ -698,6 +745,14 @@ defmodule ArbiterWeb.SessionDockLive do
           window.removeEventListener("phx:navigate", this.onNavigate)
           if (this.onForget) this.removeHandleEvent(this.onForget)
           if (!this.terminal) return
+
+          // A dead pane has no stream to replay, so what it leaves behind is
+          // its screen rather than an offset (bd-a292yj). A LiveView rejoin —
+          // which re-renders the dock from an empty mount — is the one thing
+          // that gets here with a window still open.
+          if (this.terminal.readOnly()) {
+            rememberFinalScreen(this.sessionId, this.terminal.snapshot())
+          }
 
           rememberResume(this.sessionId, this.terminal.stream.lastSeq)
           this.terminal.dispose()

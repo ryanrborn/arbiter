@@ -1017,6 +1017,19 @@ pane through a collapse too (hidden, not removed): "until dismissed" means what
 it says. Dismissing is the one act that throws the scrollback away, and it
 takes the window out of the persisted `localStorage` state with it.
 
+A **LiveView rejoin** is the one thing the pane cannot ride out by itself, and
+the live check is what found it: a rejoin re-runs the dock's `mount/3`, renders
+it empty, and that patch destroys every window element — and every xterm in one
+— before `restore` puts them back. A live pane recovers by replaying its stream
+from `last_seq`; a dead one has no stream left. So the client keeps which
+sessions are frozen and the text their panes held, in memory next to the resume
+book, `restore` carries the frozen list (re-validated like the rest of that
+payload — it must be an open window whose row is genuinely over), and a pane
+rebuilt frozen opens no socket at all: it is painted from the kept text and
+says out loud that the styling did not survive. `scripts/verify_session_page.mjs`
+asserts the whole sequence in a real browser — kill, read-only with the
+scrollback, drop and re-join the socket, still there, then dismiss.
+
 **The one case the dock cannot serve alone, said out loud.** A session that
 ended in a *previous* browser session has no scrollback here and none to fetch
 until transcript persistence (bd-5pelo2, phase 9). Opening it gives a window

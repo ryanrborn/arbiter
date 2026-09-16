@@ -850,6 +850,60 @@ defmodule ArbiterWeb.SessionDockLiveTest do
     end
   end
 
+  # A LiveView rejoin re-runs `mount/3`, so every window — and every note that
+  # one of them is holding a dead pane — is gone server-side while the panes
+  # themselves are still on screen. `restore` is how both come back.
+  describe "a rejoin, with a frozen window on screen" do
+    test "a client-reported frozen window keeps its read-only pane", %{conn: conn} do
+      session = launch!()
+      {:ok, _} = Sessions.kill(session.id)
+
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => [session.id],
+        "expanded" => session.id,
+        "frozen" => [session.id]
+      })
+
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}[data-readonly]")
+      assert has_element?(dock, "#session-dock-ended-#{session.id}")
+      refute has_element?(dock, "#session-dock-unavailable-#{session.id}")
+    end
+
+    # Same hostility as the rest of the payload: `localStorage` and the DOM are
+    # both things a devtools console can write.
+    test "a frozen claim about a session that is still running is dropped", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => [session.id],
+        "expanded" => session.id,
+        "frozen" => [session.id]
+      })
+
+      refute has_element?(dock, "#session-dock-ended-#{session.id}")
+      assert has_element?(dock, "#session-dock-status-#{session.id}")
+    end
+
+    test "a frozen claim about a window that is not open is dropped", %{conn: conn} do
+      open_one = launch!()
+      other = launch!()
+      {:ok, _} = Sessions.kill(other.id)
+
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => [open_one.id],
+        "expanded" => open_one.id,
+        "frozen" => [other.id]
+      })
+
+      refute has_element?(dock, "#session-dock-window-#{other.id}")
+    end
+  end
+
   describe "a session that ended before this browser session" do
     # Until transcript persistence (bd-5pelo2, phase 9) the dock has nothing
     # to replay for a session it never watched. Saying so — and pointing at

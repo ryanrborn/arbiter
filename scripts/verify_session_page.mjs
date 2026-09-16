@@ -343,6 +343,14 @@ async function run(page) {
   // reason — until the operator dismisses it. Both halves are checked, because
   // "the pane is still there" and "the pane is dead" have to be true at once.
 
+  // A line only this check could have put there. The claim is about the
+  // *buffer* surviving, and whether the scripted pane happens to echo anything
+  // is not what is under test.
+  await page.eval(
+    `document.getElementById("session-dock-terminal-${sessionId}")
+       .__arbTerminal.term.write("ARB-SCROLLBACK-MARKER\\r\\n")`
+  )
+
   await page.eval(`document.getElementById("session-dock-menu-${sessionId}").click()`)
   await page.poll(
     `!!document.getElementById("session-dock-kill-${sessionId}")`,
@@ -363,19 +371,22 @@ async function run(page) {
          if (!term || !term.readOnly()) return null
          // The scrollback is the whole reason the window stays. An empty
          // buffer would pass every other check here and still be the bug.
-         const lines = term.term.buffer.active.length
-         return lines > 0 ? "read-only" : null
+         return term.snapshot().includes("ARB-SCROLLBACK-MARKER") ? "read-only" : null
        })()`,
       "the pane never went read-only with its scrollback intact"
     )
   } catch (_error) {
     killed = await page.eval(
       `(() => {
+         const win = document.getElementById("session-dock-window-${sessionId}")
+         const ids = win
+           ? Array.from(win.querySelectorAll("[id]")).map((e) => e.id).join(",")
+           : "(no window)"
          const pane = document.getElementById("session-dock-terminal-${sessionId}")
-         if (!pane) return "the pane was torn down"
+         if (!pane) return "the pane was torn down; ids=" + ids
          const term = pane.__arbTerminal
-         if (!term) return "the pane has no terminal"
-         return "still writable, readOnly=" + term.readOnly()
+         if (!term) return "the pane has no terminal; ids=" + ids
+         return "still writable, readOnly=" + term.readOnly() + "; ids=" + ids
        })()`
     )
   }
@@ -386,6 +397,57 @@ async function run(page) {
     "kill-leaves-a-read-only-window-without-a-reload",
     killed === "read-only" && stillLive,
     `${killed} live-navigation=${stillLive}`
+  )
+
+  // -- the frozen window survives a LiveView rejoin ---------------------------
+  //
+  // A rejoin re-runs the dock's `mount/3`, which re-renders it empty before
+  // `restore` puts the windows back — so every window element, and every
+  // xterm in one, is destroyed and rebuilt. A live pane recovers by replaying
+  // its stream; a dead one has no stream left, and without the client keeping
+  // both the fact that it is frozen and the text it held, the operator's
+  // ended window would quietly become "its output is unavailable".
+
+  await page.eval(`
+    window.__arbRejoined2 = false
+    window.liveSocket.disconnect(() => {
+      window.__arbRejoined2 = true
+      window.liveSocket.connect()
+    })
+  `)
+  await page.poll("window.__arbRejoined2 === true", "the LiveView socket never dropped again")
+
+  let survived = null
+  try {
+    survived = await page.pollValue(
+      `(() => {
+         const pane = document.getElementById("session-dock-terminal-${sessionId}")
+         if (!pane) return null
+         const term = pane.__arbTerminal
+         if (!term || !term.readOnly()) return null
+         return term.snapshot().includes("ARB-SCROLLBACK-MARKER") ? "survived" : null
+       })()`,
+      "the frozen window did not come back read-only with its scrollback"
+    )
+  } catch (_error) {
+    survived = await page.eval(
+      `(() => {
+         if (document.getElementById("session-dock-unavailable-${sessionId}")) {
+           return "downgraded to 'output unavailable'"
+         }
+         const pane = document.getElementById("session-dock-terminal-${sessionId}")
+         if (!pane) return "the window came back without a pane"
+         const term = pane.__arbTerminal
+         if (!term) return "the pane came back without a terminal"
+         return term.readOnly() ? "read-only but empty" : "came back writable"
+       })()`
+    )
+  }
+
+  check(
+    "a-frozen-window-survives-a-liveview-rejoin",
+    survived === "survived",
+    `${survived}`
   )
 
   // ...and dismissing it is the one thing that takes it away.
