@@ -81,6 +81,71 @@ function normalize(state) {
   return { open, expanded }
 }
 
+// -- the handover from /sessions/:id ------------------------------------------
+//
+// `ArbiterWeb.SessionLive` hands its session to the dock with a `push_event`,
+// which LiveView delivers as a `window` event — so a *sibling* sticky view
+// hears it even though it shares no assigns with the page that sent it.
+//
+// On a live navigation the dock's hook is already mounted and catches it
+// directly. On a **cold load** of `/sessions/:id` it is not: the parent view
+// joins, applies its patch and dispatches its events before its sticky
+// children have joined at all, and the request would land on nothing. So it is
+// also remembered here, by a listener installed when this module is imported —
+// which `app.js` does before `liveSocket.connect()` — and claimed by whichever
+// of the two gets there first.
+let pendingOpen = null
+
+export function rememberOpenRequest(detail) {
+  pendingOpen = detail && typeof detail.id === "string" && detail.id !== "" ? detail.id : null
+}
+
+/** The pending session id, if any. Claiming it consumes it. */
+export function takeOpenRequest() {
+  const id = pendingOpen
+  pendingOpen = null
+  return id
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("phx:session-dock:open", (event) => rememberOpenRequest(event.detail))
+}
+
+// -- the resume book ----------------------------------------------------------
+//
+// Phase 2 (bd-9myzv8): collapsing a window disposes the xterm *and* the
+// `SessionStream` that held `last_seq`, because the acceptance criterion is
+// that a strip of collapsed windows holds zero xterm instances and zero live
+// sockets. The byte offset the next expand has to resume from therefore cannot
+// live in either of them, so it lives here.
+//
+// Deliberately **in memory**, never in `localStorage`. A resumed join replays
+// a delta, and a delta is only meaningful painted onto the screen it was
+// computed against. After a reload there is no such screen, so the right thing
+// there is a snapshot — which is exactly what an empty book produces.
+const resumePoints = new Map()
+
+export function rememberResume(sessionId, seq) {
+  if (!sessionId) return
+  if (!Number.isInteger(seq) || seq < 0) return
+
+  // Monotonic. A dispose that lands after something else has already advanced
+  // the offset must not rewind it into replaying bytes twice.
+  const known = resumePoints.get(sessionId)
+  if (known !== undefined && known >= seq) return
+
+  resumePoints.set(sessionId, seq)
+}
+
+export function resumeFrom(sessionId) {
+  const seq = resumePoints.get(sessionId)
+  return seq === undefined ? null : seq
+}
+
+export function forgetResume(sessionId) {
+  resumePoints.delete(sessionId)
+}
+
 // -- scroll survival ----------------------------------------------------------
 //
 // `sticky: true` keeps the dock's process and its DOM node across a
@@ -154,9 +219,35 @@ export const SessionDock = {
 
     this.handleEvent("session-dock:persist", (state) => writeDockState(this.store, state))
 
+    // The handover from `/sessions/:id`. Claimed here too so that a later
+    // remount — a LiveView rejoin re-runs every `mounted()` — cannot re-open a
+    // window the operator has since dismissed.
+    this.handleEvent("session-dock:open", ({ id }) => {
+      takeOpenRequest()
+      if (typeof id === "string" && id !== "") this.pushEvent("open", { id })
+    })
+
     // Told, not asked: the server re-validates this against the sessions that
     // actually exist and pushes back whatever survived, which is also how a
     // stale id gets swept out of storage.
+    this.pushEvent("restore", readDockState(this.store))
+
+    // ...and then, in that order, whatever arrived before this hook existed:
+    // `restore` decides which windows are open, `open` adds one to them.
+    const pending = takeOpenRequest()
+    if (pending) this.pushEvent("open", { id: pending })
+  },
+
+  // A LiveView rejoin — a server restart, a laptop waking up — re-runs the
+  // dock's `mount/3`, so `open_ids` is back to `[]` and the strip re-renders
+  // empty. It does **not** re-mount hooks, so without this nothing ever tells
+  // the server what was open again and the dock stays empty until the next
+  // full page load, taking the expanded window's terminal with it.
+  //
+  // That is the one moment §10.1 is about: the sessions outlive the restart on
+  // purpose, and the operator is meant to see "reconnecting…" and get their
+  // terminal back — not an empty strip.
+  reconnected() {
     this.pushEvent("restore", readDockState(this.store))
   },
 

@@ -6,12 +6,17 @@
 // `scripts/verify_session_terminal.mjs` drives `createSessionTerminal` on a
 // bare `file://` page: it proves the renderer and the protocol engine. What it
 // cannot see is everything that only exists on the *dashboard*: the LiveView
-// navigation that lands on `/sessions/<id>`, the colocated hook mounting on
-// that navigation, the `/session` socket it opens, the pane's real layout
-// inside the page's chrome, and what the page does when the session is killed
-// underneath it. Every bug in this ticket lived in exactly that gap — the
-// terminal's own unit tests were green while the page was stuck on
-// "connecting…".
+// navigation that lands on `/sessions/<id>`, the hook mounting on that
+// navigation, the `/session` socket it opens, the pane's real layout inside
+// the page's chrome, and what happens when the session is killed underneath
+// it. Every bug in this ticket lived in exactly that gap — the terminal's own
+// unit tests were green while the page was stuck on "connecting…".
+//
+// Since bd-9myzv8 the terminal itself lives in the **session dock**, so that
+// is where these four criteria are now measured: landing on `/sessions/<id>`
+// hands the session to the dock, and the dock's expanded window is what has to
+// reach `live`, fit, honour the copy/paste bindings and go inert on a kill.
+// The claim is unchanged; only the pane it is made about moved.
 //
 //   node scripts/verify_session_page.mjs --url http://127.0.0.1:4848
 //
@@ -190,12 +195,20 @@ async function run(page) {
   console.log(`SESSION ${sessionId}`)
 
   // -- criterion 1: the first join after the launch redirect ------------------
+  //
+  // The page no longer holds a terminal: landing on `/sessions/<id>` pushes
+  // `session-dock:open` and the *dock* is what connects (bd-9myzv8). So the
+  // window has to appear before there is a status strip to read at all.
+  await page.poll(
+    `!!document.getElementById("session-dock-window-${sessionId}")`,
+    "the session page never handed the session to the dock"
+  )
 
   let state = null
   try {
     state = await page.pollValue(
       `(() => {
-         const el = document.getElementById("terminal-status")
+         const el = document.querySelector('[id^="session-dock-status-"]')
          return el && el.dataset.state === "live" ? "live" : null
        })()`,
       "never reached live"
@@ -203,7 +216,7 @@ async function run(page) {
   } catch (_error) {
     state = await page.eval(
       `(() => {
-         const el = document.getElementById("terminal-status")
+         const el = document.querySelector('[id^="session-dock-status-"]')
          if (!el) return "(no status strip)"
          return el.dataset.state || "(hook never painted a state)"
        })()`
@@ -306,8 +319,8 @@ async function run(page) {
 
   const afterStall = await page.eval(
     `(() => {
-       const stalled = !!document.getElementById("terminal-stalled")
-       const el = document.getElementById("terminal-status")
+       const stalled = !!document.querySelector('[id^="session-dock-stalled-"]')
+       const el = document.querySelector('[id^="session-dock-status-"]')
        return JSON.stringify({ stalled, state: el && el.dataset.state })
      })()`
   )
@@ -329,8 +342,8 @@ async function run(page) {
   try {
     killed = await page.pollValue(
       `(() => {
-         const gone = !!document.getElementById("terminal-inactive")
-         const pane = document.querySelector('[id^="session-terminal-"]')
+         const gone = !!document.querySelector('[id^="session-dock-inactive-"]')
+         const pane = document.querySelector('[id^="session-dock-terminal-"]')
          return gone && !pane ? "replaced" : null
        })()`,
       "the terminal was never replaced"
@@ -338,7 +351,7 @@ async function run(page) {
   } catch (_error) {
     killed = await page.eval(
       `(() => {
-         const pane = document.querySelector('[id^="session-terminal-"]')
+         const pane = document.querySelector('[id^="session-dock-terminal-"]')
          return pane ? "the terminal is still mounted" : "no placeholder"
        })()`
     )
@@ -353,13 +366,14 @@ async function run(page) {
   )
 }
 
-// The pane's box is `h-[min(70vh,640px)] p-2`, so "the last row is visible"
-// is exactly "xterm's screen ends inside the container's content box". A
-// fraction over is what clips half of Claude Code's footer.
+// The dock pane's box is `h-[min(52vh,380px)]` of frame minus the status strip,
+// with `p-1.5` of its own, so "the last row is visible" is exactly "xterm's
+// screen ends inside the container's content box". A fraction over is what
+// clips half of Claude Code's footer.
 async function fitCheck(page, name) {
   const measured = await page.eval(
     `(() => {
-       const pane = document.querySelector('[id^="session-terminal-"]')
+       const pane = document.querySelector('[id^="session-dock-terminal-"]')
        if (!pane) return { error: "no terminal element" }
        const screen = pane.querySelector(".xterm-screen")
        if (!screen) return { error: "no .xterm-screen" }
@@ -374,7 +388,7 @@ async function fitCheck(page, name) {
        // The status strip's meta slot is the server's own view of the pane
        // geometry, so it needs no handle on the xterm instance to report the
        // row count the fit actually asked for.
-       const meta = document.querySelector('#terminal-status [data-role="meta"]')
+       const meta = document.querySelector('[id^="session-dock-status-"] [data-role="meta"]')
 
        return {
          overflow: screen.getBoundingClientRect().bottom - contentBottom,
@@ -465,7 +479,7 @@ function pageDriver(cdp, sessionId) {
     async focusTerminal() {
       const box = await driver.eval(
         `(() => {
-           const pane = document.querySelector('[id^="session-terminal-"]')
+           const pane = document.querySelector('[id^="session-dock-terminal-"]')
            if (!pane) return null
            const r = pane.getBoundingClientRect()
            return { x: r.left + r.width / 2, y: r.top + r.height / 2 }

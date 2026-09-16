@@ -870,11 +870,11 @@ session), linked from the global nav between Loop and Usage.
 | 6.1 vendor, no npm | `apps/arbiter_web/assets/vendor/xterm/` + `assets/css/xterm.css`, imported from `app.css`. Provenance, digests and upgrade steps in that directory's `README.md`; `ArbiterWeb.TerminalAssetsTest` fails if a `package.json` appears or a version drifts |
 | 6.2 canvas, not WebGL | `assets/js/session_terminal.mjs` loads `CanvasAddon`; the same test greps the asset tree for `addon-webgl` |
 | 6.3 interaction | copy/paste, scrollback 5000, the narrow-width floor and the fit debounce, all in `session_terminal.mjs` |
-| the hook | `.SessionTerminal`, colocated in `ArbiterWeb.SessionLive` |
+| the hook | `.SessionTerminal`, colocated in `ArbiterWeb.SessionDockLive` — it moved there from `SessionLive` with the session dock's phase 2 (bd-9myzv8), so the terminal outlives the page the operator opened it from |
 | the protocol | `assets/js/session_stream.mjs` — DOM-free on purpose (below) |
 | the fit | `assets/js/session_fit.mjs` — DOM-free, replaces `addon-fit` (bd-3r2otb) |
 | copy/paste | `assets/js/session_keys.mjs` — DOM-free (bd-3r2otb) |
-| page chrome | `ArbiterWeb.SessionIndexLive`, `ArbiterWeb.SessionLive` |
+| page chrome | `ArbiterWeb.SessionIndexLive`, `ArbiterWeb.SessionLive`, and the dock's own window chrome in `ArbiterWeb.SessionDockLive` |
 
 **The canvas addon pins the terminal version.** Upstream shipped
 `@xterm/xterm@6.0.0` on 2025-12-22 alongside new `addon-webgl`, `addon-search`,
@@ -1203,9 +1203,11 @@ The two items §7.7 left open are done:
     "not a `cost-state` record" (a file with no cost at all reports
     `cost_usd: nil`, `estimated: false`). `ArbiterWeb.SessionChannel` was
     already subscribed to that topic and forwarding it (phase 4's
-    placeholder), so no channel change was needed. `SessionLive`'s hook-owned
-    status strip renders a running token/cost chip from it, the same way it
-    already renders geometry from `meta` events — never a LiveView diff.
+    placeholder), so no channel change was needed. The hook-owned status strip
+    renders a running token/cost chip from it, the same way it already renders
+    geometry from `meta` events — never a LiveView diff. (That strip was on
+    `SessionLive` when phase 7 shipped; it moved into the session dock's
+    window with bd-9myzv8.)
 
     `session.provider_session_id` / `.config_dir` are read as of the reader's
     own start rather than re-fetched every tick, but a mid-session rollover

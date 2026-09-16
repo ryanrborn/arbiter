@@ -25,6 +25,7 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/arbiter_web"
 import topbar from "../vendor/topbar"
 import {SessionDock} from "./session_dock.mjs"
+import {insideTerminal} from "./session_keys.mjs"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
@@ -75,8 +76,13 @@ if (process.env.NODE_ENV === "development") {
     //
     //   * click with "c" key pressed to open at caller location
     //   * click with "d" key pressed to open at function component definition location
+    // bd-9myzv8: a keystroke typed into a dock terminal belongs to the agent,
+    // never to the dashboard. Without this, typing `d` at a session prompt
+    // arms jump-to-definition and the next click inside the terminal opens an
+    // editor instead of placing the cursor. It is the only window-level key
+    // handler Arbiter has today, and it is the template for the next one.
     let keyDown
-    window.addEventListener("keydown", e => keyDown = e.key)
+    window.addEventListener("keydown", e => { if(!insideTerminal(e.target)) keyDown = e.key })
     window.addEventListener("keyup", _e => keyDown = null)
     window.addEventListener("click", e => {
       if(keyDown === "c"){

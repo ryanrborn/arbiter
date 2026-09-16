@@ -10,19 +10,67 @@
 // under `node --test`. The live check found both branches wrong in opposite
 // directions — one cancelled nothing, the other cancelled too much — and
 // neither showed up in a renderer test.
+//
+// ## The focus rule (bd-9myzv8)
+//
+// Since the session dock, a terminal is no longer a page the operator
+// navigated to on purpose — it is a window floating over whatever page they
+// *are* on. So the rule has to be stated rather than inherited:
+//
+//   * **While the terminal has focus it owns the keyboard, completely.** Plain
+//     `Ctrl+C` is SIGINT, `Escape` interrupts the agent, `Tab` completes, and
+//     Alt is left alone for the agent's own meta bindings (`macOptionIsMeta:
+//     false`). Nothing here is reserved for the dashboard.
+//   * **Arbiter's own window-level key handling ignores terminal keystrokes.**
+//     `insideTerminal/1` below is how it tells, and every pane the hook mounts
+//     into carries `data-arb-terminal` so that it can.
+//   * **`Ctrl/Cmd+Shift+Escape` releases focus** back to the page. A widget
+//     that takes every key is a keyboard trap, and a keyboard trap needs one
+//     documented way out. It joins `Ctrl/Cmd+Shift+C`/`V` in the same family,
+//     and no TUI wants it — `Shift+Escape` alone would have read better, but
+//     Chrome binds that to its own task manager.
+
+/**
+ * The attribute every terminal pane carries, so window-level key handling
+ * elsewhere on the dashboard can tell a keystroke meant for the agent from one
+ * meant for the page.
+ */
+export const TERMINAL_ATTR = "data-arb-terminal"
+
+/**
+ * Is `target` inside a terminal pane?
+ *
+ * Hostile by default: this is called from key handlers that must never throw,
+ * with targets that can be the document, an element that has been detached, or
+ * nothing at all.
+ */
+export function insideTerminal(target) {
+  return !!(target && typeof target.closest === "function" && target.closest(`[${TERMINAL_ATTR}]`))
+}
 
 /**
  * The handler xterm's `attachCustomKeyEventHandler` wants: `false` means
  * "xterm, keep out of this one", `true` means "this is an ordinary keystroke".
  *
- * `deps` is `{term, clipboard, onClipboardError}` — `clipboard` is
- * `navigator.clipboard` (or undefined, on an insecure origin).
+ * `deps` is `{term, clipboard, onClipboardError, onReleaseFocus}` —
+ * `clipboard` is `navigator.clipboard` (or undefined, on an insecure origin).
  */
-export function handleTerminalKey(event, { term, clipboard, onClipboardError = () => {} }) {
+export function handleTerminalKey(
+  event,
+  { term, clipboard, onClipboardError = () => {}, onReleaseFocus = () => {} }
+) {
   if (event.type !== "keydown") return true
   if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return true
 
   const key = String(event.key || "").toLowerCase()
+
+  // The way out of the keyboard trap. `preventDefault` as well as `false`, so
+  // that nothing else on the page — the browser included — acts on it either.
+  if (key === "escape") {
+    event.preventDefault()
+    onReleaseFocus()
+    return false
+  }
 
   if (key === "c") {
     // `preventDefault` unconditionally, including with an empty selection:

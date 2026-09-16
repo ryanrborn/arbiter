@@ -107,6 +107,7 @@ export class SessionStream {
     sessionId,
     geometry,
     sink = {},
+    lastSeq = null,
     stdinChunkBytes = DEFAULT_STDIN_CHUNK_BYTES,
     resizeDebounceMs = DEFAULT_RESIZE_DEBOUNCE_MS
   }) {
@@ -123,7 +124,13 @@ export class SessionStream {
     this.snapshots = 0
     this.finished = false
 
-    this._lastSeq = null
+    // A **seeded** resume point (bd-9myzv8). The session dock disposes the
+    // stream when a window collapses, so the offset the next expand has to
+    // resume from does not live in this object any more — it is handed back
+    // in. Anything that is not a whole, non-negative byte offset is "no
+    // opinion": it goes on the wire as `null`, which is the server's cue to
+    // send a snapshot rather than a replay from a made-up offset.
+    this._lastSeq = Number.isInteger(lastSeq) && lastSeq >= 0 ? lastSeq : null
     this._status = null
     this._stdinSeq = 0
     this._pendingResize = null

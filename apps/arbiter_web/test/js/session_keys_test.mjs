@@ -189,3 +189,100 @@ test("other Ctrl+Shift chords and non-keydown events pass straight through", () 
     assert.equal(event.prevented, false)
   }
 })
+
+// -- the escape hatch (bd-9myzv8, session dock phase 2) -----------------------
+//
+// An expanded dock terminal swallows the keyboard on purpose: plain `Ctrl+C`
+// is SIGINT, `Escape` interrupts the agent, `Tab` completes, and Alt is left
+// alone for the agent's own meta bindings. That is a deliberate keyboard trap,
+// so it needs a documented way out that no agent can want for itself —
+// `Ctrl/Cmd+Shift+Escape`, in the same `Ctrl/Cmd+Shift` family as copy and
+// paste.
+
+import { handleTerminalKey as handle, insideTerminal, TERMINAL_ATTR } from "../../assets/js/session_keys.mjs"
+
+test("Ctrl+Shift+Escape releases focus back to the page instead of reaching the agent", () => {
+  const released = []
+  const event = keyEvent("Escape", { ctrl: true, shift: true })
+
+  const result = handle(event, {
+    term: fakeTerm(),
+    clipboard: null,
+    onReleaseFocus: () => released.push(true)
+  })
+
+  assert.equal(result, false, "xterm must not also send the keystroke")
+  assert.equal(event.prevented, true)
+  assert.deepEqual(released, [true])
+})
+
+test("Cmd+Shift+Escape does the same, for the mac keyboard", () => {
+  const released = []
+  const event = keyEvent("Escape", { meta: true, shift: true })
+
+  assert.equal(
+    handle(event, { term: fakeTerm(), clipboard: null, onReleaseFocus: () => released.push(true) }),
+    false
+  )
+  assert.deepEqual(released, [true])
+})
+
+test("a plain Escape is the agent's, not the page's", () => {
+  const released = []
+  const event = keyEvent("Escape")
+
+  assert.equal(
+    handle(event, { term: fakeTerm(), clipboard: null, onReleaseFocus: () => released.push(true) }),
+    true
+  )
+  assert.equal(event.prevented, false)
+  assert.deepEqual(released, [])
+})
+
+test("Shift+Escape alone is the agent's too — Chrome already owns that one", () => {
+  const released = []
+  const event = keyEvent("Escape", { shift: true })
+
+  assert.equal(
+    handle(event, { term: fakeTerm(), clipboard: null, onReleaseFocus: () => released.push(true) }),
+    true
+  )
+  assert.deepEqual(released, [])
+})
+
+// -- telling a terminal keystroke from a page one -----------------------------
+//
+// The other half of the rule: Arbiter's own window-level key handling has to
+// ignore anything typed into a terminal, or `d` in a prompt fires the dev
+// build's jump-to-definition binding.
+
+function node(attrs = {}, parent = null) {
+  return {
+    parentElement: parent,
+    hasAttribute: (name) => Object.prototype.hasOwnProperty.call(attrs, name),
+    closest(selector) {
+      let el = this
+      while (el) {
+        if (selector.split(",").some((s) => el.hasAttribute(s.trim().replace(/^\[|\]$/g, "")))) {
+          return el
+        }
+        el = el.parentElement
+      }
+      return null
+    }
+  }
+}
+
+test("a keystroke whose target sits inside a terminal is recognised as one", () => {
+  const pane = node({ [TERMINAL_ATTR]: "" })
+  const textarea = node({}, pane)
+
+  assert.equal(insideTerminal(textarea), true)
+  assert.equal(insideTerminal(pane), true)
+})
+
+test("a keystroke anywhere else on the page is not", () => {
+  assert.equal(insideTerminal(node({})), false)
+  assert.equal(insideTerminal(null), false)
+  assert.equal(insideTerminal({}), false)
+})
