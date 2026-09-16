@@ -69,7 +69,11 @@ defmodule Arbiter.Workflows.Conductor do
     co-dispatched. A ready directive is held back if a conflicting peer is
     already `:in_progress`, or if a conflicting peer was already selected
     earlier in the same drain pass. `:conflicts_with` is symmetric, so the edge
-    is honored regardless of which direction it was stored in.
+    is honored regardless of which direction it was stored in. The rule itself
+    lives in `Arbiter.Tasks.EdgeGate` (bd-6bax7s), shared with
+    `Arbiter.Board.Scheduler` — the board used to answer this question
+    differently, which is to say not at all, and a coordinator who set the
+    mutex on two Ready cards got both dispatched anyway.
   * **Concurrency** — the effective cap per drain cycle is
     `min(workspace_max_concurrent, system_max_concurrent, quota_headroom)`.
     Available slots = effective cap minus the members currently `:in_progress`.
@@ -153,8 +157,8 @@ defmodule Arbiter.Workflows.Conductor do
   require Logger
 
   alias Arbiter.Messages.Message
-  alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
+  alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Graph
   alias Arbiter.Tasks.GraphMember
   alias Arbiter.Tasks.Issue
@@ -601,7 +605,7 @@ defmodule Arbiter.Workflows.Conductor do
         )
         |> Enum.sort_by(&{&1.priority, &1.id})
 
-      conflicts = conflict_adjacency(member_ids)
+      conflicts = EdgeGate.load_conflict_adjacency(member_ids)
       dispatched = select_and_dispatch(ready, slots, active_ids, conflicts, state)
       {dispatched, state}
     end
@@ -618,7 +622,7 @@ defmodule Arbiter.Workflows.Conductor do
           remaining <= 0 ->
             {acc, claimed, remaining}
 
-          conflicts_with_claimed?(issue.id, claimed, conflicts) ->
+          blocked_by_edge?(issue.id, conflicts, claimed) ->
             {acc, claimed, remaining}
 
           true ->
@@ -632,11 +636,11 @@ defmodule Arbiter.Workflows.Conductor do
     Enum.reverse(dispatched)
   end
 
-  defp conflicts_with_claimed?(issue_id, claimed, conflicts) do
-    case Map.get(conflicts, issue_id) do
-      nil -> false
-      neighbors -> not MapSet.disjoint?(neighbors, claimed)
-    end
+  # The same predicate the board's scheduler asks (bd-6bax7s). Readiness here
+  # already came from `Issue.ready/0`, so `:blocked_by` is empty by
+  # construction and the only edge left to consult is the mutex.
+  defp blocked_by_edge?(issue_id, conflicts, claimed) do
+    EdgeGate.gate(%{conflicts: EdgeGate.conflicts(conflicts, issue_id), claimed: claimed}) != :ok
   end
 
   defp dispatch_one(task_id, %State{dispatch_depth: depth, graph_id: graph_id} = state) do
@@ -739,32 +743,6 @@ defmodule Arbiter.Workflows.Conductor do
   # `Arbiter.Tasks.Dependencies`, which runs the same check over the *global*
   # edge set on every gating-edge write so a cycle never reaches the DB.
   defp gating_edges(member_ids), do: DependencyGraph.gating_edges(member_ids)
-
-  # Symmetric conflicts_with adjacency among members: %{id => MapSet(peers)}.
-  # The edge is stored in a single direction but means the same both ways, so
-  # both endpoints get the other recorded.
-  defp conflict_adjacency(member_ids) do
-    member_set = MapSet.new(member_ids)
-    conflicts_with = :conflicts_with
-
-    Dependency
-    |> Ash.Query.filter(type == ^conflicts_with)
-    |> Ash.read!()
-    |> Enum.reduce(%{}, fn d, acc ->
-      if MapSet.member?(member_set, d.from_issue_id) and
-           MapSet.member?(member_set, d.to_issue_id) do
-        acc
-        |> add_conflict(d.from_issue_id, d.to_issue_id)
-        |> add_conflict(d.to_issue_id, d.from_issue_id)
-      else
-        acc
-      end
-    end)
-  end
-
-  defp add_conflict(map, a, b) do
-    Map.update(map, a, MapSet.new([b]), &MapSet.put(&1, b))
-  end
 
   # ---- cycle detection ----------------------------------------------------
 

@@ -98,6 +98,7 @@ defmodule Arbiter.Board.Snapshot do
 
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Usage.Budget
   alias Arbiter.Worker.Watchdog
 
@@ -117,6 +118,30 @@ defmodule Arbiter.Board.Snapshot do
   @auto_resolving_block_reasons [:behind_base, :ci_failed]
 
   @default_system_max 16
+
+  # bd-6bax7s: what a live worker's status is *called* on a card held back by a
+  # `:conflicts_with` mutex, and — by omission — which statuses count as in
+  # flight at all. `:failed` is absent on purpose: a parked worker is terminal,
+  # so it holds nothing back. `:awaiting_review` is present even though it
+  # holds no worker slot — an open MR on the counterpart is exactly the thing
+  # a mutex exists to keep a second worker away from.
+  @conflict_states %{
+    idle: "running",
+    running: "running",
+    resuming: "resuming",
+    awaiting: "awaiting input",
+    awaiting_review_gate: "in review",
+    awaiting_review: "awaiting review"
+  }
+
+  # A reviewer / implementer worker claims the mutex on behalf of the author it
+  # is working for, for the window where the author's own worker has already
+  # gone away.
+  @reviewer_state "in review"
+  @fix_pass_state "fix pass"
+
+  # An issue flipped to :in_progress whose worker has not registered yet.
+  @dispatching_state "dispatching"
 
   # Dispatch flips an issue to :in_progress before the worker is registered
   # (worktree provisioning, fetch, etc. — seconds on a large repo). Below this
@@ -141,9 +166,10 @@ defmodule Arbiter.Board.Snapshot do
   Derive the board from an already-read picture of the world.
 
   Expected keys: `:issues`, `:workers`, `:blocked_by` (issue id → open blocker
-  ids), `:changed_files` (task id → repo-relative paths a worktree has
-  touched), `:now`, `:slots_total`, `:quota`, `:paused` and `:ready_order`.
-  Every key has a sane default, so a caller may pass only what it has.
+  ids), `:conflicts_with` (`{a, b}` pairs from the mutex edges),
+  `:changed_files` (task id → repo-relative paths a worktree has touched),
+  `:now`, `:slots_total`, `:quota`, `:paused` and `:ready_order`. Every key has
+  a sane default, so a caller may pass only what it has.
 
   `:ready_order` is the operator's hand-ranking of the Ready queue — the ids
   it names lead the queue in that order, and everything else follows in
@@ -157,6 +183,11 @@ defmodule Arbiter.Board.Snapshot do
     issues = Map.get(input, :issues, [])
     workers = Map.get(input, :workers, [])
     blocked_by = Map.get(input, :blocked_by, %{})
+    # bd-6bax7s: `{a, b}` pairs from the `:conflicts_with` edges, an *input*
+    # like `:blocked_by` — the pure half never goes looking for rows.
+    # `EdgeGate` folds them into symmetric adjacency, so a card is held
+    # whichever direction the coordinator happened to store the edge in.
+    conflicts = EdgeGate.adjacency(Map.get(input, :conflicts_with, []))
     changed = Map.get(input, :changed_files, %{})
     now = Map.get(input, :now) || DateTime.utc_now()
     slots_total = Map.get(input, :slots_total, 0)
@@ -195,8 +226,9 @@ defmodule Arbiter.Board.Snapshot do
 
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, worked, blocked_by, ready_order),
+        ready: ready_cards(issues, worked, blocked_by, conflicts, ready_order),
         running: in_flight(authors, issues_by_id, changed),
+        conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
         quota: quota,
         paused: paused?
@@ -259,6 +291,8 @@ defmodule Arbiter.Board.Snapshot do
       workers: workers,
       blocked_by: Keyword.get_lazy(opts, :blocked_by, fn -> blockers_from(deps, issues) end),
       parent_of: Keyword.get_lazy(opts, :parent_of, fn -> parent_of_from(deps) end),
+      conflicts_with:
+        Keyword.get_lazy(opts, :conflicts_with, fn -> EdgeGate.conflict_pairs(deps) end),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
       slots_total: Keyword.get(opts, :slots_total) || effective_max_concurrent(workspace_id),
@@ -486,7 +520,7 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp ready_cards(issues, worked, blocked_by, ready_order) do
+  defp ready_cards(issues, worked, blocked_by, conflicts, ready_order) do
     ranked = ranking(ready_order)
 
     issues
@@ -502,7 +536,8 @@ defmodule Arbiter.Board.Snapshot do
         workspace_id: Map.get(issue, :workspace_id),
         assignee: Map.get(issue, :assignee),
         scope: FileScope.declared_paths(issue),
-        blocked_by: Map.get(blocked_by, issue.id, [])
+        blocked_by: Map.get(blocked_by, issue.id, []),
+        conflicts_with: EdgeGate.conflicts(conflicts, issue.id)
       }
     end)
   end
@@ -881,6 +916,63 @@ defmodule Arbiter.Board.Snapshot do
   # What the in-flight work has claimed: the issue's declared paths plus
   # whatever the worktree has actually changed. The union matters — a worker
   # ten minutes in has touched files its ticket never named.
+  # bd-6bax7s: everything a `:conflicts_with` counterpart must not run beside,
+  # as `%{task_id => state}`. Wider than `in_flight/3`, which answers the *file*
+  # question and so only counts slot-holders: a counterpart at
+  # `:awaiting_review` holds an open MR rather than a slot, and is still very
+  # much mid-flight as far as a declared mutex is concerned.
+  #
+  # Three sources, in increasing authority:
+  #
+  #   * an issue flipped to `:in_progress` whose worker has not registered yet
+  #     (inside `@orphan_grace_seconds`) — the window the bd-1780 incident
+  #     dispatched into. Past the grace it reads as *orphaned* instead, and
+  #     releases the mutex: nothing is going to retry it on its own, so holding
+  #     its counterpart hostage would strand both.
+  #   * a reviewer / implementer worker, claiming on behalf of the author it
+  #     works for — covers a fix pass whose author worker has already gone.
+  #   * the author's own live worker, which knows its status exactly.
+  #
+  # A counterpart that is `:closed`, parked at `:awaiting_verification`
+  # (merged — the worktree is gone, nothing left to collide with) or `:failed`
+  # (parked, terminal) appears in none of them.
+  defp conflict_claims(authors, gate_workers, issues, worked, now) do
+    issues
+    |> Enum.filter(&mid_dispatch?(&1, worked, now))
+    |> Map.new(&{&1.id, @dispatching_state})
+    |> Map.merge(Map.new(claims_from(gate_workers, &gate_author/1, &gate_state/1)))
+    |> Map.merge(Map.new(claims_from(authors, & &1.task_id, &author_state/1)))
+  end
+
+  defp claims_from(workers, id_fun, state_fun) do
+    Enum.flat_map(workers, fn w ->
+      case {id_fun.(w), state_fun.(w)} do
+        {nil, _} -> []
+        {_, nil} -> []
+        {id, state} -> [{id, state}]
+      end
+    end)
+  end
+
+  defp author_state(worker), do: Map.get(@conflict_states, Map.get(worker, :status))
+
+  defp gate_state(worker) do
+    case worker_role(worker) do
+      :implementer -> @fix_pass_state
+      _ -> @reviewer_state
+    end
+  end
+
+  # The inverse of `orphaned?/3` for an `:in_progress` issue: young enough that
+  # the missing worker reads as "still provisioning", not "stopped".
+  defp mid_dispatch?(issue, worked, now) do
+    issue.status == :in_progress and
+      not dispatchable_type_excluded?(issue) and
+      not MapSet.member?(worked, issue.id) and
+      DateTime.diff(now, Map.get(issue, :updated_at) || created_at(issue)) <
+        @orphan_grace_seconds
+  end
+
   defp in_flight(workers, issues_by_id, changed) do
     workers
     |> Enum.filter(&(&1.status in @slot_statuses))
@@ -1014,7 +1106,7 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp dependency_rows(opts) do
-    if Keyword.has_key?(opts, :blocked_by) and Keyword.has_key?(opts, :parent_of) do
+    if Enum.all?([:blocked_by, :parent_of, :conflicts_with], &Keyword.has_key?(opts, &1)) do
       []
     else
       Ash.read!(Arbiter.Tasks.Dependency)
@@ -1030,27 +1122,11 @@ defmodule Arbiter.Board.Snapshot do
     for %{type: :parent_of} = dep <- deps, do: {dep.from_issue_id, dep.to_issue_id}
   end
 
-  # Open gating blockers per issue: `:depends_on` targets and `:blocks` sources
-  # that are not themselves closed. Mirrors `Arbiter.Tasks.Issue.ready/0`'s
-  # gating rule, but keeps the blocked issues instead of dropping them — the
-  # board shows *why* a card can't go, which means it has to show the card.
+  # Open gating blockers per issue. The rule itself lives in
+  # `Arbiter.Tasks.EdgeGate` (bd-6bax7s), shared with the Conductor so the two
+  # schedulers cannot drift; this is only the read that feeds it.
   defp blockers_from(deps, issues) do
-    open_ids = for i <- issues, i.status == :open, into: MapSet.new(), do: i.id
-    closed = for i <- issues, i.status == :closed, into: MapSet.new(), do: i.id
-
-    deps
-    |> Enum.flat_map(fn dep ->
-      case dep.type do
-        :depends_on -> [{dep.from_issue_id, dep.to_issue_id}]
-        :blocks -> [{dep.to_issue_id, dep.from_issue_id}]
-        _ -> []
-      end
-    end)
-    |> Enum.filter(fn {blocked, blocker} ->
-      MapSet.member?(open_ids, blocked) and not MapSet.member?(closed, blocker)
-    end)
-    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Map.new(fn {id, blockers} -> {id, blockers |> Enum.uniq() |> Enum.sort()} end)
+    EdgeGate.blockers(deps, issues)
   rescue
     _ -> %{}
   end

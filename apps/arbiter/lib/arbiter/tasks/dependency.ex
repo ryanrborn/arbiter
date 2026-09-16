@@ -23,15 +23,25 @@ defmodule Arbiter.Tasks.Dependency do
     issues concurrently". **Symmetric**: A conflicts_with B implies B
     conflicts_with A (both directions carry the same meaning). **Non-gating**:
     it does NOT affect `Issue.ready/0` — a conflicting peer being open does not
-    prevent an issue from becoming ready. The Conductor (C3) consumes this edge
-    at dispatch time to avoid co-dispatching two conflicting directives.
+    prevent an issue from becoming *ready*. It is consumed one step later, at
+    **dispatch** time, by `Arbiter.Tasks.EdgeGate` — the predicate both
+    schedulers ask (the graph Conductor, and the board's
+    `Arbiter.Board.Scheduler` / Autopilot since bd-6bax7s). A ready task whose
+    counterpart is in flight is held with `blocked — conflicts with <id>
+    (<state>)` until that counterpart merges, closes or is parked.
 
   ## Gating vs non-gating edges
 
   Only `:blocks` and `:depends_on` gate readiness (i.e. appear in
   `Issue.ready/0`). All other edge types — `:relates_to`, `:discovered_from`,
   `:parent_of`, and `:conflicts_with` — are non-gating: they carry semantic
-  meaning but do not prevent an issue from being picked up.
+  meaning but do not prevent an issue from becoming ready.
+
+  "Non-gating" is a statement about *readiness*, not about dispatch.
+  `:conflicts_with` is non-gating and still stops a dispatch, because
+  readiness is a property of the task and the mutex is a property of the
+  moment. `Arbiter.Tasks.EdgeGate` holds both halves of that distinction, and
+  is what the Conductor and the board scheduler both consult.
 
   ## Constraints
 
@@ -124,8 +134,9 @@ defmodule Arbiter.Tasks.Dependency do
 
       description """
       Edge type. Only `:blocks` and `:depends_on` gate readiness; the rest are
-      non-gating. `:conflicts_with` is symmetric mutual-exclusion (consumed by
-      the Conductor at dispatch time, not at readiness evaluation). See module
+      non-gating. `:conflicts_with` is symmetric mutual-exclusion, consumed at
+      dispatch time rather than at readiness evaluation — by the Conductor and
+      the board's scheduler alike, through `Arbiter.Tasks.EdgeGate`. See module
       doc for full semantics.
       """
     end
