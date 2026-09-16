@@ -75,6 +75,27 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert second == [older.id]
     end
 
+    test "shows the resolved display name, and the id stays reachable (bd-o2vtsz)", %{conn: conn} do
+      named = launch!(name: "refinement session")
+      unnamed = launch!()
+
+      {:ok, view, html} = live(conn, ~p"/sessions")
+
+      assert html =~ "refinement session"
+
+      assert has_element?(
+               view,
+               "#session-#{named.id}-short-id",
+               Arbiter.Sessions.DisplayName.short_id(named.id)
+             )
+
+      assert has_element?(
+               view,
+               "#session-#{unnamed.id}-short-id",
+               Arbiter.Sessions.DisplayName.short_id(unnamed.id)
+             )
+    end
+
     test "an ended session is shown as ended, with the reason it ended", %{conn: conn} do
       session = launch!()
       {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "killed by hand")
@@ -110,7 +131,7 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert has_element?(view, "#launch-session")
 
       assert {:error, {:live_redirect, %{to: to}}} =
-               view |> element("#launch-session") |> render_click()
+               view |> form("#launch-session-form") |> render_submit()
 
       assert [session] = Sessions.list()
       assert to == "/sessions/#{session.id}"
@@ -121,6 +142,29 @@ defmodule ArbiterWeb.SessionLiveTest do
       assert session.workspace_id == nil
       assert session.can_dispatch == false
       assert session.status == :running
+      assert session.name == nil
+    end
+
+    test "an operator-supplied name reaches the session row (bd-o2vtsz)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert {:error, {:live_redirect, _}} =
+               view
+               |> form("#launch-session-form", %{"name" => "refinement session"})
+               |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.name == "refinement session"
+    end
+
+    test "a blank name launches with no name, same as leaving it empty", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert {:error, {:live_redirect, _}} =
+               view |> form("#launch-session-form", %{"name" => "   "}) |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.name == nil
     end
 
     test "a failed launch reports why and leaves the operator on the list", %{conn: conn} do
@@ -128,7 +172,7 @@ defmodule ArbiterWeb.SessionLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/sessions")
 
-      html = view |> element("#launch-session") |> render_click()
+      html = view |> form("#launch-session-form") |> render_submit()
 
       assert html =~ "Could not launch"
       assert has_element?(view, "#launch-session")
