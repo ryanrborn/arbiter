@@ -1587,12 +1587,18 @@ single chunk contains a full match. A fixed-size hold-back window doesn't fix
 this: redaction only ever sees the *written* portion, so bytes held back are
 never look-ahead for a match starting in what was already written — a token
 typed slowly enough outlives any fixed window one byte at a time (bd-5pelo2,
-round 2, finding 1). Instead `Arbiter.Sessions.Stream` cuts only at a byte that
-cannot appear inside a credential (every pattern is built from an unbroken
-run of token characters, so a separator boundary can never fall inside a
-match), holding everything from the last such separator onward and writing
-everything before it — bounded by a hard cap so a run with no separator at
-all still drains eventually (bd-5pelo2, round 2, finding 1).
+round 2, finding 1). Cutting at *any* separator byte isn't safe either: two of
+the seven patterns aren't unbroken token runs — `Bearer\s+<token>` contains a
+space, and a PEM block spans newlines by construction — so a cut at, say, the
+space inside `Bearer <token>` splits exactly the match it exists to protect
+(bd-5pelo2, round 3, finding 1). Instead `Arbiter.Sessions.Stream` cuts only at
+a **newline**: no supported pattern except the PEM block spans one, so a
+same-line match (including `Bearer <token>`) is always wholly before the cut
+or wholly after it. The PEM block gets its own guard on top — if the
+candidate writable portion contains a `-----BEGIN` with no matching
+`-----END` after it, the cut is pulled back to the start of that marker.
+Both are bounded by the same hard cap so a run with no newline at all still
+drains eventually (bd-5pelo2, round 2 finding 1; round 3 finding 1).
 
 **Known deferral: capture starts at first attach, not at session launch.**
 `tmux pipe-pane -O` is started by `Arbiter.Sessions.Stream` the first time a
@@ -1603,10 +1609,25 @@ session **nobody ever opens in a browser** is not yet captured at all: the pipe
 is never started, because nothing currently starts it outside the attach path.
 Closing that gap means starting the reader from session launch
 (`Arbiter.Sessions.launch/1`) and from the boot-time adoption sweep
-(`Arbiter.Sessions.Adoption`) rather than from `ArbiterWeb.SessionChannel`,
-which is a wider change touching both call paths and their test suites — left
-for a follow-up rather than folded into this round, to keep the fix that *is*
-landing (capture surviving detach) reviewable on its own.
+(`Arbiter.Sessions.Adoption`) rather than from `ArbiterWeb.SessionChannel`.
+This was attempted in round 3 (`Stream.ensure_reader/2`, called from both
+call paths right after `mark_running/1`) and reverted after it reproduced a
+concrete regression rather than a hypothetical one: several existing tests
+(e.g. `StreamTurnActivityTest`) launch a session with a bare runner stub and
+only *afterwards* attach with `terminal: Arbiter.Test.ScriptedPty` to drive a
+scripted pane. `Arbiter.Sessions.Stream`'s config — including which
+`Terminal` it uses — is fixed by whichever call starts the reader first, for
+the reader's whole life (see "Configuration" above). Starting the reader
+eagerly at launch time locks it onto the real `Terminal.Tmux` (there is no
+scripted pane yet to point it at), and the later `attach/2` with `ScriptedPty`
+then talks to that already-started, already-wrong-terminal reader instead of
+configuring a new one — reproduced directly: `StreamTurnActivityTest` fails
+with `ScriptedPty` never receiving a `start_stream` call at all. Fixing that
+for real means auditing and updating every test across both call paths that
+relies on "launch first, pick the test terminal on the first attach", not
+just adding the two call sites — the wider change the round-1 implementer
+already flagged as out of scope, now with a concrete failure attached rather
+than a projected one. Left for a follow-up that budgets for that audit.
 
 **Known gap: an `arbiter` restart drops the bytes written while no reader was
 alive.** The moduledoc's claim that a restart "drops the reader but never the

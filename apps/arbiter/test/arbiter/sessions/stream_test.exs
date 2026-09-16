@@ -272,6 +272,66 @@ defmodule Arbiter.Sessions.StreamTest do
 
       :ok = Stream.stop(id)
     end
+
+    test "a typed Bearer token is redacted even split across ticks (bd-5pelo2 round 3 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      filler = String.duplicate("x", 600)
+      header = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"
+
+      ScriptedPty.emit(id, filler <> "\n")
+      collect_stdout(id, byte_size(filler) + 1)
+
+      header
+      |> String.graphemes()
+      |> Enum.each(fn ch ->
+        ScriptedPty.emit(id, ch)
+        Process.sleep(10)
+      end)
+
+      collect_stdout(id, byte_size(header))
+
+      ScriptedPty.emit(id, "\n" <> filler)
+      collect_stdout(id, byte_size(filler) + 1)
+
+      transcript = File.read!(Transcript.path_for(id))
+      refute transcript =~ "abcdefghijklmnopqrstuvwxyz012345"
+      assert transcript =~ "Authorization: [REDACTED]"
+
+      :ok = Stream.stop(id)
+    end
+
+    test "a PEM private key block is redacted even emitted line by line (bd-5pelo2 round 3 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      filler = String.duplicate("x", 600)
+
+      lines = [
+        "-----BEGIN RSA PRIVATE KEY-----\n",
+        "MIIEpAIBAAKCAQEA1234567890\n",
+        "-----END RSA PRIVATE KEY-----\n"
+      ]
+
+      ScriptedPty.emit(id, filler <> "\n")
+      collect_stdout(id, byte_size(filler) + 1)
+
+      Enum.each(lines, fn line ->
+        ScriptedPty.emit(id, line)
+        collect_stdout(id, byte_size(line))
+      end)
+
+      ScriptedPty.emit(id, filler)
+      collect_stdout(id, byte_size(filler))
+
+      transcript = File.read!(Transcript.path_for(id))
+      refute transcript =~ "MIIEpAIBAAKCAQEA1234567890"
+      refute transcript =~ "-----BEGIN RSA PRIVATE KEY-----"
+      assert transcript =~ "[REDACTED]"
+
+      :ok = Stream.stop(id)
+    end
   end
 
   describe "coalescing (§5.3 item 1)" do

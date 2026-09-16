@@ -749,19 +749,26 @@ defmodule Arbiter.Sessions.Stream do
   # look-ahead for a match starting in `writable` — a token that outlives the
   # window one byte at a time is never whole in either write.
   #
-  # Instead, cut only at a byte that cannot appear *inside* a credential —
-  # every pattern `Arbiter.Redaction.redact_patterns/1` matches is built from
-  # `@token_bytes` with no embedded whitespace/separator, so a cut placed at
-  # a separator can never fall inside a match. Hold everything from the last
-  # separator onward (it may still be mid-token) and write everything before
-  # it. Bounded by `@max_hold_bytes` so a pathological run with no separator
-  # (huge base64 blob, binary noise) still drains instead of buffering
-  # forever — the tiny residual risk of a split match is accepted only past
-  # that bound, same as the flush-on-shutdown residual already documented
-  # for the never-attached case.
+  # Cutting at *any* separator byte doesn't fix this either (bd-5pelo2 round 3
+  # finding 1): two of `Arbiter.Redaction.redact_patterns/1`'s patterns are
+  # not unbroken token runs — `Bearer\s+<token>` contains a space, and a PEM
+  # block spans newlines by construction — so a cut at, say, the space inside
+  # `Bearer <token>` splits exactly the match it was meant to protect.
+  #
+  # Cut at a **newline** instead. No supported pattern except the PEM block
+  # spans a newline, so a same-line match (including `Bearer <token>`) is
+  # always either wholly before the cut or wholly after it — never split.
+  # Bounded by `@max_hold_bytes` so a pathological run with no newline (huge
+  # base64 blob, binary noise) still drains instead of buffering forever.
+  #
+  # The PEM block is the one pattern a newline cut cannot protect on its own,
+  # so it gets its own guard: if the candidate writable portion contains a
+  # `-----BEGIN` with no matching `-----END` after it, the cut is pulled back
+  # to the start of that marker and everything from there is held instead —
+  # same `@max_hold_bytes` bound applies.
   @max_hold_bytes 8192
-  @token_bytes ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.:/+="
-  @separator_patterns for b <- 0..255, b not in @token_bytes, do: <<b>>
+  @pem_begin "-----BEGIN"
+  @pem_end "-----END"
 
   defp record_transcript(state, data) do
     combined = state.transcript_tail <> data
@@ -778,7 +785,7 @@ defmodule Arbiter.Sessions.Stream do
   end
 
   defp split_tail(data) do
-    case last_separator_index(data) do
+    case last_newline_index(data) do
       nil ->
         force_cut(data)
 
@@ -788,7 +795,7 @@ defmodule Arbiter.Sessions.Stream do
         if hold_size > @max_hold_bytes do
           force_cut(data)
         else
-          {:binary.part(data, 0, idx + 1), :binary.part(data, idx + 1, hold_size)}
+          adjust_for_open_pem(data, idx + 1)
         end
     end
   end
@@ -800,16 +807,58 @@ defmodule Arbiter.Sessions.Stream do
     {:binary.part(data, 0, cut), :binary.part(data, cut, @max_hold_bytes)}
   end
 
-  # Rightmost byte outside `@token_bytes` — a boundary no credential pattern
-  # can straddle. `nil` when the whole buffer is one unbroken token-shaped run.
-  # `:binary.matches/2` over the (compile-time, ~186-entry) separator set runs
-  # its own optimized multi-pattern search rather than materializing `data`
-  # as an Erlang list, which is what blew the reader's heap under sustained
-  # high-throughput panes before this rewrite.
-  defp last_separator_index(data) do
-    case :binary.matches(data, @separator_patterns) do
-      [] -> nil
-      matches -> matches |> List.last() |> elem(0)
+  defp adjust_for_open_pem(data, cut) do
+    candidate = :binary.part(data, 0, cut)
+
+    case open_pem_start(candidate) do
+      nil ->
+        {candidate, :binary.part(data, cut, byte_size(data) - cut)}
+
+      begin_idx ->
+        hold_size = byte_size(data) - begin_idx
+
+        if hold_size > @max_hold_bytes do
+          force_cut(data)
+        else
+          {:binary.part(data, 0, begin_idx), :binary.part(data, begin_idx, hold_size)}
+        end
+    end
+  end
+
+  # Byte offset of a `-----BEGIN` marker in `data` with no matching
+  # `-----END` after it, or `nil` if the buffer holds no unterminated PEM
+  # marker. Only the last `-----BEGIN` needs checking: valid PEM blocks don't
+  # overlap, so if the last one is closed, every earlier one is too.
+  defp open_pem_start(data) do
+    case :binary.matches(data, @pem_begin) do
+      [] ->
+        nil
+
+      matches ->
+        {begin_idx, _len} = List.last(matches)
+        rest = :binary.part(data, begin_idx, byte_size(data) - begin_idx)
+
+        if :binary.match(rest, @pem_end) == :nomatch, do: begin_idx, else: nil
+    end
+  end
+
+  # Rightmost newline in `data` — the one boundary no supported credential
+  # pattern (other than the separately-guarded PEM block) can straddle.
+  # `nil` when there is none within `@max_hold_bytes` of the end. Scans
+  # backward from the end instead of collecting every newline's position
+  # (bd-5pelo2 round 3 finding 3) — O(hold size), not O(chunk size), and
+  # allocates nothing.
+  defp last_newline_index(data) do
+    limit = max(byte_size(data) - @max_hold_bytes - 1, -1)
+    scan_back_newline(data, byte_size(data) - 1, limit)
+  end
+
+  defp scan_back_newline(_data, i, limit) when i <= limit, do: nil
+
+  defp scan_back_newline(data, i, limit) do
+    case :binary.at(data, i) do
+      ?\n -> i
+      _ -> scan_back_newline(data, i - 1, limit)
     end
   end
 
