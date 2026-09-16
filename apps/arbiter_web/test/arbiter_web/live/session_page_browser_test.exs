@@ -1,10 +1,10 @@
 defmodule ArbiterWeb.SessionPageBrowserTest do
   @moduledoc """
-  The session page in a real browser, from the launch click onwards
-  (bd-3r2otb, acceptance criteria 1-4).
+  `/sessions` in a real browser, from the launch click onwards (bd-3r2otb,
+  acceptance criteria 1-4).
 
   Every bug this test exists for was invisible to the rest of the suite.
-  `ArbiterWeb.SessionLiveTest` renders the page's chrome without a hook,
+  `ArbiterWeb.SessionIndexLiveTest` renders the page's chrome without a hook,
   `ArbiterWeb.SessionTerminalBrowserTest` drives the terminal on a bare
   `file://` page without LiveView, and `ArbiterWeb.SessionTransportSocketTest`
   drives the channel without a browser. The first live check of phase 5 broke
@@ -14,16 +14,18 @@ defmodule ArbiterWeb.SessionPageBrowserTest do
   refresh.
 
   So this boots the real endpoint on a real port and drives a real Chromium
-  through the real thing: click launch, follow the live navigation, wait for
-  the status strip to say `live`, measure that the fitted pane ends inside its
-  container at three window sizes, press a **trusted** `Ctrl+Shift+C`/`+V`, and
-  kill the session while the page is open.
+  through the real thing: click launch, wait for the status strip to say
+  `live`, measure that the fitted pane ends inside its container at three
+  window sizes, press a **trusted** `Ctrl+Shift+C`/`+V`, and kill the session
+  from the window's own overflow while the page is open.
 
   Since bd-9myzv8 the terminal lives in the session dock, so that is the pane
-  these four criteria are measured against: landing on `/sessions/<id>` hands
-  the session to the dock and the dock's expanded window is what connects. The
-  claims are unchanged; only the element ids moved. What the dock adds on top
-  — resume across a collapse, survival across navigation — is
+  these four criteria are measured against; since bd-a292yj there is no
+  `/sessions/<id>` to navigate to at all — Launch opens the window in the dock,
+  on the page the operator is already on, and criterion 4 asserts phase 3's
+  shape of a kill: the pane stays, read-only, with its scrollback and end
+  reason, until it is dismissed. What the dock adds on top — resume across a
+  collapse, survival across navigation — is
   `ArbiterWeb.SessionDockTerminalBrowserTest`.
 
   The page is served from the real bundle, so the bundle has to be current: a

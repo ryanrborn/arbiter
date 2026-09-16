@@ -5,18 +5,20 @@
 //
 // `scripts/verify_session_terminal.mjs` drives `createSessionTerminal` on a
 // bare `file://` page: it proves the renderer and the protocol engine. What it
-// cannot see is everything that only exists on the *dashboard*: the LiveView
-// navigation that lands on `/sessions/<id>`, the hook mounting on that
-// navigation, the `/session` socket it opens, the pane's real layout inside
-// the page's chrome, and what happens when the session is killed underneath
-// it. Every bug in this ticket lived in exactly that gap — the terminal's own
-// unit tests were green while the page was stuck on "connecting…".
+// cannot see is everything that only exists on the *dashboard*: the hook
+// mounting when a session is launched, the `/session` socket it opens, the
+// pane's real layout inside the page's chrome, and what happens when the
+// session is killed underneath it. Every bug in this ticket lived in exactly
+// that gap — the terminal's own unit tests were green while the page was
+// stuck on "connecting…".
 //
-// Since bd-9myzv8 the terminal itself lives in the **session dock**, so that
-// is where these four criteria are now measured: landing on `/sessions/<id>`
-// hands the session to the dock, and the dock's expanded window is what has to
-// reach `live`, fit, honour the copy/paste bindings and go inert on a kill.
-// The claim is unchanged; only the pane it is made about moved.
+// Since bd-9myzv8 the terminal itself lives in the **session dock**, and since
+// bd-a292yj there is no `/sessions/<id>` to navigate to at all: clicking
+// Launch on `/sessions` opens the session's window in the dock, on the page
+// the operator is already on. So these four criteria are measured against that
+// window — it has to reach `live`, fit, honour the copy/paste bindings and go
+// read-only on a kill. The claims are unchanged; only the pane they are made
+// about moved.
 //
 //   node scripts/verify_session_page.mjs --url http://127.0.0.1:4848
 //
@@ -151,8 +153,9 @@ async function run(page) {
     "the dashboard's root LiveView never joined"
   )
 
-  // A marker that only a *full page load* can clear. Criterion 1 is about the
-  // live navigation specifically: if the browser reloaded, the bug would hide.
+  // A marker that only a *full page load* can clear. Criterion 1 is about
+  // reaching a live terminal without one: if the browser reloaded, the bug
+  // would hide.
   await page.eval("window.__arbNoReload = true")
 
   // Every keydown that our handler does not stop reaches the document. This is
@@ -171,16 +174,16 @@ async function run(page) {
     })
   `)
 
-  // The click is re-issued every poll until the URL changes, so a click lost
+  // The click is re-issued every poll until a window appears, so a click lost
   // to any residual race costs 100ms rather than the whole deadline. It cannot
   // launch a second session: LiveView marks the clicked element with
   // `data-phx-ref-src` + `phx-click-loading` for exactly as long as the server
-  // has that event in flight, and both are gone only once the reply (here, the
-  // redirect) has been applied.
+  // has that event in flight, and both are gone only once the reply has been
+  // applied — and by then the dock window it asked for is in the DOM.
   const sessionId = await page.pollValue(
     `(() => {
-       const match = document.location.pathname.match(/^\\/sessions\\/(.+)$/)
-       if (match) return match[1]
+       const window_ = document.querySelector('[id^="session-dock-window-"]')
+       if (window_) return window_.id.replace("session-dock-window-", "")
 
        const button = document.getElementById("launch-session")
        const inFlight =
@@ -190,18 +193,18 @@ async function run(page) {
        if (!inFlight) button.click()
        return null
      })()`,
-    "the launch never navigated to /sessions/<id>"
+    "the launch never opened a session window in the dock"
   )
   console.log(`SESSION ${sessionId}`)
 
   // -- criterion 1: the first join after the launch redirect ------------------
   //
-  // The page no longer holds a terminal: landing on `/sessions/<id>` pushes
-  // `session-dock:open` and the *dock* is what connects (bd-9myzv8). So the
-  // window has to appear before there is a status strip to read at all.
+  // `/sessions` holds no terminal: Launch pushes `session-dock:open` and the
+  // *dock* is what connects (bd-9myzv8, bd-a292yj). So the window has to
+  // appear before there is a status strip to read at all.
   await page.poll(
     `!!document.getElementById("session-dock-window-${sessionId}")`,
-    "the session page never handed the session to the dock"
+    "the launch never handed the session to the dock"
   )
 
   let state = null
@@ -332,9 +335,20 @@ async function run(page) {
     `stall banner=${stallVerdict.stalled} status=${stallVerdict.state}`
   )
 
-  // -- criterion 4: kill replaces the terminal, live --------------------------
+  // -- criterion 4: kill leaves a read-only window, live ----------------------
+  //
+  // Phase 3 (bd-a292yj) changed the *shape* of this claim rather than the
+  // claim: killing used to replace the pane with a placeholder, and now leaves
+  // it exactly where it was, read-only, with its final scrollback and the end
+  // reason — until the operator dismisses it. Both halves are checked, because
+  // "the pane is still there" and "the pane is dead" have to be true at once.
 
-  await page.eval(`document.getElementById("kill-session").click()`)
+  await page.eval(`document.getElementById("session-dock-menu-${sessionId}").click()`)
+  await page.poll(
+    `!!document.getElementById("session-dock-kill-${sessionId}")`,
+    "the window's overflow never opened"
+  )
+  await page.eval(`document.getElementById("session-dock-kill-${sessionId}").click()`)
   await page.poll(`!!document.getElementById("confirm-kill")`, "the kill modal never opened")
   await page.eval(`document.getElementById("confirm-kill").click()`)
 
@@ -342,17 +356,26 @@ async function run(page) {
   try {
     killed = await page.pollValue(
       `(() => {
-         const gone = !!document.querySelector('[id^="session-dock-inactive-"]')
-         const pane = document.querySelector('[id^="session-dock-terminal-"]')
-         return gone && !pane ? "replaced" : null
+         const pane = document.getElementById("session-dock-terminal-${sessionId}")
+         const ended = !!document.getElementById("session-dock-ended-${sessionId}")
+         if (!pane || !ended) return null
+         const term = pane.__arbTerminal
+         if (!term || !term.readOnly()) return null
+         // The scrollback is the whole reason the window stays. An empty
+         // buffer would pass every other check here and still be the bug.
+         const lines = term.term.buffer.active.length
+         return lines > 0 ? "read-only" : null
        })()`,
-      "the terminal was never replaced"
+      "the pane never went read-only with its scrollback intact"
     )
   } catch (_error) {
     killed = await page.eval(
       `(() => {
-         const pane = document.querySelector('[id^="session-dock-terminal-"]')
-         return pane ? "the terminal is still mounted" : "no placeholder"
+         const pane = document.getElementById("session-dock-terminal-${sessionId}")
+         if (!pane) return "the pane was torn down"
+         const term = pane.__arbTerminal
+         if (!term) return "the pane has no terminal"
+         return "still writable, readOnly=" + term.readOnly()
        })()`
     )
   }
@@ -360,9 +383,28 @@ async function run(page) {
   const stillLive = await page.eval("window.__arbNoReload === true")
 
   check(
-    "kill-replaces-the-terminal-without-a-reload",
-    killed === "replaced" && stillLive,
+    "kill-leaves-a-read-only-window-without-a-reload",
+    killed === "read-only" && stillLive,
     `${killed} live-navigation=${stillLive}`
+  )
+
+  // ...and dismissing it is the one thing that takes it away.
+  await page.eval(`document.getElementById("session-dock-dismiss-${sessionId}").click()`)
+
+  let dismissed = null
+  try {
+    dismissed = await page.pollValue(
+      `document.getElementById("session-dock-window-${sessionId}") ? null : "gone"`,
+      "the dismissed window stayed in the dock"
+    )
+  } catch (_error) {
+    dismissed = "still docked"
+  }
+
+  check(
+    "dismissing-an-ended-window-removes-it",
+    dismissed === "gone",
+    `${dismissed}`
   )
 }
 

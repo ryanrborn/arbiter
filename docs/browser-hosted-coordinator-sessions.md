@@ -509,8 +509,9 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
    `Sessions.kill/2` an operator or the dashboard would use. `keep_alive`
    (`Sessions.set_keep_alive/2`) is an unconditional pin — a session so
    marked is never a candidate, however stale its clock reads, and is
-   reachable from an operator's session page (`/sessions/:id`'s "Pin
-   keep_alive" button), not just the API. `last_turn_at` is a new column
+   reachable from the operator's UI (the dock window's "Pin keep_alive"
+   overflow item, `/sessions/:id`'s button before bd-a292yj deleted that
+   page), not just the API. `last_turn_at` is a new column
    alongside the existing `last_client_at`: a turn actually running is
    activity distinct from a client merely being attached, and without it a
    long-running unattended agent turn would look idle to the sweep. Both
@@ -862,8 +863,9 @@ live worker log. The session hook is the same pattern, one level up.
 
 ### 6.4 Status — phase 5 shipped (bd-c76fu9)
 
-The browser terminal is live at `/sessions` (list) and `/sessions/:id` (one
-session), linked from the global nav between Loop and Usage.
+The browser terminal is live at `/sessions` (list), linked from the global nav
+between Loop and Usage — and, since the session dock's phase 2/3, in the dock
+strip on *every* page. `/sessions/:id` no longer exists; see §6.5.
 
 | §6 item | Where it landed |
 |---|---|
@@ -874,7 +876,7 @@ session), linked from the global nav between Loop and Usage.
 | the protocol | `assets/js/session_stream.mjs` — DOM-free on purpose (below) |
 | the fit | `assets/js/session_fit.mjs` — DOM-free, replaces `addon-fit` (bd-3r2otb) |
 | copy/paste | `assets/js/session_keys.mjs` — DOM-free (bd-3r2otb) |
-| page chrome | `ArbiterWeb.SessionIndexLive`, `ArbiterWeb.SessionLive`, and the dock's own window chrome in `ArbiterWeb.SessionDockLive` |
+| page chrome | `ArbiterWeb.SessionIndexLive` (the index) and the dock's own window chrome in `ArbiterWeb.SessionDockLive` (everything per-session) |
 
 **The canvas addon pins the terminal version.** Upstream shipped
 `@xterm/xterm@6.0.0` on 2025-12-22 alongside new `addon-webgl`, `addon-search`,
@@ -954,8 +956,9 @@ back, and reads the tally off the browser's own engine:
 `RESULT: PASS — frames=3 bytes=55 seq=55 reconnects=1 gaps=0 duplicates=0`.
 
 Narrow widths are a two-part check because they are a two-part claim: the page
-must not scroll sideways (`#terminal-scroller` is `overflow-x-auto`, asserted in
-`ArbiterWeb.SessionLiveTest`) and the pane must keep a floor width wide enough
+must not scroll sideways (`#session-dock-scroller-<id>` is `overflow-x-auto`,
+asserted in `ArbiterWeb.SessionDockLiveTest`) and the pane must keep a floor
+width wide enough
 to be a terminal (`min-w-[640px]`, measured at **89 columns** in the browser
 check above).
 
@@ -969,6 +972,58 @@ check above).
 * **Multiple concurrent terminals on one page** are not exercised. The hook is
   per-element and holds no module state, so nothing prevents it; it is simply
   not a shape phase 5 ships a page for.
+
+### 6.5 The session dock, and the end of `/sessions/:id` (phase 3, bd-a292yj)
+
+The dock epic (bd-dlc136 phase 1, bd-9myzv8 phase 2, bd-a292yj phase 3) moved
+the terminal — and then everything around it — out of a page and into a strip
+pinned to the bottom of every dashboard page. Phase 3 finished the move and
+executed the decision it left open.
+
+**`/sessions/:id` is gone, route and all.** Once `keep_alive`, Detach, Kill,
+the metadata and the cost figure live in a dock window, keeping the page would
+mean two surfaces owning the same controls, and two surfaces that own the same
+control drift. The alternative — a route that still exists but whose controls
+have moved away — is the worst of the three. So the page was deleted along with
+`ArbiterWeb.SessionLive` and its tests; `apps/arbiter_web/lib/arbiter_web/router.ex`
+carries a comment saying why, so it does not come back by accident.
+
+| control | owner |
+|---|---|
+| the terminal, `keep_alive`, Detach, session metadata, ledger cost/tokens, the end reason | the dock window (`ArbiterWeb.SessionDockLive`) |
+| launch, name at launch, the full history, reviewing sessions that ended long ago | `/sessions` (`ArbiterWeb.SessionIndexLive`) |
+| Kill | **both**, deliberately — ending a session is a fleet act and a window act. One implementation: `SessionIndexLive.kill_modal/1`, rendered by both views, and both keep the confirm step |
+
+Kill's confirmation matters *more* in the dock than it did on the page: a title
+bar that is on screen everywhere is a different risk profile from a page an
+operator navigated to on purpose.
+
+Detach is not a second implementation of anything. "Drop this browser's reader,
+leave the agent running" is exactly what collapsing a window already does — the
+pane is unmounted, which disposes the xterm and closes its `/session` socket —
+so the overflow item routes into the same `collapse` handler under the name an
+operator comes looking for.
+
+**An ended session's window stays, read-only, until dismissed.** The last
+output is most interesting exactly when the session dies, and auto-closing
+throws it away. So an end does not unmount the pane (unmounting is what
+disposes the xterm): it *freezes* it. `data-readonly` reaches the
+`phx-update="ignore"` element — LiveView merges `data-*` attributes onto
+ignored nodes and then runs the hook's `updated()`, which is the only channel
+the server has into a subtree it is otherwise forbidden to touch — the hook
+calls the terminal's `setReadOnly`, and `SessionStream` had already refused
+stdin from the moment the channel reported `exit`. A frozen window keeps its
+pane through a collapse too (hidden, not removed): "until dismissed" means what
+it says. Dismissing is the one act that throws the scrollback away, and it
+takes the window out of the persisted `localStorage` state with it.
+
+**The one case the dock cannot serve alone, said out loud.** A session that
+ended in a *previous* browser session has no scrollback here and none to fetch
+until transcript persistence (bd-5pelo2, phase 9). Opening it gives a window
+that says exactly that and points at `/sessions`, rather than an empty terminal
+that reads like a live one with nothing on it. The two cases are named, never
+blurred — which is the difference between "your output is gone" and "your agent
+has printed nothing".
 
 ## 7. Metering and attribution (research task 4)
 
@@ -1207,7 +1262,10 @@ The two items §7.7 left open are done:
     renders a running token/cost chip from it, the same way it already renders
     geometry from `meta` events — never a LiveView diff. (That strip was on
     `SessionLive` when phase 7 shipped; it moved into the session dock's
-    window with bd-9myzv8.)
+    window with bd-9myzv8, and bd-a292yj added a second, ledger-backed figure
+    in the window's info view — the HUD answers "what is this turn costing",
+    the info view answers "what has this session cost", including after it
+    ended.)
 
     `session.provider_session_id` / `.config_dir` are read as of the reader's
     own start rather than re-fetched every tick, but a mid-session rollover

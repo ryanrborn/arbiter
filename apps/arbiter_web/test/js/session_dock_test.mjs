@@ -251,7 +251,7 @@ test("dismissing a session forgets it, so re-opening starts from a snapshot", ()
 
 // -- the handover from /sessions/:id (bd-9myzv8) -------------------------------
 //
-// `SessionLive` hands its session to the dock with a `push_event`, which
+// A sibling view hands its session to the dock with a `push_event`, which
 // reaches the client as a `window` event. On a *live navigation* the dock's
 // hook is already mounted and catches it directly — but on a cold load of
 // `/sessions/:id` the parent view joins and dispatches before its sticky

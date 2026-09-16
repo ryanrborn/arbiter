@@ -26,6 +26,47 @@ defmodule ArbiterWeb.SessionDockLive do
   `live_render(..., session:)` value from `layouts/live.html.heex`, because
   `get_connect_info/2` is root-and-mount only and this is a nested child.
 
+  ## The controls, and the page that used to hold them (phase 3, bd-a292yj)
+
+  The dock is now the session. `keep_alive`, Detach, Kill, the metadata and the
+  cost figure all live in a window's title bar or its overflow, and
+  `/sessions/:id` — which used to own them — is **gone**, route and all. That
+  was phase 3's one decision to execute: keeping the page meant two surfaces
+  owning the same controls, and two surfaces that own the same control drift.
+  `/sessions` stays as the index (launch, name at launch, the whole history,
+  and Kill as a fleet act), and the one control deliberately on both surfaces —
+  Kill — goes through `SessionIndexLive.kill_modal/1` on both, so there is a
+  single confirmation rather than two that can diverge.
+
+  Kill keeps its confirm step *here in particular*. A title bar that is on
+  screen on every page is a different risk profile from a page an operator
+  navigated to deliberately; a cursor crosses this strip all day.
+
+  Detach is not a second implementation of anything: dropping this browser's
+  reader and leaving the agent running is exactly what collapsing already does
+  (the pane goes, so the xterm and its socket go), so the menu item routes
+  straight into `collapse`.
+
+  ## Windows whose session has ended
+
+  An ended session's window **stays, read-only, with its final scrollback and
+  the end reason**, until the operator dismisses it. The last output is most
+  interesting exactly when the session dies, and auto-closing throws it away.
+  So the pane is not unmounted on an end — unmounting is what disposes the
+  xterm — it is *frozen*: `data-readonly` reaches the `phx-update="ignore"`
+  element (LiveView merges `data-*` onto ignored nodes and then runs the hook's
+  `updated()`), the hook calls the terminal's `setReadOnly`, and the stream had
+  already refused stdin from the moment the channel reported `exit`. A frozen
+  window keeps its pane through a collapse too, hidden rather than removed —
+  "until dismissed" means what it says. It holds no socket, so eight of them
+  cost eight xterms and zero connections.
+
+  This is the one thing the dock cannot serve alone. A session that ended in a
+  *previous* browser session has no scrollback here to show and none to fetch
+  until transcript persistence lands (bd-5pelo2, phase 9). Its window says so
+  and points at `/sessions`, rather than rendering an empty terminal that reads
+  like a live one with nothing on it: the two cases are named, never blurred.
+
   Nothing about the transport changed. `ArbiterWeb.SessionSocket`'s topic was
   already keyed to the session id rather than to a LiveView process
   (`endpoint.ex:18-26`), precisely so a client can reattach from somewhere
@@ -69,6 +110,10 @@ defmodule ArbiterWeb.SessionDockLive do
   alias Arbiter.Sessions
   alias Arbiter.Sessions.DisplayName
   alias ArbiterWeb.CoreComponents.Data
+  alias ArbiterWeb.SessionIndexLive
+  alias ArbiterWeb.SessionUsage
+
+  require Logger
 
   # A dock holding more windows than this is not a dock, and the cap is also
   # what stops a hand-edited `localStorage` value from making the server walk
@@ -83,6 +128,13 @@ defmodule ArbiterWeb.SessionDockLive do
   # and has no other symptom than a strip that says "connecting…" forever.
   @stall_ms 8_000
 
+  # How often an *open* info panel re-pulls the usage ledger. Same figure and
+  # the same reasoning as `ArbiterWeb.SessionIndexLive`'s:
+  # `Arbiter.Sessions.UsageIngest` only sweeps every 5 minutes by default, so
+  # polling faster buys nothing — this just has to be "a panel left open
+  # catches the next sweep". The timer only exists while the panel does.
+  @usage_refresh_ms 30_000
+
   @impl true
   def mount(_params, session, socket) do
     if connected?(socket) do
@@ -95,6 +147,15 @@ defmodule ArbiterWeb.SessionDockLive do
      |> assign(:open_ids, [])
      |> assign(:expanded_id, nil)
      |> assign(:exited, MapSet.new())
+     # Windows whose pane is mounted but whose session has since ended: the
+     # xterm stays, read-only, holding the scrollback it had when the agent
+     # went (bd-a292yj). See `freeze_pane/2`.
+     |> assign(:frozen, MapSet.new())
+     |> assign(:menu_id, nil)
+     |> assign(:info_id, nil)
+     |> assign(:info_usage, nil)
+     |> assign(:usage_refresh_ref, nil)
+     |> assign(:kill_candidate, nil)
      |> assign(:loopback?, Map.get(session, "loopback?", true))
      |> assign(:terminal_live?, false)
      |> assign(:terminal_stalled?, false)
@@ -173,8 +234,90 @@ defmodule ArbiterWeb.SessionDockLive do
     if socket.assigns.expanded_id == id do
       {:noreply, socket |> collapse_window() |> persist()}
     else
-      {:noreply, socket}
+      {:noreply, close_menu(socket)}
     end
+  end
+
+  # Detach is "drop this browser's reader, leave the agent running" — which is
+  # exactly what collapsing does, since collapsing is what removes the pane and
+  # so disposes the xterm and its `/session` socket. So this is not a second
+  # implementation of anything: it is the same handler under the name an
+  # operator comes looking for (it was `SessionLive`'s `detach` before the
+  # terminal moved to the dock).
+  def handle_event("detach", params, socket), do: handle_event("collapse", params, socket)
+
+  # -- the window's own controls (phase 3, bd-a292yj) -------------------------
+  #
+  # Every one of them carries its own `phx-value-id`, so which window happens
+  # to be expanded has nothing to do with which session they act on.
+
+  def handle_event("toggle_menu", %{"id" => id}, socket) do
+    {:noreply, assign(socket, :menu_id, if(socket.assigns.menu_id == id, do: nil, else: id))}
+  end
+
+  def handle_event("close_menu", _params, socket), do: {:noreply, close_menu(socket)}
+
+  # The info side of a window: the session's metadata and the ledger's
+  # cost/tokens, so neither costs a navigation away from whatever the operator
+  # was reading. It is an *overlay*, never a replacement for the pane — see
+  # `window/1`.
+  def handle_event("toggle_info", %{"id" => id}, socket) do
+    socket = close_menu(socket)
+
+    if socket.assigns.info_id == id do
+      {:noreply, close_info(socket)}
+    else
+      {:noreply,
+       socket
+       |> assign(:info_id, id)
+       |> load_info_usage()
+       |> schedule_usage_refresh()}
+    end
+  end
+
+  def handle_event("toggle_keep_alive", %{"id" => id}, socket) do
+    socket = close_menu(socket)
+
+    case Map.fetch(socket.assigns.sessions_by_id, id) do
+      {:ok, session} -> {:noreply, set_keep_alive(socket, session)}
+      :error -> {:noreply, socket}
+    end
+  end
+
+  # Kill keeps its confirm step here precisely *because* the dock is always on
+  # screen: a one-click kill in a title bar an operator's cursor crosses all
+  # day is a different risk profile from one on a page they navigated to
+  # deliberately. The confirmation is `SessionIndexLive.kill_modal/1` itself,
+  # not a second copy of it.
+  def handle_event("confirm_kill", %{"id" => id}, socket) do
+    {:noreply,
+     socket
+     |> close_menu()
+     |> assign(:kill_candidate, Map.get(socket.assigns.sessions_by_id, id))}
+  end
+
+  def handle_event("cancel_kill", _params, socket) do
+    {:noreply, assign(socket, :kill_candidate, nil)}
+  end
+
+  def handle_event("kill", %{"id" => id}, socket) do
+    socket =
+      case Sessions.kill(id) do
+        {:ok, _ended} ->
+          socket
+
+        {:error, reason} ->
+          Logger.error("SessionDockLive: kill #{id} failed: #{inspect(reason)}")
+          put_flash(socket, :error, "Could not end that session: #{inspect(reason)}")
+      end
+
+    # Freeze *before* re-reading: `live_pane?/2` asks whether there was a pane
+    # a moment ago, which is a question only the pre-kill row can answer.
+    {:noreply,
+     socket
+     |> assign(:kill_candidate, nil)
+     |> freeze_pane(id)
+     |> load_sessions()}
   end
 
   # From the hook, the first time its stream reaches `live`. Only ever clears
@@ -195,6 +338,7 @@ defmodule ArbiterWeb.SessionDockLive do
   def handle_event("terminal_exited", %{"id" => id}, socket) do
     {:noreply,
      socket
+     |> freeze_pane(id)
      |> assign(:exited, MapSet.put(socket.assigns.exited, id))
      |> load_sessions()}
   end
@@ -215,13 +359,23 @@ defmodule ArbiterWeb.SessionDockLive do
      # resume point goes, and so does the note that this session's agent had
      # exited. Re-opening it later re-reads the row, which is the authority.
      |> assign(:exited, MapSet.delete(socket.assigns.exited, id))
+     # Dismissing an ended window is the one way its read-only pane goes away
+     # (bd-a292yj): the final scrollback is thrown out by an explicit act,
+     # rather than by the session merely having ended.
+     |> assign(:frozen, MapSet.delete(socket.assigns.frozen, id))
+     |> close_menu()
+     |> then(&if &1.assigns.info_id == id, do: close_info(&1), else: &1)
      |> push_event("session-dock:forget", %{id: id})
      |> persist()}
   end
 
+  # `Arbiter.Sessions.mark_ended/2` — a Kill (from here, from `/sessions`, or
+  # from `arb`), an agent that exited on its own, the orphan reaper. Whichever
+  # it was, a window with a live pane keeps it: read-only, still holding the
+  # last thing the agent printed, which is exactly the output worth reading.
   @impl true
-  def handle_info({:session_ended, _session_id}, socket) do
-    {:noreply, load_sessions(socket)}
+  def handle_info({:session_ended, session_id}, socket) do
+    {:noreply, socket |> freeze_pane(session_id) |> load_sessions()}
   end
 
   # Nothing mounted a `.SessionTerminal` in time. The likeliest cause has no
@@ -234,6 +388,16 @@ defmodule ArbiterWeb.SessionDockLive do
         not socket.assigns.terminal_live?
 
     {:noreply, assign(socket, :terminal_stalled?, stalled?)}
+  end
+
+  # Only ever armed while an info panel is open, and re-armed by the pull
+  # itself, so a closed panel costs no queries.
+  def handle_info(:refresh_dock_usage, socket) do
+    if socket.assigns.info_id do
+      {:noreply, socket |> load_info_usage() |> schedule_usage_refresh()}
+    else
+      {:noreply, assign(socket, :usage_refresh_ref, nil)}
+    end
   end
 
   # The lifecycle topic is shared, and a sticky child outlives the page it was
@@ -261,6 +425,7 @@ defmodule ArbiterWeb.SessionDockLive do
     |> assign(:expanded_id, id)
     |> assign(:terminal_live?, false)
     |> assign(:terminal_stalled?, false)
+    |> close_menu()
   end
 
   defp collapse_window(socket) do
@@ -268,12 +433,78 @@ defmodule ArbiterWeb.SessionDockLive do
     |> assign(:expanded_id, nil)
     |> assign(:terminal_live?, false)
     |> assign(:terminal_stalled?, false)
+    |> close_menu()
+    |> close_info()
   end
 
-  # Whether there is anything to attach to, re-decided on every render, so a
-  # session that ends under an open window swaps to the placeholder live.
+  defp close_menu(socket), do: assign(socket, :menu_id, nil)
+
+  defp close_info(socket) do
+    socket
+    |> assign(:info_id, nil)
+    |> assign(:info_usage, nil)
+  end
+
+  # Whether there is anything to *attach* to, re-decided on every render. Note
+  # that this is not "is there a pane": a window whose session ended under it
+  # keeps its pane, read-only, with nothing attached (`freeze_pane/2`).
   defp attachable?(session, exited) do
     session.status == :running and not MapSet.member?(exited, session.id)
+  end
+
+  # The moment an ended session's window stops being a client and becomes a
+  # record (bd-a292yj). Only a window that actually has a pane on screen can
+  # freeze: one that was collapsed when its session died has no scrollback to
+  # keep, and pretending otherwise is the dishonest half of this feature.
+  defp freeze_pane(socket, id) do
+    if live_pane?(socket, id) do
+      assign(socket, :frozen, MapSet.put(socket.assigns.frozen, id))
+    else
+      socket
+    end
+  end
+
+  # Is there a live pane for this session right now? It has to be the expanded
+  # window, the peer has to be on loopback (off it no terminal was ever
+  # mounted, §10.4), and the row has to still read attachable — which it does
+  # until whoever is calling this records the end.
+  defp live_pane?(socket, id) do
+    with true <- socket.assigns.expanded_id == id,
+         true <- socket.assigns.loopback?,
+         {:ok, session} <- Map.fetch(socket.assigns.sessions_by_id, id) do
+      attachable?(session, socket.assigns.exited)
+    else
+      _other -> false
+    end
+  end
+
+  defp set_keep_alive(socket, session) do
+    case Sessions.set_keep_alive(session, not session.keep_alive) do
+      {:ok, _updated} ->
+        load_sessions(socket)
+
+      {:error, reason} ->
+        Logger.error("SessionDockLive: set_keep_alive #{session.id} failed: #{inspect(reason)}")
+        put_flash(socket, :error, "Could not update keep_alive: #{inspect(reason)}")
+    end
+  end
+
+  defp load_info_usage(socket) do
+    session = Map.get(socket.assigns.sessions_by_id, socket.assigns.info_id)
+    assign(socket, :info_usage, SessionUsage.for_session(session))
+  end
+
+  # Cancels any prior ref first, so re-opening a panel in a burst cannot stack
+  # duplicate timers (`SessionIndexLive`'s bd-9mrzti finding 3, same shape).
+  defp schedule_usage_refresh(socket) do
+    if ref = socket.assigns[:usage_refresh_ref], do: Process.cancel_timer(ref)
+
+    ref =
+      if connected?(socket) and socket.assigns.info_id do
+        Process.send_after(self(), :refresh_dock_usage, @usage_refresh_ms)
+      end
+
+    assign(socket, :usage_refresh_ref, ref)
   end
 
   defp persist(socket) do
@@ -316,10 +547,22 @@ defmodule ArbiterWeb.SessionDockLive do
         session={session}
         expanded?={@expanded_id == session.id}
         attachable?={attachable?(session, @exited)}
+        frozen?={MapSet.member?(@frozen, session.id)}
         loopback?={@loopback?}
         stalled?={@terminal_stalled? and @expanded_id == session.id}
+        menu_open?={@menu_id == session.id}
+        info_open?={@info_id == session.id}
+        usage={@info_usage}
       />
     </div>
+
+    <%!-- Outside `#session-dock-root`, which is `pointer-events-none` so the
+          strip never swallows clicks meant for the page underneath it — a
+          modal rendered inside it would be unclickable. It is
+          `SessionIndexLive.kill_modal/1` itself rather than a second copy:
+          both surfaces end real sessions and both must ask first, and a
+          duplicate is a second chance for one of them to stop asking. --%>
+    <SessionIndexLive.kill_modal session={@kill_candidate} />
 
     <script :type={Phoenix.LiveView.ColocatedHook} name=".SessionTerminal">
       import { createSessionTerminal } from "@/js/session_terminal.mjs"
@@ -369,6 +612,10 @@ defmodule ArbiterWeb.SessionDockLive do
             onExit: (payload) => {
               this.state = "ended"
               this.setState("ended")
+              // The pane stays — the last thing the agent printed is exactly
+              // what is worth reading — but nothing typed into it can reach a
+              // process that is gone (bd-a292yj).
+              this.terminal.setReadOnly()
               this.pushEvent("terminal_exited", { ...(payload || {}), id: this.sessionId })
             },
             onError: (err) => this.setMeta({ error: (err && err.code) || "error" }),
@@ -416,7 +663,21 @@ defmodule ArbiterWeb.SessionDockLive do
           // xterm rather than about a stand-in.
           this.el.__arbTerminal = this.terminal
 
+          // A window restored straight into the frozen state — `restore` can
+          // re-render a pane the server already knows is read-only before this
+          // hook ever sees an `exit`.
+          if (this.el.dataset.readonly) this.terminal.setReadOnly()
+
           this.terminal.focus()
+        },
+
+        // LiveView merges `data-*` attributes onto a `phx-update="ignore"`
+        // element and then runs this, which is the only channel the server has
+        // into a pane it is otherwise forbidden to touch. It is how a session
+        // killed from the dock's own title bar, or reaped elsewhere, goes
+        // read-only even when the channel never delivered an `exit`.
+        updated() {
+          if (this.terminal && this.el.dataset.readonly) this.terminal.setReadOnly()
         },
 
         // A LiveView rejoin re-runs `mount/3` — the strip is server-rendered as
@@ -593,16 +854,32 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :session, :any, required: true
   attr :expanded?, :boolean, required: true
   attr :attachable?, :boolean, required: true
+  attr :frozen?, :boolean, required: true
   attr :loopback?, :boolean, required: true
   attr :stalled?, :boolean, required: true
+  attr :menu_open?, :boolean, required: true
+  attr :info_open?, :boolean, required: true
+  attr :usage, :any, required: true, doc: "the info panel's rollup, or nil"
 
   defp window(assigns) do
-    assigns = assign(assigns, :terminal?, assigns.expanded? and assigns.attachable?)
+    assigns =
+      assigns
+      # A *live* pane: an xterm with a `/session` socket under it. Only the
+      # expanded window ever has one, and only on loopback.
+      |> assign(:live?, assigns.expanded? and assigns.attachable? and assigns.loopback?)
+      # Any pane at all — live, or frozen at the last thing the agent printed.
+      # A frozen pane outlives collapsing on purpose: the acceptance is "until
+      # explicitly dismissed", and a collapse is not that. It holds no socket,
+      # so eight of them cost eight xterms and zero connections.
+      |> assign(:pane?, (assigns.expanded? and assigns.attachable? and assigns.loopback?) or assigns.frozen?)
+      |> assign(:name, DisplayName.resolve(assigns.session))
+      |> assign(:running?, assigns.session.status == :running and not assigns.frozen?)
 
     ~H"""
     <div
       id={"session-dock-window-#{@session.id}"}
       data-expanded={to_string(@expanded?)}
+      data-status={@session.status}
       class={
         [
           "pointer-events-auto flex flex-col justify-end grow-0 shrink",
@@ -622,23 +899,30 @@ defmodule ArbiterWeb.SessionDockLive do
         ]
       }
     >
+      <%!-- A collapsed window still renders its frame when it holds a frozen
+            pane, hidden rather than removed: unmounting it is what disposes
+            the xterm, and disposing it is what throws the final scrollback
+            away. `hidden` is `display: none`, so it costs no layout. --%>
       <div
-        :if={@expanded?}
+        :if={@expanded? or @frozen?}
         id={"session-dock-frame-#{@session.id}"}
         role="region"
-        aria-label={"Session #{DisplayName.resolve(@session)}"}
+        aria-label={"Session #{@name}"}
         class={[
-          "flex flex-col h-[min(52vh,380px)] overflow-hidden",
+          "relative flex flex-col h-[min(52vh,380px)] overflow-hidden",
           "border border-b-0 border-solid border-[var(--border-default)]",
-          "rounded-t-[var(--radius-panel)] bg-[var(--surface-panel)] shadow-lg"
+          "rounded-t-[var(--radius-panel)] bg-[var(--surface-panel)] shadow-lg",
+          not @expanded? && "hidden"
         ]}
       >
         <%!-- The status strip is chrome, pinned outside the xterm element so
               it can never fight the fit for rows (§6.3). Its contents are
               hook-owned — so LiveView is told to keep out of them, and so it
-              is only rendered when there is a hook to own it. --%>
+              is only rendered when there is a hook to own it. A frozen pane
+              has no channel and no live state to paint, so it gets the ended
+              banner below instead. --%>
         <div
-          :if={@terminal? and @loopback?}
+          :if={@live?}
           id={"session-dock-status-#{@session.id}"}
           phx-update="ignore"
           class={[
@@ -650,7 +934,9 @@ defmodule ArbiterWeb.SessionDockLive do
           <span data-role="state">connecting…</span>
           <%!-- Live cost HUD (§7.5, phase 7): hook-owned, same reason the rest
                 of this strip is — a value that updates every ~2s must not
-                become a LiveView diff. --%>
+                become a LiveView diff. The info panel's figure is the ledger's
+                own rollup and answers a different question (what this session
+                has cost, including after it ended). --%>
           <span data-role="usage" class="text-[var(--text-label)] truncate"></span>
           <span data-role="meta" class="ml-auto shrink-0 text-[var(--text-label)]"></span>
           <%!-- The keyboard rule, said out loud. An expanded terminal takes
@@ -664,11 +950,32 @@ defmodule ArbiterWeb.SessionDockLive do
           </span>
         </div>
 
+        <%!-- The session ended under this window (bd-a292yj). The pane below
+              stays exactly as the agent left it, read-only; this says so, says
+              why it ended, and offers the one act that throws it away. --%>
+        <div
+          :if={@frozen?}
+          id={"session-dock-ended-#{@session.id}"}
+          class={[
+            "flex shrink-0 items-center gap-2 px-2.5 py-1",
+            "border-b border-solid border-[var(--border-default)]",
+            "bg-[var(--surface-field)]",
+            "text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-body)]"
+          ]}
+        >
+          <.icon name="hero-power-micro" class="size-3.5 shrink-0 text-[var(--text-label)]" />
+          <span>Agent exited</span>
+          <span :if={@session.end_reason} class="text-[var(--text-label)] truncate">
+            {@session.end_reason}
+          </span>
+          <span class="ml-auto shrink-0 text-[var(--text-label)]">read-only</span>
+        </div>
+
         <%!-- Not inside the status strip: that is `phx-update="ignore"` and
               hook-owned, and this is precisely the case where there may be no
               hook to own it. --%>
         <div
-          :if={@stalled? and @terminal? and @loopback?}
+          :if={@stalled? and @live?}
           id={"session-dock-stalled-#{@session.id}"}
           class={[
             "flex shrink-0 flex-wrap items-center gap-1.5 px-2.5 py-1.5",
@@ -692,15 +999,22 @@ defmodule ArbiterWeb.SessionDockLive do
               sideways — a `position: fixed` strip that overflowed would give
               every page a horizontal scrollbar it never had. --%>
         <div
-          :if={@terminal? and @loopback?}
+          :if={@pane?}
           id={"session-dock-scroller-#{@session.id}"}
           class="flex grow min-h-0 overflow-x-auto bg-[var(--arb-term-bg,#16181d)]"
         >
+          <%!-- `data-readonly` is the one thing that reaches a
+                `phx-update="ignore"` element through a patch: LiveView merges
+                `data-*` attributes onto an ignored node and then calls the
+                hook's `updated()`, which is how a pane goes read-only without
+                being re-created. The hook also does it from the channel's own
+                `exit` event, whichever lands first. --%>
           <div
             id={"session-dock-terminal-#{@session.id}"}
             phx-hook=".SessionTerminal"
             phx-update="ignore"
             data-arb-terminal
+            data-readonly={if @frozen?, do: "true"}
             data-session-id={@session.id}
             class="grow min-w-[640px] p-1.5"
           >
@@ -710,7 +1024,8 @@ defmodule ArbiterWeb.SessionDockLive do
         <%!-- §10.4: `ArbiterWeb.SessionSocket` trusts a loopback peer and the
               browser sends no token, so a `/session` connect from here would
               just fail silently. Say so up front instead of mounting a
-              terminal that never attaches (bd-2zskbb). --%>
+              terminal that never attaches (bd-2zskbb), and say what *does*
+              work — an SSH port-forward is the supported way in (#1775). --%>
         <div
           :if={@attachable? and not @loopback?}
           id={"session-dock-remote-#{@session.id}"}
@@ -718,22 +1033,159 @@ defmodule ArbiterWeb.SessionDockLive do
         >
           <.icon name="hero-lock-closed" class="size-5 text-[var(--text-label)]" />
           <p>This session's terminal is loopback-only by design.</p>
-          <p class="text-[var(--text-label)]">
-            Reaching it from another device is Remote Control's job.
+          <p
+            :if={@session.auth_mode == :seeded_credentials and @session.remote_control}
+            class="text-[var(--text-label)]"
+          >
+            Forward the port over SSH: <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
+            (<.link
+              href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
+              target="_blank"
+              class="underline"
+            >docs</.link>), or use Remote Control.
+          </p>
+          <p
+            :if={@session.auth_mode == :seeded_credentials and not @session.remote_control}
+            class="text-[var(--text-label)]"
+          >
+            Forward the port over SSH: <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
+            (<.link
+              href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
+              target="_blank"
+              class="underline"
+            >docs</.link>). Remote Control (mode B, launched with
+            <code>--remote-control</code>) is not enabled on this session.
+          </p>
+          <p :if={@session.auth_mode != :seeded_credentials} class="text-[var(--text-label)]">
+            This session runs under a workspace token (mode A). Forward the port over SSH:
+            <code>ssh -L 4848:127.0.0.1:4848 &lt;host&gt;</code>
+            (<.link
+              href="https://github.com/ryanrborn/arbiter/blob/main/docs/remote-access.md"
+              target="_blank"
+              class="underline"
+            >docs</.link>).
           </p>
         </div>
 
+        <%!-- Ended, and this dock never held its pane: either it ended before
+              this browser session, or its window was dismissed and re-opened.
+              Either way there is no scrollback here to show and none to fetch
+              until transcript persistence lands (bd-5pelo2, phase 9) — so it
+              says so and points at the index, rather than rendering an empty
+              terminal that reads like a live one with nothing on it. --%>
         <div
-          :if={not @attachable?}
-          id={"session-dock-inactive-#{@session.id}"}
-          class="grow min-h-0 flex items-center justify-center px-4 text-center text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+          :if={not @pane? and not @attachable?}
+          id={"session-dock-unavailable-#{@session.id}"}
+          class="grow min-h-0 flex flex-col items-center justify-center gap-1.5 px-4 text-center text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
         >
-          Nothing to attach to — this session is no longer running.
+          <.icon name="hero-power" class="size-5" />
+          <p class="text-[var(--text-body)]">
+            This session has ended{if @session.end_reason, do: " (#{@session.end_reason})"}.
+          </p>
+          <p>
+            Its output is not available here — the dock was not watching it when it ended.
+          </p>
+          <.link
+            navigate={~p"/sessions"}
+            class="text-[var(--text-link)] no-underline hover:underline"
+          >
+            Ended sessions are listed on /sessions
+          </.link>
+        </div>
+
+        <%!-- The info side of the window: an *overlay*, not a swap. Replacing
+              the pane would unmount it, and unmounting it disposes the xterm —
+              a config dir is not worth a scrollback. --%>
+        <div
+          :if={@info_open? and @expanded?}
+          id={"session-dock-info-panel-#{@session.id}"}
+          class={[
+            "absolute inset-0 z-10 overflow-y-auto px-3 py-2.5",
+            "bg-[var(--surface-panel)] text-[11px] font-[family-name:var(--font-mono)]"
+          ]}
+        >
+          <div class="flex items-center gap-2 mb-2">
+            <Data.status_chip status={@session.status} class="badge-xs shrink-0" />
+            <span class="grow truncate text-[12px] font-medium text-[var(--text-title)]">
+              {@name}
+            </span>
+            <button
+              type="button"
+              id={"session-dock-info-close-#{@session.id}"}
+              phx-click="toggle_info"
+              phx-value-id={@session.id}
+              aria-label={"Close info for #{@name}"}
+              class="shrink-0 flex items-center justify-center size-[22px] rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)]"
+            >
+              <.icon name="hero-x-mark-micro" class="size-4" />
+            </button>
+          </div>
+
+          <%!-- The ledger's own rollup, the same `Arbiter.Usage.summarize(by:
+                :session)` `/sessions` and `arb usage --by session` read
+                (`ArbiterWeb.SessionUsage`). Never a silent `$0.00` for a
+                session the ledger has no rows for yet. --%>
+          <p
+            :if={@usage}
+            id={"session-dock-usage-#{@session.id}"}
+            class="mb-2 text-[var(--text-body)]"
+          >
+            {Data.format_tokens(@usage.tokens_in)} in / {Data.format_tokens(@usage.tokens_out)} out · {Data.format_usd(
+              @usage.total_cost_usd
+            )}<span :if={@usage.estimated}> (estimated)</span>
+          </p>
+          <p
+            :if={!@usage}
+            id={"session-dock-usage-empty-#{@session.id}"}
+            class="mb-2 italic text-[var(--text-label)]"
+          >
+            no usage data
+          </p>
+
+          <dl class="grid grid-cols-1 gap-x-4 gap-y-1 text-[var(--text-label)]">
+            <div class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">id</dt>
+              <dd class="truncate text-[var(--text-body)]">{@session.id}</dd>
+            </div>
+            <div class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">cwd</dt>
+              <dd class="truncate text-[var(--text-body)]">{@session.cwd}</dd>
+            </div>
+            <div class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">scope unit</dt>
+              <dd class="truncate text-[var(--text-body)]">{@session.scope_unit}</dd>
+            </div>
+            <div class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">config dir</dt>
+              <dd class="truncate text-[var(--text-body)]">{@session.config_dir}</dd>
+            </div>
+            <div class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">auth mode</dt>
+              <dd class="text-[var(--text-body)]">{@session.auth_mode}</dd>
+            </div>
+            <div class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">can dispatch</dt>
+              <dd class="text-[var(--text-body)]">{@session.can_dispatch}</dd>
+            </div>
+            <div class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">keep_alive</dt>
+              <dd
+                id={"session-dock-keep-alive-value-#{@session.id}"}
+                class="text-[var(--text-body)]"
+              >
+                {@session.keep_alive}
+              </dd>
+            </div>
+            <div :if={@session.end_reason} class="flex gap-2">
+              <dt class="min-w-[7rem] shrink-0">end reason</dt>
+              <dd class="truncate text-[var(--text-body)]">{@session.end_reason}</dd>
+            </div>
+          </dl>
         </div>
       </div>
 
       <div class={[
-        "flex items-center gap-1.5 pl-3 pr-1 h-[var(--session-dock-strip-height)]",
+        "relative flex items-center gap-1.5 pl-3 pr-1 h-[var(--session-dock-strip-height)]",
         "border border-b-0 border-solid border-[var(--border-default)]",
         "bg-[var(--surface-chrome)]",
         not @expanded? && "rounded-t-[var(--radius-panel)]"
@@ -741,7 +1193,7 @@ defmodule ArbiterWeb.SessionDockLive do
         <span
           class={[
             "size-1.5 rounded-full shrink-0",
-            if(@session.status == :running,
+            if(@running?,
               do: "bg-[var(--arb-live)]",
               else: "bg-[var(--text-ghost,var(--text-label))]"
             )
@@ -756,18 +1208,39 @@ defmodule ArbiterWeb.SessionDockLive do
           phx-click={if @expanded?, do: "collapse", else: "expand"}
           phx-value-id={@session.id}
           aria-expanded={to_string(@expanded?)}
-          title={DisplayName.resolve(@session)}
+          title={@name}
           class="grow min-w-0 text-left text-[12px] font-medium text-[var(--text-title)] truncate cursor-pointer bg-transparent border-0"
         >
-          {DisplayName.resolve(@session)}
+          {@name}
         </button>
+
+        <%!-- Why it is over, in the title bar, where a collapsed window can
+              still say it (bd-a292yj). Truncated by design; the whole reason
+              is in the tooltip and in the info side. --%>
+        <span
+          :if={not @running?}
+          id={"session-dock-end-reason-#{@session.id}"}
+          title={@session.end_reason || "ended"}
+          class="shrink min-w-0 max-w-[7rem] truncate text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+        >
+          {@session.end_reason || "ended"}
+        </span>
+
+        <.window_menu
+          session={@session}
+          name={@name}
+          open?={@menu_open?}
+          expanded?={@expanded?}
+          running?={@running?}
+          info_open?={@info_open?}
+        />
 
         <button
           type="button"
           id={"session-dock-dismiss-#{@session.id}"}
           phx-click="dismiss"
           phx-value-id={@session.id}
-          aria-label={"Dismiss #{DisplayName.resolve(@session)}"}
+          aria-label={"Dismiss #{@name}"}
           class="shrink-0 flex items-center justify-center size-[22px] rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
         >
           <.icon name="hero-x-mark-micro" class="size-4" />
@@ -775,5 +1248,117 @@ defmodule ArbiterWeb.SessionDockLive do
       </div>
     </div>
     """
+  end
+
+  @doc false
+  # The window's overflow. A title bar 11rem wide cannot hold four controls, and
+  # a kill button an operator's cursor crosses all day should not be one click
+  # from the end of a session — so the per-session controls live one deliberate
+  # click in, and Kill asks again after that.
+  attr :session, :any, required: true
+  attr :name, :string, required: true
+  attr :open?, :boolean, required: true
+  attr :expanded?, :boolean, required: true
+  attr :running?, :boolean, required: true
+  attr :info_open?, :boolean, required: true
+
+  defp window_menu(assigns) do
+    ~H"""
+    <div class="relative shrink-0">
+      <button
+        type="button"
+        id={"session-dock-menu-#{@session.id}"}
+        phx-click="toggle_menu"
+        phx-value-id={@session.id}
+        aria-haspopup="menu"
+        aria-expanded={to_string(@open?)}
+        aria-controls={"session-dock-menu-panel-#{@session.id}"}
+        aria-label={"Controls for #{@name}"}
+        class="flex items-center justify-center size-[22px] rounded-[var(--radius-field)] cursor-pointer bg-transparent border-0 text-[var(--text-label)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-card)]"
+      >
+        <.icon name="hero-ellipsis-horizontal-micro" class="size-4" />
+      </button>
+
+      <%!-- Opens *upward*: the dock is pinned to the bottom of the viewport,
+            so a menu that dropped down would render off-screen. --%>
+      <div
+        :if={@open?}
+        id={"session-dock-menu-panel-#{@session.id}"}
+        role="menu"
+        phx-click-away="close_menu"
+        class={[
+          "absolute bottom-full right-0 mb-1 z-40 w-[13rem] py-1",
+          "rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)]",
+          "bg-[var(--surface-card)] shadow-lg"
+        ]}
+      >
+        <button
+          type="button"
+          id={"session-dock-info-#{@session.id}"}
+          role="menuitem"
+          phx-click="toggle_info"
+          phx-value-id={@session.id}
+          class={menu_item_class()}
+        >
+          <.icon name="hero-information-circle-micro" class="size-4 shrink-0" />
+          {if @info_open?, do: "Hide info", else: "Info & cost"}
+        </button>
+
+        <button
+          :if={@running?}
+          type="button"
+          id={"session-dock-keep-alive-#{@session.id}"}
+          role="menuitem"
+          phx-click="toggle_keep_alive"
+          phx-value-id={@session.id}
+          class={menu_item_class()}
+        >
+          <.icon
+            name={if @session.keep_alive, do: "hero-bookmark-slash-micro", else: "hero-bookmark-micro"}
+            class="size-4 shrink-0"
+          />
+          {if @session.keep_alive, do: "Unpin keep_alive", else: "Pin keep_alive"}
+        </button>
+
+        <%!-- Detach is the same handler as collapse (see `handle_event/3`):
+              dropping this browser's reader and leaving the agent running is
+              what removing the pane already does. Only offered where there is
+              a reader to drop. --%>
+        <button
+          :if={@running? and @expanded?}
+          type="button"
+          id={"session-dock-detach-#{@session.id}"}
+          role="menuitem"
+          phx-click="detach"
+          phx-value-id={@session.id}
+          class={menu_item_class()}
+        >
+          <.icon name="hero-arrow-right-start-on-rectangle-micro" class="size-4 shrink-0" />
+          Detach (leave it running)
+        </button>
+
+        <button
+          :if={@running?}
+          type="button"
+          id={"session-dock-kill-#{@session.id}"}
+          role="menuitem"
+          phx-click="confirm_kill"
+          phx-value-id={@session.id}
+          class={[menu_item_class(), "text-[var(--text-danger,#e5484d)]"]}
+        >
+          <.icon name="hero-power-micro" class="size-4 shrink-0" />
+          Kill…
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  defp menu_item_class do
+    [
+      "flex w-full items-center gap-2 px-2.5 py-1.5 cursor-pointer",
+      "bg-transparent border-0 text-left text-[11.5px] text-[var(--text-secondary)]",
+      "hover:bg-[var(--surface-chrome)] hover:text-[var(--text-primary)]"
+    ]
   end
 end

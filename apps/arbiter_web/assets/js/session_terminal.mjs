@@ -125,7 +125,7 @@ export function createSessionTerminal(el, options = {}) {
   // No connect params. The dashboard is loopback-only by design (§10.4) and
   // `ArbiterWeb.SessionSocket` trusts a loopback peer without a token, so the
   // page has none to send; reaching the dashboard from elsewhere is Remote
-  // Control's job (§8), not a second auth scheme here. `SessionLive` now
+  // Control's job (§8), not a second auth scheme here. `SessionDockLive` now
   // checks the peer server-side and skips mounting this hook at all off
   // loopback (bd-2zskbb), so by the time this file runs, a connect attempt
   // here is never a doomed one. The socket also accepts
@@ -361,11 +361,37 @@ export function createSessionTerminal(el, options = {}) {
         attach(applyFit())
       }, SETTLE_DEADLINE_MS)
 
+  // The pane an agent left behind (bd-a292yj). The session dock keeps a window
+  // whose session has ended, with its final scrollback, until the operator
+  // dismisses it — so the one thing left to guarantee is that nothing typed
+  // into it can reach a pane that is gone.
+  //
+  // Belt and braces, because "nothing happens" is not observable from the
+  // outside: `SessionStream` already refuses to send once it is `finished`
+  // (which the channel's own `exit` sets), `disableStdin` stops xterm from
+  // emitting `onData` at all, and the cursor goes so the pane does not look
+  // like it is waiting for input. Scrollback, selection and copy all still
+  // work, which is the whole point of keeping it.
+  let readOnly = false
+
+  const setReadOnly = () => {
+    if (readOnly || disposed) return
+    readOnly = true
+
+    term.options.disableStdin = true
+    term.options.cursorBlink = false
+    term.blur()
+  }
+
   return {
     term,
     stream,
     renderer,
-    focus: () => term.focus(),
+    setReadOnly,
+    readOnly: () => readOnly,
+    focus: () => {
+      if (!readOnly) term.focus()
+    },
     blur: () => term.blur(),
     fit: applyFit,
     refit: scheduleFit,

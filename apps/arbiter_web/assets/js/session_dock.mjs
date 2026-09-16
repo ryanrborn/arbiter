@@ -81,19 +81,21 @@ function normalize(state) {
   return { open, expanded }
 }
 
-// -- the handover from /sessions/:id ------------------------------------------
+// -- the handover from another view -------------------------------------------
 //
-// `ArbiterWeb.SessionLive` hands its session to the dock with a `push_event`,
-// which LiveView delivers as a `window` event — so a *sibling* sticky view
-// hears it even though it shares no assigns with the page that sent it.
+// `ArbiterWeb.SessionIndexLive` hands a session to the dock with a
+// `push_event` — on Launch, and from any row's Open — which LiveView delivers
+// as a `window` event, so a *sibling* sticky view hears it even though it
+// shares no assigns with the page that sent it. (Before bd-a292yj deleted it,
+// `/sessions/:id` did the same thing on mount.)
 //
-// On a live navigation the dock's hook is already mounted and catches it
-// directly. On a **cold load** of `/sessions/:id` it is not: the parent view
-// joins, applies its patch and dispatches its events before its sticky
-// children have joined at all, and the request would land on nothing. So it is
-// also remembered here, by a listener installed when this module is imported —
-// which `app.js` does before `liveSocket.connect()` — and claimed by whichever
-// of the two gets there first.
+// When the dock's hook is already mounted it catches the event directly. On a
+// **cold load** it may not be: the parent view joins, applies its patch and
+// dispatches its events before its sticky children have joined at all, and the
+// request would land on nothing. So it is also remembered here, by a listener
+// installed when this module is imported — which `app.js` does before
+// `liveSocket.connect()` — and claimed by whichever of the two gets there
+// first.
 let pendingOpen = null
 
 export function rememberOpenRequest(detail) {

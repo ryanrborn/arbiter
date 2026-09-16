@@ -43,10 +43,11 @@ defmodule ArbiterWeb.LiveHooks do
   ## `:loopback`
 
   Assigns `:loopback?` — whether the browser on the other end is on this box.
-  It is the input to §10.4's one auth rule, and two pages need it: the session
-  dock, whose terminal rides a `/session` socket that trusts a loopback peer
-  and nothing else (bd-2zskbb), and `SessionLive`, which says the same thing
-  about the session it is showing.
+  It is the input to §10.4's one auth rule, and one surface needs it: the
+  session dock, whose terminal rides a `/session` socket that trusts a loopback
+  peer and nothing else (bd-2zskbb). Off loopback its window says so, and says
+  how to get in (an SSH port-forward), rather than mounting a pane that
+  silently never attaches.
 
   It has to be a *root* view's hook. `get_connect_info/2` is root-and-mount
   only, and `ArbiterWeb.SessionDockLive` is a nested, sticky child — so the
