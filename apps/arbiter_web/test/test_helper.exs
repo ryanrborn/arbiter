@@ -1,5 +1,6 @@
 System.delete_env("ARBITER_WORKTREE_ROOT")
 System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
+System.delete_env("ARBITER_MEMORY_ROOT")
 
 # bd-3ymdvi: `:node` tests drive the real terminal channel over a real
 # WebSocket using `scripts/verify_session_transport.mjs` — the same client the

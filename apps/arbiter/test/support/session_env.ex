@@ -18,7 +18,8 @@ defmodule Arbiter.Test.SessionEnv do
     :sessions_agent_command,
     :sessions_launch_command,
     :sessions_bridge_verify_timeout_ms,
-    :sessions_bridge_verify_poll_interval_ms
+    :sessions_bridge_verify_poll_interval_ms,
+    :memory_root
   ]
 
   @doc """
@@ -59,7 +60,8 @@ defmodule Arbiter.Test.SessionEnv do
       sessions_root: Path.join(base, "sessions"),
       sessions_runtime_dir: Path.join(base, "runtime"),
       primary_checkout: Path.join(base, "checkout"),
-      sessions_credentials_source: Path.join(base, "operator")
+      sessions_credentials_source: Path.join(base, "operator"),
+      memory_root: Path.join(base, "memory")
     ]
 
     File.mkdir_p!(overrides[:primary_checkout])

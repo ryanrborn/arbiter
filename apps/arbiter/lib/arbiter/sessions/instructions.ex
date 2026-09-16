@@ -102,14 +102,21 @@ defmodule Arbiter.Sessions.Instructions do
 
     ## Memory
 
-    * `memory/shared/` — the operator's memory layers, mounted **read-only**.
-      Read them freely. **Never write, edit, or delete anything under it.**
-      `MEMORY.md` is a single unlocked file and other sessions are reading it
-      concurrently; a write from here is a last-write-wins clobber of somebody
-      else's memory.
+    * `memory/shared/` — the operator's memory layers, mounted **read-only**,
+      one subdirectory per type: `user/`, `feedback/`, `reference/` (always
+      present) and `project/` (populated only when this session is bound to a
+      workspace, and only with that workspace's own memories — never another
+      workspace's). Read them freely. **Never write, edit, or delete anything
+      under it.** The source is a single unlocked file per memory and other
+      sessions are reading it concurrently; a write from here is a
+      last-write-wins clobber of somebody else's memory.
     * `memory/candidates/` — your write space. Anything you learn that is worth
       keeping goes here, one fact per file. A later promotion step (not yours)
-      reviews candidates into the shared layer.
+      reviews candidates into the shared layer. If a candidate is scoped to
+      this session's workspace rather than being general operator/behavioural
+      context, tag it `metadata.type: project` with `metadata.workspace_id`
+      set to this workspace's id — an untagged or mistagged candidate simply
+      never mounts for anyone, so when in doubt, tag it.
 
     ## Process discipline
 
