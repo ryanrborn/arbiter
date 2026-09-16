@@ -356,7 +356,7 @@ defmodule Arbiter.Sessions.Provisioning do
     #{shell_quote(paths.watchdog_script)} >/dev/null 2>&1 &
 
     cd #{shell_quote(session.cwd || paths.workspace)}
-    exec #{agent_command(opts)}
+    exec #{agent_command(session, opts)}
     """
 
     with :ok <- File.write(paths.launch_script, script),
@@ -437,16 +437,34 @@ defmodule Arbiter.Sessions.Provisioning do
   @doc """
   The agent invocation the launch wrapper `exec`s.
 
-  Overridable with `config :arbiter, :sessions_agent_command, "…"` — which is
-  how the live-systemd integration check pins a deterministic payload, and how
-  an install with `claude` somewhere unusual points at it.
+  Overridable with `config :arbiter, :sessions_agent_command, "…"` (or the
+  `:agent_command` option) — which is how the live-systemd integration check
+  pins a deterministic payload, and how an install with `claude` somewhere
+  unusual points at it. Either override wins outright and skips `--name`
+  entirely — a pinned/overridden payload is exactly what it says, not a
+  template to append flags to.
+
+  Absent an override, an operator-supplied `session.name` (bd-o2vtsz) becomes
+  `claude --name <name>`, single-quoted with embedded quotes escaped — the
+  name is operator text landing in a generated `sh` script that is `exec`'d,
+  so unescaped it would be command injection running as the operator. No name
+  → a bare `claude`, unchanged from before this option existed.
   """
-  @spec agent_command(keyword()) :: String.t()
-  def agent_command(opts \\ []) do
+  @spec agent_command(Session.t(), keyword()) :: String.t()
+  def agent_command(%Session{} = session, opts \\ []) do
     Keyword.get(opts, :agent_command) ||
       Application.get_env(:arbiter, :sessions_agent_command) ||
-      "claude"
+      default_agent_command(session)
   end
+
+  defp default_agent_command(%Session{name: name}) when is_binary(name) do
+    case String.trim(name) do
+      "" -> "claude"
+      trimmed -> "claude --name " <> shell_quote(trimmed)
+    end
+  end
+
+  defp default_agent_command(%Session{}), do: "claude"
 
   @doc """
   The dead-man's switch grace window, in seconds (§4.6 item 3, suggested 1h).

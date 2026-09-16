@@ -14,6 +14,19 @@ defmodule Arbiter.Sessions.Session do
 
   ## Fields
 
+    * `name` — an operator-supplied display name (bd-o2vtsz), passed through to
+      `claude --name` at launch (`Arbiter.Sessions.Provisioning`) so Arbiter and
+      the session agree. **Not** the cwd-derived name Claude Code keeps in its
+      own `sessions/<pid>.json` — every session's cwd basename is the literal
+      string `workspace`, so that name collides across the whole fleet and is
+      never used as a display label. `nil` means no operator name was given;
+      `Arbiter.Sessions.DisplayName.resolve/1` is the one place that decides
+      what to show instead (the session's own `ai-title`, then a short id).
+      Settable at create and updatable afterwards via `:rename`, but a rename
+      is **Arbiter-side only** — there is no way to safely rewrite a live
+      session's own `sessions/<pid>.json` from outside, so a later rename does
+      not reach Claude Code's prompt box / `/resume` picker / terminal title
+      for a session already running. Only `--name` at launch does.
     * `provider` — which agent CLI runs in the pane. `:claude_code` is the
       first (and currently only) implementation; the launch command itself is
       behind `Arbiter.Sessions.Provider` so a second provider is an adapter,
@@ -131,7 +144,8 @@ defmodule Arbiter.Sessions.Session do
         :provider_session_id,
         :auth_mode,
         :remote_control,
-        :can_dispatch
+        :can_dispatch,
+        :name
       ]
 
       # The OS handles and the §9.1 scaffold paths are both functions of the
@@ -263,10 +277,28 @@ defmodule Arbiter.Sessions.Session do
       accept [:keep_alive]
       require_atomic? false
     end
+
+    update :rename do
+      description """
+      Change the operator-supplied display name (bd-o2vtsz). Arbiter-side
+      only — a session already running keeps whatever name `--name` gave it
+      at launch; see the `name` attribute doc for why this does not reach a
+      live session's own `sessions/<pid>.json`.
+      """
+
+      accept [:name]
+      require_atomic? false
+    end
   end
 
   attributes do
     uuid_primary_key :id
+
+    attribute :name, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+      description "Operator-supplied display name (bd-o2vtsz); nil falls through the ladder."
+    end
 
     attribute :provider, :atom do
       allow_nil? false
