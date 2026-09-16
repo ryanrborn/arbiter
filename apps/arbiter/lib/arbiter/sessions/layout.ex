@@ -9,7 +9,8 @@ defmodule Arbiter.Sessions.Layout do
         config/               # CLAUDE_CONFIG_DIR (isolated, per session)
         CLAUDE.md             # generated: role, workspace binding, guardrails
         memory/
-          shared/             # read-only mounted layers (§9.4; phase 12 fills)
+          shared/             # read-only mounted layers, type-scoped (§9.4)
+            user/, feedback/, reference/, project/
           candidates/         # per-session write space (§9.4)
         transcript/           # raw PTY byte stream (§11)
         auth.env              # mode 0600, mode-A only (§10.3)
@@ -74,7 +75,11 @@ defmodule Arbiter.Sessions.Layout do
   @spec memory_dir(String.t()) :: String.t()
   def memory_dir(id), do: Path.join(session_dir(id), "memory")
 
-  @doc "Read-only shared memory layers; phase 12 mounts them, phase 3 only makes the point."
+  @doc """
+  Read-only shared memory layers (§9.4). `Arbiter.Sessions.Memory` populates
+  one subdirectory per `metadata.type` under here — `user/`, `feedback/`,
+  `reference/`, `project/` — with symlinks into the configured memory root.
+  """
   @spec memory_shared_dir(String.t()) :: String.t()
   def memory_shared_dir(id), do: Path.join(memory_dir(id), "shared")
 

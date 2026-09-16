@@ -49,6 +49,24 @@ defmodule Arbiter.Config.Paths do
   end
 
   @doc """
+  Root holding the shared memory layers a coordinator session mounts
+  read-only (RFC §9.4, `Arbiter.Sessions.Memory`).
+
+  Points at a flat directory of frontmatter-tagged `*.md` files — the
+  frontmatter convention documented on `Arbiter.Sessions.Memory` (a
+  `metadata.type` key, and for `project` a `metadata.workspace_id` key). This
+  is not the layout `arb init` produces today (`memory/MEMORY.md` has no such
+  frontmatter); an operator wanting real memory mounted into sessions must
+  point `ARBITER_MEMORY_ROOT` at a directory laid out this way. The default is
+  an empty directory that just happens not to exist yet, which
+  `Arbiter.Sessions.Memory` treats as "no memories" rather than an error.
+  """
+  @spec memory_root() :: String.t()
+  def memory_root do
+    resolve("ARBITER_MEMORY_ROOT", :memory_root, "~/.arbiter/memory")
+  end
+
+  @doc """
   The **primary checkout** — the source tree the live server runs from, and the
   thing RFC §10.2 exists to keep sessions out of.
 

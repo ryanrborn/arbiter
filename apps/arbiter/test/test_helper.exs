@@ -7,6 +7,11 @@ System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
 # `on_exit`, cleaning only its own tmp dir, would then never remove).
 System.delete_env("ARBITER_SESSIONS_ROOT")
 
+# bd-6dkpf1: same reason — an exported ARBITER_MEMORY_ROOT would beat both
+# config/test.exs and SessionEnv, mounting the operator's real memory into
+# test session scaffolds.
+System.delete_env("ARBITER_MEMORY_ROOT")
+
 # bd-bpt0ag: `:live_systemd` tests spawn REAL systemd user scopes and tmux
 # servers on whatever host runs them, so they are opt-in rather than part of
 # `mix precommit`. Run them deliberately:
