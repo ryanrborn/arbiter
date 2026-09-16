@@ -170,6 +170,10 @@ config :arbiter, :sessions_heartbeat, enabled: false
 # `Arbiter.Sessions.TranscriptRetention.sweep/1` synchronously (§11, phase 9).
 config :arbiter, :sessions_transcript_retention, enabled: false
 
+# A small cap here keeps `TranscriptTest`'s size-cap test from materialising
+# a 100 MB default three times over (bd-5pelo2 round 4 finding 4).
+config :arbiter, :sessions_transcript, max_bytes: 1024
+
 # Disable the Stage 3 canary ticker in test — it would otherwise walk every
 # workspace a test creates on a timer, off the sandbox connection. Tests drive
 # `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.

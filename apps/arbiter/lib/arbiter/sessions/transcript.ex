@@ -96,6 +96,64 @@ defmodule Arbiter.Sessions.Transcript do
   def exists?(id) when is_binary(id) and id != "", do: File.regular?(path_for(id))
 
   @doc """
+  Absolute path of `id`'s pipe-offset sidecar, `<id>.raw.offset`.
+
+  Not the transcript file's own size: redaction is not length-preserving
+  (`Redaction.redact/2` and `redact_patterns/1` both shrink matches to
+  `[REDACTED]`), so the transcript file's byte count cannot double as a
+  position in `Arbiter.Sessions.Naming.pipe_path/1`'s pipe file. This sidecar
+  tracks that position directly — how far into the pipe file `Stream` has
+  already fed through redaction — so a reader started after an `arbiter`
+  restart can catch the transcript up on whatever the pane wrote while
+  nobody was reading (bd-5pelo2 round 4 finding 1).
+  """
+  @spec offset_path_for(String.t()) :: String.t()
+  def offset_path_for(id) when is_binary(id) and id != "" do
+    path_for(id) <> ".offset"
+  end
+
+  @doc """
+  The pipe-file offset last persisted for `id` by `write_offset/2`, or `nil`
+  if none has been recorded yet (a session never captured, or one predating
+  this sidecar).
+  """
+  @spec read_offset(String.t()) :: non_neg_integer() | nil
+  def read_offset(id) when is_binary(id) and id != "" do
+    case File.read(offset_path_for(id)) do
+      {:ok, contents} ->
+        case Integer.parse(String.trim(contents)) do
+          {offset, ""} when offset >= 0 -> offset
+          _ -> nil
+        end
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  @doc """
+  Persist `offset` (a byte position in `id`'s pipe file) as the point its
+  transcript capture has reached. Best-effort: a write failure is logged and
+  swallowed, same posture as `append_open/3`.
+  """
+  @spec write_offset(String.t(), non_neg_integer()) :: :ok
+  def write_offset(id, offset) when is_binary(id) and id != "" and is_integer(offset) do
+    path = offset_path_for(id)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path, Integer.to_string(offset)) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "Sessions.Transcript: offset write failed path=#{path}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  @doc """
   The redact-on-write secret list for `session` — its workspace's registered
   secrets, or `[]` for a cross-workspace session (`workspace_id: nil`, the
   coordinator's normal shape) or one whose workspace failed to load.

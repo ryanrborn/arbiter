@@ -5,12 +5,17 @@ defmodule Arbiter.Sessions.TranscriptRetention do
   longer than the retention window (§11, phase 9 of
   `docs/browser-hosted-coordinator-sessions.md`).
 
-  Only the transcript file is removed here — the rest of the session's
-  scaffold (`Arbiter.Sessions.Layout`) is a separate concern this sweep does
-  not touch. Modelled directly on `Arbiter.Events.Retention`: an injectable
-  `:now` and explicit options for tests, a config-backed default for
-  production, and a best-effort sweep that logs and swallows rather than
-  crashing its caller.
+  The session's tmux pipe file (`Arbiter.Sessions.Naming.pipe_path/1`) is
+  removed alongside the transcript: it lives on tmpfs
+  (`$XDG_RUNTIME_DIR/arbiter`), is no longer closed when the last reader
+  detaches (`Arbiter.Sessions.Stream`'s moduledoc, bd-5pelo2 finding 1), and
+  nothing else ever deletes it — without this sweep an ended session's raw
+  PTY bytes would sit in RAM forever (bd-5pelo2 round 4 finding 3). The rest
+  of the session's scaffold (`Arbiter.Sessions.Layout`) is a separate concern
+  this sweep does not touch. Modelled directly on `Arbiter.Events.Retention`:
+  an injectable `:now` and explicit options for tests, a config-backed
+  default for production, and a best-effort sweep that logs and swallows
+  rather than crashing its caller.
 
   ## Configuration
 
@@ -29,6 +34,7 @@ defmodule Arbiter.Sessions.TranscriptRetention do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Transcript
 
@@ -71,8 +77,16 @@ defmodule Arbiter.Sessions.TranscriptRetention do
   end
 
   defp purge_one(%Session{id: id}) do
-    path = Transcript.path_for(id)
+    rm_if_exists(Transcript.path_for(id))
+    rm_if_exists(Transcript.offset_path_for(id))
 
+    case Naming.pipe_path(id) do
+      {:ok, pipe_path} -> rm_if_exists(pipe_path)
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp rm_if_exists(path) do
     if File.regular?(path) do
       case File.rm(path) do
         :ok ->

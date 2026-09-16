@@ -234,6 +234,14 @@ defmodule Arbiter.Worker.SessionArchive do
   discovered). Subagent transcripts are walked exactly as `archive/4` already
   does, via `archive_subagents/3` deriving the provider session id from the
   located path.
+
+  The returned `report()`'s `:run_id` field holds `session_id` here, not a
+  run id — this entry point reuses `archive/4`'s report shape rather than
+  defining a session-specific one. Archived files also land under the same
+  `OutputLog.root()` namespace `archive/4` writes run archives into, keyed by
+  whichever id was passed in; a session id colliding with a run id would
+  overwrite one with the other. Both are UUIDs, so this is not a practical
+  risk, but it is why nothing here checks for the collision.
   """
   @spec archive_session(String.t(), String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, report()}

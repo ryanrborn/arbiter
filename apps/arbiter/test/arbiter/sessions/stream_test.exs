@@ -16,6 +16,7 @@ defmodule Arbiter.Sessions.StreamTest do
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Stream
   alias Arbiter.Sessions.Transcript
+  alias Arbiter.Test.MismatchedTerminal
   alias Arbiter.Test.ScriptedPty
 
   @moduletag :tmp_dir
@@ -329,6 +330,30 @@ defmodule Arbiter.Sessions.StreamTest do
       refute transcript =~ "MIIEpAIBAAKCAQEA1234567890"
       refute transcript =~ "-----BEGIN RSA PRIVATE KEY-----"
       assert transcript =~ "[REDACTED]"
+
+      :ok = Stream.stop(id)
+    end
+
+    test "bytes written to the pipe while no reader is alive are caught up on the next open (bd-5pelo2 round 4 finding 1)",
+         %{session: session, id: id, opts: opts} do
+      {:ok, _} = attach(session, opts)
+
+      ScriptedPty.emit(id, "hello\n")
+      assert_stdout(id, "hello\n")
+      :ok = Stream.stop(id)
+      assert File.read!(Transcript.path_for(id)) == "hello\n"
+
+      # Simulate the "arbiter restart" window: the pane's own pipe-pane
+      # keeps appending straight to the pipe file while no reader (and no
+      # `Stream` process at all) is alive to see it — `ScriptedPty`'s
+      # `streaming?` flag stays `true` across `Stream.stop/1`, matching the
+      # real tmux pipe's session-lifetime scope (bd-5pelo2 finding 1).
+      pipe_path = ScriptedPty.path(id)
+      File.write!(pipe_path, "goodbye\n", [:append, :binary])
+
+      {:ok, _} = attach(session, opts)
+
+      assert File.read!(Transcript.path_for(id)) == "hello\ngoodbye\n"
 
       :ok = Stream.stop(id)
     end
@@ -819,6 +844,53 @@ defmodule Arbiter.Sessions.StreamTest do
 
       assert {:error, {:tmux_failed, 1, "no server running"}} = attach(session, opts)
       wait_until(fn -> Stream.whereis(id) == nil end)
+    end
+  end
+
+  describe "ensure_reader/2 and terminal reconfiguration (bd-5pelo2 round 4 finding 2)" do
+    test "a later attach/2 reconfigures a reader ensure_reader/2 started under the wrong terminal",
+         %{session: session, id: id, opts: opts, tmp_dir: tmp_dir} do
+      :ok = Stream.ensure_reader(session, terminal: MismatchedTerminal, pipe_dir: tmp_dir)
+      wait_until(fn -> Stream.whereis(id) != nil end)
+
+      assert {:ok, attached} = attach(session, opts)
+      assert attached.snapshot == "SNAPSHOT"
+
+      ScriptedPty.emit(id, "hello")
+      assert assert_stdout(id, "hello") == 5
+    end
+
+    test "ensure_reader/2 is a no-op once a reader is already running", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+      pid = Stream.whereis(id)
+
+      :ok = Stream.ensure_reader(session, opts)
+
+      assert Stream.whereis(id) == pid
+    end
+
+    test "reconfiguration is skipped once a real client is already attached", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+      pid = Stream.whereis(id)
+
+      # A second attach asking for a different terminal must not reset the
+      # `seq` space out from under the client already streaming.
+      assert {:ok, _} =
+               attach(session, Keyword.put(opts, :terminal, MismatchedTerminal),
+                 subscriber: spawn(fn -> Process.sleep(:infinity) end)
+               )
+
+      assert Stream.whereis(id) == pid
+      ScriptedPty.emit(id, "hello")
+      assert assert_stdout(id, "hello") == 5
     end
   end
 

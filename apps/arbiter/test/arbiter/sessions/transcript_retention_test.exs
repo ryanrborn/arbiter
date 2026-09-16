@@ -10,6 +10,7 @@ defmodule Arbiter.Sessions.TranscriptRetentionTest do
   import Ecto.Query, only: [from: 2]
 
   alias Arbiter.Sessions
+  alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Transcript
   alias Arbiter.Sessions.TranscriptRetention
@@ -83,6 +84,33 @@ defmodule Arbiter.Sessions.TranscriptRetentionTest do
       backdate_ended_at(session, old)
 
       assert :ok = TranscriptRetention.sweep(retention_days: 30)
+    end
+
+    test "also deletes the session's tmux pipe file past the retention window" do
+      session = ended_session!()
+      :ok = Transcript.append(session.id, "hello")
+      {:ok, pipe_path} = Naming.pipe_path(session.id)
+      File.mkdir_p!(Path.dirname(pipe_path))
+      File.write!(pipe_path, "raw pty bytes")
+      old = DateTime.add(DateTime.utc_now(), -31, :day)
+      _session = backdate_ended_at(session, old)
+
+      assert :ok = TranscriptRetention.sweep(retention_days: 30)
+
+      refute File.exists?(pipe_path)
+    end
+
+    test "leaves the pipe file alone within the retention window" do
+      session = ended_session!()
+      {:ok, pipe_path} = Naming.pipe_path(session.id)
+      File.mkdir_p!(Path.dirname(pipe_path))
+      File.write!(pipe_path, "raw pty bytes")
+      recent = DateTime.add(DateTime.utc_now(), -1, :day)
+      _session = backdate_ended_at(session, recent)
+
+      assert :ok = TranscriptRetention.sweep(retention_days: 30)
+
+      assert File.exists?(pipe_path)
     end
   end
 end
