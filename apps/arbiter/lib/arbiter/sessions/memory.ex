@@ -51,6 +51,8 @@ defmodule Arbiter.Sessions.Memory do
   outlives re-provisioning.
   """
 
+  require Logger
+
   alias Arbiter.Config.Paths
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Session
@@ -76,15 +78,26 @@ defmodule Arbiter.Sessions.Memory do
     _ = File.rm_rf(shared_dir)
     File.mkdir_p!(shared_dir)
 
-    files = memory_files(root)
+    by_type =
+      root
+      |> memory_files()
+      |> Enum.map(fn path -> {path, frontmatter(path)} end)
+      |> Enum.group_by(fn {_path, fm} -> fm[:type] end)
 
     Enum.each(@shared_types, fn type ->
-      mount_type(shared_dir, type, matching(files, type))
+      mount_type(shared_dir, type, paths(by_type, type))
     end)
 
-    mount_type(shared_dir, "project", matching_project(files, session.workspace_id))
+    project_files =
+      by_type |> Map.get("project", []) |> matching_project(session.workspace_id)
+
+    mount_type(shared_dir, "project", project_files)
 
     :ok
+  end
+
+  defp paths(by_type, type) do
+    by_type |> Map.get(type, []) |> Enum.map(fn {path, _fm} -> path end)
   end
 
   defp mount_type(shared_dir, type, files) do
@@ -92,21 +105,26 @@ defmodule Arbiter.Sessions.Memory do
     File.mkdir_p!(dest_dir)
 
     Enum.each(files, fn path ->
-      File.ln_s(path, Path.join(dest_dir, Path.basename(path)))
-    end)
-  end
+      dest = Path.join(dest_dir, Path.basename(path))
 
-  defp matching(files, type) do
-    Enum.filter(files, fn path -> frontmatter(path)[:type] == type end)
+      case File.ln_s(path, dest) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "Arbiter.Sessions.Memory: could not mount #{path} at #{dest}: #{inspect(reason)}"
+          )
+      end
+    end)
   end
 
   defp matching_project(_files, nil), do: []
 
   defp matching_project(files, workspace_id) do
-    Enum.filter(files, fn path ->
-      fm = frontmatter(path)
-      fm[:type] == "project" and fm[:workspace_id] == workspace_id
-    end)
+    files
+    |> Enum.filter(fn {_path, fm} -> fm[:workspace_id] == workspace_id end)
+    |> Enum.map(fn {path, _fm} -> path end)
   end
 
   defp memory_files(root) do

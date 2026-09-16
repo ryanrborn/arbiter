@@ -1410,6 +1410,12 @@ Per the operator's decision ("a stale memory is worse"), a session mounts memory
 | `reference` | always, all sessions | read | pointers to external resources |
 | `project` | **only** the session's bound workspace | read | cites `file:line`/modules; rots fast; a vstim session must not load arbiter internals |
 
+A `project` memory scopes to a workspace via its own `metadata.workspace_id`
+frontmatter key (the workspace's id, matching `session.workspace_id`). A
+`project` memory with no `workspace_id` mounts for no session — the safe
+failure mode, per "a stale memory is worse" — rather than leaking into every
+workspace's session.
+
 **Shared layer is read-mostly.** A session never writes into it. Writes land in a
 **per-session candidate space**, on disk at:
 

@@ -264,6 +264,13 @@ config :arbiter,
 
 config :arbiter, :primary_checkout, "/nonexistent/arbiter-primary-checkout"
 
+# Shared memory root (bd-6dkpf1, RFC §9.4). Same reasoning as :sessions_root
+# above — under tmp so the suite never mounts the operator's real memory
+# files into throwaway session scaffolds.
+config :arbiter,
+       :memory_root,
+       Path.join(System.tmp_dir!(), "arbiter-test-memory-root")
+
 # Mode B copies the operator's real `~/.claude/.credentials.json` into a
 # session's config dir — correct in production (§8.2), catastrophic in a test
 # suite that provisions dozens of throwaway sessions under tmp. Point the

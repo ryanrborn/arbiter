@@ -112,7 +112,11 @@ defmodule Arbiter.Sessions.Instructions do
       last-write-wins clobber of somebody else's memory.
     * `memory/candidates/` — your write space. Anything you learn that is worth
       keeping goes here, one fact per file. A later promotion step (not yours)
-      reviews candidates into the shared layer.
+      reviews candidates into the shared layer. If a candidate is scoped to
+      this session's workspace rather than being general operator/behavioural
+      context, tag it `metadata.type: project` with `metadata.workspace_id`
+      set to this workspace's id — an untagged or mistagged candidate simply
+      never mounts for anyone, so when in doubt, tag it.
 
     ## Process discipline
 
