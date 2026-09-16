@@ -3275,15 +3275,19 @@ defmodule Arbiter.Worker.Watchdog do
         # coverage park (the park is only ever reached from the approved path),
         # so naming this park there would revoke its own lift on the next tick.
         {:wait,
-         %{
-           state
-           | coverage_unknown_polls: polls,
-             coverage_parked?: true,
-             coverage_park_poll: state.poll_count,
-             max_polls: :infinity
-         }}
+         lift_poll_ceiling(%{state | coverage_unknown_polls: polls, coverage_parked?: true})}
     end
   end
+
+  # Only when a finite ceiling is actually in force. If another episode already
+  # holds `max_polls: :infinity` for its own reasons — the merge stall in
+  # `do_apply_approved_auto_merge/1`, a block park — that lift is neither ours
+  # to take over nor, later, ours to give back, so nothing is recorded and
+  # `restore_poll_ceiling/1` leaves it alone.
+  defp lift_poll_ceiling(%{max_polls: cap} = state) when is_integer(cap),
+    do: %{state | max_polls: :infinity, coverage_park_poll: state.poll_count}
+
+  defp lift_poll_ceiling(state), do: state
 
   defp reset_coverage_episode(%{coverage_unknown_head: head} = state, head), do: state
 
@@ -3372,7 +3376,7 @@ defmodule Arbiter.Worker.Watchdog do
   # shadow mode the key is omitted rather than set to `nil`: passing a literal
   # `nil` typechecked as "an answer that cannot exist", which made dialyzer
   # prove `observe_coverage/4` never returns and then report the whole flag-off
-  # branch (`apply_legacy_decision`) as dead code (#1736 review round 1).
+  # branch as dead code (#1736 review round 1).
   defp with_coverage_answer(obs, nil), do: obs
 
   defp with_coverage_answer(obs, new),
