@@ -123,6 +123,10 @@ defmodule Arbiter.Application do
       # never on the sweep that first notices it. See
       # Arbiter.Sessions.OrphanReaper.
       Arbiter.Sessions.OrphanReaper,
+      # Deletes a session's persisted raw transcript once it has been :ended
+      # past the retention window (phase 9, RFC §11). See
+      # Arbiter.Sessions.TranscriptRetention.
+      Arbiter.Sessions.TranscriptRetention,
       # Terminal transport for browser-hosted coordinator sessions (bd-3ymdvi,
       # phase 4). One `Arbiter.Sessions.Stream` reader per *attached* session,
       # started on first attach and stopped when the last client leaves — so

@@ -222,6 +222,18 @@ config :arbiter, Arbiter.Sessions.Stream,
 # bytes for a repaint, so the snapshot is a window onto it.
 config :arbiter, :sessions_snapshot_lines, 2_000
 
+# Persisted raw PTY transcript (§11, phase 9). `max_bytes` is a per-session
+# safety ceiling — measured sessions land well under it (§11: 25 MB for a
+# long JSONL, and the raw stream is smaller still). `retention_days` outlives
+# Claude Code's own ~21-day session-store prune (§11's whole reason to exist)
+# with margin for an operator's own investigation window.
+config :arbiter, :sessions_transcript,
+  max_bytes: 100 * 1024 * 1024,
+  retention_days: 30
+
+# See `Arbiter.Sessions.TranscriptRetention` moduledoc for the sweep cadence.
+config :arbiter, :sessions_transcript_retention, interval_ms: 6 * 60 * 60_000
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

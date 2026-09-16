@@ -261,7 +261,10 @@ defmodule Arbiter.Sessions do
   Every path that ends a session — Kill, a payload exiting on its own, the
   adoption/orphan sweep finding a vanished scope — runs through here, so this
   is also the single place that tells `ArbiterWeb.SessionIndexLive` (and any
-  other subscriber) to refresh (bd-bsdeb2, `lifecycle_topic/0`).
+  other subscriber) to refresh (bd-bsdeb2, `lifecycle_topic/0`), and the
+  single place that archives the session's own JSONL (§11, phase 9) — the
+  CLI prunes its session store at ~21 days, so this is the last reliable
+  moment to copy it out.
   """
   @spec mark_ended(Session.t(), String.t()) :: {:ok, Session.t()} | {:error, term()}
   def mark_ended(%Session{} = session, reason) when is_binary(reason) do
@@ -278,8 +281,25 @@ defmodule Arbiter.Sessions do
 
     with {:ok, ended} <- Ash.update(current, %{end_reason: reason}, action: :mark_ended) do
       Phoenix.PubSub.broadcast(Arbiter.PubSub, lifecycle_topic(), {:session_ended, ended.id})
+      _ = archive_session_jsonl(ended)
       {:ok, ended}
     end
+  end
+
+  # Best-effort, and never on the caller's critical path: `archive_session/4`
+  # already reduces every failure mode to `{:ok, report}` (see its moduledoc),
+  # so this can only fail by raising, which is exactly what the `rescue` is
+  # for — a session ending must never be blocked by its own archival.
+  defp archive_session_jsonl(%Session{} = session) do
+    Arbiter.Worker.SessionArchive.archive_coordinator_session(session)
+  rescue
+    e ->
+      Logger.warning(
+        "Sessions.mark_ended: archive_coordinator_session raised for #{session.id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
   end
 
   @doc """

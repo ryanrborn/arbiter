@@ -155,6 +155,7 @@ defmodule Arbiter.Sessions.Stream do
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Session
+  alias Arbiter.Sessions.Transcript
   alias Arbiter.Usage.ClaudeSessionFile
 
   require Logger
@@ -371,6 +372,7 @@ defmodule Arbiter.Sessions.Stream do
       opts: opts,
       config: config,
       path: pipe_path(session, opts),
+      redact_values: redact_values(session, opts),
       fd: nil,
       seq: 0,
       ring: :queue.new(),
@@ -676,6 +678,7 @@ defmodule Arbiter.Sessions.Stream do
   defp push_frame(state, data) do
     seq = state.seq + byte_size(data)
     frame = Frame.encode(seq, data)
+    _ = Transcript.append(state.id, data, state.redact_values)
 
     state
     |> Map.put(:seq, seq)
@@ -1078,6 +1081,18 @@ defmodule Arbiter.Sessions.Stream do
 
       dir ->
         Path.join(dir, Naming.pipe_basename(session.id))
+    end
+  end
+
+  # Resolved once, at reader start, and reused for every frame's transcript
+  # write (`Arbiter.Sessions.Transcript.append/3`) rather than re-fetched: a
+  # DB round trip per PTY poll tick would compete with the tick's own 25ms
+  # budget. `:redact_values` is a test seam so a suite need not fixture a
+  # whole workspace to assert redaction.
+  defp redact_values(session, opts) do
+    case Keyword.fetch(opts, :redact_values) do
+      {:ok, values} -> values
+      :error -> Transcript.redact_values_for(session)
     end
   end
 

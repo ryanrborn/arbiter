@@ -24,6 +24,21 @@ defmodule Arbiter.Redaction do
 
   @placeholder "[REDACTED]"
 
+  # Shape-based, not value-based: these catch a credential nobody registered
+  # as a workspace secret — a token an agent echoed, or one an operator pasted
+  # into a coordinator session's raw PTY stream (`Arbiter.Sessions.Transcript`,
+  # §11). Longest/most-specific patterns are not order-sensitive here the way
+  # `redact/2`'s value list is, because each pattern matches a disjoint shape.
+  @credential_patterns [
+    ~r/sk-ant-[A-Za-z0-9_-]{20,}/,
+    ~r/sk-[A-Za-z0-9]{20,}/,
+    ~r/gh[pousr]_[A-Za-z0-9]{20,}/,
+    ~r/AKIA[0-9A-Z]{16}/,
+    ~r/xox[baprs]-[A-Za-z0-9-]{10,}/,
+    ~r/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----/s,
+    ~r/Bearer\s+[A-Za-z0-9\-_.=]{20,}/
+  ]
+
   @doc "The literal string substituted in place of a redacted secret."
   @spec placeholder() :: String.t()
   def placeholder, do: @placeholder
@@ -49,4 +64,22 @@ defmodule Arbiter.Redaction do
   end
 
   def redact(text, _secret_values), do: text
+
+  @doc """
+  Scrub common credential-shaped substrings by pattern rather than by exact
+  value — complementary to `redact/2`, not a replacement for it. `redact/2`
+  only ever removes a value a human explicitly marked secret; this catches
+  the shape of a live token nobody registered (`Arbiter.Sessions.Transcript`
+  runs both, in that order, on every byte of a coordinator session's raw PTY
+  capture).
+  """
+  @spec redact_patterns(String.t()) :: String.t()
+  @spec redact_patterns(term()) :: term()
+  def redact_patterns(text) when is_binary(text) do
+    Enum.reduce(@credential_patterns, text, fn pattern, acc ->
+      Regex.replace(pattern, acc, @placeholder)
+    end)
+  end
+
+  def redact_patterns(text), do: text
 end

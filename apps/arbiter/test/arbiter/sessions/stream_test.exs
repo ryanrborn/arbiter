@@ -15,6 +15,7 @@ defmodule Arbiter.Sessions.StreamTest do
   alias Arbiter.Sessions.Frame
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Stream
+  alias Arbiter.Sessions.Transcript
   alias Arbiter.Test.ScriptedPty
 
   @moduletag :tmp_dir
@@ -162,6 +163,49 @@ defmodule Arbiter.Sessions.StreamTest do
 
       ScriptedPty.emit(id, "NEW")
       assert assert_stdout(id, "NEW") == 13
+    end
+  end
+
+  describe "persisted transcript (§11, phase 9)" do
+    test "every pumped byte is also appended to the durable raw transcript", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+
+      ScriptedPty.emit(id, "hello")
+      assert_stdout(id, "hello")
+      ScriptedPty.emit(id, " world")
+      assert_stdout(id, " world")
+
+      assert File.read!(Transcript.path_for(id)) == "hello world"
+    end
+
+    test "redacts a known secret before it reaches the durable transcript", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, Keyword.put(opts, :redact_values, ["super-secret-value"]))
+
+      ScriptedPty.emit(id, "token=super-secret-value here")
+      assert_stdout(id, "token=super-secret-value here")
+
+      assert File.read!(Transcript.path_for(id)) == "token=[REDACTED] here"
+    end
+
+    test "redacts a credential-shaped token even when it is not a registered secret", %{
+      session: session,
+      id: id,
+      opts: opts
+    } do
+      {:ok, _} = attach(session, opts)
+
+      ScriptedPty.emit(id, "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz")
+      assert_stdout(id, "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz")
+
+      assert File.read!(Transcript.path_for(id)) == "ANTHROPIC_API_KEY=[REDACTED]"
     end
   end
 
