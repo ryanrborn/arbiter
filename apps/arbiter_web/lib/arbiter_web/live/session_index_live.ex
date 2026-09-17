@@ -717,6 +717,9 @@ defmodule ArbiterWeb.SessionIndexLive do
   defp dispatch_label(%{can_dispatch: true}), do: " · can dispatch"
   defp dispatch_label(_session), do: ""
 
+  defp remote_control_label(%{remote_control: true, bridge_status: :unavailable}),
+    do: " · remote control bridge unavailable"
+
   defp remote_control_label(%{remote_control: true}), do: " · remote control requested"
   defp remote_control_label(_session), do: ""
 end

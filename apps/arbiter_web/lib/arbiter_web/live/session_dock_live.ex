@@ -1510,6 +1510,23 @@ defmodule ArbiterWeb.SessionDockLive do
           {@name}
         </button>
 
+        <%!-- §8.3's bridge-verification result, persisted (bd-cdretj) rather
+              than only broadcast live: the usual case is that nobody is
+              attached in the ~15s after launch when verification finishes,
+              so a live-only signal is gone by the time an operator opens
+              this window. Shown in the title bar — collapsed or expanded —
+              so it survives a fresh mount, unlike the hook-owned status
+              strip's `data-role="meta"`, which only ever reflects a signal
+              that arrived while a client was already connected. --%>
+        <span
+          :if={@session.remote_control and @session.bridge_status == :unavailable}
+          id={"session-dock-bridge-unavailable-#{@session.id}"}
+          title="Remote Control's bridge never came up — /remote-control in the session to retry."
+          class="shrink-0 px-1.5 h-[18px] flex items-center rounded-[var(--radius-field)] text-[10px] font-medium bg-[var(--arb-danger-bg,#3a1d1d)] text-[var(--arb-danger,#f87171)]"
+        >
+          bridge unavailable
+        </span>
+
         <%!-- Why it is over, in the title bar, where a collapsed window can
               still say it (bd-a292yj). Truncated by design; the whole reason
               is in the tooltip and in the info side. --%>

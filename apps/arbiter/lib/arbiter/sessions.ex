@@ -454,6 +454,23 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
+  Persist that §8.3's bridge-verification poll never found a `bridge-session`
+  record (bd-cdretj).
+
+  `verify_bridge/2` already calls `broadcast_error/2` on this outcome, but
+  that is fire-and-forget over `Phoenix.PubSub`: a session with no attached
+  client at that moment never sees it, and the usual case is exactly that —
+  verification runs in the ~15s right after launch, before an operator has
+  opened the session. This gives a client that attaches *after* the fact
+  something durable to check instead of a plain terminal indistinguishable
+  from a healthy one.
+  """
+  @spec mark_bridge_unavailable(Session.t()) :: {:ok, Session.t()} | {:error, term()}
+  def mark_bridge_unavailable(%Session{} = session) do
+    Ash.update(session, %{}, action: :mark_bridge_unavailable)
+  end
+
+  @doc """
   The usage-ledger rows attributable to a session, oldest first.
 
   Joined **by string** on the provider session id, not by foreign key (§7.4
@@ -691,6 +708,8 @@ defmodule Arbiter.Sessions do
             Logger.warning(
               "Arbiter.Sessions: remote control bridge never came up for #{session.id}"
             )
+
+            _ = mark_bridge_unavailable(session)
 
             broadcast_error(session.id, %{
               code: "bridge_unavailable",

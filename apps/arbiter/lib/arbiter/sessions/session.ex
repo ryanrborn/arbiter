@@ -84,6 +84,12 @@ defmodule Arbiter.Sessions.Session do
     * `end_reason` — free text saying *why* it ended: an operator kill, a failed
       launch, or the adoption sweep finding the scope vanished. §4.6 requires the
       sweep to record a reason rather than silently flipping rows.
+    * `bridge_status` — `nil` until §8.3's bridge-verification poll finds no
+      `bridge-session` record, then `:unavailable` (`mark_bridge_unavailable`,
+      bd-cdretj). `Arbiter.Sessions.broadcast_error/2`'s live PubSub signal for
+      the same event only reaches a client already attached when it fires —
+      normally nobody, since verification runs in the ~15s right after launch —
+      so this is what a client attaching afterwards has to go on instead.
 
   ## No FK to the ledger
 
@@ -291,6 +297,22 @@ defmodule Arbiter.Sessions.Session do
       accept [:name]
       require_atomic? false
     end
+
+    update :mark_bridge_unavailable do
+      description """
+      §8.3's bridge-verification poll timed out with no `bridge-session`
+      record. Persisted (bd-cdretj) so a client that attaches after
+      `broadcast_error/2`'s fire-and-forget PubSub message already went
+      out — the normal case, since verification runs in the ~15s right
+      after launch and an operator is rarely already attached — still sees
+      that the bridge never came up, instead of a plain terminal that looks
+      no different from a healthy one.
+      """
+
+      accept []
+      require_atomic? false
+      change set_attribute(:bridge_status, :unavailable)
+    end
   end
 
   validations do
@@ -428,6 +450,18 @@ defmodule Arbiter.Sessions.Session do
     attribute :end_reason, :string do
       public? true
       constraints max_length: 512, trim?: true
+    end
+
+    attribute :bridge_status, :atom do
+      public? true
+      constraints one_of: [:unavailable]
+
+      description """
+      `nil` until §8.3's bridge-verification poll finds no `bridge-session`
+      record (`mark_bridge_unavailable`, bd-cdretj) — a durable copy of
+      what `Arbiter.Sessions.broadcast_error/2`'s live-only signal cannot
+      guarantee an operator ever sees.
+      """
     end
 
     create_timestamp :inserted_at
