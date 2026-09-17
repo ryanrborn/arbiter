@@ -19,7 +19,7 @@ import assert from "node:assert/strict"
 
 import { DOCK_STORAGE_KEY, readDockState, writeDockState } from "../../assets/js/session_dock.mjs"
 
-const EMPTY = { open: [], expanded: null }
+const EMPTY = { open: [], expanded: null, sizes: {} }
 
 function memoryStore(initial = {}) {
   const data = new Map(Object.entries(initial))
@@ -77,9 +77,13 @@ test("unparseable or wrongly-shaped contents read as an empty dock", () => {
 
 test("a well-formed payload round-trips", () => {
   const store = memoryStore()
-  writeDockState(store, { open: ["a", "b"], expanded: "b" })
+  writeDockState(store, { open: ["a", "b"], expanded: "b", sizes: { b: "side" } })
 
-  assert.deepEqual(readDockState(store), { open: ["a", "b"], expanded: "b" })
+  assert.deepEqual(readDockState(store), {
+    open: ["a", "b"],
+    expanded: "b",
+    sizes: { b: "side" }
+  })
 })
 
 test("non-string entries and a non-string expanded id are dropped on read", () => {
@@ -87,7 +91,8 @@ test("non-string entries and a non-string expanded id are dropped on read", () =
 
   assert.deepEqual(readDockState(memoryStore({ [DOCK_STORAGE_KEY]: raw })), {
     open: ["a", "b"],
-    expanded: null
+    expanded: null,
+    sizes: {}
   })
 })
 
@@ -96,8 +101,61 @@ test("an expanded id that is not open is dropped on read", () => {
 
   assert.deepEqual(readDockState(memoryStore({ [DOCK_STORAGE_KEY]: raw })), {
     open: ["a"],
-    expanded: null
+    expanded: null,
+    sizes: {}
   })
+})
+
+// -- the per-session size preset (bd-covojz) ----------------------------------
+//
+// The size of the expanded window is the same *kind* of thing as which windows
+// are open: a browser preference, not fleet state. It rides in the same
+// payload, under the same guards — a design session reopens as a side panel
+// and a quick one stays Compact, and a store that is blocked, full or
+// hand-edited costs the operator the preference rather than the dock.
+
+test("a size for a session that is not open is dropped on read", () => {
+  const raw = JSON.stringify({ open: ["a"], expanded: "a", sizes: { a: "max", b: "side" } })
+
+  assert.deepEqual(readDockState(memoryStore({ [DOCK_STORAGE_KEY]: raw })), {
+    open: ["a"],
+    expanded: "a",
+    sizes: { a: "max" }
+  })
+})
+
+test("a size that is not one of the three presets is dropped on read", () => {
+  const raw = JSON.stringify({
+    open: ["a", "b", "c"],
+    expanded: null,
+    sizes: { a: "huge", b: 7, c: "side" }
+  })
+
+  assert.deepEqual(readDockState(memoryStore({ [DOCK_STORAGE_KEY]: raw })), {
+    open: ["a", "b", "c"],
+    expanded: null,
+    sizes: { c: "side" }
+  })
+})
+
+test("a wrongly-shaped sizes value reads as no preferences at all", () => {
+  for (const sizes of [null, "side", 7, ["side"]]) {
+    const raw = JSON.stringify({ open: ["a"], expanded: null, sizes })
+
+    assert.deepEqual(
+      readDockState(memoryStore({ [DOCK_STORAGE_KEY]: raw })).sizes,
+      {},
+      `for ${JSON.stringify(sizes)}`
+    )
+  }
+})
+
+test("Compact is the default and is not written back", () => {
+  const store = memoryStore()
+
+  writeDockState(store, { open: ["a", "b"], expanded: "a", sizes: { a: "compact", b: "max" } })
+
+  assert.deepEqual(readDockState(store).sizes, { b: "max" })
 })
 
 test("a store that throws on write is survivable and changes nothing", () => {

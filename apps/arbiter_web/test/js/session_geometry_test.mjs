@@ -329,3 +329,70 @@ test("interacting with an adopted client reclaims the pane, and the other adopts
     { cols: 100, rows: 30 }
   ])
 })
+
+// -- the size presets (bd-covojz) ---------------------------------------------
+//
+// The epic rejected free drag-resize partly because a continuous resize is the
+// worst case for this seam: every frame of a drag is a new geometry against a
+// pane every attached client shares. The three presets are the answer — each
+// one is a *single discrete* geometry change, taken through the same forced
+// refit a keypress takes (`terminal.reclaim()`), so what has to hold is that
+// one preset change is one fit, one push and one pane resize, and that landing
+// on the same geometry twice is silent.
+
+test("each size preset claims the pane exactly once", async () => {
+  const pane = new FakePane()
+  // Compact: 44rem of window is about 86 columns.
+  const client = new FakeClient(pane, { cols: 86, rows: 18 }).mount()
+  await sleep(10)
+
+  // Side panel: narrower, taller — the floor is 80 columns (§6.3).
+  client.own = { cols: 80, rows: 52 }
+  client.refit({ force: true })
+  await sleep(10)
+
+  // Maximized.
+  client.own = { cols: 210, rows: 56 }
+  client.refit({ force: true })
+  await sleep(10)
+
+  assert.deepEqual(client.resizePushes, [
+    { cols: 86, rows: 18 },
+    { cols: 80, rows: 52 },
+    { cols: 210, rows: 56 }
+  ])
+  assert.deepEqual(pane.resizes.length, 3, "one pane resize per preset, not one per frame")
+  assert.deepEqual(client.term, { cols: 210, rows: 56 }, "and the terminal follows")
+  assert.equal(client.geometry.adopted, false)
+})
+
+test("re-picking the size a window already has says nothing on the wire", async () => {
+  const pane = new FakePane()
+  const client = new FakeClient(pane, { cols: 86, rows: 18 }).mount()
+  await sleep(10)
+
+  // The forced refit the preset button fires, at a box that did not move.
+  client.refit({ force: true })
+  await sleep(10)
+
+  // `SessionStream.resize` drops a push that would land the pane where it
+  // already is, so a redundant preset click costs the pane nothing.
+  assert.deepEqual(pane.resizes, [{ cols: 86, rows: 18 }])
+})
+
+// A side panel the operator resizes the *browser* under is the one case the
+// dock cannot see coming: the panel is a share of the viewport, so the pane's
+// geometry moves without anything in the dock being clicked. The terminal's
+// own `window.resize` listener is a forced refit for exactly this reason.
+test("a browser resize under a side panel refits and takes the pane with it", async () => {
+  const pane = new FakePane()
+  const client = new FakeClient(pane, { cols: 80, rows: 52 }).mount()
+  await sleep(10)
+
+  client.own = { cols: 96, rows: 52 }
+  client.refit({ force: true })
+  await sleep(10)
+
+  assert.deepEqual(pane.resizes.at(-1), { cols: 96, rows: 52 })
+  assert.deepEqual(client.term, { cols: 96, rows: 52 })
+})

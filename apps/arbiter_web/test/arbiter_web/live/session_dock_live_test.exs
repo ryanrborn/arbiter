@@ -1429,4 +1429,312 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert {:ok, %{name: "born in the dock"}} = Sessions.get(id)
     end
   end
+
+  # bd-covojz. Today's expanded window suits "let's file this issue"; design
+  # work needs room. Three presets rather than a drag handle — the epic
+  # rejected free-floating windows partly because a continuous resize is the
+  # worst case for terminal refit, and each of these is one discrete geometry
+  # change phase 2's refit path already handles.
+  describe "the expanded window's size presets" do
+    test "the title bar offers all three, with Compact the default", %{conn: conn} do
+      session = launch!(name: "sizeable")
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="compact"]))
+
+      for size <- ~w(compact side max) do
+        assert has_element?(dock, "#session-dock-size-#{size}-#{session.id}")
+      end
+
+      assert has_element?(
+               dock,
+               ~s(#session-dock-size-compact-#{session.id}[aria-pressed="true"])
+             )
+
+      assert has_element?(dock, ~s(#session-dock-size-side-#{session.id}[aria-pressed="false"]))
+    end
+
+    test "a collapsed window offers no size control", %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+      {_view, dock} = dock(conn)
+
+      open!(dock, a)
+      open!(dock, b)
+
+      refute has_element?(dock, "#session-dock-size-side-#{a.id}")
+      assert has_element?(dock, "#session-dock-size-side-#{b.id}")
+    end
+
+    test "picking Side panel docks the window right, at full height", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_click(element(dock, "#session-dock-size-side-#{session.id}"))
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="side"]))
+      assert has_element?(dock, ~s(#session-dock-size-side-#{session.id}[aria-pressed="true"]))
+
+      html = render(dock)
+      # The panel is a share of the viewport floored at 80 columns (§6.3), and
+      # the page is inset by exactly the same variable so nothing hides under
+      # it — both sides of that contract are `--session-dock-side-width`.
+      assert html =~ "var(--session-dock-side-width)"
+      assert html =~ "right-0"
+    end
+
+    test "Maximized fills the page and Compact takes it back", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_click(element(dock, "#session-dock-size-max-#{session.id}"))
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="max"]))
+
+      render_click(element(dock, "#session-dock-size-compact-#{session.id}"))
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="compact"]))
+    end
+
+    # The whole point of a preset is that the terminal follows it. The dock
+    # cannot reach into the pane, so it says so on the wire and both hooks —
+    # the dock's layout half and the terminal's `reclaim` — hear the same
+    # event. Reusing phase 2's refit path rather than a second one.
+    test "every size change is announced to the client", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      assert_push_event(dock, "session-dock:size", %{id: _, size: "compact"})
+
+      render_click(element(dock, "#session-dock-size-side-#{session.id}"))
+      assert_push_event(dock, "session-dock:size", %{id: id, size: "side"})
+      assert id == session.id
+    end
+
+    test "collapsing the window announces that there is no sized window left",
+         %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      render_click(element(dock, "#session-dock-size-max-#{session.id}"))
+
+      render_click(element(dock, "#session-dock-title-#{session.id}"))
+
+      assert_push_event(dock, "session-dock:size", %{id: nil, size: "compact"})
+    end
+
+    test "a size is remembered per session, not for the dock", %{conn: conn} do
+      design = launch!(name: "design")
+      quick = launch!(name: "quick")
+      {_view, dock} = dock(conn)
+
+      open!(dock, design)
+      render_click(element(dock, "#session-dock-size-side-#{design.id}"))
+
+      open!(dock, quick)
+      assert has_element?(dock, ~s(#session-dock-window-#{quick.id}[data-size="compact"]))
+
+      # Back to the design session: it reopens as a side panel.
+      render_click(element(dock, "#session-dock-title-#{design.id}"))
+      assert has_element?(dock, ~s(#session-dock-window-#{design.id}[data-size="side"]))
+    end
+
+    test "the size rides in the persisted payload", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_click(element(dock, "#session-dock-size-max-#{session.id}"))
+
+      id = session.id
+      assert_push_event(dock, "session-dock:persist", %{open: [^id], sizes: %{^id => "max"}})
+    end
+
+    test "a restored size is applied on re-expand and on reload", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => [session.id],
+        "expanded" => session.id,
+        "sizes" => %{session.id => "side"}
+      })
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="side"]))
+    end
+
+    # Same rule as every other half of this payload: storage is whatever a
+    # previous version, a half-written write or a devtools console left there.
+    test "a hostile or stale sizes payload renders a Compact window", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+
+      for sizes <- [
+            "not-a-map",
+            ["side"],
+            %{session.id => "enormous"},
+            %{session.id => 7},
+            %{"11111111-1111-1111-1111-111111111111" => "side"}
+          ] do
+        render_hook(dock, "restore", %{
+          "open" => [session.id],
+          "expanded" => session.id,
+          "sizes" => sizes
+        })
+
+        assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="compact"])),
+               "for #{inspect(sizes)}"
+      end
+    end
+
+    test "setting a size for a window that is not open changes nothing", %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_hook(dock, "set_size", %{
+        "id" => "11111111-1111-1111-1111-111111111111",
+        "size" => "max"
+      })
+
+      render_hook(dock, "set_size", %{"id" => session.id, "size" => "enormous"})
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="compact"]))
+    end
+
+    # The narrow-viewport rule. The client owns the measurement — only it knows
+    # the viewport and the pane's cell — and says so; the server renders the
+    # Maximized geometry and the title bar says why.
+    test "a viewport too narrow for a side panel falls back to Maximized, and says so",
+         %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+      render_click(element(dock, "#session-dock-size-side-#{session.id}"))
+
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="max"]))
+      assert has_element?(dock, "#session-dock-size-fallback-#{session.id}")
+      # The operator's choice is not silently rewritten — Side panel is still
+      # the pressed control, and it comes back when the window has room again.
+      assert has_element?(dock, ~s(#session-dock-size-side-#{session.id}[aria-pressed="true"]))
+
+      render_hook(dock, "size_fallback", %{"fallback" => false})
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="side"]))
+      refute has_element?(dock, "#session-dock-size-fallback-#{session.id}")
+    end
+
+    # The server clears `size_fallback?` on every size change and re-asks the
+    # client, which is the only half of the loop it can run. The failure mode
+    # that cost round 1 was the *client* swallowing a re-asked answer that had
+    # not changed, leaving the server at `false` and a side panel rendered on a
+    # viewport that cannot fit it. Both re-ask paths are checked here — the
+    # already-pressed button and expanding another window — and the client's
+    # now-unconditional answer to each puts the note back.
+    test "a re-asked size is re-asked on the wire, and the note comes back with the answer",
+         %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+      {_view, dock} = dock(conn)
+      open!(dock, a)
+
+      render_click(element(dock, "#session-dock-size-side-#{a.id}"))
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+      assert has_element?(dock, "#session-dock-size-fallback-#{a.id}")
+
+      # Clicking the already-pressed Side button. The claim was about the size
+      # that *was* rendering, so it is dropped — and re-asked in the same
+      # breath.
+      render_click(element(dock, "#session-dock-size-side-#{a.id}"))
+      refute has_element?(dock, "#session-dock-size-fallback-#{a.id}")
+      assert_push_event(dock, "session-dock:size", %{id: _, size: "side"})
+
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+      assert has_element?(dock, ~s(#session-dock-window-#{a.id}[data-size="max"]))
+      assert has_element?(dock, "#session-dock-size-fallback-#{a.id}")
+
+      # And expanding a second window whose stored size is also Side: the
+      # requested size never changed, so only an unconditional answer gets the
+      # note onto the new window.
+      render_hook(dock, "restore", %{
+        "open" => [a.id, b.id],
+        "expanded" => b.id,
+        "sizes" => %{a.id => "side", b.id => "side"}
+      })
+
+      refute has_element?(dock, "#session-dock-size-fallback-#{b.id}")
+      assert_push_event(dock, "session-dock:size", %{id: _, size: "side"})
+
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+
+      assert has_element?(dock, ~s(#session-dock-window-#{b.id}[data-size="max"]))
+      assert has_element?(dock, "#session-dock-size-fallback-#{b.id}")
+    end
+
+    test "a fallback claim never turns a Compact window into a Maximized one",
+         %{conn: conn} do
+      session = launch!()
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+
+      assert has_element?(dock, ~s(#session-dock-window-#{session.id}[data-size="compact"]))
+      refute has_element?(dock, "#session-dock-size-fallback-#{session.id}")
+    end
+
+    # Acceptance 6: the invariant the whole dock is built on does not get a
+    # pass just because a window is now the size of the page.
+    test "one expanded window at a time holds in every size, and the roster stays reachable",
+         %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+      {_view, dock} = dock(conn)
+
+      open!(dock, b)
+      open!(dock, a)
+
+      for size <- ~w(side max compact) do
+        render_click(element(dock, "#session-dock-size-#{size}-#{a.id}"))
+
+        assert has_element?(dock, ~s(#session-dock-window-#{a.id}[data-expanded="true"]))
+        assert has_element?(dock, ~s(#session-dock-window-#{b.id}[data-expanded="false"]))
+        assert has_element?(dock, "#session-dock-roster-toggle")
+
+        html = render(dock)
+        assert length(Regex.scan(~r/id="session-dock-terminal-/, html)) == 1
+      end
+
+      # "Reachable" is not "present in the HTML". A Maximized window is
+      # `fixed`, so inside the dock root's stacking context it paints over the
+      # roster's in-flow column unless that column is lifted above it — and its
+      # frame is opaque, so the toggle would look like it did nothing.
+      render_click(element(dock, "#session-dock-size-max-#{a.id}"))
+      render_click(element(dock, "#session-dock-roster-toggle"))
+
+      assert has_element?(dock, "#session-dock-roster-panel")
+      assert has_element?(dock, ~s(#session-dock-roster-column[class*="relative"]))
+      assert has_element?(dock, ~s(#session-dock-roster-column[class*="z-40"]))
+
+      # And expanding the other one still collapses this one, side panel or not.
+      render_click(element(dock, "#session-dock-size-side-#{a.id}"))
+      render_click(element(dock, "#session-dock-title-#{b.id}"))
+
+      assert has_element?(dock, ~s(#session-dock-window-#{a.id}[data-expanded="false"]))
+      assert has_element?(dock, ~s(#session-dock-window-#{b.id}[data-expanded="true"]))
+    end
+
+    # A side panel that covered the page would have taken away the one thing it
+    # exists for. The inset is the page's half of that contract, and it is the
+    # same variable the panel's width is.
+    test "the page reserves room for a side panel", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, ~s(main[class*="--session-dock-page-inset"]))
+    end
+  end
 end

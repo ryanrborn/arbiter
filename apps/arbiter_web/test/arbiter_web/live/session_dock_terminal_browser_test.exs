@@ -172,6 +172,20 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
               "an-idle-window-never-takes-the-pane-back",
               "interacting-reclaims-the-pane-at-this-windows-own-geometry",
               "ctrl-shift-escape-hands-the-keyboard-back-to-the-page",
+              # The size presets (bd-covojz). Named for the same reason as the
+              # rest: `maximized-keeps-the-roster-reachable` is a hit test now,
+              # and a hit test that stops being emitted is exactly the kind of
+              # silence a green verdict hides.
+              "side-panel-docks-right-at-full-height",
+              "side-panel-leaves-the-page-usable-beside-it",
+              "side-panel-still-fits-eighty-columns",
+              "side-panel-refits-the-same-terminal",
+              "a-viewport-too-narrow-for-a-side-panel-maximizes-and-says-so",
+              "re-picking-the-pressed-size-keeps-the-narrow-viewport-fallback",
+              "a-browser-resize-under-a-side-panel-refits-the-pane",
+              "maximized-fills-nearly-the-whole-page",
+              "maximized-keeps-the-roster-reachable",
+              "compact-comes-back-exactly-as-it-was",
               "no-console-errors"
             ] do
           assert output =~ "CHECK #{claim}: PASS", "the browser never reported #{claim}"
