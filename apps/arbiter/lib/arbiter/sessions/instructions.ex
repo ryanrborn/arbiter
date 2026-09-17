@@ -100,6 +100,27 @@ defmodule Arbiter.Sessions.Instructions do
     terminate you mid-call. Ask the operator to kill it from the dashboard or
     the CLI.
 
+    ## Event monitor
+
+    A `SessionStart` hook already told you to do this, but in case it fired
+    before this file did: run `$ARB_SESSION_ROOT/monitor.sh` via the **Monitor**
+    tool with `persistent: true`, not background Bash — an infinite loop never
+    exits, so it never produces a notification for `run_in_background` to
+    surface. It streams `/events` (inbox, review_gate, worker_done,
+    worker_failed) using your own session token; it never calls
+    `arb mcp token mint`.
+
+    Treat every line it prints as a **wake-up signal only**, not the payload:
+    call `coordinator_inbox` for the authoritative unread view before acting on
+    anything. The stream is shared — **every session receives every event**,
+    including ones filed for other sessions' tasks — so decide what concerns
+    you and ignore the rest.
+
+    `curl`'s own `--max-time` closes the connection periodically; re-arm the
+    monitor whenever it exits (token expiry or a network blip). It resumes
+    with `since=<last cursor>` automatically, so re-arming never re-delivers
+    what you already saw or drops what arrived while it was down.
+
     ## Memory
 
     * `memory/shared/` — the operator's memory layers, mounted **read-only**,

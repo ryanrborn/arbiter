@@ -105,11 +105,15 @@ Run it through a persistent background "monitor" primitive so each event
 line becomes a notification — not a fire-and-forget background process that
 only buffers to a file you never look at.
 
-## The stream is not durable
+## The stream is a wake-up signal, not the payload
 
-There is no replay across a reconnect gap (typically under a second), so an
-event landing exactly then won't print. Escalations persist in the mailbox
+`/events` supports replay: pass `since=<cursor>` (the `"cursor"` field of the
+last event you saw) or an ISO-8601 timestamp, and a reconnect replays
+everything persisted after that point before rejoining the live tail — so a
+gap in coverage only happens if the client reconnects without tracking its
+last cursor, the way the self-healing loop above does (it re-mints a token
+and reconnects cold every cycle). Escalations persist in the mailbox
 regardless — `mcp__arbiter__coordinator_inbox` (CLI: `arb message inbox`) is
-the source of truth; the stream is only for live watching. To tell a
-*broken* stream from a *quiet* one, cause a known event (e.g. send yourself a
-test message) and confirm it appears.
+the source of truth; the stream is only for waking you up to check it. To
+tell a *broken* stream from a *quiet* one, cause a known event (e.g. send
+yourself a test message) and confirm it appears.

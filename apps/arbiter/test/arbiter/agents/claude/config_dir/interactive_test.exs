@@ -333,6 +333,52 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       assert "Edit(#{checkout}/**)" in deny
     end
 
+    test "arms the event monitor via a SessionStart hook (bd-aqafdr)", %{
+      config: config,
+      tmp: tmp
+    } do
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: nil,
+                 mcp_servers: ["arbiter"]
+               )
+
+      settings = settings!(config)
+      assert [%{"matcher" => matcher, "hooks" => [hook]}] = settings["hooks"]["SessionStart"]
+
+      # startup, resume AND compaction — a hook that fired only on cold start
+      # could be skipped the way a CLAUDE.md section is not.
+      assert matcher =~ "startup"
+      assert matcher =~ "resume"
+      assert matcher =~ "compact"
+
+      assert hook["type"] == "command"
+      # Never spawns the monitor loop directly (a hook is a synchronous shell
+      # command, not a way to start a background process the model can see) —
+      # it injects the instruction to arm it via the model's own Monitor tool.
+      output = System.cmd("sh", ["-c", hook["command"]]) |> elem(0) |> Jason.decode!()
+      context = output["hookSpecificOutput"]["additionalContext"]
+
+      assert context =~ "Monitor"
+      assert context =~ "monitor.sh"
+      assert context =~ "coordinator_inbox"
+    end
+
+    test "omits the event-monitor hook when the session has no MCP server", %{
+      config: config,
+      tmp: tmp
+    } do
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: nil,
+                 mcp_servers: []
+               )
+
+      refute Map.has_key?(settings!(config), "hooks")
+    end
+
     test "the session profile ignores the headless worker's install-wide override", %{
       config: config,
       tmp: tmp

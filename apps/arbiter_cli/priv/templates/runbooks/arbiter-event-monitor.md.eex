@@ -51,5 +51,5 @@ Route is `/events` (NOT `/api/events`, which 404s). Served as `application/x-ndj
 
 **Other agents (Codex, Antigravity, etc.):** use your harness's own persistent-background / output-streaming primitive if it has one; otherwise run the loop as a background process and poll its output, or skip live-tailing and rely on the mailbox.
 
-> [!danger] Backstop — the stream is not durable
-> There's no replay across the ~1s reconnect gap, so an event landing exactly then won't print. **`arb message inbox` is the source of truth**; the stream is only for live watching.
+> [!danger] Backstop — the stream is a wake-up signal, not the payload
+> `/events` **does** replay: pass `since=<cursor>` (the `"cursor"` field of the last event you saw) or an ISO-8601 timestamp, and a reconnect first replays everything you missed before rejoining the live tail — the loop above just doesn't do this, since it re-mints a token and reconnects cold each cycle rather than tracking a cursor. **`arb message inbox` is still the source of truth**; the stream is only for waking you up to check it.

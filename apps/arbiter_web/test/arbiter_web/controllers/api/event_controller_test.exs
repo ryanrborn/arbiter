@@ -1,12 +1,31 @@
 defmodule ArbiterWeb.Api.EventControllerTest do
-  use ArbiterWeb.ConnCase, async: true
+  # async: false — the revocation-timing test mutates the module's
+  # keepalive interval via Application env (same discipline as
+  # `arbiter_web/test/arbiter_web/mcp/transport_test.exs`).
+  use ArbiterWeb.ConnCase, async: false
 
   alias Arbiter.Tasks.Workspace
   alias Arbiter.MCP.Scope
+  alias Arbiter.Sessions
+  alias Arbiter.Test.SessionEnv
+  alias Arbiter.Test.SessionRunnerStub
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "evt-ctrl-ws", prefix: "ec"})
     {:ok, ws: ws}
+  end
+
+  defp launch_session!(opts \\ []) do
+    SessionEnv.sandbox("event-ctrl-#{System.unique_integer([:positive])}")
+    SessionRunnerStub.reset()
+    {:ok, session} = Sessions.launch(Keyword.merge([runner: SessionRunnerStub], opts))
+    session
+  end
+
+  defp extend_keepalive(ms) do
+    previous = Application.get_env(:arbiter_web, ArbiterWeb.Api.EventController, [])
+    Application.put_env(:arbiter_web, ArbiterWeb.Api.EventController, keepalive_ms: ms)
+    on_exit(fn -> Application.put_env(:arbiter_web, ArbiterWeb.Api.EventController, previous) end)
   end
 
   # ---- auth ---------------------------------------------------------------
@@ -32,6 +51,123 @@ defmodule ArbiterWeb.Api.EventControllerTest do
       token = Scope.mint_worker(task, "test-repo")
       conn = get(conn, "/events?token=#{token}")
       assert json_response(conn, 401)["error"] == "unauthorized"
+    end
+  end
+
+  # ---- header auth (bd-aqafdr) ---------------------------------------------
+  # A session's own token lives only in a mode-0600 curl config
+  # (`Arbiter.Sessions.Provisioning`), never in argv, so its monitor sends it
+  # as a header rather than a query param. `token=` must keep working
+  # unchanged for the `arb init` runbook's `curl -N` loop.
+
+  describe "GET /events — header auth" do
+    test "a coordinator token as Authorization: Bearer enters the stream", %{ws: ws} do
+      token = Scope.mint_coordinator(ws.id)
+
+      task =
+        Task.async(fn ->
+          Phoenix.ConnTest.build_conn()
+          |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+          |> get("/events")
+        end)
+
+      assert nil == Task.yield(task, 100)
+      Task.shutdown(task, :brutal_kill)
+    end
+
+    test "a session token as Authorization: Bearer enters the stream" do
+      session = launch_session!()
+      token = Sessions.mint_mcp_token(session)
+
+      task =
+        Task.async(fn ->
+          Phoenix.ConnTest.build_conn()
+          |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+          |> get("/events")
+        end)
+
+      assert nil == Task.yield(task, 100)
+      Task.shutdown(task, :brutal_kill)
+    end
+
+    test "returns 401 for a revoked session token presented as a header", %{conn: conn} do
+      session = launch_session!()
+      token = Sessions.mint_mcp_token(session)
+      {:ok, _} = Sessions.revoke_mcp_token(session)
+
+      conn =
+        conn
+        |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+        |> get("/events")
+
+      assert json_response(conn, 401)["error"] == "unauthorized"
+    end
+
+    test "malformed Authorization header falls back to query token", %{ws: ws} do
+      token = Scope.mint_coordinator(ws.id)
+
+      task =
+        Task.async(fn ->
+          Phoenix.ConnTest.build_conn()
+          |> Plug.Conn.put_req_header("authorization", "Basic garbage")
+          |> get("/events?token=#{token}")
+        end)
+
+      assert nil == Task.yield(task, 100)
+      Task.shutdown(task, :brutal_kill)
+    end
+  end
+
+  # ---- revocation mid-stream (bd-aqafdr) -----------------------------------
+
+  describe "GET /events — revocation closes an open stream" do
+    test "a stream open on a session token closes within one keepalive tick after revocation" do
+      extend_keepalive(50)
+      session = launch_session!()
+      token = Sessions.mint_mcp_token(session)
+
+      task = Task.async(fn -> get(Phoenix.ConnTest.build_conn(), "/events?token=#{token}") end)
+      assert nil == Task.yield(task, 100)
+
+      {:ok, _} = Sessions.revoke_mcp_token(session)
+
+      assert {:ok, _conn} = Task.yield(task, 500),
+             "expected the stream to close once the keepalive tick re-checks revocation"
+    end
+
+    test "a busy stream (events faster than keepalive) still closes after revocation" do
+      extend_keepalive(20)
+      session = launch_session!()
+      token = Sessions.mint_mcp_token(session)
+
+      task = Task.async(fn -> get(Phoenix.ConnTest.build_conn(), "/events?token=#{token}") end)
+      assert nil == Task.yield(task, 50)
+
+      pump =
+        Task.async(fn ->
+          Stream.repeatedly(fn ->
+            Phoenix.PubSub.broadcast(
+              Arbiter.PubSub,
+              "events",
+              {:event, %{topic: "worker_done", at: DateTime.to_iso8601(DateTime.utc_now())}}
+            )
+
+            Process.sleep(5)
+          end)
+          |> Stream.run()
+        end)
+
+      Process.sleep(50)
+      {:ok, _} = Sessions.revoke_mcp_token(session)
+
+      assert {:ok, _conn} = Task.yield(task, 500),
+             "expected a stream with continuous event traffic to still close after revocation" <>
+               " — revocation must be checked on a timer, not only on receive idle timeout"
+
+      assert Process.alive?(pump.pid),
+             "stream only closed because event traffic stopped — the busy path is untested"
+
+      Task.shutdown(pump, :brutal_kill)
     end
   end
 

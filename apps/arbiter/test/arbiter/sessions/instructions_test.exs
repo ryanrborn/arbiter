@@ -142,6 +142,24 @@ defmodule Arbiter.Sessions.InstructionsTest do
     end
   end
 
+  describe "the event monitor section (bd-aqafdr)" do
+    test "documents the Monitor tool, re-arming, since= reconnect, and the mailbox source of truth" do
+      doc = render()
+      monitor = section(doc, "Event monitor")
+
+      assert monitor =~ "monitor.sh"
+      assert monitor =~ "Monitor"
+      assert monitor =~ ~r/background bash/i
+
+      assert monitor =~ "coordinator_inbox"
+      assert monitor =~ ~r/since=/
+
+      # Every session gets every shared-mailbox event — the agent filters.
+      assert monitor =~ ~r/every session/i
+      assert monitor =~ ~r/ignore|filter|concern/i
+    end
+  end
+
   defp index_of(doc, needle) do
     case :binary.match(doc, needle) do
       {at, _} -> at

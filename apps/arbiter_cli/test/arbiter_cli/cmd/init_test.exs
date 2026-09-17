@@ -61,6 +61,48 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert runbook =~ "/events"
     end
 
+    test "runbooks/arbiter-event-monitor.md no longer claims the stream has no replay (bd-aqafdr)" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      runbook = File.read!(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
+
+      refute runbook =~ ~r/no replay/i
+      assert runbook =~ "since="
+    end
+
+    # `Arbiter.Sessions.Instructions` (the per-session CLAUDE.md) and this
+    # runbook both describe the event monitor, but can't share code: the
+    # runbook is a template compiled into the `arbiter_cli` escript, and
+    # `Instructions` lives in the `arbiter` server app, which must not
+    # depend on the escript. Pinning both here catches the two drifting.
+    test "the runbook's session forward-reference and the session's own instructions agree on the key facts (bd-aqafdr)" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      runbook = File.read!(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
+
+      assert runbook =~ "bd-aqafdr"
+      assert runbook =~ "$ARB_SESSION_ID"
+      refute runbook =~ ~r/no replay/i
+
+      session = %Arbiter.Sessions.Session{
+        id: "sess1",
+        cwd: "/tmp/sess1",
+        workspace_id: nil,
+        can_dispatch: false
+      }
+
+      instructions = Arbiter.Sessions.Instructions.render(session)
+
+      for phrase <- ["Monitor", "monitor.sh", "coordinator_inbox", "since="] do
+        assert instructions =~ phrase,
+               "expected the session's generated CLAUDE.md to mention #{inspect(phrase)}"
+      end
+    end
+
     test "docs/monitoring.md documents workspace-agnostic coordinator tokens and token recovery" do
       stub_install()
       dir = tmp_dir()
