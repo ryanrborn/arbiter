@@ -180,6 +180,36 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       refute out =~ "STALE"
     end
 
+    # bd-1pmf9h: `stale` alone reads identically whether the poll is merely
+    # quiet or the fleet is flatly unauthenticated. `credentials_expired`
+    # surfaces CredentialWatchdog's own expiry state so `arb quota` says so
+    # directly rather than making the operator infer it from an aging poll.
+    test "flags credentials_expired distinctly from a plain stale poll" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "credentials_expired", true)
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "CREDENTIALS EXPIRED"
+    end
+
+    test "no credentials-expired label when credentials are valid" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "credentials_expired", false)
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "CREDENTIALS EXPIRED"
+    end
+
     test "says so when no window is gating dispatch" do
       stub_get("/api/quota", %{
         "data" => %{

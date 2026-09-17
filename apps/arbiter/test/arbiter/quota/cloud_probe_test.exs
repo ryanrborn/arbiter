@@ -8,6 +8,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
   """
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Quota.CloudProbe
   alias Arbiter.Tasks.Workspace
 
@@ -331,7 +332,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
           # Each cycle must hit the network (and re-trigger the stub's 429) to
           # be an independent, observable failure — without this reset, the
           # 180s cooldown after cycle 1's real 429 would short-circuit cycles
-          # 2-3 straight to `{:error, :cooling_down}` with no HTTP call to
+          # 2-3 straight to `{:error, {:backoff, 429}}` with no HTTP call to
           # synchronize on.
           Arbiter.Quota.OAuthUsage.reset_cooldown!("solo-token")
           CloudProbe.probe(pid)
@@ -352,6 +353,211 @@ defmodule Arbiter.Quota.CloudProbeTest do
       end)
 
       assert length(Arbiter.Messages.Message.inbox(coordinator)) == 1
+    end
+  end
+
+  describe "probe/1 oauth usage 401 streak -> CredentialWatchdog (bd-1pmf9h)" do
+    defp start_watchdog do
+      {:ok, pid} =
+        start_supervised(%{
+          id: make_ref(),
+          start: {CredentialWatchdog, :start_link, [[name: nil, enabled: false]]}
+        })
+
+      pid
+    end
+
+    setup do
+      Application.put_env(:arbiter, :oauth_usage_http_stub, true)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :oauth_usage_http_stub, true)
+        Arbiter.Quota.OAuthUsage.reset_cooldown!("401-token")
+      end)
+
+      :ok
+    end
+
+    defp stub_status(status) do
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, status, "")
+      end)
+    end
+
+    defp stub_ok do
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Req.Test.json(conn, %{"five_hour" => %{"utilization" => 1}})
+      end)
+    end
+
+    test "two consecutive 401s trip the watchdog's expired flag for Claude", context do
+      Req.Test.set_req_test_to_shared(context)
+      _ws = workspace_with_token!("solo", "401-token")
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [token: "401-token"],
+          credential_watchdog: watchdog
+        )
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      stub_status(401)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
+      end)
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
+      end)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+    end
+
+    test "a rate-limited/backoff tick between two 401s does not reset the streak", context do
+      Req.Test.set_req_test_to_shared(context)
+      _ws = workspace_with_token!("solo", "401-token")
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [token: "401-token"],
+          credential_watchdog: watchdog
+        )
+
+      stub_status(401)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
+      end)
+
+      # A real 429 in between is a distinct, non-auth signal — it must not
+      # erase the 401 streak the way it silently did in production (bd-1pmf9h).
+      stub_status(429)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        Process.sleep(50)
+      end)
+
+      assert CloudProbe.state(pid).oauth_consecutive_401s == 1
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      # The 429 above put the client on a cooldown, so the *next* tick should
+      # hit the client-side `{:backoff, 429}` skip rather than the network at
+      # all — stub the transport to fail the test if it's actually called,
+      # proving the cooldown short-circuits it, and confirm the 401 streak
+      # (the label this PR introduces for that skip) is left untouched.
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn _conn ->
+        flunk("expected the client-side cooldown to skip the network call")
+      end)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        Process.sleep(50)
+      end)
+
+      assert CloudProbe.state(pid).oauth_consecutive_401s == 1
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      Arbiter.Quota.OAuthUsage.reset_cooldown!("401-token")
+      stub_status(401)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
+      end)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+    end
+
+    test "the streak keeps re-arming past the threshold after a spurious recovery clears the mark (regression)",
+         context do
+      Req.Test.set_req_test_to_shared(context)
+      _ws = workspace_with_token!("solo", "401-token")
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [token: "401-token"],
+          credential_watchdog: watchdog
+        )
+
+      stub_status(401)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 2 end)
+      end)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      # Simulate the watchdog's own CLI probe reporting a spurious recovery
+      # (exactly what happened for 15h straight in the original incident) —
+      # this must not permanently blind the 401 streak to further outage.
+      :ok = CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, watchdog)
+      _ = :sys.get_state(watchdog)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 3 end)
+      end)
+
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
+    end
+
+    test "a success resets the 401 streak", context do
+      Req.Test.set_req_test_to_shared(context)
+      _ws = workspace_with_token!("solo", "401-token")
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [token: "401-token"],
+          credential_watchdog: watchdog
+        )
+
+      stub_status(401)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
+      end)
+
+      stub_ok()
+      CloudProbe.probe(pid)
+      wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 0 end)
+
+      stub_status(401)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_401s == 1 end)
+      end)
+
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, watchdog)
     end
   end
 

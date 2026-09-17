@@ -460,6 +460,12 @@ defmodule Arbiter.Quota do
       # this cycle" — both look identical (STALE, old `captured_at`) without
       # this. `arb quota` uses it to say which one it is.
       oauth_poll_fresh: Arbiter.Quota.Gate.oauth_poll_fresh?(q),
+      # bd-1pmf9h: `stale` alone reads identically whether the poll is merely
+      # quiet or the fleet is flatly unauthenticated — a dead token still
+      # serves a stale-but-present snapshot for hours. Surfaces
+      # `CredentialWatchdog`'s own expiry state (set by `CloudProbe`'s
+      # consecutive-401 tracking or the periodic CLI probe) directly here.
+      credentials_expired: Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Claude),
       per_model_utilization: q.per_model_utilization || %{},
       extra_usage: q.extra_usage || %{},
       oauth_utilization_5h: q.oauth_utilization_5h,
