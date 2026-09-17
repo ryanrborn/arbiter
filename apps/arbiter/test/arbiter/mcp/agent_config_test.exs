@@ -153,6 +153,47 @@ defmodule Arbiter.MCP.AgentConfigTest do
       refute Map.has_key?(server, "httpUrl")
     end
 
+    # bd-7s29yq (T6b): agy DOES read `$HOME/.gemini/config/mcp_config.json`, and
+    # now that `Arbiter.Agents.Gemini.ConfigDir` owns a per-worktree `$HOME`
+    # there is finally a token-safe place to put it. The worktree stays empty —
+    # agy reads nothing from it either way.
+    test "with an isolated agy HOME the config lands there, not in the worktree", %{dir: dir} do
+      base = Path.join(System.tmp_dir!(), "mcp-agyhome-#{System.unique_integer([:positive])}")
+      prev_enabled = Application.get_env(:arbiter, :worker_isolate_config)
+      prev_root = Application.get_env(:arbiter, :worker_agy_home_root)
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "homes"))
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :worker_isolate_config, prev_enabled)
+
+        if is_nil(prev_root),
+          do: Application.delete_env(:arbiter, :worker_agy_home_root),
+          else: Application.put_env(:arbiter, :worker_agy_home_root, prev_root)
+
+        File.rm_rf(base)
+      end)
+
+      assert :ok =
+               Gemini.write_mcp_config(dir,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-agy-home",
+                 cli: :agy
+               )
+
+      refute File.exists?(Path.join(dir, ".gemini")),
+             "the worktree must stay clean — agy never reads a worktree-local MCP config"
+
+      home = Arbiter.Agents.Gemini.ConfigDir.path(worktree: dir)
+      config = Jason.decode!(File.read!(Path.join(home, ".gemini/config/mcp_config.json")))
+
+      assert config ==
+               Gemini.agy_config_map(
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-agy-home"
+               )
+    end
+
     test "agy_config_map/1 omits enabledTools for coordinator scope" do
       config = Gemini.agy_config_map(mcp_url: "u", scope_token: "t", include_tools: nil)
       refute Map.has_key?(config["mcpServers"]["arbiter"], "enabledTools")

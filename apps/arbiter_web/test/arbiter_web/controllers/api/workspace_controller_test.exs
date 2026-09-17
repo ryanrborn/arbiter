@@ -81,6 +81,101 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert posture["policy_enforced"] == true
     end
 
+    # bd-7s29yq AC3: the posture surface must tell the truth for agy too. The
+    # Gemini adapter used to hard-code `policy_enforced: false` because nothing
+    # enforced the policy; now it answers from the live seam (agy on PATH +
+    # worker config isolation on), so this asserts the endpoint *tracks the
+    # adapter* rather than a constant either way.
+    test "security_posture.policy_enforced tracks the gemini adapter's own answer", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws",
+          prefix: "agyws",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            }
+          }
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["provider"] == "gemini"
+      assert posture["mode"] == "strict"
+      assert posture["policy_enforced"] == Arbiter.Agents.Gemini.security_enforced?()
+    end
+
+    # ...and the assertion above is only worth anything if BOTH branches are
+    # reachable. `config/test.exs` pins `worker_isolate_config: false` for the
+    # suite, so without this the comparison is `false == false` and would still
+    # pass with the whole seam ripped out. Drive the enforced branch explicitly.
+    test "security_posture.policy_enforced is true for agy with config isolation on", %{
+      conn: conn
+    } do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws-enforced",
+          prefix: "agyenf",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            }
+          }
+        })
+
+      with_agy_on_path(fn ->
+        assert Arbiter.Agents.Gemini.security_enforced?()
+
+        posture =
+          conn
+          |> get(~p"/api/workspaces/#{ws.id}")
+          |> json_response(200)
+          |> Map.fetch!("security_posture")
+
+        assert posture["provider"] == "gemini"
+        assert posture["policy_enforced"] == true
+      end)
+
+      # And with isolation off there is nowhere to put the generated
+      # settings.json, so the endpoint must go back to reporting `false`.
+      posture =
+        conn
+        |> get(~p"/api/workspaces/#{ws.id}")
+        |> json_response(200)
+        |> Map.fetch!("security_posture")
+
+      assert posture["policy_enforced"] == false
+    end
+
+    # A stub `agy` on PATH plus the isolation switch on — the two things
+    # `Gemini.security_enforced?/0` reads. Restores both unconditionally.
+    defp with_agy_on_path(fun) do
+      tmp = Path.join(System.tmp_dir!(), "agy-posture-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      agy = Path.join(tmp, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+
+      prev_isolate = Application.get_env(:arbiter, :worker_isolate_config)
+      prev_path = System.get_env("PATH")
+
+      try do
+        Application.put_env(:arbiter, :worker_isolate_config, true)
+        System.put_env("PATH", tmp)
+        fun.()
+      after
+        if is_nil(prev_isolate),
+          do: Application.delete_env(:arbiter, :worker_isolate_config),
+          else: Application.put_env(:arbiter, :worker_isolate_config, prev_isolate)
+
+        System.put_env("PATH", prev_path)
+        File.rm_rf!(tmp)
+      end
+    end
+
     test "returns 404 for missing", %{conn: conn} do
       bogus = "00000000-0000-0000-0000-000000000000"
       conn = get(conn, ~p"/api/workspaces/#{bogus}")

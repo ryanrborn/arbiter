@@ -582,4 +582,125 @@ defmodule Arbiter.Agents.GeminiTest do
                ])
     end
   end
+
+  # bd-7s29yq (T6b): the agy security seam. `Gemini.Security` owns the
+  # policy -> agy vocabulary mapping and is unit-tested in
+  # `gemini/security_test.exs`; these cover the *wiring* — that the adapter
+  # actually emits it.
+  describe "agy security wiring (bd-7s29yq)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "gemini-sec-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      agy = Path.join(tmp, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, agy: agy}
+    end
+
+    test ":strict emits --sandbox and never --dangerously-skip-permissions", %{agy: agy} do
+      policy = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :strict}})
+
+      assert {:ok, argv} = Gemini.default_argv("p", security: policy)
+      assert ["sh", "-c", _exec, "sh", ^agy, "-p", "p" | rest] = argv
+      assert "--sandbox" in rest
+      refute "--dangerously-skip-permissions" in rest
+    end
+
+    test ":auto emits neither flag — the generated settings carry the posture", %{agy: agy} do
+      policy = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :auto}})
+
+      assert {:ok, argv} = Gemini.default_argv("p", security: policy)
+      assert ["sh", "-c", _exec, "sh", ^agy, "-p", "p" | rest] = argv
+      refute "--sandbox" in rest
+      refute "--dangerously-skip-permissions" in rest
+    end
+  end
+
+  describe "security_enforced?/0 (bd-7s29yq AC3)" do
+    test "is false when the isolated agy HOME is switched off — nothing is enforced then" do
+      prev = Application.get_env(:arbiter, :worker_isolate_config)
+      Application.put_env(:arbiter, :worker_isolate_config, false)
+      on_exit(fn -> Application.put_env(:arbiter, :worker_isolate_config, prev) end)
+
+      refute Gemini.security_enforced?()
+    end
+
+    test "is true only for the agy CLI with isolation on — upstream gemini has no seam" do
+      prev = Application.get_env(:arbiter, :worker_isolate_config)
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      tmp = Path.join(System.tmp_dir!(), "gemini-enf-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH")
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :worker_isolate_config, prev)
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      gemini = Path.join(tmp, "gemini")
+      File.write!(gemini, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini, 0o755)
+      System.put_env("PATH", tmp)
+      refute Gemini.security_enforced?()
+
+      agy = Path.join(tmp, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+      assert Gemini.security_enforced?()
+    end
+  end
+
+  describe "spawn_env/1 — isolated agy HOME (bd-7s29yq AC2)" do
+    test "injects HOME so the operator's ~/.gemini memory, skills and plugins cannot load" do
+      base = Path.join(System.tmp_dir!(), "gemini-home-#{System.unique_integer([:positive])}")
+      prev_enabled = Application.get_env(:arbiter, :worker_isolate_config)
+      prev_root = Application.get_env(:arbiter, :worker_agy_home_root)
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "homes"))
+
+      # home_env/1 only fires for the resolved `agy` executable — stub one onto
+      # PATH so this test doesn't depend on the host actually having agy installed.
+      bin = Path.join(base, "bin")
+      File.mkdir_p!(bin)
+      agy = Path.join(bin, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", bin <> ":" <> old_path)
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :worker_isolate_config, prev_enabled)
+
+        if is_nil(prev_root),
+          do: Application.delete_env(:arbiter, :worker_agy_home_root),
+          else: Application.put_env(:arbiter, :worker_agy_home_root, prev_root)
+
+        System.put_env("PATH", old_path)
+        File.rm_rf!(base)
+      end)
+
+      env = Gemini.spawn_env(worktree: Path.join(base, "wt"))
+      assert {"HOME", home} = Enum.find(env, &match?({"HOME", _}, &1))
+      assert home != System.user_home()
+      assert File.regular?(Path.join(home, ".gemini/GEMINI.md"))
+      assert File.regular?(Path.join(home, ".gemini/antigravity-cli/settings.json"))
+    end
+
+    test "injects no HOME when isolation is off (unchanged inherited behaviour)" do
+      prev = Application.get_env(:arbiter, :worker_isolate_config)
+      Application.put_env(:arbiter, :worker_isolate_config, false)
+      on_exit(fn -> Application.put_env(:arbiter, :worker_isolate_config, prev) end)
+
+      refute Enum.any?(Gemini.spawn_env(api_key: "k"), &match?({"HOME", _}, &1))
+    end
+  end
 end

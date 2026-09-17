@@ -3396,11 +3396,18 @@ defmodule Arbiter.Worker.ReviewGate do
         # has its own shorter internal turn timeout (agy's 5-minute
         # `--print-timeout`) can raise it to match. Adapters that don't
         # recognize `:timeout_ms` just ignore it.
+        # `worktree_path:` keys the agy spawn's isolated `$HOME`
+        # (`Arbiter.Agents.Gemini.ConfigDir`, bd-7s29yq) so a reviewer /
+        # revise-round implementer gets the same generated permission posture
+        # and Arbiter-owned `GEMINI.md` as a first-round worker, rather than
+        # the operator's `~/.gemini`. Adapters that don't recognise it ignore
+        # it.
         agent_opts =
           agent_opts_for_role(ws, role_atom, state.task_id) ++
             [
               security: SecurityPolicy.resolve(ws, %{}, state.repo),
               workspace: ws,
+              worktree_path: state.worktree_path,
               timeout_ms: state.timeout_ms
             ]
 
