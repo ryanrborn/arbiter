@@ -300,15 +300,22 @@ defmodule Arbiter.Board.Snapshot do
       paused: Keyword.get(opts, :paused, false),
       ready_order: Keyword.get(opts, :ready_order, []),
       watchdog_live:
-        Keyword.get_lazy(opts, :watchdog_live, fn -> load_watchdog_live(workers) end),
+        Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(workers) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
   end
 
-  # Which of these workers still has a live Watchdog (bd-8jixav). One Registry
-  # lookup per parked worker — cheap, and only for the `:awaiting_review` rows,
-  # which are the only ones the question means anything for.
-  defp load_watchdog_live(workers) do
+  @doc """
+  Which of `workers` still has a live Watchdog (bd-8jixav). One Registry
+  lookup per parked worker — cheap, and only for the `:awaiting_review` rows,
+  which are the only ones the question means anything for.
+
+  Public so a caller scoped to fewer than the whole fleet (e.g.
+  `Arbiter.Tasks.EpicRollup`, bd-58z2tu) can build the same liveness set
+  `needs_you?/2` expects without going through `load/1`.
+  """
+  @spec watchdog_live([map()]) :: MapSet.t() | nil
+  def watchdog_live(workers) do
     workers
     |> Enum.filter(&(Map.get(&1, :status) == :awaiting_review and Watchdog.alive?(&1.task_id)))
     |> MapSet.new(& &1.task_id)
@@ -635,7 +642,7 @@ defmodule Arbiter.Board.Snapshot do
         # The collapsed rows keep their vote: a dead fix pass under a
         # legitimately-parked primary still needs a human, even though the
         # primary row alone reads as "the machine has this".
-        needs_you: Enum.any?(group, &needs_you?(&1, watchdog_alive(&1, watchdog_live))),
+        needs_you: child_needs_you?(group, watchdog_live),
         collapsed_note: collapsed_note(w, group),
         since: since(w)
       })
@@ -736,26 +743,53 @@ defmodule Arbiter.Board.Snapshot do
   defp waiting_reason(%{status: :awaiting_review}), do: nil
   defp waiting_reason(worker), do: halt_reason(worker)
 
+  @doc """
+  Whether a single live worker row needs the operator: an `:awaiting`
+  question, a `:failed` park, or an open MR blocked for a reason outside the
+  Watchdog's auto-resolvable set. `alive` is the `:awaiting_review`
+  Watchdog-liveness bit (see `watchdog_alive/2`) — `false` always flags,
+  since nothing is polling the MR.
+
+  Public (bd-58z2tu) so `Arbiter.Tasks.EpicRollup` can classify a child's
+  worker the same way the board's Waiting column does, through
+  `child_needs_you?/2`, rather than re-deriving the rule.
+  """
+  @spec needs_you?(map(), boolean() | nil) :: boolean()
   # bd-8jixav: the MR is open and *nothing is polling it*. This outranks every
   # block-reason nuance below — a `:ci_failed` block the Watchdog would
   # ordinarily clear by itself is not getting cleared by a process that no
   # longer exists.
-  defp needs_you?(_worker, false), do: true
+  def needs_you?(_worker, false), do: true
 
   # A question has no retry, so it is always the human's.
-  defp needs_you?(%{status: :awaiting}, _alive), do: true
+  def needs_you?(%{status: :awaiting}, _alive), do: true
 
   # A parked worker is terminal — the system has exhausted itself by
   # definition, whatever its last poll happened to record.
-  defp needs_you?(%{status: :failed}, _alive), do: true
+  def needs_you?(%{status: :failed}, _alive), do: true
 
-  defp needs_you?(worker, _alive) do
+  def needs_you?(worker, _alive) do
     case Watchdog.effective_block_reason(get_meta(worker, :last_merger_status) || %{}) do
       # No block the forge will admit to: the MR is simply mid-review, which is
       # still the machine's turn.
       nil -> false
       reason -> reason not in @auto_resolving_block_reasons
     end
+  end
+
+  @doc """
+  Whether any of a task's live worker rows need the operator — the
+  collapsed-group vote `waiting_cards/3` casts for a card, factored out so
+  `Arbiter.Tasks.EpicRollup` can cast the same vote for an epic's child
+  (bd-58z2tu). Pass every worker row for the task (a collapsed primary plus
+  any subordinate fix/conflict pass), not just the primary, so a `:failed`
+  fix pass under a legitimately-parked primary still counts. An empty list
+  reads as `false` — a child with no live worker at all is not this
+  function's question; the caller decides what "no worker" means for it.
+  """
+  @spec child_needs_you?([map()], MapSet.t() | nil) :: boolean()
+  def child_needs_you?(workers, watchdog_live) do
+    Enum.any?(workers, &needs_you?(&1, watchdog_alive(&1, watchdog_live)))
   end
 
   # ---- parent refs (bd-38of5i) ---------------------------------------------
