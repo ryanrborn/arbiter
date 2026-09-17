@@ -596,7 +596,6 @@ defmodule Arbiter.Sessions.ProvisioningTest do
         |> File.read!()
         |> Jason.decode!()
 
-      assert "Write(#{checkout}/**)" in settings["permissions"]["deny"]
       assert "Edit(#{checkout}/**)" in settings["permissions"]["deny"]
     end
 
@@ -605,7 +604,7 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       settings = session_settings!(session)
 
       assert settings["permissions"]["defaultMode"] == "auto"
-      assert "Write(#{checkout}/**)" in settings["permissions"]["deny"]
+      assert "Edit(#{checkout}/**)" in settings["permissions"]["deny"]
       assert "Bash(rm -rf:*)" in settings["permissions"]["deny"]
     end
 

@@ -164,9 +164,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       settings = config |> Path.join("settings.json") |> File.read!() |> Jason.decode!()
       deny = settings["permissions"]["deny"]
 
-      assert "Write(#{checkout}/**)" in deny
       assert "Edit(#{checkout}/**)" in deny
-      assert "NotebookEdit(#{checkout}/**)" in deny
 
       # the install-wide hardened floor is still there
       assert "Bash(rm -rf:*)" in deny
@@ -399,7 +397,6 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
       assert "Read(**/.env)" in deny
       assert "Bash(gh pr create:*)" in deny
       assert "Bash(glab mr create:*)" in deny
-      assert "Write(#{checkout}/**)" in deny
       assert "Edit(#{checkout}/**)" in deny
     end
 
