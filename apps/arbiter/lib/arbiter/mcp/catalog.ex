@@ -18,6 +18,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_ready` | coordinator | `Issue.ready/1` |
   | `inbox_check` | worker, coordinator | `Messages.inbox/2` + `mark_read` |
   | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (coordinator mailbox) |
+  | `coordinator_inbox_clear` | coordinator | `Messages.clear_ids/1` + `Messages.clear_by_task/2` |
   | `workspace_show` | worker, coordinator | `Ash.get(Workspace, id)` |
   | `task_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
 
@@ -127,7 +128,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
+  @workspace_tools ~w(task_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
 
   @raw_tools [
     %{
@@ -236,6 +237,35 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.coordinator_inbox/2
+    },
+    %{
+      name: "coordinator_inbox_clear",
+      tiers: @coordinator,
+      description:
+        "Soft-clear specific coordinator-mailbox messages — the structured replacement for " <>
+          "`arb inbox clear <id> ...` / `arb inbox clear --task <task-id>`. Accepts `ids` " <>
+          "(a list of message ids) and/or `task_id`; at least one is required. `ids` resolve " <>
+          "directly by id, regardless of workspace. `task_id` clears every coordinator message " <>
+          "concerning that task; pass `workspace` to scope it explicitly, else it resolves the " <>
+          "usual way (bound workspace, then the installation default) and errors rather than " <>
+          "guessing when that's ambiguous. Rows are retained (soft-clear), never destroyed. " <>
+          "Returns what was cleared and what id wasn't found.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "ids" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" => "Message ids (or full ids resolved elsewhere) to clear."
+          },
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Clear every coordinator message concerning this task."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.coordinator_inbox_clear/2
     },
     %{
       name: "workspace_show",
