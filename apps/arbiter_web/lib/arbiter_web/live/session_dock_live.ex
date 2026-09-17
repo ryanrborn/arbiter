@@ -179,6 +179,13 @@ defmodule ArbiterWeb.SessionDockLive do
      # banner, and it must survive `dismiss_error` and vice versa.
      |> assign(:launch_open?, false)
      |> assign(:launch_auth_mode, "seeded_credentials")
+     |> assign(:launch_name, nil)
+     |> assign(:launch_workspace_id, nil)
+     |> assign(:launch_can_dispatch?, false)
+     # §9.5: on when mode B, which is the default auth mode — see
+     # `SessionIndexLive`'s moduledoc.
+     |> assign(:launch_remote_control?, true)
+     |> assign(:workspaces, SessionIndexLive.workspaces())
      |> assign(:launch_error, nil)
      # The dock's own error notice. It cannot use `put_flash/3`: this view
      # mounts `layout: false` and a nested LiveView's flash never reaches the
@@ -248,19 +255,29 @@ defmodule ArbiterWeb.SessionDockLive do
 
   # New session (bd-cdut29). The panel and the roster panel are independent —
   # opening one does not close the other — since there is nothing conflicting
-  # about seeing the roster while filling in a name.
+  # about seeing the roster while filling in a name. The dock is sticky and
+  # survives navigation without remounting, so `workspaces` is re-read on the
+  # way open rather than only once at mount — otherwise a workspace created
+  # after the dock first mounted would never show up in its launcher short of
+  # a full browser reload (review finding, phase 11 round 1).
   def handle_event("toggle_launch", _params, socket) do
+    open? = not socket.assigns.launch_open?
+
+    socket =
+      if open?, do: assign(socket, :workspaces, SessionIndexLive.workspaces()), else: socket
+
     {:noreply,
      socket
-     |> assign(:launch_open?, not socket.assigns.launch_open?)
+     |> assign(:launch_open?, open?)
      |> assign(:launch_error, nil)}
   end
 
   # Same params-to-state mapping `SessionIndexLive` uses for its own copy of
   # this form (see `SessionIndexLive.launch_form/1`), so the disabled-checkbox
-  # gating (§8.3) behaves identically on both surfaces.
+  # gating (§8.3) — and every other option's server-side echo — behaves
+  # identically on both surfaces.
   def handle_event("validate_launch", params, socket) do
-    {:noreply, assign(socket, :launch_auth_mode, SessionIndexLive.launch_auth_mode_param(params))}
+    {:noreply, SessionIndexLive.assign_launch_params(socket, params)}
   end
 
   # `SessionIndexLive.launch_defaults/1` is the same params-to-opts logic the
@@ -286,6 +303,7 @@ defmodule ArbiterWeb.SessionDockLive do
          |> assign(:launch_open?, false)
          |> assign(:launch_error, nil)
          |> assign(:roster_open?, false)
+         |> SessionIndexLive.reset_launch_params()
          |> persist()}
 
       {:error, reason} ->
@@ -713,6 +731,11 @@ defmodule ArbiterWeb.SessionDockLive do
         running_count={@running_count}
         launch_open?={@launch_open?}
         launch_auth_mode={@launch_auth_mode}
+        launch_name={@launch_name}
+        launch_workspace_id={@launch_workspace_id}
+        launch_can_dispatch?={@launch_can_dispatch?}
+        launch_remote_control?={@launch_remote_control?}
+        workspaces={@workspaces}
         launch_error={@launch_error}
       />
 
@@ -981,6 +1004,11 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :running_count, :integer, required: true
   attr :launch_open?, :boolean, required: true
   attr :launch_auth_mode, :string, required: true
+  attr :launch_name, :string, default: nil
+  attr :launch_workspace_id, :string, default: nil
+  attr :launch_can_dispatch?, :boolean, default: false
+  attr :launch_remote_control?, :boolean, default: false
+  attr :workspaces, :list, required: true
   attr :launch_error, :any, required: true
 
   defp roster(assigns) do
@@ -1001,6 +1029,11 @@ defmodule ArbiterWeb.SessionDockLive do
         <SessionIndexLive.launch_form
           prefix="session-dock-launch"
           launch_auth_mode={@launch_auth_mode}
+          launch_name={@launch_name}
+          launch_workspace_id={@launch_workspace_id}
+          launch_can_dispatch?={@launch_can_dispatch?}
+          launch_remote_control?={@launch_remote_control?}
+          workspaces={@workspaces}
           error={@launch_error}
         />
       </div>

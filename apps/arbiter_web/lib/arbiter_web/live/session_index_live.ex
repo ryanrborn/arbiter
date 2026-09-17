@@ -24,21 +24,36 @@ defmodule ArbiterWeb.SessionIndexLive do
   session is a fleet act as much as a window act — and both of them go through
   `kill_modal/1` below, so there is one confirmation, not two that can drift.
 
-  ## Launch takes almost no options, deliberately
+  ## The §9.5 pre-launch options (phase 11)
 
-  Phase 11 owns the full pre-launch options UI (workspace, `can_dispatch`,
-  …). This page launches with the defaults phase 3 already treats as the
-  safe ones: cross-workspace and `can_dispatch` **off** — §10.1's rule that a
-  session cannot start workers until an operator says so. A button that
-  quietly launched something with dispatch rights would be the wrong default
-  to ship first.
+  `launch_form/1` carries the whole option set: session name, provider
+  (Claude Code — the only one there is, so no selector for it), auth mode,
+  Remote Control (§8, gated to mode B), workspace binding, and
+  `can_dispatch`. Every option keeps its §9.5 default, including Remote
+  Control's — see below, this was wrong through round 3 (review finding,
+  phase 11 round 4: the code shipped it off by default and this moduledoc
+  claimed that was the spec):
 
-  Auth mode and Remote Control (§8) are the two exceptions, pulled forward
-  from phase 11 because §8.3's design consequence 1 is a hard UI rule, not
-  an option that can wait: "`--remote-control` must be disabled in the UI
-  when mode A is selected, with the reason shown. Offering a toggle that
-  silently does nothing is the worst outcome." Mode B (seeded credentials,
-  Amendment 2) is still the default.
+    * Workspace binding defaults to **cross-workspace** (`workspace_id: nil`).
+      Picking a workspace from `workspaces/0`'s list opts a session into a
+      single one. The `<select>` offers no way to *pick* an id outside that
+      list, but a crafted submit still can — `launch_workspace_id/2` re-checks
+      it against `workspaces/0` server-side (mirroring the `remote_control`
+      clamp below), so a bogus id falls back to cross-workspace rather than
+      binding the session to a workspace that doesn't exist (review finding,
+      phase 11 round 4).
+    * `can_dispatch` defaults **off** — §10.1's rule that a session cannot
+      start workers until an operator says so. A button that quietly
+      launched something with dispatch rights would be the wrong default to
+      ship, so the checkbox has to be checked, explicitly, every time.
+
+  Remote Control defaults **on** under mode B and is force-disabled under
+  mode A — §9.5's table row reads "on when mode B; disabled with reason when
+  mode A" (§8.3). §8.3's design consequence 1 adds the hard UI rule on top:
+  "`--remote-control` must be disabled in the UI when mode A is selected,
+  with the reason shown. Offering a toggle that silently does nothing is the
+  worst outcome." Mode B (seeded credentials, Amendment 2) is still the
+  default auth mode, so a fresh launch panel arrives with the box checked.
 
   ## Kill is confirmed, and says what it takes with it
 
@@ -73,6 +88,7 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   alias Arbiter.Sessions
   alias Arbiter.Sessions.DisplayName
+  alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.CoreComponents.Domain
@@ -102,6 +118,12 @@ defmodule ArbiterWeb.SessionIndexLive do
       |> assign(:kill_candidate, nil)
       |> assign(:usage_refresh_ref, nil)
       |> assign(:launch_auth_mode, "seeded_credentials")
+      |> assign(:launch_name, nil)
+      |> assign(:launch_workspace_id, nil)
+      |> assign(:launch_can_dispatch?, false)
+      # §9.5: on when mode B, which is the default auth mode — see moduledoc.
+      |> assign(:launch_remote_control?, true)
+      |> assign(:workspaces, workspaces())
       |> refresh()
 
     {:ok, socket}
@@ -109,7 +131,7 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   @impl true
   def handle_event("validate_launch", params, socket) do
-    {:noreply, assign(socket, :launch_auth_mode, launch_auth_mode_param(params))}
+    {:noreply, assign_launch_params(socket, params)}
   end
 
   def handle_event("launch", params, socket) do
@@ -118,7 +140,7 @@ defmodule ArbiterWeb.SessionIndexLive do
         # Straight into the dock rather than off to a page of its own: the
         # terminal is in the strip at the bottom of every page, and a redirect
         # would only have thrown away whatever the operator was reading.
-        {:noreply, socket |> refresh() |> open_in_dock(session.id)}
+        {:noreply, socket |> refresh() |> reset_launch_params() |> open_in_dock(session.id)}
 
       {:error, reason} ->
         Logger.error("SessionIndexLive: launch failed: #{inspect(reason)}")
@@ -239,10 +261,91 @@ defmodule ArbiterWeb.SessionIndexLive do
       # validation) so a submission that bypassed the disabled attribute
       # still cannot request it.
       remote_control: auth_mode == "seeded_credentials" and launch_remote_control?(params),
-      workspace_id: nil,
-      can_dispatch: false,
+      workspace_id: launch_workspace_id(params, Enum.map(workspaces(), & &1.id)),
+      # §10.1: off unless the operator explicitly checks the box. A session
+      # that could dispatch workers by default is the wrong thing to ship
+      # turned on.
+      can_dispatch: launch_can_dispatch?(params),
       name: launch_name(params)
     ]
+  end
+
+  @doc """
+  Workspaces the launch form offers for the §9.5 binding option, sorted by
+  name. Public so `ArbiterWeb.SessionDockLive`'s mount can load the same
+  list for its copy of `launch_form/1` — see `launch_defaults/1` above.
+  """
+  @spec workspaces() :: [Workspace.t()]
+  def workspaces do
+    Workspace
+    |> Ash.Query.sort(name: :asc)
+    |> Ash.read()
+    |> case do
+      {:ok, list} -> list
+      _ -> []
+    end
+  end
+
+  @doc """
+  Mirrors every §9.5 option from a `validate_launch` (or `launch`) params map
+  onto its own assign, so a `phx-change` diff that touches an unrelated field
+  — switching `auth_mode`, say — cannot cause LiveView's DOM patch to
+  re-morph the *other* inputs back to their server-rendered defaults and
+  silently discard a workspace pick or a checked `can_dispatch` box (review
+  finding, phase 11 round 1). Public so `ArbiterWeb.SessionDockLive`'s own
+  `validate_launch` calls the same mapping rather than a second copy of it.
+  """
+  def assign_launch_params(socket, params) do
+    previous_auth_mode = socket.assigns.launch_auth_mode
+    auth_mode = launch_auth_mode_param(params)
+
+    # A disabled checkbox never contributes to form params (the browser omits
+    # it entirely), so a plain "was `remote_control` => "true" in params?"
+    # check can't tell "operator explicitly unchecked it under mode B" apart
+    # from "it was disabled under mode A and never sent anything". Mode A ->
+    # B is the one transition that must re-arrive checked (§9.5: on when mode
+    # B) rather than inheriting whatever mode A's disabled box last rendered.
+    entering_mode_b? = auth_mode == "seeded_credentials" and previous_auth_mode != auth_mode
+
+    valid_workspace_ids = Enum.map(socket.assigns.workspaces, & &1.id)
+
+    socket
+    |> Phoenix.Component.assign(:launch_auth_mode, auth_mode)
+    |> Phoenix.Component.assign(:launch_name, launch_name(params))
+    |> Phoenix.Component.assign(
+      :launch_workspace_id,
+      launch_workspace_id(params, valid_workspace_ids)
+    )
+    |> Phoenix.Component.assign(:launch_can_dispatch?, launch_can_dispatch?(params))
+    # Mode A never shows Remote Control as checked, even if the box was
+    # ticked under mode B before the operator switched — otherwise the
+    # checkbox renders `checked` and `disabled` at once right above the
+    # reason saying it is unavailable (review finding, phase 11 round 2).
+    # Mirrors the clamp `launch_defaults/1` applies server-side.
+    |> Phoenix.Component.assign(
+      :launch_remote_control?,
+      auth_mode == "seeded_credentials" and
+        (entering_mode_b? or launch_remote_control?(params))
+    )
+  end
+
+  @doc """
+  Resets every §9.5 launch option assign back to its mount default. Called
+  after a successful launch so the *next* launch from the same panel starts
+  clean instead of echoing the last submission — `can_dispatch` and Remote
+  Control both carry forward in the broadening direction otherwise, which
+  §10.1 and the moduledoc above require to be a per-launch, explicit choice
+  (review finding, phase 11 round 2). Public so `ArbiterWeb.SessionDockLive`'s
+  `launch` handler uses the same reset rather than a second copy of it.
+  """
+  def reset_launch_params(socket) do
+    socket
+    |> Phoenix.Component.assign(:launch_auth_mode, "seeded_credentials")
+    |> Phoenix.Component.assign(:launch_name, nil)
+    |> Phoenix.Component.assign(:launch_workspace_id, nil)
+    |> Phoenix.Component.assign(:launch_can_dispatch?, false)
+    # §9.5: on when mode B, which is the default this resets back to.
+    |> Phoenix.Component.assign(:launch_remote_control?, true)
   end
 
   @doc false
@@ -254,6 +357,22 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp launch_remote_control?(%{"remote_control" => "true"}), do: true
   defp launch_remote_control?(_params), do: false
+
+  # A crafted submit can send any string here — the `<select>` only ever
+  # offers ids from `workspaces/0`'s own list, but nothing upstream re-checks
+  # that server-side, so a bogus id must fall back to cross-workspace rather
+  # than bind the session to a workspace that doesn't exist.
+  defp launch_workspace_id(%{"workspace_id" => id}, valid_ids) when is_binary(id) do
+    case String.trim(id) do
+      "" -> nil
+      trimmed -> if trimmed in valid_ids, do: trimmed, else: nil
+    end
+  end
+
+  defp launch_workspace_id(_params, _valid_ids), do: nil
+
+  defp launch_can_dispatch?(%{"can_dispatch" => "true"}), do: true
+  defp launch_can_dispatch?(_params), do: false
 
   defp launch_name(%{"name" => name}) when is_binary(name) do
     case String.trim(name) do
@@ -289,7 +408,15 @@ defmodule ArbiterWeb.SessionIndexLive do
           subtitle="Coordinator sessions Arbiter hosts. They live in their own systemd scope, so they survive an arbiter restart."
         >
           <:actions>
-            <.launch_form prefix="launch-session" launch_auth_mode={@launch_auth_mode} />
+            <.launch_form
+              prefix="launch-session"
+              launch_auth_mode={@launch_auth_mode}
+              launch_name={@launch_name}
+              launch_workspace_id={@launch_workspace_id}
+              launch_can_dispatch?={@launch_can_dispatch?}
+              launch_remote_control?={@launch_remote_control?}
+              workspaces={@workspaces}
+            />
           </:actions>
         </Domain.index_header>
 
@@ -398,8 +525,12 @@ defmodule ArbiterWeb.SessionIndexLive do
   its roster — so this stays a function component rather than a
   `Phoenix.LiveComponent`: no shared process, and `phx-submit="launch"` /
   `phx-change="validate_launch"` reach whichever LiveView happens to have
-  rendered it. Both views implement `validate_launch` (to track
-  `launch_auth_mode` for the disabled-checkbox gating, §8.3) and `launch`
+  rendered it. Both views implement `validate_launch` (calling
+  `assign_launch_params/2` to mirror every option onto its own assign — not
+  just `launch_auth_mode` for the disabled-checkbox gating, §8.3, but the
+  workspace pick and the `can_dispatch`/`remote_control` checkboxes too, so a
+  `phx-change` on one field can't cause LiveView's DOM patch to reset the
+  others to their server-rendered defaults) and `launch`
   (calling `Sessions.launch(launch_defaults(params))`, and `describe/1` for
   the failure message) themselves — see `launch_defaults/1` and `describe/1`
   below, both public for the dock to call.
@@ -413,6 +544,11 @@ defmodule ArbiterWeb.SessionIndexLive do
   """
   attr :prefix, :string, required: true
   attr :launch_auth_mode, :string, required: true
+  attr :launch_name, :string, default: nil
+  attr :launch_workspace_id, :string, default: nil
+  attr :launch_can_dispatch?, :boolean, default: false
+  attr :launch_remote_control?, :boolean, default: false
+  attr :workspaces, :list, default: []
   attr :error, :string, default: nil, doc: "an inline launch failure to show, or nil"
 
   def launch_form(assigns) do
@@ -427,6 +563,7 @@ defmodule ArbiterWeb.SessionIndexLive do
         type="text"
         name="name"
         id={"#{@prefix}-name"}
+        value={@launch_name}
         placeholder="Session name (optional)"
         mono={false}
         size="sm"
@@ -441,11 +578,21 @@ defmodule ArbiterWeb.SessionIndexLive do
           {"Mode A — workspace token", "oauth_token"}
         ]}
       />
+      <%!-- §9.5: cross-workspace unless the operator opts a session into a
+            single workspace. --%>
+      <Forms.select
+        name="workspace_id"
+        id={"#{@prefix}-workspace-id"}
+        size="sm"
+        value={@launch_workspace_id || ""}
+        options={[{"Cross-workspace", ""}] ++ Enum.map(@workspaces, &{&1.name, &1.id})}
+      />
       <span class="flex items-center gap-1.5">
         <Forms.checkbox
           name="remote_control"
           id={"#{@prefix}-remote-control"}
           value="true"
+          checked={@launch_remote_control?}
           disabled={@launch_auth_mode != "seeded_credentials"}
           label="Remote Control"
         />
@@ -457,6 +604,15 @@ defmodule ArbiterWeb.SessionIndexLive do
           needs mode B — a workspace token (mode A) never bridges (§8.3)
         </span>
       </span>
+      <%!-- §10.1: off by default; turning it on is a deliberate pre-launch
+            choice, never a silent inherited default. --%>
+      <Forms.checkbox
+        name="can_dispatch"
+        id={"#{@prefix}-can-dispatch"}
+        value="true"
+        checked={@launch_can_dispatch?}
+        label="Can dispatch workers"
+      />
       <%!-- Launching is slow (a systemd scope, a `claude` process) and does
             not redirect, so the button stays on screen and under the cursor
             throughout — without this a second click during the launch
