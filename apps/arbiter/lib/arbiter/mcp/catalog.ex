@@ -18,7 +18,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_ready` | coordinator | `Issue.ready/1` |
   | `inbox_check` | worker, coordinator | `Messages.inbox/2` + `mark_read` |
   | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (coordinator mailbox) |
-  | `coordinator_inbox_clear` | coordinator | `Messages.clear_ids/1` + `Messages.clear_by_task/2` |
+  | `coordinator_inbox_clear` | coordinator | `Messages.clear_ids/2` + `Messages.clear_by_task/2` |
   | `workspace_show` | worker, coordinator | `Ash.get(Workspace, id)` |
   | `task_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
 
@@ -249,6 +249,8 @@ defmodule Arbiter.MCP.Catalog do
           "concerning that task; pass `workspace` to scope it explicitly, else it resolves the " <>
           "usual way (bound workspace, then the installation default) and errors rather than " <>
           "guessing when that's ambiguous. Rows are retained (soft-clear), never destroyed. " <>
+          "Clears only YOUR view of the shared mailbox: a session token clears its own copy, " <>
+          "leaving every other session and the sessionless coordinator still owing the message. " <>
           "Returns what was cleared and what id wasn't found.",
       input_schema: %{
         "type" => "object",

@@ -860,6 +860,249 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
+  # ---- per-reader read state (bd-8akewg) -----------------------------------
+
+  describe "per-reader receipts" do
+    setup do
+      ws = "ws-receipt-#{System.unique_integer([:positive])}"
+      coordinator = Message.coordinator_ref()
+
+      {:ok, msg} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: coordinator,
+          subject: "needs a decision",
+          body: "escalation body"
+        })
+
+      %{ws: ws, coordinator: coordinator, msg: msg}
+    end
+
+    test "every reader sees a new shared message as unread", %{ws: ws, coordinator: ref} do
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      assert [_] = Message.inbox(ref, workspace_id: ws, reader: a)
+      assert [_] = Message.inbox(ref, workspace_id: ws, reader: b)
+      assert [_] = Message.inbox(ref, workspace_id: ws, reader: Message.coordinator_reader())
+    end
+
+    test "one session reading does not consume another session's copy", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      {:ok, _} = Message.mark_read(msg, reader: a)
+
+      assert [] = Message.inbox(ref, workspace_id: ws, reader: a)
+      assert [msg.id] == Enum.map(Message.outstanding(ref, workspace_id: ws, reader: a), & &1.id)
+      assert [_] = Message.inbox(ref, workspace_id: ws, reader: b)
+      assert [] = Message.outstanding(ref, workspace_id: ws, reader: b)
+
+      # the shared row itself is untouched by a session read
+      {:ok, reloaded} = Ash.get(Message, msg.id)
+      assert reloaded.read_at == nil
+    end
+
+    test "one session clearing does not clear another session's copy", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      {:ok, _} = Message.mark_read(msg, reader: a)
+      {:ok, _} = Message.mark_read(msg, reader: b)
+      {:ok, 1, 0, 0} = Message.clear_read(ref, workspace_id: ws, reader: a)
+
+      assert [] = Message.inbox(ref, workspace_id: ws, reader: a)
+      assert [] = Message.outstanding(ref, workspace_id: ws, reader: a)
+      assert [_] = Message.outstanding(ref, workspace_id: ws, reader: b)
+    end
+
+    test "a session clear leaves last_with_subject dedupe suppressing repeats", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+
+      {:ok, _} = Message.mark_read(msg, reader: a)
+      {:ok, _, _, _} = Message.clear_all(ref, workspace_id: ws, reader: a)
+
+      assert %{id: id} =
+               Message.last_with_subject(ref, ["needs a decision"],
+                 workspace_id: ws,
+                 uncleared: true
+               )
+
+      assert id == msg.id
+    end
+
+    test "the sessionless coordinator reader keeps today's row-level behaviour", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      coord = Message.coordinator_reader()
+
+      {:ok, _} = Message.mark_read(msg, reader: coord)
+      {:ok, reloaded} = Ash.get(Message, msg.id)
+      assert %DateTime{} = reloaded.read_at
+
+      {:ok, 1, 0, 0} = Message.clear_read(ref, workspace_id: ws, reader: coord)
+      {:ok, reloaded} = Ash.get(Message, msg.id)
+      assert %DateTime{} = reloaded.cleared_at
+
+      # ... and a coordinator clear re-enables the escalation repeat, as today.
+      refute Message.last_with_subject(ref, ["needs a decision"],
+               workspace_id: ws,
+               uncleared: true
+             )
+    end
+
+    test "sessionless coordinator reads do not touch a session's view", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+
+      {:ok, _} = Message.mark_read(msg, reader: Message.coordinator_reader())
+
+      {:ok, _, _, _} =
+        Message.clear_all(ref, workspace_id: ws, reader: Message.coordinator_reader())
+
+      assert [_] = Message.inbox(ref, workspace_id: ws, reader: a)
+    end
+
+    test "clear_all for a reader covers unread and outstanding for that reader only", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      {:ok, second} =
+        Message.send_mail(%{kind: :info, workspace_id: ws, to_ref: ref, body: "fyi"})
+
+      {:ok, _} = Message.mark_read(msg, reader: a)
+
+      assert {:ok, 1, 1, 0} = Message.clear_all(ref, workspace_id: ws, reader: a)
+      assert [] = Message.inbox(ref, workspace_id: ws, reader: a)
+      assert [] = Message.outstanding(ref, workspace_id: ws, reader: a)
+
+      assert Enum.map(Message.inbox(ref, workspace_id: ws, reader: b), & &1.id) |> Enum.sort() ==
+               Enum.sort([msg.id, second.id])
+    end
+
+    test "hard_purge removes the receipts of the rows it destroys", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+
+      {:ok, _} = Message.mark_read(msg, reader: a)
+      {:ok, _} = Message.mark_read(msg, reader: Message.coordinator_reader())
+
+      {:ok, _, _, _} =
+        Message.clear_read(ref, workspace_id: ws, reader: Message.coordinator_reader())
+
+      assert {:ok, 1} = Message.hard_purge(ref, workspace_id: ws)
+      assert Message.receipts_for_message(msg.id) == []
+    end
+
+    test "clear_ids for a session reader leaves the row and every other reader alone", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      {:ok, _} = Message.mark_read(msg, reader: a)
+      {:ok, _} = Message.mark_read(msg, reader: b)
+
+      assert {:ok, [%Message{}], []} = Message.clear_ids([msg.id], reader: a)
+
+      assert [] = Message.outstanding(ref, workspace_id: ws, reader: a)
+      assert [_] = Message.outstanding(ref, workspace_id: ws, reader: b)
+
+      # the shared row is untouched, so escalation dedupe still suppresses
+      {:ok, reloaded} = Ash.get(Message, msg.id)
+      assert reloaded.cleared_at == nil
+
+      assert %{id: id} =
+               Message.last_with_subject(ref, ["needs a decision"],
+                 workspace_id: ws,
+                 uncleared: true
+               )
+
+      assert id == msg.id
+    end
+
+    test "clear_ids for the sessionless reader still stamps the row", ctx do
+      %{msg: msg} = ctx
+
+      assert {:ok, [_], []} = Message.clear_ids([msg.id], reader: Message.coordinator_reader())
+      assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, msg.id)
+    end
+
+    test "clear_ids reports unknown ids as not_found for a session reader too", ctx do
+      %{msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+
+      assert {:ok, [_], ["nope"]} = Message.clear_ids([msg.id, "nope"], reader: a)
+    end
+
+    test "clear_by_task for a session reader leaves the row and other readers alone", %{ws: ws} do
+      ref = Message.coordinator_ref()
+      task = "bd-task#{System.unique_integer([:positive])}"
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: ref,
+          task_ref: task,
+          subject: "task escalation",
+          body: "x"
+        })
+
+      {:ok, _} = Message.mark_read(m, reader: a)
+      {:ok, _} = Message.mark_read(m, reader: b)
+
+      assert {:ok, [%Message{}]} = Message.clear_by_task(task, workspace_id: ws, reader: a)
+
+      assert [] = Message.outstanding(ref, workspace_id: ws, reader: a)
+      assert Enum.any?(Message.outstanding(ref, workspace_id: ws, reader: b), &(&1.id == m.id))
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+
+      # idempotent for that reader: a second call finds nothing left
+      assert {:ok, []} = Message.clear_by_task(task, workspace_id: ws, reader: a)
+    end
+
+    test "clear_by_task for the sessionless reader still stamps the row", %{ws: ws} do
+      ref = Message.coordinator_ref()
+      task = "bd-task#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: ref,
+          task_ref: task,
+          body: "x"
+        })
+
+      assert {:ok, [_]} =
+               Message.clear_by_task(task,
+                 workspace_id: ws,
+                 reader: Message.coordinator_reader()
+               )
+
+      assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, m.id)
+    end
+
+    test "no reader option keeps the legacy row-level semantics (task mailboxes)" do
+      ws = "ws-receipt-legacy-#{System.unique_integer([:positive])}"
+      task = "bd-legacy#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{kind: :direction, workspace_id: ws, to_ref: task, body: "do it"})
+
+      assert [_] = Message.inbox(task, workspace_id: ws)
+      {:ok, _} = Message.mark_read(m)
+      assert [] = Message.inbox(task, workspace_id: ws)
+      assert [_] = Message.outstanding(task, workspace_id: ws)
+    end
+  end
+
   describe "clear_ids/1 (per-message soft-clear)" do
     test "soft-clears exactly the given ids, read or unread, and retains the rows" do
       {:ok, unread} =

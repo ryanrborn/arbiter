@@ -35,7 +35,19 @@ defmodule ArbiterCli.Cmd.Inbox do
   concerns.
 
   Flags:
-    --json    emit JSON instead of human-readable text
+    --json             emit JSON instead of human-readable text
+    --session <id>     act as that browser session's reader instead of the
+                       shared sessionless coordinator one (bd-8akewg)
+
+  ## Reader identity (bd-8akewg)
+
+  The coordinator mailbox is a single shared queue, but read/cleared state is
+  per reader. With no `--session`, `arb inbox` is the **sessionless
+  coordinator** reader — the same identity the dashboard drawer and a plain
+  `arb mcp token mint` token share, and the one that carries the operator's
+  existing triage state. `--session <id>` reads and clears one browser
+  session's view instead, leaving every other reader's untouched. It composes
+  with every form, including the targeted `clear <id>` and `clear --task`.
   """
 
   alias ArbiterCli.{Client, Output}
@@ -55,33 +67,35 @@ defmodule ArbiterCli.Cmd.Inbox do
     else
       mode = Output.mode(argv)
 
-      case Output.drop_json(argv) do
+      {session, rest} = take_session(Output.drop_json(argv))
+
+      case rest do
         [] ->
-          coordinator_inbox_view(true, mode)
+          coordinator_inbox_view(true, mode, session)
 
         ["--all"] ->
-          coordinator_inbox_view(false, mode)
+          coordinator_inbox_view(false, mode, session)
 
         ["read", id] ->
-          read_one(id, mode)
+          read_one(id, mode, session)
 
         ["read"] ->
           Output.die("inbox read requires a message id: `arb inbox read <id>`")
 
         ["clear"] ->
-          clear(false, mode)
+          clear(false, mode, session)
 
         ["clear", "--all"] ->
-          clear(true, mode)
+          clear(true, mode, session)
 
         ["clear", "--task"] ->
           Output.die("inbox clear --task requires a task id: `arb inbox clear --task <task-id>`")
 
         ["clear", "--task", task_id] ->
-          clear_task(task_id, mode)
+          clear_task(task_id, mode, session)
 
         ["clear" | ids] when ids != [] ->
-          clear_ids(ids, mode)
+          clear_ids(ids, mode, session)
 
         [task_id] ->
           task_inbox(task_id, mode)
@@ -92,13 +106,31 @@ defmodule ArbiterCli.Cmd.Inbox do
     end
   end
 
+  # Pull `--session <id>` out of argv wherever it sits, so it composes with the
+  # positional subcommands (`clear`, `read <id>`) rather than needing a slot in
+  # each of their patterns. Returns `{session_id | nil, remaining_argv}`.
+  defp take_session(argv) do
+    case Enum.split_while(argv, &(&1 != "--session")) do
+      {before, ["--session", id | rest]} -> {id, before ++ rest}
+      {_before, ["--session"]} -> Output.die("inbox --session requires a session id")
+      {argv, []} -> {nil, argv}
+    end
+  end
+
+  # The reader query/body param forwarded to the API. Absent means the shared
+  # sessionless coordinator reader, which is what every existing caller wants.
+  defp reader_params(nil), do: []
+  defp reader_params(session) when is_binary(session), do: [session: session]
+
   # ---- coordinator views ----------------------------------------------------
 
-  defp coordinator_inbox_view(unread_only, mode) do
+  defp coordinator_inbox_view(unread_only, mode, session) do
     params =
       if unread_only,
         do: [to_ref: @coordinator, unread: "true"],
         else: [to_ref: @coordinator, limit: @all_limit]
+
+    params = params ++ reader_params(session)
 
     case Client.get("/api/messages", params) do
       {:ok, %{"data" => list}} -> emit_list(list, mode, coordinator_label(unread_only, list))
@@ -141,12 +173,17 @@ defmodule ArbiterCli.Cmd.Inbox do
   # the operator still sees the message; it just stays unread.
   defp mark_read(%{"id" => id}), do: Client.post("/api/messages/#{id}/read", %{})
 
+  defp mark_read_as(id, nil), do: Client.post("/api/messages/#{id}/read", %{})
+
+  defp mark_read_as(id, session) when is_binary(session),
+    do: Client.post("/api/messages/#{id}/read", %{session: session})
+
   # ---- read one ------------------------------------------------------------
 
-  defp read_one(token, mode) do
+  defp read_one(token, mode, session) do
     case resolve_id(token) do
       {:ok, id} ->
-        case Client.post("/api/messages/#{id}/read", %{}) do
+        case mark_read_as(id, session) do
           {:ok, message} -> emit_full(message, mode)
           {:error, err} -> Output.die(err)
         end
@@ -190,8 +227,8 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # ---- clear ---------------------------------------------------------------
 
-  defp clear(clear_all, mode) do
-    params = [to_ref: @coordinator]
+  defp clear(clear_all, mode, session) do
+    params = [to_ref: @coordinator] ++ reader_params(session)
     params = if clear_all, do: params ++ [all: "true"], else: params
 
     case Client.delete("/api/messages", params) do
@@ -245,10 +282,10 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # ---- clear specific ids ----------------------------------------------------
 
-  defp clear_ids(tokens, mode) do
+  defp clear_ids(tokens, mode, session) do
     case resolve_ids(tokens) do
       {:ok, ids} ->
-        case Client.delete("/api/messages", ids: Enum.join(ids, ",")) do
+        case Client.delete("/api/messages", [ids: Enum.join(ids, ",")] ++ reader_params(session)) do
           {:ok, %{"data" => data}} ->
             cleared = data["cleared"] || []
             not_found = data["not_found"] || []
@@ -296,8 +333,8 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # ---- clear by task ---------------------------------------------------------
 
-  defp clear_task(task_id, mode) do
-    case Client.delete("/api/messages", task_id: task_id) do
+  defp clear_task(task_id, mode, session) do
+    case Client.delete("/api/messages", [task_id: task_id] ++ reader_params(session)) do
       {:ok, %{"data" => data}} ->
         cleared = data["cleared"] || []
         emit_cleared_task(length(cleared), task_id, mode)
