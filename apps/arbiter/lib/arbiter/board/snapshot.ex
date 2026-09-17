@@ -520,7 +520,6 @@ defmodule Arbiter.Board.Snapshot do
         difficulty: Map.get(issue, :difficulty),
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
-        assignee: Map.get(issue, :assignee),
         created_at: created_at(issue)
       }
     end)
@@ -540,7 +539,6 @@ defmodule Arbiter.Board.Snapshot do
         difficulty: Map.get(issue, :difficulty),
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
-        assignee: Map.get(issue, :assignee),
         scope: FileScope.declared_paths(issue),
         blocked_by: Map.get(blocked_by, issue.id, []),
         conflicts_with: EdgeGate.conflicts(conflicts, issue.id)
@@ -601,7 +599,6 @@ defmodule Arbiter.Board.Snapshot do
         priority: Map.get(issue, :priority),
         difficulty: Map.get(issue, :difficulty),
         workspace_id: Map.get(issue, :workspace_id),
-        assignee: Map.get(issue, :assignee),
         status: :awaiting_verification,
         reason: "merged — awaiting verification (restart and observe)",
         mr_ref: Map.get(issue, :pr_ref),
@@ -715,7 +712,6 @@ defmodule Arbiter.Board.Snapshot do
         priority: Map.get(issue, :priority),
         difficulty: Map.get(issue, :difficulty),
         workspace_id: Map.get(issue, :workspace_id),
-        assignee: Map.get(issue, :assignee),
         status: :in_progress,
         reason: "worker stopped — resume or close",
         mr_ref: Map.get(issue, :pr_ref),
@@ -923,7 +919,6 @@ defmodule Arbiter.Board.Snapshot do
         title: Map.get(issue, :title),
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
-        assignee: Map.get(issue, :assignee),
         closed_at: Map.get(issue, :closed_at) || Map.get(issue, :updated_at)
       }
     end)
@@ -954,7 +949,6 @@ defmodule Arbiter.Board.Snapshot do
       priority: issue && Map.get(issue, :priority),
       difficulty: issue && Map.get(issue, :difficulty),
       workspace_id: Map.get(worker, :workspace_id),
-      assignee: issue && Map.get(issue, :assignee),
       status: worker.status
     }
   end

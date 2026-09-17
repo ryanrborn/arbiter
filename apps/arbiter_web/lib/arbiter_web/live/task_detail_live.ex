@@ -10,7 +10,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   the same domain calls the CLI/MCP use:
 
     * **Edit** — the fields an operator authors: title, status (open ⇄
-      in_progress), priority, difficulty, type, assignee, target branch,
+      in_progress), priority, difficulty, type, target branch,
       description and acceptance. Deliberately NOT editable here: `notes` /
       `qa_notes` / `deployment_notes` / `pr_body` (worker-authored
       deliverables — a stray dashboard edit would clobber a run's output),
@@ -408,7 +408,6 @@ defmodule ArbiterWeb.TaskDetailLive do
           difficulty: difficulty,
           description: TaskForm.trimmed(params["description"]),
           acceptance: TaskForm.trimmed(params["acceptance"]),
-          assignee: TaskForm.trimmed(params["assignee"]),
           target_branch: TaskForm.trimmed(params["target_branch"]),
           repo: TaskForm.trimmed(params["repo"])
         }
@@ -2763,9 +2762,6 @@ defmodule ArbiterWeb.TaskDetailLive do
                     </span>
                     <span :if={!@workspace} class="italic text-[var(--text-label)]">(none)</span>
                   </:item>
-                  <:item :if={present?(@task.assignee)} label="Assignee">
-                    <code class="text-xs">{@task.assignee}</code>
-                  </:item>
                   <:item :if={@task.tracker_type != :none} label="Tracker">
                     <% tracker_url = tracker_url(@workspace, @task.tracker_ref) %>
                     <a
@@ -2890,12 +2886,6 @@ defmodule ArbiterWeb.TaskDetailLive do
                   if(@task.difficulty, do: to_string(@task.difficulty), else: "")
                 )
               }
-            />
-            <.input
-              name="task[assignee]"
-              label="Assignee (optional)"
-              value={TaskForm.value(@edit_params, "assignee", @task.assignee || "")}
-              placeholder="who owns this"
             />
             <.input
               name="task[target_branch]"
@@ -3643,7 +3633,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   # Compact changeset summary for the timeline. Mirrors AuditLogLive.
   defp format_changes(changes) when is_map(changes) do
     changes
-    |> Map.take(["status", "title", "priority", "tracker_type", "assignee"])
+    |> Map.take(["status", "title", "priority", "tracker_type"])
     |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
   end
 

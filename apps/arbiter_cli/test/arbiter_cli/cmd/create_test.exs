@@ -429,7 +429,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
       assert {:ok, %{"ref" => "42", "tracker_type" => "github"}} = Jason.decode(String.trim(out))
     end
 
-    test "forwards --description and --assignee to the tickets endpoint" do
+    test "forwards --description to the tickets endpoint and ignores --assignee, with a warning" do
       parent = self()
 
       stub_routes([
@@ -446,7 +446,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
          end}
       ])
 
-      {_out, _err, exit_code} =
+      {_out, err, exit_code} =
         capture(fn ->
           Create.run([
             "Detailed",
@@ -461,7 +461,8 @@ defmodule ArbiterCli.Cmd.CreateTest do
       assert exit_code == 0
       assert_received {:posted, body}
       assert body["description"] == "some body"
-      assert body["assignee"] == "alice"
+      refute Map.has_key?(body, "assignee")
+      assert err =~ "--assignee is deprecated"
     end
 
     test "--ticket-only and --no-tracker errors before posting" do

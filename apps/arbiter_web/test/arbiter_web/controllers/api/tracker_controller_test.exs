@@ -93,4 +93,41 @@ defmodule ArbiterWeb.Api.TrackerControllerTest do
       assert %{"error" => %{"type" => "tracker_error"}} = json_response(conn, 401)
     end
   end
+
+  describe "POST /api/workspaces/:workspace_id/tracker/tickets" do
+    # bd-1ozks5: `assignee` is still accepted for one release — the local
+    # assignee field is gone, so it's ignored and reported back as a warning
+    # rather than rejected outright.
+    test "accepts and ignores a deprecated `assignee`, with a warning", %{conn: conn, gh: ws} do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 501, "html_url" => "https://github.com/o/r/issues/501"})
+      end)
+
+      conn =
+        post(conn, ~p"/api/workspaces/#{ws.id}/tracker/tickets", %{
+          "title" => "unclaimed work",
+          "assignee" => "alice"
+        })
+
+      body = json_response(conn, 201)
+      assert body["ref"] == "501"
+      assert [warning] = body["warnings"]
+      assert warning =~ "assignee"
+    end
+
+    test "no warnings key when assignee isn't passed", %{conn: conn, gh: ws} do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 502, "html_url" => "https://github.com/o/r/issues/502"})
+      end)
+
+      conn = post(conn, ~p"/api/workspaces/#{ws.id}/tracker/tickets", %{"title" => "clean"})
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "warnings")
+    end
+  end
 end

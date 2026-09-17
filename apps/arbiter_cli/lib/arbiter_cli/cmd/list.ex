@@ -1,11 +1,17 @@
 defmodule ArbiterCli.Cmd.List do
   @moduledoc """
   `arb list [--status ...] [--type ...] [--priority N] [--labels ...]
-            [--tracker] [--workspace-id ID] [--assignee USER] [--json]`
+            [--tracker] [--workspace-id ID] [--json]`
 
   Filters are passed through to `GET /api/issues` as query params. `--labels`
   is accepted for interface parity with `bd`, but the current Issue resource
   has no labels field — the flag is ignored with a stderr warning.
+
+  `--assignee` is deprecated (bd-1ozks5): it filtered the local `assignee`
+  column, which no longer exists (Arbiter is a local single-user app). The
+  flag is still accepted for interface parity, but is ignored with a stderr
+  warning rather than sent as a filter. Use `--tracker` to see who a tracker
+  issue is assigned to upstream.
 
   With `--tracker`, the workspace's external tracker is also queried (e.g.
   open GitHub issues assigned to the workspace user) and merged into the
@@ -46,12 +52,19 @@ defmodule ArbiterCli.Cmd.List do
         )
       end
 
+      if opts[:assignee] && mode == :text do
+        IO.puts(
+          :stderr,
+          "arb: warning: --assignee is deprecated and ignored — Arbiter is a local " <>
+            "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
+        )
+      end
+
       params =
         []
         |> put_if(:status, opts[:status])
         |> put_if(:issue_type, opts[:type])
         |> put_if(:priority, opts[:priority])
-        |> put_if(:assignee, opts[:assignee])
         |> put_if(:workspace_id, opts[:workspace_id])
 
       case fetch_tasks(params) do

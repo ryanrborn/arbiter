@@ -143,7 +143,6 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
       status: Atom.to_string(map_status(row["status"])),
       priority: parse_priority(row["priority"]),
       issue_type: Atom.to_string(map_issue_type(row["issue_type"])),
-      assignee: nonempty(row["assignee"]),
       tracker_type: Atom.to_string(tracker_type),
       tracker_ref: tracker_ref,
       created_at: parse_dt(row["created_at"]) || now,

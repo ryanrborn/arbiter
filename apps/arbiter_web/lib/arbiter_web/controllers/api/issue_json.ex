@@ -50,7 +50,6 @@ defmodule ArbiterWeb.Api.IssueJSON do
       # consumer can tell "not parked" from "this API predates the field".
       review_park_reason: issue.review_park_reason,
       review_parked_at: iso(issue.review_parked_at),
-      assignee: issue.assignee,
       tracker_type: to_string_atom(issue.tracker_type),
       tracker_ref: issue.tracker_ref,
       pr_ref: issue.pr_ref,

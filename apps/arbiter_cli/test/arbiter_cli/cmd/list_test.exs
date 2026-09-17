@@ -33,6 +33,22 @@ defmodule ArbiterCli.Cmd.ListTest do
     assert {:ok, %{"data" => [_]}} = Jason.decode(String.trim(out))
   end
 
+  # bd-1ozks5: --assignee used to filter the local column, which is gone —
+  # it's now accepted for interface parity but ignored, with a warning.
+  test "--assignee is deprecated: not forwarded as a filter, warns on stderr" do
+    stub_routes([
+      {{"get", "/api/issues"},
+       fn conn ->
+         refute Map.has_key?(conn.query_params, "assignee")
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+       end}
+    ])
+
+    {_out, err, exit_code} = capture(fn -> List.run(["--assignee", "alice"]) end)
+    assert exit_code == 0
+    assert err =~ "--assignee is deprecated"
+  end
+
   describe "--tracker" do
     @workspace_lookup {{"get", "/api/workspaces"},
                        {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]},
