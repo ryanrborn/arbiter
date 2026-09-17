@@ -454,6 +454,92 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "coordinator_inbox_clear/2" do
+    test "clears specific ids regardless of read state, retaining the rows", ctx do
+      {:ok, unread} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "unread"})
+
+      {:ok, read} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "read"})
+
+      {:ok, _} = Message.mark_read(read)
+
+      assert {:ok, %{cleared: cleared, not_found: [], cleared_by_task: []}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [unread.id, read.id]})
+
+      assert Enum.map(cleared, & &1.id) |> Enum.sort() == Enum.sort([unread.id, read.id])
+
+      assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, unread.id)
+      assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, read.id)
+      assert c1
+      assert c2
+    end
+
+    test "resolves ids regardless of workspace binding — no `workspace` arg needed", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-clear-other", prefix: "cico"})
+
+      {:ok, foreign} =
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "coordinator", body: "foreign"})
+
+      assert {:ok, %{cleared: [cleared], not_found: []}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [foreign.id]})
+
+      assert cleared.id == foreign.id
+    end
+
+    test "reports unknown ids as not_found", ctx do
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "m"})
+
+      bogus = Ecto.UUID.generate()
+
+      assert {:ok, %{cleared: [cleared], not_found: [^bogus]}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [m.id, bogus]})
+
+      assert cleared.id == m.id
+    end
+
+    test "clears every coordinator message concerning a task_id", ctx do
+      {:ok, escalation} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ctx.ws.id,
+          to_ref: "coordinator",
+          task_ref: ctx.task.id,
+          body: "needs a decision"
+        })
+
+      {:ok, unrelated} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ctx.ws.id,
+          to_ref: "coordinator",
+          task_ref: "some-other-task",
+          body: "not this task"
+        })
+
+      assert {:ok, %{cleared_by_task: [cleared]}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert cleared.id == escalation.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unrelated.id)
+    end
+
+    test "requires ids and/or task_id", ctx do
+      assert {:error, {:invalid_args, message}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{})
+
+      assert message =~ "ids and/or task_id"
+    end
+
+    test "worker tier is denied (catalog-level gating)", ctx do
+      assert {:rpc_error, -32_003, message} =
+               Catalog.call(ctx.worker, "coordinator_inbox_clear", %{"ids" => ["x"]})
+
+      assert message =~ "not permitted"
+    end
+  end
+
   describe "workspace_show/2" do
     test "returns the scope's own workspace config + resolved security posture", ctx do
       assert {:ok, data} = Tools.workspace_show(ctx.worker, %{})

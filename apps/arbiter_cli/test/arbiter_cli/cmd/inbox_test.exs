@@ -190,6 +190,132 @@ defmodule ArbiterCli.Cmd.InboxTest do
     end
   end
 
+  describe "arb inbox clear <id|prefix> [...]" do
+    test "clears one message given a full id" do
+      id = "11111111-2222-3333-4444-555566667777"
+
+      stub_routes([
+        {{"delete", "/api/messages"}, {%{"data" => %{"cleared" => [id], "not_found" => []}}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", id]) end)
+      assert code == 0
+      assert out =~ "Cleared 1 message."
+    end
+
+    test "resolves a unique short prefix against coordinator mail, then clears it" do
+      full = "0b9d1f2a-1111-2222-3333-444455556666"
+
+      stub_routes([
+        {{"get", "/api/messages"}, {%{"data" => [coordinator_msg(%{"id" => full})]}, 200}},
+        {{"delete", "/api/messages"},
+         {%{"data" => %{"cleared" => [full], "not_found" => []}}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", "0b9d1f2a"]) end)
+      assert code == 0
+      assert out =~ "Cleared 1 message."
+    end
+
+    test "clears several ids in one call" do
+      id1 = "11111111-2222-3333-4444-555566667777"
+      id2 = "22222222-3333-4444-5555-666677778888"
+
+      stub_routes([
+        {{"delete", "/api/messages"},
+         {%{"data" => %{"cleared" => [id1, id2], "not_found" => []}}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", id1, id2]) end)
+      assert code == 0
+      assert out =~ "Cleared 2 messages."
+    end
+
+    test "refuses an ambiguous prefix and lists the candidates" do
+      stub_routes([
+        {{"get", "/api/messages"},
+         {%{
+            "data" => [
+              coordinator_msg(%{"id" => "0b9d1f2a-1111-2222-3333-444455556666"}),
+              coordinator_msg(%{"id" => "0b9d9999-1111-2222-3333-444455556666"})
+            ]
+          }, 200}}
+      ])
+
+      {_out, err, code} = capture(fn -> Inbox.run(["clear", "0b9d"]) end)
+      assert code != 0
+      assert err =~ "ambiguous id prefix"
+      assert err =~ "0b9d1f2a-1111-2222-3333-444455556666"
+      assert err =~ "0b9d9999-1111-2222-3333-444455556666"
+    end
+
+    test "errors clearly on an unknown id" do
+      stub_routes([
+        {{"get", "/api/messages"}, {%{"data" => []}, 200}}
+      ])
+
+      {_out, err, code} = capture(fn -> Inbox.run(["clear", "deadbeef"]) end)
+      assert code != 0
+      assert err =~ "no coordinator message matches"
+    end
+
+    test "reports any ids the server didn't find" do
+      id = "11111111-2222-3333-4444-555566667777"
+
+      stub_routes([
+        {{"delete", "/api/messages"}, {%{"data" => %{"cleared" => [], "not_found" => [id]}}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", id]) end)
+      assert code == 0
+      assert out =~ "Cleared 0 messages"
+      assert out =~ "1 id not found"
+      assert out =~ id
+    end
+
+    test "--json emits cleared and not_found" do
+      id = "11111111-2222-3333-4444-555566667777"
+
+      stub_routes([
+        {{"delete", "/api/messages"}, {%{"data" => %{"cleared" => [id], "not_found" => []}}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", id, "--json"]) end)
+      assert code == 0
+      assert {:ok, %{"data" => %{"cleared" => [^id], "not_found" => []}}} = Jason.decode(out)
+    end
+  end
+
+  describe "arb inbox clear --task <task-id>" do
+    test "clears every coordinator message for the task" do
+      stub_routes([
+        {{"delete", "/api/messages"},
+         {%{"data" => %{"cleared" => ["m-1", "m-2"], "cleared_count" => 2}}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", "--task", "bd-1qx1nt"]) end)
+      assert code == 0
+      assert out =~ "Cleared 2 messages for bd-1qx1nt."
+    end
+
+    test "reports nothing to clear" do
+      stub_routes([
+        {{"delete", "/api/messages"},
+         {%{"data" => %{"cleared" => [], "cleared_count" => 0}}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", "--task", "bd-1qx1nt"]) end)
+      assert code == 0
+      assert out =~ "Nothing to clear for bd-1qx1nt."
+    end
+
+    test "requires a task id" do
+      {_out, err, code} = capture(fn -> Inbox.run(["clear", "--task"]) end)
+      assert code != 0
+      assert err =~ "requires a task id"
+    end
+  end
+
   describe "arb inbox <task-id> (worker path)" do
     test "lists a task's unread mail and marks each read" do
       stub_routes([

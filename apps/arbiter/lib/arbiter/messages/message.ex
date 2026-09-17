@@ -635,6 +635,64 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
+  Soft-clear specific messages by id (stamps `cleared_at`; idempotent; rows
+  retained — the same transition as `mark_cleared/1`, batched). Resolves each
+  id directly with `Ash.get/2`, **regardless of workspace**: an id is already
+  unambiguous, so there is nothing to scope it against (bd-95pse9 — a
+  workspace-scoped lookup here is exactly the trap that made `coordinator_inbox`
+  silently return `count: 0` when the caller omitted `workspace`).
+
+  Returns `{:ok, cleared, not_found}` where `cleared` is the list of updated
+  messages and `not_found` is the subset of `ids` that matched no row (or
+  matched a row `mark_cleared/1` refuses, e.g. a `:notification`).
+  """
+  def clear_ids(ids) when is_list(ids) do
+    {cleared, not_found} =
+      Enum.reduce(ids, {[], []}, fn id, {cleared_acc, missing_acc} ->
+        case mark_cleared(id) do
+          {:ok, message} -> {[message | cleared_acc], missing_acc}
+          {:error, _} -> {cleared_acc, [id | missing_acc]}
+        end
+      end)
+
+    cleared = Enum.reverse(cleared)
+    broadcast_workspaces(cleared)
+
+    {:ok, cleared, Enum.reverse(not_found)}
+  end
+
+  @doc """
+  Soft-clear every coordinator message concerning `task_ref` — every
+  mailbox-family row addressed to the coordinator (`to_ref` in
+  `coordinator_refs/0`) whose `task_ref` matches, still outstanding
+  (`cleared_at IS NULL`). The targeted counterpart to `clear_read/2` /
+  `clear_all/2`: clearing one task's escalation thread (e.g. once it closes)
+  without sweeping the rest of the coordinator's mailbox. Rows are retained
+  (soft). Idempotent — a second call finds nothing left to clear. Pass
+  `workspace_id:` to scope to one workspace.
+
+  Returns `{:ok, cleared}`, the list of updated messages (`[]` when nothing
+  was outstanding for the task).
+  """
+  def clear_by_task(task_ref, opts \\ []) when is_binary(task_ref) do
+    query =
+      __MODULE__
+      |> Ash.Query.filter(
+        task_ref == ^task_ref and to_ref in ^@coordinator_refs and is_nil(cleared_at) and
+          kind in ^@mailbox_kinds
+      )
+
+    query = scope_workspace(query, opts)
+
+    to_clear = Ash.read!(query)
+    Enum.each(to_clear, &mark_cleared/1)
+
+    broadcast_workspaces(to_clear)
+
+    {:ok, to_clear}
+  end
+
+  @doc """
   Hard purge: the **only** path that destroys rows. Permanently deletes every
   *already-cleared* (`cleared_at NOT NULL`) message addressed to `to_ref` — the
   addressed history that soft-clear accumulates. Pending and outstanding mail

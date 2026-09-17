@@ -18,6 +18,7 @@ defmodule Arbiter.MCP.CatalogTest do
                        worker_resume worker_review worker_stop worker_list worker_show worker_runs
                        worker_log task_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox
+                       coordinator_inbox_clear
                        workspace_config_set workspace_config_unset
                        external_review_list external_review_show review_greenlight
                        loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject
@@ -25,7 +26,7 @@ defmodule Arbiter.MCP.CatalogTest do
 
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
-  @workspace_resolving_tools ~w(task_ready coordinator_inbox workspace_show
+  @workspace_resolving_tools ~w(task_ready coordinator_inbox coordinator_inbox_clear workspace_show
                                 quota_get task_create worker_list task_list usage_summarize notify_list
                                 tracker_claim tracker_sync worker_review graph_create workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
