@@ -1485,17 +1485,60 @@ defmodule Arbiter.MCP.Tools do
   def authorize_subtree(%Scope{}, _id), do: :ok
 
   @doc """
-  Authorize an **edge** write for a `:refine` scope: at least one endpoint must be
-  in the bound subtree.
+  Authorize an **edge** write for a `:refine` scope.
 
-  One endpoint is enough by design — refinement is largely about wiring the
-  subtree to the work around it (`depends_on` a sibling's API change,
-  `relates_to` the epic's other half). The edge still cannot reach across
-  workspaces: both endpoints are fetched workspace-scoped first.
+  Two rules, because one edge type is not like the others:
+
+    * **`:parent_of` — both endpoints must be in the subtree.** `parent_of` is
+      the very relation `Scope.subtree_member?/2` walks, so a one-endpoint rule
+      would be self-extending: `dep_add(bound_issue, any_issue, :parent_of)`
+      adopts `any_issue` into the subtree, and the next `task_update` /
+      `task_promote` on it then passes `authorize_subtree/2`. Repeat and a
+      refine token reaches every issue in the workspace — including promoting
+      it to Ready, where Autopilot can claim it, which is exactly what
+      `can_dispatch: false` exists to prevent. Requiring both endpoints keeps
+      re-parenting *within* the subtree available and makes adoption of an
+      outsider impossible. The same rule applies to a `parent_of` **removal**
+      (and to a `dep_remove` with no `type`, which would take `parent_of` edges
+      with it): the shape of the tree outside the subtree is not a refine
+      session's to edit.
+
+    * **Every other type — at least one endpoint in the subtree.** None of
+      `relates_to` / `depends_on` / `blocks` / `discovered_from` /
+      `conflicts_with` confers authority over its endpoints, and refinement is
+      largely about wiring the subtree to the work around it (`depends_on` a
+      sibling's API change, `relates_to` the epic's other half).
+
+  The edge still cannot reach across workspaces either way: both endpoints are
+  fetched workspace-scoped first.
+
+  `type` is the cast `Dependency` type, or `nil` for "every edge between the
+  pair" (`dep_remove` with no type), which is treated as `:parent_of` because it
+  may remove one.
   """
-  @spec authorize_subtree_edge(Scope.t(), String.t(), String.t()) ::
+  @spec authorize_subtree_edge(Scope.t(), String.t(), String.t(), atom() | nil) ::
           :ok | {:error, {:unauthorized, String.t()}}
-  def authorize_subtree_edge(%Scope{tier: :refine} = scope, from_id, to_id) do
+  def authorize_subtree_edge(scope, from_id, to_id, type)
+
+  def authorize_subtree_edge(%Scope{tier: :refine} = scope, from_id, to_id, type)
+      when type in [:parent_of, nil] do
+    case Enum.reject([from_id, to_id], &Scope.subtree_member?(scope, &1)) do
+      [] ->
+        :ok
+
+      outside ->
+        {:error,
+         {:unauthorized,
+          subtree_denial(
+            scope,
+            "#{Enum.join(outside, " and ")} #{verb(outside)} outside it — a parent_of edge " <>
+              "needs BOTH endpoints inside the subtree, so a refine session cannot adopt " <>
+              "an outside task into its subtree (or re-parent one out of it)"
+          )}}
+    end
+  end
+
+  def authorize_subtree_edge(%Scope{tier: :refine} = scope, from_id, to_id, _type) do
     if Scope.subtree_member?(scope, from_id) or Scope.subtree_member?(scope, to_id) do
       :ok
     else
@@ -1509,7 +1552,10 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  def authorize_subtree_edge(%Scope{}, _from_id, _to_id), do: :ok
+  def authorize_subtree_edge(%Scope{}, _from_id, _to_id, _type), do: :ok
+
+  defp verb([_one]), do: "is"
+  defp verb(_many), do: "are"
 
   defp subtree_denial(%Scope{issue_id: bound}, detail) do
     "a refine session may only write inside the parent_of subtree of #{bound}: #{detail}"

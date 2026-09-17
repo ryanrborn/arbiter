@@ -135,14 +135,20 @@ defmodule Arbiter.MCP.Tools.Task do
   For a `:refine` scope (bd-3uy2hn) the parent is not optional: it defaults to the
   bound issue and must be the bound issue or one of its descendants, so a refine
   token cannot file a task outside its subtree. The parent is authorized *before*
-  the task is created — a refused create leaves nothing behind.
+  the task is created — a refused create leaves nothing behind. The same
+  `refine_field_gate/2` that narrows `task_update` also runs here, so a refine
+  session cannot set on create (`assignee`, `tracker_ref`, `target_branch`, …)
+  what it would be refused on update.
   """
   @spec task_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_create(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, title} <- Tools.require_string(args, "title"),
          {:ok, parent_id} <- create_parent(scope, args, ws_id),
-         {:ok, attrs} <- Tools.collect_attrs(args, task_create_spec()) do
+         {:ok, attrs} <- Tools.collect_attrs(args, task_create_spec()),
+         # Gate *before* title/workspace_id are forced on: those two are set by
+         # the tool, not by the caller, and a refine session is allowed both.
+         {:ok, attrs} <- refine_field_gate(scope, attrs) do
       attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
 
       case Ash.create(Issue, attrs) do
@@ -174,9 +180,39 @@ defmodule Arbiter.MCP.Tools.Task do
     end
   end
 
-  defp attach_parent(result, _scope, _issue, nil), do: {:ok, result}
+  @doc """
+  Attach `issue` under `parent_id` with a `parent_of` edge.
 
-  defp attach_parent(result, %Scope{} = scope, %Issue{} = issue, parent_id) do
+  The edge is a second write, after `Ash.create(Issue, …)` and outside its
+  transaction, so it can fail on its own — a parent deleted between the
+  authorization and this call, or a resource-level rejection. When it does, the
+  task is **kept**, and the error says so. That is deliberate, not an oversight:
+
+    * An issue cannot be un-created. `Ash.destroy` on a task whose paper-trail
+      version row already exists fails the version table's foreign key, so there
+      is no compensating delete to run.
+    * Rolling the pair back in one `Ash.transaction/2` is not available either:
+      `Dependencies.add/4` opens its own, and under the test sandbox (and any
+      caller already inside a transaction) `Ash.rollback/2` would abort the
+      enclosing transaction rather than just this create.
+
+  So the contract is: *the task exists, the edge does not.* For a coordinator
+  that is a one-call fix (`dep_add`). For a refine session it is not — the
+  unparented task sits outside the bound subtree, and a `parent_of` add needs
+  both endpoints inside it (`Tools.authorize_subtree_edge/4`) — so the message
+  names the id and says who can re-attach it. Either way nothing is silently
+  half-done.
+
+  Public (rather than private) so that contract is directly testable; the
+  failure is otherwise only reachable by a race.
+  """
+  @spec attach_parent(map(), Scope.t(), Issue.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, {:invalid, String.t()}}
+  def attach_parent(result, scope, issue, parent_id)
+
+  def attach_parent(result, _scope, _issue, nil), do: {:ok, result}
+
+  def attach_parent(result, %Scope{} = scope, %Issue{} = issue, parent_id) do
     case Dependencies.add(parent_id, issue.id, :parent_of,
            created_by: Arbiter.PaperTrail.actor_label(scope)
          ) do
@@ -184,13 +220,22 @@ defmodule Arbiter.MCP.Tools.Task do
         {:ok, Map.put(result, :parent_id, parent_id)}
 
       {:error, reason} ->
-        # The task exists; only the edge failed. Say so plainly and name the id,
-        # so the caller can retry `dep_add` rather than file a duplicate.
-        {:error,
-         {:invalid,
-          "task #{issue.id} was created, but the parent_of edge from #{parent_id} failed: " <>
-            inspect(reason) <> " — add it with dep_add"}}
+        {:error, {:invalid, orphan_message(scope, issue, parent_id, reason)}}
     end
+  end
+
+  defp orphan_message(%Scope{tier: tier}, %Issue{} = issue, parent_id, reason) do
+    recovery =
+      if tier == :refine do
+        " — it is filed in the workspace Backlog with no parent, which puts it " <>
+          "outside this session's subtree: ask a coordinator to attach it with dep_add, or " <>
+          "file it again once #{parent_id} is reachable"
+      else
+        " — the task is filed with no parent; attach it with dep_add rather than filing it again"
+      end
+
+    "task #{issue.id} was created, but the parent_of edge from #{parent_id} failed: " <>
+      inspect(reason) <> recovery
   end
 
   # bd-7mbrlg: non-blocking heads-up at filing time — the task is created
@@ -431,7 +476,7 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, type} <- Tools.require_enum(args, "type", Dependency.types()),
          {:ok, from_task} <- Tools.fetch_task(scope, args, from),
          {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to),
-         :ok <- Tools.authorize_subtree_edge(scope, from, to) do
+         :ok <- Tools.authorize_subtree_edge(scope, from, to, type) do
       opts =
         []
         |> Tools.maybe_put_kw(:notes, Tools.fetch_string(args, "notes"))
@@ -461,7 +506,7 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()),
          {:ok, from_task} <- Tools.fetch_task(scope, args, from),
          {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to),
-         :ok <- Tools.authorize_subtree_edge(scope, from, to) do
+         :ok <- Tools.authorize_subtree_edge(scope, from, to, type) do
       case Dependencies.remove(from, to, type) do
         {:ok, removed} -> {:ok, %{from_issue_id: from, to_issue_id: to, removed: removed}}
         {:error, reason} -> Tools.dependency_error(reason)

@@ -358,9 +358,19 @@ Two gates, not one:
 2. **Data-level.** Every allowed *write* (`task_update`, `task_update_progress`,
    `task_create`, `task_promote`, `dep_add`, `dep_remove`) must target the bound
    issue or a descendant reachable from it by `parent_of`
-   (`Arbiter.MCP.Tools.authorize_subtree/2`; an edge needs one endpoint inside).
-   Reads stay broad across the bound workspace, because refining an issue means
-   reading its neighbours.
+   (`Arbiter.MCP.Tools.authorize_subtree/2`). Reads stay broad across the bound
+   workspace, because refining an issue means reading its neighbours.
+
+   Edges have two rules (`Arbiter.MCP.Tools.authorize_subtree_edge/4`).
+   `relates_to` / `depends_on` / `blocks` / `discovered_from` / `conflicts_with`
+   need **one** endpoint inside — wiring the subtree to the work around it is
+   most of what refinement does, and none of those types confers authority over
+   its endpoints. `parent_of` needs **both**, because `parent_of` is the very
+   relation the subtree check walks: a one-endpoint rule would be
+   self-extending, letting a refine token adopt any issue in the workspace into
+   its subtree and then edit and promote it. Re-parenting within the subtree
+   stays available; adopting (or expelling) an outsider does not. A typeless
+   `dep_remove` is held to the `parent_of` rule, since it would remove one.
 
 Promotion is allowed inside the subtree, and still honours the
 acceptance-required rule (bd-7mbrlg). Because Autopilot can claim a task within

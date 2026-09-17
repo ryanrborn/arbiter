@@ -218,6 +218,78 @@ defmodule Arbiter.MCP.RefineToolsTest do
       assert Dependencies.for_issue(ctx.sibling.id).relates_to == []
     end
 
+    test "dep_add cannot adopt an outside task via parent_of (subtree self-extension)", ctx do
+      # `parent_of` is the relation the subtree check itself walks, so a
+      # one-endpoint rule would let a refine token pull any issue in the
+      # workspace into its subtree and then edit and promote it.
+      assert {:rpc_error, -32_003, message} =
+               call(ctx.refine, "dep_add", %{
+                 "from_issue_id" => ctx.root.id,
+                 "to_issue_id" => ctx.sibling.id,
+                 "type" => "parent_of"
+               })
+
+      assert message =~ "BOTH endpoints"
+
+      assert Dependencies.for_issue(ctx.sibling.id).parents |> Enum.map(& &1.issue_id) ==
+               [ctx.grandparent.id]
+
+      # …and the escalation the adoption would have unlocked is still refused.
+      assert {:rpc_error, -32_003, _} =
+               call(ctx.refine, "task_update", %{"id" => ctx.sibling.id, "title" => "hijacked"})
+
+      assert {:rpc_error, -32_003, _} =
+               call(ctx.refine, "task_promote", %{"id" => ctx.sibling.id})
+
+      assert reload!(ctx.sibling).title == "sibling"
+      refute reload!(ctx.sibling).refined
+    end
+
+    test "parent_of is refused when only the *to* endpoint is in the subtree", ctx do
+      assert {:rpc_error, -32_003, message} =
+               call(ctx.refine, "dep_add", %{
+                 "from_issue_id" => ctx.unrelated.id,
+                 "to_issue_id" => ctx.grandchild.id,
+                 "type" => "parent_of"
+               })
+
+      assert message =~ "BOTH endpoints"
+    end
+
+    test "parent_of re-parenting *within* the subtree still works", ctx do
+      assert {:ok, _} =
+               call(ctx.refine, "dep_add", %{
+                 "from_issue_id" => ctx.root.id,
+                 "to_issue_id" => ctx.grandchild.id,
+                 "type" => "parent_of"
+               })
+
+      parents = Dependencies.for_issue(ctx.grandchild.id).parents
+      assert ctx.root.id in Enum.map(parents, & &1.issue_id)
+    end
+
+    test "dep_remove cannot detach the bound issue from its own parent", ctx do
+      assert {:rpc_error, -32_003, message} =
+               call(ctx.refine, "dep_remove", %{
+                 "from_issue_id" => ctx.grandparent.id,
+                 "to_issue_id" => ctx.root.id,
+                 "type" => "parent_of"
+               })
+
+      assert message =~ "BOTH endpoints"
+
+      # A typeless remove would take the parent_of edge with it, so it is held
+      # to the same rule.
+      assert {:rpc_error, -32_003, _} =
+               call(ctx.refine, "dep_remove", %{
+                 "from_issue_id" => ctx.grandparent.id,
+                 "to_issue_id" => ctx.root.id
+               })
+
+      assert Dependencies.for_issue(ctx.root.id).parents |> Enum.map(& &1.issue_id) ==
+               [ctx.grandparent.id]
+    end
+
     test "dep_remove follows the same rule", ctx do
       {:ok, _} = Dependencies.add(ctx.sibling.id, ctx.unrelated.id, :relates_to)
 
@@ -277,6 +349,62 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
       assert Issue |> Ash.Query.filter(workspace_id == ^ctx.ws.id) |> Ash.read!() |> length() ==
                before
+    end
+
+    test "refuses fields the refine field gate refuses on update", ctx do
+      for {field, value} <- [
+            {"assignee", "someone"},
+            {"tracker_type", "github"},
+            {"tracker_ref", "org/repo#1"},
+            {"target_branch", "release"},
+            {"auto_close", true}
+          ] do
+        result = call(ctx.refine, "task_create", %{"title" => "shaped", field => value})
+
+        assert {:rpc_error, -32_003, message} = result
+        assert message =~ field
+      end
+
+      # …and nothing was filed along the way.
+      assert Issue
+             |> Ash.Query.filter(workspace_id == ^ctx.ws.id and title == "shaped")
+             |> Ash.read!() == []
+    end
+
+    test "a failed parent_of attach: the task survives, and the error pins the contract", ctx do
+      {:ok, orphan} = Ash.create(Issue, %{title: "would-be child", workspace_id: ctx.ws.id})
+
+      # The edge write is a second, non-transactional write; a parent that went
+      # away between the authorization and the attach is the production race.
+      # An issue cannot be un-created (the paper-trail version row's FK refuses
+      # the destroy), so the documented contract is "task exists, edge missing"
+      # — asserted here so it stays a deliberate choice.
+      assert {:error, {:invalid, message}} =
+               Arbiter.MCP.Tools.Task.attach_parent(%{}, ctx.refine, orphan, "bd-gone")
+
+      assert message =~ orphan.id
+      assert message =~ "bd-gone"
+      assert {:ok, _} = Ash.get(Issue, orphan.id)
+      assert Dependencies.for_issue(orphan.id).parents == []
+    end
+
+    test "the orphan message tells a refine session it cannot re-attach the task itself", ctx do
+      {:ok, orphan} = Ash.create(Issue, %{title: "stranded", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, refine_message}} =
+               Arbiter.MCP.Tools.Task.attach_parent(%{}, ctx.refine, orphan, "bd-gone")
+
+      # The unparented task is outside the bound subtree, and a parent_of add
+      # needs both endpoints inside it — so dep_add is not a recovery the
+      # session can run, and the message must not claim otherwise.
+      assert refine_message =~ "coordinator"
+
+      coordinator = %Scope{tier: :coordinator, workspace_id: ctx.ws.id}
+
+      assert {:error, {:invalid, coordinator_message}} =
+               Arbiter.MCP.Tools.Task.attach_parent(%{}, coordinator, orphan, "bd-gone")
+
+      assert coordinator_message =~ "dep_add"
     end
 
     test "cannot create into another workspace", ctx do

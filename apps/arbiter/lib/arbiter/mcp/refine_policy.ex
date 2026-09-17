@@ -20,9 +20,16 @@ defmodule Arbiter.MCP.RefinePolicy do
 
   **Reads are broad.** Refining an issue means reading its neighbours — the epic
   above it, the sibling that already solved half the problem, the repo it belongs
-  to, the skills a worker would bring. Those reads are all scoped to the token's
-  bound workspace by `Arbiter.MCP.Scope.same_workspace?/2`, so breadth here costs
-  nothing across workspaces.
+  to, the skills a worker would bring. The task-, workspace- and graph-shaped
+  reads resolve their target through `Arbiter.MCP.Tools.authorized_workspace/2` /
+  `Arbiter.MCP.Tools.resolve_workspace_id/2`, which pin a workspace-bound scope to
+  its own workspace, so breadth there costs nothing across workspaces.
+
+  `repo_list` / `repo_show` are the deliberate exception: repos are an
+  installation-level registry, not a per-workspace one, and those two handlers
+  ignore the scope and return the installation-wide list. That is intended — a
+  refine session needs to name the repo a task belongs to — and it is a read of
+  configuration, not of anyone's work.
 
   **Writes are narrow, and doubly gated.** A tool being allowed here only means a
   refine session may *call* it; the handler then requires the target to be the
