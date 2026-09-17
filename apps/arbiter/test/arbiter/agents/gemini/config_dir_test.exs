@@ -80,7 +80,8 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
     test "generates an Arbiter-owned agy settings.json, never the operator's", %{worktree: wt} do
       assert {:ok, home} = ConfigDir.ensure(worktree: wt, security: strict())
 
-      settings = Jason.decode!(File.read!(Path.join(home, ".gemini/antigravity-cli/settings.json")))
+      settings =
+        Jason.decode!(File.read!(Path.join(home, ".gemini/antigravity-cli/settings.json")))
 
       assert settings["toolPermission"] == "strict"
       assert settings["allowNonWorkspaceAccess"] == false

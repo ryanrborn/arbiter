@@ -3,6 +3,13 @@ defmodule Arbiter.Agents.Gemini do
   Gemini agent adapter implementing `Arbiter.Agents.Agent`.
 
   Favors `agy` CLI binary, falling back to `gemini` CLI binary if `agy` is not on PATH.
+
+  The two CLIs are not interchangeable — see `resolve_executable/0`. On the agy
+  branch the spawn's security posture is split across
+  `Arbiter.Agents.Gemini.Security` (argv + the generated settings document) and
+  `Arbiter.Agents.Gemini.ConfigDir` (the isolated `$HOME` that document lands
+  in, injected by `spawn_env/1`); the upstream `gemini` branch has no analogue
+  of either (bd-7s29yq).
   """
 
   @behaviour Arbiter.Agents.Agent
@@ -296,6 +303,11 @@ defmodule Arbiter.Agents.Gemini do
       agy_model_and_effort_argv(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
+  # The upstream `gemini` CLI has no allow/deny mechanism and no settings file
+  # we can generate, so its branches stay coarse: `:bypass` skips its own trust
+  # and confirmation gates, `:auto`/`:strict` leave them on. Nothing here
+  # enforces the policy's deny rules, which is why `security_enforced?/0`
+  # answers `false` on a host where `gemini` (not `agy`) is the resolved CLI.
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--skip-trust", "-y"] ++
       model_flag(:gemini, opts) ++ thinking_flag(:gemini, opts) ++ output_format_flag()
