@@ -55,6 +55,7 @@ defmodule Arbiter.Worker.Dispatch do
   """
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
@@ -896,7 +897,7 @@ defmodule Arbiter.Worker.Dispatch do
           |> Arbiter.Agents.ProviderConfig.apply_overrides("gemini")
           |> Map.get("tier_models", %{})
 
-        base = Arbiter.Agents.Gemini.Config.default_tier_models(:agy)
+        base = GeminiConfig.default_tier_models(:agy)
         Map.get(overrides, config["model_tier"]) || Map.get(base, config["model_tier"])
     end
   rescue
