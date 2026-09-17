@@ -2101,6 +2101,7 @@ defmodule Arbiter.MCP.Tools do
 
   defdelegate inbox_check(scope, args), to: Arbiter.MCP.Tools.Messaging
   defdelegate coordinator_inbox(scope, args), to: Arbiter.MCP.Tools.Messaging
+  defdelegate coordinator_inbox_clear(scope, args), to: Arbiter.MCP.Tools.Messaging
   defdelegate message_send(scope, args), to: Arbiter.MCP.Tools.Messaging
   defdelegate notify_list(scope, args), to: Arbiter.MCP.Tools.Messaging
 

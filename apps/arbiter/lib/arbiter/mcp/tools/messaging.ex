@@ -129,6 +129,64 @@ defmodule Arbiter.MCP.Tools.Messaging do
     :ok
   end
 
+  # ---- coordinator_inbox_clear ---------------------------------------------
+
+  @doc """
+  Soft-clear specific coordinator-mailbox messages — the structured
+  replacement for `arb inbox clear <id> ...` / `arb inbox clear --task
+  <task-id>`. Coordinator only. Accepts `ids` (a list of message ids) and/or
+  `task_id`; at least one is required.
+
+  `ids` resolve directly by id, **regardless of workspace** (bd-95pse9: an id
+  is already unambiguous, and a workspace-scoped lookup here is exactly the
+  trap that made `coordinator_inbox` silently return `count: 0` when the
+  caller omitted `workspace`). `task_id` clears every coordinator message
+  concerning that task; it resolves a workspace the normal way (explicit
+  `workspace` arg → the scope's bound workspace → the installation default),
+  erroring rather than guessing when that's ambiguous.
+
+  Returns `{:ok, %{cleared: [...], not_found: [...], cleared_by_task: [...]}}`
+  — `cleared`/`not_found` cover the `ids` clear, `cleared_by_task` the
+  `task_id` clear.
+  """
+  @spec coordinator_inbox_clear(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def coordinator_inbox_clear(%Scope{} = scope, args) do
+    ids = fetch_string_list(args, "ids")
+    task_id = Tools.fetch_string(args, "task_id")
+
+    if ids == [] and is_nil(task_id) do
+      {:error, {:invalid_args, "coordinator_inbox_clear requires ids and/or task_id"}}
+    else
+      {:ok, cleared, not_found} = if ids == [], do: {:ok, [], []}, else: Message.clear_ids(ids)
+
+      with {:ok, cleared_by_task} <- clear_by_task_if_present(scope, args, task_id) do
+        {:ok,
+         %{
+           cleared: Enum.map(cleared, &serialize_message/1),
+           not_found: not_found,
+           cleared_by_task: Enum.map(cleared_by_task, &serialize_message/1)
+         }}
+      end
+    end
+  end
+
+  defp clear_by_task_if_present(_scope, _args, nil), do: {:ok, []}
+
+  defp clear_by_task_if_present(scope, args, task_id) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
+      Message.clear_by_task(task_id, workspace_id: ws_id)
+    end
+  end
+
+  defp fetch_string_list(args, key) when is_map(args) do
+    case Map.get(args, key) do
+      list when is_list(list) -> Enum.filter(list, &is_binary/1)
+      _ -> []
+    end
+  end
+
+  defp fetch_string_list(_args, _key), do: []
+
   # ---- message_send -------------------------------------------------------
 
   @doc """
