@@ -337,6 +337,32 @@ defmodule Arbiter.SessionsTest do
       assert session_id == session.id
     end
 
+    test "a failed verify persists bridge_status: :unavailable on the session row (bd-cdretj)" do
+      test_pid = self()
+
+      session =
+        launch!(
+          remote_control: true,
+          bridge_verify_fun: fn _dir, _opts ->
+            send(test_pid, {:verify_started, self()})
+            receive do: (:go -> :ok)
+            {:error, :bridge_unavailable}
+          end
+        )
+
+      assert session.bridge_status == nil
+
+      assert_receive {:verify_started, task_pid}, 1_000
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.usage_topic(session.id))
+      send(task_pid, :go)
+      assert_receive {:session_error, _id, %{code: "bridge_unavailable"}}, 1_000
+
+      # A late attach — a client that never saw the broadcast at all — must
+      # still be able to see the failure by re-reading the row.
+      assert {:ok, reloaded} = Sessions.get(session.id)
+      assert reloaded.bridge_status == :unavailable
+    end
+
     test "a bridge that comes up broadcasts nothing" do
       test_pid = self()
 

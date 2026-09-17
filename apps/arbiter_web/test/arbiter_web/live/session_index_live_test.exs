@@ -218,6 +218,26 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       assert render(view) =~ "exited"
       assert has_element?(view, "#session-#{session.id}", "ended")
     end
+
+    test "a session with a persisted bridge_status: :unavailable is labeled in the list (bd-cdretj)",
+         %{conn: conn} do
+      session = launch!(remote_control: true)
+      {:ok, session} = Sessions.mark_bridge_unavailable(session)
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#session-#{session.id}", "remote control bridge unavailable")
+    end
+
+    test "a session with remote_control requested but no bridge failure is labeled as requested",
+         %{conn: conn} do
+      session = launch!(remote_control: true)
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#session-#{session.id}", "remote control requested")
+      refute has_element?(view, "#session-#{session.id}", "remote control bridge unavailable")
+    end
   end
 
   describe "launching" do

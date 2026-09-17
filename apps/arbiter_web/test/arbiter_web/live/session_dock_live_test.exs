@@ -1298,6 +1298,58 @@ defmodule ArbiterWeb.SessionDockLiveTest do
     end
   end
 
+  describe "a bridge that never came up (§8.3, bd-cdretj)" do
+    test "a persisted bridge_status: :unavailable shows in the title bar on a fresh mount",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+      {:ok, session} = Sessions.mark_bridge_unavailable(session)
+
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      assert has_element?(
+               dock,
+               "#session-dock-bridge-unavailable-#{session.id}",
+               "bridge unavailable"
+             )
+    end
+
+    test "no badge when the bridge is fine, or Remote Control was never requested",
+         %{conn: conn} do
+      ok = launch!(auth_mode: :seeded_credentials, remote_control: true)
+      unset = launch!(auth_mode: :seeded_credentials, remote_control: false)
+      {:ok, unset} = Sessions.mark_bridge_unavailable(unset)
+
+      {_view, dock} = dock(conn)
+      open!(dock, ok)
+      open!(dock, unset)
+
+      refute has_element?(dock, "#session-dock-bridge-unavailable-#{ok.id}")
+      refute has_element?(dock, "#session-dock-bridge-unavailable-#{unset.id}")
+    end
+
+    test "opening the window clears a stale :unavailable once a bridge-session record shows up",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+      {:ok, session} = Sessions.mark_bridge_unavailable(session)
+
+      project_dir = Path.join(session.config_dir, "projects/some-project")
+      File.mkdir_p!(project_dir)
+
+      File.write!(
+        Path.join(project_dir, "transcript.jsonl"),
+        Jason.encode!(%{"type" => "bridge-session"}) <> "\n"
+      )
+
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-bridge-unavailable-#{session.id}")
+      assert {:ok, reloaded} = Sessions.get(session.id)
+      assert reloaded.bridge_status == nil
+    end
+  end
+
   describe "off loopback (§10.4, bd-2zskbb)" do
     defp remote(conn) do
       Plug.Test.put_peer_data(conn, %{address: {192, 168, 1, 38}, port: 55_555, ssl_cert: nil})

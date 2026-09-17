@@ -141,6 +141,7 @@ defmodule Arbiter.Sessions.SessionTest do
 
       assert columns == [
                {"auth_mode", true, false},
+               {"bridge_status", false, false},
                {"can_dispatch", true, false},
                {"config_dir", false, false},
                {"cwd", true, false},

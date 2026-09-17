@@ -48,6 +48,16 @@ defmodule Arbiter.Sessions.BridgeVerification do
     poll(config_dir, deadline, poll_interval_ms)
   end
 
+  @doc """
+  A single, non-blocking check for a `bridge-session` record — the same test
+  `verify/2` polls with, exposed for a caller that wants a one-shot answer
+  instead of waiting out a timeout (bd-cdretj round 2: the session dock
+  re-checks this on `open` to clear a stale `:unavailable` once an operator
+  has since retried `/remote-control` by hand).
+  """
+  @spec present?(String.t()) :: boolean()
+  def present?(config_dir) when is_binary(config_dir), do: bridge_session_present?(config_dir)
+
   defp poll(config_dir, deadline, poll_interval_ms) do
     if bridge_session_present?(config_dir) do
       :ok
