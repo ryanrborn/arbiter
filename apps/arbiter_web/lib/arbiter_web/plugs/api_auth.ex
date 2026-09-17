@@ -11,6 +11,20 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   Rejects unauthenticated non-loopback requests with HTTP 401 and a JSON error
   body matching the API error shape: `%{"error" => %{"message" => "..."}}`.
 
+  A caller's decoded `%Scope{}` — when a valid Bearer token was presented, on
+  loopback or not — is assigned to `conn.assigns[:mcp_scope]`. `nil` means
+  genuinely anonymous: no `Authorization` header at all, the one case
+  loopback still lets through unauthenticated. A header that *is* present but
+  expired, revoked, or malformed is rejected with 401 on loopback exactly
+  like off-loopback — it is never silently downgraded to anonymous. That
+  matters because a session's own `arb` CLI now authenticates over loopback
+  with its own token (bd-5b5hq7): if that token were revoked (its session
+  ended) and the plug just shrugged and treated the request as anonymous, a
+  still-running session process would trade a revoked token for a brand-new
+  unrestricted one through the exact endpoint meant to stop that
+  (`ArbiterWeb.Api.McpController.mint_token/2`, which reads `:mcp_scope` to
+  cap what it mints at what the caller already had).
+
   Do NOT trust `X-Forwarded-For` — arbiter binds directly (no reverse proxy)
   so `conn.remote_ip` is always the real peer.
   """
@@ -27,21 +41,21 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
 
   @impl true
   def call(%Plug.Conn{remote_ip: remote_ip} = conn, _opts) do
-    if Loopback.loopback?(remote_ip), do: conn, else: require_bearer(conn)
-  end
-
-  defp require_bearer(conn) do
     case get_req_header(conn, "authorization") do
       ["Bearer " <> token] ->
         case Scope.from_token(String.trim(token)) do
-          {:ok, _scope} -> conn
+          {:ok, scope} -> assign(conn, :mcp_scope, scope)
           {:error, :expired} -> halt_unauthorized(conn, "Bearer token expired")
           {:error, :revoked} -> halt_unauthorized(conn, "Bearer token revoked (session ended)")
           {:error, _} -> halt_unauthorized(conn, "Invalid Bearer token")
         end
 
       _ ->
-        halt_unauthorized(conn, "Authorization: Bearer <token> required")
+        if Loopback.loopback?(remote_ip) do
+          assign(conn, :mcp_scope, nil)
+        else
+          halt_unauthorized(conn, "Authorization: Bearer <token> required")
+        end
     end
   end
 

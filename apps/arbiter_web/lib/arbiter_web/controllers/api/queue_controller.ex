@@ -37,28 +37,48 @@ defmodule ArbiterWeb.Api.QueueController do
       encountered an error.
   """
   def resume(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    case Conductor.resume_task(task_id) do
-      :ok ->
-        json(conn, %{resumed: true, task_id: task_id})
+    with :ok <- ensure_dispatch_allowed(conn) do
+      case Conductor.resume_task(task_id) do
+        :ok ->
+          json(conn, %{resumed: true, task_id: task_id})
 
-      {:error, :not_found} ->
-        {:error, :not_found}
+        {:error, :not_found} ->
+          {:error, :not_found}
 
-      {:error, :not_failed} ->
-        {:error,
-         {:invalid_request,
-          "task #{task_id} has not failed in any running graph — nothing to resume"}}
+        {:error, :not_failed} ->
+          {:error,
+           {:invalid_request,
+            "task #{task_id} has not failed in any running graph — nothing to resume"}}
 
-      {:error, :dispatch_failed} ->
-        {:error, {:invalid_request, "re-dispatch of #{task_id} failed — check worker logs"}}
+        {:error, :dispatch_failed} ->
+          {:error, {:invalid_request, "re-dispatch of #{task_id} failed — check worker logs"}}
 
-      {:error, reason} ->
-        {:error, {:invalid_request, "resume failed: #{inspect(reason)}"}}
+        {:error, reason} ->
+          {:error, {:invalid_request, "resume failed: #{inspect(reason)}"}}
+      end
     end
   end
 
   def resume(_conn, _params) do
     {:error, {:invalid_request, "task_id path parameter is required"}}
+  end
+
+  # Same guardrail as `ArbiterWeb.Api.WorkerController.ensure_dispatch_allowed/1`
+  # (bd-5b5hq7): this route re-dispatches a worker just as `POST
+  # /api/workers/dispatch` does, so a token with `can_dispatch: false` must not
+  # be able to reach it either — otherwise a session denied dispatch could
+  # curl this loopback-exempt route with its own valid token instead.
+  defp ensure_dispatch_allowed(conn) do
+    case conn.assigns[:mcp_scope] do
+      nil ->
+        :ok
+
+      %Arbiter.MCP.Scope{can_dispatch: true} ->
+        :ok
+
+      %Arbiter.MCP.Scope{} ->
+        {:error, {:unauthorized, "this token may not dispatch (can_dispatch is not set)"}}
+    end
   end
 
   @doc """

@@ -230,6 +230,16 @@ defmodule Arbiter.Agents.SecurityPolicy do
   (the MergeQueue still owns PR creation — bd-53xrmi — and a hand-rolled
   `gh pr create` from a coordinator console produces the same duplicate on the
   same wrong base).
+
+  It also denies `Bash(arb mcp token mint:*)` (bd-5b5hq7). A session's own MCP
+  token is already deliberately weaker than a full coordinator token —
+  `can_dispatch: false` by default, possibly workspace-bound, and revoked when
+  the session ends — and unauthenticated loopback minting plus `arb` on PATH
+  would otherwise let the session trade up for a full-power token just by
+  running the CLI. This is a guardrail against *casual* escalation, not a
+  sandbox: the same-user threat model means a determined session could still
+  reach the API directly. See the server-side caller-inheritance guard in
+  `ArbiterWeb.Api.McpController.mint_token/2` for the actual boundary.
   """
   @spec interactive_session_base() :: t()
   def interactive_session_base do
@@ -240,7 +250,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
       | permissions: %{
           base.permissions
           | mode: :auto,
-            safe_defaults: @safe_default_categories -- [:no_async_wait]
+            safe_defaults: @safe_default_categories -- [:no_async_wait],
+            deny: base.permissions.deny ++ ["Bash(arb mcp token mint:*)"]
         }
     }
   end

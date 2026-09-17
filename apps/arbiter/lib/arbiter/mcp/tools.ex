@@ -676,8 +676,9 @@ defmodule Arbiter.MCP.Tools do
   conductor holds the task as failed.
   """
   @spec queue_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def queue_resume(%Scope{} = _scope, args) do
-    with {:ok, task_id} <- require_string(args, "task_id") do
+  def queue_resume(%Scope{} = scope, args) do
+    with :ok <- ensure_can_dispatch(scope),
+         {:ok, task_id} <- require_string(args, "task_id") do
       case Arbiter.Workflows.Conductor.resume_task(task_id) do
         :ok ->
           {:ok, %{resumed: true, task_id: task_id}}

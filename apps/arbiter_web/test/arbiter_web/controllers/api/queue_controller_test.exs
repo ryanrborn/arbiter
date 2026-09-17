@@ -90,6 +90,35 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     end
   end
 
+  describe "POST /api/queue/:task_id/resume — dispatch guardrail (bd-5b5hq7)" do
+    # Same shape as WorkerController's dispatch guardrail: this route
+    # re-dispatches a worker, so a bearer token with can_dispatch: false must
+    # be refused before ever reaching Conductor.resume_task/1 — otherwise a
+    # session denied dispatch over MCP could curl this loopback route
+    # instead. Refused before task/graph lookup, so a bogus task_id is fine.
+    test "a bearer token with can_dispatch: false is refused, even over loopback", %{
+      conn: conn
+    } do
+      token = Arbiter.MCP.Scope.mint_coordinator(nil, can_dispatch: false)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/queue/nonexistent-task/resume", %{})
+
+      body = json_response(conn, 403)
+      assert body["error"]["message"] =~ "can_dispatch"
+    end
+
+    test "no token at all (anonymous loopback) is unaffected by the guardrail", %{conn: conn} do
+      conn = post(conn, ~p"/api/queue/nonexistent-task/resume", %{})
+
+      # Falls through to Conductor.resume_task/1, which 404s for an unknown
+      # task — proof the guardrail didn't intercept an anonymous caller.
+      assert json_response(conn, 404)
+    end
+  end
+
   describe "POST /api/queue/:task_id/rerun_ci (bd-5mzzww / #1448)" do
     test "re-runs CI through the live watchdog and reports the granularity used", %{
       conn: conn,

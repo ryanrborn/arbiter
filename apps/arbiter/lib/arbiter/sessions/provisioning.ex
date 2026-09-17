@@ -114,7 +114,7 @@ defmodule Arbiter.Sessions.Provisioning do
          :ok <- mount_memory(session, opts),
          :ok <- seed_config_dir(session, config_dir, cwd, opts),
          :ok <- write_auth_env(session, paths, opts),
-         {:ok, mcp_config} <- write_mcp_config(session, cwd, opts),
+         {:ok, mcp_config} <- write_mcp_config(session, cwd, paths, opts),
          :ok <- write_watchdog_script(session, paths, opts),
          :ok <- write_launch_script(session, paths, config_dir, opts) do
       {:ok,
@@ -290,7 +290,7 @@ defmodule Arbiter.Sessions.Provisioning do
   # (`Arbiter.MCP.AgentConfig.Claude`), and `launch.sh` cd's into that cwd
   # before exec'ing the agent. One directory out and the session starts with no
   # Arbiter MCP server at all.
-  defp write_mcp_config(session, cwd, opts) do
+  defp write_mcp_config(session, cwd, paths, opts) do
     path = Path.join(cwd, ClaudeMCP.filename())
 
     if Keyword.get(opts, :mcp, MCP.enabled?()) do
@@ -311,7 +311,8 @@ defmodule Arbiter.Sessions.Provisioning do
                mcp_url: MCP.server_url(),
                scope_token: token,
                server_name: MCP.server_name()
-             ) do
+             ),
+           :ok <- write_secret(paths.mcp_token, token) do
         {:ok, path}
       else
         {:error, {:write_failed, _, _} = reason} -> {:error, reason}
@@ -319,6 +320,7 @@ defmodule Arbiter.Sessions.Provisioning do
       end
     else
       _ = File.rm(path)
+      _ = File.rm(paths.mcp_token)
       {:ok, nil}
     end
   end
