@@ -379,6 +379,17 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
          %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/sessions")
 
+      # `render_change` first, so `can_dispatch: true` is actually latched
+      # onto the server assign before the launch that must clear it —
+      # `render_submit` alone never fires `phx-change`, so a test that skips
+      # this step passes whether or not the reset fix exists (review
+      # finding, phase 11 round 3).
+      view
+      |> form("#launch-session-form", %{"name" => "first", "can_dispatch" => "true"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-can-dispatch[checked]")
+
       view
       |> form("#launch-session-form", %{"name" => "first", "can_dispatch" => "true"})
       |> render_submit()
@@ -394,6 +405,23 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
       assert [%{name: "second", can_dispatch: false}, %{name: "first", can_dispatch: true}] =
                Sessions.list()
+    end
+
+    test "switching to mode A un-checks a previously-checked Remote Control box",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"remote_control" => "true"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-remote-control[checked]")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      refute has_element?(view, "#launch-session-remote-control[checked]")
     end
   end
 
