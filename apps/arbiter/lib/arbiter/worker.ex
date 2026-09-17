@@ -3359,13 +3359,15 @@ defmodule Arbiter.Worker do
     adapter = agent_adapter_for_provider(provider)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
-      # `splice_prompt/2` is not a callback on Arbiter.Agents.Agent (see its
-      # @optional_callbacks) — only Claude and Codex define it, Gemini does not.
-      # The `function_exported?/3` guard above is what makes the call safe; a
-      # static `adapter.splice_prompt(...)` makes the compiler resolve `adapter`
-      # to every adapter module and emit an "undefined or private" warning for
-      # Gemini, which `mix compile --warnings-as-errors` then fails on. The
-      # dynamic dispatch is the point, not an oversight.
+      # `splice_prompt/2` is not a callback on Arbiter.Agents.Agent — it's a
+      # `@doc false` convention each adapter opts into (Claude, Codex, Gemini
+      # as of bd-b7e33c all define it). The `function_exported?/3` guard above
+      # is what makes the call safe for any future adapter that doesn't; a
+      # static `adapter.splice_prompt(...)` makes the compiler resolve
+      # `adapter` to every known adapter module and would emit an "undefined
+      # or private" warning for the first one that omits it, which `mix
+      # compile --warnings-as-errors` then fails on. The dynamic dispatch is
+      # the point, not an oversight.
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(adapter, :splice_prompt, [argv, [nudge]]) do
         {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
