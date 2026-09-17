@@ -285,5 +285,51 @@ defmodule Arbiter.Worker.ResumeTest do
                "CONTINUE PROMPT"
              ]
     end
+
+    # bd-b7e33c: gemini/agy used to be the one provider `inject_resume_argv/4`
+    # could not rewrite at all (Arbiter.Agents.Gemini had no `splice_prompt/2`)
+    # — it fell straight to `:unsupported_provider`. Now it's driven through
+    # the same dynamic-adapter path as claude/codex.
+    test "inserts --conversation for agy and swaps the prompt" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/bin/agy",
+        "-p",
+        "ORIGINAL TASK PROMPT",
+        "--model",
+        "gemini-3.1-pro",
+        "--output-format",
+        "stream-json"
+      ]
+
+      {:ok, %{argv: out}} =
+        Worker.inject_resume_argv(%{argv: argv}, "sess-abc", "CONTINUE PROMPT", "gemini")
+
+      idx = Enum.find_index(out, &(&1 == "-p"))
+      assert Enum.slice(out, idx, 2) == ["-p", "CONTINUE PROMPT"]
+      refute "ORIGINAL TASK PROMPT" in out
+      assert Enum.find_index(out, &(&1 == "--conversation")) == idx + 2
+      assert Enum.at(out, idx + 3) == "sess-abc"
+    end
+
+    test "upstream gemini CLI (no --conversation) returns an explicit error, not :unsupported_provider" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/bin/gemini",
+        "-p",
+        "ORIGINAL TASK PROMPT",
+        "--model",
+        "gemini-2.5-pro"
+      ]
+
+      assert {:error, :resume_unsupported} =
+               Worker.inject_resume_argv(%{argv: argv}, "sess-abc", "CONTINUE PROMPT", "gemini")
+    end
   end
 end
