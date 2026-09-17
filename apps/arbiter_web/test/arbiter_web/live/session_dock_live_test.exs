@@ -246,6 +246,30 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       refute has_element?(dock, ~s(#session-dock-title-#{first.id}[aria-expanded="true"]))
     end
 
+    # Finding 1, bd-cdut29 review round 1: at the @max_open (8) cap the
+    # front-take used to evict the *newly launched* window instead of the
+    # oldest one, so the operator got no window for a session that really
+    # did start, and lost the one they already had expanded, with no error
+    # to explain either.
+    test "launching at the eight-window cap still expands the new window", %{conn: conn} do
+      already_open = for n <- 1..8, do: launch!(name: "s#{n}")
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => Enum.map(already_open, & &1.id),
+        "expanded" => List.first(already_open).id
+      })
+
+      render_click(element(dock, "#session-dock-new-session"))
+      dock |> form("#session-dock-launch-form") |> render_submit()
+
+      already_open_ids = Enum.map(already_open, & &1.id)
+      assert [session] = Enum.reject(Sessions.list(), &(&1.id in already_open_ids))
+      assert has_element?(dock, ~s(#session-dock-title-#{session.id}[aria-expanded="true"]))
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert length(Regex.scan(~r/id="session-dock-window-/, render(dock))) == 8
+    end
+
     test "a failed launch is shown inline and opens no window", %{conn: conn} do
       put_env(:sessions_runner, Arbiter.Test.FailingSessionRunner)
       {_view, dock} = dock(conn)

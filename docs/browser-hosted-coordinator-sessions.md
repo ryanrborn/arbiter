@@ -980,10 +980,10 @@ check above).
 
 ### 6.5 The session dock, and the end of `/sessions/:id` (phase 3, bd-a292yj)
 
-The dock epic (bd-dlc136 phase 1, bd-9myzv8 phase 2, bd-a292yj phase 3) moved
-the terminal — and then everything around it — out of a page and into a strip
-pinned to the bottom of every dashboard page. Phase 3 finished the move and
-executed the decision it left open.
+The dock epic (bd-dlc136 phase 1, bd-9myzv8 phase 2, bd-a292yj phase 3,
+bd-cdut29 phase 4) moved the terminal — and then everything around it — out
+of a page and into a strip pinned to the bottom of every dashboard page.
+Phase 3 finished the move and executed the decision it left open.
 
 **`/sessions/:id` is gone, route and all.** Once `keep_alive`, Detach, Kill,
 the metadata and the cost figure live in a dock window, keeping the page would
@@ -996,8 +996,9 @@ carries a comment saying why, so it does not come back by accident.
 | control | owner |
 |---|---|
 | the terminal, `keep_alive`, Detach, session metadata, ledger cost/tokens, the end reason | the dock window (`ArbiterWeb.SessionDockLive`) |
-| launch, name at launch, the full history, reviewing sessions that ended long ago | `/sessions` (`ArbiterWeb.SessionIndexLive`) |
+| name at launch, the full history, reviewing sessions that ended long ago | `/sessions` (`ArbiterWeb.SessionIndexLive`) |
 | Kill | **both**, deliberately — ending a session is a fleet act and a window act. One implementation: `SessionIndexLive.kill_modal/1`, rendered by both views, and both keep the confirm step |
+| launch | **both**, deliberately (phase 4, bd-cdut29) — the dock roster's **New session** control needs the same launch options without leaving the current page. One implementation: `SessionIndexLive.launch_form/1` and `launch_defaults/1`, rendered/called by both views, so `/sessions`' launch path and the dock's stay a single code path rather than two that can drift |
 
 Kill's confirmation matters *more* in the dock than it did on the page: a title
 bar that is on screen everywhere is a different risk profile from a page an

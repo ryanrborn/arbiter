@@ -33,10 +33,13 @@ defmodule ArbiterWeb.SessionDockLive do
   `/sessions/:id` — which used to own them — is **gone**, route and all. That
   was phase 3's one decision to execute: keeping the page meant two surfaces
   owning the same controls, and two surfaces that own the same control drift.
-  `/sessions` stays as the index (launch, name at launch, the whole history,
-  and Kill as a fleet act), and the one control deliberately on both surfaces —
-  Kill — goes through `SessionIndexLive.kill_modal/1` on both, so there is a
-  single confirmation rather than two that can diverge.
+  `/sessions` stays as the index (name at launch, the whole history, and Kill
+  as a fleet act). Two controls are deliberately on both surfaces: Kill, which
+  goes through `SessionIndexLive.kill_modal/1` on both so there is a single
+  confirmation rather than two that can diverge, and — since phase 4,
+  bd-cdut29 — launch itself, through `SessionIndexLive.launch_form/1` and
+  `launch_defaults/1`, so starting a session from the dock is the same one
+  implementation `/sessions`' own launch button calls, not a second launcher.
 
   Kill keeps its confirm step *here in particular*. A title bar that is on
   screen on every page is a different risk profile from a page an operator
@@ -274,7 +277,7 @@ defmodule ArbiterWeb.SessionDockLive do
     case Sessions.launch(SessionIndexLive.launch_defaults(params)) do
       {:ok, session} ->
         socket = load_sessions(socket)
-        open_ids = Enum.take(Enum.uniq(socket.assigns.open_ids ++ [session.id]), @max_open)
+        open_ids = open_window_ids(socket.assigns.open_ids, session.id)
 
         {:noreply,
          socket
@@ -301,7 +304,7 @@ defmodule ArbiterWeb.SessionDockLive do
     socket = load_sessions(socket)
 
     if Enum.any?(socket.assigns.sessions, &(&1.id == id)) do
-      open_ids = Enum.take(Enum.uniq(socket.assigns.open_ids ++ [id]), @max_open)
+      open_ids = open_window_ids(socket.assigns.open_ids, id)
 
       {:noreply,
        socket
@@ -533,6 +536,16 @@ defmodule ArbiterWeb.SessionDockLive do
     |> assign(:sessions, sessions)
     |> assign(:sessions_by_id, by_id)
     |> assign(:running_count, Enum.count(sessions, &(&1.status == :running)))
+  end
+
+  # Opening always keeps the id being opened, even at the @max_open cap: the
+  # id being added is also about to be the one that gets expanded, so taking
+  # from the *front* (evicting the newest) would silently drop the window an
+  # operator just asked for while still collapsing whatever was open before it
+  # (finding 1, bd-cdut29 review round 1). Taking from the tail evicts the
+  # oldest window instead.
+  defp open_window_ids(open_ids, id) do
+    (open_ids ++ [id]) |> Enum.uniq() |> Enum.take(-@max_open)
   end
 
   # Expanding is what mounts a terminal, so it is also what re-arms the watch
