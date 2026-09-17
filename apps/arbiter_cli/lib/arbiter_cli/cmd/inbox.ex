@@ -10,6 +10,11 @@ defmodule ArbiterCli.Cmd.Inbox do
       arb inbox read <id>       show one message in full, mark it read
       arb inbox clear           soft-clear the outstanding (read) tail
       arb inbox clear --all     soft-clear everything (read + unread)
+      arb inbox clear <id> ...  soft-clear exactly the given message(s), by id
+                                or unique id prefix — read or unread
+      arb inbox clear --task <task-id>
+                                soft-clear every coordinator message
+                                concerning that task
       arb inbox <task-id>       (worker path) a task's unread mail; drained
                                 — marked read on fetch
 
@@ -26,7 +31,8 @@ defmodule ArbiterCli.Cmd.Inbox do
       0b9d1f2a  [bd-1qx1nt] completion from worker-019e — GitLab adapter complete (2m ago)
 
   The leading token is a short message id — pass it (or a unique prefix) to
-  `arb inbox read`. The bracket is the task the message concerns.
+  `arb inbox read` or `arb inbox clear`. The bracket is the task the message
+  concerns.
 
   Flags:
     --json             emit JSON instead of human-readable text
@@ -40,7 +46,8 @@ defmodule ArbiterCli.Cmd.Inbox do
   coordinator** reader — the same identity the dashboard drawer and a plain
   `arb mcp token mint` token share, and the one that carries the operator's
   existing triage state. `--session <id>` reads and clears one browser
-  session's view instead, leaving every other reader's untouched.
+  session's view instead, leaving every other reader's untouched. It composes
+  with every form, including the targeted `clear <id>` and `clear --task`.
   """
 
   alias ArbiterCli.{Client, Output}
@@ -63,14 +70,38 @@ defmodule ArbiterCli.Cmd.Inbox do
       {session, rest} = take_session(Output.drop_json(argv))
 
       case rest do
-        [] -> coordinator_inbox_view(true, mode, session)
-        ["--all"] -> coordinator_inbox_view(false, mode, session)
-        ["read", id] -> read_one(id, mode, session)
-        ["read"] -> Output.die("inbox read requires a message id: `arb inbox read <id>`")
-        ["clear"] -> clear(false, mode, session)
-        ["clear", "--all"] -> clear(true, mode, session)
-        [task_id] -> task_inbox(task_id, mode)
-        _ -> Output.die("inbox: unrecognized arguments. See `arb help`.")
+        [] ->
+          coordinator_inbox_view(true, mode, session)
+
+        ["--all"] ->
+          coordinator_inbox_view(false, mode, session)
+
+        ["read", id] ->
+          read_one(id, mode, session)
+
+        ["read"] ->
+          Output.die("inbox read requires a message id: `arb inbox read <id>`")
+
+        ["clear"] ->
+          clear(false, mode, session)
+
+        ["clear", "--all"] ->
+          clear(true, mode, session)
+
+        ["clear", "--task"] ->
+          Output.die("inbox clear --task requires a task id: `arb inbox clear --task <task-id>`")
+
+        ["clear", "--task", task_id] ->
+          clear_task(task_id, mode, session)
+
+        ["clear" | ids] when ids != [] ->
+          clear_ids(ids, mode, session)
+
+        [task_id] ->
+          task_inbox(task_id, mode)
+
+        _ ->
+          Output.die("inbox: unrecognized arguments. See `arb help`.")
       end
     end
   end
@@ -178,9 +209,17 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   defp match_prefix(list, token) do
     case Enum.filter(list, &String.starts_with?(to_string(&1["id"]), token)) do
-      [%{"id" => id}] -> {:ok, id}
-      [] -> {:error, "no coordinator message matches id #{inspect(token)}"}
-      _ -> {:error, "ambiguous id prefix #{inspect(token)} — give more characters"}
+      [%{"id" => id}] ->
+        {:ok, id}
+
+      [] ->
+        {:error, "no coordinator message matches id #{inspect(token)}"}
+
+      matches ->
+        candidates = Enum.map_join(matches, ", ", &to_string(&1["id"]))
+
+        {:error,
+         "ambiguous id prefix #{inspect(token)} — give more characters. Candidates: #{candidates}"}
     end
   end
 
@@ -240,6 +279,79 @@ defmodule ArbiterCli.Cmd.Inbox do
       "Cleared #{read} read + #{unread} unread message#{if total == 1, do: "", else: "s"} (#{total} total)."
     )
   end
+
+  # ---- clear specific ids ----------------------------------------------------
+
+  defp clear_ids(tokens, mode, session) do
+    case resolve_ids(tokens) do
+      {:ok, ids} ->
+        case Client.delete("/api/messages", [ids: Enum.join(ids, ",")] ++ reader_params(session)) do
+          {:ok, %{"data" => data}} ->
+            cleared = data["cleared"] || []
+            not_found = data["not_found"] || []
+            emit_cleared_ids(cleared, not_found, mode)
+
+          {:error, err} ->
+            Output.die(err)
+        end
+
+      {:error, msg} ->
+        Output.die(msg)
+    end
+  end
+
+  defp resolve_ids(tokens) do
+    Enum.reduce_while(tokens, {:ok, []}, fn token, {:ok, acc} ->
+      case resolve_id(token) do
+        {:ok, id} -> {:cont, {:ok, [id | acc]}}
+        {:error, msg} -> {:halt, {:error, msg}}
+      end
+    end)
+    |> case do
+      {:ok, ids} -> {:ok, Enum.reverse(ids)}
+      other -> other
+    end
+  end
+
+  defp emit_cleared_ids(cleared, not_found, :json) do
+    IO.puts(Jason.encode!(%{data: %{cleared: cleared, not_found: not_found}}))
+  end
+
+  defp emit_cleared_ids(cleared, [], :text) do
+    n = length(cleared)
+    IO.puts("Cleared #{n} message#{plural(n)}.")
+  end
+
+  defp emit_cleared_ids(cleared, not_found, :text) do
+    n = length(cleared)
+    m = length(not_found)
+
+    IO.puts(
+      "Cleared #{n} message#{plural(n)}; #{m} id#{plural(m)} not found: #{Enum.join(not_found, ", ")}"
+    )
+  end
+
+  # ---- clear by task ---------------------------------------------------------
+
+  defp clear_task(task_id, mode, session) do
+    case Client.delete("/api/messages", [task_id: task_id] ++ reader_params(session)) do
+      {:ok, %{"data" => data}} ->
+        cleared = data["cleared"] || []
+        emit_cleared_task(length(cleared), task_id, mode)
+
+      {:error, err} ->
+        Output.die(err)
+    end
+  end
+
+  defp emit_cleared_task(n, _task_id, :json) do
+    IO.puts(Jason.encode!(%{data: %{cleared_count: n}}))
+  end
+
+  defp emit_cleared_task(0, task_id, :text), do: IO.puts("Nothing to clear for #{task_id}.")
+
+  defp emit_cleared_task(n, task_id, :text),
+    do: IO.puts("Cleared #{n} message#{plural(n)} for #{task_id}.")
 
   defp plural(1), do: ""
   defp plural(_), do: "s"

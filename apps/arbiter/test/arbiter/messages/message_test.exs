@@ -998,6 +998,97 @@ defmodule Arbiter.Messages.MessageTest do
       assert Message.receipts_for_message(msg.id) == []
     end
 
+    test "clear_ids for a session reader leaves the row and every other reader alone", ctx do
+      %{ws: ws, coordinator: ref, msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      {:ok, _} = Message.mark_read(msg, reader: a)
+      {:ok, _} = Message.mark_read(msg, reader: b)
+
+      assert {:ok, [%Message{}], []} = Message.clear_ids([msg.id], reader: a)
+
+      assert [] = Message.outstanding(ref, workspace_id: ws, reader: a)
+      assert [_] = Message.outstanding(ref, workspace_id: ws, reader: b)
+
+      # the shared row is untouched, so escalation dedupe still suppresses
+      {:ok, reloaded} = Ash.get(Message, msg.id)
+      assert reloaded.cleared_at == nil
+
+      assert %{id: id} =
+               Message.last_with_subject(ref, ["needs a decision"],
+                 workspace_id: ws,
+                 uncleared: true
+               )
+
+      assert id == msg.id
+    end
+
+    test "clear_ids for the sessionless reader still stamps the row", ctx do
+      %{msg: msg} = ctx
+
+      assert {:ok, [_], []} = Message.clear_ids([msg.id], reader: Message.coordinator_reader())
+      assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, msg.id)
+    end
+
+    test "clear_ids reports unknown ids as not_found for a session reader too", ctx do
+      %{msg: msg} = ctx
+      a = Message.session_reader("sess-a")
+
+      assert {:ok, [_], ["nope"]} = Message.clear_ids([msg.id, "nope"], reader: a)
+    end
+
+    test "clear_by_task for a session reader leaves the row and other readers alone", %{ws: ws} do
+      ref = Message.coordinator_ref()
+      task = "bd-task#{System.unique_integer([:positive])}"
+      a = Message.session_reader("sess-a")
+      b = Message.session_reader("sess-b")
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: ref,
+          task_ref: task,
+          subject: "task escalation",
+          body: "x"
+        })
+
+      {:ok, _} = Message.mark_read(m, reader: a)
+      {:ok, _} = Message.mark_read(m, reader: b)
+
+      assert {:ok, [%Message{}]} = Message.clear_by_task(task, workspace_id: ws, reader: a)
+
+      assert [] = Message.outstanding(ref, workspace_id: ws, reader: a)
+      assert Enum.any?(Message.outstanding(ref, workspace_id: ws, reader: b), &(&1.id == m.id))
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+
+      # idempotent for that reader: a second call finds nothing left
+      assert {:ok, []} = Message.clear_by_task(task, workspace_id: ws, reader: a)
+    end
+
+    test "clear_by_task for the sessionless reader still stamps the row", %{ws: ws} do
+      ref = Message.coordinator_ref()
+      task = "bd-task#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: ref,
+          task_ref: task,
+          body: "x"
+        })
+
+      assert {:ok, [_]} =
+               Message.clear_by_task(task,
+                 workspace_id: ws,
+                 reader: Message.coordinator_reader()
+               )
+
+      assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, m.id)
+    end
+
     test "no reader option keeps the legacy row-level semantics (task mailboxes)" do
       ws = "ws-receipt-legacy-#{System.unique_integer([:positive])}"
       task = "bd-legacy#{System.unique_integer([:positive])}"
@@ -1009,6 +1100,168 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} = Message.mark_read(m)
       assert [] = Message.inbox(task, workspace_id: ws)
       assert [_] = Message.outstanding(task, workspace_id: ws)
+    end
+  end
+
+  describe "clear_ids/1 (per-message soft-clear)" do
+    test "soft-clears exactly the given ids, read or unread, and retains the rows" do
+      {:ok, unread} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "u"})
+
+      {:ok, read} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "r"})
+
+      {:ok, _} = Message.mark_read(read)
+
+      {:ok, untouched} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "x"})
+
+      assert {:ok, cleared, []} = Message.clear_ids([unread.id, read.id])
+      assert Enum.map(cleared, & &1.id) |> Enum.sort() == Enum.sort([unread.id, read.id])
+
+      assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, unread.id)
+      assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, read.id)
+      assert c1
+      assert c2
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, untouched.id)
+    end
+
+    test "resolves by id regardless of workspace" do
+      {:ok, m} =
+        Message.send_mail(%{
+          workspace_id: "ws-elsewhere",
+          to_ref: "coordinator",
+          kind: :info,
+          body: "elsewhere"
+        })
+
+      assert {:ok, [cleared], []} = Message.clear_ids([m.id])
+      assert cleared.id == m.id
+    end
+
+    test "is idempotent — clearing an already-cleared message succeeds again" do
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "m"})
+
+      assert {:ok, [_], []} = Message.clear_ids([m.id])
+      assert {:ok, [_], []} = Message.clear_ids([m.id])
+    end
+
+    test "reports unknown ids as not_found rather than raising" do
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "m"})
+
+      bogus = Ecto.UUID.generate()
+
+      assert {:ok, cleared, not_found} = Message.clear_ids([m.id, bogus])
+      assert Enum.map(cleared, & &1.id) == [m.id]
+      assert not_found == [bogus]
+    end
+  end
+
+  describe "clear_by_task/2 (per-task soft-clear)" do
+    test "soft-clears every coordinator message concerning the task, and none other" do
+      task = "bd-cleartask#{System.unique_integer([:positive])}"
+      other = "bd-otherclear#{System.unique_integer([:positive])}"
+
+      {:ok, escalation} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: @ws,
+          from_ref: task,
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "needs a decision"
+        })
+
+      {:ok, completion} =
+        Message.send_mail(%{
+          kind: :completion,
+          workspace_id: @ws,
+          from_ref: task,
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "done"
+        })
+
+      {:ok, other_task_msg} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: @ws,
+          from_ref: other,
+          to_ref: "coordinator",
+          task_ref: other,
+          body: "unrelated"
+        })
+
+      {:ok, direct_to_task} =
+        Message.send_mail(%{
+          kind: :direction,
+          workspace_id: @ws,
+          from_ref: "coordinator",
+          to_ref: task,
+          body: "not addressed to the coordinator"
+        })
+
+      assert {:ok, cleared} = Message.clear_by_task(task)
+
+      assert Enum.map(cleared, & &1.id) |> Enum.sort() ==
+               Enum.sort([escalation.id, completion.id])
+
+      assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, escalation.id)
+      assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, completion.id)
+      assert c1
+      assert c2
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, other_task_msg.id)
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, direct_to_task.id)
+    end
+
+    test "scopes to a workspace when asked" do
+      task = "bd-clearws#{System.unique_integer([:positive])}"
+
+      {:ok, elsewhere} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: "ws-cleartask-elsewhere",
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "elsewhere"
+        })
+
+      {:ok, here} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: @ws,
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "here"
+        })
+
+      assert {:ok, [cleared]} = Message.clear_by_task(task, workspace_id: @ws)
+      assert cleared.id == here.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, elsewhere.id)
+    end
+
+    test "returns an empty list and does nothing when there is nothing outstanding" do
+      assert {:ok, []} = Message.clear_by_task("bd-nonexistent-task")
+    end
+
+    test "is idempotent" do
+      task = "bd-clearidem#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: @ws,
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "x"
+        })
+
+      assert {:ok, [_]} = Message.clear_by_task(task)
+      assert {:ok, []} = Message.clear_by_task(task)
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, m.id)
+      assert cleared_at
     end
   end
 end

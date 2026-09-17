@@ -664,6 +664,22 @@ defmodule Arbiter.Messages.Message do
     end
   end
 
+  # "Not yet addressed by this reader" — the predicate behind a targeted clear.
+  # Unlike `outstanding`, an unread message counts: clearing a task's thread
+  # sweeps mail the reader never opened, exactly as `clear_all/2` does.
+  defp uncleared_filter(query, nil), do: Ash.Query.filter(query, is_nil(cleared_at))
+
+  defp uncleared_filter(query, reader) when is_binary(reader) do
+    if sessionless_reader?(reader) do
+      uncleared_filter(query, nil)
+    else
+      Ash.Query.filter(
+        query,
+        not exists(receipts, reader_ref == ^reader and not is_nil(cleared_at))
+      )
+    end
+  end
+
   @doc """
   The most recent mailbox-family message addressed to `to_ref` whose `subject`
   is one of `subjects`, or `nil` when there is none (bd-brwx7w).
@@ -785,6 +801,92 @@ defmodule Arbiter.Messages.Message do
   defp clear_one(message, reader) when is_binary(reader) do
     {:ok, _receipt} = MessageReceipt.mark_cleared(message.id, reader)
     if sessionless_reader?(reader), do: mark_cleared(message), else: {:ok, message}
+  end
+
+  @doc """
+  Soft-clear specific messages by id (stamps `cleared_at`; idempotent; rows
+  retained — the same transition as `mark_cleared/1`, batched). Resolves each
+  id directly with `Ash.get/2`, **regardless of workspace**: an id is already
+  unambiguous, so there is nothing to scope it against (bd-95pse9 — a
+  workspace-scoped lookup here is exactly the trap that made `coordinator_inbox`
+  silently return `count: 0` when the caller omitted `workspace`).
+
+  Returns `{:ok, cleared, not_found}` where `cleared` is the list of updated
+  messages and `not_found` is the subset of `ids` that matched no row (or
+  matched a row `mark_cleared/1` refuses, e.g. a `:notification`).
+
+  Pass `reader:` to clear only that reader's view (bd-8akewg) — a session
+  writes its own receipt and leaves the shared row, and therefore every other
+  reader and the escalation dedupe, untouched.
+  """
+  def clear_ids(ids, opts \\ []) when is_list(ids) do
+    reader = Keyword.get(opts, :reader)
+
+    {cleared, not_found} =
+      Enum.reduce(ids, {[], []}, fn id, {cleared_acc, missing_acc} ->
+        case clear_id(id, reader) do
+          {:ok, message} -> {[message | cleared_acc], missing_acc}
+          {:error, _} -> {cleared_acc, [id | missing_acc]}
+        end
+      end)
+
+    cleared = Enum.reverse(cleared)
+    broadcast_workspaces(cleared)
+
+    {:ok, cleared, Enum.reverse(not_found)}
+  end
+
+  defp clear_id(id, nil), do: mark_cleared(id)
+
+  # Per reader, the row is not the source of truth, so the id has to resolve to
+  # a real mailbox-family row before a receipt is written — otherwise a bad id
+  # (or a `:notification`, which `mark_cleared/1` refuses outright) would be
+  # silently recorded as cleared rather than reported in `not_found`.
+  defp clear_id(id, reader) when is_binary(reader) do
+    with {:ok, message} <- Ash.get(__MODULE__, id),
+         true <- message.kind in @mailbox_kinds do
+      clear_one(message, reader)
+    else
+      false -> {:error, :not_clearable}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Soft-clear every coordinator message concerning `task_ref` — every
+  mailbox-family row addressed to the coordinator (`to_ref` in
+  `coordinator_refs/0`) whose `task_ref` matches, still outstanding
+  (`cleared_at IS NULL`). The targeted counterpart to `clear_read/2` /
+  `clear_all/2`: clearing one task's escalation thread (e.g. once it closes)
+  without sweeping the rest of the coordinator's mailbox. Rows are retained
+  (soft). Idempotent — a second call finds nothing left to clear. Pass
+  `workspace_id:` to scope to one workspace.
+
+  Returns `{:ok, cleared}`, the list of updated messages (`[]` when nothing
+  was outstanding for the task).
+
+  Pass `reader:` to clear only that reader's view (bd-8akewg); "still
+  outstanding" is then read per reader too, so the call stays idempotent for
+  that reader without depending on the shared row.
+  """
+  def clear_by_task(task_ref, opts \\ []) when is_binary(task_ref) do
+    reader = Keyword.get(opts, :reader)
+
+    query =
+      __MODULE__
+      |> Ash.Query.filter(
+        task_ref == ^task_ref and to_ref in ^@coordinator_refs and kind in ^@mailbox_kinds
+      )
+      |> uncleared_filter(reader)
+
+    query = scope_workspace(query, opts)
+
+    to_clear = Ash.read!(query)
+    Enum.each(to_clear, &clear_one(&1, reader))
+
+    broadcast_workspaces(to_clear)
+
+    {:ok, to_clear}
   end
 
   @doc """

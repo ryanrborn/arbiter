@@ -146,6 +146,13 @@ defmodule Arbiter.MCP.Tools.Messaging do
 
   defp reader_opts(%Scope{}), do: [reader: Message.coordinator_reader()]
 
+  # Just the reader — the `:since` floor in `reader_opts/1` only shapes an
+  # unread *listing*; a clear names its targets outright.
+  defp reader_opt(%Scope{session_id: session_id}) when is_binary(session_id),
+    do: [reader: Message.session_reader(session_id)]
+
+  defp reader_opt(%Scope{}), do: [reader: Message.coordinator_reader()]
+
   # The floor for a session's unread view. `nil` (no such row) means no floor:
   # a token whose session has been hard-deleted is degenerate, and showing too
   # much mail beats swallowing an escalation.
@@ -174,6 +181,71 @@ defmodule Arbiter.MCP.Tools.Messaging do
   defp validate_state_and_clear_combo(_state, _clear) do
     :ok
   end
+
+  # ---- coordinator_inbox_clear ---------------------------------------------
+
+  @doc """
+  Soft-clear specific coordinator-mailbox messages — the structured
+  replacement for `arb inbox clear <id> ...` / `arb inbox clear --task
+  <task-id>`. Coordinator only. Accepts `ids` (a list of message ids) and/or
+  `task_id`; at least one is required.
+
+  `ids` resolve directly by id, **regardless of workspace** (bd-95pse9: an id
+  is already unambiguous, and a workspace-scoped lookup here is exactly the
+  trap that made `coordinator_inbox` silently return `count: 0` when the
+  caller omitted `workspace`). `task_id` clears every coordinator message
+  concerning that task; it resolves a workspace the normal way (explicit
+  `workspace` arg → the scope's bound workspace → the installation default),
+  erroring rather than guessing when that's ambiguous.
+
+  Both forms clear **only the calling reader's view** (bd-8akewg): a session
+  token writes its own receipts and leaves the shared row — and therefore every
+  other session, the sessionless coordinator, and the `last_with_subject/3`
+  escalation dedupe — untouched. A plain minted token is the shared sessionless
+  coordinator reader, which still stamps the row exactly as before.
+
+  Returns `{:ok, %{cleared: [...], not_found: [...], cleared_by_task: [...]}}`
+  — `cleared`/`not_found` cover the `ids` clear, `cleared_by_task` the
+  `task_id` clear.
+  """
+  @spec coordinator_inbox_clear(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def coordinator_inbox_clear(%Scope{} = scope, args) do
+    ids = fetch_string_list(args, "ids")
+    task_id = Tools.fetch_string(args, "task_id")
+
+    if ids == [] and is_nil(task_id) do
+      {:error, {:invalid_args, "coordinator_inbox_clear requires ids and/or task_id"}}
+    else
+      {:ok, cleared, not_found} =
+        if ids == [], do: {:ok, [], []}, else: Message.clear_ids(ids, reader_opt(scope))
+
+      with {:ok, cleared_by_task} <- clear_by_task_if_present(scope, args, task_id) do
+        {:ok,
+         %{
+           cleared: Enum.map(cleared, &serialize_message/1),
+           not_found: not_found,
+           cleared_by_task: Enum.map(cleared_by_task, &serialize_message/1)
+         }}
+      end
+    end
+  end
+
+  defp clear_by_task_if_present(_scope, _args, nil), do: {:ok, []}
+
+  defp clear_by_task_if_present(scope, args, task_id) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
+      Message.clear_by_task(task_id, [workspace_id: ws_id] ++ reader_opt(scope))
+    end
+  end
+
+  defp fetch_string_list(args, key) when is_map(args) do
+    case Map.get(args, key) do
+      list when is_list(list) -> Enum.filter(list, &is_binary/1)
+      _ -> []
+    end
+  end
+
+  defp fetch_string_list(_args, _key), do: []
 
   # ---- message_send -------------------------------------------------------
 
