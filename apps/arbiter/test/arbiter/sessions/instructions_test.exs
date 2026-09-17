@@ -16,7 +16,9 @@ defmodule Arbiter.Sessions.InstructionsTest do
   use ExUnit.Case, async: true
 
   alias Arbiter.Sessions.Instructions
+  alias Arbiter.Sessions.RefineDoctrine
   alias Arbiter.Sessions.Session
+  alias Arbiter.Tasks.Workspace
 
   @checkout "/home/operator/dev/arbiter"
 
@@ -157,6 +159,129 @@ defmodule Arbiter.Sessions.InstructionsTest do
       # Every session gets every shared-mailbox event — the agent filters.
       assert monitor =~ ~r/every session/i
       assert monitor =~ ~r/ignore|filter|concern/i
+    end
+  end
+
+  describe "the refine variant (bd-980x89, task AC1, AC2, AC4)" do
+    defp fixture_issue(overrides \\ %{}) do
+      Map.merge(
+        %{
+          id: "bd-refme01",
+          title: "Fix the widget",
+          description: "The widget is broken in prod.",
+          acceptance: "1. It isn't broken.",
+          issue_type: :bug,
+          priority: 2,
+          difficulty: 2,
+          repo: "arbiter",
+          refined: false,
+          tracker_ref: "1999"
+        },
+        overrides
+      )
+    end
+
+    defp fixture_epic do
+      %{id: "bd-epic0001", title: "Parent epic"}
+    end
+
+    defp fixture_edges do
+      [
+        %{type: "depends_on", direction: "outgoing", id: "bd-sib00001", title: "Sibling issue"}
+      ]
+    end
+
+    defp fixture_workspace(overrides \\ %{}) do
+      struct!(%Workspace{id: "ws-1", name: "Acme", prefix: "bd", config: %{}}, overrides)
+    end
+
+    defp render_refine(refine_overrides \\ %{}, opts \\ []) do
+      refine =
+        Map.merge(
+          %{
+            issue: fixture_issue(),
+            epic: fixture_epic(),
+            edges: fixture_edges(),
+            repo_checkout: "/home/operator/dev/arbiter-readonly",
+            workspace: fixture_workspace()
+          },
+          refine_overrides
+        )
+
+      Instructions.render(session(), Keyword.put(opts, :refine, refine))
+    end
+
+    test "non-refine sessions render exactly as today (AC1)" do
+      assert render() == render()
+      refute render() =~ "refine session"
+    end
+
+    test "presence of :refine switches to the refine variant" do
+      doc = render_refine()
+      assert doc =~ "refine session"
+      refute doc =~ "coordinator session"
+    end
+
+    test "injects the bound issue's current fields (AC2)" do
+      doc = render_refine()
+
+      assert doc =~ "bd-refme01"
+      assert doc =~ "Fix the widget"
+      assert doc =~ "The widget is broken in prod."
+      assert doc =~ "1. It isn't broken."
+      assert doc =~ "bug"
+      assert doc =~ "arbiter"
+      assert doc =~ "1999"
+    end
+
+    test "injects the parent epic (AC2)" do
+      doc = render_refine()
+      assert doc =~ "bd-epic0001"
+      assert doc =~ "Parent epic"
+    end
+
+    test "injects edges (AC2)" do
+      doc = render_refine()
+      assert doc =~ "bd-sib00001"
+      assert doc =~ "depends_on"
+    end
+
+    test "injects the workspace and repo checkout path (AC2)" do
+      doc = render_refine()
+      assert doc =~ "Acme"
+      assert doc =~ "/home/operator/dev/arbiter-readonly"
+    end
+
+    test "states the permission summary plainly (AC2)" do
+      doc = render_refine()
+      assert doc =~ "task_create"
+      assert doc =~ "task_promote"
+      assert doc =~ ~r/never.{0,40}dispatch/is
+    end
+
+    test "states the session ends when the issue is promoted" do
+      doc = render_refine()
+      assert doc =~ ~r/session ends when the bound issue is promoted/i
+    end
+
+    test "carries the filing doctrine, including its anchors (AC4)" do
+      doc = render_refine()
+      assert doc =~ "D5 is never"
+      assert doc =~ "POST-MERGE"
+      assert doc =~ "verify_after_deploy"
+    end
+
+    test "honors a per-workspace doctrine override (AC3)" do
+      ws = fixture_workspace(config: %{"refine" => %{"doctrine" => "# Custom doctrine\n"}})
+      doc = render_refine(%{workspace: ws})
+
+      assert doc =~ "# Custom doctrine"
+      refute doc =~ "D5 is never"
+    end
+
+    test "with no workspace given, falls back to the built-in doctrine" do
+      doc = render_refine(%{workspace: nil})
+      assert doc =~ RefineDoctrine.template() |> String.slice(0, 40)
     end
   end
 
