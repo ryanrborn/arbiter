@@ -971,6 +971,24 @@ defmodule Arbiter.MCP.ToolsTest do
       # tracker_type stays none — context ref is read-only and never claimed
       assert reloaded.tracker_type == :none
     end
+
+    # bd-1ozks5: the local assignee field is gone; an existing coordinator
+    # prompt/script may still pass it — accept and ignore, with a warning.
+    test "accepts and ignores a deprecated `assignee`, with a warning", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "still has assignee",
+                 "issue_type" => "task",
+                 "assignee" => "alice"
+               })
+
+      refute Map.has_key?(data, :assignee)
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      refute Map.has_key?(reloaded, :assignee)
+    end
   end
 
   # bd-9dwbvt: the MCP creation path's slice of "every issue carries a repo".
@@ -1079,6 +1097,31 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "requires at least one field to update", ctx do
       assert {:error, {:invalid, _}} = Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id})
+    end
+
+    # bd-1ozks5: the local assignee field is gone; an existing coordinator
+    # prompt/script may still pass it — accept and ignore, with a warning,
+    # rather than failing (even when it's the only field passed).
+    test "a deprecated `assignee`-only update succeeds as a no-op, with a warning", ctx do
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id, "assignee" => "alice"})
+
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
+    end
+
+    test "a deprecated `assignee` alongside a real field still applies the field, with a warning",
+         ctx do
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "priority" => 0,
+                 "assignee" => "alice"
+               })
+
+      assert data.priority == 0
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
     end
 
     test "cannot update a task in another workspace (not-found)", ctx do

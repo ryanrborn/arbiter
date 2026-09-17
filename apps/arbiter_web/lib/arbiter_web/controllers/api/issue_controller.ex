@@ -6,7 +6,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
     * `POST   /api/issues`             — :create
     * `GET    /api/issues`             — :index (filters: status, priority,
-                                        issue_type, assignee, workspace_id)
+                                        issue_type, workspace_id)
     * `GET    /api/issues/ready`       — :ready (Issue.ready/0)
     * `GET    /api/issues/:id`         — :show
     * `PATCH  /api/issues/:id`         — :update
@@ -16,10 +16,16 @@ defmodule ArbiterWeb.Api.IssueController do
     * `POST   /api/issues/:id/verify`  — :verify (body: `outcome` +
       `evidence`) — records the post-merge restart-and-observe result
       (bd-9so315)
+
+  bd-1ozks5: the local `Issue.assignee` field was removed. `POST /api/issues`
+  and `PATCH /api/issues/:id` still accept an `assignee` param — for one
+  release it's silently dropped and reported back as a `warnings` entry,
+  rather than rejected outright and breaking an existing coordinator script.
   """
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
@@ -30,7 +36,7 @@ defmodule ArbiterWeb.Api.IssueController do
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   @atom_fields ~w(status issue_type tracker_type)a
-  @filter_fields ~w(status priority difficulty issue_type assignee workspace_id)a
+  @filter_fields ~w(status priority difficulty issue_type workspace_id)a
 
   def index(conn, params) do
     with {:ok, filters} <- build_filters(params) do
@@ -91,10 +97,11 @@ defmodule ArbiterWeb.Api.IssueController do
 
   def create(conn, params) do
     force? = params["force"] == true
+    assignee_warnings = AssigneeCompat.warnings(params)
 
     attrs =
       params
-      |> Map.drop(["id", "force"])
+      |> Map.drop(["id", "force", "assignee"])
       |> coerce_atoms(@atom_fields)
 
     case dedup_check(attrs, force?) do
@@ -105,7 +112,7 @@ defmodule ArbiterWeb.Api.IssueController do
               nil ->
                 conn
                 |> put_status(:created)
-                |> render(:show, issue: issue, warnings: ac_warnings(issue))
+                |> render(:show, issue: issue, warnings: assignee_warnings ++ ac_warnings(issue))
 
               err ->
                 upstream_failure_response(conn, issue.id, err)
@@ -213,14 +220,16 @@ defmodule ArbiterWeb.Api.IssueController do
   defp blank?(str), do: String.trim(str) == ""
 
   def update(conn, %{"id" => id} = params) do
+    assignee_warnings = AssigneeCompat.warnings(params)
+
     attrs =
       params
-      |> Map.drop(["id", "workspace_id"])
+      |> Map.drop(["id", "workspace_id", "assignee"])
       |> coerce_atoms(@atom_fields)
 
     with {:ok, issue} <- Ash.get(Issue, id),
          {:ok, updated} <- Ash.update(issue, attrs) do
-      render(conn, :show, issue: updated)
+      render(conn, :show, issue: updated, warnings: assignee_warnings)
     end
   end
 

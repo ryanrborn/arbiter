@@ -114,7 +114,6 @@ defmodule Arbiter.Tasks.Issue do
         :difficulty,
         :issue_type,
         :auto_close,
-        :assignee,
         :tracker_type,
         :tracker_ref,
         :tracker_context_type,
@@ -192,7 +191,6 @@ defmodule Arbiter.Tasks.Issue do
         :issue_type,
         :auto_close,
         :verify_after_deploy,
-        :assignee,
         :tracker_type,
         :tracker_ref,
         :tracker_context_type,
@@ -668,11 +666,6 @@ defmodule Arbiter.Tasks.Issue do
       also auto-fills a standard reason for D0 (trivial) work. `nil` means no
       waiver was ever needed or given.
       """
-    end
-
-    attribute :assignee, :string do
-      public? true
-      constraints max_length: 255, trim?: true
     end
 
     attribute :tracker_type, :atom do

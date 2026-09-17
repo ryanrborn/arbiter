@@ -9,6 +9,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -137,7 +138,7 @@ defmodule Arbiter.MCP.Tools.Task do
   token cannot file a task outside its subtree. The parent is authorized *before*
   the task is created — a refused create leaves nothing behind. The same
   `refine_field_gate/2` that narrows `task_update` also runs here, so a refine
-  session cannot set on create (`assignee`, `tracker_ref`, `target_branch`, …)
+  session cannot set on create (`tracker_ref`, `target_branch`, …)
   what it would be refused on update.
   """
   @spec task_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -156,6 +157,7 @@ defmodule Arbiter.MCP.Tools.Task do
           issue
           |> Tools.serialize_task_summary()
           |> with_ac_warning(issue)
+          |> with_deprecation_warnings(args)
           |> attach_parent(scope, issue, parent_id)
 
         {:error, err} ->
@@ -255,6 +257,18 @@ defmodule Arbiter.MCP.Tools.Task do
   defp blank?(nil), do: true
   defp blank?(str), do: String.trim(str) == ""
 
+  # bd-1ozks5: `assignee` is still accepted for one release — the local
+  # assignee field is gone, so it's ignored and reported back as a
+  # `warnings` entry rather than rejected outright.
+  defp with_deprecation_warnings(result, args) when is_map(args) do
+    with_deprecation_warnings(result, AssigneeCompat.warnings(args))
+  end
+
+  defp with_deprecation_warnings(result, []), do: result
+
+  defp with_deprecation_warnings(result, warnings) when is_list(warnings),
+    do: Map.update(result, :warnings, warnings, &(&1 ++ warnings))
+
   # Narrow a write to the fields a `:refine` token may set (bd-3uy2hn). Rejecting
   # a disallowed field is deliberate rather than silently dropping it: a refine
   # agent that asked to close a task must be told it cannot, not told "updated"
@@ -288,15 +302,31 @@ defmodule Arbiter.MCP.Tools.Task do
   """
   @spec task_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_update(%Scope{} = scope, args) do
+    assignee_warnings = AssigneeCompat.warnings(args)
+
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
          :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, attrs} <- Tools.collect_attrs(args, task_update_spec()),
-         {:ok, attrs} <- refine_field_gate(scope, attrs),
-         :ok <- Tools.require_some(attrs, "provide at least one field to update") do
-      case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}
-        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+         {:ok, attrs} <- refine_field_gate(scope, attrs) do
+      case {map_size(attrs), assignee_warnings} do
+        {0, []} ->
+          {:error, {:invalid, "provide at least one field to update"}}
+
+        {0, warnings} ->
+          # Only a deprecated `assignee` was passed — nothing to write, but
+          # that isn't a failure: report the task back with the warning.
+          {:ok, issue |> Tools.serialize_task_summary() |> with_deprecation_warnings(warnings)}
+
+        {_, warnings} ->
+          case Ash.update(issue, attrs, action: :update) do
+            {:ok, updated} ->
+              {:ok,
+               updated |> Tools.serialize_task_summary() |> with_deprecation_warnings(warnings)}
+
+            {:error, err} ->
+              {:error, {:invalid, Tools.ash_error_message(err)}}
+          end
       end
     end
   end
@@ -559,7 +589,6 @@ defmodule Arbiter.MCP.Tools.Task do
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
-      {"assignee", :string},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
       {"tracker_context_ref", :string},
@@ -583,7 +612,6 @@ defmodule Arbiter.MCP.Tools.Task do
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
-      {"assignee", :string},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
       {"tracker_context_ref", :string},

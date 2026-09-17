@@ -68,6 +68,27 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       refute Map.has_key?(body, "warnings")
     end
 
+    # bd-1ozks5: the local assignee field is gone, but an existing coordinator
+    # script/prompt may still pass it — accept and ignore, with a warning,
+    # rather than failing the create.
+    test "accepts and ignores a deprecated `assignee` param, with a warning", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "still has assignee",
+          workspace_id: ws.id,
+          issue_type: "task",
+          assignee: "alice"
+        })
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "assignee")
+      assert [warning] = body["warnings"]
+      assert warning =~ "assignee"
+    end
+
     test "accepts and persists `difficulty` (0..5)", %{conn: conn, ws: ws} do
       conn =
         post(conn, ~p"/api/issues", %{
@@ -619,6 +640,22 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert body["pr_body"] == "## Summary\nWorker-authored writeup."
 
       assert Ash.get!(Issue, issue.id).pr_body == "## Summary\nWorker-authored writeup."
+    end
+
+    # bd-1ozks5: accept and ignore a deprecated `assignee` on update too.
+    test "accepts and ignores a deprecated `assignee` param, with a warning", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} = Ash.create(Issue, %{title: "before", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{title: "after", assignee: "bob"})
+
+      body = json_response(conn, 200)
+      assert body["title"] == "after"
+      refute Map.has_key?(body, "assignee")
+      assert [warning] = body["warnings"]
+      assert warning =~ "assignee"
     end
   end
 

@@ -44,9 +44,14 @@ defmodule ArbiterCli.Cmd.Update do
   With an **issue id**, `arb update` patches that issue's fields:
 
       arb update <id> [--priority N] [--append-notes text] [--status s]
-                      [--description d] [--assignee a] [--acceptance a]
+                      [--description d] [--acceptance a]
                       [--qa-notes text] [--deployment-notes text]
                       [--pr-body text] [--repo owner/name]
+
+  `--assignee` is deprecated (bd-1ozks5): Arbiter is a local single-user app
+  and no longer tracks an assignee locally, so the flag is accepted and
+  ignored with a stderr warning rather than rejected outright — for one
+  release, so an existing script that still passes it doesn't break.
 
   `--acceptance` sets the acceptance criteria field, which guides the worker
   in implementing and testing the change.
@@ -295,6 +300,7 @@ defmodule ArbiterCli.Cmd.Update do
       end
 
     validate_difficulty!(opts[:difficulty])
+    warn_deprecated_assignee(opts[:assignee], mode)
 
     payload =
       %{}
@@ -308,21 +314,29 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("status", opts[:status])
       |> put_if("description", opts[:description])
       |> put_if("title", opts[:title])
-      |> put_if("assignee", opts[:assignee])
       |> put_if("repo", opts[:repo])
       |> maybe_append_notes(opts[:append_notes], existing)
       |> maybe_resume_review(opts[:resume_review])
       |> put_bool_if("verify_after_deploy", opts[:verify_after_deploy])
 
-    if map_size(payload) == 0 do
+    if map_size(payload) == 0 and is_nil(opts[:assignee]) do
       Output.die(
         "update requires at least one field flag (e.g. --priority, --append-notes, --resume-review)"
       )
     end
 
-    case Client.patch("/api/issues/" <> id, payload) do
-      {:ok, issue} -> Output.emit_issue(issue, mode)
-      {:error, err} -> Output.die(err)
+    if map_size(payload) == 0 do
+      # bd-1ozks5: only a deprecated --assignee was given — nothing to
+      # write, but that isn't a failure. Report the task back unchanged.
+      case Client.get("/api/issues/" <> id) do
+        {:ok, issue} -> Output.emit_issue(issue, mode)
+        {:error, err} -> Output.die(err)
+      end
+    else
+      case Client.patch("/api/issues/" <> id, payload) do
+        {:ok, issue} -> Output.emit_issue(issue, mode)
+        {:error, err} -> Output.die(err)
+      end
     end
   end
 
@@ -361,4 +375,18 @@ defmodule ArbiterCli.Cmd.Update do
   end
 
   defp maybe_resume_review(payload, _), do: payload
+
+  # bd-1ozks5: the local assignee field is gone — accept and ignore
+  # `--assignee` for one release rather than breaking an existing script.
+  defp warn_deprecated_assignee(nil, _mode), do: :ok
+
+  defp warn_deprecated_assignee(_value, :text) do
+    IO.puts(
+      :stderr,
+      "arb: warning: --assignee is deprecated and ignored — Arbiter is a local " <>
+        "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
+    )
+  end
+
+  defp warn_deprecated_assignee(_value, _mode), do: :ok
 end

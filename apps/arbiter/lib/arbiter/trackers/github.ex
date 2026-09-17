@@ -231,13 +231,12 @@ defmodule Arbiter.Trackers.GitHub do
        }}
 
   # Map task-domain attrs onto GitHub's POST /repos/:o/:r/issues body. `title`
-  # is required; `body`, `assignees`, and labels are optional — we skip them
-  # when the caller didn't supply them. Labels are a merged set of: the
+  # is required; `body` and labels are optional — we skip them when the
+  # caller didn't supply them. Labels are a merged set of: the
   # initial-status label from the workspace status_map, a `"priority: N"` label
   # when `:priority` is set, and a `"type: T"` label when `:issue_type` is set.
   defp build_create_payload(cfg, attrs, title) do
     description = pluck(attrs, [:description, "description"])
-    assignee = pluck(attrs, [:assignee, "assignee"])
     status = pluck(attrs, [:status, "status"]) || :open
     priority = pluck(attrs, [:priority, "priority"])
     issue_type = pluck(attrs, [:issue_type, "issue_type"])
@@ -245,7 +244,6 @@ defmodule Arbiter.Trackers.GitHub do
     payload =
       %{"title" => title}
       |> maybe_put("body", description)
-      |> maybe_put_assignees(assignee)
       |> maybe_put_labels(cfg, status, priority, issue_type)
 
     {:ok, payload}
@@ -263,14 +261,6 @@ defmodule Arbiter.Trackers.GitHub do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, ""), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp maybe_put_assignees(payload, nil), do: payload
-  defp maybe_put_assignees(payload, ""), do: payload
-
-  defp maybe_put_assignees(payload, login) when is_binary(login),
-    do: Map.put(payload, "assignees", [login])
-
-  defp maybe_put_assignees(payload, _), do: payload
 
   # Merge labels from three sources: the workspace status_map for the initial
   # task status, a "priority: N" label when priority is given, and a "type: T"

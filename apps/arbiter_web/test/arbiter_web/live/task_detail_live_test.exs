@@ -390,7 +390,6 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
             "priority" => "1",
             "difficulty" => "4",
             "issue_type" => "chore",
-            "assignee" => "ada",
             "target_branch" => "release/x",
             "description" => "rewritten body",
             "acceptance" => "it works"
@@ -408,7 +407,6 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert reloaded.priority == 1
       assert reloaded.difficulty == 4
       assert reloaded.issue_type == :chore
-      assert reloaded.assignee == "ada"
       assert reloaded.target_branch == "release/x"
       assert reloaded.acceptance == "it works"
     end
@@ -1293,7 +1291,6 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Issue, %{
           title: "railed",
           workspace_id: ws.id,
-          assignee: "ada",
           target_branch: "main"
         })
 
@@ -1309,7 +1306,6 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "MACHINE STATE"
-      assert html =~ "ada"
       assert html =~ "#591"
 
       assert html =~ "RELATIONSHIPS"

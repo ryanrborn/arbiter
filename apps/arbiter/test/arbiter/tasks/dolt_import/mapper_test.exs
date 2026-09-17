@@ -195,5 +195,16 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
       ws_id = Ash.UUIDv7.generate()
       assert Mapper.issue_record(%{"id" => "hq-1"}, ws_id, @now).workspace_id == ws_id
     end
+
+    # bd-1ozks5: the local assignee column is gone; the import record must not
+    # carry the key at all, or Repo.insert_all (raw column map) would fail.
+    test "issue_record/3 no longer maps an assignee, even when the source row has one" do
+      ws_id = Ash.UUIDv7.generate()
+
+      record =
+        Mapper.issue_record(%{"id" => "hq-1", "assignee" => "someone"}, ws_id, @now)
+
+      refute Map.has_key?(record, :assignee)
+    end
   end
 end

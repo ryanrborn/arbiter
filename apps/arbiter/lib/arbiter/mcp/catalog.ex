@@ -140,7 +140,7 @@ defmodule Arbiter.MCP.Catalog do
           "`child_closed`/`child_total` over its `parent_of` children). A worker reads its " <>
           "own task (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
-          "pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, auto_close, " <>
+          "pr_body, pr_ref, tracker_ref, target_branch, repo, auto_close, " <>
           "verify_after_deploy + the verification state, timestamps). Every view also " <>
           "carries `estimate`: what comparable closed tasks actually cost, as " <>
           "`{range: [p25, p75], median, p90, n, basis, fallback_level}` over a 60-day " <>
@@ -161,7 +161,7 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "boolean",
             "description" =>
               "When true, return the complete record including notes, qa_notes, " <>
-                "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, assignee, " <>
+                "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, " <>
                 "auto_close, verify_after_deploy, awaiting_verification_at, " <>
                 "verification_outcome, verification_evidence, review_park_reason, " <>
                 "review_parked_at, and timestamps. " <>
@@ -343,7 +343,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Create a task in the workspace. `title` is required; optional `description`, " <>
-          "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, `assignee`, " <>
+          "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, " <>
           "`tracker_type`, …. The task is always created in the coordinator's own workspace. " <>
           "Created tasks land in the board's Backlog (`refined: false`), not its Ready queue, " <>
           "and stay there until a human promotes them from the task detail page. " <>
@@ -401,7 +401,13 @@ defmodule Arbiter.MCP.Catalog do
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
           },
-          "assignee" => %{"type" => "string"},
+          "assignee" => %{
+            "type" => "string",
+            "description" =>
+              "Deprecated (bd-1ozks5): accepted and ignored. Arbiter is a local " <>
+                "single-user app and no longer tracks an assignee locally; the response " <>
+                "carries a `warnings` entry when this is passed."
+          },
           "tracker_type" => %{
             "type" => "string",
             "description" => "none | jira | shortcut | linear | github | gitlab."
@@ -474,7 +480,13 @@ defmodule Arbiter.MCP.Catalog do
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
           },
-          "assignee" => %{"type" => "string"},
+          "assignee" => %{
+            "type" => "string",
+            "description" =>
+              "Deprecated (bd-1ozks5): accepted and ignored. Arbiter is a local " <>
+                "single-user app and no longer tracks an assignee locally; the response " <>
+                "carries a `warnings` entry when this is passed."
+          },
           "tracker_type" => %{"type" => "string"},
           "tracker_ref" => %{"type" => "string"},
           "tracker_context_type" => %{"type" => "string"},
