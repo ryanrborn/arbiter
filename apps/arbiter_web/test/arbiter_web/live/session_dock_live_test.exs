@@ -289,6 +289,51 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert session.workspace_id == workspace.id
     end
 
+    test "switching auth mode in the dock's panel does not discard a workspace pick or can_dispatch",
+         %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock2", prefix: "ad2"})
+
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{
+        "workspace_id" => workspace.id,
+        "can_dispatch" => "true"
+      })
+      |> render_change()
+
+      dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      assert has_element?(dock, "#session-dock-launch-can-dispatch[checked]")
+
+      dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+      assert session.can_dispatch == true
+    end
+
+    test "reopening the launch panel picks up a workspace created since the dock mounted",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+      refute render(dock) =~ "acme-dock3"
+
+      {:ok, _workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock3", prefix: "ad3"})
+
+      render_click(element(dock, "#session-dock-new-session"))
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert render(dock) =~ "acme-dock3"
+    end
+
     test "a failed launch is shown inline and opens no window", %{conn: conn} do
       put_env(:sessions_runner, Arbiter.Test.FailingSessionRunner)
       {_view, dock} = dock(conn)

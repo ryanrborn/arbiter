@@ -311,6 +311,45 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       assert [session] = Sessions.list()
       assert session.workspace_id == workspace.id
     end
+
+    test "switching auth mode does not silently discard a workspace pick or can_dispatch",
+         %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web3", prefix: "aw3"})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"workspace_id" => workspace.id, "can_dispatch" => "true"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      # auth_mode is the only field explicitly changed here — the workspace
+      # pick and can_dispatch check must survive this round trip rather than
+      # reverting to their server-rendered defaults (review finding, phase 11
+      # round 1: a form that re-renders `value=""` / no `checked` regardless
+      # of what the operator picked loses those choices the moment any other
+      # field triggers a diff).
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      assert has_element?(
+               view,
+               ~s(#launch-session-workspace-id option[value="#{workspace.id}"][selected])
+             )
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+      assert session.can_dispatch == true
+    end
   end
 
   describe "can_dispatch in the launch form (§10.1)" do
