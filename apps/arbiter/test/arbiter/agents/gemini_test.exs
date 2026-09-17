@@ -69,19 +69,20 @@ defmodule Arbiter.Agents.GeminiTest do
       assert Gemini.resolved_model([]) == "gemini-2.5-pro"
     end
 
-    test "returns nil when the resolved executable is agy, even with an explicit :model",
+    test "resolves a model for agy the same way as gemini (bd-d2yut8): no more forced nil",
          %{tmp: tmp} do
-      # agy's model catalogue doesn't overlap ours at all (confirmed live —
-      # bd-2fzwlc round 2/3), so an explicit override can't be trusted either:
-      # agy is preferred over gemini whenever both are on PATH, and stamping
-      # any of these ids on the row would be a guess the session can't back up.
+      # agy does accept `--model` (bd-d2yut8 retires the "agy accepts no
+      # model" assumption), so resolution now runs the same explicit →
+      # tier → workspace active_model chain as the gemini branch. With
+      # nothing configured there is still no known agy-CLI default to fall
+      # back to, so that case alone stays nil.
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
       assert Gemini.resolved_model([]) == nil
-      assert Gemini.resolved_model(model: "gemini-2.5-flash") == nil
-      assert Gemini.resolved_model(model_tier: "premium") == nil
+      assert Gemini.resolved_model(model: "gemini-2.5-flash") == "gemini-2.5-flash"
+      assert Gemini.resolved_model(model_tier: "premium") == "gemini-3.1-pro-high"
     end
   end
 
@@ -169,30 +170,44 @@ defmodule Arbiter.Agents.GeminiTest do
       assert "-y" in rest
     end
 
-    test "omits --model on the agy branch even with an explicit :model opt", %{tmp: tmp} do
-      # agy's model catalogue doesn't overlap ours at all (confirmed live —
-      # bd-2fzwlc round 3): every model id this module can produce is rejected
-      # by agy as an unrecognized `--model`, so the flag must never be passed
-      # on the agy branch regardless of what opts request.
+    test "passes an explicit :model opt through as --model on the agy branch", %{tmp: tmp} do
+      # bd-d2yut8: agy does accept `--model` — retire the old assumption
+      # that it doesn't and pass the flag through like the gemini branch.
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
       assert {:ok, argv} = Gemini.default_argv("the prompt", model: "gemini-flash")
       assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
-      refute "--model" in rest
-      refute "gemini-flash" in rest
+      assert "--model" in rest
+      assert "gemini-flash" in rest
     end
 
-    test "omits --model on the agy branch for every :model_tier", %{tmp: tmp} do
+    test "resolves :model_tier to a concrete model on the agy branch via the agy tier map",
+         %{tmp: tmp} do
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      for tier <- ["premium", "standard", "economy"] do
+      for {tier, model} <- [
+            {"economy", "gemini-3.8-flash-low"},
+            {"standard", "gemini-3.8-flash-medium"},
+            {"premium", "gemini-3.1-pro-high"},
+            {"flagship", "claude-opus-4-6-thinking"}
+          ] do
         {:ok, argv} = Gemini.default_argv("the prompt", model_tier: tier)
-        refute "--model" in argv
+        assert "--model" in argv
+        assert model in argv
       end
+    end
+
+    test "omits --model on the agy branch when nothing resolves", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", [])
+      refute "--model" in argv
     end
 
     test "passes through `:model` opt as `--model <name>` on the gemini branch", %{tmp: tmp} do
@@ -251,16 +266,74 @@ defmodule Arbiter.Agents.GeminiTest do
       refute "gemini-2.5-pro" in argv
     end
 
-    test ":thinking opt is empty in argv by default (env-var path)", %{tmp: tmp} do
+    test ":thinking opt maps to --effort <level> by default", %{tmp: tmp} do
       agy_stub = Path.join(tmp, "agy")
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
       {:ok, argv} = Gemini.default_argv("the prompt", thinking: "high")
-      # No CLI flag is committed by default — workspace can opt in via
-      # thinking_argv overrides if it pins a CLI flag.
-      refute Enum.any?(argv, &String.starts_with?(&1, "--thinking"))
-      refute Enum.any?(argv, &String.starts_with?(&1, "--reasoning"))
+      assert "--effort" in argv
+      assert chunk_after(argv, "--effort") == "high"
+    end
+
+    test ":thinking none maps to no argv", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", thinking: "none")
+      refute "--effort" in argv
+    end
+
+    test ":thinking xhigh/max clamp to --effort high", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      for level <- ["xhigh", "max"] do
+        {:ok, argv} = Gemini.default_argv("the prompt", thinking: level)
+        assert chunk_after(argv, "--effort") == "high"
+      end
+    end
+
+    test "gemini branch never emits --effort (Finding 1: upstream CLI rejects it)", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      for level <- ["low", "medium", "high", "xhigh", "max"] do
+        {:ok, argv} = Gemini.default_argv("the prompt", thinking: level)
+        refute "--effort" in argv
+      end
+    end
+
+    test "agy branch omits --effort when the resolved model already carries an effort suffix (Finding 2)",
+         %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      # Every non-flagship agy tier model carries a "-low"/"-medium"/"-high"
+      # suffix. Passing a :thinking level that disagrees with the tier's own
+      # suffix must still omit --effort — the operator decision is "never
+      # both", so the id's own suffix always wins and there is no way to
+      # emit two conflicting effort signals.
+      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "premium", thinking: "low")
+      assert "--model" in argv
+      assert "gemini-3.1-pro-high" in argv
+      refute "--effort" in argv
+    end
+
+    test "agy branch emits --effort for a suffix-free flagship model", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "flagship", thinking: "high")
+      assert "--model" in argv
+      assert "claude-opus-4-6-thinking" in argv
+      assert "--effort" in argv
+      assert chunk_after(argv, "--effort") == "high"
     end
 
     test ":thinking argv can be overridden per-workspace via thinking_argv config",
