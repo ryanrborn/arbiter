@@ -91,6 +91,19 @@ defmodule ArbiterWeb.SessionTerminalBrowserTest do
         assert output =~ "CHECK a-reparent-does-not-leave-the-terminal-scrolled-to-the-top: PASS"
         assert output =~ "CHECK collapsing-tears-down-the-xterm-and-closes-the-socket: PASS"
 
+        # bd-4tjw34: two clients, one pane. The policy is unit-tested under
+        # `node --test`; what needs a browser is that it lands on the *real*
+        # xterm — that the adopted geometry is what the renderer draws at, and
+        # that a real `focusin` is what takes the pane back.
+        assert output =~ "CHECK this-clients-own-geometry-is-not-reported-as-adopted: PASS"
+        assert output =~ "CHECK another-clients-geometry-is-adopted-by-the-real-xterm: PASS"
+        assert output =~ "CHECK the-adopted-geometry-is-labelled-as-adopted: PASS"
+        assert output =~ "CHECK the-adopted-screen-renders-without-wrapping: PASS"
+        assert output =~ "CHECK a-meta-is-never-answered-with-a-resize: PASS"
+        assert output =~ "CHECK focus-reclaims-the-pane-at-this-clients-own-geometry: PASS"
+        assert output =~ "CHECK reclaiming-puts-the-real-xterm-back-at-its-own-geometry: PASS"
+        assert output =~ "CHECK a-browser-resize-reclaims-an-adopted-pane: PASS"
+
         refute output =~ ": FAIL"
 
       other ->

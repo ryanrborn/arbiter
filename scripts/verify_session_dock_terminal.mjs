@@ -391,6 +391,86 @@ async function run(page) {
   await page.resizeViewport(WIDTH, HEIGHT)
   await page.settle(700)
 
+  // -- another client resizes the shared pane (bd-4tjw34) -------------------
+  //
+  // The pane is one tmux pane and the last client to resize it wins, so a
+  // second tab — or the operator's own `tmux attach` — leaves this window
+  // rendering a screen the pane no longer has. The window has to *adopt* that
+  // geometry rather than keep its own, and it must not answer by pushing its
+  // own back: two idle clients that both re-assert never stop.
+  //
+  // The second client is a real one, attached on the Elixir side.
+
+  const mine = await settledGeometry(page, SESSION_A)
+  const theirs = { cols: mine.cols + 13, rows: mine.rows + 4 }
+
+  const resized = await sync(`resize ${SESSION_A} ${theirs.cols} ${theirs.rows}`)
+  if (resized !== "ok") throw new Error(`the second client could not resize the pane: ${resized}`)
+
+  await page.poll(
+    `(() => {
+       const el = document.getElementById("session-dock-terminal-${SESSION_A}")
+       return el && el.__arbTerminal && el.__arbTerminal.term.cols === ${theirs.cols} &&
+         el.__arbTerminal.term.rows === ${theirs.rows}
+     })()`,
+    "the window never adopted the geometry the other client gave the pane"
+  )
+
+  const adopted = await geometry(page, SESSION_A)
+
+  check(
+    "another-clients-resize-is-adopted-by-this-window",
+    adopted.cols === theirs.cols &&
+      adopted.rows === theirs.rows &&
+      adopted.meta === `${theirs.cols}x${theirs.rows}` &&
+      adopted.adopted === true,
+    `the window was ${mine.cols}x${mine.rows}, the pane went to ${theirs.cols}x${theirs.rows}, ` +
+      `the terminal renders ${adopted.cols}x${adopted.rows} and the strip reports ` +
+      `${adopted.meta} (adopted=${adopted.adopted})`
+  )
+
+  // Idle: long enough for both debounces and a round trip several times over.
+  await page.settle(1200)
+
+  const stillTheirs = await geometry(page, SESSION_A)
+
+  check(
+    "an-idle-window-never-takes-the-pane-back",
+    stillTheirs.cols === theirs.cols &&
+      stillTheirs.rows === theirs.rows &&
+      stillTheirs.adopted === true,
+    `after idling the terminal is ${stillTheirs.cols}x${stillTheirs.rows} ` +
+      `and the strip reports ${stillTheirs.meta} (adopted=${stillTheirs.adopted})`
+  )
+
+  // ...and interacting takes it back. A keystroke, not a `focus()` call: this
+  // window's terminal has held focus since it was expanded, so focusing it
+  // again fires no `focusin` at all — and typing into a terminal that is
+  // already focused is exactly the case the operator hits.
+  await page.type("x")
+
+  await page.poll(
+    `(() => {
+       const el = document.getElementById("session-dock-terminal-${SESSION_A}")
+       return el && el.__arbTerminal && el.__arbTerminal.term.cols === ${mine.cols} &&
+         el.__arbTerminal.term.rows === ${mine.rows}
+     })()`,
+    "typing never reclaimed the pane at this window's own geometry"
+  )
+
+  const reclaimed = await settledGeometry(page, SESSION_A)
+
+  check(
+    "interacting-reclaims-the-pane-at-this-windows-own-geometry",
+    reclaimed.cols === mine.cols &&
+      reclaimed.rows === mine.rows &&
+      reclaimed.meta === `${mine.cols}x${mine.rows}` &&
+      reclaimed.adopted === false &&
+      reclaimed.paneOverflow <= 1,
+    `typing put the terminal back to ${reclaimed.cols}x${reclaimed.rows} ` +
+      `and the pane reports ${reclaimed.meta} (adopted=${reclaimed.adopted})`
+  )
+
   // -- the keyboard rule ----------------------------------------------------
 
   const focus = await page.json(`(() => {
@@ -535,6 +615,14 @@ function geometry(page, id) {
     const scroller = document.getElementById("session-dock-scroller-${id}")
     const win = document.getElementById("session-dock-window-${id}")
 
+    // The size label reads "120x40", or "adopted 120x40" for a pane sitting at
+    // another client's geometry (bd-4tjw34), either of them optionally
+    // followed by " . N clients". The geometry token and the adopted flag are
+    // reported apart so a caller can assert on one without the other.
+    // (No backticks in here: this whole function is inside a template literal.)
+    const metaSlot = status ? status.querySelector('[data-role="meta"]') : null
+    const metaWords = metaSlot ? metaSlot.textContent.split(" ") : []
+
     return {
       cols: term ? term.cols : null,
       rows: term ? term.rows : null,
@@ -543,7 +631,8 @@ function geometry(page, id) {
       xterms: document.querySelectorAll(".xterm").length,
       stamp: el ? el.__arbStamp || null : null,
       state: status ? status.dataset.state : null,
-      meta: status ? status.querySelector('[data-role="meta"]').textContent.split(" ")[0] : null,
+      meta: metaSlot ? metaWords.find((w) => /^\\d+x\\d+$/.test(w)) || metaWords[0] : null,
+      adopted: metaSlot ? metaSlot.dataset.adopted === "true" : null,
       paneOverflow: overflow,
       text: lines.join("\\n"),
       path: location.pathname
@@ -631,6 +720,25 @@ function pageDriver(cdp, sessionId) {
     // A *trusted* key event, which a synthetic `dispatchEvent` is not: only a
     // trusted one can be cancelled by `preventDefault`, and the whole claim
     // here is that `Ctrl+Shift+Escape` never reaches the agent.
+    // A printable keystroke on whatever holds focus. `key` below is Escape and
+    // only Escape (it hard-codes the virtual key code); this is the ordinary
+    // typing path, which is what reclaims a pane another client took
+    // (bd-4tjw34).
+    async type(text) {
+      const code = text.toUpperCase().charCodeAt(0)
+      const common = {
+        key: text,
+        code: `Key${text.toUpperCase()}`,
+        text,
+        unmodifiedText: text,
+        windowsVirtualKeyCode: code,
+        nativeVirtualKeyCode: code
+      }
+
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", ...common }, sessionId)
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...common }, sessionId)
+    },
+
     async key(key, { ctrl = false, shift = false } = {}) {
       const modifiers = (ctrl ? 2 : 0) | (shift ? 8 : 0)
       const common = { key, code: key, windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27, modifiers }

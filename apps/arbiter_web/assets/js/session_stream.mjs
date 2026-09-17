@@ -134,6 +134,9 @@ export class SessionStream {
     this._status = null
     this._stdinSeq = 0
     this._pendingResize = null
+    // The geometry this client last put on the wire, and still believes the
+    // pane holds — a resize matching it is a no-op. `noteGeometry` retires it
+    // the moment a `meta` says the pane is somewhere else.
     this._pushedGeometry = null
     this._resizeTimer = null
   }
@@ -233,6 +236,28 @@ export class SessionStream {
       this._resizeTimer = null
       this._flushResize()
     }, this.resizeDebounceMs)
+  }
+
+  /**
+   * Note the geometry the pane actually has. Pushes nothing (bd-4tjw34).
+   *
+   * `resize` skips a push that would land the pane where this client already
+   * put it, which is only sound while this client is the only one attached.
+   * It is not: the pane is shared and last-writer-wins, so another client's
+   * resize moves it out from under that cache — and a client that later
+   * reclaims the pane at the very size it itself last pushed would have the
+   * reclaim swallowed as a no-op, leaving the pane at the other client's
+   * geometry and the operator's interaction doing nothing at all.
+   *
+   * So a `meta` that does not agree with what this client last sent retires
+   * it: the cache only ever suppresses a push the pane genuinely does not
+   * need. `session_terminal.mjs` calls this for every `meta`.
+   */
+  noteGeometry(cols, rows) {
+    if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return
+
+    const pushed = this._pushedGeometry
+    if (pushed && (pushed.cols !== cols || pushed.rows !== rows)) this._pushedGeometry = null
   }
 
   /**
