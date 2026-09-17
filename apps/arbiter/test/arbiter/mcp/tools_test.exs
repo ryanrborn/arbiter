@@ -8,6 +8,7 @@ defmodule Arbiter.MCP.ToolsTest do
   alias Arbiter.MCP.Catalog
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Sessions.Session
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
 
@@ -345,6 +346,150 @@ defmodule Arbiter.MCP.ToolsTest do
       assert message =~ "not permitted"
     end
 
+    # ---- bd-8akewg: per-reader read state -------------------------------
+
+    test "two session tokens each see a new shared message as unread", ctx do
+      {:ok, a} = new_session(ctx.ws)
+      {:ok, b} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      assert {:ok, %{count: 1, messages: [%{body: "shared"}]}} =
+               Tools.coordinator_inbox(a, %{})
+
+      # Session A's poll consumed its own copy only.
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
+      assert {:ok, %{count: 1, messages: [%{body: "shared"}]}} = Tools.coordinator_inbox(b, %{})
+    end
+
+    test "a session clearing leaves another session's unread and outstanding intact", ctx do
+      {:ok, a} = new_session(ctx.ws)
+      {:ok, b} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      # B reads it (now outstanding for B), A reads *and* clears.
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{})
+      assert {:ok, %{count: 1, deleted_read: 1}} = Tools.coordinator_inbox(a, %{"clear" => true})
+
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{"state" => "outstanding"})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{"state" => "outstanding"})
+    end
+
+    test "a session's reads and clears leave the sessionless coordinator's view alone", ctx do
+      {:ok, a} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(a, %{"clear" => true})
+
+      # The sessionless coordinator (session_id: nil) still has it unread.
+      assert {:ok, %{count: 1, messages: [%{body: "shared"}]}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "a session does not inherit the resolved archive that predates it", ctx do
+      {:ok, archived} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "before"})
+
+      # The operator already dealt with it from the drawer/CLI, which stamps the
+      # shared row — that is the global "resolved" signal.
+      {:ok, _} = Message.mark_read(archived, reader: Message.coordinator_reader())
+      {:ok, _} = Message.mark_cleared(archived)
+
+      {:ok, a} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "after"})
+
+      assert {:ok, %{count: 1, messages: [%{body: "after"}]}} = Tools.coordinator_inbox(a, %{})
+    end
+
+    test "a session launched after an unresolved escalation still sees it", ctx do
+      # The feature's primary use case: the notifier raises an escalation while
+      # no session is running, the operator launches one to deal with it. The
+      # row stays uncleared, so `last_with_subject/3` keeps suppressing a
+      # repeat — if the session could not see it, nothing ever would re-deliver
+      # it.
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ctx.ws.id,
+          kind: :escalation,
+          to_ref: "coordinator",
+          subject: "budget exhausted",
+          body: "before-the-session"
+        })
+
+      {:ok, a} = new_session(ctx.ws)
+
+      assert {:ok, %{count: 1, messages: [%{body: "before-the-session"}]}} =
+               Tools.coordinator_inbox(a, %{})
+
+      # …and having read it, the session owes it, not the archive.
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
+
+      assert {:ok, %{count: 1, messages: [%{body: "before-the-session"}]}} =
+               Tools.coordinator_inbox(a, %{"state" => "outstanding"})
+
+      # The dedupe signal is untouched by the session reading it.
+      assert %{body: "before-the-session"} =
+               Message.last_with_subject(Message.coordinator_ref(), ["budget exhausted"],
+                 workspace_id: ctx.ws.id,
+                 uncleared: true
+               )
+    end
+
+    test "the minted-token path carries session identity all the way to the handler", ctx do
+      # The production call path: `Provisioning.mint_token/2` → the session's
+      # `.mcp.json` → `Scope.from_token/1` in the plug → `Catalog.call/3`. The
+      # hand-built `%Scope{}` the other tests use would not catch a `session_id`
+      # claim that failed to survive minting or decoding.
+      {:ok, session_a} = Ash.create(Session, %{cwd: "/tmp/mcp-e2e", workspace_id: ctx.ws.id})
+      {:ok, session_b} = Ash.create(Session, %{cwd: "/tmp/mcp-e2e", workspace_id: ctx.ws.id})
+
+      {:ok, scope_a} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_a))
+      {:ok, scope_b} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_b))
+
+      assert scope_a.session_id == session_a.id
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "e2e"})
+
+      assert {:ok, %{count: 1, messages: [%{body: "e2e"}]}} =
+               Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      assert {:ok, %{count: 0}} = Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      # Session B's copy survived session A's poll.
+      assert {:ok, %{count: 1, messages: [%{body: "e2e"}]}} =
+               Catalog.call(scope_b, "coordinator_inbox", %{})
+    end
+
+    test "a cross-workspace session reads every workspace, and `workspace` filters", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "xws-other", prefix: "xwo"})
+      {:ok, a} = new_session(nil)
+      {:ok, b} = new_session(nil)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "here"})
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "coordinator", body: "there"})
+
+      assert {:ok, %{count: 2, messages: messages}} =
+               Tools.coordinator_inbox(a, %{"state" => "unread"})
+
+      assert Enum.map(messages, & &1.body) |> Enum.sort() == ["here", "there"]
+
+      # …and `workspace` still narrows it to one, for a reader that has seen
+      # neither message yet.
+      assert {:ok, %{count: 1, messages: [%{body: "there"}]}} =
+               Tools.coordinator_inbox(b, %{"workspace" => other_ws.id})
+    end
+
     test "state: \"outstanding\" returns read-but-uncleared messages without mutating", ctx do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ctx.ws.id))
 
@@ -523,6 +668,76 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert cleared.id == escalation.id
       assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unrelated.id)
+    end
+
+    # ---- bd-8akewg: per-reader clears ------------------------------------
+
+    test "a session's id-clear leaves the row and every other reader alone", ctx do
+      {:ok, a} = new_session(ctx.ws)
+      {:ok, b} = new_session(ctx.ws)
+
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{})
+
+      assert {:ok, %{cleared: [cleared], not_found: []}} =
+               Tools.coordinator_inbox_clear(a, %{"ids" => [m.id]})
+
+      assert cleared.id == m.id
+
+      # The shared row survives, so the sessionless coordinator and session B
+      # both still owe the message.
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{"state" => "outstanding"})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{"state" => "outstanding"})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "a session's task-clear leaves the row and every other reader alone", ctx do
+      {:ok, a} = new_session(ctx.ws)
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ctx.ws.id,
+          to_ref: "coordinator",
+          task_ref: ctx.task.id,
+          body: "needs a decision"
+        })
+
+      assert {:ok, %{cleared_by_task: [cleared]}} =
+               Tools.coordinator_inbox_clear(a, %{"task_id" => ctx.task.id})
+
+      assert cleared.id == m.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "the minted-token path clears only the calling session's view", ctx do
+      # The production call path for a browser-hosted session: mint its token,
+      # decode it back to a scope, dispatch through the catalog. A hand-built
+      # %Scope{} would not catch a `session_id` claim lost in minting/decoding.
+      {:ok, session_a} = Ash.create(Session, %{cwd: "/tmp/mcp-clear", workspace_id: ctx.ws.id})
+      {:ok, session_b} = Ash.create(Session, %{cwd: "/tmp/mcp-clear", workspace_id: ctx.ws.id})
+
+      {:ok, scope_a} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_a))
+      {:ok, scope_b} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_b))
+
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "e2e-clear"})
+
+      assert {:ok, %{cleared: [%{id: cleared_id}]}} =
+               Catalog.call(scope_a, "coordinator_inbox_clear", %{"ids" => [m.id]})
+
+      assert cleared_id == m.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+
+      assert {:ok, %{count: 0}} = Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      assert {:ok, %{count: 1, messages: [%{body: "e2e-clear"}]}} =
+               Catalog.call(scope_b, "coordinator_inbox", %{})
     end
 
     test "requires ids and/or task_id", ctx do
@@ -5038,6 +5253,19 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert "ci_rerun" in names
       assert "ci_mark_external" in names
+    end
+  end
+
+  # bd-8akewg: a real `Arbiter.Sessions.Session` row plus the coordinator scope
+  # its MCP token would decode to. The row has to exist because
+  # `coordinator_inbox` floors a session's unread view at the session's own
+  # start time.
+  defp new_session(workspace) do
+    ws_id = if workspace, do: workspace.id, else: nil
+
+    with {:ok, session} <-
+           Ash.create(Session, %{cwd: "/tmp/mcp-tools-session", workspace_id: ws_id}) do
+      {:ok, %Scope{tier: :coordinator, workspace_id: ws_id, session_id: session.id}}
     end
   end
 end

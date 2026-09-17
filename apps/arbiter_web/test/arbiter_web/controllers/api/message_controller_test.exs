@@ -214,6 +214,189 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
     end
   end
 
+  # ---- bd-8akewg: explicit reader ------------------------------------------
+
+  describe "per-reader read state" do
+    setup do
+      ws = "ws-api-reader-#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: "coordinator",
+          body: "shared escalation"
+        })
+
+      %{ws: ws, message: m, session: "sess-#{System.unique_integer([:positive])}"}
+    end
+
+    test "read with `session` marks it read for that session only", ctx do
+      %{conn: conn, message: m, session: session} = ctx
+
+      conn = post(conn, ~p"/api/messages/#{m.id}/read", %{session: session})
+      assert json_response(conn, 200)
+
+      # The shared row is untouched, so the sessionless coordinator still has it.
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.read_at == nil
+
+      reader = Message.session_reader(session)
+      assert [] = Message.inbox("coordinator", workspace_id: ctx.ws, reader: reader)
+      assert [_] = Message.outstanding("coordinator", workspace_id: ctx.ws, reader: reader)
+    end
+
+    test "read without `session` keeps stamping the row (sessionless coordinator)", ctx do
+      %{conn: conn, message: m} = ctx
+
+      conn = post(conn, ~p"/api/messages/#{m.id}/read", %{})
+      assert json_response(conn, 200)["read_at"]
+
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.read_at
+    end
+
+    test "clear with `session` clears only that session's view", ctx do
+      %{conn: conn, message: m, session: session} = ctx
+      reader = Message.session_reader(session)
+
+      {:ok, _} = Message.mark_read(m, reader: reader)
+
+      conn = delete(conn, ~p"/api/messages", %{to_ref: "coordinator", session: session})
+      assert %{"deleted_read" => 1} = json_response(conn, 200)["data"]
+
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.cleared_at == nil
+      assert [] = Message.outstanding("coordinator", workspace_id: ctx.ws, reader: reader)
+      assert [_] = Message.inbox("coordinator", workspace_id: ctx.ws)
+    end
+
+    test "clear by ids with `session` clears only that session's view", ctx do
+      %{conn: conn, message: m, session: session} = ctx
+      reader = Message.session_reader(session)
+
+      {:ok, _} = Message.mark_read(m, reader: reader)
+
+      conn = delete(conn, ~p"/api/messages", %{ids: m.id, session: session})
+      assert %{"cleared" => [id], "not_found" => []} = json_response(conn, 200)["data"]
+      assert id == m.id
+
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.cleared_at == nil
+      assert [] = Message.outstanding("coordinator", workspace_id: ctx.ws, reader: reader)
+      assert [_] = Message.inbox("coordinator", workspace_id: ctx.ws)
+    end
+
+    test "clear by task_id with `session` clears only that session's view", ctx do
+      %{conn: conn, session: session, ws: ws} = ctx
+      reader = Message.session_reader(session)
+      task = "bd-api#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "task escalation"
+        })
+
+      conn = delete(conn, ~p"/api/messages", %{task_id: task, session: session})
+      assert %{"cleared_count" => 1} = json_response(conn, 200)["data"]
+
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.cleared_at == nil
+      assert Enum.any?(Message.inbox("coordinator", workspace_id: ws), &(&1.id == m.id))
+
+      refute Enum.any?(
+               Message.inbox("coordinator", workspace_id: ws, reader: reader),
+               &(&1.id == m.id)
+             )
+    end
+
+    test "index unread=true with `session` is that session's unread view", ctx do
+      %{conn: conn, message: m, session: session} = ctx
+
+      listed =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true", session: session})
+        |> json_response(200)
+
+      assert m.id in Enum.map(listed["data"], & &1["id"])
+
+      {:ok, _} = Message.mark_read(m, reader: Message.session_reader(session))
+
+      listed =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true", session: session})
+        |> json_response(200)
+
+      refute m.id in Enum.map(listed["data"], & &1["id"])
+
+      # …and the sessionless view is unaffected.
+      listed =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true"})
+        |> json_response(200)
+
+      assert m.id in Enum.map(listed["data"], & &1["id"])
+    end
+
+    test "a real session's unread view over REST matches coordinator_inbox's bound", %{conn: conn} do
+      # bd-8akewg review finding 2: `arb inbox --session <id>` lands here, while
+      # the MCP `coordinator_inbox` lands in Tools.Messaging. Both resolve the
+      # session's unread bound through `Message.unread_floor/2`, so the archive
+      # must drop out here too rather than printing "50 unread" of long-resolved
+      # mail for a session the MCP tool reports 0 for.
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "api-floor-#{System.unique_integer([:positive])}",
+          prefix: "afl"
+        })
+
+      {:ok, archived} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws.id,
+          to_ref: "coordinator",
+          body: "resolved long ago"
+        })
+
+      {:ok, _} = Message.mark_read(archived, reader: Message.coordinator_reader())
+      {:ok, _} = Message.mark_cleared(archived)
+
+      {:ok, unresolved} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws.id,
+          to_ref: "coordinator",
+          body: "still owed"
+        })
+
+      {:ok, session} =
+        Ash.create(Arbiter.Sessions.Session, %{cwd: "/tmp/api-floor", workspace_id: ws.id})
+
+      ids =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true", session: session.id})
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Enum.map(& &1["id"])
+
+      assert unresolved.id in ids
+      refute archived.id in ids
+
+      # …exactly the set the MCP handler reports for the same session.
+      assert [%{id: mcp_id}] =
+               Message.inbox("coordinator",
+                 workspace_id: ws.id,
+                 reader: Message.session_reader(session.id)
+               )
+
+      assert mcp_id == unresolved.id
+    end
+  end
+
   describe "DELETE /api/messages?ids=... (per-message soft clear)" do
     test "soft-clears exactly the given ids, resolved regardless of workspace", %{conn: conn} do
       {:ok, m1} =

@@ -15,5 +15,6 @@ defmodule Arbiter.Messages do
 
   resources do
     resource Arbiter.Messages.Message
+    resource Arbiter.Messages.MessageReceipt
   end
 end

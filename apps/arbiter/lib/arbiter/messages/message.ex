@@ -49,6 +49,38 @@ defmodule Arbiter.Messages.Message do
       *softly* (`clear_read/2`, `clear_all/2`, `mark_cleared/1`); the row is
       retained as the durable escalation record. Only `hard_purge/2` destroys.
 
+  ## Per-reader read state (bd-8akewg)
+
+  Those three states are *per reader* on the coordinator mailbox, which is a
+  single shared queue: producers write one row addressed to `"coordinator"` and
+  every browser-hosted session plus the sessionless coordinator reads it. When
+  read/cleared were only the two row timestamps above, the first reader to poll
+  consumed everybody else's mail.
+
+  So `inbox/2`, `outstanding/2`, `mark_read/2`, `clear_read/2` and `clear_all/2`
+  take a `reader:` option, and the state for that reader lives in
+  `Arbiter.Messages.MessageReceipt` — no receipt is the unread state. Two rules
+  make the rest of the system hold still:
+
+    * A **session** reader (`session_reader/1`) writes only its own receipt. The
+      row's `cleared_at` stays nil, so one session triaging its copy cannot
+      re-arm an escalation the `last_with_subject/3` dedupe is suppressing.
+    * The **sessionless coordinator** reader (`coordinator_reader/0` — the CLI,
+      the dashboard drawer, a plain minted token) mirrors its writes onto the
+      row *and* reads through it, so the REST listing, `hard_purge/2` and that
+      same dedupe behave exactly as they did.
+
+  Omitting `reader:` keeps the original row-level semantics, which is what a
+  task mailbox wants: it has exactly one reader.
+
+  A session reader with no receipts is, by definition, unread on *everything*,
+  so its unread view is bounded (`unread_floor/2`): everything since the
+  session started, **plus** every row that is still globally uncleared. The
+  second half is what matters — an escalation raised before the session was
+  launched is exactly what that session is usually launched to deal with, and
+  the `last_with_subject/3` dedupe guarantees it is never re-raised. Only the
+  resolved archive is withheld.
+
   ## PubSub
 
   On create, the message is broadcast on `"messages:<workspace_id>"` as
@@ -60,6 +92,8 @@ defmodule Arbiter.Messages.Message do
     otp_app: :arbiter,
     domain: Arbiter.Messages,
     data_layer: AshSqlite.DataLayer
+
+  alias Arbiter.Messages.MessageReceipt
 
   require Ash.Query
 
@@ -75,6 +109,15 @@ defmodule Arbiter.Messages.Message do
   @coordinator_ref "coordinator"
   @legacy_coordinator_ref "admiral"
   @coordinator_refs [@coordinator_ref, @legacy_coordinator_ref]
+
+  # bd-8akewg: the *reader* identity every sessionless coordinator shares — the
+  # CLI, the dashboard drawer, and any plain `arb mcp token mint` token. It is
+  # deliberately one identity rather than one per token: the runbook mints a
+  # fresh token every cycle, so per-token identity would scatter the operator's
+  # triage state across throwaway readers. A browser-hosted session gets
+  # `session_reader/1` instead. Distinct from `@coordinator_ref`, which is the
+  # *address* rows are sent to; they share a literal only by coincidence.
+  @coordinator_reader "coordinator"
 
   sqlite do
     table "messages"
@@ -287,6 +330,16 @@ defmodule Arbiter.Messages.Message do
     update_timestamp :updated_at
   end
 
+  relationships do
+    # bd-8akewg: per-reader read state. Declared so the per-reader queries can
+    # push `exists(receipts, …)` down into SQL as a subquery rather than
+    # loading a reader's whole receipt history into the BEAM on every poll.
+    has_many :receipts, Arbiter.Messages.MessageReceipt do
+      destination_attribute :message_id
+      public? true
+    end
+  end
+
   # ---- introspection -------------------------------------------------------
 
   @doc "All valid kind atoms."
@@ -316,6 +369,50 @@ defmodule Arbiter.Messages.Message do
   """
   def ref_variants(ref) when ref in @coordinator_refs, do: @coordinator_refs
   def ref_variants(ref), do: [ref]
+
+  @doc """
+  The reader identity every **sessionless** coordinator shares (bd-8akewg): the
+  CLI (`arb inbox`), the dashboard drawer, and any plain `arb mcp token mint`
+  token. One identity, not one per token — the runbook mints a fresh token each
+  cycle, so per-token identity would scatter the operator's triage state.
+
+  This reader's reads and clears are additionally **mirrored onto the message
+  row** (`read_at`/`cleared_at`), which is what keeps the REST `unread=true`
+  listing, `hard_purge/2`, and the `last_with_subject/3` dedupe behaving exactly
+  as they did before per-reader state existed. Session readers never touch the
+  row, so one session clearing its copy cannot re-arm a repeat escalation.
+  """
+  def coordinator_reader, do: @coordinator_reader
+
+  @doc """
+  The reader identity of a browser-hosted session: `"session:<session_id>"`.
+  `session_id` is the `Arbiter.Sessions.Session` row id, the same claim
+  `Arbiter.MCP.Scope.mint_session/2` puts on the session's MCP token.
+  """
+  def session_reader(session_id) when is_binary(session_id) and session_id != "",
+    do: "session:" <> session_id
+
+  @doc """
+  True when `reader_ref` is the shared sessionless coordinator reader — the one
+  whose state is mirrored onto the message row. See `coordinator_reader/0`.
+  """
+  def sessionless_reader?(reader_ref), do: reader_ref == @coordinator_reader
+
+  @doc "Every per-reader receipt recorded against `message_id`."
+  def receipts_for_message(message_id) when is_binary(message_id),
+    do: Arbiter.Messages.MessageReceipt.for_message(message_id)
+
+  @doc """
+  Narrow an `Ash.Query` on this resource to one lifecycle `state` (`:unread` or
+  `:outstanding`) as seen by `reader_ref` — or, when `reader_ref` is `nil`, by
+  the row itself (the pre-bd-8akewg semantics).
+
+  Exposed for callers that build their own query and cannot go through
+  `inbox/2` / `outstanding/2` — the REST `GET /api/messages` filter endpoint,
+  which layers kind/from_ref/limit on top of the same predicate.
+  """
+  def for_reader(query, reader_ref, :unread), do: unread_filter(query, reader_ref)
+  def for_reader(query, reader_ref, :outstanding), do: outstanding_filter(query, reader_ref)
 
   @doc """
   The preferred task reference for a message: `task_ref` if set, else the
@@ -433,13 +530,30 @@ defmodule Arbiter.Messages.Message do
   @doc """
   Mark a message read (stamps `read_at`). Accepts a `%Message{}` or an id.
   """
-  def mark_read(id) when is_binary(id) do
+  def mark_read(message_or_id, opts \\ [])
+
+  def mark_read(id, opts) when is_binary(id) do
     with {:ok, message} <- Ash.get(__MODULE__, id) do
-      mark_read(message)
+      mark_read(message, opts)
     end
   end
 
-  def mark_read(message), do: Ash.update(message, %{}, action: :mark_read)
+  def mark_read(message, opts) do
+    case Keyword.get(opts, :reader) do
+      nil ->
+        Ash.update(message, %{}, action: :mark_read)
+
+      reader when is_binary(reader) ->
+        {:ok, _receipt} = MessageReceipt.mark_read(message.id, reader)
+
+        if sessionless_reader?(reader) do
+          Ash.update(message, %{}, action: :mark_read)
+        else
+          broadcast_read(message)
+          {:ok, message}
+        end
+    end
+  end
 
   @doc """
   Mark a message cleared (stamps `cleared_at` — the soft "addressed" transition).
@@ -467,19 +581,80 @@ defmodule Arbiter.Messages.Message do
 
     query =
       __MODULE__
-      |> Ash.Query.filter(
-        to_ref in ^refs and is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
-      )
+      |> Ash.Query.filter(to_ref in ^refs and kind in ^@mailbox_kinds)
       |> Ash.Query.sort(inserted_at: :asc)
-
-    query =
-      case Keyword.get(opts, :workspace_id) do
-        ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
-        _ -> query
-      end
+      |> unread_filter(Keyword.get(opts, :reader))
+      |> scope_workspace(opts)
 
     Ash.read!(query)
   end
+
+  # Unread, row-level: the pre-bd-8akewg semantics, still what a *task* mailbox
+  # wants (exactly one reader — the worker — so receipts would be pure
+  # overhead) and what `to_ref`-agnostic callers get when they name no reader.
+  defp unread_filter(query, nil) do
+    Ash.Query.filter(query, is_nil(read_at) and is_nil(cleared_at))
+  end
+
+  # Unread, per reader: *no receipt at all* is the unread state, so this is a
+  # `NOT EXISTS` subquery rather than a load-and-reject in the BEAM — the
+  # coordinator mailbox keeps every row it has ever received (clear is soft),
+  # and a reader's receipt history grows with it.
+  defp unread_filter(query, reader) when is_binary(reader) do
+    if sessionless_reader?(reader) do
+      # The sessionless coordinator reader mirrors every read/clear onto the row
+      # (see `coordinator_reader/0`), so its receipt view and the row view are
+      # the same set by construction — and the row predicate is covered by the
+      # `(workspace_id, to_ref, read_at)` index the drawer renders through on
+      # every page load. Reading it through the subquery would be correct and
+      # needlessly slower.
+      unread_filter(query, nil)
+    else
+      query
+      |> Ash.Query.filter(
+        not exists(
+          receipts,
+          reader_ref == ^reader and (not is_nil(read_at) or not is_nil(cleared_at))
+        )
+      )
+      |> unread_floor(reader_floor(reader))
+    end
+  end
+
+  # bd-8akewg: the bound on a session reader's unread view. With no receipts a
+  # reader is unread on *everything*, and handing a session created today the
+  # whole coordinator archive is not a mailbox.
+  #
+  # The bound is a union, not a cutoff: everything since the session started,
+  # **or** still globally uncleared. Anything the operator has not resolved is
+  # live mail no matter when it was raised — a session launched at 09:05 to
+  # deal with a 09:00 escalation has to be able to see it, and since a session
+  # clear never stamps the row, `last_with_subject/3` would otherwise suppress
+  # the repeat forever. What drops out is only the resolved archive.
+  #
+  # Derived from the reader ref here, in one place, so `inbox/2` and the
+  # `for_reader/3` query filter the REST endpoint (and through it `arb inbox
+  # --session <id>`) builds on cannot drift apart.
+  defp unread_floor(query, %DateTime{} = since),
+    do: Ash.Query.filter(query, is_nil(cleared_at) or inserted_at >= ^since)
+
+  # No session row behind the ref (hard-deleted, or a synthetic reader): no
+  # floor at all. Degenerate, and showing too much mail beats swallowing an
+  # escalation.
+  defp unread_floor(query, _no_floor), do: query
+
+  defp reader_floor("session:" <> session_id) when session_id != "" do
+    case Ash.get(Arbiter.Sessions.Session, session_id) do
+      {:ok, %{started_at: %DateTime{} = started_at}} -> started_at
+      _ -> nil
+    end
+  rescue
+    # A ref that is not a real session id at all (Ash raises on an id it cannot
+    # cast) reads as "no floor" rather than taking the caller's query down.
+    _ -> nil
+  end
+
+  defp reader_floor(_reader), do: nil
 
   @doc """
   Outstanding mailbox-family messages addressed to `to_ref`, oldest first:
@@ -493,18 +668,46 @@ defmodule Arbiter.Messages.Message do
 
     query =
       __MODULE__
-      |> Ash.Query.filter(
-        to_ref in ^refs and not is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
-      )
+      |> Ash.Query.filter(to_ref in ^refs and kind in ^@mailbox_kinds)
       |> Ash.Query.sort(inserted_at: :asc)
-
-    query =
-      case Keyword.get(opts, :workspace_id) do
-        ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
-        _ -> query
-      end
+      |> outstanding_filter(Keyword.get(opts, :reader))
+      |> scope_workspace(opts)
 
     Ash.read!(query)
+  end
+
+  defp outstanding_filter(query, nil) do
+    Ash.Query.filter(query, not is_nil(read_at) and is_nil(cleared_at))
+  end
+
+  # Per reader, outstanding needs a receipt to exist — no `:since` floor is
+  # needed here, because a reader can only be outstanding on mail it has
+  # already read.
+  defp outstanding_filter(query, reader) when is_binary(reader) do
+    if sessionless_reader?(reader) do
+      outstanding_filter(query, nil)
+    else
+      Ash.Query.filter(
+        query,
+        exists(receipts, reader_ref == ^reader and not is_nil(read_at) and is_nil(cleared_at))
+      )
+    end
+  end
+
+  # "Not yet addressed by this reader" — the predicate behind a targeted clear.
+  # Unlike `outstanding`, an unread message counts: clearing a task's thread
+  # sweeps mail the reader never opened, exactly as `clear_all/2` does.
+  defp uncleared_filter(query, nil), do: Ash.Query.filter(query, is_nil(cleared_at))
+
+  defp uncleared_filter(query, reader) when is_binary(reader) do
+    if sessionless_reader?(reader) do
+      uncleared_filter(query, nil)
+    else
+      Ash.Query.filter(
+        query,
+        not exists(receipts, reader_ref == ^reader and not is_nil(cleared_at))
+      )
+    end
   end
 
   @doc """
@@ -586,22 +789,13 @@ defmodule Arbiter.Messages.Message do
   `workspace_id:` to scope to one workspace.
   """
   def clear_read(to_ref, opts \\ []) when is_binary(to_ref) do
-    refs = ref_variants(to_ref)
+    reader = Keyword.get(opts, :reader)
+    outstanding = outstanding(to_ref, opts)
 
-    outstanding_query =
-      __MODULE__
-      |> Ash.Query.filter(
-        to_ref in ^refs and not is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
-      )
-
-    outstanding_query = scope_workspace(outstanding_query, opts)
-
-    outstanding = Ash.read!(outstanding_query)
-    Enum.each(outstanding, &mark_cleared/1)
-
+    Enum.each(outstanding, &clear_one(&1, reader))
     broadcast_workspaces(outstanding)
 
-    remaining_unread = count_pending(refs, opts)
+    remaining_unread = length(inbox(to_ref, opts))
 
     {:ok, length(outstanding), 0, remaining_unread}
   end
@@ -615,23 +809,28 @@ defmodule Arbiter.Messages.Message do
   to scope to one workspace.
   """
   def clear_all(to_ref, opts \\ []) when is_binary(to_ref) do
-    refs = ref_variants(to_ref)
+    reader = Keyword.get(opts, :reader)
+    pending = inbox(to_ref, opts)
+    outstanding = outstanding(to_ref, opts)
+    to_clear = outstanding ++ pending
 
-    query =
-      __MODULE__
-      |> Ash.Query.filter(to_ref in ^refs and is_nil(cleared_at) and kind in ^@mailbox_kinds)
-
-    query = scope_workspace(query, opts)
-
-    to_clear = Ash.read!(query)
-    read_count = Enum.count(to_clear, &(not is_nil(&1.read_at)))
-    unread_count = Enum.count(to_clear, &is_nil(&1.read_at))
-
-    Enum.each(to_clear, &mark_cleared/1)
-
+    Enum.each(to_clear, &clear_one(&1, reader))
     broadcast_workspaces(to_clear)
 
-    {:ok, read_count, unread_count, 0}
+    {:ok, length(outstanding), length(pending), 0}
+  end
+
+  # The one place the clear transition branches on reader identity. A session
+  # writes only its own receipt: the row's `cleared_at` stays nil, so the
+  # `last_with_subject/3` dedupe keeps suppressing a repeat page that one
+  # session happened to triage away. The sessionless coordinator reader — the
+  # operator — also stamps the row, which is the global "resolved" signal
+  # `hard_purge/2` and that same dedupe have always read.
+  defp clear_one(message, nil), do: mark_cleared(message)
+
+  defp clear_one(message, reader) when is_binary(reader) do
+    {:ok, _receipt} = MessageReceipt.mark_cleared(message.id, reader)
+    if sessionless_reader?(reader), do: mark_cleared(message), else: {:ok, message}
   end
 
   @doc """
@@ -645,11 +844,17 @@ defmodule Arbiter.Messages.Message do
   Returns `{:ok, cleared, not_found}` where `cleared` is the list of updated
   messages and `not_found` is the subset of `ids` that matched no row (or
   matched a row `mark_cleared/1` refuses, e.g. a `:notification`).
+
+  Pass `reader:` to clear only that reader's view (bd-8akewg) — a session
+  writes its own receipt and leaves the shared row, and therefore every other
+  reader and the escalation dedupe, untouched.
   """
-  def clear_ids(ids) when is_list(ids) do
+  def clear_ids(ids, opts \\ []) when is_list(ids) do
+    reader = Keyword.get(opts, :reader)
+
     {cleared, not_found} =
       Enum.reduce(ids, {[], []}, fn id, {cleared_acc, missing_acc} ->
-        case mark_cleared(id) do
+        case clear_id(id, reader) do
           {:ok, message} -> {[message | cleared_acc], missing_acc}
           {:error, _} -> {cleared_acc, [id | missing_acc]}
         end
@@ -659,6 +864,22 @@ defmodule Arbiter.Messages.Message do
     broadcast_workspaces(cleared)
 
     {:ok, cleared, Enum.reverse(not_found)}
+  end
+
+  defp clear_id(id, nil), do: mark_cleared(id)
+
+  # Per reader, the row is not the source of truth, so the id has to resolve to
+  # a real mailbox-family row before a receipt is written — otherwise a bad id
+  # (or a `:notification`, which `mark_cleared/1` refuses outright) would be
+  # silently recorded as cleared rather than reported in `not_found`.
+  defp clear_id(id, reader) when is_binary(reader) do
+    with {:ok, message} <- Ash.get(__MODULE__, id),
+         true <- message.kind in @mailbox_kinds do
+      clear_one(message, reader)
+    else
+      false -> {:error, :not_clearable}
+      {:error, _} = err -> err
+    end
   end
 
   @doc """
@@ -673,19 +894,25 @@ defmodule Arbiter.Messages.Message do
 
   Returns `{:ok, cleared}`, the list of updated messages (`[]` when nothing
   was outstanding for the task).
+
+  Pass `reader:` to clear only that reader's view (bd-8akewg); "still
+  outstanding" is then read per reader too, so the call stays idempotent for
+  that reader without depending on the shared row.
   """
   def clear_by_task(task_ref, opts \\ []) when is_binary(task_ref) do
+    reader = Keyword.get(opts, :reader)
+
     query =
       __MODULE__
       |> Ash.Query.filter(
-        task_ref == ^task_ref and to_ref in ^@coordinator_refs and is_nil(cleared_at) and
-          kind in ^@mailbox_kinds
+        task_ref == ^task_ref and to_ref in ^@coordinator_refs and kind in ^@mailbox_kinds
       )
+      |> uncleared_filter(reader)
 
     query = scope_workspace(query, opts)
 
     to_clear = Ash.read!(query)
-    Enum.each(to_clear, &mark_cleared/1)
+    Enum.each(to_clear, &clear_one(&1, reader))
 
     broadcast_workspaces(to_clear)
 
@@ -710,6 +937,9 @@ defmodule Arbiter.Messages.Message do
     query = scope_workspace(query, opts)
 
     purged = Ash.read!(query)
+    # Receipts first: there is no FK cascade (see the migration's note), so the
+    # per-reader rows would otherwise outlive the message they describe.
+    MessageReceipt.purge_for_messages(Enum.map(purged, & &1.id))
     Enum.each(purged, &Ash.destroy!/1)
 
     broadcast_workspaces(purged)
@@ -722,15 +952,6 @@ defmodule Arbiter.Messages.Message do
       ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
       _ -> query
     end
-  end
-
-  defp count_pending(refs, opts) do
-    __MODULE__
-    |> Ash.Query.filter(
-      to_ref in ^refs and is_nil(read_at) and is_nil(cleared_at) and kind in ^@mailbox_kinds
-    )
-    |> scope_workspace(opts)
-    |> Ash.count!()
   end
 
   defp broadcast_workspaces(messages) do
