@@ -213,4 +213,100 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
   end
+
+  describe "DELETE /api/messages?ids=... (per-message soft clear)" do
+    test "soft-clears exactly the given ids, resolved regardless of workspace", %{conn: conn} do
+      {:ok, m1} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "1"})
+
+      {:ok, m2} =
+        Message.send_mail(%{
+          workspace_id: "ws-elsewhere",
+          to_ref: "coordinator",
+          kind: :info,
+          body: "2"
+        })
+
+      {:ok, untouched} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "3"})
+
+      conn = delete(conn, ~p"/api/messages", %{ids: "#{m1.id},#{m2.id}"})
+
+      assert %{"data" => %{"cleared" => cleared, "not_found" => []}} =
+               json_response(conn, 200)
+
+      assert Enum.sort(cleared) == Enum.sort([m1.id, m2.id])
+      assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, m1.id)
+      assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, m2.id)
+      assert c1
+      assert c2
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, untouched.id)
+    end
+
+    test "reports unknown ids as not_found", %{conn: conn} do
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "1"})
+
+      bogus = Ecto.UUID.generate()
+
+      conn = delete(conn, ~p"/api/messages", %{ids: "#{m.id},#{bogus}"})
+
+      assert %{"data" => %{"cleared" => [cleared_id], "not_found" => [^bogus]}} =
+               json_response(conn, 200)
+
+      assert cleared_id == m.id
+    end
+  end
+
+  describe "DELETE /api/messages?task_id=... (per-task soft clear)" do
+    test "clears every coordinator message concerning the task", %{conn: conn} do
+      task = "bd-ctrl-cleartask"
+
+      {:ok, escalation} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: @ws,
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "needs a decision"
+        })
+
+      {:ok, unrelated} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: @ws,
+          to_ref: "coordinator",
+          task_ref: "bd-ctrl-other",
+          body: "not this task"
+        })
+
+      conn = delete(conn, ~p"/api/messages", %{task_id: task})
+
+      assert %{"data" => %{"cleared" => [cleared_id], "cleared_count" => 1}} =
+               json_response(conn, 200)
+
+      assert cleared_id == escalation.id
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, escalation.id)
+      assert cleared_at
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unrelated.id)
+    end
+
+    test "scopes to a workspace when given", %{conn: conn} do
+      task = "bd-ctrl-cleartask-ws"
+
+      {:ok, elsewhere} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: "ws-elsewhere-2",
+          to_ref: "coordinator",
+          task_ref: task,
+          body: "elsewhere"
+        })
+
+      conn = delete(conn, ~p"/api/messages", %{task_id: task, workspace_id: @ws})
+
+      assert %{"data" => %{"cleared" => [], "cleared_count" => 0}} = json_response(conn, 200)
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, elsewhere.id)
+    end
+  end
 end
