@@ -327,6 +327,20 @@ defmodule Arbiter.Sessions.Session do
       require_atomic? false
       change set_attribute(:bridge_status, :unavailable)
     end
+
+    update :mark_bridge_available do
+      description """
+      Clear a stale `:unavailable` once a `bridge-session` record is
+      actually observed (bd-cdretj round 2) — an operator retrying
+      `/remote-control` after `mark_bridge_unavailable` fixes the bridge
+      without ever touching this row, so without this the badge and the
+      session-list label keep asserting a failure that is no longer true.
+      """
+
+      accept []
+      require_atomic? false
+      change set_attribute(:bridge_status, nil)
+    end
   end
 
   validations do

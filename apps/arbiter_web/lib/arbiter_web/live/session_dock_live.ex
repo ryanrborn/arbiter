@@ -124,6 +124,7 @@ defmodule ArbiterWeb.SessionDockLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Sessions
+  alias Arbiter.Sessions.BridgeVerification
   alias Arbiter.Sessions.DisplayName
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.SessionIndexLive
@@ -319,7 +320,7 @@ defmodule ArbiterWeb.SessionDockLive do
   end
 
   def handle_event("open", %{"id" => id}, socket) do
-    socket = load_sessions(socket)
+    socket = socket |> load_sessions() |> recheck_bridge(id)
 
     if Enum.any?(socket.assigns.sessions, &(&1.id == id)) do
       open_ids = open_window_ids(socket.assigns.open_ids, id)
@@ -572,6 +573,28 @@ defmodule ArbiterWeb.SessionDockLive do
   def handle_info(_message, socket), do: {:noreply, socket}
 
   # -- state ------------------------------------------------------------------
+
+  # bd-cdretj round 2: `mark_bridge_unavailable` is a one-way durable flag —
+  # nothing clears it once written, so an operator who retries
+  # `/remote-control` by hand and gets a working bridge is met with a badge
+  # that keeps insisting it's still broken. Opening the window is the one
+  # moment a client is guaranteed to be about to look at this session, so
+  # it's also the cheapest place to re-run the same one-shot check
+  # `BridgeVerification.verify/2` polls with and clear the flag if it now
+  # finds a bridge.
+  defp recheck_bridge(socket, id) do
+    session = Enum.find(socket.assigns.sessions, &(&1.id == id))
+
+    if session && session.remote_control && session.bridge_status == :unavailable &&
+         BridgeVerification.present?(session.config_dir) do
+      case Sessions.mark_bridge_available(session) do
+        {:ok, _updated} -> load_sessions(socket)
+        {:error, _reason} -> socket
+      end
+    else
+      socket
+    end
+  end
 
   defp load_sessions(socket) do
     sessions = Sessions.list()

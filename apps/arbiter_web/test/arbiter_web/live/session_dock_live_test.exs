@@ -1327,6 +1327,27 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       refute has_element?(dock, "#session-dock-bridge-unavailable-#{ok.id}")
       refute has_element?(dock, "#session-dock-bridge-unavailable-#{unset.id}")
     end
+
+    test "opening the window clears a stale :unavailable once a bridge-session record shows up",
+         %{conn: conn} do
+      session = launch!(auth_mode: :seeded_credentials, remote_control: true)
+      {:ok, session} = Sessions.mark_bridge_unavailable(session)
+
+      project_dir = Path.join(session.config_dir, "projects/some-project")
+      File.mkdir_p!(project_dir)
+
+      File.write!(
+        Path.join(project_dir, "transcript.jsonl"),
+        Jason.encode!(%{"type" => "bridge-session"}) <> "\n"
+      )
+
+      {_view, dock} = dock(conn)
+      open!(dock, session)
+
+      refute has_element?(dock, "#session-dock-bridge-unavailable-#{session.id}")
+      assert {:ok, reloaded} = Sessions.get(session.id)
+      assert reloaded.bridge_status == nil
+    end
   end
 
   describe "off loopback (§10.4, bd-2zskbb)" do

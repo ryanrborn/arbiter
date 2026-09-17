@@ -513,6 +513,18 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
+  Clear a `bridge_status: :unavailable` once a `bridge-session` record is
+  actually observed (bd-cdretj round 2) — an operator who fixed the bridge
+  by hand after the fact (`/remote-control` retried in the session) leaves
+  no other trace on this row, so the badge and list label would otherwise
+  keep reporting a failure that already resolved itself.
+  """
+  @spec mark_bridge_available(Session.t()) :: {:ok, Session.t()} | {:error, term()}
+  def mark_bridge_available(%Session{} = session) do
+    Ash.update(session, %{}, action: :mark_bridge_available)
+  end
+
+  @doc """
   The usage-ledger rows attributable to a session, oldest first.
 
   Joined **by string** on the provider session id, not by foreign key (§7.4
@@ -752,7 +764,15 @@ defmodule Arbiter.Sessions do
               "Arbiter.Sessions: remote control bridge never came up for #{session.id}"
             )
 
-            _ = mark_bridge_unavailable(session)
+            case mark_bridge_unavailable(session) do
+              {:ok, _} ->
+                :ok
+
+              {:error, reason} ->
+                Logger.warning(
+                  "Arbiter.Sessions: could not persist bridge_status for #{session.id}: #{inspect(reason)}"
+                )
+            end
 
             broadcast_error(session.id, %{
               code: "bridge_unavailable",
