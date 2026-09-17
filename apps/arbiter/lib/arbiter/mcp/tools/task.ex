@@ -27,6 +27,22 @@ defmodule Arbiter.MCP.Tools.Task do
   # for a human observation before closing.
   @progress_flags ~w(verify_after_deploy)
 
+  # bd-3uy2hn: the fields a `:refine` token may write on a task in its subtree.
+  # Deliberately excludes `status` (lifecycle belongs to the board, and closing
+  # has its own tool), everything tracker- or assignment-shaped, and `pr_ref` /
+  # `target_branch` / `pr_body` — a refine session shapes *what the work is*, not
+  # who does it, where it lands, or whether it is done.
+  @refine_writable_fields ~w(title description acceptance notes qa_notes deployment_notes
+                             issue_type difficulty priority repo verify_after_deploy)
+
+  # bd-3uy2hn / coordinator doctrine: Autopilot can claim a task within seconds
+  # of it becoming Ready, so any child or edge that must exist before work starts
+  # has to exist *before* the promote, not after. Returned on every refine-tier
+  # promotion so the rule travels with the action, not just the docs.
+  @edges_before_promote "Edges before promote: Autopilot can claim this task within seconds " <>
+                          "of it going Ready, so every parent_of child and depends_on edge it " <>
+                          "needs must already exist. Promote last."
+
   # ---- task_show ----------------------------------------------------------
 
   @doc "Read a single task. Worker: its own task only. Coordinator: any in its workspace."
@@ -89,7 +105,9 @@ defmodule Arbiter.MCP.Tools.Task do
   def task_update_progress(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
-         {:ok, attrs} <- progress_attrs(args) do
+         :ok <- Tools.authorize_subtree(scope, issue.id),
+         {:ok, attrs} <- progress_attrs(args),
+         {:ok, attrs} <- refine_field_gate(scope, attrs) do
       case Ash.update(issue, attrs, action: :update) do
         {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
@@ -104,24 +122,74 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_create --------------------------------------------------------
 
   @doc """
-  Create a task in a workspace. Coordinator only. The target workspace is
-  resolved from the optional `workspace` arg (name or id), else the scope's bound
-  workspace, else the installation default — and `workspace_id` is then forced
-  onto the task. Backs onto `Ash.create(Issue, …)` (the same path `arb create` /
-  the REST `POST /api/issues` take), so a workspace with a tracker configured
-  still mirrors the new task upstream.
+  Create a task in a workspace. The target workspace is resolved from the optional
+  `workspace` arg (name or id), else the scope's bound workspace, else the
+  installation default — and `workspace_id` is then forced onto the task. Backs
+  onto `Ash.create(Issue, …)` (the same path `arb create` / the REST
+  `POST /api/issues` take), so a workspace with a tracker configured still mirrors
+  the new task upstream.
+
+  An optional `parent_id` attaches the new task as a `parent_of` child of an
+  existing task in the same workspace, in one call.
+
+  For a `:refine` scope (bd-3uy2hn) the parent is not optional: it defaults to the
+  bound issue and must be the bound issue or one of its descendants, so a refine
+  token cannot file a task outside its subtree. The parent is authorized *before*
+  the task is created — a refused create leaves nothing behind.
   """
   @spec task_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_create(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, title} <- Tools.require_string(args, "title"),
+         {:ok, parent_id} <- create_parent(scope, args, ws_id),
          {:ok, attrs} <- Tools.collect_attrs(args, task_create_spec()) do
       attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
 
       case Ash.create(Issue, attrs) do
-        {:ok, issue} -> {:ok, with_ac_warning(Tools.serialize_task_summary(issue), issue)}
-        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+        {:ok, issue} ->
+          issue
+          |> Tools.serialize_task_summary()
+          |> with_ac_warning(issue)
+          |> attach_parent(scope, issue, parent_id)
+
+        {:error, err} ->
+          {:error, {:invalid, Tools.ash_error_message(err)}}
       end
+    end
+  end
+
+  # Resolve and authorize the `parent_of` parent for a create. `{:ok, nil}` means
+  # "file it unparented", which only a non-refine scope can ask for.
+  defp create_parent(%Scope{} = scope, args, ws_id) do
+    named = Tools.fetch_string(args, "parent_id")
+    requested = if scope.tier == :refine, do: named || scope.issue_id, else: named
+
+    if is_nil(requested) do
+      {:ok, nil}
+    else
+      with {:ok, parent} <- Tools.fetch_task_in_workspace(ws_id, requested),
+           :ok <- Tools.authorize_subtree(scope, parent.id) do
+        {:ok, parent.id}
+      end
+    end
+  end
+
+  defp attach_parent(result, _scope, _issue, nil), do: {:ok, result}
+
+  defp attach_parent(result, %Scope{} = scope, %Issue{} = issue, parent_id) do
+    case Dependencies.add(parent_id, issue.id, :parent_of,
+           created_by: Arbiter.PaperTrail.actor_label(scope)
+         ) do
+      {:ok, _dep} ->
+        {:ok, Map.put(result, :parent_id, parent_id)}
+
+      {:error, reason} ->
+        # The task exists; only the edge failed. Say so plainly and name the id,
+        # so the caller can retry `dep_add` rather than file a duplicate.
+        {:error,
+         {:invalid,
+          "task #{issue.id} was created, but the parent_of edge from #{parent_id} failed: " <>
+            inspect(reason) <> " — add it with dep_add"}}
     end
   end
 
@@ -142,6 +210,29 @@ defmodule Arbiter.MCP.Tools.Task do
   defp blank?(nil), do: true
   defp blank?(str), do: String.trim(str) == ""
 
+  # Narrow a write to the fields a `:refine` token may set (bd-3uy2hn). Rejecting
+  # a disallowed field is deliberate rather than silently dropping it: a refine
+  # agent that asked to close a task must be told it cannot, not told "updated"
+  # and left believing it did.
+  #
+  # Works on both attr shapes in this module — string keys from `collect_attrs/2`
+  # and atom keys from `progress_attrs/1`.
+  defp refine_field_gate(%Scope{tier: :refine}, attrs) do
+    case Enum.reject(Map.keys(attrs), &(to_string(&1) in @refine_writable_fields)) do
+      [] ->
+        {:ok, attrs}
+
+      refused ->
+        {:error,
+         {:unauthorized,
+          "a refine session may not write " <>
+            Enum.map_join(Enum.sort(refused), ", ", &to_string/1) <>
+            " — it may set only: " <> Enum.join(@refine_writable_fields, ", ")}}
+    end
+  end
+
+  defp refine_field_gate(%Scope{}, attrs), do: {:ok, attrs}
+
   # ---- task_update --------------------------------------------------------
 
   @doc """
@@ -154,7 +245,9 @@ defmodule Arbiter.MCP.Tools.Task do
   def task_update(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
          {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id),
          {:ok, attrs} <- Tools.collect_attrs(args, task_update_spec()),
+         {:ok, attrs} <- refine_field_gate(scope, attrs),
          :ok <- Tools.require_some(attrs, "provide at least one field to update") do
       case Ash.update(issue, attrs, action: :update) do
         {:ok, updated} -> {:ok, Tools.serialize_task_summary(updated)}
@@ -217,7 +310,8 @@ defmodule Arbiter.MCP.Tools.Task do
   @spec task_promote(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_promote(%Scope{} = scope, args) do
     with {:ok, id} <- Tools.resolve_task_id(scope, args),
-         {:ok, issue} <- Tools.fetch_task(scope, args, id) do
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id) do
       promote_args =
         case Map.get(args, "acceptance_waived") do
           reason when is_binary(reason) -> %{acceptance_waived: reason}
@@ -225,11 +319,23 @@ defmodule Arbiter.MCP.Tools.Task do
         end
 
       case Ash.update(issue, promote_args, action: :promote_to_ready) do
-        {:ok, promoted} -> {:ok, Tools.serialize_task_summary(promoted)}
-        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+        {:ok, promoted} ->
+          {:ok, with_promotion_note(Tools.serialize_task_summary(promoted), scope)}
+
+        {:error, err} ->
+          {:error, {:invalid, Tools.ash_error_message(err)}}
       end
     end
   end
+
+  # The edges-before-promote rule, on the response of every refine-tier
+  # promotion. Coordinators already own the scheduling doctrine; a refine session
+  # is a fresh agent in a narrow scope, and the one ordering mistake it can make
+  # that Arbiter cannot undo is promoting before wiring.
+  defp with_promotion_note(result, %Scope{tier: :refine}),
+    do: Map.put(result, :promotion_note, @edges_before_promote)
+
+  defp with_promotion_note(result, %Scope{}), do: result
 
   # ---- task_sync_upstream_close --------------------------------------------
 
@@ -324,7 +430,8 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, to} <- Tools.require_string(args, "to_issue_id"),
          {:ok, type} <- Tools.require_enum(args, "type", Dependency.types()),
          {:ok, from_task} <- Tools.fetch_task(scope, args, from),
-         {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to) do
+         {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to),
+         :ok <- Tools.authorize_subtree_edge(scope, from, to) do
       opts =
         []
         |> Tools.maybe_put_kw(:notes, Tools.fetch_string(args, "notes"))
@@ -353,7 +460,8 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, to} <- Tools.require_string(args, "to_issue_id"),
          {:ok, type} <- Tools.optional_enum(args, "type", Dependency.types()),
          {:ok, from_task} <- Tools.fetch_task(scope, args, from),
-         {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to) do
+         {:ok, _to_task} <- Tools.fetch_task_in_workspace(from_task.workspace_id, to),
+         :ok <- Tools.authorize_subtree_edge(scope, from, to) do
       case Dependencies.remove(from, to, type) do
         {:ok, removed} -> {:ok, %{from_issue_id: from, to_issue_id: to, removed: removed}}
         {:error, reason} -> Tools.dependency_error(reason)

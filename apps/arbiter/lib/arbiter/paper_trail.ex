@@ -18,6 +18,7 @@ defmodule Arbiter.PaperTrail do
 
     * a coordinator scope → `"coordinator"`
     * a worker scope → `"worker:<task_id>"`
+    * a refine scope → `"refine:<bound issue id>"`
     * a bare string (e.g. `"cli"`, `"dashboard"`) → itself
     * `nil` → `nil` (an unattributed write, e.g. a seed or a legacy caller)
   """
@@ -32,6 +33,9 @@ defmodule Arbiter.PaperTrail do
 
   def actor_label(%Scope{tier: :worker, task_id: task_id}) when is_binary(task_id),
     do: "worker:#{task_id}"
+
+  def actor_label(%Scope{tier: :refine, issue_id: issue_id}) when is_binary(issue_id),
+    do: "refine:#{issue_id}"
 
   def actor_label(%Scope{tier: tier}) when is_atom(tier), do: Atom.to_string(tier)
   def actor_label(label) when is_binary(label), do: label

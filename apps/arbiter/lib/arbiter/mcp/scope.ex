@@ -13,9 +13,10 @@ defmodule Arbiter.MCP.Scope do
   ## Tiers
 
       %Arbiter.MCP.Scope{
-        tier:         :worker | :coordinator,
-        workspace_id: "uuid" | nil,    # worker: the bound workspace; coordinator: nil (workspace-agnostic)
+        tier:         :worker | :coordinator | :refine,
+        workspace_id: "uuid" | nil,    # worker/refine: the bound workspace; coordinator: nil (workspace-agnostic)
         task_id:      "bd-…" | nil,    # worker tier: the one task it may read/progress
+        issue_id:     "bd-…" | nil,    # refine tier: the bound issue whose subtree it may write
         repo:         "shipyard" | nil,# worker tier: its repo
         session_id:   "uuid" | nil,    # browser-hosted session this token belongs to (revocable)
         can_dispatch:    false | true,    # coordinator-only; the recursion guardrail
@@ -26,6 +27,26 @@ defmodule Arbiter.MCP.Scope do
   |---|---|---|---|
   | `:worker` | its own task, its mailbox, its workspace config | progress/qa/deployment notes on **its own task**; flags to siblings | never |
   | `:coordinator` | across any workspace on the installation | create/update/close tasks, deps (incl. `parent_of` grouping); dispatch | yes |
+  | `:refine` | broadly across its **bound workspace** (tasks, graph reads, repos, skills, workspace config) | title/description/acceptance/typing/notes edits, `task_create`, dep edges and `task_promote` — **only inside the bound issue's `parent_of` subtree** | never |
+
+  ## The `:refine` tier (bd-3uy2hn)
+
+  A refine token is the capability behind a browser-hosted *refinement* session:
+  it exists to turn one rough Backlog issue into a properly specified, broken-down
+  and promotable one, and nothing else.
+
+    * It is bound to a **workspace and an issue**, and carries a `session_id`, so
+      it is revocable exactly like a phase-3 session token.
+    * **Reads are broad on purpose** — refining an issue means reading its
+      neighbours — but every **write** must land on the bound issue or a
+      descendant reachable from it by `parent_of` (`subtree_member?/2`).
+    * `can_dispatch` is **always** false, whatever the claim says. The tier, not
+      the claim, decides: a refine session must never start work, only shape it.
+
+  Which tools a refine token may call at all is one explicit table,
+  `Arbiter.MCP.RefinePolicy` — allow or deny for *every* tool in the catalog,
+  with no implicit default, so a newly added tool cannot silently inherit
+  authority.
 
   The `:worker` tier is deliberately narrow — it must not list arbitrary tasks,
   dispatch, or touch another task's state, and it is **workspace-scoped**: a worker
@@ -51,17 +72,19 @@ defmodule Arbiter.MCP.Scope do
   defstruct tier: nil,
             workspace_id: nil,
             task_id: nil,
+            issue_id: nil,
             repo: nil,
             session_id: nil,
             can_dispatch: false,
             depth: 0
 
-  @type tier :: :worker | :coordinator
+  @type tier :: :worker | :coordinator | :refine
 
   @type t :: %__MODULE__{
           tier: tier(),
           workspace_id: String.t() | nil,
           task_id: String.t() | nil,
+          issue_id: String.t() | nil,
           repo: String.t() | nil,
           session_id: String.t() | nil,
           can_dispatch: boolean(),
@@ -70,7 +93,7 @@ defmodule Arbiter.MCP.Scope do
 
   @doc "The valid tier atoms."
   @spec tiers() :: [tier()]
-  def tiers, do: [:worker, :coordinator]
+  def tiers, do: [:worker, :coordinator, :refine]
 
   # ---- minting ------------------------------------------------------------
 
@@ -167,6 +190,35 @@ defmodule Arbiter.MCP.Scope do
     |> MCP.mint(opts)
   end
 
+  @doc """
+  Mint a `:refine`-tier scope token: one browser-hosted refinement session, bound
+  to one workspace and one issue (bd-3uy2hn).
+
+  The claims are the binding. `workspace_id` and `issue_id` are both required —
+  a refine token with either missing does not decode at all, because "unbound"
+  can never mean "unrestricted" for a tier whose entire job is to be restricted.
+  `session_id` makes it revocable the moment the session ends (see
+  `mint_session/2`), and `can_dispatch` is hard-wired off: it is not an option
+  here, and `from_claims/1` refuses to honour the claim even if some other minter
+  sets it.
+  """
+  @spec mint_refine(String.t(), String.t(), String.t(), keyword()) :: String.t()
+  def mint_refine(session_id, workspace_id, issue_id, opts \\ [])
+      when is_binary(session_id) and session_id != "" and is_binary(workspace_id) and
+             workspace_id != "" and is_binary(issue_id) and issue_id != "" do
+    %{
+      tier: :refine,
+      workspace_id: workspace_id,
+      issue_id: issue_id,
+      task_id: nil,
+      repo: nil,
+      session_id: session_id,
+      can_dispatch: false,
+      depth: Keyword.get(opts, :depth, 0)
+    }
+    |> MCP.mint(opts)
+  end
+
   # ---- verifying ----------------------------------------------------------
 
   @doc """
@@ -226,6 +278,24 @@ defmodule Arbiter.MCP.Scope do
      }}
   end
 
+  # A refine claim only decodes when *both* bindings are present: the workspace it
+  # may read and the issue whose subtree it may write. `can_dispatch` is dropped
+  # on the floor — the tier decides, not the claim.
+  defp from_claims(%{tier: :refine, workspace_id: ws, issue_id: issue} = c)
+       when is_binary(ws) and ws != "" and is_binary(issue) and issue != "" do
+    {:ok,
+     %__MODULE__{
+       tier: :refine,
+       workspace_id: ws,
+       task_id: nil,
+       issue_id: issue,
+       repo: nil,
+       session_id: nilable_string(c[:session_id]),
+       can_dispatch: false,
+       depth: depth(c[:depth])
+     }}
+  end
+
   defp from_claims(_), do: {:error, :invalid}
 
   defp nilable_string(s) when is_binary(s) and s != "", do: s
@@ -255,12 +325,22 @@ defmodule Arbiter.MCP.Scope do
     * `:coordinator` — the requested id is required (a non-empty binary) and used
       verbatim; a missing id is `{:error, :missing}` so the handler can surface a
       usable "id is required" rather than guessing.
+    * `:refine` — a missing id defaults to the bound issue; any explicit id is
+      accepted here, because reads across the workspace are deliberately broad.
+      **This is not the write gate.** A refine write must additionally pass
+      `subtree_member?/2`; `own_task/2` only resolves which task is being named.
   """
   @spec own_task(t(), String.t() | nil) ::
           {:ok, String.t()} | {:error, :unauthorized | :missing}
   def own_task(%__MODULE__{tier: :worker, task_id: bound}, nil), do: {:ok, bound}
   def own_task(%__MODULE__{tier: :worker, task_id: bound}, bound), do: {:ok, bound}
   def own_task(%__MODULE__{tier: :worker}, _other), do: {:error, :unauthorized}
+  def own_task(%__MODULE__{tier: :refine, issue_id: bound}, nil), do: {:ok, bound}
+
+  def own_task(%__MODULE__{tier: :refine}, id) when is_binary(id) and id != "", do: {:ok, id}
+
+  def own_task(%__MODULE__{tier: :refine}, _), do: {:error, :missing}
+
   def own_task(%__MODULE__{tier: :coordinator}, id) when is_binary(id) and id != "", do: {:ok, id}
   def own_task(%__MODULE__{tier: :coordinator}, _), do: {:error, :missing}
 
@@ -280,4 +360,20 @@ defmodule Arbiter.MCP.Scope do
 
   def same_workspace?(%__MODULE__{workspace_id: ws}, ws) when is_binary(ws), do: true
   def same_workspace?(%__MODULE__{}, _), do: false
+
+  @doc """
+  Whether `task_id` lies inside a `:refine` scope's authority — the bound issue
+  itself, or a descendant reachable from it by `parent_of` edges.
+
+  This is the write gate for the refine tier, and it is deliberately `false` for
+  every other tier: `:worker` and `:coordinator` have no subtree concept, so
+  asking this question about them is a caller bug and the safe answer is "no".
+  Handlers call `Arbiter.MCP.Tools.authorize_subtree/2`, which is tier-aware and
+  is the function to reach for; this one answers only the graph question.
+  """
+  @spec subtree_member?(t(), String.t() | nil) :: boolean()
+  def subtree_member?(%__MODULE__{tier: :refine, issue_id: bound}, task_id),
+    do: Arbiter.Tasks.Dependencies.in_parent_subtree?(bound, task_id)
+
+  def subtree_member?(%__MODULE__{}, _task_id), do: false
 end

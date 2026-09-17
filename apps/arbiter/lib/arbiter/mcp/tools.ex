@@ -1463,6 +1463,55 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  @doc """
+  Authorize a **write** against a `:refine` scope's subtree: the bound issue, or
+  a descendant reachable from it by `parent_of` edges.
+
+  A no-op (`:ok`) for every other tier — `:worker` and `:coordinator` have no
+  subtree concept and are gated by `own_task/2` and workspace isolation instead.
+  Handlers call this *after* `fetch_task/3`, so a cross-workspace id is still
+  reported not-found rather than unauthorized (existence must not leak).
+  """
+  @spec authorize_subtree(Scope.t(), String.t() | nil) ::
+          :ok | {:error, {:unauthorized, String.t()}}
+  def authorize_subtree(%Scope{tier: :refine} = scope, id) do
+    if Scope.subtree_member?(scope, id) do
+      :ok
+    else
+      {:error, {:unauthorized, subtree_denial(scope, "#{id} is outside it")}}
+    end
+  end
+
+  def authorize_subtree(%Scope{}, _id), do: :ok
+
+  @doc """
+  Authorize an **edge** write for a `:refine` scope: at least one endpoint must be
+  in the bound subtree.
+
+  One endpoint is enough by design — refinement is largely about wiring the
+  subtree to the work around it (`depends_on` a sibling's API change,
+  `relates_to` the epic's other half). The edge still cannot reach across
+  workspaces: both endpoints are fetched workspace-scoped first.
+  """
+  @spec authorize_subtree_edge(Scope.t(), String.t(), String.t()) ::
+          :ok | {:error, {:unauthorized, String.t()}}
+  def authorize_subtree_edge(%Scope{tier: :refine} = scope, from_id, to_id) do
+    if Scope.subtree_member?(scope, from_id) or Scope.subtree_member?(scope, to_id) do
+      :ok
+    else
+      {:error,
+       {:unauthorized,
+        subtree_denial(scope, "neither #{from_id} nor #{to_id} is in it — an edge needs at " <>
+          "least one endpoint inside the subtree")}}
+    end
+  end
+
+  def authorize_subtree_edge(%Scope{}, _from_id, _to_id), do: :ok
+
+  defp subtree_denial(%Scope{issue_id: bound}, detail) do
+    "a refine session may only write inside the parent_of subtree of #{bound}: #{detail}"
+  end
+
   # Fetch a graph, enforcing workspace isolation for the scope.
   defp fetch_graph(%Scope{} = scope, graph_id) when is_binary(graph_id) do
     case Ash.get(Graph, graph_id) do
