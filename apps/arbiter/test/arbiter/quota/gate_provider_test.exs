@@ -519,6 +519,143 @@ defmodule Arbiter.Quota.GateProviderTest do
     end
   end
 
+  describe "Dispatch.dispatch/2 — Antigravity model-hint threading (bd-7qj58o AC4)" do
+    # These drive the gate through `Quota.provider_code(:gemini)`, which
+    # probes PATH live — pin `agy` onto PATH (mirrors
+    # `provider_code_gemini_test.exs`) so the antigravity row these tests
+    # seed is actually the one the gate looks up, regardless of whether this
+    # host happens to have `agy` installed.
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-dispatch-hint-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH") || ""
+      agy_path = Path.join(tmp, "agy")
+      File.write!(agy_path, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_path, 0o755)
+      System.put_env("PATH", tmp <> ":" <> old_path)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, workspace} =
+        Ash.create(Workspace, %{
+          name: "agyh-#{System.unique_integer([:positive])}",
+          prefix: "ah#{System.unique_integer([:positive])}",
+          config: %{
+            "agent" => %{"type" => "gemini", "config" => %{"model_tier" => "premium"}},
+            "routing" => %{
+              "policy" => "by_priority",
+              "rules" => %{"P0" => %{"model" => "claude-opus-4-6-thinking"}}
+            },
+            "quota" => %{"on_exhaustion" => "throttle"}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "agy flagship work",
+          workspace_id: workspace.id,
+          priority: 0
+        })
+
+      on_exit(fn ->
+        if pid = DispatchQueueSupervisor.whereis(workspace.id) do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+        end
+      end)
+
+      {:ok, workspace: workspace, task: task}
+    end
+
+    test "a routing-pinned config[\"model\"] gates the Claude/GPT bucket, not model_tier's Gemini one (finding 1)",
+         %{workspace: workspace, task: task} do
+      # `model_tier` resolves to a Gemini model ("premium" → gemini-3.1-pro-high),
+      # but the P0 routing rule pins `config["model"]` to a claude-* id, which
+      # wins per `Gemini.resolve_model/2`'s own precedence. The Gemini bucket
+      # has headroom while Claude/GPT is blown — a hint that only looked at
+      # model_tier would fail open here.
+      Ash.create!(GoogleQuota, %{
+        workspace_id: workspace.id,
+        provider: "antigravity",
+        captured_at: now(),
+        reset_at: ahead(3600),
+        snapshot: %{
+          "models" => [
+            agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
+            agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
+            agy_bucket("claude_and_gpt_models", "5h", 3.0, ahead(3600)),
+            agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
+          ]
+        }
+      })
+
+      assert {:error, {:quota_held, held_id}} =
+               Arbiter.Worker.Dispatch.dispatch(task.id, start_driver: false)
+
+      assert held_id == task.id
+      assert DispatchQueue.held?(workspace.id, task.id)
+    end
+
+    test "a nested per-provider tier_models override is honoured for the hint (finding 2)", %{} do
+      # No routing rule fires, so the hint falls back to model_tier ->
+      # tier_models. Scope the override under agent.config["gemini"] the way
+      # a multi-provider pool must (bd-a6vu3c) — the hint has to read it via
+      # `ProviderConfig.apply_overrides/2`, same as the real dispatch does.
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agyo-#{System.unique_integer([:positive])}",
+          prefix: "ao#{System.unique_integer([:positive])}",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "config" => %{
+                "model_tier" => "premium",
+                "gemini" => %{"tier_models" => %{"premium" => "claude-sonnet-4-6"}}
+              }
+            },
+            "quota" => %{"on_exhaustion" => "throttle"}
+          }
+        })
+
+      on_exit(fn ->
+        if pid = DispatchQueueSupervisor.whereis(ws.id) do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+        end
+      end)
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "agy override work", workspace_id: ws.id, priority: 4})
+
+      Ash.create!(GoogleQuota, %{
+        workspace_id: ws.id,
+        provider: "antigravity",
+        captured_at: now(),
+        reset_at: ahead(3600),
+        snapshot: %{
+          "models" => [
+            agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
+            agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
+            agy_bucket("claude_and_gpt_models", "5h", 3.0, ahead(3600)),
+            agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
+          ]
+        }
+      })
+
+      assert {:error, {:quota_held, held_id}} =
+               Arbiter.Worker.Dispatch.dispatch(task.id, start_driver: false)
+
+      assert held_id == task.id
+      assert DispatchQueue.held?(ws.id, task.id)
+    end
+  end
+
   describe "Workflows.QuotaGate.Default — provider-aware cap clamp" do
     alias Arbiter.Workflows.QuotaGate
 

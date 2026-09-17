@@ -94,9 +94,11 @@ defmodule Arbiter.Quota.Gate.Snapshot do
   (bd-7qj58o AC4): it picks which of the four Antigravity sub-buckets
   ("Gemini Models" / "Claude and GPT models", each with a `5h` and a
   `weekly` window) the primary/secondary windows are read from — a
-  `claude-*` / `gpt-*` model routes to "Claude and GPT models", anything
-  else (including `nil`, unresolved) to "Gemini Models". See
-  `antigravity_windows/2`.
+  `claude-*` / `gpt-*` model routes to "Claude and GPT models", a
+  recognized Gemini model to "Gemini Models". Anything else (including
+  `nil`, unresolved) doesn't match either group's exact-id lookup, so it
+  falls through to the worst-of-both-groups reading — the conservative
+  default when the model can't be identified. See `antigravity_windows/2`.
   """
   @spec normalize(term(), keyword()) :: t() | nil
   def normalize(quota, opts \\ [])

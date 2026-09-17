@@ -861,13 +861,13 @@ defmodule Arbiter.Worker.Dispatch do
   # family (bd-7qj58o AC4) — "Claude and GPT models" vs "Gemini Models" — but
   # the gate runs before `start_agent/4`'s own model tiering, so it doesn't
   # otherwise know the model. Best-effort hint: an explicit `opts[:model]`
-  # override wins as-is; otherwise resolve the workspace's routed
-  # `model_tier` through agy's own tier map (mirrors
-  # `Arbiter.Agents.Gemini.Config.model_for_tier/2`, but reads the workspace
-  # config directly since the per-process active config isn't seeded until
-  # later in dispatch). An unresolvable hint leaves `opts` untouched — the
-  # gate then falls back to its conservative worst-of-both-groups reading
-  # rather than holding on the wrong bucket.
+  # override wins as-is; otherwise resolve the same routing choice the real
+  # dispatch will use and mirror `Gemini.resolve_model/2`'s own precedence —
+  # an explicit `config["model"]` pin wins over `model_tier` (routing
+  # policies such as `ByPriority`/`ByBudget` routinely set `"model"`
+  # directly). An unresolvable hint leaves `opts` untouched — the gate then
+  # falls back to its conservative worst-of-both-groups reading rather than
+  # holding on the wrong bucket.
   defp maybe_add_gemini_model_hint(:gemini, task, workspace, opts) do
     case Keyword.get(opts, :model) do
       model when is_binary(model) and model != "" ->
@@ -884,13 +884,21 @@ defmodule Arbiter.Worker.Dispatch do
   defp maybe_add_gemini_model_hint(_provider, _task, _workspace, opts), do: opts
 
   defp gemini_model_tier_hint(task, workspace) do
-    tier = Routing.choose(task, workspace, %{}).config["model_tier"]
+    config = Routing.choose(task, workspace, %{}).config
 
-    overrides =
-      get_in((workspace && workspace.config) || %{}, ["agent", "config", "tier_models"]) || %{}
+    case config["model"] do
+      model when is_binary(model) and model != "" ->
+        model
 
-    base = Arbiter.Agents.Gemini.Config.default_tier_models(:agy)
-    Map.get(overrides, tier) || Map.get(base, tier)
+      _ ->
+        overrides =
+          ((workspace && workspace.config["agent"]["config"]) || %{})
+          |> Arbiter.Agents.ProviderConfig.apply_overrides("gemini")
+          |> Map.get("tier_models", %{})
+
+        base = Arbiter.Agents.Gemini.Config.default_tier_models(:agy)
+        Map.get(overrides, config["model_tier"]) || Map.get(base, config["model_tier"])
+    end
   rescue
     _ -> nil
   end
