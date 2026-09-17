@@ -146,6 +146,14 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "collapse duplicate status helpers"
     end
 
+    test "the mine/all toggle is not rendered (Arbiter is single-user)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      refute has_element?(view, ~s(button[phx-click="scope"]))
+      refute has_element?(view, ~s(button[phx-value-option="mine"]))
+      refute has_element?(view, ~s(button[phx-value-option="all"][phx-click="scope"]))
+    end
+
     test "a closed issue leaves Ready for Closed today", %{conn: conn, ws: ws} do
       task = issue(ws, "already landed")
       {:ok, _} = Ash.update(task, %{}, action: :close)
