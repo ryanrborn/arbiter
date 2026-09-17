@@ -12,7 +12,7 @@ defmodule ArbiterCli.Main do
                                   [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
                                   [--auto-close]
       arb issue update    <id> [--title ...] [--priority N] [--difficulty N] [--status s]
-                                  [--description d] [--assignee a] [--append-notes text]
+                                  [--description d] [--append-notes text]
                                   [--qa-notes text] [--deployment-notes text]
                                   [--pr-body text]
       arb issue close     <id> [--reason ...]

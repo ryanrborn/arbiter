@@ -2,7 +2,7 @@ defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
   `arb create <title> [--description ...] [--priority N] [--difficulty N]
                        [--type T] [--deps id1,id2] [--labels a,b]
-                       [--assignee a] [--tracker-ref REF] [--no-tracker]
+                       [--tracker-ref REF] [--no-tracker]
                        [--target-branch NAME] [--repo owner/name]
                        [--parent <parent-id>] [--ticket-only]`
 
