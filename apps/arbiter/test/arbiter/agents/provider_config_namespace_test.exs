@@ -133,10 +133,12 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       Gemini.Config.put_active(config)
 
       assert Claude.Config.thinking_argv("high") == ["--effort", "max"]
-      # Gemini has no scoped override, so it keeps its own built-in default
-      # rather than picking up Claude's "max" override (bd-d2yut8: Gemini's
-      # default is now ["--effort", "high"], no longer empty).
-      assert Gemini.Config.thinking_argv("high") == ["--effort", "high"]
+      # Gemini has no scoped override, so it keeps its own built-in default.
+      # bd-d2yut8 Finding 1: the upstream `gemini` CLI rejects `--effort`
+      # entirely (only the `agy` fork accepts it), so the default (unscoped
+      # / `:gemini`) executable still emits nothing here.
+      assert Gemini.Config.thinking_argv("high") == []
+      assert Gemini.Config.thinking_argv("high", :agy) == ["--effort", "high"]
     end
   end
 

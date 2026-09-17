@@ -99,21 +99,35 @@ defmodule Arbiter.Agents.Gemini.ConfigTest do
     end
   end
 
-  describe "thinking_argv/1 (bd-d2yut8: --effort mapping)" do
+  describe "thinking_argv/2 for :agy (bd-d2yut8: --effort mapping)" do
     test "low/medium/high map to --effort <level>" do
-      assert Config.thinking_argv("low") == ["--effort", "low"]
-      assert Config.thinking_argv("medium") == ["--effort", "medium"]
-      assert Config.thinking_argv("high") == ["--effort", "high"]
+      assert Config.thinking_argv("low", :agy) == ["--effort", "low"]
+      assert Config.thinking_argv("medium", :agy) == ["--effort", "medium"]
+      assert Config.thinking_argv("high", :agy) == ["--effort", "high"]
     end
 
     test "none and nil map to no argv" do
-      assert Config.thinking_argv("none") == []
-      assert Config.thinking_argv(nil) == []
+      assert Config.thinking_argv("none", :agy) == []
+      assert Config.thinking_argv(nil, :agy) == []
     end
 
     test "xhigh/max clamp to --effort high" do
-      assert Config.thinking_argv("xhigh") == ["--effort", "high"]
-      assert Config.thinking_argv("max") == ["--effort", "high"]
+      assert Config.thinking_argv("xhigh", :agy) == ["--effort", "high"]
+      assert Config.thinking_argv("max", :agy) == ["--effort", "high"]
+    end
+  end
+
+  describe "thinking_argv/2 for :gemini (Finding 1: upstream CLI rejects --effort)" do
+    test "always returns [] regardless of level, including the default (no executable given)" do
+      for level <- ["low", "medium", "high", "xhigh", "max", "none", nil] do
+        assert Config.thinking_argv(level) == []
+        assert Config.thinking_argv(level, :gemini) == []
+      end
+    end
+
+    test "a workspace thinking_argv override does not leak onto the gemini branch" do
+      Config.put_active(%{"thinking_argv" => %{"high" => ["--effort", "high"]}})
+      assert Config.thinking_argv("high", :gemini) == []
     end
   end
 end

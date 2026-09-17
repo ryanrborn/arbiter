@@ -143,9 +143,6 @@ defmodule Arbiter.Agents.Gemini do
       {:ok, {:agy, _}} ->
         resolve_model(:agy, opts)
 
-      {:ok, {:gemini, _}} ->
-        resolve_model(:gemini, opts) || @default_model
-
       _ ->
         resolve_model(:gemini, opts) || @default_model
     end
@@ -189,24 +186,22 @@ defmodule Arbiter.Agents.Gemini do
   # equivalent) — see security_enforced?/0.
   defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
-      model_flag(:agy, opts) ++
-      thinking_flag(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
+      agy_model_and_effort_argv(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
   defp build_argv(:agy, exec, prompt, opts, _policy) do
     [exec, "-p", prompt] ++
-      model_flag(:agy, opts) ++
-      thinking_flag(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
+      agy_model_and_effort_argv(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--skip-trust", "-y"] ++
-      model_flag(:gemini, opts) ++ thinking_flag(opts) ++ output_format_flag()
+      model_flag(:gemini, opts) ++ thinking_flag(:gemini, opts) ++ output_format_flag()
   end
 
   defp build_argv(:gemini, exec, prompt, opts, _policy) do
     [exec, "-p", prompt] ++
-      model_flag(:gemini, opts) ++ thinking_flag(opts) ++ output_format_flag()
+      model_flag(:gemini, opts) ++ thinking_flag(:gemini, opts) ++ output_format_flag()
   end
 
   # Both the upstream `gemini` CLI and the `agy` fork support
@@ -240,6 +235,31 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
+  # bd-d2yut8 Finding 2: model ids in the agy tier map carry their own effort
+  # suffix (`-low`/`-medium`/`-high`, e.g. `gemini-3.1-pro-high`). Passing
+  # `--effort` alongside such an id sends two conflicting effort signals with
+  # undefined precedence in agy — the operator decision is "never both", so
+  # `--effort` is only emitted for a suffix-free resolved model (or when no
+  # model resolves at all).
+  defp agy_model_and_effort_argv(opts) do
+    model = resolve_model(:agy, opts)
+
+    model_part =
+      case model do
+        nil -> []
+        m -> ["--model", m]
+      end
+
+    effort_part = if effort_suffixed?(model), do: [], else: thinking_flag(:agy, opts)
+
+    model_part ++ effort_part
+  end
+
+  defp effort_suffixed?(model) when is_binary(model),
+    do: Regex.match?(~r/-(low|medium|high)$/, model)
+
+  defp effort_suffixed?(_), do: false
+
   defp model_flag(executable, opts) do
     case resolve_model(executable, opts) do
       nil -> []
@@ -263,9 +283,9 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  defp thinking_flag(opts) do
+  defp thinking_flag(executable, opts) do
     case Keyword.get(opts, :thinking) do
-      level when is_binary(level) and level != "" -> Config.thinking_argv(level)
+      level when is_binary(level) and level != "" -> Config.thinking_argv(level, executable)
       _ -> []
     end
   end

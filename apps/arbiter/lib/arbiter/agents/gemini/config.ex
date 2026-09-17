@@ -184,18 +184,26 @@ defmodule Arbiter.Agents.Gemini.Config do
 
   @doc """
   Resolve an abstract `thinking` level to a list of CLI argv tokens to
-  append to the spawn command. The default mapping is empty for all
-  levels — Gemini's reasoning knob varies per CLI fork; the level is
-  surfaced via the `GEMINI_THINKING_LEVEL` env var instead (see
-  `thinking_env/1`) and the workspace can opt into CLI argv via
-  `agent.config["thinking_argv"]` once a flag is pinned.
-  """
-  @spec thinking_argv(String.t() | nil) :: [String.t()]
-  def thinking_argv(nil), do: []
-  def thinking_argv(""), do: []
-  def thinking_argv("none"), do: []
+  append to the spawn command, for the given executable (`:gemini`, the
+  default, or `:agy`).
 
-  def thinking_argv(level) when is_binary(level) do
+  Only `agy` accepts a `--effort <level>` flag (bd-d2yut8) — the upstream
+  `gemini` CLI has no such flag (`Unknown argument: effort`, confirmed live
+  against gemini-cli), so the `:gemini` branch always returns `[]`
+  regardless of level or workspace override; its reasoning knob is surfaced
+  via the `GEMINI_THINKING_LEVEL` env var instead (see `thinking_env/1`).
+  For `:agy`, `low`/`medium`/`high` map to `["--effort", level]`, `none` /
+  `nil` map to `[]`, and the workspace can override per-level argv via
+  `agent.config["thinking_argv"]`.
+  """
+  @spec thinking_argv(String.t() | nil, :agy | :gemini) :: [String.t()]
+  def thinking_argv(level, executable \\ :gemini)
+  def thinking_argv(nil, _executable), do: []
+  def thinking_argv("", _executable), do: []
+  def thinking_argv("none", _executable), do: []
+  def thinking_argv(_level, :gemini), do: []
+
+  def thinking_argv(level, :agy) when is_binary(level) do
     {:ok, cfg} = resolve()
     overrides = list_map(Map.get(cfg.raw, "thinking_argv"))
 
@@ -205,7 +213,7 @@ defmodule Arbiter.Agents.Gemini.Config do
     end
   end
 
-  def thinking_argv(_), do: []
+  def thinking_argv(_level, _executable), do: []
 
   @doc """
   Resolve an abstract `thinking` level to a list of `{name, value}` env

@@ -296,6 +296,46 @@ defmodule Arbiter.Agents.GeminiTest do
       end
     end
 
+    test "gemini branch never emits --effort (Finding 1: upstream CLI rejects it)", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      for level <- ["low", "medium", "high", "xhigh", "max"] do
+        {:ok, argv} = Gemini.default_argv("the prompt", thinking: level)
+        refute "--effort" in argv
+      end
+    end
+
+    test "agy branch omits --effort when the resolved model already carries an effort suffix (Finding 2)",
+         %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      # Every non-flagship agy tier model carries a "-low"/"-medium"/"-high"
+      # suffix. Passing a :thinking level that disagrees with the tier's own
+      # suffix must still omit --effort — the operator decision is "never
+      # both", so the id's own suffix always wins and there is no way to
+      # emit two conflicting effort signals.
+      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "premium", thinking: "low")
+      assert "--model" in argv
+      assert "gemini-3.1-pro-high" in argv
+      refute "--effort" in argv
+    end
+
+    test "agy branch emits --effort for a suffix-free flagship model", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "flagship", thinking: "high")
+      assert "--model" in argv
+      assert "claude-opus-4-6-thinking" in argv
+      assert "--effort" in argv
+      assert chunk_after(argv, "--effort") == "high"
+    end
+
     test ":thinking argv can be overridden per-workspace via thinking_argv config",
          %{tmp: tmp} do
       agy_stub = Path.join(tmp, "agy")
