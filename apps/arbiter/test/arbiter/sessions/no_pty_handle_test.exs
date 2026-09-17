@@ -95,6 +95,22 @@ defmodule Arbiter.Sessions.NoPtyHandleTest do
            """
   end
 
+  # The one deliberate exception to "every session-path spawn goes through the
+  # runner" (bd-1lszsc). `Arbiter.Sessions.RepoCheckout` shells out to `git` to
+  # build and remove a refine session's read-only grounding worktree. That is
+  # not the session *lifecycle* path this guard exists for: it spawns no PTY,
+  # holds no handle, and every call returns before the function does — the
+  # property AC 3 is actually about. It is also why it cannot go through the
+  # runner: the runner is the injectable seam every session test stubs, and a
+  # stubbed `git` would mean the checkout tests assert against a worktree that
+  # was never created.
+  #
+  # The exemption is kept as narrow as it can be: this file, and only literal
+  # `System.cmd("git", ...)` calls — never a shell, never a variable command.
+  @non_runner_spawn_sites %{
+    "apps/arbiter/lib/arbiter/sessions/repo_checkout.ex" => ~s|System.cmd("git",|
+  }
+
   test "the only spawn in the session path is the synchronous runner" do
     spawns =
       for {rel, source} <- session_sources(),
@@ -103,14 +119,29 @@ defmodule Arbiter.Sessions.NoPtyHandleTest do
             String.contains?(line, "ReleaseEnv.cmd(") or String.contains?(line, ":os.cmd("),
           do: {rel, n, String.trim(line)}
 
+    {exempt, runner_spawns} =
+      Enum.split_with(spawns, fn {rel, _n, _line} ->
+        Map.has_key?(@non_runner_spawn_sites, rel)
+      end)
+
     # One site, in the runner, and it is the release-env-scrubbed helper
     # (bd-2oelme) rather than a raw `System.cmd/3`.
-    assert Enum.map(spawns, &elem(&1, 0)) |> Enum.uniq() ==
+    assert Enum.map(runner_spawns, &elem(&1, 0)) |> Enum.uniq() ==
              ["apps/arbiter/lib/arbiter/sessions/runner/host.ex"],
-           "session-path spawn sites outside the runner: #{inspect(spawns)}"
+           "session-path spawn sites outside the runner: #{inspect(runner_spawns)}"
 
-    assert Enum.all?(spawns, fn {_rel, _n, line} -> String.contains?(line, "ReleaseEnv.cmd(") end),
-           "every session spawn must go through ReleaseEnv (AC 6): #{inspect(spawns)}"
+    assert Enum.all?(runner_spawns, fn {_rel, _n, line} ->
+             String.contains?(line, "ReleaseEnv.cmd(")
+           end),
+           "every session spawn must go through ReleaseEnv (AC 6): #{inspect(runner_spawns)}"
+
+    # The exemption does not become a hole: an exempt file may only spawn the
+    # one literal command it was exempted for.
+    assert Enum.all?(exempt, fn {rel, _n, line} ->
+             String.contains?(line, Map.fetch!(@non_runner_spawn_sites, rel))
+           end),
+           "an exempt session-path file spawned something other than what it is " <>
+             "exempt for: #{inspect(exempt)}"
   end
 
   test "the runner is documented as synchronous and returns the exit status" do
