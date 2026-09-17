@@ -45,6 +45,23 @@ defmodule Arbiter.Agents.Gemini.Stream do
       {"event":"step_update","step_update":{"conversation_id":..,"step_index":..,"state":"DONE","step_type":"user_input"|"unknown"|"agent_response"|"checkpoint",..}}
       {"event":"result","result":{"conversation_id":..,"status":"SUCCESS"|..,"response":..,"duration_seconds":..,"num_turns":..,"usage":{"input_tokens":..,"output_tokens":..,"thinking_tokens":..,"cache_read_tokens":..,"total_tokens":..}}}
 
+  ## `agy` tool telemetry (bd-7y3mm9)
+
+  A `step_type: "tool"` step arrives twice per call — `state: "ACTIVE"` with
+  `tool_name` + `tool_info.parameters`, then `state: "DONE"` with
+  `duration_seconds` + `tool_info.output` — and was previously dropped
+  entirely by the `step_update` catch-all, which is why an agy transcript
+  used to be a handful of lines regardless of how much work the run did:
+
+      {"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello-from-agy"}}}}
+      {"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":0.027,"tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello-from-agy"},"output":"hello-from-agy\r\n"}}}
+
+  agy's shell tool is `run_command` (not upstream-gemini's
+  `run_shell_command`) and its command parameter is `CommandLine`
+  (PascalCase, not `command`) — `agy_tool_params/2` renames it before handing
+  off to the shared `summarize_params/1`/`shell_activity/1` helpers so
+  `mix test` still resolves to the `running tests` activity phrase.
+
   `agy`'s terminal `result.usage` has no per-model breakdown, and — confirmed
   live (bd-2fzwlc round 2) — no `result` or `init` event names which model
   actually ran; agy's own catalogue doesn't overlap the Gemini price table at
@@ -189,6 +206,50 @@ defmodule Arbiter.Agents.Gemini.Stream do
     text |> lines() |> Enum.map(&{&1, true})
   end
 
+  # agy's tool telemetry (bd-7y3mm9): a `step_type: "tool"` step carries
+  # `tool_name` + `tool_info.parameters` on ACTIVE and `tool_info.output` on
+  # DONE — reuse the exact same `summarize_params/1`/`truncate_lines/2`
+  # helpers the upstream-gemini `tool_use`/`tool_result` clauses already use,
+  # so the rendering is byte-compatible.
+  def format_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "tool", "state" => "ACTIVE"} = step
+      }) do
+    name = step["tool_name"] || "tool"
+    params = agy_tool_params(name, get_in(step, ["tool_info", "parameters"]))
+    [{"⏵ #{name}(#{summarize_params(params)})", false}]
+  end
+
+  def format_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "tool", "state" => "DONE"} = step
+      }) do
+    body =
+      step
+      |> get_in(["tool_info", "output"])
+      |> output_text()
+      |> lines()
+      |> Enum.reject(&(&1 == ""))
+      |> truncate_lines(40)
+
+    Enum.map(["⏴ tool result" | body], &{&1, false})
+  end
+
+  # A `step_type: "tool"` step in a state other than ACTIVE/DONE (agy's wire
+  # carries at least a `CANCELLED` enum value) — the failure/cancellation
+  # wire shape was never captured live (bd-7y3mm9), so route it through the
+  # same "schema drift is loud" warning the unrecognized-top-level-event
+  # clause below uses, rather than silently dropping it like the generic
+  # step_update fallback would.
+  def format_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "tool", "state" => state} = step
+      })
+      when is_binary(state) do
+    name = step["tool_name"] || "tool"
+    [{"⚠ gemini: unrecognized tool step state #{state} for #{name} (schema drift?)", false}]
+  end
+
   # Other step types (user_input echo, checkpoint, unknown bookkeeping steps)
   # are not worker output — display nothing and never arm completion.
   def format_event(%{"event" => "step_update"}), do: []
@@ -232,6 +293,14 @@ defmodule Arbiter.Agents.Gemini.Stream do
     if String.trim(text) == "", do: nil, else: "responding"
   end
 
+  def activity_for_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "tool", "state" => "ACTIVE"} = step
+      }) do
+    name = step["tool_name"]
+    tool_activity(name, agy_tool_params(name, get_in(step, ["tool_info", "parameters"])))
+  end
+
   def activity_for_event(_event), do: nil
 
   # ---- internals ---------------------------------------------------------
@@ -260,6 +329,12 @@ defmodule Arbiter.Agents.Gemini.Stream do
     do: "reading " <> file_label(params)
 
   defp tool_activity("run_shell_command", params), do: shell_activity(params)
+
+  # agy's own shell tool is named "run_command", not upstream-gemini's
+  # "run_shell_command" — `agy_tool_params/2` has already renamed its
+  # `CommandLine` parameter to `command` by the time this clause runs, so it
+  # reuses `shell_activity/1` unmodified.
+  defp tool_activity("run_command", params), do: shell_activity(params)
 
   defp tool_activity(search, _params) when search in ~w(glob search_file_content grep),
     do: "searching"
@@ -340,6 +415,21 @@ defmodule Arbiter.Agents.Gemini.Stream do
 
   defp agy_duration_ms(seconds) when is_number(seconds), do: round(seconds * 1000)
   defp agy_duration_ms(_), do: nil
+
+  # agy's `run_command` tool parameter is `CommandLine` (PascalCase, verified
+  # live — bd-7y3mm9), not the `command` key `summarize_params/1` and
+  # `shell_activity/1` already know from Claude/upstream-gemini's shell
+  # tools. Normalize it onto the shared key so both helpers stay untouched.
+  #
+  # Public (not `defp`) so `ClaudeSession.capture_steps/2` can normalize the
+  # same params before handing them to `StepSummary.input_summary/2` — the
+  # step row's `input_summary` must read the same string as the `⏵
+  # run_command(...)` transcript line this module renders for the identical
+  # call, not the raw `CommandLine` wire key.
+  @doc false
+  def agy_tool_params("run_command", %{"CommandLine" => cmd}), do: %{"command" => cmd}
+  def agy_tool_params(_name, params) when is_map(params), do: params
+  def agy_tool_params(_name, _params), do: %{}
 
   defp agy_result_summary(result) do
     status = result["status"] || "done"

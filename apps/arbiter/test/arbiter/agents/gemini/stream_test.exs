@@ -273,6 +273,71 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
     end
   end
 
+  # Verbatim from a live `agy v1.2.4 --output-format stream-json` probe
+  # (bd-4gpx4a, reproduced in bd-7y3mm9) — including the `CommandLine`
+  # parameter casing agy's `run_command` tool actually uses, which is why
+  # `summarize_params/1`/`shell_activity/1` need a rename step before they
+  # can read it.
+  describe "format_event/1 — agy tool telemetry (bd-7y3mm9)" do
+    @active_tool_event %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 2,
+        "state" => "ACTIVE",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "echo hello-from-agy"}
+        }
+      }
+    }
+
+    @done_tool_event %{
+      "event" => "step_update",
+      "step_update" => %{
+        "step_index" => 2,
+        "state" => "DONE",
+        "step_type" => "tool",
+        "tool_name" => "run_command",
+        "duration_seconds" => 0.027,
+        "tool_info" => %{
+          "name" => "run_command",
+          "parameters" => %{"CommandLine" => "echo hello-from-agy"},
+          "output" => "hello-from-agy\r\n"
+        }
+      }
+    }
+
+    test "ACTIVE tool step renders name + summarized params, never arms" do
+      assert [{line, false}] = Stream.format_event(@active_tool_event)
+      assert line == "⏵ run_command(echo hello-from-agy)"
+    end
+
+    test "DONE tool step renders a result label + truncated output, never arms" do
+      lines = Stream.format_event(@done_tool_event)
+      assert {"⏴ tool result", false} in lines
+      # agy's output carries the child shell's own \r\n; `lines/1` only
+      # splits on \n (matching the existing Claude/gemini tool_result path),
+      # so the trailing \r rides along on the line — not stripped here.
+      assert {"hello-from-agy\r", false} in lines
+      assert Enum.all?(lines, fn {_t, detect?} -> detect? == false end)
+    end
+
+    test "activity_for_event routes run_command through shell_activity, mix test -> running tests" do
+      assert Stream.activity_for_event(@active_tool_event) == "running: echo hello-from-agy"
+
+      mix_test_event =
+        put_in(
+          @active_tool_event,
+          ["step_update", "tool_info", "parameters", "CommandLine"],
+          "mix test"
+        )
+
+      assert Stream.activity_for_event(mix_test_event) == "running tests"
+    end
+  end
+
   describe "activity_for_event/1 — agy wire schema" do
     test "maps agy event shapes to coarse phrases" do
       assert Stream.activity_for_event(%{"event" => "init"}) == "starting"

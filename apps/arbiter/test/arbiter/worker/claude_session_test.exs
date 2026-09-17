@@ -1262,6 +1262,54 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
       assert "partial response with no trailing newline" in lines
     end
+
+    # bd-7y3mm9 AC5: agy's terminal `result` event carries `response`, which
+    # restates the same text the `agent_response` deltas already streamed —
+    # `agy_result_summary/1` must never read `result.response` into the
+    # transcript, or the final answer renders twice.
+    test "the final answer from agent_response deltas is not repeated by the terminal result event" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-no-dup")
+      topic = "worker:#{task_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{
+          "event" => "step_update",
+          "step_update" => %{
+            "step_index" => 3,
+            "state" => "DONE",
+            "step_type" => "agent_response",
+            "text_delta" => "DONE\n",
+            "duration_seconds" => 1.67
+          }
+        },
+        %{
+          "event" => "result",
+          "result" => %{
+            "status" => "SUCCESS",
+            "response" => "DONE\n",
+            "num_turns" => 1,
+            "duration_seconds" => 2.0,
+            "usage" => %{"total_tokens" => 1234}
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert Enum.count(lines, &(&1 == "DONE")) == 1
+    end
   end
 
   describe "codex exec --json parsing" do
