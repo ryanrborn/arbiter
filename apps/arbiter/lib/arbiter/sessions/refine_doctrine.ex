@@ -46,18 +46,32 @@ defmodule Arbiter.Sessions.RefineDoctrine do
   def content(nil), do: template()
 
   def content(%Workspace{config: config}) do
-    case get_in(config || %{}, ["refine", "doctrine_path"]) do
-      path when is_binary(path) and path != "" ->
-        case File.read(path) do
-          {:ok, text} -> text
-          {:error, _reason} -> template()
-        end
+    config = config || %{}
 
-      _ ->
-        case get_in(config || %{}, ["refine", "doctrine"]) do
-          text when is_binary(text) and text != "" -> text
-          _ -> template()
-        end
+    case doctrine_path(config) do
+      {:ok, path} -> read_doctrine_path(path)
+      :none -> doctrine_override(config) || template()
+    end
+  end
+
+  defp doctrine_path(config) do
+    case get_in(config, ["refine", "doctrine_path"]) do
+      path when is_binary(path) and path != "" -> {:ok, path}
+      _ -> :none
+    end
+  end
+
+  defp read_doctrine_path(path) do
+    case File.read(path) do
+      {:ok, text} -> text
+      {:error, _reason} -> template()
+    end
+  end
+
+  defp doctrine_override(config) do
+    case get_in(config, ["refine", "doctrine"]) do
+      text when is_binary(text) and text != "" -> text
+      _ -> nil
     end
   end
 
