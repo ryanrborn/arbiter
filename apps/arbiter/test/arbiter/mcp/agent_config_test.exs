@@ -91,6 +91,74 @@ defmodule Arbiter.MCP.AgentConfigTest do
     end
   end
 
+  # bd-m8geh4: `.gemini/settings.json` is the UPSTREAM `gemini` CLI's config
+  # file. The `agy` (Antigravity) CLI never reads it, and never reads any
+  # worktree-local path at all — see `Arbiter.MCP.AgentConfig.Gemini`'s moduledoc
+  # for the live probe that established this.
+  describe "Gemini adapter CLI-flavour split (bd-m8geh4)" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "mcp-agycfg-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      {:ok, dir: dir}
+    end
+
+    test "`.gemini/settings.json` serves the upstream `gemini` CLI only", %{dir: dir} do
+      assert :ok =
+               Gemini.write_mcp_config(dir, mcp_url: "u", scope_token: "t", cli: :gemini)
+
+      assert File.exists?(Path.join([dir, ".gemini", "settings.json"]))
+    end
+
+    test "the `agy` CLI is refused explicitly — never a silent no-op", %{dir: dir} do
+      assert {:error, :unsupported} =
+               Gemini.write_mcp_config(dir, mcp_url: "u", scope_token: "t", cli: :agy)
+
+      refute File.exists?(Path.join(dir, ".gemini")),
+             "agy must not get a `.gemini/settings.json` it will never read"
+
+      assert File.ls!(dir) == []
+    end
+
+    test "AgentConfig.write/3 propagates the agy refusal to the caller", %{dir: dir} do
+      assert {:error, :unsupported} =
+               AgentConfig.write(:gemini, dir, mcp_url: "u", scope_token: "t", cli: :agy)
+    end
+
+    test "cli_flavour/1 honours an explicit override and otherwise sniffs PATH", %{dir: _dir} do
+      assert Gemini.cli_flavour(cli: :agy) == :agy
+      assert Gemini.cli_flavour(cli: :gemini) == :gemini
+      assert Gemini.cli_flavour([]) in [:agy, :gemini]
+    end
+
+    test "agy_config_map/1 emits agy's own mcp_config.json schema" do
+      config =
+        Gemini.agy_config_map(mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-agy")
+
+      assert %{
+               "mcpServers" => %{
+                 "arbiter" => %{
+                   "serverUrl" => "http://127.0.0.1:4848/mcp",
+                   "headers" => %{"Authorization" => "Bearer tok-agy"}
+                 }
+               }
+             } = config
+
+      server = config["mcpServers"]["arbiter"]
+
+      # agy names the client-side allowlist `enabledTools`; the upstream gemini
+      # CLI names it `includeTools`. Neither accepts the other's key.
+      assert "task_show" in server["enabledTools"]
+      refute Map.has_key?(server, "includeTools")
+      refute Map.has_key?(server, "httpUrl")
+    end
+
+    test "agy_config_map/1 omits enabledTools for coordinator scope" do
+      config = Gemini.agy_config_map(mcp_url: "u", scope_token: "t", include_tools: nil)
+      refute Map.has_key?(config["mcpServers"]["arbiter"], "enabledTools")
+    end
+  end
+
   describe "AgentConfig.write/3" do
     setup do
       dir = Path.join(System.tmp_dir!(), "mcp-agentcfg-#{System.unique_integer([:positive])}")
@@ -121,13 +189,14 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert scope.workspace_id == "ws-77"
     end
 
-    test "writes a parseable .gemini/settings.json for the :gemini provider", %{dir: dir} do
+    test "writes a parseable .gemini/settings.json for the upstream `gemini` CLI", %{dir: dir} do
       token = Scope.mint_worker(%{id: "bd-88", workspace_id: "ws-88"}, "shipyard")
 
       assert :ok =
                AgentConfig.write(:gemini, dir,
                  mcp_url: "http://127.0.0.1:4848/mcp",
-                 scope_token: token
+                 scope_token: token,
+                 cli: :gemini
                )
 
       path = Path.join([dir, ".gemini", "settings.json"])
@@ -240,11 +309,29 @@ defmodule Arbiter.MCP.AgentConfigTest do
              "expected .mcp.json to be excluded from git staging, got:\n#{status_out}"
     end
 
-    test "write/3 for :gemini adds .gemini/ to .git/info/exclude", %{repo: repo} do
+    test "write/3 for the `agy` CLI writes nothing and excludes nothing (bd-m8geh4)",
+         %{repo: repo} do
+      assert {:error, :unsupported} =
+               AgentConfig.write(:gemini, repo,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-agy-excl",
+                 cli: :agy
+               )
+
+      refute File.exists?(Path.join(repo, ".gemini"))
+
+      exclude_path = Path.join([repo, ".git", "info", "exclude"])
+      exclude_content = if File.exists?(exclude_path), do: File.read!(exclude_path), else: ""
+      refute exclude_content =~ ".gemini/"
+    end
+
+    test "write/3 for the upstream `gemini` CLI adds .gemini/ to .git/info/exclude",
+         %{repo: repo} do
       assert :ok =
                AgentConfig.write(:gemini, repo,
                  mcp_url: "http://127.0.0.1:4848/mcp",
-                 scope_token: "tok-gemini-excl"
+                 scope_token: "tok-gemini-excl",
+                 cli: :gemini
                )
 
       exclude_content = File.read!(Path.join([repo, ".git", "info", "exclude"]))
