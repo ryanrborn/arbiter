@@ -18,6 +18,14 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     * **Early mark** — `Arbiter.Worker` calls `mark_expired/2` when a worker
       dies with `:auth_expired`, so the Watchdog records the failure immediately
       rather than waiting for the next periodic probe.
+    * **Usage-poll mark** — `Arbiter.Quota.CloudProbe` also calls `mark_expired/3`
+      for Claude after N consecutive `{:http_error, 401}` responses from the
+      `/api/oauth/usage` poll (bd-1pmf9h, default N=2). This is a second,
+      independent expiry signal alongside the periodic CLI probe above — the
+      original incident this closes went undetected for ~15h because the CLI
+      probe never saw trouble until the credentials file was removed outright,
+      while the usage poll had been 401ing (and, in between, hitting the
+      endpoint's own tight rate-limit bucket) the whole time.
 
   A successful probe on a previously-expired adapter clears the expired flag
   and schedules the next poll at the normal interval. While an adapter is
@@ -121,6 +129,26 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @doc """
+  Clear `adapter`'s expired mark following an independent success signal.
+
+  Called by `Arbiter.Quota.CloudProbe` when a `/api/oauth/usage` poll succeeds,
+  so a usage-poll-detected expiry (`mark_expired/3`) can also recover without
+  waiting for the Watchdog's own periodic CLI probe — the symmetric
+  counterpart to that signal (bd-1pmf9h). A no-op if `adapter` isn't marked
+  expired. Fire-and-forget; best-effort. Pass a `server` pid/name to target a
+  specific instance (useful in tests).
+  """
+  @spec mark_recovered(module(), GenServer.server()) :: :ok
+  def mark_recovered(adapter, server \\ __MODULE__) when is_atom(adapter) do
+    GenServer.cast(server, {:mark_recovered, adapter})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Reset the Watchdog's per-adapter state to `:ok` (all credentials considered valid).
   Intended for test isolation only. The probe interval timer is unaffected.
   """
@@ -197,6 +225,11 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     else
       {:noreply, record_expiry(state, adapter, reason, :worker_report)}
     end
+  end
+
+  @impl true
+  def handle_cast({:mark_recovered, adapter}, state) do
+    {:noreply, on_probe_ok(state, adapter, Map.get(state.adapters, adapter, :ok))}
   end
 
   @impl true
