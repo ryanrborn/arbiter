@@ -374,6 +374,27 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       assert [session] = Sessions.list()
       assert session.can_dispatch == true
     end
+
+    test "a second launch from the same view does not inherit the prior can_dispatch choice",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"name" => "first", "can_dispatch" => "true"})
+      |> render_submit()
+
+      # The form re-renders after a successful launch; a fresh submit with
+      # only a name must not silently carry the prior can_dispatch: true
+      # forward (review finding, phase 11 round 2).
+      refute has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      view
+      |> form("#launch-session-form", %{"name" => "second"})
+      |> render_submit()
+
+      assert [%{name: "second", can_dispatch: false}, %{name: "first", can_dispatch: true}] =
+               Sessions.list()
+    end
   end
 
   describe "Remote Control gating in the launch form (§8.3)" do

@@ -136,7 +136,7 @@ defmodule ArbiterWeb.SessionIndexLive do
         # Straight into the dock rather than off to a page of its own: the
         # terminal is in the strip at the bottom of every page, and a redirect
         # would only have thrown away whatever the operator was reading.
-        {:noreply, socket |> refresh() |> open_in_dock(session.id)}
+        {:noreply, socket |> refresh() |> reset_launch_params() |> open_in_dock(session.id)}
 
       {:error, reason} ->
         Logger.error("SessionIndexLive: launch failed: #{inspect(reason)}")
@@ -292,11 +292,38 @@ defmodule ArbiterWeb.SessionIndexLive do
   `validate_launch` calls the same mapping rather than a second copy of it.
   """
   def assign_launch_params(socket, params) do
+    auth_mode = launch_auth_mode_param(params)
+
     socket
-    |> Phoenix.Component.assign(:launch_auth_mode, launch_auth_mode_param(params))
+    |> Phoenix.Component.assign(:launch_auth_mode, auth_mode)
     |> Phoenix.Component.assign(:launch_workspace_id, launch_workspace_id(params))
     |> Phoenix.Component.assign(:launch_can_dispatch?, launch_can_dispatch?(params))
-    |> Phoenix.Component.assign(:launch_remote_control?, launch_remote_control?(params))
+    # Mode A never shows Remote Control as checked, even if the box was
+    # ticked under mode B before the operator switched — otherwise the
+    # checkbox renders `checked` and `disabled` at once right above the
+    # reason saying it is unavailable (review finding, phase 11 round 2).
+    # Mirrors the clamp `launch_defaults/1` applies server-side.
+    |> Phoenix.Component.assign(
+      :launch_remote_control?,
+      auth_mode == "seeded_credentials" and launch_remote_control?(params)
+    )
+  end
+
+  @doc """
+  Resets every §9.5 launch option assign back to its mount default. Called
+  after a successful launch so the *next* launch from the same panel starts
+  clean instead of echoing the last submission — `can_dispatch` and Remote
+  Control both carry forward in the broadening direction otherwise, which
+  §10.1 and the moduledoc above require to be a per-launch, explicit choice
+  (review finding, phase 11 round 2). Public so `ArbiterWeb.SessionDockLive`'s
+  `launch` handler uses the same reset rather than a second copy of it.
+  """
+  def reset_launch_params(socket) do
+    socket
+    |> Phoenix.Component.assign(:launch_auth_mode, "seeded_credentials")
+    |> Phoenix.Component.assign(:launch_workspace_id, nil)
+    |> Phoenix.Component.assign(:launch_can_dispatch?, false)
+    |> Phoenix.Component.assign(:launch_remote_control?, false)
   end
 
   @doc false

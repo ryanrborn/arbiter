@@ -300,6 +300,7 @@ defmodule ArbiterWeb.SessionDockLive do
          |> assign(:launch_open?, false)
          |> assign(:launch_error, nil)
          |> assign(:roster_open?, false)
+         |> SessionIndexLive.reset_launch_params()
          |> persist()}
 
       {:error, reason} ->

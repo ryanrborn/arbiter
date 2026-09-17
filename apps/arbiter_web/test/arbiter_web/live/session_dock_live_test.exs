@@ -319,6 +319,30 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert session.can_dispatch == true
     end
 
+    test "reopening the launch panel after a launch does not inherit the prior can_dispatch choice",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "first", "can_dispatch" => "true"})
+      |> render_submit()
+
+      # `launch_open?` goes false on success, so the panel is removed from
+      # the DOM (`:if={@launch_open?}`) — reopening it must rebuild it clean,
+      # not with the prior can_dispatch echoed back (review finding, phase 11
+      # round 2).
+      render_click(element(dock, "#session-dock-new-session"))
+      refute has_element?(dock, "#session-dock-launch-can-dispatch[checked]")
+
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "second"})
+      |> render_submit()
+
+      assert [%{name: "second", can_dispatch: false}, %{name: "first", can_dispatch: true}] =
+               Sessions.list()
+    end
+
     test "reopening the launch panel picks up a workspace created since the dock mounted",
          %{conn: conn} do
       {_view, dock} = dock(conn)
