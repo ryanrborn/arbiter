@@ -153,6 +153,50 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       refute File.exists?(marker), "the ; inside the name must never run as a command"
     end
 
+    test "remote_control with a name: --remote-control gets <name> · <short-id>, injection-safe" do
+      bin_dir = tmp_dir!("stub-claude-bin-remote")
+      marker = Path.join(bin_dir, "injected-marker")
+      capture = Path.join(bin_dir, "captured-argv")
+
+      File.write!(Path.join(bin_dir, "claude"), """
+      #!/bin/sh
+      printf '%s\\n' "$@" > #{shell_quote(capture)}
+      """)
+
+      File.chmod!(Path.join(bin_dir, "claude"), 0o755)
+
+      malicious = "o'Brien's $HOME; touch #{marker}"
+
+      session =
+        launch!(
+          name: malicious,
+          remote_control: true,
+          bridge_verify_timeout_ms: 50,
+          bridge_verify_poll_interval_ms: 10
+        )
+
+      short_id = String.slice(session.id, 0..7)
+      combined = "#{malicious} · #{short_id}"
+      script = Layout.launch_script_path(session.id)
+
+      body = File.read!(script)
+
+      assert body =~
+               "exec claude --name " <>
+                 shell_quote(malicious) <> " --remote-control " <> shell_quote(combined) <> "\n"
+
+      path = "#{bin_dir}:#{System.get_env("PATH")}"
+      assert {_out, 0} = System.cmd("sh", [script], env: [{"PATH", path}], stderr_to_stdout: true)
+
+      # Verify the combined string arrived as a single argv entry and injected nothing
+      argv = File.read!(capture) |> String.split("\n", trim: true)
+
+      assert Enum.any?(argv, fn arg -> arg == combined end),
+             "combined name · id must be a single argv entry"
+
+      refute File.exists?(marker), "the ; inside the name must never run as a command"
+    end
+
     test "remote_control: true appends --remote-control <id>, single-quoted (§8)" do
       session =
         launch!(
@@ -176,10 +220,11 @@ defmodule Arbiter.Sessions.ProvisioningTest do
         )
 
       body = File.read!(Layout.launch_script_path(session.id))
+      short_id = String.slice(session.id, 0..7)
 
       assert body =~
                "exec claude --name 'afk session' --remote-control " <>
-                 shell_quote(session.id) <> "\n"
+                 shell_quote("afk session · #{short_id}") <> "\n"
     end
 
     test "no remote_control → launch.sh never mentions the flag" do

@@ -57,7 +57,7 @@ Once you're done accessing the dashboard and terminal, close port 4848 on the re
 
 ## Alternative: Remote Control (mode B)
 
-For persistent, multi-session access with full browser support and auditing, consider [Remote Control mode](/docs/browser-hosted-coordinator-sessions.md#8-remote-control-sessions-research-task-4) (launched with `--remote-control`). SSH tunneling is simpler for temporary or single-machine access.
+For persistent, multi-session access with full browser support and auditing, consider [Remote Control mode](/docs/browser-hosted-coordinator-sessions.md#8-remote-control-sessions-research-task-4) (launched with `--remote-control`). The session appears in claude.ai / the Claude app titled `<name> · <short id>` (or the full session id if unnamed) — see the RFC for details. SSH tunneling is simpler for temporary or single-machine access.
 
 ## Trust assumption: loopback means the same Unix user (bd-5b5hq7)
 

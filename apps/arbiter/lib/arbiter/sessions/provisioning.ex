@@ -557,11 +557,15 @@ defmodule Arbiter.Sessions.Provisioning do
   so unescaped it would be command injection running as the operator. No name
   → a bare `claude`, unchanged from before this option existed.
 
-  `session.remote_control` (§8) appends `--remote-control <id>`, single-quoted
-  the same way — the session's own id, per design consequence 3 (§8.3), not
-  the operator name, so a claude.ai session is traceable back to the row that
-  launched it regardless of what (or whether) the operator named it. The
-  `Session` resource's validation already refuses `remote_control: true`
+  `session.remote_control` (§8) appends `--remote-control <value>`, single-quoted
+  the same way. The value combines traceability with readability (design consequence
+  3, §8.3):
+    * If a name was supplied (and non-empty after trimming): `<name> · <short-id>`,
+      where short-id is the first 8 characters of the session UUID. Readable, and
+      still traceable back to the row.
+    * If no name (nil or blank after trimming): the full session UUID, unchanged
+      from the prior behavior.
+  The `Session` resource's validation already refuses `remote_control: true`
   outside mode B (§8.3), so this never needs to check `auth_mode` itself.
   """
   @spec agent_command(Session.t(), keyword()) :: String.t()
@@ -587,7 +591,23 @@ defmodule Arbiter.Sessions.Provisioning do
 
   defp append_name(parts, %Session{}), do: parts
 
+  defp append_remote_control(parts, %Session{remote_control: true, id: id, name: name})
+       when is_binary(name) do
+    case String.trim(name) do
+      "" ->
+        # No name or blank name: use full id
+        parts ++ ["--remote-control", shell_quote(id)]
+
+      trimmed ->
+        # Named session: combine name with short id
+        short_id = String.slice(id, 0..7)
+        remote_title = "#{trimmed} · #{short_id}"
+        parts ++ ["--remote-control", shell_quote(remote_title)]
+    end
+  end
+
   defp append_remote_control(parts, %Session{remote_control: true, id: id}) do
+    # No name at all
     parts ++ ["--remote-control", shell_quote(id)]
   end
 
