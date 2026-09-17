@@ -235,6 +235,21 @@ defmodule Arbiter.Agents.Gemini.Stream do
     Enum.map(["⏴ tool result" | body], &{&1, false})
   end
 
+  # A `step_type: "tool"` step in a state other than ACTIVE/DONE (agy's wire
+  # carries at least a `CANCELLED` enum value) — the failure/cancellation
+  # wire shape was never captured live (bd-7y3mm9), so route it through the
+  # same "schema drift is loud" warning the unrecognized-top-level-event
+  # clause below uses, rather than silently dropping it like the generic
+  # step_update fallback would.
+  def format_event(%{
+        "event" => "step_update",
+        "step_update" => %{"step_type" => "tool", "state" => state} = step
+      })
+      when is_binary(state) do
+    name = step["tool_name"] || "tool"
+    [{"⚠ gemini: unrecognized tool step state #{state} for #{name} (schema drift?)", false}]
+  end
+
   # Other step types (user_input echo, checkpoint, unknown bookkeeping steps)
   # are not worker output — display nothing and never arm completion.
   def format_event(%{"event" => "step_update"}), do: []
@@ -405,9 +420,16 @@ defmodule Arbiter.Agents.Gemini.Stream do
   # live — bd-7y3mm9), not the `command` key `summarize_params/1` and
   # `shell_activity/1` already know from Claude/upstream-gemini's shell
   # tools. Normalize it onto the shared key so both helpers stay untouched.
-  defp agy_tool_params("run_command", %{"CommandLine" => cmd}), do: %{"command" => cmd}
-  defp agy_tool_params(_name, params) when is_map(params), do: params
-  defp agy_tool_params(_name, _params), do: %{}
+  #
+  # Public (not `defp`) so `ClaudeSession.capture_steps/2` can normalize the
+  # same params before handing them to `StepSummary.input_summary/2` — the
+  # step row's `input_summary` must read the same string as the `⏵
+  # run_command(...)` transcript line this module renders for the identical
+  # call, not the raw `CommandLine` wire key.
+  @doc false
+  def agy_tool_params("run_command", %{"CommandLine" => cmd}), do: %{"command" => cmd}
+  def agy_tool_params(_name, params) when is_map(params), do: params
+  def agy_tool_params(_name, _params), do: %{}
 
   defp agy_result_summary(result) do
     status = result["status"] || "done"

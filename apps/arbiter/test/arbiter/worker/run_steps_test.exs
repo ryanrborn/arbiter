@@ -214,7 +214,7 @@ defmodule Arbiter.Worker.RunStepsTest do
     assert step.name == "run_command"
     assert step.is_error == false
     assert step.duration_ms == 27
-    assert step.input_summary =~ "echo hello-from-agy"
+    assert step.input_summary == "echo hello-from-agy"
     assert is_binary(step.input_digest)
     assert step.output_summary =~ "hello-from-agy"
     assert step.source == "live"

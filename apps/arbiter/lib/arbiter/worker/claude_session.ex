@@ -767,7 +767,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # session was killed mid-call — leaves its pending entry stranded and never
   # writes a row: absent, not garbage.
   #
-  # Deliberately Claude/Codex no-op: Codex speaks a different stream-json
+  # Deliberately a Codex-only no-op: Codex speaks a different stream-json
   # shape entirely (see its own `Stream.format_event/1` module) and is routed
   # around here explicitly rather than relying on the shape match to miss, so
   # the "rows absent for non-Claude/agy runs" property is asserted, not
@@ -782,11 +782,23 @@ defmodule Arbiter.Worker.ClaudeSession do
   # correlation key (the column is `allow_nil? false`); it's scoped to the
   # step, not globally unique, but that mirrors how Claude's `tool_use_id` is
   # only unique within its own run too.
+  #
+  # `is_error` is hardcoded `false`: only the DONE state (success) is matched
+  # here, so a tool step that ends in some other state (agy's wire carries at
+  # least `CANCELLED`) falls through to the catch-all clause below and writes
+  # no row at all — the failure/cancellation wire shape was never captured
+  # live, only its existence as an enum literal. `Gemini.Stream.format_event/1`
+  # surfaces those states as a schema-drift warning in the transcript so they
+  # aren't silently invisible, but no `worker_run_steps` row backs them yet.
   defp capture_steps(%{provider: "gemini"} = session, %{
          "event" => "step_update",
          "step_update" => %{"step_type" => "tool", "state" => "DONE"} = step
        }) do
-    input = get_in(step, ["tool_info", "parameters"])
+    input =
+      Arbiter.Agents.Gemini.Stream.agy_tool_params(
+        step["tool_name"],
+        get_in(step, ["tool_info", "parameters"])
+      )
 
     write_step(session, %{
       run_id: Map.get(session, :run_id),
