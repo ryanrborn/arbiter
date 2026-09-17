@@ -290,6 +290,10 @@ defmodule Arbiter.Quota.CloudProbe do
 
     cond do
       failed == [] ->
+        if state.oauth_consecutive_401s > 0 do
+          CredentialWatchdog.mark_recovered(Arbiter.Agents.Claude, state.credential_watchdog)
+        end
+
         %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
 
       failed != [] and length(failed) == length(results) ->
@@ -349,7 +353,7 @@ defmodule Arbiter.Quota.CloudProbe do
   defp note_oauth_401(%State{} = state, workspace_ids, {:error, {:http_error, 401}}) do
     count = state.oauth_consecutive_401s + 1
 
-    if count == state.oauth_401_expiry_threshold do
+    if count >= state.oauth_401_expiry_threshold do
       mark_credential_expired(state, workspace_ids, count)
     end
 

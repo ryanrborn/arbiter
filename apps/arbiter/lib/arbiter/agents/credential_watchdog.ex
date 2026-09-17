@@ -129,6 +129,26 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @doc """
+  Clear `adapter`'s expired mark following an independent success signal.
+
+  Called by `Arbiter.Quota.CloudProbe` when a `/api/oauth/usage` poll succeeds,
+  so a usage-poll-detected expiry (`mark_expired/3`) can also recover without
+  waiting for the Watchdog's own periodic CLI probe — the symmetric
+  counterpart to that signal (bd-1pmf9h). A no-op if `adapter` isn't marked
+  expired. Fire-and-forget; best-effort. Pass a `server` pid/name to target a
+  specific instance (useful in tests).
+  """
+  @spec mark_recovered(module(), GenServer.server()) :: :ok
+  def mark_recovered(adapter, server \\ __MODULE__) when is_atom(adapter) do
+    GenServer.cast(server, {:mark_recovered, adapter})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Reset the Watchdog's per-adapter state to `:ok` (all credentials considered valid).
   Intended for test isolation only. The probe interval timer is unaffected.
   """
@@ -205,6 +225,11 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     else
       {:noreply, record_expiry(state, adapter, reason, :worker_report)}
     end
+  end
+
+  @impl true
+  def handle_cast({:mark_recovered, adapter}, state) do
+    {:noreply, on_probe_ok(state, adapter, Map.get(state.adapters, adapter, :ok))}
   end
 
   @impl true

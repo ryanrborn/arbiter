@@ -200,6 +200,8 @@ defmodule Arbiter.QuotaTest do
     # (set by `CloudProbe`'s consecutive-401 tracking, or its periodic CLI
     # probe) directly on the quota view.
     test "credentials_expired reflects CredentialWatchdog's expiry state for Claude" do
+      on_exit(fn -> Arbiter.Agents.CredentialWatchdog.reset() end)
+
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)
 
@@ -218,12 +220,10 @@ defmodule Arbiter.QuotaTest do
         )
 
       # mark_expired/3 is a cast against the application's named singleton —
-      # give it a beat to land before asserting.
-      Process.sleep(20)
+      # sync on it deterministically instead of sleeping.
+      _ = :sys.get_state(Arbiter.Agents.CredentialWatchdog)
 
       assert Quota.serialize(ws.id).credentials_expired
-
-      :ok = Arbiter.Agents.CredentialWatchdog.reset()
     end
 
     defp restore_test_env do
