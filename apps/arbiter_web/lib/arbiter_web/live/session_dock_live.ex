@@ -179,9 +179,12 @@ defmodule ArbiterWeb.SessionDockLive do
      # banner, and it must survive `dismiss_error` and vice versa.
      |> assign(:launch_open?, false)
      |> assign(:launch_auth_mode, "seeded_credentials")
+     |> assign(:launch_name, nil)
      |> assign(:launch_workspace_id, nil)
      |> assign(:launch_can_dispatch?, false)
-     |> assign(:launch_remote_control?, false)
+     # §9.5: on when mode B, which is the default auth mode — see
+     # `SessionIndexLive`'s moduledoc.
+     |> assign(:launch_remote_control?, true)
      |> assign(:workspaces, SessionIndexLive.workspaces())
      |> assign(:launch_error, nil)
      # The dock's own error notice. It cannot use `put_flash/3`: this view
@@ -728,6 +731,7 @@ defmodule ArbiterWeb.SessionDockLive do
         running_count={@running_count}
         launch_open?={@launch_open?}
         launch_auth_mode={@launch_auth_mode}
+        launch_name={@launch_name}
         launch_workspace_id={@launch_workspace_id}
         launch_can_dispatch?={@launch_can_dispatch?}
         launch_remote_control?={@launch_remote_control?}
@@ -1000,6 +1004,7 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :running_count, :integer, required: true
   attr :launch_open?, :boolean, required: true
   attr :launch_auth_mode, :string, required: true
+  attr :launch_name, :string, default: nil
   attr :launch_workspace_id, :string, default: nil
   attr :launch_can_dispatch?, :boolean, default: false
   attr :launch_remote_control?, :boolean, default: false
@@ -1024,6 +1029,7 @@ defmodule ArbiterWeb.SessionDockLive do
         <SessionIndexLive.launch_form
           prefix="session-dock-launch"
           launch_auth_mode={@launch_auth_mode}
+          launch_name={@launch_name}
           launch_workspace_id={@launch_workspace_id}
           launch_can_dispatch?={@launch_can_dispatch?}
           launch_remote_control?={@launch_remote_control?}

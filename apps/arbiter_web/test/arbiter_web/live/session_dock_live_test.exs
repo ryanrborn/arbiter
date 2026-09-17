@@ -354,6 +354,41 @@ defmodule ArbiterWeb.SessionDockLiveTest do
                Sessions.list()
     end
 
+    test "reopening the launch panel after a launch does not inherit the prior session name",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "first"})
+      |> render_submit()
+
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{})
+      |> render_submit()
+
+      assert [%{name: nil}, %{name: "first"}] = Sessions.list()
+    end
+
+    test "the dock's panel also arrives with Remote Control checked under mode B (§9.5)",
+         %{conn: conn} do
+      # Same default as the index's copy of this form (review finding,
+      # phase 11 round 4) — the dock shares `assign_launch_params/2` and
+      # `reset_launch_params/1`, but its own mount had its own hardcoded
+      # `false` to fix too.
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(dock, "#session-dock-launch-remote-control[checked]")
+
+      dock |> form("#session-dock-launch-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.remote_control == true
+    end
+
     test "switching to mode A in the dock un-checks a previously-checked Remote Control box",
          %{conn: conn} do
       {_view, dock} = dock(conn)
@@ -370,6 +405,21 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       |> render_change()
 
       refute has_element?(dock, "#session-dock-launch-remote-control[checked]")
+    end
+
+    test "reopening the launch panel after a launch defaults Remote Control back to checked",
+         %{conn: conn} do
+      # The panel is removed from the DOM on a successful launch
+      # (`:if={@launch_open?}`) and rebuilt on reopen — it must rebuild from
+      # the §9.5 default, not a stale `false` left by the reset (review
+      # finding, phase 11 round 4).
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock |> form("#session-dock-launch-form") |> render_submit()
+
+      render_click(element(dock, "#session-dock-new-session"))
+      assert has_element?(dock, "#session-dock-launch-remote-control[checked]")
     end
 
     test "reopening the launch panel picks up a workspace created since the dock mounted",
