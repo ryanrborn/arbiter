@@ -33,10 +33,13 @@ defmodule ArbiterWeb.SessionDockLive do
   `/sessions/:id` — which used to own them — is **gone**, route and all. That
   was phase 3's one decision to execute: keeping the page meant two surfaces
   owning the same controls, and two surfaces that own the same control drift.
-  `/sessions` stays as the index (launch, name at launch, the whole history,
-  and Kill as a fleet act), and the one control deliberately on both surfaces —
-  Kill — goes through `SessionIndexLive.kill_modal/1` on both, so there is a
-  single confirmation rather than two that can diverge.
+  `/sessions` stays as the index (name at launch, the whole history, and Kill
+  as a fleet act). Two controls are deliberately on both surfaces: Kill, which
+  goes through `SessionIndexLive.kill_modal/1` on both so there is a single
+  confirmation rather than two that can diverge, and — since phase 4,
+  bd-cdut29 — launch itself, through `SessionIndexLive.launch_form/1` and
+  `launch_defaults/1`, so starting a session from the dock is the same one
+  implementation `/sessions`' own launch button calls, not a second launcher.
 
   Kill keeps its confirm step *here in particular*. A title bar that is on
   screen on every page is a different risk profile from a page an operator
@@ -169,6 +172,14 @@ defmodule ArbiterWeb.SessionDockLive do
      |> assign(:info_usage, nil)
      |> assign(:usage_refresh_ref, nil)
      |> assign(:kill_candidate, nil)
+     # The New session panel (bd-cdut29): `ArbiterWeb.SessionIndexLive.launch_form/1`
+     # embedded here rather than a second launcher. `launch_error` is its own
+     # inline failure, separate from `error_message` below — a launch failure
+     # belongs on the form the operator is looking at, not the dock's general
+     # banner, and it must survive `dismiss_error` and vice versa.
+     |> assign(:launch_open?, false)
+     |> assign(:launch_auth_mode, "seeded_credentials")
+     |> assign(:launch_error, nil)
      # The dock's own error notice. It cannot use `put_flash/3`: this view
      # mounts `layout: false` and a nested LiveView's flash never reaches the
      # host page's `<Layouts.app flash={@flash}>`, so a failed kill would
@@ -235,11 +246,65 @@ defmodule ArbiterWeb.SessionDockLive do
     {:noreply, assign(socket, :roster_open?, not socket.assigns.roster_open?)}
   end
 
+  # New session (bd-cdut29). The panel and the roster panel are independent —
+  # opening one does not close the other — since there is nothing conflicting
+  # about seeing the roster while filling in a name.
+  def handle_event("toggle_launch", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:launch_open?, not socket.assigns.launch_open?)
+     |> assign(:launch_error, nil)}
+  end
+
+  # Same params-to-state mapping `SessionIndexLive` uses for its own copy of
+  # this form (see `SessionIndexLive.launch_form/1`), so the disabled-checkbox
+  # gating (§8.3) behaves identically on both surfaces.
+  def handle_event("validate_launch", params, socket) do
+    {:noreply, assign(socket, :launch_auth_mode, SessionIndexLive.launch_auth_mode_param(params))}
+  end
+
+  # `SessionIndexLive.launch_defaults/1` is the same params-to-opts logic the
+  # index page's launch button uses — not a second implementation of the
+  # phase-5 defaults or the §8.3 remote-control clamp, just called from here
+  # too. On success the new session goes straight into the roster and takes
+  # the expanded slot, the same as clicking Open on a row already does
+  # (`expand_window/2` is what enforces one-expanded-at-a-time). On failure
+  # `open_ids` is left untouched, so no window opens for it — a runner
+  # failure can still leave an ended row for the audit trail (same as
+  # `SessionIndexLive`'s own launch failure), but that is a history entry,
+  # never something live sitting half-built in the roster.
+  def handle_event("launch", params, socket) do
+    case Sessions.launch(SessionIndexLive.launch_defaults(params)) do
+      {:ok, session} ->
+        socket = load_sessions(socket)
+        open_ids = open_window_ids(socket.assigns.open_ids, session.id)
+
+        {:noreply,
+         socket
+         |> assign(:open_ids, open_ids)
+         |> expand_window(session.id)
+         |> assign(:launch_open?, false)
+         |> assign(:launch_error, nil)
+         |> assign(:roster_open?, false)
+         |> persist()}
+
+      {:error, reason} ->
+        Logger.error("SessionDockLive: launch failed: #{inspect(reason)}")
+
+        {:noreply,
+         assign(
+           socket,
+           :launch_error,
+           "Could not launch a session: #{SessionIndexLive.describe(reason)}"
+         )}
+    end
+  end
+
   def handle_event("open", %{"id" => id}, socket) do
     socket = load_sessions(socket)
 
     if Enum.any?(socket.assigns.sessions, &(&1.id == id)) do
-      open_ids = Enum.take(Enum.uniq(socket.assigns.open_ids ++ [id]), @max_open)
+      open_ids = open_window_ids(socket.assigns.open_ids, id)
 
       {:noreply,
        socket
@@ -473,6 +538,16 @@ defmodule ArbiterWeb.SessionDockLive do
     |> assign(:running_count, Enum.count(sessions, &(&1.status == :running)))
   end
 
+  # Opening always keeps the id being opened, even at the @max_open cap: the
+  # id being added is also about to be the one that gets expanded, so taking
+  # from the *front* (evicting the newest) would silently drop the window an
+  # operator just asked for while still collapsing whatever was open before it
+  # (finding 1, bd-cdut29 review round 1). Taking from the tail evicts the
+  # oldest window instead.
+  defp open_window_ids(open_ids, id) do
+    (open_ids ++ [id]) |> Enum.uniq() |> Enum.take(-@max_open)
+  end
+
   # Expanding is what mounts a terminal, so it is also what re-arms the watch
   # for one that never connects.
   defp expand_window(socket, id) do
@@ -636,6 +711,9 @@ defmodule ArbiterWeb.SessionDockLive do
         sessions={@sessions}
         open_ids={@open_ids}
         running_count={@running_count}
+        launch_open?={@launch_open?}
+        launch_auth_mode={@launch_auth_mode}
+        launch_error={@launch_error}
       />
 
       <.window
@@ -882,10 +960,32 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :sessions, :list, required: true
   attr :open_ids, :list, required: true
   attr :running_count, :integer, required: true
+  attr :launch_open?, :boolean, required: true
+  attr :launch_auth_mode, :string, required: true
+  attr :launch_error, :any, required: true
 
   defp roster(assigns) do
     ~H"""
     <div class="pointer-events-auto flex flex-col justify-end shrink basis-[268px] min-w-[8.5rem] max-w-[268px]">
+      <%!-- New session (bd-cdut29): the exact same options `/sessions`
+            launches with, opened without navigating away from wherever the
+            operator is. See `SessionIndexLive.launch_form/1`. --%>
+      <div
+        :if={@launch_open?}
+        id="session-dock-launch-panel"
+        class={[
+          "mb-1 px-2.5 py-2.5",
+          "rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)]",
+          "bg-[var(--surface-card)] shadow-lg"
+        ]}
+      >
+        <SessionIndexLive.launch_form
+          prefix="session-dock-launch"
+          launch_auth_mode={@launch_auth_mode}
+          error={@launch_error}
+        />
+      </div>
+
       <div
         :if={@open?}
         id="session-dock-roster-panel"
@@ -942,32 +1042,53 @@ defmodule ArbiterWeb.SessionDockLive do
         </ul>
       </div>
 
-      <button
-        type="button"
-        id="session-dock-roster-toggle"
-        phx-click="toggle_roster"
-        aria-expanded={to_string(@open?)}
-        aria-controls="session-dock-roster-panel"
-        class={[
-          "flex items-center gap-2 px-3 h-[var(--session-dock-strip-height)] w-full cursor-pointer",
-          "rounded-t-[var(--radius-panel)] border border-b-0 border-solid border-[var(--border-default)]",
-          "bg-[var(--surface-chrome)] text-[12px] font-medium text-[var(--text-title)]",
-          "hover:bg-[var(--surface-card)] transition-colors"
-        ]}
-      >
-        <.icon name="hero-command-line-micro" class="size-4 shrink-0" />
-        <span class="grow text-left">Sessions</span>
-        <span
-          id="session-dock-running-count"
-          class="font-[family-name:var(--font-mono)] text-[10.5px] text-[var(--text-label)]"
+      <div class="flex items-stretch gap-1">
+        <button
+          type="button"
+          id="session-dock-roster-toggle"
+          phx-click="toggle_roster"
+          aria-expanded={to_string(@open?)}
+          aria-controls="session-dock-roster-panel"
+          class={[
+            "flex grow items-center gap-2 px-3 h-[var(--session-dock-strip-height)] cursor-pointer",
+            "rounded-t-[var(--radius-panel)] border border-b-0 border-solid border-[var(--border-default)]",
+            "bg-[var(--surface-chrome)] text-[12px] font-medium text-[var(--text-title)]",
+            "hover:bg-[var(--surface-card)] transition-colors"
+          ]}
         >
-          {@running_count} running
-        </span>
-        <.icon
-          name={if @open?, do: "hero-chevron-down-micro", else: "hero-chevron-up-micro"}
-          class="size-4 shrink-0"
-        />
-      </button>
+          <.icon name="hero-command-line-micro" class="size-4 shrink-0" />
+          <span class="grow text-left">Sessions</span>
+          <span
+            id="session-dock-running-count"
+            class="font-[family-name:var(--font-mono)] text-[10.5px] text-[var(--text-label)]"
+          >
+            {@running_count} running
+          </span>
+          <.icon
+            name={if @open?, do: "hero-chevron-down-micro", else: "hero-chevron-up-micro"}
+            class="size-4 shrink-0"
+          />
+        </button>
+
+        <button
+          type="button"
+          id="session-dock-new-session"
+          phx-click="toggle_launch"
+          aria-expanded={to_string(@launch_open?)}
+          aria-controls="session-dock-launch-panel"
+          aria-label="New session"
+          title="New session"
+          class={[
+            "shrink-0 flex items-center justify-center w-[var(--session-dock-strip-height)]",
+            "h-[var(--session-dock-strip-height)] cursor-pointer",
+            "rounded-t-[var(--radius-panel)] border border-b-0 border-solid border-[var(--border-default)]",
+            "bg-[var(--surface-chrome)] text-[var(--text-secondary)]",
+            "hover:bg-[var(--surface-card)] hover:text-[var(--text-primary)] transition-colors"
+          ]}
+        >
+          <.icon name="hero-plus-micro" class="size-4 shrink-0" />
+        </button>
+      </div>
     </div>
     """
   end

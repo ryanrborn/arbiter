@@ -187,6 +187,107 @@ defmodule ArbiterWeb.SessionDockLiveTest do
     end
   end
 
+  # bd-cdut29: launching without leaving whatever page the operator is on.
+  # The form itself is `ArbiterWeb.SessionIndexLive.launch_form/1`, shared
+  # with `/sessions` — these tests are about the dock's own wiring around it
+  # (the New session toggle, routing a launch into the roster/expand state,
+  # and the inline error the dock needs because a nested LiveView's flash
+  # never reaches the host page), not a re-proof of the form's own fields or
+  # the §8.3 gating, which `SessionIndexLiveTest` already covers exhaustively
+  # against the identical markup.
+  describe "launching from the roster" do
+    test "the New session control is on every dashboard page", %{conn: conn} do
+      for path <- ["/", "/tasks", "/sessions"] do
+        {_view, dock} = dock(conn, path)
+        assert has_element?(dock, "#session-dock-new-session"), "no New session on #{path}"
+      end
+    end
+
+    test "is closed until the New session control is clicked", %{conn: conn} do
+      {_view, dock} = dock(conn)
+
+      refute has_element?(dock, "#session-dock-launch-panel")
+      render_click(element(dock, "#session-dock-new-session"))
+      assert has_element?(dock, "#session-dock-launch-panel")
+      assert has_element?(dock, "#session-dock-launch-form")
+    end
+
+    test "a successful launch adds the session to the roster, expands its window, and closes the panel",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "filed from the dock"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.name == "filed from the dock"
+
+      refute has_element?(dock, "#session-dock-launch-panel")
+      assert has_element?(dock, ~s(#session-dock-title-#{session.id}[aria-expanded="true"]))
+      open_roster(dock)
+      assert has_element?(dock, "#session-dock-roster-#{session.id}")
+    end
+
+    test "expanding the launched window collapses whatever was expanded before it", %{
+      conn: conn
+    } do
+      first = launch!(name: "already open")
+      {_view, dock} = dock(conn)
+      open!(dock, first)
+      assert has_element?(dock, ~s(#session-dock-title-#{first.id}[aria-expanded="true"]))
+
+      render_click(element(dock, "#session-dock-new-session"))
+      dock |> form("#session-dock-launch-form") |> render_submit()
+
+      assert [second] = Enum.reject(Sessions.list(), &(&1.id == first.id))
+      assert has_element?(dock, ~s(#session-dock-title-#{second.id}[aria-expanded="true"]))
+      refute has_element?(dock, ~s(#session-dock-title-#{first.id}[aria-expanded="true"]))
+    end
+
+    # Finding 1, bd-cdut29 review round 1: at the @max_open (8) cap the
+    # front-take used to evict the *newly launched* window instead of the
+    # oldest one, so the operator got no window for a session that really
+    # did start, and lost the one they already had expanded, with no error
+    # to explain either.
+    test "launching at the eight-window cap still expands the new window", %{conn: conn} do
+      already_open = for n <- 1..8, do: launch!(name: "s#{n}")
+      {_view, dock} = dock(conn)
+
+      render_hook(dock, "restore", %{
+        "open" => Enum.map(already_open, & &1.id),
+        "expanded" => List.first(already_open).id
+      })
+
+      render_click(element(dock, "#session-dock-new-session"))
+      dock |> form("#session-dock-launch-form") |> render_submit()
+
+      already_open_ids = Enum.map(already_open, & &1.id)
+      assert [session] = Enum.reject(Sessions.list(), &(&1.id in already_open_ids))
+      assert has_element?(dock, ~s(#session-dock-title-#{session.id}[aria-expanded="true"]))
+      assert has_element?(dock, "#session-dock-terminal-#{session.id}")
+      assert length(Regex.scan(~r/id="session-dock-window-/, render(dock))) == 8
+    end
+
+    test "a failed launch is shown inline and opens no window", %{conn: conn} do
+      put_env(:sessions_runner, Arbiter.Test.FailingSessionRunner)
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      html = dock |> form("#session-dock-launch-form") |> render_submit()
+
+      assert html =~ "Could not launch"
+      # The panel stays open with the error on it — nothing to reopen or
+      # retype — and the roster gains no open window for it (a runner
+      # failure still leaves an ended row for the audit trail, the same as
+      # `SessionIndexLive`'s own failed-launch case; the window is what
+      # "half-created" refers to here).
+      assert has_element?(dock, "#session-dock-launch-panel")
+      refute has_element?(dock, ~s([id^="session-dock-window-"]))
+    end
+  end
+
   describe "opening, expanding and dismissing" do
     test "opening adds a title bar and closes the roster", %{conn: conn} do
       session = launch!(name: "one")
