@@ -54,7 +54,9 @@ defmodule Arbiter.Sessions.RefineDoctrineTest do
     end
 
     test "config[\"refine\"][\"doctrine_path\"] reads the file at render time" do
-      path = Path.join(System.tmp_dir!(), "refine-doctrine-#{System.unique_integer([:positive])}.md")
+      path =
+        Path.join(System.tmp_dir!(), "refine-doctrine-#{System.unique_integer([:positive])}.md")
+
       File.write!(path, "# Filed from disk\n")
       on_exit(fn -> File.rm(path) end)
 
