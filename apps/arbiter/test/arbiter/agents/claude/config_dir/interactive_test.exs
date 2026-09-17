@@ -230,6 +230,76 @@ defmodule Arbiter.Agents.Claude.ConfigDir.InteractiveTest do
     end
   end
 
+  describe "Remote Control eligibility cache (bd-cdretj)" do
+    test "mode B copies the operator's oauthAccount and GrowthBook cache so --remote-control's startup check has something to read",
+         %{config: config, source: source, tmp: tmp} do
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{
+          "oauthAccount" => %{"organizationUuid" => "org-123"},
+          "cachedGrowthBookFeatures" => %{"tengu_ccr_bridge" => true},
+          "cachedGrowthBookFeaturesAt" => 1_789_659_549_691
+        })
+      )
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: source,
+                 auth_mode: :seeded_credentials
+               )
+
+      json = claude_json!(config)
+      assert json["oauthAccount"] == %{"organizationUuid" => "org-123"}
+      assert json["cachedGrowthBookFeatures"] == %{"tengu_ccr_bridge" => true}
+      assert json["cachedGrowthBookFeaturesAt"] == 1_789_659_549_691
+    end
+
+    test "mode A never seeds the eligibility cache alongside no credentials", %{
+      config: config,
+      source: source,
+      tmp: tmp
+    } do
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{"oauthAccount" => %{"organizationUuid" => "org-123"}})
+      )
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: source,
+                 auth_mode: :oauth_token
+               )
+
+      refute Map.has_key?(claude_json!(config), "oauthAccount")
+    end
+
+    test "never overwrites what Claude Code has already fetched and written back on a live session",
+         %{config: config, source: source, tmp: tmp} do
+      File.write!(
+        Path.join(source, ".claude.json"),
+        Jason.encode!(%{"oauthAccount" => %{"organizationUuid" => "operator-org"}})
+      )
+
+      File.mkdir_p!(config)
+
+      File.write!(
+        Path.join(config, ".claude.json"),
+        Jason.encode!(%{"oauthAccount" => %{"organizationUuid" => "session-live-org"}})
+      )
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: source,
+                 auth_mode: :seeded_credentials
+               )
+
+      assert claude_json!(config)["oauthAccount"] == %{"organizationUuid" => "session-live-org"}
+    end
+  end
+
   # bd-5xlkkj — the post-merge live check of phase 5 found a freshly provisioned
   # session still stopping on two prompts nobody was there to answer, and running
   # under the *headless worker's* profile. These pin the fixes against the keys
