@@ -1387,8 +1387,10 @@ token does not carry it.
    timeout and surface `bridge_unavailable` (§5.2 `error`) if absent. Never report
    "reachable remotely" on the strength of having passed a flag.
 3. `--remote-control [name]` and `--remote-control-session-name-prefix` let
-   Arbiter name sessions; use the Arbiter session id so a claude.ai session is
-   traceable back to a row.
+   Arbiter name sessions. The remote session title combines the operator-provided
+   name with the Arbiter session id for traceability: `<name> · <first-8-chars-of-id>`
+   when named, or just the full id when unnamed. This keeps the claude.ai session
+   traceable back to its row while remaining readable.
 
 ## 9. Per-session provisioning (research task 5)
 
