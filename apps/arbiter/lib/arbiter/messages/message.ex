@@ -244,16 +244,6 @@ defmodule Arbiter.Messages.Message do
     end
   end
 
-  relationships do
-    # bd-8akewg: per-reader read state. Declared so the per-reader queries can
-    # push `exists(receipts, …)` down into SQL as a subquery rather than
-    # loading a reader's whole receipt history into the BEAM on every poll.
-    has_many :receipts, Arbiter.Messages.MessageReceipt do
-      destination_attribute :message_id
-      public? true
-    end
-  end
-
   attributes do
     uuid_primary_key :id
 
@@ -330,6 +320,16 @@ defmodule Arbiter.Messages.Message do
 
     create_timestamp :inserted_at
     update_timestamp :updated_at
+  end
+
+  relationships do
+    # bd-8akewg: per-reader read state. Declared so the per-reader queries can
+    # push `exists(receipts, …)` down into SQL as a subquery rather than
+    # loading a reader's whole receipt history into the BEAM on every poll.
+    has_many :receipts, Arbiter.Messages.MessageReceipt do
+      destination_attribute :message_id
+      public? true
+    end
   end
 
   # ---- introspection -------------------------------------------------------

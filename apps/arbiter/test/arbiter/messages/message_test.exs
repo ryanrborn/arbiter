@@ -959,7 +959,9 @@ defmodule Arbiter.Messages.MessageTest do
       a = Message.session_reader("sess-a")
 
       {:ok, _} = Message.mark_read(msg, reader: Message.coordinator_reader())
-      {:ok, _, _, _} = Message.clear_all(ref, workspace_id: ws, reader: Message.coordinator_reader())
+
+      {:ok, _, _, _} =
+        Message.clear_all(ref, workspace_id: ws, reader: Message.coordinator_reader())
 
       assert [_] = Message.inbox(ref, workspace_id: ws, reader: a)
     end
@@ -988,7 +990,9 @@ defmodule Arbiter.Messages.MessageTest do
 
       {:ok, _} = Message.mark_read(msg, reader: a)
       {:ok, _} = Message.mark_read(msg, reader: Message.coordinator_reader())
-      {:ok, _, _, _} = Message.clear_read(ref, workspace_id: ws, reader: Message.coordinator_reader())
+
+      {:ok, _, _, _} =
+        Message.clear_read(ref, workspace_id: ws, reader: Message.coordinator_reader())
 
       assert {:ok, 1} = Message.hard_purge(ref, workspace_id: ws)
       assert Message.receipts_for_message(msg.id) == []

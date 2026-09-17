@@ -78,10 +78,6 @@ defmodule Arbiter.Messages.MessageReceipt do
     end
   end
 
-  identities do
-    identity :unique_message_reader, [:message_id, :reader_ref]
-  end
-
   attributes do
     uuid_primary_key :id
 
@@ -110,6 +106,10 @@ defmodule Arbiter.Messages.MessageReceipt do
 
     create_timestamp :inserted_at
     update_timestamp :updated_at
+  end
+
+  identities do
+    identity :unique_message_reader, [:message_id, :reader_ref]
   end
 
   # ---- helpers -------------------------------------------------------------

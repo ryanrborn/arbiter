@@ -403,12 +403,39 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{count: 1, messages: [%{body: "after"}]}} = Tools.coordinator_inbox(a, %{})
     end
 
+    test "the minted-token path carries session identity all the way to the handler", ctx do
+      # The production call path: `Provisioning.mint_token/2` → the session's
+      # `.mcp.json` → `Scope.from_token/1` in the plug → `Catalog.call/3`. The
+      # hand-built `%Scope{}` the other tests use would not catch a `session_id`
+      # claim that failed to survive minting or decoding.
+      {:ok, session_a} = Ash.create(Session, %{cwd: "/tmp/mcp-e2e", workspace_id: ctx.ws.id})
+      {:ok, session_b} = Ash.create(Session, %{cwd: "/tmp/mcp-e2e", workspace_id: ctx.ws.id})
+
+      {:ok, scope_a} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_a))
+      {:ok, scope_b} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_b))
+
+      assert scope_a.session_id == session_a.id
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "e2e"})
+
+      assert {:ok, %{count: 1, messages: [%{body: "e2e"}]}} =
+               Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      assert {:ok, %{count: 0}} = Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      # Session B's copy survived session A's poll.
+      assert {:ok, %{count: 1, messages: [%{body: "e2e"}]}} =
+               Catalog.call(scope_b, "coordinator_inbox", %{})
+    end
+
     test "a cross-workspace session reads every workspace, and `workspace` filters", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "xws-other", prefix: "xwo"})
       {:ok, a} = new_session(nil)
       {:ok, b} = new_session(nil)
 
-      {:ok, _} = Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "here"})
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "here"})
 
       {:ok, _} =
         Message.send_mail(%{workspace_id: other_ws.id, to_ref: "coordinator", body: "there"})
@@ -5026,7 +5053,8 @@ defmodule Arbiter.MCP.ToolsTest do
   defp new_session(workspace) do
     ws_id = if workspace, do: workspace.id, else: nil
 
-    with {:ok, session} <- Ash.create(Session, %{cwd: "/tmp/mcp-tools-session", workspace_id: ws_id}) do
+    with {:ok, session} <-
+           Ash.create(Session, %{cwd: "/tmp/mcp-tools-session", workspace_id: ws_id}) do
       {:ok, %Scope{tier: :coordinator, workspace_id: ws_id, session_id: session.id}}
     end
   end
