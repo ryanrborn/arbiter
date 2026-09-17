@@ -324,6 +324,7 @@ defmodule Arbiter.Sessions.Provisioning do
       _ = File.rm(paths.mcp_token)
       _ = File.rm(paths.monitor_curlrc)
       _ = File.rm(paths.monitor_script)
+      _ = File.rm(paths.monitor_cursor)
       {:ok, nil}
     end
   end
@@ -360,24 +361,36 @@ defmodule Arbiter.Sessions.Provisioning do
     # script's own argv, and never calls `arb mcp token mint` — the token
     # here is the session's own, already scoped and revocable (bd-5b5hq7).
     # Run this via the Monitor tool (persistent: true), never background
-    # Bash: an infinite loop never exits, so it never produces a
-    # notification for `run_in_background` to surface.
+    # Bash: this loop only exits if the session's token is revoked/expired
+    # server-side, so `run_in_background` would never see it finish either.
+    #
+    # `--max-time 240` bounds each individual connection (proxies and load
+    # balancers can silently drop long-lived idle connections); the outer
+    # `while true` reconnects immediately, re-reading the cursor file each
+    # time so a reconnect resumes from the last event actually seen instead
+    # of replaying from the start or re-using a stale `since=`.
     set -e
 
     CURLRC=#{shell_quote(paths.monitor_curlrc)}
-    CURSOR_FILE=#{shell_quote(Path.join(paths.root, "monitor.cursor"))}
+    CURSOR_FILE=#{shell_quote(paths.monitor_cursor)}
 
-    since=""
-    if [ -s "$CURSOR_FILE" ]; then
-      since="&since=$(cat "$CURSOR_FILE")"
-    fi
+    while true; do
+      since=""
+      if [ -s "$CURSOR_FILE" ]; then
+        since="&since=$(cat "$CURSOR_FILE")"
+      fi
 
-    curl -K "$CURLRC" -sN --max-time 240 \\
-      "#{Arbiter.MCP.events_url()}?subscribe=inbox,review_gate,worker_done,worker_failed$since" |
-    while IFS= read -r line; do
-      printf '%s\\n' "$line"
-      cursor=$(printf '%s' "$line" | sed -n 's/.*"cursor":\\([0-9]*\\).*/\\1/p')
-      [ -n "$cursor" ] && printf '%s' "$cursor" > "$CURSOR_FILE"
+      curl -K "$CURLRC" -sN --max-time 240 \\
+        "#{Arbiter.MCP.events_url()}?subscribe=inbox,review_gate,worker_done,worker_failed$since" |
+      while IFS= read -r line; do
+        printf '%s\\n' "$line"
+        cursor=$(printf '%s' "$line" | sed -n 's/.*"cursor":\\([0-9]*\\).*/\\1/p')
+        if [ -n "$cursor" ]; then
+          printf '%s' "$cursor" > "$CURSOR_FILE"
+        fi
+      done
+
+      sleep 1
     done
     """
   end

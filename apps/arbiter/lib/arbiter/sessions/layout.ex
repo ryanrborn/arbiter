@@ -104,6 +104,14 @@ defmodule Arbiter.Sessions.Layout do
   @spec monitor_script_path(String.t()) :: String.t()
   def monitor_script_path(id), do: Path.join(session_dir(id), "monitor.sh")
 
+  @doc """
+  The last-seen `since=` cursor `monitor.sh` persists between reconnects
+  (bd-aqafdr), so a re-armed monitor resumes from where it left off instead
+  of replaying from the start.
+  """
+  @spec monitor_cursor_path(String.t()) :: String.t()
+  def monitor_cursor_path(id), do: Path.join(session_dir(id), "monitor.cursor")
+
   @doc "Memory mount root (§9.4)."
   @spec memory_dir(String.t()) :: String.t()
   def memory_dir(id), do: Path.join(session_dir(id), "memory")
@@ -182,7 +190,8 @@ defmodule Arbiter.Sessions.Layout do
       launch_script: launch_script_path(id),
       watchdog_script: watchdog_script_path(id),
       monitor_curlrc: monitor_curlrc_path(id),
-      monitor_script: monitor_script_path(id)
+      monitor_script: monitor_script_path(id),
+      monitor_cursor: monitor_cursor_path(id)
     }
   end
 

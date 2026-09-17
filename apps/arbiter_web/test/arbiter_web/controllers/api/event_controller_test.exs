@@ -134,6 +134,37 @@ defmodule ArbiterWeb.Api.EventControllerTest do
       assert {:ok, _conn} = Task.yield(task, 500),
              "expected the stream to close once the keepalive tick re-checks revocation"
     end
+
+    test "a busy stream (events faster than keepalive) still closes after revocation" do
+      extend_keepalive(20)
+      session = launch_session!()
+      token = Sessions.mint_mcp_token(session)
+
+      task = Task.async(fn -> get(Phoenix.ConnTest.build_conn(), "/events?token=#{token}") end)
+      assert nil == Task.yield(task, 50)
+
+      pump =
+        Task.async(fn ->
+          for _ <- 1..50 do
+            Phoenix.PubSub.broadcast(
+              Arbiter.PubSub,
+              "events",
+              {:event, %{topic: "worker_done", at: DateTime.to_iso8601(DateTime.utc_now())}}
+            )
+
+            Process.sleep(5)
+          end
+        end)
+
+      Process.sleep(50)
+      {:ok, _} = Sessions.revoke_mcp_token(session)
+
+      assert {:ok, _conn} = Task.yield(task, 500),
+             "expected a stream with continuous event traffic to still close after revocation" <>
+               " — revocation must be checked on a timer, not only on receive idle timeout"
+
+      Task.shutdown(pump, :brutal_kill)
+    end
   end
 
   # ---- topic parsing -------------------------------------------------------

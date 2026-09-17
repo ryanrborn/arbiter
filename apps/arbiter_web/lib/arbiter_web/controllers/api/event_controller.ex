@@ -79,7 +79,7 @@ defmodule ArbiterWeb.Api.EventController do
       topic_set = MapSet.new(topics)
       {conn, last_cursor} = replay(conn, scope.workspace_id, topic_set, since)
 
-      event_loop(conn, topic_set, last_cursor, scope)
+      event_loop(conn, topic_set, last_cursor, scope, next_revocation_check())
     else
       {:error, :unauthorized} ->
         conn
@@ -264,37 +264,59 @@ defmodule ArbiterWeb.Api.EventController do
   # wrongly treated as already-delivered and silently dropped. An event with
   # no cursor (persist failed) is always sent — it was never a replay
   # candidate to begin with.
-  defp event_loop(conn, topics, watermark, scope) do
+  # `revocation_deadline` is a `System.monotonic_time(:millisecond)` value:
+  # the next time revocation is due to be re-checked. It is independent of
+  # the receive timeout below — a stream that never idles (an event arrives
+  # at least once per `keepalive_ms`) would otherwise never hit the `after`
+  # clause, and a revoked/ended session's already-open stream would keep
+  # streaming forever instead of closing within one keepalive interval.
+  defp event_loop(conn, topics, watermark, scope, revocation_deadline) do
     receive do
       {:event, event} ->
-        if deliver?(event, topics, watermark) do
-          json_line = Jason.encode!(stringify_keys(event)) <> "\n"
-
-          case Plug.Conn.chunk(conn, json_line) do
-            {:ok, conn} -> event_loop(conn, topics, watermark, scope)
-            {:error, _} -> conn
-          end
+        if due?(revocation_deadline) and revoked?(scope) do
+          conn
         else
-          event_loop(conn, topics, watermark, scope)
+          revocation_deadline = advance(revocation_deadline)
+
+          if deliver?(event, topics, watermark) do
+            json_line = Jason.encode!(stringify_keys(event)) <> "\n"
+
+            case Plug.Conn.chunk(conn, json_line) do
+              {:ok, conn} -> event_loop(conn, topics, watermark, scope, revocation_deadline)
+              {:error, _} -> conn
+            end
+          else
+            event_loop(conn, topics, watermark, scope, revocation_deadline)
+          end
         end
     after
       keepalive_ms() ->
         # Session tokens are revocable (Arbiter.MCP.Scope) but a long-lived
         # chunked connection is only checked once, at authenticate/2 —
-        # re-check on every keepalive tick so ending or revoking a session
-        # closes its already-open stream within one tick, not just at the
-        # next reconnect. Plain coordinator/worker tokens carry no
-        # session_id and are never revocable, so this is a no-op for them.
+        # re-check here too so an idle stream closes within one tick.
+        # Plain coordinator/worker tokens carry no session_id and are never
+        # revocable, so this is a no-op for them.
         if revoked?(scope) do
           conn
         else
           case Plug.Conn.chunk(conn, "\n") do
-            {:ok, conn} -> event_loop(conn, topics, watermark, scope)
-            {:error, _} -> conn
+            {:ok, conn} ->
+              event_loop(conn, topics, watermark, scope, advance(revocation_deadline))
+
+            {:error, _} ->
+              conn
           end
         end
     end
   end
+
+  defp due?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+
+  defp advance(deadline) do
+    if due?(deadline), do: next_revocation_check(), else: deadline
+  end
+
+  defp next_revocation_check, do: System.monotonic_time(:millisecond) + keepalive_ms()
 
   defp revoked?(%Scope{session_id: nil}), do: false
   defp revoked?(%Scope{session_id: id}), do: Arbiter.Sessions.mcp_token_revoked?(id)

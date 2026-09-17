@@ -395,11 +395,29 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       assert script =~ "/events"
     end
 
+    test "monitor.sh reconnects in a loop instead of exiting once its curl call ends" do
+      session = launch!()
+      script = session.id |> Layout.monitor_script_path() |> File.read!()
+
+      assert script =~ ~r/while true; do/
+      assert script =~ Layout.monitor_cursor_path(session.id)
+      # the cursor file is read fresh on every loop iteration, not once up front
+      assert script |> String.split(~r/while true; do/) |> Enum.at(1) =~ "CURSOR_FILE"
+    end
+
+    test "monitor.sh does not abort on a keepalive line (no bare `&&` under `set -e`)" do
+      session = launch!()
+      script = session.id |> Layout.monitor_script_path() |> File.read!()
+
+      refute script =~ ~r/\]\s*&&\s*printf/
+    end
+
     test "no monitor files when :mcp is disabled" do
       session = launch!(mcp: false)
 
       refute File.exists?(Layout.monitor_curlrc_path(session.id))
       refute File.exists?(Layout.monitor_script_path(session.id))
+      refute File.exists?(Layout.monitor_cursor_path(session.id))
     end
   end
 
