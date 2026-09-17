@@ -152,6 +152,14 @@ defmodule ArbiterWeb.SessionDockLive do
   # catches the next sweep". The timer only exists while the panel does.
   @usage_refresh_ms 30_000
 
+  # The expanded window's size presets (bd-covojz). Three, not a drag handle:
+  # the epic (bd-1hdg5b) rejected free-floating windows partly because a
+  # continuous drag-resize is the worst case for terminal refit, and each of
+  # these is a single discrete geometry change phase 2's refit path already
+  # handles. `"compact"` is today's bottom-docked window and the default.
+  @sizes ~w(compact side max)
+  @default_size "compact"
+
   @impl true
   def mount(_params, session, socket) do
     if connected?(socket) do
@@ -163,6 +171,17 @@ defmodule ArbiterWeb.SessionDockLive do
      |> assign(:roster_open?, false)
      |> assign(:open_ids, [])
      |> assign(:expanded_id, nil)
+     # The per-session size preset (bd-covojz), keyed by session id. Like
+     # `open_ids` it is a *browser* preference the client hands back on
+     # `restore`, so a design session reopens as a side panel and a quick one
+     # stays Compact. Entries are only kept for open windows.
+     |> assign(:sizes, %{})
+     # The client's answer to "does a side panel actually fit here?". Only it
+     # knows the viewport and the pane's cell, so it measures and says so; this
+     # is what turns a Side panel into a Maximized one on a narrow screen, with
+     # the title bar saying why. Never a rewrite of the operator's choice —
+     # the preference stays `"side"` and comes back when there is room.
+     |> assign(:size_fallback?, false)
      |> assign(:exited, MapSet.new())
      # Windows whose pane is mounted but whose session has since ended: the
      # xterm stays, read-only, holding the scrollback it had when the agent
@@ -242,7 +261,40 @@ defmodule ArbiterWeb.SessionDockLive do
     socket =
       if expanded_id, do: expand_window(socket, expanded_id), else: collapse_window(socket)
 
-    {:noreply, socket |> assign(:open_ids, open_ids) |> assign(:frozen, frozen) |> persist()}
+    {:noreply,
+     socket
+     |> assign(:open_ids, open_ids)
+     |> assign(:frozen, frozen)
+     |> assign(:sizes, restored_sizes(params, open_ids))
+     |> persist()}
+  end
+
+  # The size preset of the expanded window (bd-covojz). A discrete geometry
+  # change, so the pane is told once, after the layout has settled — which is
+  # `persist/1`'s `session-dock:size` push and the terminal hook's `reclaim`,
+  # phase 2's one refit path rather than a second one.
+  #
+  # A `size_fallback?` left over from a narrow viewport is cleared here: the
+  # claim was about the *previous* size, and the client re-measures and says so
+  # again if it still holds.
+  def handle_event("set_size", %{"id" => id, "size" => size}, socket) do
+    if id in socket.assigns.open_ids and size in @sizes do
+      {:noreply,
+       socket
+       |> assign(:sizes, Map.put(socket.assigns.sizes, id, size))
+       |> assign(:size_fallback?, false)
+       |> persist()}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # "This viewport cannot fit a usable page *and* 80 columns" — the one part of
+  # the size decision the server cannot make, since it knows neither the
+  # viewport nor the pane's measured cell. It only ever means "render the
+  # Maximized geometry instead"; it never edits the stored preference.
+  def handle_event("size_fallback", %{"fallback" => fallback}, socket) do
+    {:noreply, assign(socket, :size_fallback?, fallback == true)}
   end
 
   def handle_event("toggle_roster", _params, socket) do
@@ -300,6 +352,7 @@ defmodule ArbiterWeb.SessionDockLive do
         {:noreply,
          socket
          |> assign(:open_ids, open_ids)
+         |> prune_sizes(open_ids)
          |> expand_window(session.id)
          |> assign(:launch_open?, false)
          |> assign(:launch_error, nil)
@@ -328,6 +381,7 @@ defmodule ArbiterWeb.SessionDockLive do
       {:noreply,
        socket
        |> assign(:open_ids, open_ids)
+       |> prune_sizes(open_ids)
        |> expand_window(id)
        |> assign(:roster_open?, false)
        |> persist()}
@@ -504,6 +558,9 @@ defmodule ArbiterWeb.SessionDockLive do
      # (bd-a292yj): the final scrollback is thrown out by an explicit act,
      # rather than by the session merely having ended.
      |> assign(:frozen, MapSet.delete(socket.assigns.frozen, id))
+     # ...and so does its size preset. Re-opening it later is a new window,
+     # and a new window is Compact (bd-covojz).
+     |> assign(:sizes, Map.delete(socket.assigns.sizes, id))
      |> close_menu()
      |> then(&if &1.assigns.info_id == id, do: close_info(&1), else: &1)
      |> push_event("session-dock:forget", %{id: id})
@@ -616,6 +673,13 @@ defmodule ArbiterWeb.SessionDockLive do
     (open_ids ++ [id]) |> Enum.uniq() |> Enum.take(-@max_open)
   end
 
+  # A window evicted at the cap is as gone as a dismissed one, so its size
+  # preset goes with it rather than lingering to surprise the next time that
+  # session is opened.
+  defp prune_sizes(socket, open_ids) do
+    assign(socket, :sizes, Map.take(socket.assigns.sizes, open_ids))
+  end
+
   # Expanding is what mounts a terminal, so it is also what re-arms the watch
   # for one that never connects.
   defp expand_window(socket, id) do
@@ -623,6 +687,10 @@ defmodule ArbiterWeb.SessionDockLive do
 
     socket
     |> assign(:expanded_id, id)
+    # The narrow-viewport claim was about the window that was expanded a moment
+    # ago. The client re-measures on every `session-dock:size` and says so
+    # again if it still holds (bd-covojz).
+    |> assign(:size_fallback?, false)
     |> assign(:terminal_live?, false)
     |> assign(:terminal_stalled?, false)
     |> close_menu()
@@ -631,6 +699,7 @@ defmodule ArbiterWeb.SessionDockLive do
   defp collapse_window(socket) do
     socket
     |> assign(:expanded_id, nil)
+    |> assign(:size_fallback?, false)
     |> assign(:terminal_live?, false)
     |> assign(:terminal_stalled?, false)
     |> close_menu()
@@ -718,10 +787,81 @@ defmodule ArbiterWeb.SessionDockLive do
   end
 
   defp persist(socket) do
-    push_event(socket, "session-dock:persist", %{
+    socket
+    |> push_event("session-dock:persist", %{
       open: socket.assigns.open_ids,
-      expanded: socket.assigns.expanded_id
+      expanded: socket.assigns.expanded_id,
+      sizes: socket.assigns.sizes
     })
+    # Said separately from the storage write because it has a second audience:
+    # the *terminal* hook listens for it too and answers with `reclaim()`, which
+    # is phase 2's forced refit — fit after the layout settles, send cols/rows
+    # to the pane, redraw when the geometry moved. The dock cannot reach into
+    # the pane, so a size change is announced rather than applied.
+    |> push_event("session-dock:size", %{
+      id: socket.assigns.expanded_id,
+      size: requested_size(socket.assigns)
+    })
+  end
+
+  # Which size the *expanded* window is asking for. Nothing expanded is
+  # `"compact"`: there is no panel, so the page owes it no room.
+  defp requested_size(%{expanded_id: nil}), do: @default_size
+
+  defp requested_size(%{expanded_id: id, sizes: sizes}),
+    do: Map.get(sizes, id, @default_size)
+
+  # What actually gets rendered, which is the requested size except when the
+  # client has reported that a side panel does not fit here.
+  defp effective_size("side", true), do: "max"
+  defp effective_size(size, _fallback?), do: size
+
+  # Same treatment as every other half of a `restore` payload: storage holds
+  # whatever a previous version of this code, a half-written write or a
+  # devtools console left there. An entry has to name an open window and one of
+  # the three presets, or it is not a size.
+  defp restored_sizes(params, open_ids) do
+    case Map.get(params, "sizes") do
+      sizes when is_map(sizes) ->
+        for id <- open_ids,
+            size = Map.get(sizes, id),
+            size in @sizes,
+            size != @default_size,
+            into: %{},
+            do: {id, size}
+
+      _other ->
+        %{}
+    end
+  end
+
+  # The geometry of one window, by preset. Collapsed windows are a strip of
+  # title bars and have no size of their own.
+  #
+  # Side panel and Maximized leave the dock's flex row entirely (`fixed`), so
+  # the strip below keeps the roster and every other window's title bar —
+  # acceptance 6 — while the expanded window's own title bar travels with the
+  # panel it controls. Both stop at the strip rather than covering it.
+  # The title-bar control's three options, in the order they widen.
+  defp size_presets do
+    [
+      {"compact", "Compact", "Compact — docked to the bottom of the page"},
+      {"side", "Side", "Side panel — docked right at full height, page still readable"},
+      {"max", "Max", "Maximized — nearly the whole page"}
+    ]
+  end
+
+  defp window_size_class(false, _size), do: "basis-[11rem] max-w-[11rem] min-w-[5rem]"
+
+  defp window_size_class(true, "compact"), do: "basis-[44rem] max-w-[44rem] min-w-[16rem]"
+
+  defp window_size_class(true, "side") do
+    "fixed top-[var(--nav-height)] right-0 bottom-[var(--session-dock-strip-height)] " <>
+      "w-[var(--session-dock-side-width)]"
+  end
+
+  defp window_size_class(true, "max") do
+    "fixed top-[var(--nav-height)] left-3 right-3 bottom-[var(--session-dock-strip-height)]"
   end
 
   defp open_sessions(assigns) do
@@ -737,7 +877,10 @@ defmodule ArbiterWeb.SessionDockLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :open_sessions, open_sessions(assigns))
+    assigns =
+      assigns
+      |> assign(:open_sessions, open_sessions(assigns))
+      |> assign(:default_size, @default_size)
 
     ~H"""
     <div
@@ -800,6 +943,8 @@ defmodule ArbiterWeb.SessionDockLive do
         menu_open?={@menu_id == session.id}
         info_open?={@info_id == session.id}
         usage={@info_usage}
+        size={Map.get(@sizes, session.id, @default_size)}
+        size_fallback?={@expanded_id == session.id and @size_fallback?}
       />
     </div>
 
@@ -920,6 +1065,25 @@ defmodule ArbiterWeb.SessionDockLive do
           // offset nothing on screen was painted at.
           this.onForget = this.handleEvent("session-dock:forget", ({ id }) => forgetResume(id))
 
+          // A size preset changed (bd-covojz). This is the seam the pane
+          // cannot see for itself: the window's box moves because the *server*
+          // re-rendered its classes, and the refit has to happen after that
+          // patch has been laid out, not while it is still being applied.
+          //
+          // Two frames — one for LiveView's DOM patch, one for the browser to
+          // lay it out — then `reclaim()`, which is phase 2's one refit path
+          // under `force` (fit the settled box, send the new cols/rows to the
+          // pane, and clear the renderer when the geometry actually moved).
+          // Not a second refit path: the `ResizeObserver` will also see this
+          // move, and the debounce inside `reclaim` coalesces the two into one.
+          this.onResize = this.handleEvent("session-dock:size", () => {
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                if (this.terminal) this.terminal.reclaim()
+              })
+            )
+          })
+
           // Exposed on the element the same way, and for the same reason,
           // `app.js` exposes `window.liveSocket`: a terminal is the one thing
           // on this page with no DOM to read when something looks wrong — the
@@ -961,6 +1125,7 @@ defmodule ArbiterWeb.SessionDockLive do
         destroyed() {
           window.removeEventListener("phx:navigate", this.onNavigate)
           if (this.onForget) this.removeHandleEvent(this.onForget)
+          if (this.onResize) this.removeHandleEvent(this.onResize)
           if (!this.terminal) return
 
           // A dead pane has no stream to replay, so what it leaves behind is
@@ -1205,6 +1370,14 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :info_open?, :boolean, required: true
   attr :usage, :any, required: true, doc: "the info panel's rollup, or nil"
 
+  attr :size, :string,
+    required: true,
+    doc: "the window's size preset (bd-covojz) — compact, side or max"
+
+  attr :size_fallback?, :boolean,
+    required: true,
+    doc: "the client reported this viewport cannot fit a side panel and a usable page"
+
   defp window(assigns) do
     assigns =
       assigns
@@ -1221,11 +1394,18 @@ defmodule ArbiterWeb.SessionDockLive do
       )
       |> assign(:name, DisplayName.resolve(assigns.session))
       |> assign(:running?, assigns.session.status == :running and not assigns.frozen?)
+      # What is actually rendered: the operator's choice, unless the client has
+      # reported that a side panel does not fit on this viewport.
+      # A fallback is a thing that happened to a *side panel*. It has nothing to
+      # say about a Compact or Maximized window, and must not label one.
+      |> assign(:size_fallback?, assigns.size_fallback? and assigns.size == "side")
+      |> assign(:effective_size, effective_size(assigns.size, assigns.size_fallback?))
 
     ~H"""
     <div
       id={"session-dock-window-#{@session.id}"}
       data-expanded={to_string(@expanded?)}
+      data-size={@effective_size}
       data-status={@session.status}
       class={
         [
@@ -1238,11 +1418,9 @@ defmodule ArbiterWeb.SessionDockLive do
           #
           # The expanded basis is wider than phase 1's empty frame needed: a
           # terminal cannot reflow meaningfully below ~80 columns (§6.3), and
-          # 28rem of pane was about 60 of them.
-          if(@expanded?,
-            do: "basis-[44rem] max-w-[44rem] min-w-[16rem]",
-            else: "basis-[11rem] max-w-[11rem] min-w-[5rem]"
-          )
+          # 28rem of pane was about 60 of them. The other two presets leave the
+          # row entirely — see `window_size_class/2`.
+          window_size_class(@expanded?, @effective_size)
         ]
       }
     >
@@ -1255,12 +1433,20 @@ defmodule ArbiterWeb.SessionDockLive do
         id={"session-dock-frame-#{@session.id}"}
         role="region"
         aria-label={"Session #{@name}"}
-        class={[
-          "relative flex flex-col h-[min(52vh,380px)] overflow-hidden",
-          "border border-b-0 border-solid border-[var(--border-default)]",
-          "rounded-t-[var(--radius-panel)] bg-[var(--surface-panel)] shadow-lg",
-          not @expanded? && "hidden"
-        ]}
+        class={
+          [
+            "relative flex flex-col overflow-hidden",
+            # Compact keeps phase 2's bottom-docked height; the other two are
+            # sized by the window's own `fixed` box and just fill it.
+            if(@expanded? and @effective_size != "compact",
+              do: "grow min-h-0",
+              else: "h-[min(52vh,380px)]"
+            ),
+            "border border-b-0 border-solid border-[var(--border-default)]",
+            "rounded-t-[var(--radius-panel)] bg-[var(--surface-panel)] shadow-lg",
+            not @expanded? && "hidden"
+          ]
+        }
       >
         <%!-- The status strip is chrome, pinned outside the xterm element so
               it can never fight the fit for rows (§6.3). Its contents are
@@ -1587,6 +1773,55 @@ defmodule ArbiterWeb.SessionDockLive do
           class="shrink min-w-0 max-w-[7rem] truncate text-[10px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
         >
           {@session.end_reason || "ended"}
+        </span>
+
+        <%!-- The size control (bd-covojz). Only the expanded window has a size
+              to choose, so a collapsed title bar 11rem wide never has to find
+              room for this. Three discrete presets, not a drag handle: see
+              `window_size_class/2`. --%>
+        <div
+          :if={@expanded?}
+          id={"session-dock-size-#{@session.id}"}
+          role="group"
+          aria-label={"Window size for #{@name}"}
+          class={[
+            "shrink-0 flex items-center gap-px p-px",
+            "rounded-[var(--radius-field)] border border-solid border-[var(--border-default)]",
+            "bg-[var(--surface-field)]"
+          ]}
+        >
+          <button
+            :for={{size, label, hint} <- size_presets()}
+            type="button"
+            id={"session-dock-size-#{size}-#{@session.id}"}
+            phx-click="set_size"
+            phx-value-id={@session.id}
+            phx-value-size={size}
+            aria-pressed={to_string(@size == size)}
+            title={hint}
+            class={[
+              "px-1.5 h-[18px] flex items-center rounded-[var(--radius-chip)] cursor-pointer",
+              "border-0 text-[10px] font-medium transition-colors duration-100",
+              if(@size == size,
+                do: "bg-[var(--surface-card)] text-[var(--text-title)]",
+                else: "bg-transparent text-[var(--text-label)] hover:text-[var(--text-primary)]"
+              )
+            ]}
+          >
+            {label}
+          </button>
+        </div>
+
+        <%!-- The narrow-viewport answer, said where the choice was made. The
+              preference is still Side panel — this is what happened to it
+              here, and it goes away by itself when the window has room. --%>
+        <span
+          :if={@size_fallback?}
+          id={"session-dock-size-fallback-#{@session.id}"}
+          title="This viewport cannot fit a side panel and a usable page at once, so the window is maximized."
+          class="shrink-0 px-1.5 h-[18px] flex items-center rounded-[var(--radius-field)] text-[10px] font-[family-name:var(--font-mono)] bg-[var(--surface-field)] text-[var(--text-label)]"
+        >
+          too narrow — maximized
         </span>
 
         <.window_menu

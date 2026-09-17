@@ -242,6 +242,19 @@
      toggle are this tall, and every page reserves this much room at its
      bottom so the strip never covers the last row of content. */
   --session-dock-strip-height: 34px;
+  /* bd-covojz: the expanded window's Side panel preset. §6.3 — a terminal
+     cannot reflow meaningfully below ~80 columns, so the panel is a share of
+     the viewport *floored* at 80 columns' worth of pixels. 640px is 80 cells
+     of the fallback mono face at the terminal's 13px plus the pane's chrome;
+     `session_dock_size.mjs` refines it from the real font metrics once the
+     webfont has landed, and `DEFAULT_MIN_COLUMNS_WIDTH` there is this number. */
+  --session-dock-min-cols: 640px;
+  --session-dock-side-width: max(35vw, var(--session-dock-min-cols));
+  /* How much of the page's width a side panel is currently taking. Zero unless
+     the dock hook has said a side panel is up *and* fits — which is why it is
+     a second variable rather than the width above: the page gives up room only
+     while something is actually occupying it. */
+  --session-dock-page-inset: 0px;
 
   --measure-prose: 74ch;
   --measure-narrow: 62ch;
@@ -267,6 +280,16 @@
   --arb-ease-in-out: cubic-bezier(0.4, 0, 0.4, 1);
   --pulse-period: 1.4s;
   --ping-period: 1.8s;
+}
+
+/* bd-covojz: set by the session dock's hook on `document.documentElement` to
+   the size the expanded window is *actually* rendering at — "side" only when a
+   side panel both was asked for and fits (`resolveDockSize`). It is the page's
+   half of the side-panel contract: `<main>` is inset by exactly the panel's
+   width, so the content stays visible and usable to its left instead of
+   sliding underneath it. */
+html[data-dock-size="side"] {
+  --session-dock-page-inset: var(--session-dock-side-width);
 }
 
 @keyframes arb-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
