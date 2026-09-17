@@ -471,6 +471,135 @@ async function run(page) {
       `and the pane reports ${reclaimed.meta} (adopted=${reclaimed.adopted})`
   )
 
+  // -- the size presets (bd-covojz) -----------------------------------------
+  //
+  // Three discrete geometry changes, each taken through phase 2's one refit
+  // path. What has to hold at every one of them: the *same* xterm (the stamp),
+  // a pane told the geometry the terminal fitted to, no clipped bottom row,
+  // the scrollback still on screen — and, for a side panel, a page that is
+  // inset by exactly the panel's width rather than hidden underneath it.
+
+  const compactLayout = await layout(page, SESSION_A)
+
+  await preset(page, SESSION_A, "side")
+  const sidePanel = await settledGeometry(page, SESSION_A)
+  const sideLayout = await layout(page, SESSION_A)
+
+  check(
+    "side-panel-docks-right-at-full-height",
+    sideLayout.dockSize === "side" &&
+      Math.abs(sideLayout.right - sideLayout.viewportWidth) <= 1 &&
+      sideLayout.top <= sideLayout.navHeight + 1 &&
+      sideLayout.height > sideLayout.viewportHeight * 0.7,
+    `data-dock-size=${sideLayout.dockSize}, right=${sideLayout.right}/${sideLayout.viewportWidth}, ` +
+      `top=${sideLayout.top} (nav ${sideLayout.navHeight}), height=${sideLayout.height}`
+  )
+
+  // §6.3's floor, in the preset that is most at risk of breaching it.
+  check(
+    "side-panel-still-fits-eighty-columns",
+    sidePanel.cols >= 80 && sidePanel.paneOverflow <= 1 && !sidePanel.scrolls,
+    `${sidePanel.cols}x${sidePanel.rows}, overflow=${sidePanel.paneOverflow}px, ` +
+      `sideways scroll=${sidePanel.scrolls}`
+  )
+
+  check(
+    "side-panel-leaves-the-page-usable-beside-it",
+    sideLayout.mainInset >= sideLayout.width - 1 &&
+      sideLayout.viewportWidth - sideLayout.mainInset >= 480,
+    `<main> is inset ${sideLayout.mainInset}px for a ${sideLayout.width}px panel, ` +
+      `leaving ${sideLayout.viewportWidth - sideLayout.mainInset}px of page`
+  )
+
+  check(
+    "side-panel-refits-the-same-terminal",
+    sidePanel.stamp === "kept" &&
+      sidePanel.xterms === 1 &&
+      sidePanel.state === "live" &&
+      sidePanel.text.includes(BEFORE),
+    `stamp=${sidePanel.stamp}, ${sidePanel.xterms} xterm(s), state=${sidePanel.state}, ` +
+      `scrollback kept=${sidePanel.text.includes(BEFORE)}`
+  )
+
+  // A browser resize while the panel is up. Below the point where 80 columns
+  // and a usable page both fit, the window falls back to Maximized and the
+  // title bar says so — and it comes back by itself when the room returns.
+  await page.resizeViewport(1000, HEIGHT)
+  await page.poll(
+    `!!document.getElementById("session-dock-size-fallback-${SESSION_A}")`,
+    "a viewport too narrow for a side panel never fell back to Maximized"
+  )
+  const narrow = await settledGeometry(page, SESSION_A)
+  const narrowLayout = await layout(page, SESSION_A)
+
+  check(
+    "a-viewport-too-narrow-for-a-side-panel-maximizes-and-says-so",
+    narrowLayout.dockSize === "max" &&
+      narrowLayout.mainInset === 0 &&
+      narrow.paneOverflow <= 1 &&
+      narrow.stamp === "kept",
+    `data-dock-size=${narrowLayout.dockSize}, page inset=${narrowLayout.mainInset}, ` +
+      `${narrow.cols}x${narrow.rows}, overflow=${narrow.paneOverflow}px`
+  )
+
+  await page.resizeViewport(WIDTH, HEIGHT)
+  await page.poll(
+    `!document.getElementById("session-dock-size-fallback-${SESSION_A}")`,
+    "the side panel never came back when the viewport did"
+  )
+  const widened = await settledGeometry(page, SESSION_A)
+
+  check(
+    "a-browser-resize-under-a-side-panel-refits-the-pane",
+    widened.cols === sidePanel.cols &&
+      widened.rows === sidePanel.rows &&
+      widened.meta === `${widened.cols}x${widened.rows}` &&
+      widened.paneOverflow <= 1,
+    `back to ${widened.cols}x${widened.rows}, pane reports ${widened.meta}`
+  )
+
+  await screenshot("side-panel")
+
+  await preset(page, SESSION_A, "max")
+  const maximized = await settledGeometry(page, SESSION_A)
+  const maxLayout = await layout(page, SESSION_A)
+
+  check(
+    "maximized-fills-nearly-the-whole-page",
+    maxLayout.dockSize === "max" &&
+      maxLayout.width >= maxLayout.viewportWidth * 0.9 &&
+      maxLayout.mainInset === 0 &&
+      maximized.cols > sidePanel.cols &&
+      maximized.paneOverflow <= 1,
+    `${maxLayout.width}px of ${maxLayout.viewportWidth}, ${maximized.cols}x${maximized.rows}, ` +
+      `overflow=${maximized.paneOverflow}px`
+  )
+
+  check(
+    "maximized-keeps-the-roster-reachable",
+    maxLayout.rosterVisible,
+    `the roster toggle is ${maxLayout.rosterVisible ? "" : "not "}on screen`
+  )
+
+  await screenshot("maximized")
+
+  await preset(page, SESSION_A, "compact")
+  const backToCompact = await settledGeometry(page, SESSION_A)
+  const compactAgain = await layout(page, SESSION_A)
+
+  check(
+    "compact-comes-back-exactly-as-it-was",
+    compactAgain.dockSize === "compact" &&
+      compactAgain.mainInset === 0 &&
+      backToCompact.cols === compactLayout.cols &&
+      backToCompact.rows === compactLayout.rows &&
+      backToCompact.stamp === "kept" &&
+      backToCompact.text.includes(BEFORE) &&
+      backToCompact.paneOverflow <= 1,
+    `${compactLayout.cols}x${compactLayout.rows} -> ${backToCompact.cols}x${backToCompact.rows} ` +
+      `across three presets, same xterm=${backToCompact.stamp === "kept"}`
+  )
+
   // -- the keyboard rule ----------------------------------------------------
 
   const focus = await page.json(`(() => {
@@ -504,6 +633,53 @@ async function run(page) {
 }
 
 // -- page helpers -------------------------------------------------------------
+
+// Pick a size preset from the expanded window's title bar and wait for the
+// server's re-render to land. The refit that follows it is deliberately *not*
+// waited for here — `settledGeometry` is what proves it happened.
+async function preset(page, id, size) {
+  await page.eval(`document.getElementById("session-dock-size-${size}-${id}").click()`)
+  await page.poll(
+    `document.getElementById("session-dock-size-${size}-${id}").getAttribute("aria-pressed") === "true"`,
+    `the ${size} preset never took for ${id}`
+  )
+  await page.settle()
+}
+
+// Where the window actually is, and what the *page* gave up for it. The
+// terminal's own geometry is `geometry/2`'s job; this is the other half of the
+// side panel's contract — the page has to stay visible and usable beside it.
+function layout(page, id) {
+  return page.json(`(() => {
+    const win = document.getElementById("session-dock-window-${id}")
+    const rect = win ? win.getBoundingClientRect() : null
+    const main = document.querySelector("main")
+    const nav = document.getElementById("top-nav")
+    const roster = document.getElementById("session-dock-roster-toggle")
+    const rosterRect = roster ? roster.getBoundingClientRect() : null
+    const term = document.getElementById("session-dock-terminal-${id}")
+    const xterm = term && term.__arbTerminal ? term.__arbTerminal.term : null
+
+    return {
+      dockSize: document.documentElement.dataset.dockSize || null,
+      top: rect ? Math.round(rect.top) : null,
+      right: rect ? Math.round(rect.right) : null,
+      width: rect ? Math.round(rect.width) : null,
+      height: rect ? Math.round(rect.height) : null,
+      navHeight: nav ? Math.round(nav.getBoundingClientRect().height) : null,
+      mainInset: main ? Math.round(parseFloat(getComputedStyle(main).paddingRight)) : null,
+      rosterVisible:
+        !!rosterRect &&
+        rosterRect.width > 0 &&
+        rosterRect.right <= window.innerWidth &&
+        rosterRect.bottom <= window.innerHeight,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      cols: xterm ? xterm.cols : null,
+      rows: xterm ? xterm.rows : null
+    }
+  })()`)
+}
 
 async function open(page, id) {
   await page.eval(`(() => {
