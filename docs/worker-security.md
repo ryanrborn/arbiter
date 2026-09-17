@@ -233,6 +233,77 @@ layer that sets them.
 So no worker spawn — worker, reviewer, or bare ad-hoc run — inherits the host
 operator's permission posture.
 
+## How the agy (Gemini) adapter maps it
+
+`Arbiter.Agents.Gemini.Security` is the agy analogue of the Claude module above
+(bd-7s29yq / T6b). agy has **no** `--settings` flag and **no** config-dir
+environment variable: its permission posture comes from
+`$HOME/.gemini/antigravity-cli/settings.json` and nothing else. So the mapping
+has two halves that must agree:
+
+| Mode      | agy argv                          | generated `toolPermission` | deny enforced? |
+| --------- | --------------------------------- | -------------------------- | -------------- |
+| `:bypass` | `--dangerously-skip-permissions`  | `always-proceed`           | **yes**        |
+| `:auto`   | *(none)*                          | `always-proceed`           | **yes**        |
+| `:strict` | `--sandbox`                       | `strict`                   | **yes** — and unallowed ⇒ blocked |
+
+`Arbiter.Agents.Gemini.ConfigDir` supplies the `$HOME` the settings document
+lands in: one directory per worktree under `~/.cache/arbiter/worker-agy/`,
+seeded on every spawn with
+
+* the **generated** `settings.json` (never the operator's),
+* an Arbiter-owned, persona-forbidding `GEMINI.md`,
+* `.gemini/config/mcp_config.json` when the dispatch has an MCP scope token, and
+* symlink passthrough for everything else in the operator's `$HOME` *except*
+  `.gemini`, `.agents` and `.antigravity` — the three trees agy reads its
+  config, memory, skills and plugins from.
+
+Rules are rewritten into agy's own grammar (`command(...)`, `read_file(...)`,
+`write_file(...)`, `url(...)`); a rule with no agy analogue (a bare Claude tool
+name such as `Monitor`) is dropped rather than emitted uninterpretably.
+
+### What was verified live, and what agy does *not* enforce
+
+Probed against the installed `agy` while implementing bd-7s29yq, each with a
+throwaway `$HOME`:
+
+* The generated `settings.json` **is** read in place of the operator's, and
+  `toolPermission` is echoed verbatim as `init.permission_mode` on the
+  stream-json `init` event. `apps/arbiter/test/fixtures/agy_init_strict.json`
+  is a real captured event (`permission_mode: "strict"`);
+  `agy_init_inherited.json` is the pre-fix control (`"always-proceed"`).
+* `permissions.deny` is a **hard block in every mode**, including under
+  `--dangerously-skip-permissions`: with `deny: ["command(rm)"]`, a
+  `rm ./inside.txt` came back `permission check failed for unsandboxed ...` and
+  the file survived. This is why `security_enforced?/0` can answer `true`.
+* Under `strict`, headless mode cannot prompt, so anything not matched by
+  `permissions.allow` is **auto-denied** (agy reports `denied_actions` on the
+  `result` event). It does not hang to the print timeout. `:strict` is
+  therefore genuinely allowlist-only on agy: a `:strict` agy worker gets no
+  shell at all unless the workspace policy names the commands it may run.
+* **`allowNonWorkspaceAccess: false` does not work.** With it set, a
+  `touch <outside-the-worktree>/marker` via `run_command` still succeeded, and
+  so did a `view_file` read of a file outside the workspace. The key is still
+  emitted (it is the documented switch and costs nothing), but the load-bearing
+  out-of-worktree guard is the `write_file(...)` deny list plus `:strict`'s
+  allowlist-only shell — not that flag.
+* **`--sandbox` does not change `init.permission_mode`,** and on a host with no
+  sandbox backend agy falls back to a permission check
+  (`permission check failed for unsandboxed ...`) rather than a kernel jail.
+
+As on the Claude side these are *permission-layer* guards inside the agent, not
+OS isolation.
+
+### Credentials are untouched by the `$HOME` redirect
+
+On a host with a working freedesktop Secret Service, agy keeps its live Google
+grant in the **keyring**, which is scoped to the Linux user session and not to
+`$HOME` — the T6a spike proved a brand-new `$HOME` with zero credential files
+still authenticates. `ConfigDir.keyring_available?/0` detects that and seeds
+nothing. Only when no Secret Service is reachable do we **copy** (never
+symlink, which a refresh would write back through) `oauth_creds.json`,
+`jetski-standalone-oauth-token` and `google_accounts.json`.
+
 ## Provider-agnostic by construction
 
 `SecurityPolicy` carries no Claude-specific syntax. The `Arbiter.Agents.Agent`
@@ -244,11 +315,15 @@ behaviour contract requires any adapter to:
 3. Not fall through to the host operator's personal agent config.
 4. Implement `security_enforced?/0` returning `true` once it honors the above.
 
-**Current status:** only the `Claude` adapter enforces the policy
-(`security_enforced? = true`). Future adapters (antigravity, Codex, …) implement
-the same contract their own way. Until an adapter implements it, the REST
-`security_posture.policy_enforced` field returns `false` so operators can see
-whether the declared posture is actually being enforced by the running adapter.
+**Current status:** `Claude` enforces the policy unconditionally
+(`security_enforced? = true`). `Gemini` enforces it when — and only when — the
+CLI on `PATH` is `agy` *and* worker config isolation is on, since without an
+Arbiter-owned `$HOME` there is nowhere to put the generated settings document;
+it answers `false` otherwise, including for the upstream `gemini` CLI, which has
+no allow/deny mechanism at all. `Codex` does not implement the contract yet and
+answers `false`. The REST `security_posture.policy_enforced` field reports each
+adapter's own answer, so operators can see whether the declared posture is
+actually being enforced by the running adapter.
 
 ## Where the posture is surfaced
 
