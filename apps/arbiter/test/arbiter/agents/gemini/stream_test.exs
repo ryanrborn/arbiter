@@ -328,7 +328,11 @@ defmodule Arbiter.Agents.Gemini.StreamTest do
       assert Stream.activity_for_event(@active_tool_event) == "running: echo hello-from-agy"
 
       mix_test_event =
-        put_in(@active_tool_event, ["step_update", "tool_info", "parameters", "CommandLine"], "mix test")
+        put_in(
+          @active_tool_event,
+          ["step_update", "tool_info", "parameters", "CommandLine"],
+          "mix test"
+        )
 
       assert Stream.activity_for_event(mix_test_event) == "running tests"
     end
