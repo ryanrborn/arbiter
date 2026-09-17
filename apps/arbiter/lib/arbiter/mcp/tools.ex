@@ -2039,7 +2039,6 @@ defmodule Arbiter.MCP.Tools do
       # still has to be readable there and not only in `arb prime`.
       review_park_reason: i.review_park_reason,
       review_parked_at: iso(i.review_parked_at),
-      assignee: i.assignee,
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
       tracker_context_type: to_str(i.tracker_context_type),

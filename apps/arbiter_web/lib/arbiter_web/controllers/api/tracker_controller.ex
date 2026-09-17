@@ -24,10 +24,15 @@ defmodule ArbiterWeb.Api.TrackerController do
         "url": "https://github.com/owner/repo/issues/42",
         "tracker_type": "github"
       }
+
+  bd-1ozks5: `assignee` is still accepted in the ticket body for one release
+  — the local assignee field is gone, so it's silently ignored and reported
+  back as a `warnings` entry rather than rejected.
   """
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
 
@@ -58,9 +63,13 @@ defmodule ArbiterWeb.Api.TrackerController do
         {:ok, ref} ->
           url = Trackers.link_for_workspace(workspace, ref)
 
+          body =
+            %{ref: ref, url: url, tracker_type: Atom.to_string(tracker_type)}
+            |> maybe_put_warnings(AssigneeCompat.warnings(params))
+
           conn
           |> put_status(:created)
-          |> json(%{ref: ref, url: url, tracker_type: Atom.to_string(tracker_type)})
+          |> json(body)
 
         {:error, :not_supported} ->
           {:error,
@@ -78,7 +87,6 @@ defmodule ArbiterWeb.Api.TrackerController do
     %{}
     |> put_if_present(:title, params["title"])
     |> put_if_present(:description, params["description"])
-    |> put_if_present(:assignee, params["assignee"])
     |> put_if_present(:priority, params["priority"])
     |> put_if_present(:issue_type, params["issue_type"])
   end
@@ -86,6 +94,9 @@ defmodule ArbiterWeb.Api.TrackerController do
   defp put_if_present(map, _key, nil), do: map
   defp put_if_present(map, _key, ""), do: map
   defp put_if_present(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_put_warnings(map, []), do: map
+  defp maybe_put_warnings(map, warnings), do: Map.put(map, :warnings, warnings)
 
   defp require_tracker(workspace) do
     case Trackers.workspace_type(workspace) do

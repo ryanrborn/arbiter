@@ -595,14 +595,12 @@ defmodule Arbiter.Trackers.Linear do
 
   defp build_create_input(cfg, team_id, title, attrs) do
     description = pluck(attrs, [:description, "description"])
-    assignee_id = pluck(attrs, [:assignee, "assignee"])
     status = pluck(attrs, [:status, "status"]) || :open
     priority = pluck(attrs, [:priority, "priority"])
 
     input =
       %{"teamId" => team_id, "title" => title}
       |> maybe_put("description", description)
-      |> maybe_put("assigneeId", assignee_id)
       |> maybe_put_priority(priority)
 
     # Resolve initial state if a status_map entry or type mapping exists

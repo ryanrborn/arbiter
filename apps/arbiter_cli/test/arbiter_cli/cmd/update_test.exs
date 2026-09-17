@@ -185,6 +185,44 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert exit_code == 0
   end
 
+  # bd-1ozks5: --assignee used to patch the local column, which is gone — it's
+  # still accepted for interface parity but ignored, with a warning, rather
+  # than rejected outright.
+  test "--assignee alongside a real field patches the field, drops assignee, warns" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         decoded = Jason.decode!(body)
+         assert decoded["priority"] == 1
+         refute Map.has_key?(decoded, "assignee")
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "bd-001", "priority" => 1})
+       end}
+    ])
+
+    {_out, err, exit_code} =
+      capture(fn -> Update.run(["bd-001", "--priority", "1", "--assignee", "alice"]) end)
+
+    assert exit_code == 0
+    assert err =~ "--assignee is deprecated"
+  end
+
+  test "an --assignee-only update is a no-op that fetches and reports the task, with a warning" do
+    stub_routes([
+      {{"get", "/api/issues/bd-001"}, {%{"id" => "bd-001", "title" => "unchanged"}, 200}}
+    ])
+
+    {out, err, exit_code} =
+      capture(fn -> Update.run(["bd-001", "--assignee", "alice"]) end)
+
+    assert exit_code == 0
+    assert out =~ "bd-001"
+    assert err =~ "--assignee is deprecated"
+  end
+
   # bd-9so315
   describe "--verify-after-deploy" do
     test "sets the flag" do

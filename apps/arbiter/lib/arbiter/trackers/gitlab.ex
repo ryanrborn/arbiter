@@ -474,14 +474,13 @@ defmodule Arbiter.Trackers.Gitlab do
        }}
 
   # Map task-domain attrs onto GitLab's POST /projects/:id/issues body. `title`
-  # is required; `description`, `assignee_ids`, and `labels` are optional — we
-  # skip them when the caller didn't supply them. Labels are a merged set of:
-  # the initial-status label from the workspace status_map, a `"priority: N"`
+  # is required; `description` and `labels` are optional — we skip them when
+  # the caller didn't supply them. Labels are a merged set of: the
+  # initial-status label from the workspace status_map, a `"priority: N"`
   # label when `:priority` is set, and a `"type: T"` label when `:issue_type`
   # is set (comma-joined, as GitLab expects).
   defp build_create_payload(cfg, attrs, title) do
     description = pluck(attrs, [:description, "description"])
-    assignee = pluck(attrs, [:assignee, "assignee"])
     status = pluck(attrs, [:status, "status"]) || :open
     priority = pluck(attrs, [:priority, "priority"])
     issue_type = pluck(attrs, [:issue_type, "issue_type"])
@@ -489,7 +488,6 @@ defmodule Arbiter.Trackers.Gitlab do
     %{"title" => title}
     |> maybe_put("description", description)
     |> maybe_put_labels(cfg, status, priority, issue_type)
-    |> maybe_put_assignee(cfg, assignee)
   end
 
   defp pluck(map, keys) do
@@ -535,21 +533,6 @@ defmodule Arbiter.Trackers.Gitlab do
       labels -> Map.put(payload, "labels", Enum.join(labels, ","))
     end
   end
-
-  # Best-effort: resolve the assignee username to a numeric id and set
-  # assignee_ids. A resolution failure (unknown user, wire error) simply omits
-  # the assignee rather than failing the whole create.
-  defp maybe_put_assignee(payload, _cfg, nil), do: payload
-  defp maybe_put_assignee(payload, _cfg, ""), do: payload
-
-  defp maybe_put_assignee(payload, cfg, username) when is_binary(username) do
-    case resolve_user_id(cfg, username) do
-      {:ok, id} -> Map.put(payload, "assignee_ids", [id])
-      {:error, _} -> payload
-    end
-  end
-
-  defp maybe_put_assignee(payload, _cfg, _), do: payload
 
   # ---- Internals: user resolution -----------------------------------------
 

@@ -241,7 +241,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{refined: false, title: "think about caching", assignee: "ryan"})
+            issue("bd-a", %{refined: false, title: "think about caching"})
           ]
         )
 
@@ -253,10 +253,22 @@ defmodule Arbiter.Board.SnapshotTest do
                  difficulty: 2,
                  issue_type: :task,
                  workspace_id: "ws-1",
-                 assignee: "ryan",
                  created_at: @now
                }
              ] = board.backlog
+    end
+
+    test "cards carry no assignee (bd-1ozks5: local assignee field removed)" do
+      board =
+        derive(
+          issues: [issue("bd-a")],
+          workers: [worker("bd-b", :running)]
+        )
+
+      assert [ready] = board.ready
+      refute Map.has_key?(ready.card, :assignee)
+      assert [running] = board.running
+      refute Map.has_key?(running, :assignee)
     end
   end
 
@@ -299,25 +311,6 @@ defmodule Arbiter.Board.SnapshotTest do
         )
 
       assert board.promote == "bd-b"
-    end
-  end
-
-  describe "assignee" do
-    test "every card carries the issue's assignee, so the board can filter by it" do
-      board =
-        derive(
-          issues: [
-            issue("bd-a", %{assignee: "alice"}),
-            issue("bd-b", %{status: :closed, assignee: "bob", updated_at: @now})
-          ],
-          workers: [worker("bd-c", :running)]
-        )
-
-      assert [%{card: %{assignee: "alice"}}] = board.ready
-      assert [%{assignee: "bob"}] = board.closed_today
-      # A worker's card takes its assignee from the issue; with no issue behind
-      # it there is simply nobody to name.
-      assert [%{assignee: nil}] = board.running
     end
   end
 

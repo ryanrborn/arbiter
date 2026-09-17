@@ -243,12 +243,10 @@ defmodule Arbiter.Trackers.Shortcut do
 
   defp build_create_payload(title, state_id, attrs) do
     description = pluck(attrs, [:description, "description"])
-    assignee = pluck(attrs, [:assignee, "assignee"])
 
     payload =
       %{"name" => title, "workflow_state_id" => state_id}
       |> maybe_put_description(description)
-      |> maybe_put_owner_ids(assignee)
 
     {:ok, payload}
   end
@@ -265,14 +263,6 @@ defmodule Arbiter.Trackers.Shortcut do
   defp maybe_put_description(payload, nil), do: payload
   defp maybe_put_description(payload, ""), do: payload
   defp maybe_put_description(payload, desc), do: Map.put(payload, "description", desc)
-
-  defp maybe_put_owner_ids(payload, nil), do: payload
-  defp maybe_put_owner_ids(payload, ""), do: payload
-
-  defp maybe_put_owner_ids(payload, id) when is_binary(id),
-    do: Map.put(payload, "owner_ids", [id])
-
-  defp maybe_put_owner_ids(payload, _), do: payload
 
   @impl true
   def search_by_title(title) when is_binary(title) do

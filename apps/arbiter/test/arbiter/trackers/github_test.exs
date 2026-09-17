@@ -627,13 +627,13 @@ defmodule Arbiter.Trackers.GitHubTest do
                GitHub.create(%{title: "Wire the thing", description: "Markdown description"})
     end
 
-    test "drops a blank description and propagates assignee + in_progress label" do
+    test "drops a blank description, ignores an assignee input, and propagates the in_progress label" do
       stub(fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         decoded = Jason.decode!(body)
         assert decoded["title"] == "tagged"
         refute Map.has_key?(decoded, "body")
-        assert decoded["assignees"] == ["alice"]
+        refute Map.has_key?(decoded, "assignees")
         assert decoded["labels"] == ["in progress"]
 
         conn

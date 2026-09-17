@@ -151,7 +151,6 @@ defmodule ArbiterCli.Output do
       Status:       <status>
       Priority:     <priority>
       Type:         <issue_type>
-      Assignee:     <assignee>
       Workspace:    <workspace_id>
       Tracker:      <tracker_type>:<tracker_ref>
       Created:      <created_at>
@@ -182,7 +181,6 @@ defmodule ArbiterCli.Output do
         {"Progress", child_progress_label(issue)},
         {"Rollup", epic_rollup_label(issue["epic_rollup"])},
         {"Auto-close", auto_close_label(issue)},
-        {"Assignee", issue["assignee"]},
         {"Workspace", issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
         {"Target", issue["target_branch"]},
