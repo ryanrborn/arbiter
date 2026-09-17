@@ -58,6 +58,92 @@ defmodule ArbiterWeb.MCP.PlugTest do
     end
   end
 
+  describe "refine-tier token over the real transport (bd-3uy2hn)" do
+    setup ctx do
+      session = Ash.create!(Arbiter.Sessions.Session, %{cwd: "/tmp/mcp-plug-refine"})
+
+      {:ok, child} =
+        Ash.create(Issue, %{title: "plug child", workspace_id: ctx.ws.id, acceptance: "- ac"})
+
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(ctx.task.id, child.id, :parent_of)
+
+      {:ok, outsider} = Ash.create(Issue, %{title: "plug outsider", workspace_id: ctx.ws.id})
+
+      token = Scope.mint_refine(session.id, ctx.ws.id, ctx.task.id)
+
+      {:ok, session: session, refine_token: token, child: child, outsider: outsider}
+    end
+
+    test "tools/list advertises only the allowed tools", ctx do
+      conn = rpc(ctx.conn, ctx.refine_token, req("tools/list"))
+
+      names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
+
+      assert "task_update" in names
+      assert "task_promote" in names
+      refute "worker_dispatch" in names
+      refute "task_close" in names
+      assert Enum.sort(names) == Enum.sort(Arbiter.MCP.RefinePolicy.allowed())
+    end
+
+    test "tools/call updates a descendant", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.refine_token,
+          req("tools/call", %{
+            "name" => "task_update",
+            "arguments" => %{"id" => ctx.child.id, "description" => "over the wire"}
+          })
+        )
+
+      assert %{"result" => result} = json_response(conn, 200)
+      refute result["isError"]
+      assert Ash.get!(Issue, ctx.child.id).description == "over the wire"
+    end
+
+    test "tools/call outside the subtree is a JSON-RPC not-permitted error", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.refine_token,
+          req("tools/call", %{
+            "name" => "task_update",
+            "arguments" => %{"id" => ctx.outsider.id, "title" => "hijacked"}
+          })
+        )
+
+      assert %{"error" => error} = json_response(conn, 200)
+      assert error["code"] == -32_003
+      assert error["message"] =~ "subtree"
+      assert Ash.get!(Issue, ctx.outsider.id).title == "plug outsider"
+    end
+
+    test "tools/call on a denied tool is refused", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.refine_token,
+          req("tools/call", %{
+            "name" => "task_close",
+            "arguments" => %{"id" => ctx.task.id}
+          })
+        )
+
+      assert %{"error" => error} = json_response(conn, 200)
+      assert error["code"] == -32_003
+      assert Ash.get!(Issue, ctx.task.id).status == :open
+    end
+
+    test "the token stops working the moment the session is revoked", ctx do
+      {:ok, _} = Arbiter.Sessions.revoke_mcp_token(ctx.session)
+
+      conn = rpc(ctx.conn, ctx.refine_token, req("tools/list"))
+
+      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
+    end
+  end
+
   describe "authentication" do
     test "a request with no Authorization header is 401", ctx do
       conn =

@@ -83,6 +83,7 @@ defmodule Arbiter.MCP.Catalog do
   | `repo_show` | coordinator | single repo from `list_repos()` |
   """
 
+  alias Arbiter.MCP.RefinePolicy
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
 
@@ -355,6 +356,14 @@ defmodule Arbiter.MCP.Catalog do
         "type" => "object",
         "properties" => %{
           "title" => %{"type" => "string", "description" => "Task title (required)."},
+          "parent_id" => %{
+            "type" => "string",
+            "description" =>
+              "Attach the new task as a `parent_of` child of this existing task, in the same " <>
+                "workspace, in one call (equivalent to a follow-up `dep_add` with " <>
+                "type `parent_of`). Optional. For a refine session it defaults to the bound " <>
+                "issue and may only name the bound issue or one of its descendants."
+          },
           "description" => %{"type" => "string", "description" => "Markdown body."},
           "acceptance" => %{"type" => "string", "description" => "Markdown acceptance criteria."},
           "notes" => %{"type" => "string"},
@@ -563,7 +572,10 @@ defmodule Arbiter.MCP.Catalog do
           "Coordinator only. Idempotent by design — promoting an already-refined task is a no-op success, " <>
           "not an error. bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused unless " <>
           "you pass `acceptance_waived` with a reason (`task`/`decision`/`epic` are exempt; D0 work is " <>
-          "auto-waived).",
+          "auto-waived). **Promote last.** Autopilot can claim a task within seconds of it going " <>
+          "Ready, so every `parent_of` child and every dependency edge the task needs must " <>
+          "already exist before you promote it — an edge added after the promote can lose the " <>
+          "race. A refine-tier promotion returns this rule as `promotion_note`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -2330,8 +2342,17 @@ defmodule Arbiter.MCP.Catalog do
   @spec all() :: [tool()]
   def all, do: @tools
 
-  @doc "The tool definitions visible to `scope` (those whose `:tiers` include the scope's tier)."
+  @doc """
+  The tool definitions visible to `scope`.
+
+  For `:worker` / `:coordinator` that is the tools whose `:tiers` include the
+  scope's tier. For `:refine` it is `Arbiter.MCP.RefinePolicy`'s allow list —
+  a separate, exhaustive table rather than a `:tiers` entry, so that a new tool
+  cannot join (or miss) a refine session's authority by omission. See that
+  module for why.
+  """
   @spec visible(Scope.t()) :: [tool()]
+  def visible(%Scope{tier: :refine}), do: Enum.filter(@tools, &RefinePolicy.allow?(&1.name))
   def visible(%Scope{tier: tier}), do: Enum.filter(@tools, &(tier in &1.tiers))
 
   @doc "Look up a tool definition by name."
@@ -2362,13 +2383,27 @@ defmodule Arbiter.MCP.Catalog do
         {:rpc_error, @code_invalid_params, "Unknown tool: #{name}"}
 
       {:ok, tool} ->
-        if scope.tier in tool.tiers do
-          run(tool, scope, args)
-        else
-          {:rpc_error, @code_not_permitted,
-           "Tool #{name} is not permitted for a #{scope.tier} scope"}
+        case permitted(scope, tool) do
+          :ok -> run(tool, scope, args)
+          {:error, message} -> {:rpc_error, @code_not_permitted, message}
         end
     end
+  end
+
+  # The tier gate. A refine scope is answered from the exhaustive
+  # `RefinePolicy` table — including its `:undecided` case, which denies: a tool
+  # nobody has ruled on is not a tool a browser session gets to call. Every other
+  # tier keeps reading the tool's own `:tiers`.
+  defp permitted(%Scope{tier: :refine}, tool) do
+    if RefinePolicy.allow?(tool.name),
+      do: :ok,
+      else: {:error, RefinePolicy.denial_message(tool.name)}
+  end
+
+  defp permitted(%Scope{tier: tier}, tool) do
+    if tier in tool.tiers,
+      do: :ok,
+      else: {:error, "Tool #{tool.name} is not permitted for a #{tier} scope"}
   end
 
   defp run(tool, scope, args) do

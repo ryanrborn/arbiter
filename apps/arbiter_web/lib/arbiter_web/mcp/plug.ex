@@ -113,11 +113,19 @@ defmodule ArbiterWeb.MCP.Plug do
         end
 
       conn.method == "GET" and accepts_event_stream?(conn) ->
-        # The server → client SSE stream (Streamable HTTP). Coordinator-only.
+        # The server → client SSE stream (Streamable HTTP). Coordinator and
+        # refine sessions only — the stream carries no scoped data of its own
+        # (it is a keepalive + notification channel keyed by mcp-session-id),
+        # but a worker token has no use for it and is kept out.
         case authenticate(conn) do
-          {:ok, %Scope{tier: :coordinator} = scope} -> open_sse(conn, scope)
-          {:ok, %Scope{}} -> unauthorized(conn, :forbidden)
-          {:error, reason} -> unauthorized(conn, reason)
+          {:ok, %Scope{tier: tier} = scope} when tier in [:coordinator, :refine] ->
+            open_sse(conn, scope)
+
+          {:ok, %Scope{}} ->
+            unauthorized(conn, :forbidden)
+
+          {:error, reason} ->
+            unauthorized(conn, reason)
         end
 
       true ->

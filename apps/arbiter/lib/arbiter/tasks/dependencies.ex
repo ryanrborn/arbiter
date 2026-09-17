@@ -209,6 +209,46 @@ defmodule Arbiter.Tasks.Dependencies do
   end
 
   @doc """
+  Is `id` inside the `parent_of` subtree rooted at `root_id` — the root itself,
+  or reachable from it by following `parent_of` edges downward?
+
+  The authorization primitive behind the MCP `:refine` tier (bd-3uy2hn), whose
+  token carries one bound issue and may only write inside that issue's subtree.
+  It walks **upward** from `id` (an issue has far fewer ancestors than a root
+  has descendants) with a visited set, so a malformed graph with a `parent_of`
+  cycle terminates rather than looping — `add/4`'s cycle guard does not police
+  `parent_of`, so that shape is reachable.
+
+  `false` when either id is blank, so a missing binding can never mean "allow".
+  """
+  @spec in_parent_subtree?(String.t() | nil, String.t() | nil) :: boolean()
+  def in_parent_subtree?(root_id, id) when is_binary(root_id) and is_binary(id) do
+    root_id != "" and id != "" and climb_to_root?([id], MapSet.new(), root_id)
+  end
+
+  def in_parent_subtree?(_root_id, _id), do: false
+
+  defp climb_to_root?([], _seen, _root_id), do: false
+
+  defp climb_to_root?(frontier, seen, root_id) do
+    if root_id in frontier do
+      true
+    else
+      seen = Enum.into(frontier, seen)
+
+      parents =
+        Dependency
+        |> Ash.Query.filter(type == :parent_of and to_issue_id in ^frontier)
+        |> Ash.read!()
+        |> Enum.map(& &1.from_issue_id)
+        |> Enum.reject(&MapSet.member?(seen, &1))
+        |> Enum.uniq()
+
+      climb_to_root?(parents, seen, root_id)
+    end
+  end
+
+  @doc """
   Would adding `from_id --type--> to_id` close a gating cycle?
 
   Always `false` for a non-gating type. Intended for pre-checks (greying out a
