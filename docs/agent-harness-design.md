@@ -257,7 +257,7 @@ policy (or wraps it in `:by_budget`).
 
 The policy emits **abstract** knobs only:
 
-* `"model_tier"` — `"economy" | "standard" | "premium"`.
+* `"model_tier"` — `"economy" | "standard" | "premium" | "flagship"`.
 * `"thinking"` — `"none" | "low" | "medium" | "high"` (reasoning effort).
 
 Concrete model names live inside each adapter's `Config` and are
@@ -266,9 +266,21 @@ resolved at spawn time:
 * **Claude** — tier → `haiku` / `sonnet` / `opus`; thinking →
   `--reasoning-effort <level>` (default; configurable per-workspace via
   `agent.config["thinking_argv"]`).
-* **Gemini** — tier → `gemini-2.5-flash-lite` / `gemini-2.5-flash` /
-  `gemini-2.5-pro`; thinking → `GEMINI_THINKING_LEVEL` env var
-  (default; configurable per-workspace via `thinking_argv`).
+* **Gemini** — resolution and thinking surface differ by which CLI is on
+  PATH (`agy` is preferred, falling back to upstream `gemini`; bd-d2yut8):
+  * upstream `gemini` — tier → `gemini-2.5-flash-lite` / `gemini-2.5-flash`
+    / `gemini-2.5-pro` (no `flagship` tier); thinking → `GEMINI_THINKING_LEVEL`
+    env var only — the CLI has no `--effort` flag and rejects one
+    (`Unknown argument: effort`).
+  * `agy` fork — tier → `gemini-3.8-flash-low` / `gemini-3.8-flash-medium`
+    / `gemini-3.1-pro-high` / `claude-opus-4-6-thinking` (`flagship`,
+    routed to the Claude/GPT bucket); thinking → `--effort <level>` CLI
+    flag, but only when the resolved model id has no `-low`/`-medium`/`-high`
+    suffix of its own (every non-flagship id already carries one, so
+    `--model` and `--effort` are never passed together). Both surfaces are
+    configurable per-workspace via `agent.config["tier_models"]` /
+    `["thinking_argv"]`, optionally scoped under the `"gemini"`
+    `ProviderConfig` namespace.
 
 Built-in default mapping (signed off by the coordinator; do not change
 without re-litigation):

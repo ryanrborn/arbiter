@@ -799,7 +799,7 @@ defmodule ArbiterWeb.SessionDockLive do
               // is merely slow, and the strip says "connecting…" either way.
               if (state === "live") this.pushEvent("terminal_live", { id: this.sessionId })
             },
-            onMeta: (meta) => this.setMeta(meta),
+            onMeta: (meta, info) => this.setMeta(meta, info),
             onUsage: (payload) => this.setUsage(payload),
             onExit: (payload) => {
               this.state = "ended"
@@ -917,17 +917,36 @@ defmodule ArbiterWeb.SessionDockLive do
           if (slot) slot.textContent = LABELS[state] || state
         },
 
-        setMeta(meta) {
+        // The pane's geometry, and whether it is this client's own.
+        //
+        // A pane is shared, and the last client to resize it wins (bd-4tjw34).
+        // A client that lost renders at the pane's geometry rather than at the
+        // one its own window would fit — which is the only way to render it
+        // correctly — so the label says `adopted 120x40` rather than passing
+        // the size off as this window's, and says what takes it back.
+        setMeta(meta, info) {
           if (!this.statusEl || !meta) return
           const slot = this.statusEl.querySelector('[data-role="meta"]')
           if (!slot) return
           if (meta.error) {
+            delete slot.dataset.adopted
+            slot.title = ""
             slot.textContent = meta.error
             return
           }
+          const adopted = !!(info && info.adopted)
           const clients = meta.attached_clients
+
+          if (adopted) slot.dataset.adopted = "true"
+          else delete slot.dataset.adopted
+
+          slot.title = adopted
+            ? "Another client resized this session's pane. Click or type here to take it back at this window's size."
+            : ""
           slot.textContent =
-            `${meta.cols}x${meta.rows}` + (clients > 1 ? ` · ${clients} clients` : "")
+            (adopted ? "adopted " : "") +
+            `${meta.cols}x${meta.rows}` +
+            (clients > 1 ? ` · ${clients} clients` : "")
         },
 
         // Each `usage` event carries the file's *cumulative* tokens and latest

@@ -20,50 +20,11 @@ import {
   decodeFrame,
   encodeFrame
 } from "../../assets/js/session_stream.mjs"
+import { FakeSocket } from "./support/phoenix_fake.mjs"
 
-// -- a phoenix.js stand-in ----------------------------------------------------
-
-class FakePush {
-  constructor() { this.handlers = {} }
-  receive(status, cb) { (this.handlers[status] ||= []).push(cb); return this }
-  reply(status, payload) { (this.handlers[status] || []).forEach((cb) => cb(payload)) }
-}
-
-class FakeChannel {
-  constructor(topic, params) {
-    this.topic = topic
-    this.params = params
-    this.events = {}
-    this.pushes = []
-    this.joins = []
-    this.left = false
-  }
-  on(event, cb) { (this.events[event] ||= []).push(cb) }
-  onError(cb) { this.errorHandler = cb }
-  onClose(cb) { this.closeHandler = cb }
-  join() { const p = new FakePush(); this.joins.push({ params: this.params(), push: p }); return p }
-  push(event, payload) { const p = new FakePush(); this.pushes.push({ event, payload, push: p }); return p }
-  leave() { this.left = true; return new FakePush() }
-  emit(event, payload) { (this.events[event] || []).forEach((cb) => cb(payload)) }
-  pushesFor(event) { return this.pushes.filter((p) => p.event === event) }
-}
-
-class FakeSocket {
-  constructor() {
-    this.channels = []
-    this.connected = false
-    this.disconnected = false
-    this.scheduledReconnects = 0
-    this.reconnectTimer = { scheduleTimeout: () => { this.scheduledReconnects++ } }
-  }
-  onOpen(cb) { this.openHandler = cb }
-  onClose(cb) { this.closeHandler = cb }
-  onError(cb) { this.errorHandler = cb }
-  connect() { this.connected = true }
-  disconnect() { this.disconnected = true }
-  channel(topic, params) { const c = new FakeChannel(topic, params); this.channels.push(c); return c }
-  get channel0() { return this.channels[0] }
-}
+// The phoenix.js stand-in lives in `support/phoenix_fake.mjs`: more than one
+// suite drives this module through it now — `session_geometry_test.mjs` wires
+// two clients to one simulated pane through the same fakes.
 
 // A sink that records everything, in order.
 function recorder() {
@@ -399,6 +360,78 @@ test("a resize that does not change the geometry is not pushed at all", async ()
   stream.resize(80, 24)
   await new Promise((resolve) => setTimeout(resolve, 60))
   assert.equal(channel.pushesFor("resize").length, 1, "the pane already has this size")
+})
+
+// -- the pane's geometry, when more than one client is pushing one (bd-4tjw34)
+
+test("a meta that moves the pane out from under us retires the resize dedupe", async () => {
+  const { stream, channel } = connected()
+
+  stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(channel.pushesFor("resize").length, 1)
+
+  // Another client resized the pane out from under us. Without this the cache
+  // would still vouch for 100x30, and this client reclaiming the pane at its
+  // own size would be swallowed as a no-op — leaving the pane at the other
+  // client's geometry and the operator's interaction doing nothing at all.
+  stream.noteGeometry(120, 40)
+
+  stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  assert.deepEqual(
+    channel.pushesFor("resize").map((p) => p.payload),
+    [
+      { cols: 100, rows: 30 },
+      { cols: 100, rows: 30 }
+    ]
+  )
+})
+
+test("a meta cannot swallow a resize this client has not sent yet", async () => {
+  const { stream, channel } = connected()
+
+  // The mount's own announcement, still inside the debounce window when the
+  // join's `meta` lands (bd-14b11h: a resumed join replays bytes for whatever
+  // size the pane is at, and re-announcing is what reconciles the two).
+  stream.resize(100, 30)
+  stream.noteGeometry(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  assert.deepEqual(
+    channel.pushesFor("resize").map((p) => p.payload),
+    [{ cols: 100, rows: 30 }]
+  )
+})
+
+test("a meta reporting the geometry we asked for still suppresses the next resize", async () => {
+  const { stream, channel } = connected()
+
+  stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  stream.noteGeometry(100, 30)
+  stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  assert.equal(channel.pushesFor("resize").length, 1)
+})
+
+test("an unusable geometry never retires the dedupe", async () => {
+  const { stream, channel } = connected()
+
+  stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  for (const [cols, rows] of [[0, 30], [100, 0], [-1, 30], [null, 30], [100.5, 30]]) {
+    stream.noteGeometry(cols, rows)
+  }
+
+  stream.resize(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  assert.equal(channel.pushesFor("resize").length, 1, "the cache was left alone")
 })
 
 // -- remount / redraw (bd-14b11h) ---------------------------------------------
