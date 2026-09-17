@@ -667,6 +667,16 @@ defmodule Arbiter.Agents.GeminiTest do
       Application.put_env(:arbiter, :worker_isolate_config, true)
       Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "homes"))
 
+      # home_env/1 only fires for the resolved `agy` executable — stub one onto
+      # PATH so this test doesn't depend on the host actually having agy installed.
+      bin = Path.join(base, "bin")
+      File.mkdir_p!(bin)
+      agy = Path.join(bin, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", bin <> ":" <> old_path)
+
       on_exit(fn ->
         Application.put_env(:arbiter, :worker_isolate_config, prev_enabled)
 
@@ -674,6 +684,7 @@ defmodule Arbiter.Agents.GeminiTest do
           do: Application.delete_env(:arbiter, :worker_agy_home_root),
           else: Application.put_env(:arbiter, :worker_agy_home_root, prev_root)
 
+        System.put_env("PATH", old_path)
         File.rm_rf!(base)
       end)
 
