@@ -631,13 +631,17 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
 
+      # Monitor before triggering the transition so the :DOWN message carries
+      # the real exit reason — the driver can exit before a post-hoc monitor
+      # is set up, which reports a false :noproc instead of :normal.
+      ref = Process.monitor(driver_pid)
+
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
       # Wait for the worker to fail.
       wait_until(fn -> Worker.state(worker_pid).status == :failed end)
 
       # Driver should exit after seeing :failed.
-      ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
 
       # Task must remain :in_progress for the fix-pass.

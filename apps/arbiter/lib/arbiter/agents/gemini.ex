@@ -3,11 +3,20 @@ defmodule Arbiter.Agents.Gemini do
   Gemini agent adapter implementing `Arbiter.Agents.Agent`.
 
   Favors `agy` CLI binary, falling back to `gemini` CLI binary if `agy` is not on PATH.
+
+  The two CLIs are not interchangeable — see `resolve_executable/0`. On the agy
+  branch the spawn's security posture is split across
+  `Arbiter.Agents.Gemini.Security` (argv + the generated settings document) and
+  `Arbiter.Agents.Gemini.ConfigDir` (the isolated `$HOME` that document lands
+  in, injected by `spawn_env/1`); the upstream `gemini` branch has no analogue
+  of either (bd-7s29yq).
   """
 
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Gemini.Config
+  alias Arbiter.Agents.Gemini.ConfigDir
+  alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
 
   @done_regex ~r/\barb done\b/
@@ -20,15 +29,32 @@ defmodule Arbiter.Agents.Gemini do
   @impl true
   def provider, do: "gemini"
 
-  # Gemini/agy CLIs have no per-tool deny lists or fine-grained permission modes
-  # analogous to Claude's --permission-mode + --settings. The policy is honored
-  # at the coarse level: :bypass maps to --dangerously-skip-permissions / --skip-trust;
-  # :auto and :strict omit those flags so the tool does not bypass its own
-  # permission checks. Operator-level deny rules and sandbox scoping are not yet
-  # enforceable — hence enforced? returns false so the REST posture surface can
-  # show the gap rather than claiming full enforcement.
+  @doc """
+  Whether this host's Gemini-family spawn actually enforces the resolved
+  `Arbiter.Agents.SecurityPolicy` (bd-7s29yq / T6b).
+
+  True only when **both** halves of the seam are present:
+
+    * the CLI on `PATH` is `agy` — the upstream `gemini` CLI has no analogue of
+      `permissions.allow/deny` and still runs with whatever posture it
+      inherits, so it answers `false`; and
+    * worker config isolation is on (`Arbiter.Agents.Gemini.ConfigDir.enabled?/0`)
+      — agy reads its posture only from `$HOME/.gemini/antigravity-cli/settings.json`,
+      so without an Arbiter-owned `$HOME` there is nowhere to put the generated
+      document and the spawn silently inherits the operator's
+      `always-proceed`-with-no-deny-list file. That is precisely the state
+      bd-7s29yq found, and the REST posture surface must keep showing it as
+      *not* enforced.
+
+  When both hold, `permissions.deny` is a hard block in every mode — confirmed
+  live, including under `--dangerously-skip-permissions`; see
+  `Arbiter.Agents.Gemini.Security`'s moduledoc for the probe results and for
+  the two things agy does *not* enforce.
+  """
   @impl true
-  def security_enforced?, do: false
+  def security_enforced? do
+    match?({:ok, {:agy, _}}, resolve_executable()) and ConfigDir.enabled?()
+  end
 
   @impl true
   def done_sentinel, do: @done_regex
@@ -60,9 +86,30 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
+  @doc """
+  Env pairs for an agy/gemini spawn.
+
+  Besides the API key and thinking level, this injects the isolated `HOME`
+  (`Arbiter.Agents.Gemini.ConfigDir`) that carries the generated agy permission
+  posture and the Arbiter-owned `GEMINI.md` — without it agy reads the
+  operator's own `~/.gemini` (bd-7s29yq). Pass the spawn's `:worktree` (or
+  `:worktree_path`) and `:security` policy so the right directory and posture
+  are prepared; a caller with neither still gets an isolated (default-policy)
+  HOME rather than the operator's.
+  """
   @impl true
   def spawn_env(opts \\ []) do
-    api_key_env(opts) ++ thinking_env(opts)
+    api_key_env(opts) ++ thinking_env(opts) ++ home_env(opts)
+  end
+
+  # Only the agy fork reads its config from $HOME; the upstream gemini CLI
+  # keeps its own state there too, and redirecting HOME for it would buy
+  # nothing while risking its auth. Gate on the resolved executable.
+  defp home_env(opts) do
+    case resolve_executable() do
+      {:ok, {:agy, _}} -> ConfigDir.env(opts)
+      _ -> []
+    end
   end
 
   defp api_key_env(opts) do
@@ -243,20 +290,24 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  # :bypass → pass skip-permissions so the tool doesn't gate on confirmations.
-  # :auto/:strict → omit the flag; the tool will not bypass its own permission
-  # checks. Operator deny rules are not enforceable on Gemini/agy (no --settings
-  # equivalent) — see security_enforced?/0.
-  defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
-    [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
-      agy_model_and_effort_argv(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
-  end
-
-  defp build_argv(:agy, exec, prompt, opts, _policy) do
+  # The agy branch's permission posture lives in TWO places and they must agree:
+  # the argv fragment here (`Arbiter.Agents.Gemini.Security.permission_argv/1`)
+  # and the generated `settings.json` that `Arbiter.Agents.Gemini.ConfigDir`
+  # drops into the spawn's isolated `$HOME` (injected by `spawn_env/1`). The
+  # settings document is the load-bearing half — it carries `toolPermission`
+  # and the allow/deny rules; the flag is the part agy only accepts on the
+  # command line. See `Arbiter.Agents.Gemini.Security` for the mode table.
+  defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{} = policy) do
     [exec, "-p", prompt] ++
+      Security.permission_argv(policy) ++
       agy_model_and_effort_argv(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
+  # The upstream `gemini` CLI has no allow/deny mechanism and no settings file
+  # we can generate, so its branches stay coarse: `:bypass` skips its own trust
+  # and confirmation gates, `:auto`/`:strict` leave them on. Nothing here
+  # enforces the policy's deny rules, which is why `security_enforced?/0`
+  # answers `false` on a host where `gemini` (not `agy`) is the resolved CLI.
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--skip-trust", "-y"] ++
       model_flag(:gemini, opts) ++ thinking_flag(:gemini, opts) ++ output_format_flag()

@@ -5,15 +5,15 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
 
   | CLI                     | reads                                          | per-spawn config? |
   | ----------------------- | ---------------------------------------------- | ----------------- |
-  | upstream `gemini`       | `<worktree>/.gemini/settings.json`             | yes               |
-  | `agy` (Antigravity)     | `$HOME/.gemini/config/mcp_config.json` (global) | **no**           |
+  | upstream `gemini`       | `<worktree>/.gemini/settings.json`              | yes               |
+  | `agy` (Antigravity)     | `$HOME/.gemini/config/mcp_config.json`          | via a per-spawn `$HOME` |
 
   `Arbiter.Agents.Gemini.resolve_executable/0` prefers `agy` over `gemini` when
   both are on `PATH`, so on an Antigravity host the provider is *agy*, and
   writing `.gemini/settings.json` is writing a file nothing will ever read. This
-  module therefore routes on the CLI flavour (`cli_flavour/1`) and returns an
-  explicit `{:error, :unsupported}` for `agy` rather than silently emitting a
-  dead file (bd-m8geh4).
+  module therefore routes on the CLI flavour (`cli_flavour/1`) and, for agy,
+  writes into the spawn's isolated `$HOME` instead of the worktree (bd-m8geh4,
+  bd-7s29yq).
 
   ## What agy actually reads (verified live, agy v1.2.5, 2026-09-17)
 
@@ -71,22 +71,22 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   There is also no config-dir environment variable to relocate per spawn — agy
   derives `~/.gemini` from `HOME` and exposes no `AGY_*`/`GEMINI_*` override
   (`strings $(which agy) | grep -oE '(AGY|GEMINI)_[A-Z0-9_]+'`). Per-spawn
-  isolation therefore needs a per-worker `HOME`, which is the T6a spike — not
-  this module's business.
+  isolation therefore needs a per-worker `HOME`.
 
-  ## Consequence
+  ## Consequence (updated by bd-7s29yq / T6b)
 
-  `write_mcp_config/2` refuses for agy with `{:error, :unsupported}`, and
-  `Arbiter.Worker.Dispatch` logs that refusal at `:error` at dispatch time. An
-  agy worker keeps working — it falls back to the `arb` CLI for task reads and
-  progress notes — but the operator is told, loudly, that it has no typed
-  Arbiter MCP tools, instead of a `.gemini/settings.json` sitting in the
-  worktree implying otherwise.
+  `Arbiter.Agents.Gemini.ConfigDir` now gives every agy spawn its own `$HOME`,
+  keyed on the worktree, so the global-only location finally *is* per-spawn:
+  `write_mcp_config/2` writes `agy_config_map/1`'s output to
+  `<isolated-home>/.gemini/config/mcp_config.json` and the worktree stays empty.
 
-  `agy_config_map/1` is kept and tested because agy's *schema* is confirmed
-  correct (see below); only its **location** is unavailable. Whatever ships the
-  per-worker `HOME` can write `agy_config_map/1`'s output straight to
-  `<home>/.gemini/config/mcp_config.json`.
+  The refusal path is kept for the one case where it is still right: with
+  worker config isolation switched off there is no Arbiter-owned `$HOME`, and
+  the only remaining location is the operator's own
+  `~/.gemini/config/mcp_config.json` — which a per-task scope token must never
+  be written into. `{:error, :unsupported}` then flows on to
+  `Arbiter.Worker.Dispatch`, which logs it at `:error` so the capability
+  downgrade is visible rather than silent.
 
   ## The two schemas
 
@@ -119,6 +119,8 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
 
   @behaviour Arbiter.MCP.AgentConfig
 
+  alias Arbiter.Agents.Gemini.ConfigDir
+
   @dirname ".gemini"
   @filename "settings.json"
 
@@ -141,10 +143,15 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
 
     * `:gemini` — writes `.gemini/settings.json`, the upstream CLI's
       project-scoped settings file.
-    * `:agy` — returns `{:error, :unsupported}`. agy reads MCP config only from
-      `$HOME`; no worktree-local path exists (see the moduledoc's probe). This
-      is a deliberate, loud refusal so the failure is visible at dispatch rather
-      than showing up later as an agy worker mysteriously lacking tools.
+    * `:agy` — writes `mcp_config.json` into the spawn's **isolated `$HOME`**
+      (`Arbiter.Agents.Gemini.ConfigDir`, keyed on the same `worktree`), which
+      is the only path agy reads MCP servers from. Nothing is written into the
+      worktree itself — agy would never read it. When worker config isolation
+      is switched off there is no Arbiter-owned `$HOME` to write into, and this
+      still returns `{:error, :unsupported}`: dropping a per-task scope token
+      into the operator's own `~/.gemini/config/mcp_config.json` is never
+      acceptable, and the loud refusal keeps the capability downgrade visible
+      at dispatch (bd-7s29yq).
 
   Pass `cli: :agy | :gemini` to override PATH sniffing (tests, and any caller
   that already knows which binary it is about to spawn).
@@ -153,7 +160,11 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   def write_mcp_config(worktree, opts) when is_binary(worktree) do
     case cli_flavour(opts) do
       :agy ->
-        {:error, :unsupported}
+        case ConfigDir.write_mcp_config(agy_config_map(opts), worktree: worktree) do
+          {:ok, _path} -> :ok
+          {:error, :disabled} -> {:error, :unsupported}
+          {:error, _reason} -> {:error, :unsupported}
+        end
 
       :gemini ->
         dir = Path.join(worktree, @dirname)
