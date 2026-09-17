@@ -567,6 +567,26 @@ async function run(page) {
       `${narrow.cols}x${narrow.rows}, overflow=${narrow.paneOverflow}px`
   )
 
+  // Still narrow, and the operator clicks the Side button that is already
+  // pressed. The server treats every size change as news — it drops the
+  // narrow-viewport claim, because that claim was about the size that *was*
+  // rendering, and re-asks — so the note surviving this is entirely the
+  // client answering a question whose answer did not change. A change-only
+  // answer leaves a side panel on a 1000px viewport with no note and no page
+  // inset, which is the state acceptance 2 forbids.
+  await page.eval(`document.getElementById("session-dock-size-side-${SESSION_A}").click()`)
+  await page.settle(600)
+  const reasked = await layout(page, SESSION_A)
+  const reaskedNote = await page.json(
+    `!!document.getElementById("session-dock-size-fallback-${SESSION_A}")`
+  )
+
+  check(
+    "re-picking-the-pressed-size-keeps-the-narrow-viewport-fallback",
+    reaskedNote === true && reasked.dockSize === "max" && reasked.mainInset === 0,
+    `note=${reaskedNote}, data-dock-size=${reasked.dockSize}, page inset=${reasked.mainInset}`
+  )
+
   await page.resizeViewport(WIDTH, HEIGHT)
   await page.poll(
     `!document.getElementById("session-dock-size-fallback-${SESSION_A}")`,
