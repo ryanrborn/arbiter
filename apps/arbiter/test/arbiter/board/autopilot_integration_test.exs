@@ -234,4 +234,91 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     assert escalation.subject =~ "dispatch stuck"
     assert escalation.body =~ "tonic"
   end
+
+  # `start_autopilot/1` always pins `:paused` (explicitly, or via its
+  # `paused: false` default) so every other test in this file drives the
+  # scheduler deterministically — but that means it can never exercise the
+  # fallback path in `init/1`. This starts a process with no `:paused` option
+  # at all, the same thing a real server restart does.
+  defp restart_autopilot(opts \\ []) do
+    test = self()
+
+    {:ok, pid} =
+      Autopilot.start_link(
+        Keyword.merge(
+          [
+            name: nil,
+            interval_ms: :never,
+            snapshot: &Snapshot.load/1,
+            dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+          ],
+          opts
+        )
+      )
+
+    pid
+  end
+
+  # bd-pgi97m: the pause flag used to live only in the GenServer's own state,
+  # so every restart came back paused whatever the operator last chose. These
+  # start a *second* Autopilot process with no explicit `:paused` option — the
+  # same thing `init/1` sees on a real server restart — and check it picks up
+  # what a previous instance persisted, rather than what that instance's own
+  # in-memory state happened to be.
+  describe "persisted pause state (bd-pgi97m)" do
+    test "a restart after a pause comes back paused" do
+      first = start_autopilot(paused: false)
+      assert :ok = Autopilot.pause(first, "test-suite")
+
+      restarted = restart_autopilot()
+
+      assert Autopilot.paused?(restarted) == true
+
+      assert %{paused?: true, changed_at: %DateTime{}, changed_by: "test-suite"} =
+               Autopilot.status(restarted)
+    end
+
+    test "a restart after a resume comes back resumed" do
+      first = start_autopilot(paused: true)
+      assert :ok = Autopilot.resume(first, "test-suite")
+
+      restarted = restart_autopilot()
+
+      assert Autopilot.paused?(restarted) == false
+
+      assert %{paused?: false, changed_at: %DateTime{}, changed_by: "test-suite"} =
+               Autopilot.status(restarted)
+    end
+
+    test "with nothing persisted, a restart falls back to the app-env default" do
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+
+      try do
+        Application.put_env(:arbiter, :board_autopilot, enabled: true, interval_ms: :never)
+
+        pid = restart_autopilot()
+
+        assert Autopilot.paused?(pid) == false
+        assert %{changed_at: nil, changed_by: nil} = Autopilot.status(pid)
+      after
+        if saved_config == :not_set do
+          Application.delete_env(:arbiter, :board_autopilot)
+        else
+          Application.put_env(:arbiter, :board_autopilot, saved_config)
+        end
+      end
+    end
+
+    test "a pause/resume in one test's sandboxed transaction does not leak into the next" do
+      # Every other test in this describe block pauses or resumes and then
+      # relies on the DB transaction rollback (Ecto.Adapters.SQL.Sandbox) to
+      # undo it. If that isolation broke, whichever test happened to run
+      # first would leave a real row behind and this one would see it.
+      assert Arbiter.Settings.board_autopilot_status() == %{
+               paused: nil,
+               changed_at: nil,
+               changed_by: nil
+             }
+    end
+  end
 end

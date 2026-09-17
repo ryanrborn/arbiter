@@ -18,12 +18,12 @@ defmodule ArbiterWeb.Api.SchedulerController do
   @doc """
   Pause the board autopilot.
 
-  Returns `{"paused": true}` on success.
+  Returns `{"paused": true, "changed_at": iso8601, "changed_by": "api"}` on success.
   """
   def pause(conn, _params) do
-    case Autopilot.pause() do
+    case Autopilot.pause(Autopilot, "api") do
       :ok ->
-        json(conn, %{paused: true})
+        json(conn, status_json())
 
       {:error, reason} ->
         {:error, {:invalid_request, "pause failed: #{inspect(reason)}"}}
@@ -39,12 +39,12 @@ defmodule ArbiterWeb.Api.SchedulerController do
   @doc """
   Resume the board autopilot.
 
-  Returns `{"paused": false}` on success.
+  Returns `{"paused": false, "changed_at": iso8601, "changed_by": "api"}` on success.
   """
   def resume(conn, _params) do
-    case Autopilot.resume() do
+    case Autopilot.resume(Autopilot, "api") do
       :ok ->
-        json(conn, %{paused: false})
+        json(conn, status_json())
 
       {:error, reason} ->
         {:error, {:invalid_request, "resume failed: #{inspect(reason)}"}}
@@ -60,16 +60,25 @@ defmodule ArbiterWeb.Api.SchedulerController do
   @doc """
   Get the current pause state of the board autopilot.
 
-  Returns `{"paused": true|false}`.
+  Returns `{"paused": true|false, "changed_at": iso8601|null, "changed_by": string|null}`.
   """
   def status(conn, _params) do
-    paused? = Autopilot.paused?()
-    json(conn, %{paused: paused?})
+    json(conn, status_json())
   rescue
     e ->
       {:error, {:invalid_request, "status check failed: #{inspect(e)}"}}
   catch
     :exit, reason ->
       {:error, {:invalid_request, "status check failed: process error #{inspect(reason)}"}}
+  end
+
+  defp status_json do
+    status = Autopilot.status()
+
+    %{
+      paused: status.paused?,
+      changed_at: status.changed_at,
+      changed_by: status.changed_by
+    }
   end
 end

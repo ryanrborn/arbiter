@@ -39,15 +39,23 @@ defmodule Arbiter.Board.Autopilot do
   promotion at a time still holds — a tick that arrives mid-dispatch answers
   `{:busy, id}` rather than starting a second one.
 
-  ## Paused by default
+  ## Paused by default, persisted after that (bd-pgi97m)
 
   The autopilot starts paused unless the install opts in
   (`config :arbiter, :board_autopilot, enabled: true`, or `paused: false` at
-  start). Auto-dispatch spends money and touches a git worktree; an install
-  that upgrades into this feature should not discover it by finding four
-  agents running. Pause state lives in the process, not the database: a
-  restart returns to the configured default, which is the safe direction to
-  fail.
+  start). Auto-dispatch spends money and touches a git worktree; a fresh
+  install should not discover it by finding four agents running.
+
+  Once an operator has explicitly paused or resumed via any path
+  (`pause/2` / `resume/2` — MCP, `arb scheduler`, the REST API, or a dashboard
+  toggle), that choice is persisted to `Arbiter.Settings`
+  (`installation_settings.board_autopilot_paused`) and `init/1` reads it back
+  on the next start, so a restart resumes the install's last choice instead of
+  always coming back paused. A fresh install with nothing persisted still
+  falls back to the app-env default above. Persisting is best-effort: a write
+  failure (e.g. no DB connection, as in a bare unit test) is logged and
+  swallowed rather than blocking the in-memory pause/resume, which always
+  takes effect immediately either way.
 
   While paused the board still renders a full plan — every Ready card reads
   `scheduler paused` rather than a queue position, because a position implies
@@ -174,17 +182,38 @@ defmodule Arbiter.Board.Autopilot do
   def board(server \\ __MODULE__, opts \\ [], timeout \\ 5_000),
     do: GenServer.call(server, {:board, opts}, timeout)
 
-  @doc "Stop promoting. Cards in flight keep running; the queue just stops draining."
-  @spec pause(GenServer.server()) :: :ok
-  def pause(server \\ __MODULE__), do: GenServer.call(server, {:paused, true})
+  @doc """
+  Stop promoting. Cards in flight keep running; the queue just stops
+  draining. Persisted so a restart comes back paused. `by` — free text
+  identifying the caller (e.g. `"mcp"`, `"api"`, `"dashboard"`) — is recorded
+  alongside the change for `status/2`, when known.
+  """
+  @spec pause(GenServer.server(), String.t() | nil) :: :ok
+  def pause(server \\ __MODULE__, by \\ nil), do: GenServer.call(server, {:paused, true, by})
 
-  @doc "Start promoting again. The next tick may dispatch."
-  @spec resume(GenServer.server()) :: :ok
-  def resume(server \\ __MODULE__), do: GenServer.call(server, {:paused, false})
+  @doc """
+  Start promoting again. The next tick may dispatch. Persisted so a restart
+  comes back resumed. See `pause/2` for `by`.
+  """
+  @spec resume(GenServer.server(), String.t() | nil) :: :ok
+  def resume(server \\ __MODULE__, by \\ nil), do: GenServer.call(server, {:paused, false, by})
 
   @spec paused?(GenServer.server(), timeout()) :: boolean()
   def paused?(server \\ __MODULE__, timeout \\ 5_000),
     do: GenServer.call(server, :paused?, timeout)
+
+  @doc """
+  The pause state plus when and (where known) by what it was last changed.
+  `changed_at`/`changed_by` are `nil` until the first pause/resume this
+  process has seen — including one it inherited from a persisted value at
+  boot.
+  """
+  @spec status(GenServer.server(), timeout()) :: %{
+          paused?: boolean(),
+          changed_at: DateTime.t() | nil,
+          changed_by: String.t() | nil
+        }
+  def status(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :status, timeout)
 
   @doc """
   Whether this install runs the autopilot at all. A board talking to a
@@ -202,8 +231,16 @@ defmodule Arbiter.Board.Autopilot do
   def init(opts) do
     interval = Keyword.get(opts, :interval_ms, configured_interval_ms())
 
+    {paused?, changed_at, changed_by} =
+      case Keyword.fetch(opts, :paused) do
+        {:ok, explicit} -> {explicit, nil, nil}
+        :error -> initial_paused_state()
+      end
+
     state = %{
-      paused?: Keyword.get(opts, :paused, configured_paused?()),
+      paused?: paused?,
+      paused_changed_at: changed_at,
+      paused_changed_by: changed_by,
       interval_ms: interval,
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get(opts, :dispatch, &default_dispatch/1),
@@ -239,12 +276,26 @@ defmodule Arbiter.Board.Autopilot do
 
   def handle_call(:paused?, _from, state), do: {:reply, state.paused?, state}
 
-  def handle_call({:paused, paused?}, _from, state) do
-    if paused? != state.paused? do
-      announce({:board_scheduler, if(paused?, do: :paused, else: :resumed)})
-    end
+  def handle_call(:status, _from, state) do
+    {:reply,
+     %{
+       paused?: state.paused?,
+       changed_at: state.paused_changed_at,
+       changed_by: state.paused_changed_by
+     }, state}
+  end
 
-    {:reply, :ok, %{state | paused?: paused?}}
+  def handle_call({:paused, paused?, by}, _from, state) do
+    state =
+      if paused? != state.paused? do
+        persist_paused(paused?, by)
+        announce({:board_scheduler, if(paused?, do: :paused, else: :resumed)})
+        %{state | paused?: paused?, paused_changed_at: state.now.(), paused_changed_by: by}
+      else
+        state
+      end
+
+    {:reply, :ok, state}
   end
 
   @impl true
@@ -497,5 +548,38 @@ defmodule Arbiter.Board.Autopilot do
     |> Application.get_env(:board_autopilot, [])
     |> Keyword.get(:enabled, false)
     |> Kernel.!()
+  end
+
+  # No persisted value (fresh install, or a read failure already swallowed by
+  # `Arbiter.Settings`) falls back to the app-env default, with no recorded
+  # change — that is the config's default, not something an operator chose.
+  defp initial_paused_state do
+    case Arbiter.Settings.board_autopilot_status() do
+      %{paused: paused?} = status when is_boolean(paused?) ->
+        {status.paused, status.changed_at, status.changed_by}
+
+      _ ->
+        {configured_paused?(), nil, nil}
+    end
+  end
+
+  # Best-effort: the in-memory pause/resume must always take effect even if
+  # persistence fails (no DB connection, as in a bare unit test that starts
+  # its own Autopilot with no sandbox checked out).
+  defp persist_paused(paused?, by) do
+    case Arbiter.Settings.set_board_autopilot_paused(paused?, by) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("board autopilot: failed to persist paused=#{paused?}: #{inspect(reason)}")
+    end
+  rescue
+    e -> Logger.warning("board autopilot: failed to persist paused state: #{inspect(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "board autopilot: failed to persist paused state: process error #{inspect(reason)}"
+      )
   end
 end
