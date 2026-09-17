@@ -193,6 +193,39 @@ defmodule Arbiter.QuotaTest do
       refute Quota.serialize(ws.id).oauth_poll_fresh
     end
 
+    # bd-1pmf9h: `stale` alone can't tell a coordinator "nothing has succeeded
+    # recently" apart from "the fleet is unauthenticated" — a dead token still
+    # serves a `stale: true` snapshot for hours with no other signal.
+    # `credentials_expired` surfaces `CredentialWatchdog`'s own expiry state
+    # (set by `CloudProbe`'s consecutive-401 tracking, or its periodic CLI
+    # probe) directly on the quota view.
+    test "credentials_expired reflects CredentialWatchdog's expiry state for Claude" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      refute Quota.serialize(ws.id).credentials_expired
+
+      :ok =
+        Arbiter.Agents.CredentialWatchdog.mark_expired(
+          Arbiter.Agents.Claude,
+          %Arbiter.Worker.StopReason{
+            category: :auth_expired,
+            summary: "test",
+            remediation: nil,
+            exit_status: nil,
+            signal: nil
+          }
+        )
+
+      # mark_expired/3 is a cast against the application's named singleton —
+      # give it a beat to land before asserting.
+      Process.sleep(20)
+
+      assert Quota.serialize(ws.id).credentials_expired
+
+      :ok = Arbiter.Agents.CredentialWatchdog.reset()
+    end
+
     defp restore_test_env do
       Application.put_env(:arbiter, :quota,
         on_exhaustion: :throttle,

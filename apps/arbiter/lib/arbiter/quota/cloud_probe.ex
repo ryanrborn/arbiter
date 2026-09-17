@@ -83,12 +83,34 @@ defmodule Arbiter.Quota.CloudProbe do
   `Arbiter.Quota.OAuthUsage.fetch/1`) — to point the account-wide poll at a
   fixture `:source_dir` instead of the real `~/.claude/.credentials.json`, or
   to inject a `:base_url` / `:plug`. Defaults to `[]`.
+
+  Pass `:credential_watchdog` — a `GenServer.server()` — to target a specific
+  `Arbiter.Agents.CredentialWatchdog` instance (tests); defaults to the named
+  application singleton.
+
+  ## Credential-expiry signal (bd-1pmf9h)
+
+  A `{:http_error, 401}` from `/api/oauth/usage` is a strong expiry signal in
+  its own right, independent of `CredentialWatchdog`'s own periodic CLI probe.
+  `:oauth_401_expiry_threshold` consecutive 401s (via `start_link/1` opts,
+  `config :arbiter, :cloud_quota_probe`, default 2) call
+  `Arbiter.Agents.CredentialWatchdog.mark_expired/3` for
+  `Arbiter.Agents.Claude`, tripping the dispatch guard and the coordinator
+  escalation immediately rather than waiting for the credentials file to be
+  removed outright. Any other failure (`:rate_limited`, `{:backoff, _}`, a
+  transport error, …) is neutral — it does not reset the streak, because a
+  real 429 can legitimately interleave with 401s here (the endpoint's own
+  burst bucket refills at ~1 request/5min, tight against this poll's own
+  5-minute cadence — see `docs/oauth-usage-ratelimit.md`). Only a genuine
+  success resets it.
   """
 
   use GenServer
   require Logger
 
+  alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Messages.CoordinatorNotifier
+  alias Arbiter.Worker.StopReason
 
   @default_interval_ms 300_000
 
@@ -99,6 +121,15 @@ defmodule Arbiter.Quota.CloudProbe do
   # hours the way this one did.
   @oauth_failure_escalation_threshold 3
 
+  # Consecutive `{:http_error, 401}` responses before treating the poll as a
+  # credential-expiry signal (bd-1pmf9h). A 401 straight from `/api/oauth/usage`
+  # is a far stronger expiry signal than a generic poll failure — a real
+  # incident sat undetected for ~15h because the only thing watching for
+  # expiry was `CredentialWatchdog`'s own CLI probe, which never saw the
+  # trouble until the credentials file was removed outright. Default 2 (not 1)
+  # so a single flaky response doesn't trip the fleet-wide dispatch guard.
+  @default_oauth_401_expiry_threshold 2
+
   defmodule State do
     @moduledoc false
     defstruct [
@@ -106,8 +137,11 @@ defmodule Arbiter.Quota.CloudProbe do
       :refresh_fun,
       :enabled,
       :oauth_opts,
+      :credential_watchdog,
+      :oauth_401_expiry_threshold,
       probe_count: 0,
-      oauth_consecutive_failures: 0
+      oauth_consecutive_failures: 0,
+      oauth_consecutive_401s: 0
     ]
   end
 
@@ -140,7 +174,10 @@ defmodule Arbiter.Quota.CloudProbe do
       enabled: cfg(:enabled, opts, true),
       interval_ms: cfg(:interval_ms, opts, @default_interval_ms),
       refresh_fun: Keyword.get(opts, :refresh_fun) || (&default_refresh/1),
-      oauth_opts: Keyword.get(opts, :oauth_opts, [])
+      oauth_opts: Keyword.get(opts, :oauth_opts, []),
+      credential_watchdog: Keyword.get(opts, :credential_watchdog, CredentialWatchdog),
+      oauth_401_expiry_threshold:
+        cfg(:oauth_401_expiry_threshold, opts, @default_oauth_401_expiry_threshold)
     }
 
     if state.enabled, do: schedule(self(), state.interval_ms)
@@ -153,7 +190,8 @@ defmodule Arbiter.Quota.CloudProbe do
      %{
        probe_count: state.probe_count,
        enabled: state.enabled,
-       oauth_consecutive_failures: state.oauth_consecutive_failures
+       oauth_consecutive_failures: state.oauth_consecutive_failures,
+       oauth_consecutive_401s: state.oauth_consecutive_401s
      }, state}
   end
 
@@ -252,7 +290,7 @@ defmodule Arbiter.Quota.CloudProbe do
 
     cond do
       failed == [] ->
-        %{state | oauth_consecutive_failures: 0}
+        %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
 
       failed != [] and length(failed) == length(results) ->
         # Every per-workspace write failed even though the fetch itself
@@ -271,16 +309,18 @@ defmodule Arbiter.Quota.CloudProbe do
           "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(failed)}"
         )
 
-        %{state | oauth_consecutive_failures: 0}
+        %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
     end
   end
 
-  defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason}) do
+  defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason} = error) do
     failures = state.oauth_consecutive_failures + 1
 
     if failures == @oauth_failure_escalation_threshold do
       escalate_oauth_failure(workspace_ids, failures, reason)
     end
+
+    state = note_oauth_401(state, workspace_ids, error)
 
     %{state | oauth_consecutive_failures: failures}
   end
@@ -294,6 +334,42 @@ defmodule Arbiter.Quota.CloudProbe do
   end
 
   defp escalate_oauth_failure(_workspace_ids, _failures, _reason), do: :ok
+
+  # Tracks consecutive `{:http_error, 401}` responses from the oauth-usage
+  # poll (bd-1pmf9h) — the strongest available expiry signal, independent of
+  # `CredentialWatchdog`'s own CLI probe, which only ever saw the outage once
+  # `~/.claude/.credentials.json` was removed outright. Any other error
+  # (`:rate_limited`, `{:backoff, _}`, a transport error, …) is neutral: it
+  # neither confirms nor disproves expiry, so it must not reset the streak —
+  # the real incident had 401s and real upstream 429s interleaved for 15h
+  # straight (the account's oauth-usage bucket refills at ~1 req/5min, tight
+  # against this poll's own 5-minute cadence, so a live 429 here is expected
+  # and unrelated to token validity — see `docs/oauth-usage-ratelimit.md`).
+  # Only a genuine success resets it (see `note_oauth_result/3`).
+  defp note_oauth_401(%State{} = state, workspace_ids, {:error, {:http_error, 401}}) do
+    count = state.oauth_consecutive_401s + 1
+
+    if count == state.oauth_401_expiry_threshold do
+      mark_credential_expired(state, workspace_ids, count)
+    end
+
+    %{state | oauth_consecutive_401s: count}
+  end
+
+  defp note_oauth_401(%State{} = state, _workspace_ids, _error), do: state
+
+  defp mark_credential_expired(%State{} = state, workspace_ids, count) do
+    reason = %StopReason{
+      category: :auth_expired,
+      summary:
+        "#{count} consecutive 401s from the /api/oauth/usage poll for #{inspect(workspace_ids)}",
+      remediation: "re-authenticate the operator's Claude OAuth credentials (`claude login`)",
+      exit_status: nil,
+      signal: nil
+    }
+
+    CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, reason, state.credential_watchdog)
+  end
 
   defp safe_escalate(fun) do
     fun.()

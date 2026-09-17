@@ -54,7 +54,7 @@ defmodule Arbiter.Quota.OAuthUsageTest do
       # never reaches the network while cooling down.
       Req.Test.stub(OAuthUsage.HTTP, fn _conn -> flunk("should not call the network again") end)
 
-      assert {:error, :cooling_down} = OAuthUsage.fetch(token: "test-token")
+      assert {:error, {:backoff, 429}} = OAuthUsage.fetch(token: "test-token")
     end
 
     test "surfaces a non-200/429 status as an http_error" do

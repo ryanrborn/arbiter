@@ -18,6 +18,14 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     * **Early mark** — `Arbiter.Worker` calls `mark_expired/2` when a worker
       dies with `:auth_expired`, so the Watchdog records the failure immediately
       rather than waiting for the next periodic probe.
+    * **Usage-poll mark** — `Arbiter.Quota.CloudProbe` also calls `mark_expired/3`
+      for Claude after N consecutive `{:http_error, 401}` responses from the
+      `/api/oauth/usage` poll (bd-1pmf9h, default N=2). This is a second,
+      independent expiry signal alongside the periodic CLI probe above — the
+      original incident this closes went undetected for ~15h because the CLI
+      probe never saw trouble until the credentials file was removed outright,
+      while the usage poll had been 401ing (and, in between, hitting the
+      endpoint's own tight rate-limit bucket) the whole time.
 
   A successful probe on a previously-expired adapter clears the expired flag
   and schedules the next poll at the normal interval. While an adapter is
