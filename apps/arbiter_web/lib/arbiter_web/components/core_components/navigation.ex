@@ -246,7 +246,7 @@ defmodule ArbiterWeb.CoreComponents.Navigation do
 
   ## Examples
 
-      <.segmented_control options={["mine", "all"]} value="mine" event="scope-change" />
+      <.segmented_control options={["7d", "30d", "all"]} value="7d" event="range-change" />
   """
   attr :options, :list, required: true, doc: "list of short scope words, e.g. [\"mine\", \"all\"]"
   attr :value, :string, default: nil
