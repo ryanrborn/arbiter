@@ -135,6 +135,25 @@ defmodule ArbiterWeb.Api.McpControllerTest do
     end
   end
 
+  describe "refine-tier caller (bd-3uy2hn)" do
+    # The escalation this closes: a refine token is deliberately narrower than a
+    # coordinator one (one issue's subtree, no close, no dispatch). If it could
+    # mint here it would simply trade itself for a coordinator token and the
+    # whole tier would be decorative.
+    test "is refused — a refine token cannot trade itself for a coordinator token", %{conn: conn} do
+      session = session_fixture()
+      caller_token = Scope.mint_refine(session.id, "ws-1", "bd-root")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{caller_token}")
+        |> post("/api/mcp/tokens", %{})
+
+      resp = json_response(conn, 403)
+      assert resp["error"]["message"] =~ "refine"
+    end
+  end
+
   describe "plain coordinator-token caller (no session_id)" do
     test "minted token cannot exceed the caller's workspace binding", %{conn: conn} do
       caller_token = Scope.mint_coordinator("ws-1")

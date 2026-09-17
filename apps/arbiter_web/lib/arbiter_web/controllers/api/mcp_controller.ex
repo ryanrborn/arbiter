@@ -59,7 +59,9 @@ defmodule ArbiterWeb.Api.McpController do
       permissive than the caller.
 
   A `:worker`-tier caller is refused outright (403): workers have no business
-  minting new tokens at all.
+  minting new tokens at all. So is a `:refine`-tier caller (bd-3uy2hn) — this
+  endpoint only mints coordinator tokens, so for a refine caller every possible
+  result is a widening.
   """
   def mint_token(conn, params) do
     ttl = parse_ttl(Map.get(params, "ttl"))
@@ -79,6 +81,22 @@ defmodule ArbiterWeb.Api.McpController do
         |> put_status(:forbidden)
         |> json(%{
           "error" => %{"message" => "a worker-tier token cannot mint new tokens"}
+        })
+
+      # bd-3uy2hn: the same rule, for the same reason. This endpoint caps what it
+      # mints at the caller's own authority, but it can only mint `:coordinator`
+      # tokens — so for a refine caller "capped" would still mean *wider*: a
+      # coordinator token can close tasks and write config anywhere in the
+      # workspace, none of which a refine session may do. There is nothing safe to
+      # hand back, so it hands back nothing.
+      %Scope{tier: :refine} ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{
+          "error" => %{
+            "message" =>
+              "a refine-tier token cannot mint new tokens — it would widen, not narrow, its scope"
+          }
         })
 
       %Scope{} = caller ->

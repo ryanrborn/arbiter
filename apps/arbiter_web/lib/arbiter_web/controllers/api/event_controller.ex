@@ -109,7 +109,8 @@ defmodule ArbiterWeb.Api.EventController do
       token when is_binary(token) and token != "" ->
         case Scope.from_token(token) do
           {:ok, %Scope{tier: :coordinator} = scope} -> {:ok, scope}
-          {:ok, _worker_tier} -> {:error, :unauthorized}
+          # Any narrower tier (worker, refine) is refused here.
+          {:ok, _other_tier} -> {:error, :unauthorized}
           {:error, _} -> {:error, :unauthorized}
         end
 

@@ -1463,6 +1463,104 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  @doc """
+  Authorize a **write** against a `:refine` scope's subtree: the bound issue, or
+  a descendant reachable from it by `parent_of` edges.
+
+  A no-op (`:ok`) for every other tier — `:worker` and `:coordinator` have no
+  subtree concept and are gated by `own_task/2` and workspace isolation instead.
+  Handlers call this *after* `fetch_task/3`, so a cross-workspace id is still
+  reported not-found rather than unauthorized (existence must not leak).
+  """
+  @spec authorize_subtree(Scope.t(), String.t() | nil) ::
+          :ok | {:error, {:unauthorized, String.t()}}
+  def authorize_subtree(%Scope{tier: :refine} = scope, id) do
+    if Scope.subtree_member?(scope, id) do
+      :ok
+    else
+      {:error, {:unauthorized, subtree_denial(scope, "#{id} is outside it")}}
+    end
+  end
+
+  def authorize_subtree(%Scope{}, _id), do: :ok
+
+  @doc """
+  Authorize an **edge** write for a `:refine` scope.
+
+  Two rules, because one edge type is not like the others:
+
+    * **`:parent_of` — both endpoints must be in the subtree.** `parent_of` is
+      the very relation `Scope.subtree_member?/2` walks, so a one-endpoint rule
+      would be self-extending: `dep_add(bound_issue, any_issue, :parent_of)`
+      adopts `any_issue` into the subtree, and the next `task_update` /
+      `task_promote` on it then passes `authorize_subtree/2`. Repeat and a
+      refine token reaches every issue in the workspace — including promoting
+      it to Ready, where Autopilot can claim it, which is exactly what
+      `can_dispatch: false` exists to prevent. Requiring both endpoints keeps
+      re-parenting *within* the subtree available and makes adoption of an
+      outsider impossible. The same rule applies to a `parent_of` **removal**
+      (and to a `dep_remove` with no `type`, which would take `parent_of` edges
+      with it): the shape of the tree outside the subtree is not a refine
+      session's to edit.
+
+    * **Every other type — at least one endpoint in the subtree.** None of
+      `relates_to` / `depends_on` / `blocks` / `discovered_from` /
+      `conflicts_with` confers authority over its endpoints, and refinement is
+      largely about wiring the subtree to the work around it (`depends_on` a
+      sibling's API change, `relates_to` the epic's other half).
+
+  The edge still cannot reach across workspaces either way: both endpoints are
+  fetched workspace-scoped first.
+
+  `type` is the cast `Dependency` type, or `nil` for "every edge between the
+  pair" (`dep_remove` with no type), which is treated as `:parent_of` because it
+  may remove one.
+  """
+  @spec authorize_subtree_edge(Scope.t(), String.t(), String.t(), atom() | nil) ::
+          :ok | {:error, {:unauthorized, String.t()}}
+  def authorize_subtree_edge(scope, from_id, to_id, type)
+
+  def authorize_subtree_edge(%Scope{tier: :refine} = scope, from_id, to_id, type)
+      when type in [:parent_of, nil] do
+    case Enum.reject([from_id, to_id], &Scope.subtree_member?(scope, &1)) do
+      [] ->
+        :ok
+
+      outside ->
+        {:error,
+         {:unauthorized,
+          subtree_denial(
+            scope,
+            "#{Enum.join(outside, " and ")} #{verb(outside)} outside it — a parent_of edge " <>
+              "needs BOTH endpoints inside the subtree, so a refine session cannot adopt " <>
+              "an outside task into its subtree (or re-parent one out of it)"
+          )}}
+    end
+  end
+
+  def authorize_subtree_edge(%Scope{tier: :refine} = scope, from_id, to_id, _type) do
+    if Scope.subtree_member?(scope, from_id) or Scope.subtree_member?(scope, to_id) do
+      :ok
+    else
+      {:error,
+       {:unauthorized,
+        subtree_denial(
+          scope,
+          "neither #{from_id} nor #{to_id} is in it — an edge needs at " <>
+            "least one endpoint inside the subtree"
+        )}}
+    end
+  end
+
+  def authorize_subtree_edge(%Scope{}, _from_id, _to_id, _type), do: :ok
+
+  defp verb([_one]), do: "is"
+  defp verb(_many), do: "are"
+
+  defp subtree_denial(%Scope{issue_id: bound}, detail) do
+    "a refine session may only write inside the parent_of subtree of #{bound}: #{detail}"
+  end
+
   # Fetch a graph, enforcing workspace isolation for the scope.
   defp fetch_graph(%Scope{} = scope, graph_id) when is_binary(graph_id) do
     case Ash.get(Graph, graph_id) do
