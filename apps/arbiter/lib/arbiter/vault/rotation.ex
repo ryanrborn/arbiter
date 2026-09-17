@@ -146,6 +146,11 @@ defmodule Arbiter.Vault.Rotation do
     end
   end
 
+  # `table` and `column` are interpolated as identifiers (SQLite takes no
+  # parameter in an identifier position) but are not input: both come from
+  # `@columns`, the compile-time triples list above. `select_rows/2` is only
+  # ever called with a `table`/`column` pair drawn from that list.
+  # sobelow_skip ["SQL.Query"]
   defp select_rows(table, column) do
     %{rows: rows} =
       Ecto.Adapters.SQL.query!(
@@ -167,6 +172,12 @@ defmodule Arbiter.Vault.Rotation do
   """
   @spec update_row!(String.t(), String.t(), term(), binary(), binary()) ::
           :rotated | :changed_under_us
+  # `table` and `column` are interpolated as identifiers (SQLite takes no
+  # parameter in an identifier position) but are not input: both come from
+  # `@columns` via `rotate_row!/5`, the same compile-time triples list as
+  # `select_rows/2` above. Direct test calls pass the same table/column
+  # pairs. Every actual value (`new_value`, `id`, `old_value`) is bound.
+  # sobelow_skip ["SQL.Query"]
   def update_row!(table, column, id, old_value, new_value) do
     # These columns are declared `:binary` (BLOB affinity), but a value's
     # actual SQLite storage class (TEXT vs BLOB) depends on how it was bound
