@@ -602,6 +602,54 @@ defmodule Arbiter.Sessions.ProvisioningTest do
     end
   end
 
+  # bd-980x89 — the refine variant renders into the cwd, as both files, rather
+  # than the default single session-root `CLAUDE.md`.
+  describe "the refine variant (task AC1)" do
+    defp refine_opts do
+      [
+        refine: %{
+          issue: %{
+            id: "bd-refme01",
+            title: "Fix the widget",
+            description: "broken",
+            acceptance: "fixed",
+            issue_type: :bug,
+            priority: 2,
+            difficulty: 2,
+            repo: "arbiter",
+            refined: false,
+            tracker_ref: nil
+          },
+          epic: nil,
+          edges: [],
+          repo_checkout: "/home/operator/dev/arbiter-readonly",
+          workspace: nil
+        }
+      ]
+    end
+
+    test "writes CLAUDE.md and AGENTS.md into the cwd, not the session root" do
+      session = launch!(refine_opts())
+
+      claude_md = Path.join(session.cwd, "CLAUDE.md")
+      agents_md = Path.join(session.cwd, "AGENTS.md")
+
+      assert File.read!(claude_md) =~ "refine session"
+      assert File.read!(agents_md) == File.read!(claude_md)
+
+      # The default session-root CLAUDE.md is not written for a refine session.
+      refute File.exists?(Layout.instructions_path(session.id))
+    end
+
+    test "a non-refine launch is unaffected — only the session-root CLAUDE.md exists" do
+      session = launch!()
+
+      refute File.exists?(Path.join(session.cwd, "CLAUDE.md"))
+      refute File.exists?(Path.join(session.cwd, "AGENTS.md"))
+      assert File.exists?(Layout.instructions_path(session.id))
+    end
+  end
+
   # bd-5xlkkj — the post-merge live check of phase 5 watched a real first launch
   # stop on two prompts nobody was there to answer. These assert the *provisioned*
   # scaffold, not just the generator, because the bug was that provisioning never
