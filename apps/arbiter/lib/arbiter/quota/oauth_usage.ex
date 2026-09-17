@@ -31,7 +31,7 @@ defmodule Arbiter.Quota.OAuthUsage do
   This specific endpoint 429s far more readily than normal `/v1/messages`
   traffic. On a 429 we start a 180s cooldown for that token (mirroring
   9router's `open-sse/services/usage/claude.js`) — `fetch/1` skips the call
-  and returns `{:error, :cooling_down}` until it lapses, so a hot polling
+  and returns `{:error, {:backoff, 429}}` until it lapses, so a hot polling
   loop can never hammer this endpoint into a harder ban. The header-capture
   aggregate figures are entirely unaffected by this cooldown.
 
@@ -100,18 +100,20 @@ defmodule Arbiter.Quota.OAuthUsage do
       `:arbiter, :oauth_usage_http_stub` app-env flag routes through
       `Req.Test` the same way `Arbiter.GitHub` does.
 
-  Returns `{:error, :cooling_down}` without making a request when this
-  token 429'd within the last 180s. Never raises.
+  Returns `{:error, {:backoff, last_status}}` without making a request when
+  this token 429'd within the last 180s — `last_status` is the HTTP status
+  that triggered the cooldown, so a caller can log the actual upstream
+  response behind a client-side skip rather than a bare "rate limited" that
+  looks identical to a fresh 429. Never raises.
   """
   @spec fetch(keyword()) :: {:ok, usage()} | {:error, term()}
   def fetch(opts \\ []) do
     with {:ok, token} <- fetch_token(opts) do
       key = cooldown_key(token)
 
-      if cooling_down?(key) do
-        {:error, :cooling_down}
-      else
-        request(token, key, opts)
+      case cooling_down_status(key) do
+        nil -> request(token, key, opts)
+        status -> {:error, {:backoff, status}}
       end
     end
   rescue
@@ -169,7 +171,7 @@ defmodule Arbiter.Quota.OAuthUsage do
         {:ok, parse_usage(body)}
 
       {:ok, %Req.Response{status: 429}} ->
-        set_cooldown(cooldown_key)
+        set_cooldown(cooldown_key, 429)
         {:error, :rate_limited}
 
       {:ok, %Req.Response{status: status}} ->
@@ -332,15 +334,20 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   defp cooldown_key(token), do: {:arbiter_oauth_usage_cooldown, :erlang.phash2(token)}
 
-  defp cooling_down?(key) do
+  # Returns the HTTP status that triggered the still-active cooldown, or
+  # `nil` when not cooling down (never started, or lapsed).
+  defp cooling_down_status(key) do
     case :persistent_term.get(key, nil) do
-      nil -> false
-      until -> System.monotonic_time(:millisecond) < until
+      nil ->
+        nil
+
+      {until, status} ->
+        if System.monotonic_time(:millisecond) < until, do: status, else: nil
     end
   end
 
-  defp set_cooldown(key) do
-    :persistent_term.put(key, System.monotonic_time(:millisecond) + @cooldown_ms)
+  defp set_cooldown(key, status) do
+    :persistent_term.put(key, {System.monotonic_time(:millisecond) + @cooldown_ms, status})
   end
 
   @doc false

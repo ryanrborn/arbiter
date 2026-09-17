@@ -99,6 +99,7 @@ defmodule ArbiterCli.Cmd.Quota do
 
   defp emit_claude(%{"claude" => q} = data) do
     IO.puts("Anthropic quota (workspace #{data["workspace_id"]}):")
+    emit_credentials_expired(q)
     IO.puts("  representative window: #{q["representative_claim"] || "—"}")
     IO.puts("  overage status:        #{q["overage_status"] || "—"}")
 
@@ -121,6 +122,17 @@ defmodule ArbiterCli.Cmd.Quota do
     emit_spend(data, "claude")
     emit_oauth_usage(q)
   end
+
+  # bd-1pmf9h: `stale` alone reads the same whether the poll is merely quiet
+  # or the fleet is flatly unauthenticated — surface CredentialWatchdog's own
+  # expiry state (set by CloudProbe's consecutive-401 tracking, or its
+  # periodic CLI probe) as its own unmissable line rather than folding it
+  # into the STALE explanation.
+  defp emit_credentials_expired(%{"credentials_expired" => true}) do
+    IO.puts("  ⚠️  CREDENTIALS EXPIRED — re-authenticate: claude login")
+  end
+
+  defp emit_credentials_expired(_q), do: :ok
 
   # bd-b7umwj: staleness is scoped per window, and the two windows go
   # opposite ways — say which is which rather than the old blanket

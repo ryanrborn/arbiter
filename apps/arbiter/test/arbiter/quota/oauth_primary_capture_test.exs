@@ -138,7 +138,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
                )
 
       # second call is short-circuited by the cooldown — still no write
-      assert {:error, :cooling_down} =
+      assert {:error, {:backoff, 429}} =
                Quota.capture_oauth_usage(ws.id,
                  token: "test-token",
                  plug: {Req.Test, Quota.OAuthUsage.HTTP}
