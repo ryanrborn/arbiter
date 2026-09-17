@@ -386,6 +386,10 @@ defmodule ArbiterWeb.MessagesLiveTest do
       view |> element(~s(button[phx-click="coordinator_clear"])) |> render_click()
       assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, msg.id)
 
+      # Same reason as the stop above: this re-mounted view is the one that ran
+      # the clear, and it outlives the assertions below unless we stop it here.
+      GenServer.stop(view.pid)
+
       other = Message.session_reader("sess-drawer-other")
 
       assert [%{id: id}] =
