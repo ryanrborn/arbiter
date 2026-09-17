@@ -134,9 +134,9 @@ export class SessionStream {
     this._status = null
     this._stdinSeq = 0
     this._pendingResize = null
-    // The pane's geometry as far as this client knows — what it last pushed,
-    // or what a `meta` last reported (`noteGeometry`). A resize matching it is
-    // a no-op on the wire.
+    // The geometry this client last put on the wire, and still believes the
+    // pane holds — a resize matching it is a no-op. `noteGeometry` retires it
+    // the moment a `meta` says the pane is somewhere else.
     this._pushedGeometry = null
     this._resizeTimer = null
   }
@@ -239,22 +239,25 @@ export class SessionStream {
   }
 
   /**
-   * Note the geometry the pane actually has, without pushing anything
-   * (bd-4tjw34).
+   * Note the geometry the pane actually has. Pushes nothing (bd-4tjw34).
    *
-   * `resize` dedupes against the last geometry this client sent, which is only
-   * a safe stand-in for the pane's real size while this client is the only one
-   * attached. It is not: another client's resize moves the pane out from under
-   * that cache, and a client that later reclaims the pane at the size it
-   * itself last pushed would have its push swallowed as a no-op — the pane
-   * would stay at the other client's geometry and the reclaim would silently
-   * do nothing. `session_terminal.mjs` calls this for every `meta`, so the
-   * cache tracks the pane rather than this client's history with it.
+   * `resize` skips a push that would land the pane where this client already
+   * put it, which is only sound while this client is the only one attached.
+   * It is not: the pane is shared and last-writer-wins, so another client's
+   * resize moves it out from under that cache — and a client that later
+   * reclaims the pane at the very size it itself last pushed would have the
+   * reclaim swallowed as a no-op, leaving the pane at the other client's
+   * geometry and the operator's interaction doing nothing at all.
+   *
+   * So a `meta` that does not agree with what this client last sent retires
+   * it: the cache only ever suppresses a push the pane genuinely does not
+   * need. `session_terminal.mjs` calls this for every `meta`.
    */
   noteGeometry(cols, rows) {
     if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return
 
-    this._pushedGeometry = { cols, rows }
+    const pushed = this._pushedGeometry
+    if (pushed && (pushed.cols !== cols || pushed.rows !== rows)) this._pushedGeometry = null
   }
 
   /**

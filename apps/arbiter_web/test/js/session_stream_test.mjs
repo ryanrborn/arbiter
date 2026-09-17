@@ -364,7 +364,7 @@ test("a resize that does not change the geometry is not pushed at all", async ()
 
 // -- the pane's geometry, when more than one client is pushing one (bd-4tjw34)
 
-test("a geometry noted from a meta becomes the size a resize is deduped against", async () => {
+test("a meta that moves the pane out from under us retires the resize dedupe", async () => {
   const { stream, channel } = connected()
 
   stream.resize(100, 30)
@@ -372,9 +372,9 @@ test("a geometry noted from a meta becomes the size a resize is deduped against"
   assert.equal(channel.pushesFor("resize").length, 1)
 
   // Another client resized the pane out from under us. Without this the cache
-  // would still read 100x30, and this client reclaiming the pane at its own
-  // size would be swallowed as a no-op — leaving the pane at the other
-  // client's geometry and the reclaim doing nothing at all.
+  // would still vouch for 100x30, and this client reclaiming the pane at its
+  // own size would be swallowed as a no-op — leaving the pane at the other
+  // client's geometry and the operator's interaction doing nothing at all.
   stream.noteGeometry(120, 40)
 
   stream.resize(100, 30)
@@ -386,6 +386,22 @@ test("a geometry noted from a meta becomes the size a resize is deduped against"
       { cols: 100, rows: 30 },
       { cols: 100, rows: 30 }
     ]
+  )
+})
+
+test("a meta cannot swallow a resize this client has not sent yet", async () => {
+  const { stream, channel } = connected()
+
+  // The mount's own announcement, still inside the debounce window when the
+  // join's `meta` lands (bd-14b11h: a resumed join replays bytes for whatever
+  // size the pane is at, and re-announcing is what reconciles the two).
+  stream.resize(100, 30)
+  stream.noteGeometry(100, 30)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  assert.deepEqual(
+    channel.pushesFor("resize").map((p) => p.payload),
+    [{ cols: 100, rows: 30 }]
   )
 })
 
@@ -402,7 +418,7 @@ test("a meta reporting the geometry we asked for still suppresses the next resiz
   assert.equal(channel.pushesFor("resize").length, 1)
 })
 
-test("an unusable geometry is never noted", async () => {
+test("an unusable geometry never retires the dedupe", async () => {
   const { stream, channel } = connected()
 
   stream.resize(100, 30)

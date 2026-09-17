@@ -391,6 +391,74 @@ async function run(page) {
   await page.resizeViewport(WIDTH, HEIGHT)
   await page.settle(700)
 
+  // -- another client resizes the shared pane (bd-4tjw34) -------------------
+  //
+  // The pane is one tmux pane and the last client to resize it wins, so a
+  // second tab — or the operator's own `tmux attach` — leaves this window
+  // rendering a screen the pane no longer has. The window has to *adopt* that
+  // geometry rather than keep its own, and it must not answer by pushing its
+  // own back: two idle clients that both re-assert never stop.
+  //
+  // The second client is a real one, attached on the Elixir side.
+
+  const mine = await settledGeometry(page, SESSION_A)
+  const theirs = { cols: mine.cols + 13, rows: mine.rows + 4 }
+
+  const resized = await sync(`resize ${SESSION_A} ${theirs.cols} ${theirs.rows}`)
+  if (resized !== "ok") throw new Error(`the second client could not resize the pane: ${resized}`)
+
+  await page.poll(
+    `(() => {
+       const el = document.getElementById("session-dock-terminal-${SESSION_A}")
+       return el && el.__arbTerminal && el.__arbTerminal.term.cols === ${theirs.cols} &&
+         el.__arbTerminal.term.rows === ${theirs.rows}
+     })()`,
+    "the window never adopted the geometry the other client gave the pane"
+  )
+
+  const adopted = await geometry(page, SESSION_A)
+
+  check(
+    "another-clients-resize-is-adopted-by-this-window",
+    adopted.cols === theirs.cols &&
+      adopted.rows === theirs.rows &&
+      adopted.meta.startsWith(`adopted ${theirs.cols}x${theirs.rows}`),
+    `the window was ${mine.cols}x${mine.rows}, the pane went to ${theirs.cols}x${theirs.rows}, ` +
+      `the terminal renders ${adopted.cols}x${adopted.rows} and the strip says "${adopted.meta}"`
+  )
+
+  // Idle: long enough for both debounces and a round trip several times over.
+  await page.settle(1200)
+
+  const stillTheirs = await geometry(page, SESSION_A)
+
+  check(
+    "an-idle-window-never-takes-the-pane-back",
+    stillTheirs.cols === theirs.cols &&
+      stillTheirs.rows === theirs.rows &&
+      stillTheirs.meta.startsWith("adopted "),
+    `after idling the terminal is ${stillTheirs.cols}x${stillTheirs.rows} ` +
+      `and the strip says "${stillTheirs.meta}"`
+  )
+
+  // ...and interacting takes it back. Focus is the real path: the hook listens
+  // for `focusin`, which is what a click or a Tab into the pane produces.
+  await page.eval(
+    `document.getElementById("session-dock-terminal-${SESSION_A}").__arbTerminal.focus()`
+  )
+
+  const reclaimed = await settledGeometry(page, SESSION_A)
+
+  check(
+    "interacting-reclaims-the-pane-at-this-windows-own-geometry",
+    reclaimed.cols === mine.cols &&
+      reclaimed.rows === mine.rows &&
+      reclaimed.meta === `${mine.cols}x${mine.rows}` &&
+      reclaimed.paneOverflow <= 1,
+    `focusing put the terminal back to ${reclaimed.cols}x${reclaimed.rows} ` +
+      `and the pane reports "${reclaimed.meta}"`
+  )
+
   // -- the keyboard rule ----------------------------------------------------
 
   const focus = await page.json(`(() => {

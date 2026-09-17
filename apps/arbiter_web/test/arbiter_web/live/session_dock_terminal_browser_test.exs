@@ -105,7 +105,10 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
     sync = Path.join(tmp_dir, "sync")
     File.mkdir_p!(sync)
 
-    responder = Task.async(fn -> respond(sync) end)
+    # Keyed by id so the responder can act on a session — attaching a second
+    # client to it — without a database read of its own: it runs in a Task, and
+    # the sandbox connection belongs to the test process.
+    responder = Task.async(fn -> respond(sync, Map.new([a, b], &{&1.id, &1})) end)
 
     {output, status} =
       System.cmd(
@@ -165,6 +168,9 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
               "the-resumed-window-is-laid-out-correctly",
               "a-browser-resize-refits-and-tells-the-pane",
               "a-strip-layout-change-refits-the-terminal-down-to-the-80-column-floor",
+              "another-clients-resize-is-adopted-by-this-window",
+              "an-idle-window-never-takes-the-pane-back",
+              "interacting-reclaims-the-pane-at-this-windows-own-geometry",
               "ctrl-shift-escape-hands-the-keyboard-back-to-the-page",
               "no-console-errors"
             ] do
@@ -187,7 +193,7 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
   # One turn at a time, oldest request first. It exits on the `stop` file the
   # test drops once the script has finished, so a script that dies early never
   # leaves this polling forever.
-  defp respond(sync, seen \\ 0) do
+  defp respond(sync, sessions, seen \\ 0) do
     req = Path.join(sync, "req")
 
     cond do
@@ -201,23 +207,23 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
             n = String.to_integer(n)
 
             if n > seen do
-              File.write!(Path.join(sync, "ack"), "#{n} #{handle(words)}")
-              respond(sync, n)
+              File.write!(Path.join(sync, "ack"), "#{n} #{handle(words, sessions)}")
+              respond(sync, sessions, n)
             else
               Process.sleep(25)
-              respond(sync, seen)
+              respond(sync, sessions, seen)
             end
 
           {:error, _} ->
             Process.sleep(25)
-            respond(sync, seen)
+            respond(sync, sessions, seen)
         end
     end
   end
 
   # `emit <session-id> <text>` — the pane prints a line, exactly as tmux's
   # `pipe-pane … cat >> path` would.
-  defp handle(["emit", session_id, text]) do
+  defp handle(["emit", session_id, text], _sessions) do
     case await_pipe(session_id) do
       :ok ->
         ScriptedPty.emit(session_id, text <> "\r\n")
@@ -234,11 +240,33 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
   # `subscribers <id> <id> …` — how many readers each session actually has.
   # This is the server-side half of "collapsing closes the socket": a browser
   # can only say that it holds no xterm.
-  defp handle(["subscribers" | ids]) do
+  defp handle(["subscribers" | ids], _sessions) do
     ids |> Enum.map(&subscriber_count/1) |> Enum.join(" ")
   end
 
-  defp handle(other), do: "unknown-command:#{Enum.join(other, " ")}"
+  # `resize <session-id> <cols> <rows>` — a **second** client gives the shared
+  # pane a geometry the browser's window never asked for (bd-4tjw34). This is
+  # the whole cross-client case: the pane is one tmux pane, the last writer
+  # wins it, and the browser is the client that lost.
+  #
+  # Attached and detached in one breath, because only an attached subscriber
+  # may resize and because the subscriber counts the checks above assert on
+  # have to be exactly where they were. The browser sees three `meta` events
+  # out of it — the second client arriving, the new geometry, the second client
+  # leaving — which is also a fair imitation of a tab being opened, resized and
+  # closed.
+  defp handle(["resize", session_id, cols, rows], sessions) do
+    with {:ok, session} <- Map.fetch(sessions, session_id),
+         {:ok, _attached} <- Stream.attach(session),
+         :ok <- Stream.resize(session_id, String.to_integer(cols), String.to_integer(rows)) do
+      Stream.detach(session_id)
+      "ok"
+    else
+      other -> "resize-failed:#{inspect(other)}"
+    end
+  end
+
+  defp handle(other, _sessions), do: "unknown-command:#{Enum.join(other, " ")}"
 
   # The reader opens the pipe from its own process, so "the session is live in
   # the browser" and "there is a file to append to" are not the same instant.

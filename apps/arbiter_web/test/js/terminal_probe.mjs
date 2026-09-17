@@ -267,6 +267,12 @@ export async function probe(el) {
   }
 
   try {
+    await adoptionChecks()
+  } catch (error) {
+    check("adoption-probe", String((error && error.stack) || error), false)
+  }
+
+  try {
     await dockChecks()
   } catch (error) {
     check("dock-probe", String((error && error.stack) || error), false)
@@ -507,6 +513,126 @@ async function remountChecks() {
   stuck.parent.remove()
   second.parent.remove()
   third.parent.remove()
+}
+
+// -- bd-4tjw34: two clients, one pane -----------------------------------------
+//
+// The pane is shared and last-writer-wins, so a second browser client attached
+// at a different size moves the geometry out from under this one. Before this,
+// the `meta` that announced it only updated the size label: the xterm stayed
+// laid out for a size the pane no longer had, and stayed garbled until a
+// manual resize or a reload.
+//
+// `session_geometry_test.mjs` proves the policy under `node --test`. What only
+// a browser can show is that it lands on the *real* xterm — that the adopted
+// geometry is what the renderer is actually drawing at, and that focus reaches
+// the reclaim through a real `focusin` rather than through a call in a test.
+
+async function adoptionChecks() {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const until = async (predicate, ms = 1500) => {
+    for (let waited = 0; waited < ms && !predicate(); waited += 20) await sleep(20)
+    return predicate()
+  }
+
+  const pane = hiddenPane()
+  pane.parent.style.display = "block"
+
+  const socket = new ProbeSocket()
+  const reports = []
+  const handle = createSessionTerminal(pane.el, {
+    sessionId: "probe",
+    socket,
+    onMeta: (meta, info) => reports.push({ meta, info })
+  })
+
+  if (!(await until(() => socket.joins.length > 0))) {
+    check("adopt-probe-joins", "never joined", false)
+    handle.dispose()
+    pane.parent.remove()
+    return
+  }
+
+  socket.joins[0].push.reply("ok", { seq: 0, mode: "snapshot", resized: false })
+  socket.emit("snapshot", { seq: 0, data: "" })
+
+  await until(() => socket.pushesFor("resize").length > 0)
+
+  const own = { cols: handle.term.cols, rows: handle.term.rows }
+  socket.emit("meta", { cols: own.cols, rows: own.rows, attached_clients: 1 })
+
+  const ownReport = reports.at(-1)
+  check(
+    "this-clients-own-geometry-is-not-reported-as-adopted",
+    ownReport ? `${JSON.stringify(ownReport.meta)} adopted=${ownReport.info.adopted}` : "no meta",
+    ownReport && ownReport.info.adopted === false
+  )
+
+  const settled = socket.pushesFor("resize").length
+
+  // A second client, wider and taller, wins the pane.
+  const theirs = { cols: own.cols + 17, rows: own.rows + 5 }
+  socket.emit("meta", { ...theirs, attached_clients: 2 })
+
+  check(
+    "another-clients-geometry-is-adopted-by-the-real-xterm",
+    `term ${handle.term.cols}x${handle.term.rows}, pane ${theirs.cols}x${theirs.rows}`,
+    handle.term.cols === theirs.cols && handle.term.rows === theirs.rows
+  )
+
+  const adoptedReport = reports.at(-1)
+  check(
+    "the-adopted-geometry-is-labelled-as-adopted",
+    adoptedReport
+      ? `${JSON.stringify(adoptedReport.meta)} adopted=${adoptedReport.info.adopted}`
+      : "no meta",
+    adoptedReport &&
+      adoptedReport.info.adopted === true &&
+      adoptedReport.meta.cols === theirs.cols &&
+      adoptedReport.meta.rows === theirs.rows
+  )
+
+  // ...and the screen is genuinely laid out for it: a full row at the pane's
+  // width fills exactly one line and does not wrap onto the next.
+  await writeAsync(handle.term, "\r\n" + "#".repeat(theirs.cols))
+  const filled = lineText(handle.term, handle.term.buffer.active.cursorY)
+  const below = lineText(handle.term, handle.term.buffer.active.cursorY + 1)
+  check(
+    "the-adopted-screen-renders-without-wrapping",
+    `row=${filled ? filled.length : "null"} of ${theirs.cols}, next=${JSON.stringify(below)}`,
+    filled && filled.length === theirs.cols && (below === null || below === "")
+  )
+
+  // Idle. However long the debounce is given, nothing answers the meta —
+  // this is the edge a resize fight would have to cross.
+  await sleep(400)
+  check(
+    "a-meta-is-never-answered-with-a-resize",
+    `resizes after the meta = ${socket.pushesFor("resize").length - settled}`,
+    socket.pushesFor("resize").length === settled
+  )
+
+  // Interacting takes it back. `focus()` is the real path: the hook listens
+  // for `focusin`, which is what a click or a Tab into the pane produces.
+  handle.term.focus()
+
+  const reclaimed = await until(() => socket.pushesFor("resize").length > settled)
+  const push = socket.pushesFor("resize").at(-1)
+  check(
+    "focus-reclaims-the-pane-at-this-clients-own-geometry",
+    push ? `${JSON.stringify(push.payload)} own ${own.cols}x${own.rows}` : "no resize",
+    reclaimed && push.payload.cols === own.cols && push.payload.rows === own.rows
+  )
+
+  check(
+    "reclaiming-puts-the-real-xterm-back-at-its-own-geometry",
+    `term ${handle.term.cols}x${handle.term.rows}, own ${own.cols}x${own.rows}`,
+    handle.term.cols === own.cols && handle.term.rows === own.rows
+  )
+
+  handle.dispose()
+  pane.parent.remove()
 }
 
 // -- bd-9myzv8: the session dock's collapse / expand cycle --------------------
