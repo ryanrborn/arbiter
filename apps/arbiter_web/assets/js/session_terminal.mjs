@@ -17,6 +17,7 @@ import { Socket } from "phoenix"
 
 import { SessionStream } from "./session_stream.mjs"
 import { fitGeometry, settleFit } from "./session_fit.mjs"
+import { PaneGeometry } from "./session_geometry.mjs"
 import { handleTerminalKey } from "./session_keys.mjs"
 
 // §6.3: the server holds 30k lines and the transcript holds everything, so the
@@ -50,7 +51,9 @@ const RESET = "[0m"
  * Mount a terminal into `el` and attach it to `sessionId`.
  *
  * Callbacks, all optional: `onStatus(state)` with "connecting" | "live" |
- * "reconnecting" | "detached" | "ended", `onExit(payload)`, `onMeta(meta)`,
+ * "reconnecting" | "detached" | "ended", `onExit(payload)`,
+ * `onMeta(meta, {adopted, own})` — the pane's geometry, and whether it is this
+ * client's own or another client's it has adopted (bd-4tjw34) —
  * `onUsage(payload)` (§7.5, phase 7 — the live cost HUD feed), `onError(err)`.
  *
  * `socket` and `schedule` are test seams: `apps/arbiter_web/test/js/terminal_probe.mjs`
@@ -118,16 +121,32 @@ export function createSessionTerminal(el, options = {}) {
   // puts every element in that mode — so the pane's own `p-2` was counted as
   // usable terminal space. With a 20px cell that is exactly one row too many,
   // and the bottom line of the agent's UI was clipped in half.
-  const applyFit = () => {
-    const geometry = paneGeometry(el, term)
-    if (!geometry) return null
+  const measure = () => paneGeometry(el, term)
 
-    if (geometry.cols !== term.cols || geometry.rows !== term.rows) {
+  const applyGeometry = (next) => {
+    if (!next) return null
+
+    if (next.cols !== term.cols || next.rows !== term.rows) {
       clearRenderer(term)
-      term.resize(geometry.cols, geometry.rows)
+      term.resize(next.cols, next.rows)
     }
 
-    return geometry
+    return next
+  }
+
+  // Which of the three geometries this client is showing, and when it is
+  // allowed to make the pane follow it (bd-4tjw34). The pane is shared and
+  // last-writer-wins, so the decision is emphatically not "resize to whatever
+  // fits, whenever anything moves" — see `session_geometry.mjs`.
+  const geometry = new PaneGeometry()
+
+  // Measure and apply, *without* telling the pane. The mount's settle goes
+  // through here and `attach` announces the result once there is a channel to
+  // announce it on; nothing else in the module needs a silent fit.
+  const applyFit = () => {
+    const measured = measure()
+    if (measured) applyGeometry(geometry.fit(measured).apply)
+    return measured
   }
 
   // No connect params. The dashboard is loopback-only by design (§10.4) and
@@ -197,16 +216,49 @@ export function createSessionTerminal(el, options = {}) {
         primed = true
       },
       status: onStatus,
-      meta: (meta) => onMeta(meta),
+      // The pane's real geometry, which is not necessarily this client's
+      // (bd-4tjw34). Another client attached at a different size moves it out
+      // from under us, and rendering at the size the pane actually has is the
+      // only way to render correctly — so it is adopted, and the label says
+      // so. What never happens here is a push back: that is what would make
+      // two idle tabs resize each other forever.
+      meta: (meta) => {
+        if (meta) stream.noteGeometry(meta.cols, meta.rows)
+        applyGeometry(geometry.note(meta).apply)
+        emitMeta(meta)
+      },
       usage: (payload) => onUsage(payload),
       exit: (payload) => onExit(payload),
       error: (err) => onError(err)
     }
   })
 
+  // The status strip's size label. `meta` is the pane's own report of itself;
+  // the second argument is this client's relationship to it, so the strip can
+  // say `adopted 120x40` for a pane sitting at another client's geometry
+  // (bd-4tjw34) and plain `120x40` for its own.
+  let lastMeta = null
+
+  const emitMeta = (meta) => {
+    if (meta) lastMeta = meta
+    if (!lastMeta) return
+
+    // The pane's geometry as this client last heard it, or the one it has just
+    // claimed — `lastMeta`'s own numbers are stale the moment a refit lands.
+    const pane = geometry.pane
+
+    onMeta(pane ? { ...lastMeta, cols: pane.cols, rows: pane.rows } : lastMeta, {
+      adopted: geometry.adopted,
+      own: geometry.own
+    })
+  }
+
   const stream = startReadOnly ? inertStream() : liveStream()
 
-  term.onData((data) => stream.send(data))
+  term.onData((data) => {
+    reclaim()
+    stream.send(data)
+  })
   // Some sequences (a mouse report, a bracketed paste of binary) arrive as a
   // latin1 string of raw bytes rather than text; they must not be UTF-8
   // encoded on the way out.
@@ -268,19 +320,66 @@ export function createSessionTerminal(el, options = {}) {
 
   let disposed = false
   let fitTimer = null
-  const scheduleFit = () => {
+  let forced = false
+
+  // Phase 2's single refit path, and still the only one (bd-4tjw34).
+  //
+  // `force` means "the operator interacted with *this* client" — a keypress,
+  // focus, an expand, a size preset. Without it a refit only claims the pane
+  // when this client's own box really moved, which is what keeps an adopted
+  // terminal quiet: a `ResizeObserver` that fires for a layout that settled at
+  // the same size (the adopted resize itself is one) measures the same
+  // geometry, and `PaneGeometry` answers with nothing to do.
+  const scheduleFit = ({ force = false } = {}) => {
+    forced = forced || force
+
     if (fitTimer) clearTimeout(fitTimer)
     fitTimer = setTimeout(() => {
       fitTimer = null
-      const geometry = applyFit()
+
       // Only a geometry we actually measured is pushed. A pane that has not
       // been laid out reports 0x0, and that number resizes the pane *every*
-      // attached client shares.
-      if (geometry) stream.resize(geometry.cols, geometry.rows)
+      // attached client shares. An interaction that landed on an unmeasurable
+      // pane keeps its claim rather than losing it: the `ResizeObserver` will
+      // be along the moment the box exists.
+      const measured = measure()
+      if (!measured) return
+
+      // Latched, not read from the last call: a forced refit coalesced into
+      // the debounce window by an ordinary one must still reclaim the pane.
+      const interacted = forced
+      forced = false
+
+      const { apply, announce } = geometry.fit(measured, { force: interacted })
+
+      if (apply) {
+        applyGeometry(apply)
+        // The pane is about to be at our size, so the label stops saying
+        // "adopted" now rather than a round trip later.
+        emitMeta()
+      }
+
+      if (announce) stream.resize(announce.cols, announce.rows)
     }, FIT_DEBOUNCE_MS)
   }
 
-  const observer = typeof ResizeObserver === "function" ? new ResizeObserver(scheduleFit) : null
+  // Interaction with *this* client, which is the only thing that takes a pane
+  // back off another one. Focus covers the click and the Tab; `onData` covers
+  // every keystroke and every paste, because it is the one hook both arrive
+  // through.
+  const reclaim = () => scheduleFit({ force: true })
+
+  el.addEventListener("focusin", reclaim)
+
+  // A browser resize is an interaction, and the one the `ResizeObserver`
+  // cannot be trusted to report as one: it fires for the pane's own scrollbars
+  // too, including the ones adopting another client's larger geometry puts
+  // there. `window`'s own event has no such ambiguity.
+  const onWindowResize = () => reclaim()
+  if (typeof window !== "undefined") window.addEventListener("resize", onWindowResize)
+
+  const observer =
+    typeof ResizeObserver === "function" ? new ResizeObserver(() => scheduleFit()) : null
   if (observer) observer.observe(el)
 
   // The dashboard's mono face is a **webfont** (Geist Mono, from Google
@@ -346,7 +445,7 @@ export function createSessionTerminal(el, options = {}) {
   // already at, and re-announcing is what reconciles the two.
   let attached = false
 
-  const attach = (geometry) => {
+  const attach = (measured) => {
     if (disposed || attached) return
     attached = true
 
@@ -356,7 +455,7 @@ export function createSessionTerminal(el, options = {}) {
     // just leaves the pane's geometry alone until the `ResizeObserver` above
     // sees a box, because a geometry we did not measure is a geometry that
     // resizes the pane every other client shares.
-    if (geometry) stream.resize(geometry.cols, geometry.rows)
+    if (measured) stream.resize(measured.cols, measured.rows)
   }
 
   const cancelSettle = settleFit({ measure: applyFit, schedule, onSettled: attach })
@@ -433,6 +532,12 @@ export function createSessionTerminal(el, options = {}) {
     blur: () => term.blur(),
     fit: applyFit,
     refit: scheduleFit,
+    // Take the pane back at this client's own geometry (bd-4tjw34). The
+    // terminal reclaims on its own for focus, typing and any layout change
+    // that moved its box; this is the seam for the ones it cannot see —
+    // bd-covojz's size presets are the next of them.
+    reclaim,
+    adopted: () => geometry.adopted,
     rememberScroll,
     restoreScroll,
     detach: () => stream.detach(),
@@ -443,6 +548,8 @@ export function createSessionTerminal(el, options = {}) {
       cancelSettle()
       if (settleDeadline) clearTimeout(settleDeadline)
       if (fitTimer) clearTimeout(fitTimer)
+      el.removeEventListener("focusin", reclaim)
+      if (typeof window !== "undefined") window.removeEventListener("resize", onWindowResize)
       if (observer) observer.disconnect()
       if (themeObserver) themeObserver.disconnect()
       if (colorScheme && colorScheme.removeEventListener) {
@@ -466,6 +573,7 @@ function inertStream() {
     send: () => false,
     sendBytes: () => false,
     resize: () => {},
+    noteGeometry: () => {},
     redraw: () => {},
     detach: () => {},
     kill: () => null,
