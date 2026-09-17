@@ -92,15 +92,12 @@ defmodule ArbiterWeb.BoardLive do
 
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
-  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
 
   @tasks_topic "tasks"
   @workers_topic "workers"
-
-  @coordinator_ref Message.coordinator_ref()
 
   # How many cards a column shows before it collapses into an "N more" row.
   @column_limit 8
@@ -137,7 +134,6 @@ defmodule ArbiterWeb.BoardLive do
      |> assign(:live, live?)
      |> assign(:now, DateTime.utc_now())
      |> assign(:filter, "")
-     |> assign(:scope, "all")
      |> assign(:workspace, "all")
      |> assign(:ready_order, [])
      |> assign(:expanded, MapSet.new())
@@ -173,9 +169,6 @@ defmodule ArbiterWeb.BoardLive do
   @impl true
   def handle_event("filter", %{"filter" => filter}, socket),
     do: {:noreply, assign(socket, :filter, filter)}
-
-  def handle_event("scope", %{"option" => scope}, socket),
-    do: {:noreply, assign(socket, :scope, scope)}
 
   def handle_event("workspace", %{"workspace" => id}, socket),
     do: {:noreply, assign(socket, :workspace, id)}
@@ -502,8 +495,7 @@ defmodule ArbiterWeb.BoardLive do
   defp matches?(card, assigns) do
     card = card_of(card)
 
-    matches_workspace?(card, assigns.workspace) and matches_scope?(card, assigns.scope) and
-      matches_filter?(card, assigns.filter)
+    matches_workspace?(card, assigns.workspace) and matches_filter?(card, assigns.filter)
   end
 
   # A Ready entry wraps its card; every other column is the card itself.
@@ -512,20 +504,6 @@ defmodule ArbiterWeb.BoardLive do
 
   defp matches_workspace?(_card, "all"), do: true
   defp matches_workspace?(card, id), do: Map.get(card, :workspace_id) == id
-
-  defp matches_scope?(_card, "all"), do: true
-
-  # Arbiter has no web login, so "mine" cannot mean a person. It means work
-  # that has not been handed to a named assignee — the operator's own pile.
-  defp matches_scope?(card, "mine") do
-    case Map.get(card, :assignee) do
-      nil -> true
-      "" -> true
-      assignee -> assignee == @coordinator_ref
-    end
-  end
-
-  defp matches_scope?(_card, _), do: true
 
   defp matches_filter?(_card, filter) when filter in [nil, ""], do: true
 
@@ -672,8 +650,6 @@ defmodule ArbiterWeb.BoardLive do
                 icon={search_icon()}
               />
             </form>
-
-            <.segmented_control options={["mine", "all"]} value={@scope} event="scope" />
 
             <span class="ml-auto flex flex-wrap items-center gap-2.5">
               <span
