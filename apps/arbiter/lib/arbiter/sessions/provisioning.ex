@@ -186,6 +186,12 @@ defmodule Arbiter.Sessions.Provisioning do
   def destroy(%Session{id: id}), do: destroy(id)
 
   def destroy(id) when is_binary(id) do
+    # The refine checkout first, and not merely for tidiness: it is a
+    # read-only tree, and `File.rm_rf/1` cannot unlink entries from
+    # directories it has no write permission on — so going straight at the
+    # session directory would leave the checkout *and* everything under it
+    # behind (bd-1lszsc). A no-op for the sessions that never had one.
+    _ = RepoCheckout.teardown(id)
     _ = File.rm_rf(Layout.session_dir(id))
     :ok
   end

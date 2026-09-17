@@ -140,6 +140,19 @@ defmodule Arbiter.Sessions.RepoCheckoutTest do
       refute git!(repo, ["worktree", "list"]) =~ checkout.path
     end
 
+    # `File.rm_rf/1` cannot delete a read-only directory tree, so an operator
+    # cleanup that ran straight at the session directory would leave the
+    # checkout — and everything under it — behind. `Provisioning.destroy/1`
+    # has to sweep the checkout first.
+    test "the operator's session-directory cleanup can still remove the session", %{repo: repo} do
+      session = session()
+      File.mkdir_p!(Layout.session_dir(session.id))
+      {:ok, _checkout} = RepoCheckout.provision(session, repo, "main")
+
+      assert :ok = Arbiter.Sessions.Provisioning.destroy(session.id)
+      refute File.exists?(Layout.session_dir(session.id))
+    end
+
     test "is idempotent and safe for a session that never had one" do
       assert :ok = RepoCheckout.teardown(session())
       assert :ok = RepoCheckout.teardown(session())
