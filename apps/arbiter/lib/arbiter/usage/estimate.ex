@@ -192,15 +192,27 @@ defmodule Arbiter.Usage.Estimate do
 
   @typedoc """
   Design bd-9jj5lf §4 — `"$X spent · ~$Y–Z to go"`. `spent` is the summed
-  actual spend of the epic's closed children; `to_go_low`/`to_go_high` is the
-  sum of p25/p75 estimates across open, promoted, dispatchable children only.
-  `excluded_count` covers blocked children, parked (running/waiting) children,
-  and non-dispatchable `:epic` sub-children — none of these have a defensible
-  cost basis for the remaining estimate. `upcoming_count` is unpromoted
-  Backlog children, reported separately since they aren't committed work yet.
-  `dispatchable_unestimated_count` is dispatchable children the estimator
-  itself has no history for (`:insufficient_data`) — counted, but contributing
-  nothing to the sum, same as a task-level `estimate: nil`.
+  actual spend of the epic's closed children. `to_go_low`/`to_go_high` sums a
+  defensible remaining estimate over every open, promoted child — being
+  blocked or mid-flight changes *when* a child runs, not its cost basis
+  (difficulty + issue_type), so none of them are excluded:
+
+    * **Dispatchable** (`bucket == :ready`, non-epic, unblocked) — full
+      p25/p75, counted in `dispatchable_count`.
+    * **Blocked** (open, promoted, non-epic, blocked) — full p25/p75 as well,
+      counted in `blocked_count`.
+    * **In flight** (`bucket in [:running, :waiting]`, non-epic) —
+      `max(p25 - spent, 0)` / `max(p75 - spent, 0)`, spend from
+      `Arbiter.Usage.Budget.spend_by_task/2`, counted in `in_flight_count`.
+    * **Sub-epics** (`issue_type == :epic`) — their own rollup's
+      `to_go_low`/`to_go_high`, recursively, guarded against cycles; counted
+      in `sub_epic_count`.
+
+  `upcoming_count` is unpromoted Backlog children, reported separately since
+  they aren't committed work yet. `unestimated_count` is promoted children
+  (of any of the above categories) the estimator has no history for
+  (`:insufficient_data`) — counted, but contributing nothing to the sum, same
+  as a task-level `estimate: nil`.
   """
   @type epic_rollup :: %{
           spent: float(),
@@ -208,8 +220,10 @@ defmodule Arbiter.Usage.Estimate do
           to_go_high: float(),
           closed_count: non_neg_integer(),
           dispatchable_count: non_neg_integer(),
-          dispatchable_unestimated_count: non_neg_integer(),
-          excluded_count: non_neg_integer(),
+          blocked_count: non_neg_integer(),
+          in_flight_count: non_neg_integer(),
+          sub_epic_count: non_neg_integer(),
+          unestimated_count: non_neg_integer(),
           upcoming_count: non_neg_integer()
         }
 
@@ -220,9 +234,11 @@ defmodule Arbiter.Usage.Estimate do
   Reuses `Arbiter.Tasks.EpicRollup.children_with_status/1` for membership and
   the blocked/parked classification (one query, shared with the `/epics` page
   and the epic-detail mini-board) rather than re-deriving it. The "spent" half
-  is `Arbiter.Usage.Budget.spend_by_task/2` over closed children; the "to go"
-  half is `for_issue/2` over open, promoted, dispatchable children, built on
-  one shared sample so an N-child epic costs one ledger read, not N.
+  is `Arbiter.Usage.Budget.spend_by_task/2` over closed and in-flight
+  children; the "to go" half is `for_issue/2` over every open, promoted
+  child, built on one shared sample so an N-child epic costs one ledger read,
+  not N — sub-epics recurse with that same sample passed down, so the read
+  stays singular regardless of nesting depth.
 
   Accepts the same options as `for_issue/2` (`:sample`, `:now`, `:window_days`,
   `:min_n`).
@@ -231,7 +247,8 @@ defmodule Arbiter.Usage.Estimate do
   def epic_cost_rollup(issue_or_id, opts \\ [])
 
   def epic_cost_rollup(%Issue{issue_type: :epic} = epic, opts) do
-    do_epic_cost_rollup(epic, opts)
+    {rollup, _visited} = do_epic_cost_rollup(epic, opts, MapSet.new())
+    rollup
   rescue
     error ->
       Logger.warning("Usage.Estimate.epic_cost_rollup failed: #{Exception.message(error)}")
@@ -247,20 +264,22 @@ defmodule Arbiter.Usage.Estimate do
     end
   end
 
-  defp do_epic_cost_rollup(epic, opts) do
+  defp do_epic_cost_rollup(epic, opts, visited) do
+    visited = MapSet.put(visited, epic.id)
     children = Arbiter.Tasks.EpicRollup.children_with_status(epic)
 
     {closed, open} = Enum.split_with(children, &(&1.bucket == :closed))
     {upcoming, promoted} = Enum.split_with(open, &(&1.bucket == :backlog))
 
-    {dispatchable, excluded} =
-      Enum.split_with(promoted, fn %{issue: i, bucket: bucket, blocked?: blocked?} ->
-        bucket == :ready and i.issue_type != :epic and not blocked?
-      end)
+    {sub_epics, non_epic} = Enum.split_with(promoted, fn %{issue: i} -> i.issue_type == :epic end)
+
+    {in_flight, not_in_flight} =
+      Enum.split_with(non_epic, fn %{bucket: bucket} -> bucket in [:running, :waiting] end)
+
+    {blocked, dispatchable} = Enum.split_with(not_in_flight, & &1.blocked?)
 
     spend_by_id =
-      closed
-      |> Enum.map(& &1.issue.id)
+      (Enum.map(closed, & &1.issue.id) ++ Enum.map(in_flight, & &1.issue.id))
       |> Arbiter.Usage.Budget.spend_by_task(opts)
 
     spent =
@@ -268,36 +287,86 @@ defmodule Arbiter.Usage.Estimate do
       |> Enum.reduce(0.0, fn %{issue: i}, acc -> acc + Map.get(spend_by_id, i.id, 0.0) end)
       |> money()
 
-    {to_go_low, to_go_high, unestimated} =
-      if dispatchable == [] do
-        {0.0, 0.0, 0}
+    opts_with_sample =
+      if dispatchable == [] and blocked == [] and in_flight == [] and sub_epics == [] do
+        opts
       else
-        opts_with_sample = Keyword.put_new_lazy(opts, :sample, fn -> resolve_sample(opts) end)
-
-        dispatchable
-        |> Enum.map(fn %{issue: i} -> for_issue(i, opts_with_sample) end)
-        |> Enum.reduce({0.0, 0.0, 0}, fn
-          :insufficient_data, {lo, hi, n} -> {lo, hi, n + 1}
-          est, {lo, hi, n} -> {lo + est.p25, hi + est.p75, n}
-        end)
+        Keyword.put_new_lazy(opts, :sample, fn -> resolve_sample(opts) end)
       end
 
-    %{
+    {dispatchable_lo, dispatchable_hi, dispatchable_unestimated} =
+      sum_full_estimates(dispatchable, opts_with_sample)
+
+    {blocked_lo, blocked_hi, blocked_unestimated} =
+      sum_full_estimates(blocked, opts_with_sample)
+
+    {in_flight_lo, in_flight_hi, in_flight_unestimated} =
+      sum_in_flight_estimates(in_flight, spend_by_id, opts_with_sample)
+
+    {sub_epic_lo, sub_epic_hi, visited} =
+      sum_sub_epic_estimates(sub_epics, opts_with_sample, visited)
+
+    rollup = %{
       spent: spent,
-      to_go_low: money(to_go_low),
-      to_go_high: money(to_go_high),
+      to_go_low: money(dispatchable_lo + blocked_lo + in_flight_lo + sub_epic_lo),
+      to_go_high: money(dispatchable_hi + blocked_hi + in_flight_hi + sub_epic_hi),
       closed_count: length(closed),
       dispatchable_count: length(dispatchable),
-      dispatchable_unestimated_count: unestimated,
-      excluded_count: length(excluded),
+      blocked_count: length(blocked),
+      in_flight_count: length(in_flight),
+      sub_epic_count: length(sub_epics),
+      unestimated_count: dispatchable_unestimated + blocked_unestimated + in_flight_unestimated,
       upcoming_count: length(upcoming)
     }
+
+    {rollup, visited}
+  end
+
+  defp sum_full_estimates([], _opts), do: {0.0, 0.0, 0}
+
+  defp sum_full_estimates(children, opts) do
+    children
+    |> Enum.map(fn %{issue: i} -> for_issue(i, opts) end)
+    |> Enum.reduce({0.0, 0.0, 0}, fn
+      :insufficient_data, {lo, hi, n} -> {lo, hi, n + 1}
+      est, {lo, hi, n} -> {lo + est.p25, hi + est.p75, n}
+    end)
+  end
+
+  defp sum_in_flight_estimates([], _spend_by_id, _opts), do: {0.0, 0.0, 0}
+
+  defp sum_in_flight_estimates(children, spend_by_id, opts) do
+    Enum.reduce(children, {0.0, 0.0, 0}, fn %{issue: i}, {lo, hi, n} ->
+      case for_issue(i, opts) do
+        :insufficient_data ->
+          {lo, hi, n + 1}
+
+        est ->
+          spent_so_far = Map.get(spend_by_id, i.id, 0.0)
+          {lo + max(est.p25 - spent_so_far, 0.0), hi + max(est.p75 - spent_so_far, 0.0), n}
+      end
+    end)
+  end
+
+  defp sum_sub_epic_estimates([], _opts, visited), do: {0.0, 0.0, visited}
+
+  defp sum_sub_epic_estimates(sub_epics, opts, visited) do
+    Enum.reduce(sub_epics, {0.0, 0.0, visited}, fn %{issue: i}, {lo, hi, visited} ->
+      if MapSet.member?(visited, i.id) do
+        {lo, hi, visited}
+      else
+        {sub, visited} = do_epic_cost_rollup(i, opts, visited)
+        {lo + sub.to_go_low, hi + sub.to_go_high, visited}
+      end
+    end)
   end
 
   defp resolve_sample(opts) do
     case Keyword.fetch(opts, :sample) do
       {:ok, sample} when is_list(sample) -> sample
-      _ -> sample(opts)
+      # Remote call, not a local `sample(opts)` — so a caller (or test) that
+      # mocks `__MODULE__` can still see and count this ledger read.
+      _ -> __MODULE__.sample(opts)
     end
   end
 

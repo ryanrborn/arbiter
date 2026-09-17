@@ -213,7 +213,9 @@ defmodule Arbiter.Usage.Budget do
   holds together; this `spend` is everything so far, in-flight children
   included, because a header answering "what has this epic cost" should not
   hide money still being spent. The two are expected to disagree on the same
-  page.
+  page — and since the rollup's `to_go` now nets in-flight spend against
+  those children's estimates, `spent + to_go` itself understates an epic's
+  projected total by whatever in-flight children have already burned.
 
   `state/2` unchanged: `assess/2`'s per-issue semantics stay on `assess/2`
   and `Arbiter.Usage.BudgetPatrol`, which already passes `:spend` explicitly.
