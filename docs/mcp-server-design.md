@@ -328,6 +328,49 @@ that connect back to the same server. Two guards:
    refuses past a configured max. Cheap insurance against a misconfigured
    coordinator fan-out.
 
+### 4.4 The `refine` tier (added later — bd-3uy2hn)
+
+The two tiers above turned out to have a gap in the middle. A browser-hosted
+**refinement** session — one that turns a rough Backlog issue into a specified,
+broken-down, promotable one — needs more than a worker (it must create children
+and wire edges) and much less than a coordinator (it must not dispatch, close,
+or touch anything outside the issue it was opened on).
+
+So there is a third tier, `:refine`, bound to one workspace **and one issue**:
+
+```elixir
+%Arbiter.MCP.Scope{
+  tier:         :refine,
+  workspace_id: "uuid",   # every call is filtered to this workspace
+  issue_id:     "bd-…",   # the bound issue; writes must land in its subtree
+  session_id:   "uuid",   # revocable — ends when the session ends
+  can_dispatch: false     # always, whatever the claim says
+}
+```
+
+Two gates, not one:
+
+1. **Tool-level.** `Arbiter.MCP.RefinePolicy` is an exhaustive allow/deny table
+   over every catalog tool. It is a table rather than a `:refine` entry in each
+   tool's `:tiers` list precisely so that a newly added tool cannot default into
+   (or silently out of) the tier — a conformance test fails the build when a
+   tool has no decision.
+2. **Data-level.** Every allowed *write* (`task_update`, `task_update_progress`,
+   `task_create`, `task_promote`, `dep_add`, `dep_remove`) must target the bound
+   issue or a descendant reachable from it by `parent_of`
+   (`Arbiter.MCP.Tools.authorize_subtree/2`; an edge needs one endpoint inside).
+   Reads stay broad across the bound workspace, because refining an issue means
+   reading its neighbours.
+
+Promotion is allowed inside the subtree, and still honours the
+acceptance-required rule (bd-7mbrlg). Because Autopilot can claim a task within
+seconds of it going Ready, a refine-tier promotion returns `promotion_note`
+restating the ordering: **edges and children first, promote last.**
+
+`POST /api/mcp/tokens` refuses a refine caller outright, exactly as it refuses a
+worker: that endpoint can only mint coordinator tokens, so for a refine caller
+every possible result is a widening, not the intended narrowing.
+
 ## 5. Per-agent config injection (the only agent-specific surface)
 
 The tools are written once; only the spawn-time config file differs. This rides
