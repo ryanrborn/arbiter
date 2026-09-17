@@ -391,9 +391,14 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.coordinator_inbox(ctx.coordinator, %{})
     end
 
-    test "a session does not inherit mail that predates it", ctx do
-      {:ok, _} =
+    test "a session does not inherit the resolved archive that predates it", ctx do
+      {:ok, archived} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "before"})
+
+      # The operator already dealt with it from the drawer/CLI, which stamps the
+      # shared row — that is the global "resolved" signal.
+      {:ok, _} = Message.mark_read(archived, reader: Message.coordinator_reader())
+      {:ok, _} = Message.mark_cleared(archived)
 
       {:ok, a} = new_session(ctx.ws)
 
@@ -401,6 +406,40 @@ defmodule Arbiter.MCP.ToolsTest do
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "after"})
 
       assert {:ok, %{count: 1, messages: [%{body: "after"}]}} = Tools.coordinator_inbox(a, %{})
+    end
+
+    test "a session launched after an unresolved escalation still sees it", ctx do
+      # The feature's primary use case: the notifier raises an escalation while
+      # no session is running, the operator launches one to deal with it. The
+      # row stays uncleared, so `last_with_subject/3` keeps suppressing a
+      # repeat — if the session could not see it, nothing ever would re-deliver
+      # it.
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ctx.ws.id,
+          kind: :escalation,
+          to_ref: "coordinator",
+          subject: "budget exhausted",
+          body: "before-the-session"
+        })
+
+      {:ok, a} = new_session(ctx.ws)
+
+      assert {:ok, %{count: 1, messages: [%{body: "before-the-session"}]}} =
+               Tools.coordinator_inbox(a, %{})
+
+      # …and having read it, the session owes it, not the archive.
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
+
+      assert {:ok, %{count: 1, messages: [%{body: "before-the-session"}]}} =
+               Tools.coordinator_inbox(a, %{"state" => "outstanding"})
+
+      # The dedupe signal is untouched by the session reading it.
+      assert %{body: "before-the-session"} =
+               Message.last_with_subject(Message.coordinator_ref(), ["budget exhausted"],
+                 workspace_id: ctx.ws.id,
+                 uncleared: true
+               )
     end
 
     test "the minted-token path carries session identity all the way to the handler", ctx do

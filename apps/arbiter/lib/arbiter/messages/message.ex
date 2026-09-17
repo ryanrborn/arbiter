@@ -73,6 +73,14 @@ defmodule Arbiter.Messages.Message do
   Omitting `reader:` keeps the original row-level semantics, which is what a
   task mailbox wants: it has exactly one reader.
 
+  A session reader with no receipts is, by definition, unread on *everything*,
+  so its unread view is bounded (`unread_floor/2`): everything since the
+  session started, **plus** every row that is still globally uncleared. The
+  second half is what matters — an escalation raised before the session was
+  launched is exactly what that session is usually launched to deal with, and
+  the `last_with_subject/3` dedupe guarantees it is never re-raised. Only the
+  resolved archive is withheld.
+
   ## PubSub
 
   On create, the message is broadcast on `"messages:<workspace_id>"` as
@@ -577,7 +585,6 @@ defmodule Arbiter.Messages.Message do
       |> Ash.Query.sort(inserted_at: :asc)
       |> unread_filter(Keyword.get(opts, :reader))
       |> scope_workspace(opts)
-      |> scope_since(opts)
 
     Ash.read!(query)
   end
@@ -603,28 +610,51 @@ defmodule Arbiter.Messages.Message do
       # needlessly slower.
       unread_filter(query, nil)
     else
-      Ash.Query.filter(
-        query,
+      query
+      |> Ash.Query.filter(
         not exists(
           receipts,
           reader_ref == ^reader and (not is_nil(read_at) or not is_nil(cleared_at))
         )
       )
+      |> unread_floor(reader_floor(reader))
     end
   end
 
-  # bd-8akewg: the `:since` floor. A reader with no receipts is, by definition,
-  # unread on *everything* — which for a session created today would mean being
-  # handed the entire coordinator archive on its first poll. Callers that know
-  # when a reader came into existence (`coordinator_inbox` passes the session's
-  # own `inserted_at`) pass it here; the sessionless coordinator reader passes
-  # nothing, because the migration gave it a receipt for all of its history.
-  defp scope_since(query, opts) do
-    case Keyword.get(opts, :since) do
-      %DateTime{} = since -> Ash.Query.filter(query, inserted_at >= ^since)
-      _ -> query
+  # bd-8akewg: the bound on a session reader's unread view. With no receipts a
+  # reader is unread on *everything*, and handing a session created today the
+  # whole coordinator archive is not a mailbox.
+  #
+  # The bound is a union, not a cutoff: everything since the session started,
+  # **or** still globally uncleared. Anything the operator has not resolved is
+  # live mail no matter when it was raised — a session launched at 09:05 to
+  # deal with a 09:00 escalation has to be able to see it, and since a session
+  # clear never stamps the row, `last_with_subject/3` would otherwise suppress
+  # the repeat forever. What drops out is only the resolved archive.
+  #
+  # Derived from the reader ref here, in one place, so `inbox/2` and the
+  # `for_reader/3` query filter the REST endpoint (and through it `arb inbox
+  # --session <id>`) builds on cannot drift apart.
+  defp unread_floor(query, %DateTime{} = since),
+    do: Ash.Query.filter(query, is_nil(cleared_at) or inserted_at >= ^since)
+
+  # No session row behind the ref (hard-deleted, or a synthetic reader): no
+  # floor at all. Degenerate, and showing too much mail beats swallowing an
+  # escalation.
+  defp unread_floor(query, _no_floor), do: query
+
+  defp reader_floor("session:" <> session_id) when session_id != "" do
+    case Ash.get(Arbiter.Sessions.Session, session_id) do
+      {:ok, %{started_at: %DateTime{} = started_at}} -> started_at
+      _ -> nil
     end
+  rescue
+    # A ref that is not a real session id at all (Ash raises on an id it cannot
+    # cast) reads as "no floor" rather than taking the caller's query down.
+    _ -> nil
   end
+
+  defp reader_floor(_reader), do: nil
 
   @doc """
   Outstanding mailbox-family messages addressed to `to_ref`, oldest first:

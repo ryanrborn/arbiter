@@ -362,6 +362,11 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, view, _html} = live(conn, "/")
       assert render(view) =~ "1 unread"
 
+      # Stop this mount before re-mounting below: an orphaned view stays
+      # subscribed to the workspace topic and queries the sandbox connection as
+      # the test process exits, which drops it for everybody (bd-5scl0c).
+      GenServer.stop(view.pid)
+
       # A browser session reads it and then clears its whole view.
       session = Message.session_reader("sess-drawer")
       {:ok, _} = Message.mark_read(msg, reader: session)

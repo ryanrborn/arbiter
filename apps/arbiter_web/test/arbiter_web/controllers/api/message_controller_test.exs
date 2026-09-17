@@ -341,6 +341,60 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
       assert m.id in Enum.map(listed["data"], & &1["id"])
     end
+
+    test "a real session's unread view over REST matches coordinator_inbox's bound", %{conn: conn} do
+      # bd-8akewg review finding 2: `arb inbox --session <id>` lands here, while
+      # the MCP `coordinator_inbox` lands in Tools.Messaging. Both resolve the
+      # session's unread bound through `Message.unread_floor/2`, so the archive
+      # must drop out here too rather than printing "50 unread" of long-resolved
+      # mail for a session the MCP tool reports 0 for.
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "api-floor-#{System.unique_integer([:positive])}",
+          prefix: "afl"
+        })
+
+      {:ok, archived} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws.id,
+          to_ref: "coordinator",
+          body: "resolved long ago"
+        })
+
+      {:ok, _} = Message.mark_read(archived, reader: Message.coordinator_reader())
+      {:ok, _} = Message.mark_cleared(archived)
+
+      {:ok, unresolved} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws.id,
+          to_ref: "coordinator",
+          body: "still owed"
+        })
+
+      {:ok, session} =
+        Ash.create(Arbiter.Sessions.Session, %{cwd: "/tmp/api-floor", workspace_id: ws.id})
+
+      ids =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true", session: session.id})
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Enum.map(& &1["id"])
+
+      assert unresolved.id in ids
+      refute archived.id in ids
+
+      # …exactly the set the MCP handler reports for the same session.
+      assert [%{id: mcp_id}] =
+               Message.inbox("coordinator",
+                 workspace_id: ws.id,
+                 reader: Message.session_reader(session.id)
+               )
+
+      assert mcp_id == unresolved.id
+    end
   end
 
   describe "DELETE /api/messages?ids=... (per-message soft clear)" do

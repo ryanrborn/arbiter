@@ -78,9 +78,13 @@ defmodule Arbiter.MCP.Tools.Messaging do
   minted token) and marks read / clears only that reader's view. Session A
   polling no longer empties session B's inbox.
 
-  A session's unread view is floored at the session's own start time: with no
-  receipts a reader is unread on *everything*, and handing a session created
-  today the whole archive is not a mailbox.
+  A session's unread view is bounded, because with no receipts a reader is
+  unread on *everything* and handing a session created today the whole archive
+  is not a mailbox. The bound is a union: mail raised since the session
+  started, plus anything still globally uncleared — an escalation raised before
+  the session was launched is usually the reason it was launched, and a session
+  clear never stamps the row, so the `last_with_subject/3` dedupe would
+  otherwise suppress the repeat forever. Only the resolved archive is withheld.
 
   ## Workspace scope
 
@@ -135,36 +139,20 @@ defmodule Arbiter.MCP.Tools.Messaging do
     end
   end
 
-  # `[reader: …, since: …]` for the calling scope. A session token carries a
-  # `session_id` claim (`Scope.mint_session/2`); every other coordinator token —
-  # `arb mcp token mint`, `arb init`'s `.mcp.json`, the CLI — has none and falls
-  # in with the shared sessionless reader, keeping the operator's triage state
-  # in one place across the throwaway tokens the runbook mints each cycle.
-  defp reader_opts(%Scope{session_id: session_id}) when is_binary(session_id) do
-    [reader: Message.session_reader(session_id), since: session_started_at(session_id)]
-  end
-
-  defp reader_opts(%Scope{}), do: [reader: Message.coordinator_reader()]
-
-  # Just the reader — the `:since` floor in `reader_opts/1` only shapes an
-  # unread *listing*; a clear names its targets outright.
-  defp reader_opt(%Scope{session_id: session_id}) when is_binary(session_id),
+  # `[reader: …]` for the calling scope. A session token carries a `session_id`
+  # claim (`Scope.mint_session/2`); every other coordinator token — `arb mcp
+  # token mint`, `arb init`'s `.mcp.json`, the CLI — has none and falls in with
+  # the shared sessionless reader, keeping the operator's triage state in one
+  # place across the throwaway tokens the runbook mints each cycle.
+  #
+  # The bound on a session's unread listing is derived from the reader ref
+  # inside `Message` itself (`unread_floor/2`), so this handler and the REST
+  # endpoint the drawer and `arb inbox --session <id>` go through cannot
+  # disagree about what a given session's inbox holds.
+  defp reader_opts(%Scope{session_id: session_id}) when is_binary(session_id),
     do: [reader: Message.session_reader(session_id)]
 
-  defp reader_opt(%Scope{}), do: [reader: Message.coordinator_reader()]
-
-  # The floor for a session's unread view. `nil` (no such row) means no floor:
-  # a token whose session has been hard-deleted is degenerate, and showing too
-  # much mail beats swallowing an escalation.
-  defp session_started_at(session_id) do
-    case Ash.get(Arbiter.Sessions.Session, session_id) do
-      {:ok, %{started_at: %DateTime{} = at}} -> at
-      {:ok, %{inserted_at: %DateTime{} = at}} -> at
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
+  defp reader_opts(%Scope{}), do: [reader: Message.coordinator_reader()]
 
   defp validate_state(state) when state in ["unread", "outstanding"] do
     :ok
@@ -217,7 +205,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
       {:error, {:invalid_args, "coordinator_inbox_clear requires ids and/or task_id"}}
     else
       {:ok, cleared, not_found} =
-        if ids == [], do: {:ok, [], []}, else: Message.clear_ids(ids, reader_opt(scope))
+        if ids == [], do: {:ok, [], []}, else: Message.clear_ids(ids, reader_opts(scope))
 
       with {:ok, cleared_by_task} <- clear_by_task_if_present(scope, args, task_id) do
         {:ok,
@@ -234,7 +222,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
 
   defp clear_by_task_if_present(scope, args, task_id) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
-      Message.clear_by_task(task_id, [workspace_id: ws_id] ++ reader_opt(scope))
+      Message.clear_by_task(task_id, [workspace_id: ws_id] ++ reader_opts(scope))
     end
   end
 
