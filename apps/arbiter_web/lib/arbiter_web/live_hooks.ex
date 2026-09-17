@@ -80,6 +80,14 @@ defmodule ArbiterWeb.LiveHooks do
 
   @coordinator_ref Message.coordinator_ref()
 
+  # bd-8akewg: the drawer is the operator's own view, so it reads and clears as
+  # the shared sessionless coordinator reader — the same identity `arb inbox`
+  # and a plain minted token use. That reader's state is mirrored onto the
+  # message row, so the drawer behaves exactly as it did before per-reader
+  # state existed; what changed is that a browser *session's* polling no longer
+  # empties it.
+  @reader_opts [reader: Message.coordinator_reader()]
+
   def on_mount(:current_path, _params, _session, socket) do
     socket =
       socket
@@ -136,14 +144,14 @@ defmodule ArbiterWeb.LiveHooks do
       |> attach_hook(:coordinator_inbox_events, :handle_event, fn
         "coordinator_mark_read", %{"id" => id}, socket ->
           with {:ok, msg} <- Ash.get(Message, id),
-               {:ok, _} <- Message.mark_read(msg) do
+               {:ok, _} <- Message.mark_read(msg, @reader_opts) do
             {:halt, refresh_coordinator_inbox(socket)}
           else
             _ -> {:halt, refresh_coordinator_inbox(socket)}
           end
 
         "coordinator_clear", _params, socket ->
-          _ = Message.clear_read(@coordinator_ref)
+          _ = Message.clear_read(@coordinator_ref, @reader_opts)
           {:halt, refresh_coordinator_inbox(socket)}
 
         _event, _params, socket ->
@@ -200,7 +208,8 @@ defmodule ArbiterWeb.LiveHooks do
   defp refresh_coordinator_inbox(socket) do
     {inbox, outstanding} =
       try do
-        {Message.inbox(@coordinator_ref), Message.outstanding(@coordinator_ref)}
+        {Message.inbox(@coordinator_ref, @reader_opts),
+         Message.outstanding(@coordinator_ref, @reader_opts)}
       rescue
         _ -> {[], []}
       end

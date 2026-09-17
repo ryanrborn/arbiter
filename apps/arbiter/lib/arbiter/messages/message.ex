@@ -49,6 +49,30 @@ defmodule Arbiter.Messages.Message do
       *softly* (`clear_read/2`, `clear_all/2`, `mark_cleared/1`); the row is
       retained as the durable escalation record. Only `hard_purge/2` destroys.
 
+  ## Per-reader read state (bd-8akewg)
+
+  Those three states are *per reader* on the coordinator mailbox, which is a
+  single shared queue: producers write one row addressed to `"coordinator"` and
+  every browser-hosted session plus the sessionless coordinator reads it. When
+  read/cleared were only the two row timestamps above, the first reader to poll
+  consumed everybody else's mail.
+
+  So `inbox/2`, `outstanding/2`, `mark_read/2`, `clear_read/2` and `clear_all/2`
+  take a `reader:` option, and the state for that reader lives in
+  `Arbiter.Messages.MessageReceipt` — no receipt is the unread state. Two rules
+  make the rest of the system hold still:
+
+    * A **session** reader (`session_reader/1`) writes only its own receipt. The
+      row's `cleared_at` stays nil, so one session triaging its copy cannot
+      re-arm an escalation the `last_with_subject/3` dedupe is suppressing.
+    * The **sessionless coordinator** reader (`coordinator_reader/0` — the CLI,
+      the dashboard drawer, a plain minted token) mirrors its writes onto the
+      row *and* reads through it, so the REST listing, `hard_purge/2` and that
+      same dedupe behave exactly as they did.
+
+  Omitting `reader:` keeps the original row-level semantics, which is what a
+  task mailbox wants: it has exactly one reader.
+
   ## PubSub
 
   On create, the message is broadcast on `"messages:<workspace_id>"` as
@@ -369,6 +393,18 @@ defmodule Arbiter.Messages.Message do
   @doc "Every per-reader receipt recorded against `message_id`."
   def receipts_for_message(message_id) when is_binary(message_id),
     do: Arbiter.Messages.MessageReceipt.for_message(message_id)
+
+  @doc """
+  Narrow an `Ash.Query` on this resource to one lifecycle `state` (`:unread` or
+  `:outstanding`) as seen by `reader_ref` — or, when `reader_ref` is `nil`, by
+  the row itself (the pre-bd-8akewg semantics).
+
+  Exposed for callers that build their own query and cannot go through
+  `inbox/2` / `outstanding/2` — the REST `GET /api/messages` filter endpoint,
+  which layers kind/from_ref/limit on top of the same predicate.
+  """
+  def for_reader(query, reader_ref, :unread), do: unread_filter(query, reader_ref)
+  def for_reader(query, reader_ref, :outstanding), do: outstanding_filter(query, reader_ref)
 
   @doc """
   The preferred task reference for a message: `task_ref` if set, else the

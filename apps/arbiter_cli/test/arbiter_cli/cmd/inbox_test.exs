@@ -232,4 +232,69 @@ defmodule ArbiterCli.Cmd.InboxTest do
       refute out =~ "noise"
     end
   end
+
+  # ---- bd-8akewg: explicit reader ------------------------------------------
+
+  describe "arb inbox --session <id>" do
+    test "forwards the session as the reader on the unread listing" do
+      stub_routes([
+        {{"get", "/api/messages"},
+         fn conn ->
+           assert conn.query_string =~ "session=sess-42"
+           assert conn.query_string =~ "unread=true"
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"data" => [coordinator_msg(%{})]})
+         end}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["--session", "sess-42"]) end)
+      assert code == 0
+      assert out =~ "Coordinator inbox — 1 unread"
+    end
+
+    test "forwards the session on clear" do
+      stub_routes([
+        {{"delete", "/api/messages"},
+         fn conn ->
+           assert conn.query_string =~ "session=sess-42"
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "deleted_read" => 1,
+               "deleted_unread" => 0,
+               "remaining_unread" => 0
+             }
+           })
+         end}
+      ])
+
+      {_out, _err, code} = capture(fn -> Inbox.run(["clear", "--session", "sess-42"]) end)
+      assert code == 0
+    end
+
+    test "forwards the session on read <id>" do
+      id = "0b9d1f2a-1111-2222-3333-444455556666"
+
+      stub_routes([
+        {{"post", "/api/messages/#{id}/read"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert body =~ "sess-42"
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(coordinator_msg(%{}))
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Inbox.run(["read", id, "--session", "sess-42"]) end)
+
+      assert code == 0
+    end
+  end
 end

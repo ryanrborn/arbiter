@@ -21,6 +21,16 @@ defmodule ArbiterWeb.Api.MessageController do
 
   Newest first. `arb inbox` / `arb notify` / `arb msg` / `arb message` drive
   these.
+
+  ## Reader identity (bd-8akewg)
+
+  The coordinator mailbox is shared, but read/cleared state is per reader. These
+  endpoints act as the **sessionless coordinator** reader by default — the
+  identity the CLI, the dashboard drawer and any plain minted token share — so
+  every existing caller behaves exactly as it did. Pass `session=<session_id>`
+  on :index, :read or :clear to act as that browser session's reader instead;
+  its reads and clears then leave the shared row, and therefore every other
+  reader, untouched.
   """
 
   use ArbiterWeb, :controller
@@ -33,6 +43,8 @@ defmodule ArbiterWeb.Api.MessageController do
   @default_limit 50
 
   def index(conn, params) do
+    reader = reader_ref(params)
+
     with {:ok, limit} <- parse_limit(params["limit"]),
          {:ok, kind} <- parse_kind(params["kind"]) do
       messages =
@@ -40,8 +52,8 @@ defmodule ArbiterWeb.Api.MessageController do
         |> filter_eq(:kind, kind)
         |> filter_eq(:to_ref, params["to_ref"])
         |> filter_eq(:from_ref, params["from_ref"])
-        |> maybe_unread(params["unread"])
-        |> maybe_outstanding(params["outstanding"])
+        |> maybe_unread(params["unread"], reader)
+        |> maybe_outstanding(params["outstanding"], reader)
         |> Ash.Query.sort(inserted_at: :desc)
         |> Ash.Query.limit(limit)
         |> Ash.read!()
@@ -70,9 +82,9 @@ defmodule ArbiterWeb.Api.MessageController do
     end
   end
 
-  def read(conn, %{"id" => id}) do
+  def read(conn, %{"id" => id} = params) do
     with {:ok, message} <- Ash.get(Message, id),
-         {:ok, updated} <- Message.mark_read(message) do
+         {:ok, updated} <- Message.mark_read(message, reader: reader_ref(params)) do
       render(conn, :show, message: updated)
     end
   end
@@ -83,11 +95,13 @@ defmodule ArbiterWeb.Api.MessageController do
   # retained (soft), never destroyed; the durable escalation record survives.
   # `to_ref` is required so a stray call can't sweep the table.
   def clear(conn, %{"to_ref" => to_ref} = params) when is_binary(to_ref) and to_ref != "" do
+    opts = [reader: reader_ref(params)]
+
     {:ok, deleted_read, deleted_unread, remaining_unread} =
       if params["all"] in ["true", true] do
-        Message.clear_all(to_ref)
+        Message.clear_all(to_ref, opts)
       else
-        Message.clear_read(to_ref)
+        Message.clear_read(to_ref, opts)
       end
 
     json(conn, %{
@@ -116,16 +130,25 @@ defmodule ArbiterWeb.Api.MessageController do
 
   # `unread` = pending: never seen and not cleared. cleared_at must also be nil
   # so a message soft-cleared while still unread does not resurface as pending.
-  defp maybe_unread(query, flag) when flag in ["true", true],
-    do: Ash.Query.filter(query, is_nil(read_at) and is_nil(cleared_at))
+  defp maybe_unread(query, flag, reader) when flag in ["true", true],
+    do: Message.for_reader(query, reader, :unread)
 
-  defp maybe_unread(query, _), do: query
+  defp maybe_unread(query, _flag, _reader), do: query
 
   # `outstanding` = the triage queue: seen (read_at set) but not yet cleared.
-  defp maybe_outstanding(query, flag) when flag in ["true", true],
-    do: Ash.Query.filter(query, not is_nil(read_at) and is_nil(cleared_at))
+  defp maybe_outstanding(query, flag, reader) when flag in ["true", true],
+    do: Message.for_reader(query, reader, :outstanding)
 
-  defp maybe_outstanding(query, _), do: query
+  defp maybe_outstanding(query, _flag, _reader), do: query
+
+  # The reader these endpoints act as. `session=<session_id>` opts into that
+  # browser session's own view; everything else is the shared sessionless
+  # coordinator reader, whose state is mirrored onto the row — which is why
+  # callers that never pass `session` see no change at all.
+  defp reader_ref(%{"session" => session}) when is_binary(session) and session != "",
+    do: Message.session_reader(session)
+
+  defp reader_ref(_params), do: Message.coordinator_reader()
 
   # ---- param coercion ----
 

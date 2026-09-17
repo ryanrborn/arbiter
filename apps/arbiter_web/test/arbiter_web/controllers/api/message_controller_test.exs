@@ -213,4 +213,90 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
   end
+
+  # ---- bd-8akewg: explicit reader ------------------------------------------
+
+  describe "per-reader read state" do
+    setup do
+      ws = "ws-api-reader-#{System.unique_integer([:positive])}"
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          workspace_id: ws,
+          to_ref: "coordinator",
+          body: "shared escalation"
+        })
+
+      %{ws: ws, message: m, session: "sess-#{System.unique_integer([:positive])}"}
+    end
+
+    test "read with `session` marks it read for that session only", ctx do
+      %{conn: conn, message: m, session: session} = ctx
+
+      conn = post(conn, ~p"/api/messages/#{m.id}/read", %{session: session})
+      assert json_response(conn, 200)
+
+      # The shared row is untouched, so the sessionless coordinator still has it.
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.read_at == nil
+
+      reader = Message.session_reader(session)
+      assert [] = Message.inbox("coordinator", workspace_id: ctx.ws, reader: reader)
+      assert [_] = Message.outstanding("coordinator", workspace_id: ctx.ws, reader: reader)
+    end
+
+    test "read without `session` keeps stamping the row (sessionless coordinator)", ctx do
+      %{conn: conn, message: m} = ctx
+
+      conn = post(conn, ~p"/api/messages/#{m.id}/read", %{})
+      assert json_response(conn, 200)["read_at"]
+
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.read_at
+    end
+
+    test "clear with `session` clears only that session's view", ctx do
+      %{conn: conn, message: m, session: session} = ctx
+      reader = Message.session_reader(session)
+
+      {:ok, _} = Message.mark_read(m, reader: reader)
+
+      conn = delete(conn, ~p"/api/messages", %{to_ref: "coordinator", session: session})
+      assert %{"deleted_read" => 1} = json_response(conn, 200)["data"]
+
+      {:ok, reloaded} = Ash.get(Message, m.id)
+      assert reloaded.cleared_at == nil
+      assert [] = Message.outstanding("coordinator", workspace_id: ctx.ws, reader: reader)
+      assert [_] = Message.inbox("coordinator", workspace_id: ctx.ws)
+    end
+
+    test "index unread=true with `session` is that session's unread view", ctx do
+      %{conn: conn, message: m, session: session} = ctx
+
+      listed =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true", session: session})
+        |> json_response(200)
+
+      assert m.id in Enum.map(listed["data"], & &1["id"])
+
+      {:ok, _} = Message.mark_read(m, reader: Message.session_reader(session))
+
+      listed =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true", session: session})
+        |> json_response(200)
+
+      refute m.id in Enum.map(listed["data"], & &1["id"])
+
+      # …and the sessionless view is unaffected.
+      listed =
+        conn
+        |> get(~p"/api/messages", %{to_ref: "coordinator", unread: "true"})
+        |> json_response(200)
+
+      assert m.id in Enum.map(listed["data"], & &1["id"])
+    end
+  end
 end
