@@ -22,13 +22,28 @@ defmodule Arbiter.Vault.Rotation do
     * `Arbiter.Accounts.ProviderCredential` — `:secret`
 
   Add new entries to `@columns` here when a new resource grows a `cloak`
-  block — nothing here discovers them automatically.
+  block — nothing here discovers them automatically. A drift guard
+  (`Arbiter.Vault.RotationTest` `"@columns matches every ash_cloak attribute
+  in the app"`) derives the true set from `config :arbiter, :ash_domains` +
+  `AshCloak.Info.cloak_attributes!/1` and fails if it disagrees with this
+  list, so a forgotten column shows up as a test failure rather than as
+  permanently undecryptable ciphertext after the old key is dropped.
 
   ## Safety
 
   Only counts and row ids ever reach `Mix.shell()` or a return value —
   decrypted plaintext lives strictly inside `rotate_row!/5` and is
   immediately re-encrypted, never logged or written to disk unencrypted.
+
+  ## Concurrent writes
+
+  Each row is re-encrypted with a compare-and-swap `UPDATE ... WHERE id = ?
+  AND encrypted_<attr> = ?` against the exact ciphertext read in the sweep's
+  snapshot `SELECT`. If a live write (e.g. a workspace secrets update) lands
+  on the same row in between, the CAS matches zero rows, the row is counted
+  under `:skipped_changed`, and it is left untouched rather than clobbered
+  with a re-encryption of the stale value. The sweep is idempotent, so the
+  operator re-runs `--sweep` to pick up anything reported as skipped.
   """
 
   alias Arbiter.Vault
@@ -39,12 +54,17 @@ defmodule Arbiter.Vault.Rotation do
     {Arbiter.Accounts.ProviderCredential, "provider_credentials", :secret}
   ]
 
+  @doc "The `{resource, table, attribute}` triples swept and verified. Exposed for the drift-guard test."
+  @spec columns() :: [{module(), String.t(), atom()}]
+  def columns, do: @columns
+
   @type sweep_report :: %{
           table: String.t(),
           column: String.t(),
           scanned: non_neg_integer(),
           rotated: non_neg_integer(),
-          already_current: non_neg_integer()
+          already_current: non_neg_integer(),
+          skipped_changed: non_neg_integer()
         }
 
   @type verify_report :: %{table: String.t(), column: String.t(), retired: non_neg_integer()}
@@ -73,22 +93,24 @@ defmodule Arbiter.Vault.Rotation do
   defp sweep_column!({resource, table, attr}) do
     column = "encrypted_#{attr}"
 
-    {rotated, already_current} =
+    {rotated, already_current, skipped_changed} =
       table
       |> select_rows(column)
-      |> Enum.reduce({0, 0}, fn {id, raw}, {rotated, current} ->
+      |> Enum.reduce({0, 0, 0}, fn {id, raw}, {rotated, current, skipped} ->
         case rotate_row!(resource, table, column, id, raw) do
-          :rotated -> {rotated + 1, current}
-          :already_current -> {rotated, current + 1}
+          :rotated -> {rotated + 1, current, skipped}
+          :already_current -> {rotated, current + 1, skipped}
+          :changed_under_us -> {rotated, current, skipped + 1}
         end
       end)
 
     %{
       table: table,
       column: column,
-      scanned: rotated + already_current,
+      scanned: rotated + already_current + skipped_changed,
       rotated: rotated,
-      already_current: already_current
+      already_current: already_current,
+      skipped_changed: skipped_changed
     }
   end
 
@@ -113,8 +135,7 @@ defmodule Arbiter.Vault.Rotation do
         |> Vault.decrypt!()
         |> Ash.Helpers.non_executable_binary_to_term()
 
-      update_row!(table, column, id, AshCloak.do_encrypt(resource, plaintext))
-      :rotated
+      update_row!(table, column, id, raw, AshCloak.do_encrypt(resource, plaintext))
     end
   end
 
@@ -136,13 +157,32 @@ defmodule Arbiter.Vault.Rotation do
     Enum.map(rows, fn [id, raw] -> {id, raw} end)
   end
 
-  defp update_row!(table, column, id, new_value) do
-    Ecto.Adapters.SQL.query!(
-      Arbiter.Repo,
-      "UPDATE #{table} SET #{column} = ?1 WHERE id = ?2",
-      [new_value, id]
-    )
+  @doc """
+  Compare-and-swap write: sets `column` to `new_value` only if it still
+  holds `old_value` (the value read in the sweep's snapshot). Returns
+  `:rotated` on success, `:changed_under_us` when the row moved in between —
+  in which case it is left untouched rather than clobbered with a
+  re-encryption of the stale value. Public for direct testing; used
+  internally by `rotate_row!/5`.
+  """
+  @spec update_row!(String.t(), String.t(), term(), binary(), binary()) ::
+          :rotated | :changed_under_us
+  def update_row!(table, column, id, old_value, new_value) do
+    # These columns are declared `:binary` (BLOB affinity), but a value's
+    # actual SQLite storage class (TEXT vs BLOB) depends on how it was bound
+    # at write time, not the column's declared type — Ecto's typed writes
+    # bind :binary as BLOB, while a bare Elixir binary bound through raw SQL
+    # (as this module and its tests do) binds as TEXT when it happens to be
+    # valid text. SQLite never considers a TEXT value equal to a BLOB value
+    # even with identical bytes, so both sides are CAST to BLOB here to
+    # compare on raw bytes regardless of how each was originally stored.
+    %{num_rows: n} =
+      Ecto.Adapters.SQL.query!(
+        Arbiter.Repo,
+        "UPDATE #{table} SET #{column} = ?1 WHERE id = ?2 AND CAST(#{column} AS BLOB) = CAST(?3 AS BLOB)",
+        [new_value, id, old_value]
+      )
 
-    :ok
+    if n == 1, do: :rotated, else: :changed_under_us
   end
 end

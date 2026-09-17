@@ -183,6 +183,74 @@ defmodule Arbiter.Vault.RotationTest do
     end
   end
 
+  describe "update_row!/5 compare-and-swap" do
+    test "succeeds and writes when old_value still matches, no-ops otherwise" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rot-cas-#{System.unique_integer([:positive])}",
+          secrets: %{"a" => "b"}
+        })
+
+      original = read_raw_column!("workspaces", "encrypted_secrets", ws.id)
+
+      assert Rotation.update_row!(
+               "workspaces",
+               "encrypted_secrets",
+               ws.id,
+               original,
+               "new-value-a"
+             ) == :rotated
+
+      assert read_raw_column!("workspaces", "encrypted_secrets", ws.id) == "new-value-a"
+    end
+
+    test "reports :changed_under_us and leaves the row alone when a concurrent write landed first" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rot-cas-race-#{System.unique_integer([:positive])}",
+          secrets: %{"a" => "b"}
+        })
+
+      stale_snapshot = read_raw_column!("workspaces", "encrypted_secrets", ws.id)
+
+      # Simulate a concurrent write (e.g. a live secrets update) landing
+      # between the sweep's SELECT and its UPDATE.
+      write_raw_column!("workspaces", "encrypted_secrets", ws.id, "concurrent-write")
+
+      assert Rotation.update_row!(
+               "workspaces",
+               "encrypted_secrets",
+               ws.id,
+               stale_snapshot,
+               "would-clobber-the-concurrent-write"
+             ) == :changed_under_us
+
+      assert read_raw_column!("workspaces", "encrypted_secrets", ws.id) == "concurrent-write"
+    end
+  end
+
+  describe "@columns drift guard" do
+    test "matches every ash_cloak attribute in the app" do
+      actual =
+        :arbiter
+        |> Application.fetch_env!(:ash_domains)
+        |> Enum.flat_map(&Ash.Domain.Info.resources/1)
+        |> Enum.flat_map(fn resource ->
+          resource
+          |> AshCloak.Info.cloak_attributes!()
+          |> Enum.map(&{resource, AshSqlite.DataLayer.Info.table(resource), &1})
+        end)
+        |> MapSet.new()
+
+      expected = MapSet.new(Rotation.columns())
+
+      assert actual == expected,
+             "Arbiter.Vault.Rotation's @columns is out of sync with the app's ash_cloak " <>
+               "attributes.\n  missing from @columns: #{inspect(MapSet.difference(actual, expected))}\n" <>
+               "  stale in @columns: #{inspect(MapSet.difference(expected, actual))}"
+    end
+  end
+
   describe "verify/0" do
     test "reports a nonzero retired count until the row is swept", %{
       old_key: old_key,

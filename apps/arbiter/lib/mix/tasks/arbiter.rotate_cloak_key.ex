@@ -19,6 +19,16 @@ defmodule Mix.Tasks.Arbiter.RotateCloakKey do
   `ARBITER_CLOAK_KEY_GENERATION` at its bumped value permanently).
 
   Prints only counts and table/column names — never plaintext or ciphertext.
+
+  ## It starts the Repo and the Vault, not the application
+
+  Deliberately no `Mix.Task.run("app.start")`: booting the full application
+  next to a live coordinator would start a second endpoint on the same port,
+  a second Autopilot and a second set of patrols against the same database
+  (see `mix arbiter.backfill_issue_repos` for the same precedent). This task
+  starts only the Ecto repo and the `Arbiter.Vault` GenServer it needs to
+  decrypt/re-encrypt rows — both are no-ops if already running (e.g. an
+  attached node or an iex session that started the app).
   """
 
   use Mix.Task
@@ -31,12 +41,19 @@ defmodule Mix.Tasks.Arbiter.RotateCloakKey do
   def run(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
 
-    Mix.Task.run("app.start")
+    start_deps!()
 
     cond do
       opts[:sweep] == true ->
         Mix.shell().info("Sweeping ash_cloak columns onto the current cipher...\n")
-        Rotation.sweep!() |> Enum.each(&print_sweep_report/1)
+        reports = Rotation.sweep!()
+        Enum.each(reports, &print_sweep_report/1)
+
+        if Enum.any?(reports, &(&1.skipped_changed > 0)) do
+          Mix.shell().info(
+            "\nSome rows changed concurrently and were skipped — re-run `--sweep` to pick them up."
+          )
+        end
 
       opts[:verify] == true ->
         Mix.shell().info("Checking for rows still on the retired cipher...\n")
@@ -56,10 +73,27 @@ defmodule Mix.Tasks.Arbiter.RotateCloakKey do
     end
   end
 
+  defp start_deps! do
+    Mix.Task.run("app.config")
+    {:ok, _} = Application.ensure_all_started(:ash)
+    {:ok, _} = Application.ensure_all_started(:ash_sqlite)
+
+    case Arbiter.Repo.start_link(pool_size: 1) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
+
+    case Arbiter.Vault.start_link([]) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
+  end
+
   defp print_sweep_report(%{table: table, column: column} = report) do
     Mix.shell().info(
       "  #{table}.#{column}: scanned #{report.scanned}, rotated #{report.rotated}, " <>
-        "already current #{report.already_current}"
+        "already current #{report.already_current}, skipped (changed concurrently) " <>
+        "#{report.skipped_changed}"
     )
   end
 

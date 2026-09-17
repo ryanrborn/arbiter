@@ -63,13 +63,19 @@ Rotating from generation N to N+1:
 
 4. **Sweep** — re-encrypts every `ash_cloak` column under the new cipher.
    Safe to interrupt and re-run: rows already on the new cipher are skipped.
+   The app can stay up during this step — each row is written back with a
+   compare-and-swap against the exact ciphertext read in the sweep's
+   snapshot, so a concurrent write to that row (e.g. a live secrets update)
+   is detected rather than clobbered; such rows are reported as "skipped
+   (changed concurrently)" and just need a re-run of `--sweep` to pick up.
 
    ```sh
    mix arbiter.rotate_cloak_key --sweep
    ```
 
 5. **Verify again** — must report zero rows left on the retired cipher
-   before the next step:
+   before the next step. If step 4 reported any rows skipped as changed
+   concurrently, re-run `--sweep` until it reports none, then verify:
 
    ```sh
    mix arbiter.rotate_cloak_key --verify
@@ -93,7 +99,10 @@ Rotating from generation N to N+1:
 - Nothing here ever logs plaintext or writes it to disk — the sweep task
   prints only table/column names and row counts.
 - New resources that add a `cloak do ... end` block must be added to
-  `Arbiter.Vault.Rotation`'s `@columns` list — it is not auto-discovered.
+  `Arbiter.Vault.Rotation`'s `@columns` list — it is not auto-discovered, but
+  a test (`Arbiter.Vault.RotationTest` "@columns matches every ash_cloak
+  attribute in the app") derives the true set from the Ash domains and fails
+  the suite if it drifts.
 - This rotates the *storage* key only. Rotating the underlying provider
   credential itself (e.g. a fresh `claude setup-token` grant) is a separate,
   manual operator action — see `docs/provider-account-design.md` §7.6.
