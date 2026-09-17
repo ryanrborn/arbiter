@@ -278,8 +278,11 @@ defmodule Arbiter.Board.Autopilot do
 
   def handle_call(:status, _from, state) do
     {:reply,
-     %{paused?: state.paused?, changed_at: state.paused_changed_at, changed_by: state.paused_changed_by},
-     state}
+     %{
+       paused?: state.paused?,
+       changed_at: state.paused_changed_at,
+       changed_by: state.paused_changed_by
+     }, state}
   end
 
   def handle_call({:paused, paused?, by}, _from, state) do
@@ -569,14 +572,14 @@ defmodule Arbiter.Board.Autopilot do
         :ok
 
       {:error, reason} ->
-        Logger.warning(
-          "board autopilot: failed to persist paused=#{paused?}: #{inspect(reason)}"
-        )
+        Logger.warning("board autopilot: failed to persist paused=#{paused?}: #{inspect(reason)}")
     end
   rescue
     e -> Logger.warning("board autopilot: failed to persist paused state: #{inspect(e)}")
   catch
     :exit, reason ->
-      Logger.warning("board autopilot: failed to persist paused state: process error #{inspect(reason)}")
+      Logger.warning(
+        "board autopilot: failed to persist paused state: process error #{inspect(reason)}"
+      )
   end
 end

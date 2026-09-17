@@ -152,8 +152,7 @@ defmodule Arbiter.Settings do
   stored state. Writes surface errors normally.
   """
   @spec set_board_autopilot_paused(boolean(), String.t() | nil) ::
-          {:ok,
-           %{paused: boolean(), changed_at: DateTime.t(), changed_by: String.t() | nil}}
+          {:ok, %{paused: boolean(), changed_at: DateTime.t(), changed_by: String.t() | nil}}
           | {:error, term()}
   def set_board_autopilot_paused(paused?, by \\ nil)
       when is_boolean(paused?) and (is_binary(by) or is_nil(by)) do
