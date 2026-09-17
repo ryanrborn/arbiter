@@ -155,6 +155,54 @@ defmodule Arbiter.Agents.Gemini do
 
   defp tool_result_line?(_), do: false
 
+  # Splice `insert` (a nudge/resume prompt, see the two shapes below) into a
+  # stashed `default_argv/2` invocation. Both the `:agy` and `:gemini`
+  # branches build argv as `[…, exec, "-p", prompt, flags…]` (no `--`
+  # separator, no `--print` name — see `build_argv/5` above), so the prompt
+  # slot is always the element right after `"-p"`; only the resume
+  # (`--conversation`) translation differs between the two CLIs.
+  #
+  # `["--resume", session_id, prompt]` → the worker's resume insert. Only
+  # `agy` accepts a `--conversation <id>` flag (bd-b7e33c); the upstream
+  # `gemini` CLI has no session-resume mechanism at all, so that branch
+  # returns an explicit error instead of emitting an invocation `gemini`
+  # would reject or silently misinterpret. `--print-timeout`/`--model`/
+  # `--effort` (and every other flag) are left exactly where they were —
+  # only the prompt is swapped and `--conversation <id>` is inserted right
+  # after it.
+  #
+  # `[nudge]` → a gate-nudge swap-in: only the prompt changes, on either
+  # branch.
+  #
+  # Returns `{:error, :no_print_slot}` when `argv` has no `"-p"` flag at all
+  # (test fixtures / custom commands).
+  @doc false
+  def splice_prompt(argv, insert) when is_list(argv) and is_list(insert) do
+    case Enum.find_index(argv, &(&1 == "-p")) do
+      nil ->
+        {:error, :no_print_slot}
+
+      idx ->
+        {head, [_old_prompt | tail]} = Enum.split(argv, idx + 1)
+        exec = Enum.at(head, -2)
+
+        case insert do
+          ["--resume", session_id, prompt] ->
+            if agy_executable?(exec) do
+              {:ok, head ++ [prompt, "--conversation", session_id] ++ tail}
+            else
+              {:error, :resume_unsupported}
+            end
+
+          [nudge] ->
+            {:ok, head ++ [nudge] ++ tail}
+        end
+    end
+  end
+
+  defp agy_executable?(exec) when is_binary(exec), do: Path.basename(exec) == "agy"
+  defp agy_executable?(_), do: false
+
   @doc """
   Which Gemini-family CLI this host will actually run, and where.
 

@@ -86,37 +86,31 @@ defmodule Arbiter.Worker.RespawnProviderTest do
     port
   end
 
-  test "a nudge respawn keeps the run's own provider instead of falling back to claude",
-       %{task: task, pid: pid} do
-    start_session!(pid, "codex")
+  # bd-b7e33c: `Arbiter.Agents.Gemini.splice_prompt/2` now exists, so gemini/agy
+  # is rewritten by the same dynamic-adapter path as claude/codex — it's no
+  # longer the one provider that parks with `:unsupported_provider` on a nudge
+  # respawn. This fixture's fake argv (`sh -c "echo …"`) has no `-p` slot, so
+  # the splice is a no-op (`{:error, :no_print_slot} -> {:ok, port_args}`) and
+  # the untouched argv is relaunched, exactly like the claude/codex fixtures.
+  for provider <- ["codex", "gemini"] do
+    test "a nudge respawn keeps the run's own provider (#{provider}) instead of falling back to claude",
+         %{task: task, pid: pid} do
+      start_session!(pid, unquote(provider))
 
-    # First session exits -> notes gate (blank notes) -> nudge respawn of the
-    # same stashed argv, which exits the same way -> cap exhausted -> park.
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      # First session exits -> notes gate (blank notes) -> nudge respawn of the
+      # same stashed argv, which exits the same way -> cap exhausted -> park.
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
 
-    providers = task.id |> events_for() |> Enum.map(& &1.provider)
+      snap = Worker.state(pid)
+      assert snap.meta[:notes_gate_detail] == :cap_exhausted
 
-    # Two sessions ran (original + nudge respawn) and BOTH are codex.
-    assert length(providers) == 2
-    assert Enum.all?(providers, &(&1 == "codex")), "got providers: #{inspect(providers)}"
-  end
+      providers = task.id |> events_for() |> Enum.map(& &1.provider)
 
-  test "a provider whose argv we cannot rewrite parks instead of silently re-running the task",
-       %{task: task, pid: pid} do
-    start_session!(pid, "gemini")
+      # Two sessions ran (original + nudge respawn) and BOTH kept the run's provider.
+      assert length(providers) == 2
 
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
-
-    snap = Worker.state(pid)
-
-    # `Arbiter.Agents.Gemini` exports no `splice_prompt/2`, so the nudge cannot
-    # be delivered. Relaunching the untouched argv would re-run the WHOLE
-    # original prompt at full price while pretending it was a nudge — park and
-    # escalate with a concrete cause instead.
-    assert snap.meta[:notes_gate_detail] == {:respawn_failed, :unsupported_provider}
-
-    events = events_for(task.id)
-    assert length(events) == 1
-    assert hd(events).provider == "gemini"
+      assert Enum.all?(providers, &(&1 == unquote(provider))),
+             "got providers: #{inspect(providers)}"
+    end
   end
 end
