@@ -179,7 +179,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         {:error, "no coordinator message matches id #{inspect(token)}"}
 
       matches ->
-        candidates = matches |> Enum.map(&to_string(&1["id"])) |> Enum.join(", ")
+        candidates = Enum.map_join(matches, ", ", &to_string(&1["id"]))
 
         {:error,
          "ambiguous id prefix #{inspect(token)} — give more characters. Candidates: #{candidates}"}
