@@ -2137,6 +2137,7 @@ defmodule Arbiter.Worker.Dispatch do
       ]
 
       result = Arbiter.MCP.AgentConfig.write(provider, worktree_path, write_opts)
+      _ = surface_unsupported_mcp_config(task, provider, result)
       _ = maybe_verify_codex_mcp_connection(task, provider, result, write_opts)
       result
     else
@@ -2148,6 +2149,39 @@ defmodule Arbiter.Worker.Dispatch do
       Logger.warning("Arbiter.Worker.Dispatch: MCP config injection failed: #{inspect(e)}")
       :ok
   end
+
+  # bd-m8geh4: some provider CLIs have no worktree-local MCP config file at all
+  # — the `agy` (Antigravity) fork reads MCP servers only from `$HOME`, so a
+  # per-spawn scope token has nowhere to live. Its adapter refuses with
+  # `{:error, :unsupported}` rather than writing a `.gemini/settings.json` only
+  # the *upstream* `gemini` CLI would read. Surface that at dispatch time: a
+  # silent no-op is what let agy workers run for weeks with no Arbiter MCP tools
+  # and nobody noticing, because the fallback (`arb` CLI) works well enough to
+  # hide it.
+  #
+  # Deliberately NOT fatal: an agy worker without MCP still completes its task
+  # through the `arb` CLI. The refusal is a loud capability downgrade, not a
+  # dispatch failure.
+  defp surface_unsupported_mcp_config(%Issue{id: task_id}, provider, {:error, :unsupported}) do
+    require Logger
+
+    Logger.error(
+      "Arbiter.Worker.Dispatch: MCP config injection is UNSUPPORTED for provider=#{inspect(provider)} " <>
+        "task=#{task_id} (cli=#{inspect(mcp_cli_flavour(provider))}) — this agent's CLI reads MCP " <>
+        "config only from $HOME, so no per-spawn scope token can be injected into the worktree. " <>
+        "The worker will fall back to the `arb` CLI and will have NO typed Arbiter MCP tools. " <>
+        "See Arbiter.MCP.AgentConfig.Gemini's moduledoc."
+    )
+
+    :ok
+  end
+
+  defp surface_unsupported_mcp_config(_task, _provider, _result), do: :ok
+
+  # Best-effort detail for the log line above: which concrete binary the
+  # provider resolved to, when the adapter can tell us.
+  defp mcp_cli_flavour(:gemini), do: Arbiter.MCP.AgentConfig.Gemini.cli_flavour()
+  defp mcp_cli_flavour(provider), do: provider
 
   # Codex MCP support has reports of *silent* connect failures (its own
   # moduledoc: `Arbiter.MCP.AgentConfig.Codex`) — the process starts, the config
