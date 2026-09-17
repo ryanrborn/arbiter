@@ -61,13 +61,34 @@ defmodule Arbiter.MCP.Tools.Messaging do
   replacement for `arb message inbox` / `arb inbox`. Coordinator only; the
   worker tier is denied at the catalog level.
 
-  Lists messages where `to_ref == "coordinator"` in the workspace. Two states:
+  Lists messages where `to_ref == "coordinator"`. Two states:
   - `state: "unread"` (default): unread messages, marks them read on return,
     and optionally soft-clears the outstanding tail (mirrors `arb inbox clear`).
   - `state: "outstanding"`: read-but-uncleared messages; pure read, no mutations.
 
   `state: "outstanding"` and `clear: true` are mutually exclusive and will
   return an error.
+
+  ## Reader identity (bd-8akewg)
+
+  The mailbox itself is shared — every producer writes one row, and every
+  session sees it. What is *not* shared is read/cleared state: this handler
+  derives a reader from the calling scope (`"session:<id>"` for a
+  browser-hosted session's token, the shared `"coordinator"` reader for a plain
+  minted token) and marks read / clears only that reader's view. Session A
+  polling no longer empties session B's inbox.
+
+  A session's unread view is floored at the session's own start time: with no
+  receipts a reader is unread on *everything*, and handing a session created
+  today the whole archive is not a mailbox.
+
+  ## Workspace scope
+
+  A workspace-bound token is confined to its workspace, as before. A
+  cross-workspace token that names no `workspace` now reads **every** workspace
+  rather than silently falling back to the lone/"default" one — escalations
+  raised elsewhere used to be invisible to it. Passing `workspace` still
+  filters to that one.
   """
   @spec coordinator_inbox(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def coordinator_inbox(%Scope{} = scope, args) do
@@ -76,17 +97,18 @@ defmodule Arbiter.MCP.Tools.Messaging do
     with :ok <- validate_state(state),
          {:ok, clear} <- Tools.fetch_bool(args, "clear", false),
          :ok <- validate_state_and_clear_combo(state, clear),
-         {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
+         {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
       ref = Message.coordinator_ref()
+      opts = [workspace_id: ws_id] ++ reader_opts(scope)
 
       case state do
         "unread" ->
-          messages = Message.inbox(ref, workspace_id: ws_id)
-          _ = Enum.each(messages, &Message.mark_read/1)
+          messages = Message.inbox(ref, opts)
+          _ = Enum.each(messages, &Message.mark_read(&1, opts))
 
           {deleted_read, deleted_unread, remaining_unread} =
             if clear do
-              {:ok, dr, du, ru} = Message.clear_read(ref, workspace_id: ws_id)
+              {:ok, dr, du, ru} = Message.clear_read(ref, opts)
               {dr, du, ru}
             else
               {0, 0, 0}
@@ -102,7 +124,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
            }}
 
         "outstanding" ->
-          messages = Message.outstanding(ref, workspace_id: ws_id)
+          messages = Message.outstanding(ref, opts)
 
           {:ok,
            %{
@@ -111,6 +133,30 @@ defmodule Arbiter.MCP.Tools.Messaging do
            }}
       end
     end
+  end
+
+  # `[reader: …, since: …]` for the calling scope. A session token carries a
+  # `session_id` claim (`Scope.mint_session/2`); every other coordinator token —
+  # `arb mcp token mint`, `arb init`'s `.mcp.json`, the CLI — has none and falls
+  # in with the shared sessionless reader, keeping the operator's triage state
+  # in one place across the throwaway tokens the runbook mints each cycle.
+  defp reader_opts(%Scope{session_id: session_id}) when is_binary(session_id) do
+    [reader: Message.session_reader(session_id), since: session_started_at(session_id)]
+  end
+
+  defp reader_opts(%Scope{}), do: [reader: Message.coordinator_reader()]
+
+  # The floor for a session's unread view. `nil` (no such row) means no floor:
+  # a token whose session has been hard-deleted is degenerate, and showing too
+  # much mail beats swallowing an escalation.
+  defp session_started_at(session_id) do
+    case Ash.get(Arbiter.Sessions.Session, session_id) do
+      {:ok, %{started_at: %DateTime{} = at}} -> at
+      {:ok, %{inserted_at: %DateTime{} = at}} -> at
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp validate_state(state) when state in ["unread", "outstanding"] do
