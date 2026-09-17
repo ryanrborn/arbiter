@@ -145,7 +145,7 @@ defmodule ArbiterWeb.Api.EventControllerTest do
 
       pump =
         Task.async(fn ->
-          for _ <- 1..50 do
+          Stream.repeatedly(fn ->
             Phoenix.PubSub.broadcast(
               Arbiter.PubSub,
               "events",
@@ -153,7 +153,8 @@ defmodule ArbiterWeb.Api.EventControllerTest do
             )
 
             Process.sleep(5)
-          end
+          end)
+          |> Stream.run()
         end)
 
       Process.sleep(50)
@@ -162,6 +163,9 @@ defmodule ArbiterWeb.Api.EventControllerTest do
       assert {:ok, _conn} = Task.yield(task, 500),
              "expected a stream with continuous event traffic to still close after revocation" <>
                " — revocation must be checked on a timer, not only on receive idle timeout"
+
+      assert Process.alive?(pump.pid),
+             "stream only closed because event traffic stopped — the busy path is untested"
 
       Task.shutdown(pump, :brutal_kill)
     end
