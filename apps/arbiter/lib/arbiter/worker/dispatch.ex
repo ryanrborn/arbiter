@@ -1942,8 +1942,15 @@ defmodule Arbiter.Worker.Dispatch do
         # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
         # the worker OAuth token from this workspace's `worker_env` before
         # falling back to the server env (bd-bw3466).
+        #
+        # `worktree_path:` is carried for the same reason on the agy side: it
+        # keys the per-spawn isolated `$HOME`
+        # (`Arbiter.Agents.Gemini.ConfigDir`, bd-7s29yq). It must be the SAME
+        # value `maybe_write_mcp_config/3` above was given, or the spawn would
+        # read a different HOME than the one the MCP config was written into.
         agent_opts =
-          agent_opts_from_choice(choice) ++ [security: policy, workspace: workspace]
+          agent_opts_from_choice(choice) ++
+            [security: policy, workspace: workspace, worktree_path: worktree_path]
 
         tracker_context = fetch_tracker_context(task, workspace)
 

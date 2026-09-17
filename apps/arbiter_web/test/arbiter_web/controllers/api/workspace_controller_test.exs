@@ -81,6 +81,32 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert posture["policy_enforced"] == true
     end
 
+    # bd-7s29yq AC3: the posture surface must tell the truth for agy too. The
+    # Gemini adapter used to hard-code `policy_enforced: false` because nothing
+    # enforced the policy; now it answers from the live seam (agy on PATH +
+    # worker config isolation on), so this asserts the endpoint *tracks the
+    # adapter* rather than a constant either way.
+    test "security_posture.policy_enforced tracks the gemini adapter's own answer", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws",
+          prefix: "agyws",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            }
+          }
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["provider"] == "gemini"
+      assert posture["mode"] == "strict"
+      assert posture["policy_enforced"] == Arbiter.Agents.Gemini.security_enforced?()
+    end
+
     test "returns 404 for missing", %{conn: conn} do
       bogus = "00000000-0000-0000-0000-000000000000"
       conn = get(conn, ~p"/api/workspaces/#{bogus}")
