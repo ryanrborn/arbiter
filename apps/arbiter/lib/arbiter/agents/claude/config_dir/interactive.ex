@@ -199,6 +199,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
     |> Security.settings()
     |> Map.put("skipAutoPermissionPrompt", true)
     |> put_mcp_approval(opts)
+    |> put_event_monitor_hook(opts)
   end
 
   @doc """
@@ -253,6 +254,62 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
       servers -> Map.put(document, "enabledMcpjsonServers", servers)
     end
   end
+
+  # Arms the session's own event monitor (bd-aqafdr) from a `SessionStart`
+  # hook rather than relying on the agent to read and act on a CLAUDE.md
+  # section. Claude Code hooks are synchronous shell commands, not a way to
+  # start a background process the model can see — there is no hook
+  # mechanism that starts `monitor.sh` directly and later "wakes" the agent,
+  # since only the model's own Monitor tool call turns a streaming loop into
+  # a visible notification. So this hook does the next best thing: it fires
+  # deterministically on every startup, resume AND compaction (a CLAUDE.md
+  # section can be skipped or compacted away; this cannot) and injects an
+  # `additionalContext` instruction telling the agent the exact Monitor call
+  # to make. Omitted entirely for a session with no MCP server — `mcp: false`
+  # provisions no `monitor.sh` for the hook to point at.
+  defp put_event_monitor_hook(document, opts) do
+    case mcp_servers(opts) do
+      [] ->
+        document
+
+      _servers ->
+        Map.put(document, "hooks", %{
+          "SessionStart" => [
+            %{
+              "matcher" => "startup|resume|compact",
+              "hooks" => [%{"type" => "command", "command" => session_start_hook_command()}]
+            }
+          ]
+        })
+    end
+  end
+
+  @event_monitor_context "Arm the Arbiter event monitor now: run $ARB_SESSION_ROOT/monitor.sh " <>
+                           "via the Monitor tool with persistent: true — never background Bash " <>
+                           "(an infinite loop never exits, so it never produces a notification). " <>
+                           "The stream is a wake-up signal only: call coordinator_inbox for the " <>
+                           "authoritative unread view. Re-arm the monitor if it exits (token " <>
+                           "expiry or a network blip) — it resumes from since= automatically. " <>
+                           "Every session receives every shared-mailbox event, including ones " <>
+                           "meant for other sessions; decide which concern you and ignore the rest."
+
+  # A static, single-quoted `printf` — never a `cat <<EOF` heredoc — so
+  # `$ARB_SESSION_ROOT` reaches the agent literally, for it to resolve in its
+  # own shell, rather than being expanded (or mis-expanded) inside the hook's
+  # own subprocess.
+  defp session_start_hook_command do
+    payload =
+      Jason.encode!(%{
+        "hookSpecificOutput" => %{
+          "hookEventName" => "SessionStart",
+          "additionalContext" => @event_monitor_context
+        }
+      })
+
+    "printf '%s\\n' " <> shell_quote(payload)
+  end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
 
   defp write_claude_json(dir, cwd, opts) do
     path = Path.join(dir, @claude_json)
