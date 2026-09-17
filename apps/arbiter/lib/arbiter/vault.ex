@@ -1,7 +1,7 @@
 defmodule Arbiter.Vault do
   @moduledoc """
-  Cloak vault used to encrypt sensitive `Workspace` attributes at rest
-  (tracker/merger secrets — see `Arbiter.Tasks.Workspace` and `ash_cloak`).
+  Cloak vault used to encrypt sensitive `Workspace` / `ProviderCredential`
+  attributes at rest (see `ash_cloak` `cloak` blocks on those resources).
 
   The AES-256-GCM key is read at **runtime** from the `ARBITER_CLOAK_KEY`
   environment variable, which must be a Base64-encoded 32-byte value:
@@ -14,20 +14,56 @@ defmodule Arbiter.Vault do
   through `config :arbiter, Arbiter.Vault, key: <base64>` (see `config/test.exs`)
   so the suite does not depend on a real environment variable.
 
-  Rotating the key is intentionally out of scope (see the task's "Out of
-  scope"); a rotation runbook is a separate concern.
+  ## Key rotation
+
+  Rotation is Cloak's native two-cipher scheme, driven by a second,
+  **optional** env var: `ARBITER_CLOAK_KEY_OLD`.
+
+    * New ciphertext is always written with the `:default` cipher (tag
+      `"AES.GCM.V2"`, key from `ARBITER_CLOAK_KEY`).
+    * When `ARBITER_CLOAK_KEY_OLD` is set, a second cipher (tag
+      `"AES.GCM.V1"`) is registered **decrypt-only** so rows still encrypted
+      under the previous key keep working during the rotation window. Cloak
+      dispatches decryption by matching the tag embedded in the ciphertext,
+      not by key, so the two tags must differ.
+    * Once `Arbiter.Vault.Rotation.verify/0` confirms no rows remain tagged
+      `"AES.GCM.V1"`, remove `ARBITER_CLOAK_KEY_OLD` from the environment and
+      redeploy — the retired cipher then drops out of `init/1` automatically.
+
+  See `docs/cloak-key-rotation.md` for the full runbook and
+  `Arbiter.Vault.Rotation` for the sweep/verify task this drives.
   """
 
   use Cloak.Vault, otp_app: :arbiter
 
+  @current_tag "AES.GCM.V2"
+  @retired_tag "AES.GCM.V1"
+
   @impl GenServer
   def init(config) do
-    config =
-      Keyword.put(config, :ciphers,
-        default: {Cloak.Ciphers.AES.GCM, tag: "AES.GCM.V1", key: key!(), iv_length: 12}
-      )
+    ciphers =
+      [{:default, {Cloak.Ciphers.AES.GCM, tag: @current_tag, key: key!(), iv_length: 12}}] ++
+        retired_cipher()
 
-    {:ok, config}
+    {:ok, Keyword.put(config, :ciphers, ciphers)}
+  end
+
+  @doc "Tag stamped on ciphertext written by the current (`:default`) cipher."
+  @spec current_tag() :: String.t()
+  def current_tag, do: @current_tag
+
+  @doc """
+  Tag stamped on ciphertext written by the retired, decrypt-only cipher —
+  only meaningful while `ARBITER_CLOAK_KEY_OLD` is configured.
+  """
+  @spec retired_tag() :: String.t()
+  def retired_tag, do: @retired_tag
+
+  defp retired_cipher do
+    case old_key() do
+      nil -> []
+      key -> [{:retired, {Cloak.Ciphers.AES.GCM, tag: @retired_tag, key: key, iv_length: 12}}]
+    end
   end
 
   @doc """
@@ -57,7 +93,28 @@ defmodule Arbiter.Vault do
         """
 
       raw ->
-        decode!(raw)
+        decode!(raw, "ARBITER_CLOAK_KEY")
+    end
+  end
+
+  @doc """
+  Resolve the raw 32-byte AES key for the retired (decrypt-only) cipher, or
+  `nil` when no rotation is in progress.
+
+  Resolution order mirrors `key!/0`:
+
+    1. `ARBITER_CLOAK_KEY_OLD` environment variable.
+    2. `config :arbiter, Arbiter.Vault, old_key: <base64>` — test-only fallback.
+
+  Raises the same way `key!/0` does when the value is present but malformed —
+  a rotation should fail loudly, not silently drop decrypt support for
+  not-yet-migrated rows.
+  """
+  @spec old_key() :: binary() | nil
+  def old_key do
+    case raw_old_key() do
+      nil -> nil
+      raw -> decode!(raw, "ARBITER_CLOAK_KEY_OLD")
     end
   end
 
@@ -68,17 +125,24 @@ defmodule Arbiter.Vault do
     end
   end
 
-  defp decode!(raw) do
+  defp raw_old_key do
+    case System.get_env("ARBITER_CLOAK_KEY_OLD") do
+      v when is_binary(v) and v != "" -> v
+      _ -> Application.get_env(:arbiter, __MODULE__)[:old_key]
+    end
+  end
+
+  defp decode!(raw, var_name) do
     case Base.decode64(String.trim(raw)) do
       {:ok, key} when byte_size(key) == 32 ->
         key
 
       {:ok, key} ->
-        raise "ARBITER_CLOAK_KEY must decode to 32 bytes (a 256-bit AES key), " <>
+        raise "#{var_name} must decode to 32 bytes (a 256-bit AES key), " <>
                 "got #{byte_size(key)} bytes. Generate one with: openssl rand -base64 32"
 
       :error ->
-        raise "ARBITER_CLOAK_KEY must be valid Base64. Generate one with: openssl rand -base64 32"
+        raise "#{var_name} must be valid Base64. Generate one with: openssl rand -base64 32"
     end
   end
 end
