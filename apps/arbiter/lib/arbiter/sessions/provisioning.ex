@@ -56,6 +56,7 @@ defmodule Arbiter.Sessions.Provisioning do
   revoked token would be worse than one that mints again.
   """
 
+  alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.ConfigDir.Interactive
   alias Arbiter.Config.Paths
@@ -65,6 +66,7 @@ defmodule Arbiter.Sessions.Provisioning do
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Memory
   alias Arbiter.Sessions.Naming
+  alias Arbiter.Sessions.RepoCheckout
   alias Arbiter.Sessions.Session
 
   require Logger
@@ -114,6 +116,7 @@ defmodule Arbiter.Sessions.Provisioning do
     with :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
+         {:ok, opts} <- provision_repo_checkout(session, opts),
          :ok <- write_instructions(session, paths, cwd, opts),
          :ok <- mount_memory(session, opts),
          :ok <- seed_config_dir(session, config_dir, cwd, opts),
@@ -140,12 +143,29 @@ defmodule Arbiter.Sessions.Provisioning do
   cross-workspace default, decision 6), and `can_dispatch` taken from the row —
   which defaults to **off** (§10.1).
 
+  **Unless the row is issue-bound** (bd-1lszsc): a session carrying an
+  `issue_id` is a refine session, and gets a `:refine`-tier token bound to that
+  issue and to its workspace instead. That decision is taken from the row, not
+  from a caller's option, so "a refine session can never hold a coordinator
+  token" is a property of the schema rather than of every call site
+  remembering to ask for the right tier. `:refine` requires a workspace, so a
+  bound row with no `workspace_id` is a bug worth crashing on rather than
+  quietly widening.
+
   The token is returned, never stored: the only durable copy is the mode-`0600`
   `.mcp.json` inside the session's own directory. Its revocation handle is the
   row, not a stored copy.
   """
   @spec mint_token(Session.t(), keyword()) :: String.t()
-  def mint_token(%Session{} = session, opts \\ []) do
+  def mint_token(session, opts \\ [])
+
+  def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, opts)
+      when is_binary(issue_id) and issue_id != "" and is_binary(workspace_id) and
+             workspace_id != "" do
+    MCP.Scope.mint_refine(session.id, workspace_id, issue_id, opts)
+  end
+
+  def mint_token(%Session{} = session, opts) do
     MCP.Scope.mint_session(
       session.id,
       Keyword.merge(
@@ -223,6 +243,48 @@ defmodule Arbiter.Sessions.Provisioning do
         with :ok <- write_file(Path.join(cwd, "CLAUDE.md"), content) do
           write_file(Path.join(cwd, "AGENTS.md"), content)
         end
+    end
+  end
+
+  # A refine session's read-only grounding checkout (bd-1lszsc), provisioned
+  # *before* the instructions so they can name the path — or say there is none.
+  #
+  # Deliberately not fatal. An issue with no repo, a repo the workspace never
+  # registered, a path that has stopped being a git repo: none of those are a
+  # reason to refuse the operator a refinement session. The refine instructions
+  # have a "no checkout was provided" branch precisely so this can fail softly
+  # and the agent still knows exactly where it stands.
+  defp provision_repo_checkout(%Session{} = session, opts) do
+    case Keyword.get(opts, :refine) do
+      refine when is_map(refine) ->
+        {:ok,
+         Keyword.put(
+           opts,
+           :refine,
+           Map.put(refine, :repo_checkout, checkout(session, refine, opts))
+         )}
+
+      _ ->
+        {:ok, opts}
+    end
+  end
+
+  defp checkout(session, refine, opts) do
+    case RepoCheckout.provision(
+           session,
+           Map.get(refine, :repo_path),
+           Map.get(refine, :repo_branch),
+           opts
+         ) do
+      {:ok, %{path: path}} ->
+        path
+
+      {:error, reason} ->
+        Logger.info(
+          "Sessions.Provisioning #{session.id}: no refine repo checkout (#{inspect(reason)})"
+        )
+
+        nil
     end
   end
 
@@ -572,14 +634,40 @@ defmodule Arbiter.Sessions.Provisioning do
   def agent_command(%Session{} = session, opts \\ []) do
     Keyword.get(opts, :agent_command) ||
       Application.get_env(:arbiter, :sessions_agent_command) ||
-      default_agent_command(session)
+      default_agent_command(session, opts)
   end
 
-  defp default_agent_command(%Session{} = session) do
+  defp default_agent_command(%Session{} = session, opts) do
     ["claude"]
     |> append_name(session)
+    |> append_model(opts)
+    |> append_effort(opts)
     |> append_remote_control(session)
     |> Enum.join(" ")
+  end
+
+  # `:model` / `:thinking` are how a *caller* pins a session's model tier and
+  # reasoning effort — today only `Arbiter.Sessions.Refine`, which pins premium
+  # and `high` (see its moduledoc for why those two, and why never flagship).
+  # Absent both, the command is a bare `claude` and the CLI picks, unchanged.
+  defp append_model(parts, opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" -> parts ++ ["--model", shell_token(model)]
+      _ -> parts
+    end
+  end
+
+  # Routed through the same `thinking_argv` table the dispatch path uses
+  # (`Arbiter.Agents.Claude.Config`), so a workspace that has remapped its
+  # effort flags for a newer CLI has remapped them here too.
+  defp append_effort(parts, opts) do
+    case Keyword.get(opts, :thinking) do
+      level when is_binary(level) and level != "" ->
+        parts ++ Enum.map(ClaudeConfig.thinking_argv(level), &shell_token/1)
+
+      _ ->
+        parts
+    end
   end
 
   defp append_name(parts, %Session{name: name}) when is_binary(name) do
@@ -674,6 +762,14 @@ defmodule Arbiter.Sessions.Provisioning do
   # Single-quote for /bin/sh, escaping embedded single quotes the only way sh
   # allows. Paths here are Arbiter-derived, but a session id or a configured
   # root is still data, and data does not belong unquoted in a generated script.
+  # Quote only what needs it. A model name or an effort flag is a plain token
+  # in every real config, and `--model 'opus'` in a generated script reads like
+  # the quoting is load-bearing when it is not. Anything outside this
+  # conservative set still goes through `shell_quote/1`.
+  defp shell_token(value) do
+    if Regex.match?(~r{\A[A-Za-z0-9_@%+=:,./-]+\z}, value), do: value, else: shell_quote(value)
+  end
+
   defp shell_quote(value) do
     "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
   end

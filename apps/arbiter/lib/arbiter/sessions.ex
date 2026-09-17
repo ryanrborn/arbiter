@@ -71,6 +71,7 @@ defmodule Arbiter.Sessions do
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Provider
   alias Arbiter.Sessions.Provisioning
+  alias Arbiter.Sessions.RepoCheckout
   alias Arbiter.Sessions.Runner
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Terminal
@@ -127,6 +128,11 @@ defmodule Arbiter.Sessions do
       pointed at an existing checkout.
     * `:provider` — default `:claude_code`.
     * `:workspace_id` — `nil` (default) means cross-workspace.
+    * `:issue_id` — binds the session to one issue, which makes it a **refine
+      session** (bd-1lszsc): its MCP token is minted at the `:refine` tier
+      bound to that issue rather than at the coordinator tier, and at most one
+      live session may carry a given `issue_id`. Set by
+      `Arbiter.Sessions.Refine.open/2`, which is the supported way in.
     * `:config_dir` — override the session's `CLAUDE_CONFIG_DIR`; defaults to
       the scaffolded one.
     * `:name` — an operator-supplied display name (bd-o2vtsz). Passed through
@@ -297,6 +303,12 @@ defmodule Arbiter.Sessions do
   single place that archives the session's own JSONL (§11, phase 9) — the
   CLI prunes its session store at ~21 days, so this is the last reliable
   moment to copy it out.
+
+  It is also where a refine session's read-only repo checkout goes
+  (bd-1lszsc). Putting it here rather than beside the Kill button is what
+  makes "removed when the session ends" true for *every* way a session ends,
+  including the ones nobody clicked: the idle reaper, the adoption sweep
+  finding a vanished scope, and the agent simply exiting.
   """
   @spec mark_ended(Session.t(), String.t()) :: {:ok, Session.t()} | {:error, term()}
   def mark_ended(%Session{} = session, reason) when is_binary(reason) do
@@ -316,6 +328,7 @@ defmodule Arbiter.Sessions do
       _ = final_usage_ingest(ended)
       _ = archive_session_jsonl(ended)
       _ = purge_transcript_pipe(ended)
+      _ = RepoCheckout.teardown(ended)
       {:ok, ended}
     end
   end
@@ -563,6 +576,7 @@ defmodule Arbiter.Sessions do
     Ash.create(Session, %{
       provider: Keyword.get(opts, :provider, :claude_code),
       workspace_id: Keyword.get(opts, :workspace_id),
+      issue_id: Keyword.get(opts, :issue_id),
       config_dir: Keyword.get(opts, :config_dir),
       cwd: Keyword.get(opts, :cwd),
       name: Keyword.get(opts, :name),
