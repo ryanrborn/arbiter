@@ -58,6 +58,7 @@ const HEIGHT = 900
 const BEFORE = "BEFORE-COLLAPSE"
 const ACROSS = "ACROSS-THE-NAVIGATION"
 const COLLAPSED = "WHILE-COLLAPSED"
+const PRESETS = "AT-THE-PRESETS"
 
 const checks = []
 const consoleErrors = []
@@ -118,7 +119,12 @@ try {
   cdpSessionId = sessionId
   await run(pageDriver(cdp, sessionId))
 } catch (error) {
-  check("harness", false, (error && error.stack) || String(error))
+  // The page's own exceptions come with it: a hook that threw in `mounted()`
+  // takes every later hook on the page down with it, and the symptom that
+  // reaches here is only ever "the terminal never came up".
+  const why = (error && error.stack) || String(error)
+  const logged = consoleErrors.length ? `\n  page errors: ${JSON.stringify(consoleErrors)}` : ""
+  check("harness", false, why + logged)
 } finally {
   if (cdp) cdp.close()
   // Exact-PID teardown only. This repo has an incident class around
@@ -479,6 +485,16 @@ async function run(page) {
   // the scrollback still on screen — and, for a side panel, a page that is
   // inset by exactly the panel's width rather than hidden underneath it.
 
+  // A fresh stamp and a fresh marker: the collapse/resume section above
+  // deliberately disposed the first xterm and deliberately did *not* replay
+  // what came before it, so neither the original stamp nor the original
+  // scrollback is a claim about anything here.
+  await sync(`emit ${SESSION_A} ${PRESETS}`)
+  await waitForText(page, SESSION_A, PRESETS)
+  await page.eval(
+    `(document.getElementById("session-dock-terminal-${SESSION_A}").__arbStamp = "presets")`
+  )
+
   const compactLayout = await layout(page, SESSION_A)
 
   await preset(page, SESSION_A, "side")
@@ -513,12 +529,12 @@ async function run(page) {
 
   check(
     "side-panel-refits-the-same-terminal",
-    sidePanel.stamp === "kept" &&
+    sidePanel.stamp === "presets" &&
       sidePanel.xterms === 1 &&
       sidePanel.state === "live" &&
-      sidePanel.text.includes(BEFORE),
+      sidePanel.text.includes(PRESETS),
     `stamp=${sidePanel.stamp}, ${sidePanel.xterms} xterm(s), state=${sidePanel.state}, ` +
-      `scrollback kept=${sidePanel.text.includes(BEFORE)}`
+      `scrollback kept=${sidePanel.text.includes(PRESETS)}`
   )
 
   // A browser resize while the panel is up. Below the point where 80 columns
@@ -529,6 +545,15 @@ async function run(page) {
     `!!document.getElementById("session-dock-size-fallback-${SESSION_A}")`,
     "a viewport too narrow for a side panel never fell back to Maximized"
   )
+  // Maximized at 1000px is wider than the panel was, so this is also the wait
+  // for the refit the fallback caused.
+  await page.poll(
+    `(() => {
+       const el = document.getElementById("session-dock-terminal-${SESSION_A}")
+       return el && el.__arbTerminal && el.__arbTerminal.term.cols > ${sidePanel.cols}
+     })()`,
+    "the fallback to Maximized never refitted the pane"
+  )
   const narrow = await settledGeometry(page, SESSION_A)
   const narrowLayout = await layout(page, SESSION_A)
 
@@ -537,7 +562,7 @@ async function run(page) {
     narrowLayout.dockSize === "max" &&
       narrowLayout.mainInset === 0 &&
       narrow.paneOverflow <= 1 &&
-      narrow.stamp === "kept",
+      narrow.stamp === "presets",
     `data-dock-size=${narrowLayout.dockSize}, page inset=${narrowLayout.mainInset}, ` +
       `${narrow.cols}x${narrow.rows}, overflow=${narrow.paneOverflow}px`
   )
@@ -546,6 +571,16 @@ async function run(page) {
   await page.poll(
     `!document.getElementById("session-dock-size-fallback-${SESSION_A}")`,
     "the side panel never came back when the viewport did"
+  )
+  // The window re-renders as a panel before the pane has been refitted to it —
+  // the refit is two frames and a debounce behind. Wait for the geometry, not
+  // just for the markup, or this reads the maximized size it is leaving.
+  await page.poll(
+    `(() => {
+       const el = document.getElementById("session-dock-terminal-${SESSION_A}")
+       return el && el.__arbTerminal && el.__arbTerminal.term.cols === ${sidePanel.cols}
+     })()`,
+    "the side panel never refitted back to its own geometry"
   )
   const widened = await settledGeometry(page, SESSION_A)
 
@@ -584,6 +619,13 @@ async function run(page) {
   await screenshot("maximized")
 
   await preset(page, SESSION_A, "compact")
+  await page.poll(
+    `(() => {
+       const el = document.getElementById("session-dock-terminal-${SESSION_A}")
+       return el && el.__arbTerminal && el.__arbTerminal.term.cols === ${compactLayout.cols}
+     })()`,
+    "Compact never refitted back to the geometry it started at"
+  )
   const backToCompact = await settledGeometry(page, SESSION_A)
   const compactAgain = await layout(page, SESSION_A)
 
@@ -593,11 +635,11 @@ async function run(page) {
       compactAgain.mainInset === 0 &&
       backToCompact.cols === compactLayout.cols &&
       backToCompact.rows === compactLayout.rows &&
-      backToCompact.stamp === "kept" &&
-      backToCompact.text.includes(BEFORE) &&
+      backToCompact.stamp === "presets" &&
+      backToCompact.text.includes(PRESETS) &&
       backToCompact.paneOverflow <= 1,
     `${compactLayout.cols}x${compactLayout.rows} -> ${backToCompact.cols}x${backToCompact.rows} ` +
-      `across three presets, same xterm=${backToCompact.stamp === "kept"}`
+      `across three presets, same xterm=${backToCompact.stamp === "presets"}`
   )
 
   // -- the keyboard rule ----------------------------------------------------
@@ -709,11 +751,36 @@ async function mountedGeometry(page, id) {
   return settledGeometry(page, id)
 }
 
-function waitLive(page, id) {
-  return page.poll(
-    `document.getElementById("session-dock-status-${id}").dataset.state === "live"`,
-    `the terminal for ${id} never reached "live"`
-  )
+async function waitLive(page, id) {
+  try {
+    await page.poll(
+      `document.getElementById("session-dock-status-${id}").dataset.state === "live"`,
+      `the terminal for ${id} never reached "live"`
+    )
+  } catch (error) {
+    // "It never came up" is the least useful sentence a browser check can end
+    // on. Say what the page actually had when the deadline ran out.
+    const state = await page.json(`(() => {
+      const status = document.getElementById("session-dock-status-${id}")
+      const el = document.getElementById("session-dock-terminal-${id}")
+      const term = el && el.__arbTerminal ? el.__arbTerminal : null
+      return {
+        status: status ? status.dataset.state || null : "no status strip",
+        statusText: status ? status.textContent.trim() : null,
+        pane: !!el,
+        handle: !!term,
+        xterms: document.querySelectorAll(".xterm").length,
+        socket: term && term.stream ? term.stream.state || null : null,
+        lastSeq: term && term.stream ? term.stream.lastSeq : null,
+        stalled: !!document.getElementById("session-dock-stalled-${id}"),
+        unavailable: !!document.getElementById("session-dock-unavailable-${id}"),
+        remote: !!document.getElementById("session-dock-remote-${id}"),
+        liveSocket: !!(window.liveSocket && window.liveSocket.isConnected())
+      }
+    })()`)
+
+    throw new Error(`${error.message} — page state: ${JSON.stringify(state)}`)
+  }
 }
 
 // The fit reaches the pane through two debounces in series — a drag must not

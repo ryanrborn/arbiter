@@ -1453,11 +1453,27 @@ defmodule ArbiterWeb.SessionDockLive do
               hook-owned — so LiveView is told to keep out of them, and so it
               is only rendered when there is a hook to own it. A frozen pane
               has no channel and no live state to paint, so it gets the ended
-              banner below instead. --%>
+              banner below instead.
+
+              `phx-update="ignore"` protects the *children* and nothing else:
+              for an ignored node LiveView merges the server's `data-*` on and
+              **removes every one the server did not render**. `data-state` is
+              written here by the terminal hook and by nothing on the server,
+              so without `ignore_attributes` any patch that reaches this window
+              silently erases it — a live terminal whose strip claims no state
+              at all, and whose `data-state` seam (`verify_session_dock_*.mjs`,
+              and anything reading it) goes blind. bd-covojz found this the
+              hard way: adding a size-derived class to the window turned a
+              previously-empty diff into a patch, and the state vanished two
+              milliseconds after it first read "live". The hook cannot put it
+              back itself — `updated()` fires only when an element's own
+              dataset differs from the server's, which for the *pane* it is
+              attached to it never does. --%>
         <div
           :if={@live?}
           id={"session-dock-status-#{@session.id}"}
           phx-update="ignore"
+          phx-mounted={JS.ignore_attributes("data-state")}
           class={[
             "flex shrink-0 items-center gap-2 px-2.5 py-1",
             "border-b border-solid border-[var(--border-default)]",

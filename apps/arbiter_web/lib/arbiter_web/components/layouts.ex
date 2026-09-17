@@ -140,7 +140,7 @@ defmodule ArbiterWeb.Layouts do
           fixed`, so without this the page would simply slide underneath it —
           and reading a page while talking to a session is the whole reason the
           preset exists. --%>
-    <main class="pr-[var(--session-dock-page-inset)] transition-[padding] duration-150">
+    <main class="pr-[var(--session-dock-page-inset)]">
       {render_slot(@inner_block)}
     </main>
 
