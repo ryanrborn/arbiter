@@ -186,14 +186,29 @@ defmodule Arbiter.Sessions.Refine do
 
   def model(%Workspace{} = workspace) do
     # `put_active/1` writes the process dictionary, and this runs inside a
-    # LiveView (or the caller's) process. Resolving in a throwaway task keeps
-    # the caller's own active-agent config — whatever it is — untouched.
+    # LiveView (or whatever else clicked Refine). Resolving in a throwaway task
+    # keeps the caller's own active-agent config — whatever it is — untouched.
+    #
+    # A workspace whose agent config cannot be read at all (undecryptable
+    # secrets, say) must not take the caller down with it: the whole answer
+    # this function owes is "which premium model", and the built-in default is
+    # a correct one. So the task's exit is caught rather than propagated.
     resolved =
-      Task.async(fn ->
-        ClaudeConfig.put_active(workspace)
-        ClaudeConfig.model_for_tier(@model_tier)
-      end)
-      |> Task.await(5_000)
+      try do
+        Task.async(fn ->
+          ClaudeConfig.put_active(workspace)
+          ClaudeConfig.model_for_tier(@model_tier)
+        end)
+        |> Task.await(5_000)
+      catch
+        :exit, reason ->
+          Logger.warning(
+            "Sessions.Refine: could not resolve the #{@model_tier} model for workspace " <>
+              "#{workspace.id} (#{inspect(reason)}); falling back to the built-in default"
+          )
+
+          nil
+      end
 
     resolved || default_model()
   end
@@ -299,13 +314,22 @@ defmodule Arbiter.Sessions.Refine do
     Enum.find(parents, &(&1.issue_type == :epic)) || List.first(parents)
   end
 
+  # `Dependencies.for_issue/1` groups edges by the **role** the other endpoint
+  # plays (`:blocked_by`, `:children`, …) rather than by raw row direction,
+  # precisely because direction alone is misleading — an epic's `:parent_of`
+  # children and its `:depends_on` blockers are both outbound rows and mean
+  # opposite things. So the role is what goes in `:type`, and `:direction`
+  # carries a plain arrow rather than re-exposing the raw direction the
+  # grouping just finished hiding: "`blocked_by` → `bd-x`" is unambiguous,
+  # where "`blocked_by` outbound `bd-x`" invites the reader to work out which
+  # of the two facts wins.
   defp edges(groups) do
     groups
     |> Enum.flat_map(fn {group, entries} ->
       Enum.map(entries, fn entry ->
         %{
           type: group,
-          direction: entry.direction,
+          direction: "→",
           id: entry.issue_id,
           title: (entry.issue && entry.issue.title) || "(unreadable)"
         }

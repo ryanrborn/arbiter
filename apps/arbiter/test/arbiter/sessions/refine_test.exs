@@ -286,6 +286,9 @@ defmodule Arbiter.Sessions.RefineTest do
       assert instructions =~ "the widgets are slow"
       assert instructions =~ epic.id
       assert instructions =~ ws.id
+      # The edge list names the role the other endpoint plays, not the raw
+      # row direction `Dependencies.for_issue/1` deliberately hides.
+      assert instructions =~ "`parents` → `#{epic.id}`"
 
       # Written as both names, for non-Claude providers (child 2).
       assert File.read!(Path.join(session.cwd, "AGENTS.md")) == instructions
