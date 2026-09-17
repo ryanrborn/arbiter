@@ -322,6 +322,8 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       html = render(view)
 
       assert position(html, "aaa-stuck-epic") < position(html, "zzz-calm-epic")
+      refute has_element?(view, "#epic-#{calm.id} [data-role='needs-you-chips']")
+      assert has_element?(view, "#epic-#{stuck.id} [data-role='needs-you-chips']")
     end
 
     test "unstuck epics fall back to latest child activity, then age",
@@ -337,6 +339,8 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       html = render(view)
 
       assert position(html, "newer-epic") < position(html, "older-epic")
+      refute has_element?(view, "#epic-#{older.id} [data-role='needs-you-chips']")
+      refute has_element?(view, "#epic-#{newer.id} [data-role='needs-you-chips']")
     end
 
     test "the sort dropdown offers age, % complete and title", %{conn: conn, ws: ws} do

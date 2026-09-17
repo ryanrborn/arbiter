@@ -38,7 +38,11 @@ defmodule Arbiter.Tasks.EpicRollup do
        board's Waiting column votes with, not a second definition. Covers an
        `:awaiting` question, a `:failed` park, an MR blocked for a reason
        outside the Watchdog's auto-resolvable set, and an `:in_progress`
-       child with no live worker at all (nothing will retry it on its own).
+       child with no live worker that has sat past `Snapshot.orphaned?/3`'s
+       dispatch grace window (nothing will retry it on its own). A child
+       still inside that window, or of a non-dispatchable type (`:epic`),
+       does not flag — `orphaned?/3` is reused rather than re-derived so the
+       two surfaces can't drift apart.
     3. It is blocked by an open gating blocker that itself needs the
        operator: the blocker is `:awaiting_verification`, needs-you per rule
        2, or unrefined (`:open` and not `refined` — it will never be
@@ -240,13 +244,17 @@ defmodule Arbiter.Tasks.EpicRollup do
       Keyword.get_lazy(opts, :watchdog_live, fn -> Snapshot.watchdog_live(workers) end)
 
     workers_by_task = Enum.group_by(workers, & &1.task_id)
+    worked = for {id, ws} <- workers_by_task, ws != [], into: MapSet.new(), do: id
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
     %{
       blocked: blocked,
       blocked_by: blocked_by,
       blockers_by_id: blockers_by_id,
       workers_by_task: workers_by_task,
-      watchdog_live: watchdog_live
+      watchdog_live: watchdog_live,
+      worked: worked,
+      now: now
     }
   end
 
@@ -273,6 +281,13 @@ defmodule Arbiter.Tasks.EpicRollup do
   # `:awaiting_verification` issue is handled by the caller (rule 1) before
   # this is ever reached for a child, but a blocker checked under rule 3 can
   # still be in that state, hence the explicit clause here too.
+  #
+  # A workerless `:in_progress` issue defers to `Snapshot.orphaned?/3` rather
+  # than flagging unconditionally: dispatch flips an issue to `:in_progress`
+  # before its worker registers, so a fresh dispatch must not read as
+  # "parked" (the board's `@orphan_grace_seconds` window), and a non-
+  # dispatchable child (an :epic) never gets a worker at all, so it must
+  # never flag on that basis either.
   defp needs_you_directly?(issue, ctx) do
     case Map.get(issue, :status) do
       :awaiting_verification ->
@@ -280,7 +295,7 @@ defmodule Arbiter.Tasks.EpicRollup do
 
       :in_progress ->
         case Map.get(ctx.workers_by_task, issue.id, []) do
-          [] -> true
+          [] -> Snapshot.orphaned?(issue, ctx.worked, ctx.now)
           workers -> Snapshot.child_needs_you?(workers, ctx.watchdog_live)
         end
 
@@ -327,7 +342,7 @@ defmodule Arbiter.Tasks.EpicRollup do
   defp blocker_issues(ids) do
     Issue
     |> Ash.Query.filter(id in ^ids)
-    |> Ash.Query.select([:id, :status, :refined])
+    |> Ash.Query.select([:id, :status, :refined, :issue_type, :updated_at, :created_at])
     |> Ash.read!()
     |> Map.new(&{&1.id, &1})
   end

@@ -209,13 +209,39 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       assert "#{c.id} parked" in r.needs_you_reasons
     end
 
-    test "an in_progress child with no live worker at all flags needs_you", ctx do
+    test "an in_progress child with no live worker at all flags needs_you past the dispatch grace window",
+         ctx do
       c = child(ctx.ws, ctx.epic, "orphaned-child", as: :running)
+      later = DateTime.add(DateTime.utc_now(), 120, :second)
 
-      r = rollup(ctx.epic, workers: [])
+      r = rollup(ctx.epic, workers: [], now: later)
 
       assert r.needs_you
       assert "#{c.id} parked" in r.needs_you_reasons
+    end
+
+    test "an in_progress child with no live worker does not flag needs_you inside the dispatch grace window",
+         ctx do
+      child(ctx.ws, ctx.epic, "dispatching-child", as: :running)
+
+      r = rollup(ctx.epic, workers: [])
+
+      refute r.needs_you
+    end
+
+    test "an in_progress :epic child never flags needs_you, however long it sits with no worker",
+         ctx do
+      {:ok, nested_epic} =
+        Ash.create(Issue, %{title: "nested epic", workspace_id: ctx.ws.id, issue_type: :epic})
+
+      nested_epic = Ash.update!(nested_epic, %{status: :in_progress})
+      {:ok, _} = Dependencies.add(ctx.epic.id, nested_epic.id, :parent_of)
+
+      later = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      r = rollup(ctx.epic, workers: [], now: later)
+
+      refute r.needs_you
     end
 
     test "an approved MR blocked on something the Watchdog can't clear flags needs_you", ctx do

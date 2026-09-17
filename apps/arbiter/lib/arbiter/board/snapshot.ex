@@ -731,7 +731,20 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp orphaned?(issue, worked, now) do
+  @doc """
+  Whether an `:in_progress` issue with no live worker reads as orphaned
+  (worker stopped/gone) rather than mid-dispatch. `worked` is the set of
+  issue ids that currently have a live worker attached; `now` is compared
+  against the issue's `updated_at` under `@orphan_grace_seconds` so a
+  freshly-dispatched issue (worktree still provisioning) doesn't flag before
+  its worker has had a chance to register.
+
+  Public (bd-58z2tu) so `Arbiter.Tasks.EpicRollup` classifies a workerless
+  `:in_progress` child the same way the board's Waiting column does, instead
+  of re-deriving the grace window and the non-dispatchable-type exclusion.
+  """
+  @spec orphaned?(map(), MapSet.t(), DateTime.t()) :: boolean()
+  def orphaned?(issue, worked, now) do
     issue.status == :in_progress and
       not dispatchable_type_excluded?(issue) and
       not MapSet.member?(worked, issue.id) and

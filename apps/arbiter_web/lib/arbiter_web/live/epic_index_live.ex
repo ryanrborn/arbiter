@@ -5,8 +5,8 @@ defmodule ArbiterWeb.EpicIndexLive do
   Epics no longer appear on the board (bd-2s901b §4 removed them from the one
   column they still leaked into), so this page is where they live. Each row is
   one epic with its child-progress rollup: `closed/total`, a stacked bar broken
-  into the five board buckets, the `auto_close` marker, age, and whatever stuck
-  signals its children raise.
+  into the five board buckets, the `auto_close` marker, age, and the
+  `needs_you` attention state (see below).
 
   ## The attention state: `needs_you`
 
@@ -109,7 +109,8 @@ defmodule ArbiterWeb.EpicIndexLive do
   end
 
   # Any issue transition can move a row: a child's status changes its epic's
-  # breakdown and stuck chips, and an epic's own close moves it between tabs.
+  # breakdown and needs_you chips, and an epic's own close moves it between
+  # tabs.
   @impl true
   def handle_info({:task_lifecycle, _event, _issue}, socket), do: {:noreply, refresh(socket)}
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -446,11 +447,18 @@ defmodule ArbiterWeb.EpicIndexLive do
           data-role="needs-you-chips"
         >
           <span
-            :for={{reason, index} <- Enum.with_index(@row.rollup.needs_you_reasons)}
+            :for={{reason, index} <- Enum.with_index(visible_reasons(@row.rollup.needs_you_reasons))}
             id={"epic-#{@row.epic.id}-needs-you-#{index}"}
             class="badge text-[9.5px] font-[family-name:var(--font-mono)] bg-[var(--arb-attention-wash)] border-[color:var(--arb-attention-edge)] text-[var(--arb-attention-ink)]"
           >
             {reason}
+          </span>
+          <span
+            :if={hidden_reason_count(@row.rollup.needs_you_reasons) > 0}
+            id={"epic-#{@row.epic.id}-needs-you-more"}
+            class="badge badge-ghost text-[9.5px] font-[family-name:var(--font-mono)]"
+          >
+            +{hidden_reason_count(@row.rollup.needs_you_reasons)} more
           </span>
         </div>
 
@@ -563,4 +571,10 @@ defmodule ArbiterWeb.EpicIndexLive do
   end
 
   defp money(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+
+  @max_needs_you_chips 3
+
+  defp visible_reasons(reasons), do: Enum.take(reasons, @max_needs_you_chips)
+
+  defp hidden_reason_count(reasons), do: max(length(reasons) - @max_needs_you_chips, 0)
 end
