@@ -254,7 +254,8 @@ defmodule ArbiterCli.Output do
        when is_number(spent) and is_number(lo) and is_number(hi) do
     "#{money(spent)} spent · ~#{money(lo)}–#{money(hi)} to go " <>
       "(closed=#{r["closed_count"]}, dispatchable=#{r["dispatchable_count"]}, " <>
-      "excluded=#{r["excluded_count"]}, upcoming=#{r["upcoming_count"]})"
+      "blocked=#{r["blocked_count"]}, in_flight=#{r["in_flight_count"]}, " <>
+      "sub_epic=#{r["sub_epic_count"]}, upcoming=#{r["upcoming_count"]})"
   end
 
   defp epic_rollup_label(_), do: nil

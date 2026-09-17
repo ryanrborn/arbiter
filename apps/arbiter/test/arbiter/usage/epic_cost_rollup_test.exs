@@ -1,10 +1,11 @@
 defmodule Arbiter.Usage.EpicCostRollupTest do
   @moduledoc """
-  bd-18vl9q — "$X spent · ~$Y-Z to go" epic cost rollup (design bd-9jj5lf §4):
-  closed children contribute actual spend, open dispatchable children
-  contribute summed p25-p75 estimates, blocked/parked/sub-epic children are
-  excluded from the remaining estimate, and unpromoted Backlog children are
-  reported separately as "upcoming".
+  bd-8h5iyc — "$X spent · ~$Y-Z to go" epic cost rollup (design bd-9jj5lf §4):
+  closed children contribute actual spend; open, promoted children all
+  contribute a defensible "to go" figure regardless of whether they're
+  dispatchable, blocked, in flight, or themselves sub-epics — being blocked
+  or mid-flight doesn't change a task's cost basis, only when it runs.
+  Unpromoted Backlog children are reported separately as "upcoming".
   """
 
   # async: false — the estimator reads the whole ledger, so a concurrent test
@@ -85,6 +86,11 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
     Ash.update!(child, %{status: :in_progress})
   end
 
+  defp waiting_child!(ws, epic) do
+    child = running_child!(ws, epic)
+    Ash.update!(child, %{}, action: :await_verification)
+  end
+
   # A large, evenly-spread D2/task sample so `for_issue/2` clears the n>=10
   # floor and returns a stable, known p25/p75 for the "to go" math.
   defp seed_estimator_sample!(ws) do
@@ -127,7 +133,7 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
       assert rollup.dispatchable_count == 2
     end
 
-    test "blocked children are excluded from the remaining estimate", ctx do
+    test "blocked children contribute their full p25-p75 estimate, chained epic fixture", ctx do
       seed_estimator_sample!(ctx.ws)
       blocked = ready_child!(ctx.ws, ctx.epic, %{difficulty: 2, issue_type: :task})
       {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
@@ -135,25 +141,56 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
 
       rollup = Estimate.epic_cost_rollup(ctx.epic, now: @now)
 
-      assert rollup.to_go_low == 0.0
-      assert rollup.to_go_high == 0.0
+      est = Estimate.for_issue(%Issue{difficulty: 2, issue_type: :task}, now: @now)
+
+      assert rollup.to_go_low == Float.round(est.p25, 2)
+      assert rollup.to_go_high == Float.round(est.p75, 2)
       assert rollup.dispatchable_count == 0
-      assert rollup.excluded_count == 1
+      assert rollup.blocked_count == 1
     end
 
-    test "parked (running/waiting) children are excluded from the remaining estimate", ctx do
+    test "running children contribute max(estimate - spend, 0) and count as in-flight", ctx do
       seed_estimator_sample!(ctx.ws)
-      running_child!(ctx.ws, ctx.epic)
+      running = running_child!(ctx.ws, ctx.epic)
+      event!(running.id, 1.0)
+
+      rollup = Estimate.epic_cost_rollup(ctx.epic, now: @now)
+
+      est = Estimate.for_issue(%Issue{difficulty: 2, issue_type: :task}, now: @now)
+
+      assert rollup.to_go_low == Float.round(max(est.p25 - 1.0, 0.0), 2)
+      assert rollup.to_go_high == Float.round(max(est.p75 - 1.0, 0.0), 2)
+      assert rollup.dispatchable_count == 0
+      assert rollup.in_flight_count == 1
+    end
+
+    test "waiting children contribute max(estimate - spend, 0) and count as in-flight", ctx do
+      seed_estimator_sample!(ctx.ws)
+      waiting_child!(ctx.ws, ctx.epic)
+
+      rollup = Estimate.epic_cost_rollup(ctx.epic, now: @now)
+
+      est = Estimate.for_issue(%Issue{difficulty: 2, issue_type: :task}, now: @now)
+
+      assert rollup.to_go_low == Float.round(est.p25, 2)
+      assert rollup.to_go_high == Float.round(est.p75, 2)
+      assert rollup.in_flight_count == 1
+    end
+
+    test "in-flight spend over the estimate floors the contribution at 0", ctx do
+      seed_estimator_sample!(ctx.ws)
+      running = running_child!(ctx.ws, ctx.epic)
+      est = Estimate.for_issue(%Issue{difficulty: 2, issue_type: :task}, now: @now)
+      event!(running.id, est.p75 + 100.0)
 
       rollup = Estimate.epic_cost_rollup(ctx.epic, now: @now)
 
       assert rollup.to_go_low == 0.0
       assert rollup.to_go_high == 0.0
-      assert rollup.dispatchable_count == 0
-      assert rollup.excluded_count == 1
+      assert rollup.in_flight_count == 1
     end
 
-    test "epic-type sub-children are excluded from the remaining estimate", ctx do
+    test "sub-epic children contribute their own rollup's to-go recursively", ctx do
       seed_estimator_sample!(ctx.ws)
 
       {:ok, sub_epic} =
@@ -162,12 +199,37 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
       sub_epic = Ash.update!(sub_epic, %{}, action: :promote_to_ready)
       attach!(ctx.epic, sub_epic)
 
-      rollup = Estimate.epic_cost_rollup(ctx.epic, now: @now)
+      ready_child!(ctx.ws, sub_epic, %{difficulty: 2, issue_type: :task})
+      ready_child!(ctx.ws, sub_epic, %{difficulty: 2, issue_type: :task})
 
-      assert rollup.to_go_low == 0.0
-      assert rollup.to_go_high == 0.0
+      rollup = Estimate.epic_cost_rollup(ctx.epic, now: @now)
+      sub_rollup = Estimate.epic_cost_rollup(sub_epic, now: @now)
+
+      assert rollup.to_go_low == sub_rollup.to_go_low
+      assert rollup.to_go_high == sub_rollup.to_go_high
+      assert rollup.sub_epic_count == 1
       assert rollup.dispatchable_count == 0
-      assert rollup.excluded_count == 1
+    end
+
+    test "a cycle between epics does not loop forever and contributes nothing extra", ctx do
+      seed_estimator_sample!(ctx.ws)
+      epic = Ash.update!(ctx.epic, %{}, action: :promote_to_ready)
+
+      {:ok, other_epic} =
+        Ash.create(Issue, %{title: "cyclic epic", workspace_id: ctx.ws.id, issue_type: :epic})
+
+      other_epic = Ash.update!(other_epic, %{}, action: :promote_to_ready)
+      attach!(epic, other_epic)
+      attach!(other_epic, epic)
+      ready_child!(ctx.ws, other_epic, %{difficulty: 2, issue_type: :task})
+
+      rollup = Estimate.epic_cost_rollup(epic, now: @now)
+      est = Estimate.for_issue(%Issue{difficulty: 2, issue_type: :task}, now: @now)
+
+      # counted exactly once — the back-edge to `epic` is skipped, not re-walked
+      assert rollup.to_go_low == Float.round(est.p25, 2)
+      assert rollup.to_go_high == Float.round(est.p75, 2)
+      assert rollup.sub_epic_count == 1
     end
 
     test "unpromoted Backlog children are shown separately as upcoming", ctx do
@@ -180,7 +242,6 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
       assert rollup.to_go_low == 0.0
       assert rollup.to_go_high == 0.0
       assert rollup.dispatchable_count == 0
-      assert rollup.excluded_count == 0
     end
 
     test "a childless epic rolls up to all zeroes", ctx do
@@ -191,7 +252,9 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
       assert rollup.to_go_high == 0.0
       assert rollup.closed_count == 0
       assert rollup.dispatchable_count == 0
-      assert rollup.excluded_count == 0
+      assert rollup.blocked_count == 0
+      assert rollup.in_flight_count == 0
+      assert rollup.sub_epic_count == 0
       assert rollup.upcoming_count == 0
     end
 
@@ -212,7 +275,35 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
       assert rollup.to_go_low == 0.0
       assert rollup.to_go_high == 0.0
       assert rollup.dispatchable_count == 1
-      assert rollup.dispatchable_unestimated_count == 1
+      assert rollup.unestimated_count == 1
+    end
+
+    test "the whole ledger is still read exactly once per rollup, across every child category",
+         ctx do
+      seed_estimator_sample!(ctx.ws)
+      ready_child!(ctx.ws, ctx.epic, %{difficulty: 2, issue_type: :task})
+      running_child!(ctx.ws, ctx.epic)
+      waiting_child!(ctx.ws, ctx.epic)
+
+      blocked = ready_child!(ctx.ws, ctx.epic, %{difficulty: 2, issue_type: :task})
+      {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
+      {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
+
+      {:ok, sub_epic} =
+        Ash.create(Issue, %{title: "sub-epic", workspace_id: ctx.ws.id, issue_type: :epic})
+
+      sub_epic = Ash.update!(sub_epic, %{}, action: :promote_to_ready)
+      attach!(ctx.epic, sub_epic)
+      ready_child!(ctx.ws, sub_epic, %{difficulty: 2, issue_type: :task})
+
+      :meck.new(Estimate, [:passthrough])
+
+      try do
+        Estimate.epic_cost_rollup(ctx.epic, now: @now)
+        assert :meck.num_calls(Estimate, :sample, :_) == 1
+      after
+        :meck.unload(Estimate)
+      end
     end
   end
 end
