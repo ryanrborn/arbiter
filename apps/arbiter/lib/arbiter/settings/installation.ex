@@ -23,6 +23,12 @@ defmodule Arbiter.Settings.Installation do
       — Watchdog poll intervals. `nil` falls back to the
       `:arbiter, :credential_watchdog` application env, else the Watchdog's
       hardcoded defaults (5 minutes / 1 minute).
+    * `:board_autopilot_paused` — `Arbiter.Board.Autopilot`'s pause flag.
+      `nil` means "no persisted value — fall back to the
+      `:arbiter, :board_autopilot, enabled:` application env, else paused".
+    * `:board_autopilot_paused_at` / `:board_autopilot_paused_by` — when the
+      flag was last changed and, where known, by what caller (an MCP tool, the
+      REST API, the dashboard). `nil` until the first pause/resume.
 
   Every field is nullable and `nil` always means "no override" — a fresh
   install that never writes here behaves exactly as it did before the setting
@@ -43,7 +49,10 @@ defmodule Arbiter.Settings.Installation do
     :conductor_system_max_concurrent,
     :credential_watchdog_adapters,
     :credential_watchdog_interval_ms,
-    :credential_watchdog_recovery_interval_ms
+    :credential_watchdog_recovery_interval_ms,
+    :board_autopilot_paused,
+    :board_autopilot_paused_at,
+    :board_autopilot_paused_by
   ]
 
   actions do
@@ -93,6 +102,27 @@ defmodule Arbiter.Settings.Installation do
       constraints min: 1
 
       description "CredentialWatchdog re-probe interval while an adapter is expired (ms); nil falls back to app env / default."
+    end
+
+    attribute :board_autopilot_paused, :boolean do
+      public? true
+      allow_nil? true
+
+      description "Board Autopilot's persisted pause flag; nil falls back to app env / paused."
+    end
+
+    attribute :board_autopilot_paused_at, :utc_datetime_usec do
+      public? true
+      allow_nil? true
+
+      description "When board_autopilot_paused was last changed."
+    end
+
+    attribute :board_autopilot_paused_by, :string do
+      public? true
+      allow_nil? true
+
+      description "Who/what last changed board_autopilot_paused, where known (e.g. \"mcp\", \"api\", \"dashboard\")."
     end
 
     create_timestamp :created_at

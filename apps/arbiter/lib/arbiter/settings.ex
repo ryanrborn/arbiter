@@ -117,6 +117,66 @@ defmodule Arbiter.Settings do
 
   def set_credential_watchdog_recovery_interval_ms(_), do: {:error, :invalid_value}
 
+  @doc """
+  The persisted `Arbiter.Board.Autopilot` pause state and when/by-what it was
+  last changed. `paused: nil` means "no persisted value — caller should fall
+  back to the `:arbiter, :board_autopilot, enabled:` application env, else
+  paused"; `changed_at` / `changed_by` are then also `nil`. Never raises — any
+  read failure is treated as unset.
+  """
+  @spec board_autopilot_status() :: %{
+          paused: boolean() | nil,
+          changed_at: DateTime.t() | nil,
+          changed_by: String.t() | nil
+        }
+  def board_autopilot_status do
+    case singleton() do
+      %Installation{} = row ->
+        %{
+          paused: row.board_autopilot_paused,
+          changed_at: row.board_autopilot_paused_at,
+          changed_by: row.board_autopilot_paused_by
+        }
+
+      nil ->
+        %{paused: nil, changed_at: nil, changed_by: nil}
+    end
+  rescue
+    _ -> %{paused: nil, changed_at: nil, changed_by: nil}
+  end
+
+  @doc """
+  Persist the `Arbiter.Board.Autopilot` pause state, stamping when it changed
+  and, where known, who/what changed it (an MCP tool, the REST API, the
+  dashboard — free text, `nil` when the caller doesn't know). Returns the
+  stored state. Writes surface errors normally.
+  """
+  @spec set_board_autopilot_paused(boolean(), String.t() | nil) ::
+          {:ok,
+           %{paused: boolean(), changed_at: DateTime.t(), changed_by: String.t() | nil}}
+          | {:error, term()}
+  def set_board_autopilot_paused(paused?, by \\ nil)
+      when is_boolean(paused?) and (is_binary(by) or is_nil(by)) do
+    with {:ok, row} <- get_or_create_singleton(),
+         {:ok, updated} <-
+           Ash.update(
+             row,
+             %{
+               board_autopilot_paused: paused?,
+               board_autopilot_paused_at: DateTime.utc_now(),
+               board_autopilot_paused_by: by
+             },
+             action: :update
+           ) do
+      {:ok,
+       %{
+         paused: updated.board_autopilot_paused,
+         changed_at: updated.board_autopilot_paused_at,
+         changed_by: updated.board_autopilot_paused_by
+       }}
+    end
+  end
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other
