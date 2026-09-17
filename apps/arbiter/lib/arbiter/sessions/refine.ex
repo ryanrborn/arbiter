@@ -84,8 +84,15 @@ defmodule Arbiter.Sessions.Refine do
   # visible in one place.
   @model_tier "premium"
 
+  # How long a workspace's agent config gets to resolve before the built-in
+  # defaults win. It is a config read, not a network call.
+  @resolve_timeout_ms 5_000
+
   @typedoc "What `open/2` hands back: the session, and whether it already existed."
   @type opened :: %{session: Session.t(), reopened?: boolean()}
+
+  @typedoc "The model and effort argv a refine session spawns with."
+  @type selection :: %{model: String.t() | nil, thinking_argv: [String.t()]}
 
   @doc """
   Whether `issue` can be refined — the predicate both UI entry points render
@@ -139,7 +146,7 @@ defmodule Arbiter.Sessions.Refine do
   Every other option is passed straight through to `Arbiter.Sessions.launch/1`
   — `:runner` for tests, and anything a future caller needs — except the ones
   this function owns: `:name`, `:issue_id`, `:workspace_id`, `:can_dispatch`,
-  `:refine`, `:model` and `:thinking`.
+  `:refine`, `:model`, `:thinking` and `:thinking_argv`.
   """
   @spec open(Issue.t() | String.t(), keyword()) :: {:ok, opened()} | {:error, term()}
   def open(issue, opts \\ [])
@@ -182,35 +189,69 @@ defmodule Arbiter.Sessions.Refine do
   rules — see the moduledoc.
   """
   @spec model(Workspace.t() | nil) :: String.t() | nil
-  def model(nil), do: default_model()
+  def model(workspace), do: agent_selection(workspace).model
 
-  def model(%Workspace{} = workspace) do
+  @doc """
+  The CLI argv that asks for `thinking/0`'s level, resolved against
+  `workspace`'s `agent.config["thinking_argv"]` where it remaps the effort
+  flags, and the built-in table otherwise.
+
+  Resolved here rather than at spawn time because the override lives in the
+  *workspace's* agent config, and only this module puts that config on a
+  process (see `agent_selection/1`).
+  """
+  @spec thinking_argv(Workspace.t() | nil) :: [String.t()]
+  def thinking_argv(workspace), do: agent_selection(workspace).thinking_argv
+
+  @doc """
+  Both halves of a refine session's agent selection — the premium-tier model
+  and the effort argv for `thinking/0` — resolved against `workspace`'s Claude
+  agent config in a single pass.
+
+  Never raises: a workspace whose agent config cannot be read at all falls
+  back to the built-in defaults, which are a correct answer to both questions.
+  """
+  @spec agent_selection(Workspace.t() | nil) :: selection()
+  def agent_selection(nil), do: default_selection()
+
+  def agent_selection(%Workspace{} = workspace) do
     # `put_active/1` writes the process dictionary, and this runs inside a
     # LiveView (or whatever else clicked Refine). Resolving in a throwaway task
     # keeps the caller's own active-agent config — whatever it is — untouched.
     #
-    # A workspace whose agent config cannot be read at all (undecryptable
-    # secrets, say) must not take the caller down with it: the whole answer
-    # this function owes is "which premium model", and the built-in default is
-    # a correct one. So the task's exit is caught rather than propagated.
-    resolved =
-      try do
-        Task.async(fn ->
-          ClaudeConfig.put_active(workspace)
-          ClaudeConfig.model_for_tier(@model_tier)
-        end)
-        |> Task.await(5_000)
-      catch
-        :exit, reason ->
-          Logger.warning(
-            "Sessions.Refine: could not resolve the #{@model_tier} model for workspace " <>
-              "#{workspace.id} (#{inspect(reason)}); falling back to the built-in default"
-          )
+    # `async_nolink`, and not `Task.async/1`: a workspace whose agent config
+    # cannot be read at all — `Workspace.secrets_map/1` calls `Base.decode64!/1`
+    # and `Arbiter.Vault.decrypt!/1`, both of which raise on a rotated key or a
+    # corrupt `encrypted_secrets` column — must not take the caller down with
+    # it. A *linked* task's raise arrives as an exit signal over the link and
+    # kills a non-trapping caller outright, before `Task.await/2` ever gets to
+    # catch anything; unlinked, the failure comes back as a value.
+    task =
+      Task.Supervisor.async_nolink(Arbiter.TaskSupervisor, fn ->
+        ClaudeConfig.put_active(workspace)
 
-          nil
-      end
+        %{
+          model: ClaudeConfig.model_for_tier(@model_tier),
+          thinking_argv: ClaudeConfig.thinking_argv(@thinking)
+        }
+      end)
 
-    resolved || default_model()
+    case Task.yield(task, @resolve_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, %{model: model, thinking_argv: argv}} ->
+        # An override that maps the level to `[]` is a deliberate "no flag" and
+        # is honoured; only a missing *model* falls back, since the CLI needs
+        # one named to keep this off whatever tier it would pick on its own.
+        %{model: model || default_selection().model, thinking_argv: argv}
+
+      other ->
+        Logger.warning(
+          "Sessions.Refine: could not read the agent config for workspace " <>
+            "#{workspace.id} (#{inspect(other)}); falling back to the built-in " <>
+            "#{@model_tier} model and effort flags"
+        )
+
+        default_selection()
+    end
   end
 
   @doc "The thinking level a refine session runs at. See the moduledoc."
@@ -228,6 +269,7 @@ defmodule Arbiter.Sessions.Refine do
 
   defp launch(%Issue{} = issue, opts) do
     workspace = workspace(issue.workspace_id)
+    selection = agent_selection(workspace)
 
     launch_opts =
       opts
@@ -238,7 +280,8 @@ defmodule Arbiter.Sessions.Refine do
         :can_dispatch,
         :refine,
         :model,
-        :thinking
+        :thinking,
+        :thinking_argv
       ])
       |> Keyword.merge(
         name: display_name(issue),
@@ -246,8 +289,9 @@ defmodule Arbiter.Sessions.Refine do
         workspace_id: issue.workspace_id,
         can_dispatch: false,
         refine: refine_context(issue, workspace),
-        model: model(workspace),
-        thinking: thinking()
+        model: selection.model,
+        thinking: thinking(),
+        thinking_argv: selection.thinking_argv
       )
 
     case safe_launch(launch_opts) do
@@ -359,7 +403,12 @@ defmodule Arbiter.Sessions.Refine do
     end
   end
 
-  defp default_model, do: Map.get(ClaudeConfig.default_tier_models(), @model_tier)
+  defp default_selection do
+    %{
+      model: Map.get(ClaudeConfig.default_tier_models(), @model_tier),
+      thinking_argv: Map.get(ClaudeConfig.default_thinking_argv(), @thinking, [])
+    }
+  end
 
   defp blank?(value), do: not (is_binary(value) and String.trim(value) != "")
 end

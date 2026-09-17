@@ -150,7 +150,8 @@ defmodule Arbiter.Sessions.Provisioning do
   token" is a property of the schema rather than of every call site
   remembering to ask for the right tier. `:refine` requires a workspace, so a
   bound row with no `workspace_id` is a bug worth crashing on rather than
-  quietly widening.
+  quietly widening — it raises `ArgumentError` rather than falling through to
+  the coordinator clause.
 
   The token is returned, never stored: the only durable copy is the mode-`0600`
   `.mcp.json` inside the session's own directory. Its revocation handle is the
@@ -163,6 +164,22 @@ defmodule Arbiter.Sessions.Provisioning do
       when is_binary(issue_id) and issue_id != "" and is_binary(workspace_id) and
              workspace_id != "" do
     MCP.Scope.mint_refine(session.id, workspace_id, issue_id, opts)
+  end
+
+  # An issue-bound row with no workspace is not a coordinator session that
+  # happens to name an issue — it is a refine session whose second binding got
+  # lost. Falling through to the clause below would hand it a *coordinator*
+  # token, i.e. quietly widen the one scope this whole feature narrows. The
+  # only caller that can produce this shape is one that skipped
+  # `Arbiter.Sessions.Refine.open/2`'s `{:error, :no_workspace}` guard, so the
+  # bug is upstream and worth surfacing where it happened.
+  def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, _opts)
+      when is_binary(issue_id) and issue_id != "" and
+             (is_nil(workspace_id) or workspace_id == "") do
+    raise ArgumentError,
+          "session #{session.id} is issue-bound (#{issue_id}) but has no workspace_id; " <>
+            "a :refine token requires both bindings, and a coordinator token is not a " <>
+            "safe substitute"
   end
 
   def mint_token(%Session{} = session, opts) do
@@ -663,10 +680,25 @@ defmodule Arbiter.Sessions.Provisioning do
     end
   end
 
-  # Routed through the same `thinking_argv` table the dispatch path uses
-  # (`Arbiter.Agents.Claude.Config`), so a workspace that has remapped its
-  # effort flags for a newer CLI has remapped them here too.
+  # `:thinking_argv` is already-resolved argv and is emitted verbatim. That is
+  # the path `Arbiter.Sessions.Refine` takes, and it exists because
+  # `ClaudeConfig.thinking_argv/1` reads a workspace's
+  # `agent.config["thinking_argv"]` remapping off the *active* config in the
+  # process dictionary — which provisioning never sets, and deliberately so
+  # (see `Refine.agent_selection/1`). Resolving the level here would therefore
+  # silently ignore that remapping; resolving it in the workspace-scoped task
+  # that already picks the model does not.
+  #
+  # A bare `:thinking` level from some other caller still resolves here, but
+  # against the built-in table only.
   defp append_effort(parts, opts) do
+    case Keyword.get(opts, :thinking_argv) do
+      argv when is_list(argv) -> parts ++ Enum.map(argv, &shell_token/1)
+      _ -> append_effort_level(parts, opts)
+    end
+  end
+
+  defp append_effort_level(parts, opts) do
     case Keyword.get(opts, :thinking) do
       level when is_binary(level) and level != "" ->
         parts ++ Enum.map(ClaudeConfig.thinking_argv(level), &shell_token/1)

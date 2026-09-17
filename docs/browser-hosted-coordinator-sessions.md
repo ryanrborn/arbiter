@@ -1844,7 +1844,7 @@ together. Everything above still applies — this section is only the deltas.
 | Token (§9.3) | `:coordinator`, workspace-bound or cross-workspace | `:refine`, bound to the issue *and* its workspace, `can_dispatch` hard-wired off (bd-3uy2hn) |
 | Instructions (§9.1) | one generated `CLAUDE.md` at the session root | the refine variant, in the **cwd**, as `CLAUDE.md` *and* `AGENTS.md` (bd-980x89) |
 | Repo | none — §10.2 layer 1 is "scaffold, never point at a checkout" | a **read-only** detached `git worktree` at `<root>/repo`, for grep and read grounding only |
-| Model | whatever the CLI picks | the workspace's `premium` tier model, `--effort high` — never flagship, and the routing policies are never consulted |
+| Model | whatever the CLI picks | the workspace's `premium` tier model at thinking `high` (`--effort high`, or whatever the workspace's `agent.config["thinking_argv"]` remaps that level to) — never flagship, and the routing policies are never consulted |
 
 The **checkout** is the one new thing on disk, and it is deliberately the
 weakest thing that serves reading (`Arbiter.Sessions.RepoCheckout`):

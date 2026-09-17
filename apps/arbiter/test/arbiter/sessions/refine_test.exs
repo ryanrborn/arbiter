@@ -10,11 +10,15 @@ defmodule Arbiter.Sessions.RefineTest do
   """
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.MCP.Catalog
   alias Arbiter.MCP.Scope
   alias Arbiter.Sessions
   alias Arbiter.Sessions.Layout
+  alias Arbiter.Sessions.Provisioning
   alias Arbiter.Sessions.Refine
+  alias Arbiter.Sessions.Session
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -214,6 +218,18 @@ defmodule Arbiter.Sessions.RefineTest do
       assert scope.tier == :refine
       assert scope.issue_id == issue.id
     end
+
+    # The tier is taken from the row rather than from a caller's option so that
+    # "a refine session can never hold a coordinator token" is a property of
+    # the schema. A row that is issue-bound but has lost its workspace binding
+    # would break that property quietly — it has to break it loudly instead.
+    test "an issue-bound row with no workspace refuses to mint at all", %{issue: issue} do
+      orphan = %Session{id: Ecto.UUID.generate(), issue_id: issue.id, workspace_id: nil}
+
+      assert_raise ArgumentError, ~r/issue-bound.*no workspace_id/s, fn ->
+        Provisioning.mint_token(orphan)
+      end
+    end
   end
 
   describe "open/2 — the read-only checkout" do
@@ -370,6 +386,58 @@ defmodule Arbiter.Sessions.RefineTest do
       assert script =~ "--model opus"
       refute script =~ "fable"
       refute script =~ "--effort max"
+    end
+
+    # `agent.config["thinking_argv"]` is how a workspace remaps the effort
+    # flags for a CLI that has renamed them. Resolving that override needs the
+    # workspace's config *active on a process*, which only `Refine` puts there.
+    test "honours a workspace's thinking_argv remapping", %{issue: issue, ws: ws} do
+      {:ok, _ws} =
+        Ash.update(
+          ws,
+          %{
+            config:
+              Map.merge(ws.config, %{
+                "agent" => %{
+                  "type" => "claude",
+                  "config" => %{
+                    "thinking_argv" => %{"high" => ["--max-thinking-tokens", "24000"]}
+                  }
+                }
+              })
+          },
+          action: :update
+        )
+
+      script = launch_script!(open!(issue).session)
+      assert script =~ "--max-thinking-tokens 24000"
+      refute script =~ "--effort high"
+    end
+
+    # `Refine.model/1` runs synchronously inside the LiveView `handle_event`
+    # that the Refine button fires, so a raising config read must come back as
+    # a fallback rather than as a dead LiveView.
+    test "an unreadable workspace agent config falls back without killing the caller" do
+      broken = %Workspace{
+        id: Ecto.UUID.generate(),
+        config: %{"agent" => %{"type" => "claude"}},
+        encrypted_secrets: "this is not base64 at all !!!"
+      }
+
+      # The raise is real: reading it in the caller's own process kills it.
+      assert_raise ArgumentError, fn -> Workspace.secrets_map(broken) end
+
+      # The task's own crash report and the fallback warning are the expected
+      # output here, not a test failure; captured so they do not read as one.
+      log =
+        capture_log(fn ->
+          assert Refine.agent_selection(broken) == %{
+                   model: "opus",
+                   thinking_argv: ["--effort", "high"]
+                 }
+        end)
+
+      assert log =~ "falling back to the built-in premium model"
     end
   end
 end
