@@ -270,6 +270,25 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert length(Regex.scan(~r/id="session-dock-window-/, render(dock))) == 8
     end
 
+    test "the roster's launch panel offers the same workspace binding option as the index (§9.5)",
+         %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock", prefix: "ad"})
+
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(dock, "#session-dock-launch-workspace-id")
+      assert render(dock) =~ workspace.name
+
+      dock
+      |> form("#session-dock-launch-form", %{"workspace_id" => workspace.id})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+    end
+
     test "a failed launch is shown inline and opens no window", %{conn: conn} do
       put_env(:sessions_runner, Arbiter.Test.FailingSessionRunner)
       {_view, dock} = dock(conn)

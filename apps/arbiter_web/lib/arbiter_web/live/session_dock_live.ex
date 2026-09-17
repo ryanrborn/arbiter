@@ -179,6 +179,7 @@ defmodule ArbiterWeb.SessionDockLive do
      # banner, and it must survive `dismiss_error` and vice versa.
      |> assign(:launch_open?, false)
      |> assign(:launch_auth_mode, "seeded_credentials")
+     |> assign(:workspaces, SessionIndexLive.workspaces())
      |> assign(:launch_error, nil)
      # The dock's own error notice. It cannot use `put_flash/3`: this view
      # mounts `layout: false` and a nested LiveView's flash never reaches the
@@ -713,6 +714,7 @@ defmodule ArbiterWeb.SessionDockLive do
         running_count={@running_count}
         launch_open?={@launch_open?}
         launch_auth_mode={@launch_auth_mode}
+        workspaces={@workspaces}
         launch_error={@launch_error}
       />
 
@@ -981,6 +983,7 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :running_count, :integer, required: true
   attr :launch_open?, :boolean, required: true
   attr :launch_auth_mode, :string, required: true
+  attr :workspaces, :list, required: true
   attr :launch_error, :any, required: true
 
   defp roster(assigns) do
@@ -1001,6 +1004,7 @@ defmodule ArbiterWeb.SessionDockLive do
         <SessionIndexLive.launch_form
           prefix="session-dock-launch"
           launch_auth_mode={@launch_auth_mode}
+          workspaces={@workspaces}
           error={@launch_error}
         />
       </div>

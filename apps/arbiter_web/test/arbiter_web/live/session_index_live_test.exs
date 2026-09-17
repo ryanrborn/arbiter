@@ -282,6 +282,61 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
   end
 
+  describe "workspace binding in the launch form (§9.5)" do
+    test "defaults to cross-workspace and lists workspaces to opt into", %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web", prefix: "aw"})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#launch-session-workspace-id")
+      assert render(view) =~ workspace.name
+
+      view |> form("#launch-session-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == nil
+    end
+
+    test "selecting a workspace binds the launched session to it", %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web2", prefix: "aw2"})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"workspace_id" => workspace.id})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+    end
+  end
+
+  describe "can_dispatch in the launch form (§10.1)" do
+    test "defaults off", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      refute has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      view |> form("#launch-session-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.can_dispatch == false
+    end
+
+    test "checking the box turns it on explicitly", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"can_dispatch" => "true"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.can_dispatch == true
+    end
+  end
+
   describe "Remote Control gating in the launch form (§8.3)" do
     test "mode B (the default) leaves the Remote Control checkbox enabled, no reason shown",
          %{conn: conn} do

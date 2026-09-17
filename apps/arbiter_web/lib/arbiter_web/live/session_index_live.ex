@@ -24,21 +24,26 @@ defmodule ArbiterWeb.SessionIndexLive do
   session is a fleet act as much as a window act — and both of them go through
   `kill_modal/1` below, so there is one confirmation, not two that can drift.
 
-  ## Launch takes almost no options, deliberately
+  ## The §9.5 pre-launch options (phase 11)
 
-  Phase 11 owns the full pre-launch options UI (workspace, `can_dispatch`,
-  …). This page launches with the defaults phase 3 already treats as the
-  safe ones: cross-workspace and `can_dispatch` **off** — §10.1's rule that a
-  session cannot start workers until an operator says so. A button that
-  quietly launched something with dispatch rights would be the wrong default
-  to ship first.
+  `launch_form/1` carries the whole option set: session name, provider
+  (Claude Code — the only one there is, so no selector for it), auth mode,
+  Remote Control (§8, gated to mode B), workspace binding, and
+  `can_dispatch`. Every option keeps its §9.5 default:
 
-  Auth mode and Remote Control (§8) are the two exceptions, pulled forward
-  from phase 11 because §8.3's design consequence 1 is a hard UI rule, not
-  an option that can wait: "`--remote-control` must be disabled in the UI
-  when mode A is selected, with the reason shown. Offering a toggle that
-  silently does nothing is the worst outcome." Mode B (seeded credentials,
-  Amendment 2) is still the default.
+    * Workspace binding defaults to **cross-workspace** (`workspace_id: nil`).
+      Picking a workspace from `workspaces/0`'s list opts a session into a
+      single one; there is no way to type an id that isn't in that list.
+    * `can_dispatch` defaults **off** — §10.1's rule that a session cannot
+      start workers until an operator says so. A button that quietly
+      launched something with dispatch rights would be the wrong default to
+      ship, so the checkbox has to be checked, explicitly, every time.
+
+  Remote Control is the one option with a hard UI rule beyond "off by
+  default": §8.3's design consequence 1 says "`--remote-control` must be
+  disabled in the UI when mode A is selected, with the reason shown.
+  Offering a toggle that silently does nothing is the worst outcome." Mode B
+  (seeded credentials, Amendment 2) is still the default.
 
   ## Kill is confirmed, and says what it takes with it
 
@@ -73,6 +78,7 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   alias Arbiter.Sessions
   alias Arbiter.Sessions.DisplayName
+  alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Data
   alias ArbiterWeb.CoreComponents.Domain
@@ -102,6 +108,7 @@ defmodule ArbiterWeb.SessionIndexLive do
       |> assign(:kill_candidate, nil)
       |> assign(:usage_refresh_ref, nil)
       |> assign(:launch_auth_mode, "seeded_credentials")
+      |> assign(:workspaces, workspaces())
       |> refresh()
 
     {:ok, socket}
@@ -239,10 +246,29 @@ defmodule ArbiterWeb.SessionIndexLive do
       # validation) so a submission that bypassed the disabled attribute
       # still cannot request it.
       remote_control: auth_mode == "seeded_credentials" and launch_remote_control?(params),
-      workspace_id: nil,
-      can_dispatch: false,
+      workspace_id: launch_workspace_id(params),
+      # §10.1: off unless the operator explicitly checks the box. A session
+      # that could dispatch workers by default is the wrong thing to ship
+      # turned on.
+      can_dispatch: launch_can_dispatch?(params),
       name: launch_name(params)
     ]
+  end
+
+  @doc """
+  Workspaces the launch form offers for the §9.5 binding option, sorted by
+  name. Public so `ArbiterWeb.SessionDockLive`'s mount can load the same
+  list for its copy of `launch_form/1` — see `launch_defaults/1` above.
+  """
+  @spec workspaces() :: [Workspace.t()]
+  def workspaces do
+    Workspace
+    |> Ash.Query.sort(name: :asc)
+    |> Ash.read()
+    |> case do
+      {:ok, list} -> list
+      _ -> []
+    end
   end
 
   @doc false
@@ -254,6 +280,18 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp launch_remote_control?(%{"remote_control" => "true"}), do: true
   defp launch_remote_control?(_params), do: false
+
+  defp launch_workspace_id(%{"workspace_id" => id}) when is_binary(id) do
+    case String.trim(id) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp launch_workspace_id(_params), do: nil
+
+  defp launch_can_dispatch?(%{"can_dispatch" => "true"}), do: true
+  defp launch_can_dispatch?(_params), do: false
 
   defp launch_name(%{"name" => name}) when is_binary(name) do
     case String.trim(name) do
@@ -289,7 +327,11 @@ defmodule ArbiterWeb.SessionIndexLive do
           subtitle="Coordinator sessions Arbiter hosts. They live in their own systemd scope, so they survive an arbiter restart."
         >
           <:actions>
-            <.launch_form prefix="launch-session" launch_auth_mode={@launch_auth_mode} />
+            <.launch_form
+              prefix="launch-session"
+              launch_auth_mode={@launch_auth_mode}
+              workspaces={@workspaces}
+            />
           </:actions>
         </Domain.index_header>
 
@@ -413,6 +455,7 @@ defmodule ArbiterWeb.SessionIndexLive do
   """
   attr :prefix, :string, required: true
   attr :launch_auth_mode, :string, required: true
+  attr :workspaces, :list, default: []
   attr :error, :string, default: nil, doc: "an inline launch failure to show, or nil"
 
   def launch_form(assigns) do
@@ -441,6 +484,15 @@ defmodule ArbiterWeb.SessionIndexLive do
           {"Mode A — workspace token", "oauth_token"}
         ]}
       />
+      <%!-- §9.5: cross-workspace unless the operator opts a session into a
+            single workspace. --%>
+      <Forms.select
+        name="workspace_id"
+        id={"#{@prefix}-workspace-id"}
+        size="sm"
+        value=""
+        options={[{"Cross-workspace", ""}] ++ Enum.map(@workspaces, &{&1.name, &1.id})}
+      />
       <span class="flex items-center gap-1.5">
         <Forms.checkbox
           name="remote_control"
@@ -457,6 +509,14 @@ defmodule ArbiterWeb.SessionIndexLive do
           needs mode B — a workspace token (mode A) never bridges (§8.3)
         </span>
       </span>
+      <%!-- §10.1: off by default; turning it on is a deliberate pre-launch
+            choice, never a silent inherited default. --%>
+      <Forms.checkbox
+        name="can_dispatch"
+        id={"#{@prefix}-can-dispatch"}
+        value="true"
+        label="Can dispatch workers"
+      />
       <%!-- Launching is slow (a systemd scope, a `claude` process) and does
             not redirect, so the button stays on screen and under the cursor
             throughout — without this a second click during the launch
