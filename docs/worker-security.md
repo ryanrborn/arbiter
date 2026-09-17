@@ -258,9 +258,23 @@ seeded on every spawn with
   `.gemini`, `.agents` and `.antigravity` — the three trees agy reads its
   config, memory, skills and plugins from.
 
+The home root itself lives under `~/.cache`, i.e. *inside* the operator's
+`$HOME`, so a directory that contains the root (`.cache`, `.cache/arbiter`) is
+mirrored as a real directory and its children linked individually rather than
+being linked flat — a flat `<home>/.cache -> ~/.cache` would make
+`<home>/.cache/arbiter/worker-agy/<key>` resolve back to `<home>`, an unbounded
+symlink cycle inside the worker's own `$HOME`.
+
 Rules are rewritten into agy's own grammar (`command(...)`, `read_file(...)`,
-`write_file(...)`, `url(...)`); a rule with no agy analogue (a bare Claude tool
-name such as `Monitor`) is dropped rather than emitted uninterpretably.
+`write_file(...)`, `url(...)`). A *bare* Claude tool name (no `(...)`) maps onto
+the equivalent whole-path rule where agy has one — `Write`/`Edit`/`MultiEdit`/
+`NotebookEdit` → `write_file(**)`, `Read` → `read_file(**)`,
+`WebFetch`/`WebSearch` → `url(*)`. That is what keeps the reviewer read-only
+posture (`Arbiter.Worker.Dispatch.review_security_policy/2` denies
+`Edit`/`Write`/`NotebookEdit` on every worktree-backed review dispatch) working
+for agy as well as for Claude. A rule with no agy analogue at all — `Monitor`,
+`ScheduleWakeup`, for which agy has no tool-name rule kind — is dropped rather
+than emitted uninterpretably.
 
 ### What was verified live, and what agy does *not* enforce
 
