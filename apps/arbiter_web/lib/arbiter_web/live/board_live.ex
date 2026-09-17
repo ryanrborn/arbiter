@@ -176,6 +176,14 @@ defmodule ArbiterWeb.BoardLive do
   def handle_event("expand", %{"column" => key}, socket),
     do: {:noreply, assign(socket, :expanded, MapSet.put(socket.assigns.expanded, key))}
 
+  # ---- refine (bd-1lszsc) ---------------------------------------------------
+
+  # A Backlog card's Refine chip. The board holds snapshot cards rather than
+  # issues, so the click carries the id and `ArbiterWeb.RefineEntry` — the same
+  # module the issue detail page's button goes through — resolves it.
+  def handle_event("refine", %{"id" => id}, socket),
+    do: {:noreply, ArbiterWeb.RefineEntry.open(socket, id)}
+
   # ---- the scheduler switch -------------------------------------------------
 
   # One switch for the whole install, because there is one scheduler. Pausing
@@ -732,6 +740,21 @@ defmodule ArbiterWeb.BoardLive do
                   <:status :if={card.over_budget}>
                     <.over_budget_flag />
                   </:status>
+                  <%!-- Refine (bd-1lszsc). Every card in this column is, by
+                       construction, exactly what `Refine.eligible?/1` accepts —
+                       `Board.Snapshot` builds Backlog from queueable, unrefined
+                       issues — so there is nothing to gate on here. Nesting it
+                       inside the card's own `phx-click` navigation is safe:
+                       LiveView resolves a click to the *nearest* `phx-click`
+                       ancestor, so this button's event fires and the card's
+                       navigate does not. --%>
+                  <:actions>
+                    <ArbiterWeb.RefineEntry.refine_button
+                      id={"board-refine-#{card.id}"}
+                      issue_id={card.id}
+                      variant="ghost"
+                    />
+                  </:actions>
                 </.task_card>
               </div>
 

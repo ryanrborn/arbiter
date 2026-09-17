@@ -1400,6 +1400,7 @@ token does not carry it.
 <sessions_root>/<session-id>/
   workspace/            # cwd for the agent; git worktrees created here
     .mcp.json           #   per-session scope token (§9.3) — lives in the cwd
+  repo/                 # refine sessions only (§15): read-only detached worktree
   config/               # CLAUDE_CONFIG_DIR  (isolated, per session)
     .claude.json        #   pre-seeded: onboarding + trust (§9.2)
     settings.json       #   ConfigDir.default_settings_json/0 (:443)
@@ -1829,3 +1830,37 @@ note.
 | `.LogStreamStick` colocated hook | `apps/arbiter_web/lib/arbiter_web/components/core_components/domain.ex:578` | **Pattern reused** | The repo's precedent for a hook owning scroll behaviour on live output (§6.3). |
 | esbuild config / vendored JS | `config/config.exs:160`; `apps/arbiter_web/assets/vendor/`, `js/app.js:26` | **Reused as-is** | No `package.json` exists; xterm is vendored like `topbar` (§6.1). |
 | `Quota.worker_base_url/1` / metering proxy | *removed in #1605* | **Gone — deliberately not cited** | Per Amendment 4. §7.3 records why re-adding it loses to JSONL ingestion. |
+
+## 15. Refine sessions (bd-cksar2)
+
+A session bound to one Backlog issue, launched from that issue's **Refine**
+action, so the operator and an agent can shape it into a dispatchable ticket
+together. Everything above still applies — this section is only the deltas.
+
+| | A coordinator session | A refine session |
+|---|---|---|
+| Launched from | `/sessions`, or the dock's New session | An issue's Refine action (detail page, board card) |
+| Row | `issue_id` null | `issue_id` set; a partial unique index (`WHERE status != 'ended'`) allows one live row per issue |
+| Token (§9.3) | `:coordinator`, workspace-bound or cross-workspace | `:refine`, bound to the issue *and* its workspace, `can_dispatch` hard-wired off (bd-3uy2hn) |
+| Instructions (§9.1) | one generated `CLAUDE.md` at the session root | the refine variant, in the **cwd**, as `CLAUDE.md` *and* `AGENTS.md` (bd-980x89) |
+| Repo | none — §10.2 layer 1 is "scaffold, never point at a checkout" | a **read-only** detached `git worktree` at `<root>/repo`, for grep and read grounding only |
+| Model | whatever the CLI picks | the workspace's `premium` tier model at thinking `high` (`--effort high`, or whatever the workspace's `agent.config["thinking_argv"]` remaps that level to) — never flagship, and the routing policies are never consulted |
+
+The **checkout** is the one new thing on disk, and it is deliberately the
+weakest thing that serves reading (`Arbiter.Sessions.RepoCheckout`):
+
+  * Detached at the tip of the repo's default branch, resolved locally with
+    `rev-parse` — never fetched. An interactive launch must not hang on the
+    network for a freshness nobody asked for.
+  * Every write bit stripped, directories included, so `mix`, `git commit` and
+    a stray editor write all fail with `EACCES`.
+  * Under the session root, so §10.2 layer 1 covers it: it is asserted to be
+    outside the primary checkout, and it is *never* the tree the server runs
+    from.
+  * Removed by `Sessions.mark_ended/2`, which is every way a session ends —
+    Kill, the agent exiting, the idle reaper, the adoption sweep.
+
+An issue with no repo, or one naming a repo the workspace never registered in
+`repo_paths`, simply gets no checkout: the launch succeeds and the instructions
+say there is none, rather than failing the operator's click over a gap in
+config.

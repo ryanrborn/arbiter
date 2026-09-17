@@ -71,6 +71,7 @@ defmodule Arbiter.Sessions do
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Provider
   alias Arbiter.Sessions.Provisioning
+  alias Arbiter.Sessions.RepoCheckout
   alias Arbiter.Sessions.Runner
   alias Arbiter.Sessions.Session
   alias Arbiter.Sessions.Terminal
@@ -127,6 +128,11 @@ defmodule Arbiter.Sessions do
       pointed at an existing checkout.
     * `:provider` — default `:claude_code`.
     * `:workspace_id` — `nil` (default) means cross-workspace.
+    * `:issue_id` — binds the session to one issue, which makes it a **refine
+      session** (bd-1lszsc): its MCP token is minted at the `:refine` tier
+      bound to that issue rather than at the coordinator tier, and at most one
+      live session may carry a given `issue_id`. Set by
+      `Arbiter.Sessions.Refine.open/2`, which is the supported way in.
     * `:config_dir` — override the session's `CLAUDE_CONFIG_DIR`; defaults to
       the scaffolded one.
     * `:name` — an operator-supplied display name (bd-o2vtsz). Passed through
@@ -297,6 +303,12 @@ defmodule Arbiter.Sessions do
   single place that archives the session's own JSONL (§11, phase 9) — the
   CLI prunes its session store at ~21 days, so this is the last reliable
   moment to copy it out.
+
+  It is also where a refine session's read-only repo checkout goes
+  (bd-1lszsc). Putting it here rather than beside the Kill button is what
+  makes "removed when the session ends" true for *every* way a session ends,
+  including the ones nobody clicked: the idle reaper, the adoption sweep
+  finding a vanished scope, and the agent simply exiting.
   """
   @spec mark_ended(Session.t(), String.t()) :: {:ok, Session.t()} | {:error, term()}
   def mark_ended(%Session{} = session, reason) when is_binary(reason) do
@@ -316,6 +328,7 @@ defmodule Arbiter.Sessions do
       _ = final_usage_ingest(ended)
       _ = archive_session_jsonl(ended)
       _ = purge_transcript_pipe(ended)
+      _ = RepoCheckout.teardown(ended)
       {:ok, ended}
     end
   end
@@ -393,12 +406,41 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
-  The PubSub topic session lifecycle changes (currently just `mark_ended/2`)
-  are published on — the fleet-wide counterpart to `usage_topic/1`'s
-  per-session one (bd-bsdeb2).
+  The PubSub topic session lifecycle changes (`mark_ended/2`, and
+  `request_open/1`'s open request) are published on — the fleet-wide
+  counterpart to `usage_topic/1`'s per-session one (bd-bsdeb2).
   """
   @spec lifecycle_topic() :: String.t()
   def lifecycle_topic, do: "sessions:lifecycle"
+
+  @doc """
+  Ask whatever session docks are listening to open `session_id` and expand it
+  (bd-1lszsc).
+
+  The dock is a **sticky nested LiveView** with its own process, and the pages
+  that need to put something in it — the issue detail page's Refine button, the
+  board card's — are separate processes holding no reference to it. A page
+  cannot `send/2` the dock, and `send_update/2` is for LiveComponents, not
+  LiveViews. So the request goes over the same lifecycle topic the dock is
+  already subscribed to for its own reasons.
+
+  Broadcast rather than addressed: the dashboard is loopback-only and
+  single-operator (§10.4), so "every dock this operator has open" and "the dock
+  that asked" differ only if they have two tabs up — in which case both showing
+  the session they just asked for is the right answer, not a bug.
+
+  Advisory, not a command. `ArbiterWeb.SessionDockLive` re-validates the id
+  against the sessions that actually exist before opening anything, exactly as
+  it does with the `localStorage` payload a browser hands it.
+  """
+  @spec request_open(String.t()) :: :ok | {:error, term()}
+  def request_open(session_id) when is_binary(session_id) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      lifecycle_topic(),
+      {:session_open_requested, session_id}
+    )
+  end
 
   @doc "Mark a session's scope confirmed live (launch, or re-adoption)."
   @spec mark_running(Session.t()) :: {:ok, Session.t()} | {:error, term()}
@@ -563,6 +605,7 @@ defmodule Arbiter.Sessions do
     Ash.create(Session, %{
       provider: Keyword.get(opts, :provider, :claude_code),
       workspace_id: Keyword.get(opts, :workspace_id),
+      issue_id: Keyword.get(opts, :issue_id),
       config_dir: Keyword.get(opts, :config_dir),
       cwd: Keyword.get(opts, :cwd),
       name: Keyword.get(opts, :name),
