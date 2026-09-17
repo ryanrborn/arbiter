@@ -93,4 +93,33 @@ defmodule ArbiterWeb.Plugs.ApiAuthTest do
       assert conn.status == 200
     end
   end
+
+  describe "assigns[:mcp_scope]" do
+    test "nil on anonymous loopback", %{conn: conn} do
+      conn = conn |> loopback_conn() |> get(@test_path)
+      assert conn.status == 200
+      assert conn.assigns[:mcp_scope] == nil
+    end
+
+    test "set on loopback with a valid bearer token", %{conn: conn} do
+      token = Scope.mint_coordinator(nil)
+      conn = conn |> loopback_conn() |> with_bearer(token) |> get(@test_path)
+      assert conn.status == 200
+      assert %Scope{tier: :coordinator} = conn.assigns[:mcp_scope]
+    end
+
+    test "an invalid bearer token on loopback is rejected, not downgraded to anonymous", %{
+      conn: conn
+    } do
+      conn = conn |> loopback_conn() |> with_bearer("garbage") |> get(@test_path)
+      assert conn.status == 401
+    end
+
+    test "set on non-loopback with a valid bearer token", %{conn: conn} do
+      token = Scope.mint_coordinator(nil)
+      conn = conn |> non_loopback_conn() |> with_bearer(token) |> get(@test_path)
+      assert conn.status == 200
+      assert %Scope{tier: :coordinator} = conn.assigns[:mcp_scope]
+    end
+  end
 end

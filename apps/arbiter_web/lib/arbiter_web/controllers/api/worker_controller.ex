@@ -55,14 +55,39 @@ defmodule ArbiterWeb.Api.WorkerController do
   action_fallback(ArbiterWeb.Api.FallbackController)
 
   def dispatch(conn, params) do
-    case params do
-      %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
-        with {:ok, opts} <- dispatch_opts(params) do
-          dispatch_task(conn, task_id, opts)
-        end
+    with :ok <- ensure_dispatch_allowed(conn) do
+      case params do
+        %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
+          with {:ok, opts} <- dispatch_opts(params) do
+            dispatch_task(conn, task_id, opts)
+          end
 
-      _ ->
-        {:error, {:invalid_request, "task_id is required", %{}}}
+        _ ->
+          {:error, {:invalid_request, "task_id is required", %{}}}
+      end
+    end
+  end
+
+  # This endpoint is loopback-exempt from auth (`ArbiterWeb.Plugs.ApiAuth`) —
+  # the operator's own `arb dispatch` calls it with no token at all, and that
+  # keeps working unchanged (`conn.assigns[:mcp_scope]` is `nil` for a
+  # genuinely anonymous caller). But a caller that *did* present a token —
+  # notably a session's own `arb`, which now always does (bd-5b5hq7) — must
+  # not be able to dispatch a worker through this REST route when its token's
+  # `can_dispatch` is false. Without this, `Arbiter.MCP.Tools.ensure_can_dispatch/1`
+  # (the same guardrail on the `worker_dispatch` MCP tool) would be pure
+  # theater: a session denied dispatch over MCP could just curl this loopback
+  # route with its own (still valid) token instead.
+  defp ensure_dispatch_allowed(conn) do
+    case conn.assigns[:mcp_scope] do
+      nil ->
+        :ok
+
+      %Arbiter.MCP.Scope{can_dispatch: true} ->
+        :ok
+
+      %Arbiter.MCP.Scope{} ->
+        {:error, {:unauthorized, "this token may not dispatch (can_dispatch is not set)"}}
     end
   end
 
@@ -146,47 +171,50 @@ defmodule ArbiterWeb.Api.WorkerController do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def review(conn, params) do
-    case params do
-      # External / non-arbiter PR review (bd-d4ealy): no task, no branch — point
-      # the reviewer at an arbitrary PR by URL/number through the MR adapter.
-      %{"pr" => pr} when is_binary(pr) and pr != "" ->
-        review_external(conn, params)
+    with :ok <- ensure_dispatch_allowed(conn) do
+      case params do
+        # External / non-arbiter PR review (bd-d4ealy): no task, no branch — point
+        # the reviewer at an arbitrary PR by URL/number through the MR adapter.
+        %{"pr" => pr} when is_binary(pr) and pr != "" ->
+          review_external(conn, params)
 
-      %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
-        opts = review_opts(params)
+        %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
+          opts = review_opts(params)
 
-        case Dispatch.dispatch(task_id, opts) do
-          {:ok, result} ->
-            conn
-            |> put_status(:created)
-            |> render(:dispatch, result: result)
+          case Dispatch.dispatch(task_id, opts) do
+            {:ok, result} ->
+              conn
+              |> put_status(:created)
+              |> render(:dispatch, result: result)
 
-          {:error, {:task_not_found, _}} ->
-            {:error, :not_found}
+            {:error, {:task_not_found, _}} ->
+              {:error, :not_found}
 
-          {:error, {:task_closed, _}} ->
-            {:error,
-             {:invalid_request, "task is closed; reopen it before reviewing", %{task_id: task_id}}}
+            {:error, {:task_closed, _}} ->
+              {:error,
+               {:invalid_request, "task is closed; reopen it before reviewing",
+                %{task_id: task_id}}}
 
-          {:error, {:task_awaiting_review, _}} ->
-            {:error,
-             {:invalid_request,
-              "task is already awaiting review; a Watchdog is active and will close it on MR merge",
-              %{task_id: task_id}}}
+            {:error, {:task_awaiting_review, _}} ->
+              {:error,
+               {:invalid_request,
+                "task is already awaiting review; a Watchdog is active and will close it on MR merge",
+                %{task_id: task_id}}}
 
-          # bd-2aslx6 (#1428): see the dispatch action above.
-          {:error, {:agent_session_active, _}} ->
-            {:error,
-             {:invalid_request,
-              "task already has a live agent session; wait for it to finish or stop the " <>
-                "worker before dispatching a review", %{task_id: task_id}}}
+            # bd-2aslx6 (#1428): see the dispatch action above.
+            {:error, {:agent_session_active, _}} ->
+              {:error,
+               {:invalid_request,
+                "task already has a live agent session; wait for it to finish or stop the " <>
+                  "worker before dispatching a review", %{task_id: task_id}}}
 
-          {:error, reason} ->
-            {:error, {:server_error, "review dispatch failed", %{reason: inspect(reason)}}}
-        end
+            {:error, reason} ->
+              {:error, {:server_error, "review dispatch failed", %{reason: inspect(reason)}}}
+          end
 
-      _ ->
-        {:error, {:invalid_request, "task_id or pr is required", %{}}}
+        _ ->
+          {:error, {:invalid_request, "task_id or pr is required", %{}}}
+      end
     end
   end
 
@@ -241,6 +269,14 @@ defmodule ArbiterWeb.Api.WorkerController do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def resume(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
+    with :ok <- ensure_dispatch_allowed(conn) do
+      resume_session(conn, task_id, params)
+    end
+  end
+
+  def resume(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
+
+  defp resume_session(conn, task_id, params) do
     opts = resume_opts(params)
 
     case Dispatch.resume_session(task_id, opts) do
@@ -283,8 +319,6 @@ defmodule ArbiterWeb.Api.WorkerController do
         {:error, {:server_error, "resume failed", %{reason: inspect(reason)}}}
     end
   end
-
-  def resume(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
   def index(conn, _params) do
     children = Worker.list_children()

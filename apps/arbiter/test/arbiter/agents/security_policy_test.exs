@@ -350,6 +350,18 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       refute "ScheduleWakeup" in deny
     end
 
+    test "denies minting a coordinator token from inside the session" do
+      deny = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.interactive_session())
+
+      assert "Bash(arb mcp token mint:*)" in deny
+    end
+
+    test "does not add the token-mint deny to the worker baseline" do
+      deny = Arbiter.Agents.Claude.Security.deny_rules(SecurityPolicy.base())
+
+      refute "Bash(arb mcp token mint:*)" in deny
+    end
+
     test "reads its own config key, not the worker's" do
       previous = Application.get_env(:arbiter, :worker_security_policy)
 
