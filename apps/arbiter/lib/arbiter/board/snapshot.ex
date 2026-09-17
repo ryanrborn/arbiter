@@ -299,8 +299,7 @@ defmodule Arbiter.Board.Snapshot do
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
       ready_order: Keyword.get(opts, :ready_order, []),
-      watchdog_live:
-        Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(workers) end),
+      watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(workers) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
   end
