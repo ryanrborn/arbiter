@@ -731,58 +731,63 @@ defmodule Arbiter.Sessions do
   defp verify_bridge(session, opts) do
     if Keyword.get(opts, :verify_bridge, true) do
       verify_fun = Keyword.get(opts, :bridge_verify_fun, &BridgeVerification.verify/2)
-
-      # `:bridge_verify_timeout_ms` / `:bridge_verify_poll_interval_ms` fall
-      # through to application config — same resolution `Provisioning`'s
-      # `agent_command/2` uses for `:sessions_agent_command` — so a caller
-      # that never sees `launch/1`'s opts (a LiveView `handle_event`) can
-      # still pin this down for a test without threading options through it.
-      verify_opts = [
-        timeout_ms:
-          Keyword.get(opts, :bridge_verify_timeout_ms) ||
-            Application.get_env(
-              :arbiter,
-              :sessions_bridge_verify_timeout_ms,
-              @default_bridge_verify_timeout_ms
-            ),
-        poll_interval_ms:
-          Keyword.get(opts, :bridge_verify_poll_interval_ms) ||
-            Application.get_env(
-              :arbiter,
-              :sessions_bridge_verify_poll_interval_ms,
-              @default_bridge_verify_poll_interval_ms
-            )
-      ]
+      verify_opts = bridge_verify_opts(opts)
 
       Task.Supervisor.start_child(Arbiter.TaskSupervisor, fn ->
-        case verify_fun.(session.config_dir, verify_opts) do
-          :ok ->
-            :ok
-
-          {:error, :bridge_unavailable} ->
-            Logger.warning(
-              "Arbiter.Sessions: remote control bridge never came up for #{session.id}"
-            )
-
-            case mark_bridge_unavailable(session) do
-              {:ok, _} ->
-                :ok
-
-              {:error, reason} ->
-                Logger.warning(
-                  "Arbiter.Sessions: could not persist bridge_status for #{session.id}: #{inspect(reason)}"
-                )
-            end
-
-            broadcast_error(session.id, %{
-              code: "bridge_unavailable",
-              detail: "no bridge-session record within #{verify_opts[:timeout_ms]}ms"
-            })
-        end
+        handle_bridge_verification(
+          session,
+          verify_fun.(session.config_dir, verify_opts),
+          verify_opts
+        )
       end)
     end
 
     :ok
+  end
+
+  # `:bridge_verify_timeout_ms` / `:bridge_verify_poll_interval_ms` fall
+  # through to application config — same resolution `Provisioning`'s
+  # `agent_command/2` uses for `:sessions_agent_command` — so a caller
+  # that never sees `launch/1`'s opts (a LiveView `handle_event`) can
+  # still pin this down for a test without threading options through it.
+  defp bridge_verify_opts(opts) do
+    [
+      timeout_ms:
+        Keyword.get(opts, :bridge_verify_timeout_ms) ||
+          Application.get_env(
+            :arbiter,
+            :sessions_bridge_verify_timeout_ms,
+            @default_bridge_verify_timeout_ms
+          ),
+      poll_interval_ms:
+        Keyword.get(opts, :bridge_verify_poll_interval_ms) ||
+          Application.get_env(
+            :arbiter,
+            :sessions_bridge_verify_poll_interval_ms,
+            @default_bridge_verify_poll_interval_ms
+          )
+    ]
+  end
+
+  defp handle_bridge_verification(_session, :ok, _verify_opts), do: :ok
+
+  defp handle_bridge_verification(session, {:error, :bridge_unavailable}, verify_opts) do
+    Logger.warning("Arbiter.Sessions: remote control bridge never came up for #{session.id}")
+
+    case mark_bridge_unavailable(session) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Arbiter.Sessions: could not persist bridge_status for #{session.id}: #{inspect(reason)}"
+        )
+    end
+
+    broadcast_error(session.id, %{
+      code: "bridge_unavailable",
+      detail: "no bridge-session record within #{verify_opts[:timeout_ms]}ms"
+    })
   end
 
   defp summarize(out) when is_binary(out) do
