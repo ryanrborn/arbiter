@@ -212,17 +212,23 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
     end
 
     test "a cycle between epics does not loop forever and contributes nothing extra", ctx do
+      seed_estimator_sample!(ctx.ws)
+      epic = Ash.update!(ctx.epic, %{}, action: :promote_to_ready)
+
       {:ok, other_epic} =
         Ash.create(Issue, %{title: "cyclic epic", workspace_id: ctx.ws.id, issue_type: :epic})
 
       other_epic = Ash.update!(other_epic, %{}, action: :promote_to_ready)
-      attach!(ctx.epic, other_epic)
-      attach!(other_epic, ctx.epic)
+      attach!(epic, other_epic)
+      attach!(other_epic, epic)
+      ready_child!(ctx.ws, other_epic, %{difficulty: 2, issue_type: :task})
 
-      rollup = Estimate.epic_cost_rollup(ctx.epic, now: @now)
+      rollup = Estimate.epic_cost_rollup(epic, now: @now)
+      est = Estimate.for_issue(%Issue{difficulty: 2, issue_type: :task}, now: @now)
 
-      assert rollup.to_go_low == 0.0
-      assert rollup.to_go_high == 0.0
+      # counted exactly once — the back-edge to `epic` is skipped, not re-walked
+      assert rollup.to_go_low == Float.round(est.p25, 2)
+      assert rollup.to_go_high == Float.round(est.p75, 2)
       assert rollup.sub_epic_count == 1
     end
 

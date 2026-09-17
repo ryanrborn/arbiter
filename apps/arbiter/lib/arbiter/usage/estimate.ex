@@ -247,7 +247,8 @@ defmodule Arbiter.Usage.Estimate do
   def epic_cost_rollup(issue_or_id, opts \\ [])
 
   def epic_cost_rollup(%Issue{issue_type: :epic} = epic, opts) do
-    do_epic_cost_rollup(epic, opts, MapSet.new())
+    {rollup, _visited} = do_epic_cost_rollup(epic, opts, MapSet.new())
+    rollup
   rescue
     error ->
       Logger.warning("Usage.Estimate.epic_cost_rollup failed: #{Exception.message(error)}")
@@ -271,10 +272,11 @@ defmodule Arbiter.Usage.Estimate do
     {upcoming, promoted} = Enum.split_with(open, &(&1.bucket == :backlog))
 
     {sub_epics, non_epic} = Enum.split_with(promoted, fn %{issue: i} -> i.issue_type == :epic end)
-    {blocked, unblocked} = Enum.split_with(non_epic, & &1.blocked?)
 
-    {in_flight, dispatchable} =
-      Enum.split_with(unblocked, fn %{bucket: bucket} -> bucket in [:running, :waiting] end)
+    {in_flight, not_in_flight} =
+      Enum.split_with(non_epic, fn %{bucket: bucket} -> bucket in [:running, :waiting] end)
+
+    {blocked, dispatchable} = Enum.split_with(not_in_flight, & &1.blocked?)
 
     spend_by_id =
       (Enum.map(closed, & &1.issue.id) ++ Enum.map(in_flight, & &1.issue.id))
@@ -285,7 +287,12 @@ defmodule Arbiter.Usage.Estimate do
       |> Enum.reduce(0.0, fn %{issue: i}, acc -> acc + Map.get(spend_by_id, i.id, 0.0) end)
       |> money()
 
-    opts_with_sample = Keyword.put_new_lazy(opts, :sample, fn -> resolve_sample(opts) end)
+    opts_with_sample =
+      if dispatchable == [] and blocked == [] and in_flight == [] and sub_epics == [] do
+        opts
+      else
+        Keyword.put_new_lazy(opts, :sample, fn -> resolve_sample(opts) end)
+      end
 
     {dispatchable_lo, dispatchable_hi, dispatchable_unestimated} =
       sum_full_estimates(dispatchable, opts_with_sample)
@@ -296,9 +303,10 @@ defmodule Arbiter.Usage.Estimate do
     {in_flight_lo, in_flight_hi, in_flight_unestimated} =
       sum_in_flight_estimates(in_flight, spend_by_id, opts_with_sample)
 
-    {sub_epic_lo, sub_epic_hi} = sum_sub_epic_estimates(sub_epics, opts_with_sample, visited)
+    {sub_epic_lo, sub_epic_hi, visited} =
+      sum_sub_epic_estimates(sub_epics, opts_with_sample, visited)
 
-    %{
+    rollup = %{
       spent: spent,
       to_go_low: money(dispatchable_lo + blocked_lo + in_flight_lo + sub_epic_lo),
       to_go_high: money(dispatchable_hi + blocked_hi + in_flight_hi + sub_epic_hi),
@@ -310,6 +318,8 @@ defmodule Arbiter.Usage.Estimate do
       unestimated_count: dispatchable_unestimated + blocked_unestimated + in_flight_unestimated,
       upcoming_count: length(upcoming)
     }
+
+    {rollup, visited}
   end
 
   defp sum_full_estimates([], _opts), do: {0.0, 0.0, 0}
@@ -338,15 +348,15 @@ defmodule Arbiter.Usage.Estimate do
     end)
   end
 
-  defp sum_sub_epic_estimates([], _opts, _visited), do: {0.0, 0.0}
+  defp sum_sub_epic_estimates([], _opts, visited), do: {0.0, 0.0, visited}
 
   defp sum_sub_epic_estimates(sub_epics, opts, visited) do
-    Enum.reduce(sub_epics, {0.0, 0.0}, fn %{issue: i}, {lo, hi} ->
+    Enum.reduce(sub_epics, {0.0, 0.0, visited}, fn %{issue: i}, {lo, hi, visited} ->
       if MapSet.member?(visited, i.id) do
-        {lo, hi}
+        {lo, hi, visited}
       else
-        sub = do_epic_cost_rollup(i, opts, visited)
-        {lo + sub.to_go_low, hi + sub.to_go_high}
+        {sub, visited} = do_epic_cost_rollup(i, opts, visited)
+        {lo + sub.to_go_low, hi + sub.to_go_high, visited}
       end
     end)
   end
