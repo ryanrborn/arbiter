@@ -74,9 +74,9 @@ defmodule Arbiter.MCP.Catalog do
   | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/1` (bd-8jixav) |
   | `ci_rerun` | worker, coordinator | `Arbiter.Worker.Watchdog.rerun_ci/2` → `Merger.rerun_ci/2` (bd-5mzzww) |
   | `ci_mark_external` | worker, coordinator | `Arbiter.Worker.Watchdog.mark_ci_external/2` (bd-5mzzww) |
-  | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/1` |
-  | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/1` |
-  | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.paused?/1` |
+  | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
+  | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
+  | `scheduler_status` | coordinator | `Arbiter.Board.Autopilot.status/1` |
   | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |

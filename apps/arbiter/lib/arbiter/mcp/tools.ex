@@ -1388,14 +1388,14 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Pause the board autopilot: stop promoting Ready cards to Running.
   Workers already dispatched continue to completion. Resume with `scheduler_resume`.
-  Coordinator only.
+  Persisted, so it survives a server restart. Coordinator only.
   """
   @spec scheduler_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def scheduler_pause(%Scope{} = _scope, _args) do
-    case Arbiter.Board.Autopilot.pause() do
+    case Arbiter.Board.Autopilot.pause(Arbiter.Board.Autopilot, "mcp") do
       :ok ->
         Logger.info("[scheduler_pause] autopilot paused")
-        {:ok, %{paused: true}}
+        {:ok, scheduler_status_data()}
 
       {:error, reason} ->
         {:error, {:invalid, "pause failed: #{inspect(reason)}"}}
@@ -1410,14 +1410,15 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   Resume the board autopilot: start promoting Ready cards to Running again.
-  The autopilot must be in paused state. Coordinator only.
+  The autopilot must be in paused state. Persisted, so it survives a server
+  restart. Coordinator only.
   """
   @spec scheduler_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def scheduler_resume(%Scope{} = _scope, _args) do
-    case Arbiter.Board.Autopilot.resume() do
+    case Arbiter.Board.Autopilot.resume(Arbiter.Board.Autopilot, "mcp") do
       :ok ->
         Logger.info("[scheduler_resume] autopilot resumed")
-        {:ok, %{paused: false}}
+        {:ok, scheduler_status_data()}
 
       {:error, reason} ->
         {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
@@ -1431,19 +1432,29 @@ defmodule Arbiter.MCP.Tools do
   end
 
   @doc """
-  Return the current pause state of the board autopilot.
-  Coordinator only.
+  Return the current pause state of the board autopilot, and when/by-what it
+  was last changed (`nil` when unknown, e.g. still on the boot-time config
+  default). Coordinator only.
   """
   @spec scheduler_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def scheduler_status(%Scope{} = _scope, _args) do
-    paused? = Arbiter.Board.Autopilot.paused?()
-    {:ok, %{paused: paused?}}
+    {:ok, scheduler_status_data()}
   rescue
     e ->
       {:error, {:invalid, "status check failed: #{inspect(e)}"}}
   catch
     :exit, reason ->
       {:error, {:invalid, "status check failed: process error #{inspect(reason)}"}}
+  end
+
+  defp scheduler_status_data do
+    status = Arbiter.Board.Autopilot.status()
+
+    %{
+      paused: status.paused?,
+      changed_at: status.changed_at,
+      changed_by: status.changed_by
+    }
   end
 
   # ---- shared resolution / fetch -----------------------------------------

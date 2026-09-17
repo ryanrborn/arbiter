@@ -103,4 +103,37 @@ defmodule Arbiter.SettingsTest do
       assert {:error, :invalid_value} = Settings.set_credential_watchdog_recovery_interval_ms(-1)
     end
   end
+
+  describe "board_autopilot_status/0 + set_board_autopilot_paused/2" do
+    test "returns nil paused/changed_at/changed_by when no override has been set" do
+      assert Settings.board_autopilot_status() == %{paused: nil, changed_at: nil, changed_by: nil}
+    end
+
+    test "round-trips the paused flag with a changed_at timestamp and no changed_by" do
+      before = DateTime.utc_now()
+
+      assert {:ok, %{paused: true, changed_at: %DateTime{}, changed_by: nil}} =
+               Settings.set_board_autopilot_paused(true)
+
+      assert %{paused: true, changed_at: changed_at, changed_by: nil} =
+               Settings.board_autopilot_status()
+
+      assert DateTime.compare(changed_at, before) in [:gt, :eq]
+    end
+
+    test "records changed_by when given" do
+      assert {:ok, %{paused: false, changed_by: "mcp"}} =
+               Settings.set_board_autopilot_paused(false, "mcp")
+
+      assert %{paused: false, changed_by: "mcp"} = Settings.board_autopilot_status()
+    end
+
+    test "updates the existing singleton row on subsequent writes (no duplicate rows)" do
+      assert {:ok, _} = Settings.set_board_autopilot_paused(true, "mcp")
+      assert {:ok, _} = Settings.set_board_autopilot_paused(false, "dashboard")
+
+      assert %{paused: false, changed_by: "dashboard"} = Settings.board_autopilot_status()
+      assert {:ok, [_single_row]} = Ash.read(Arbiter.Settings.Installation)
+    end
+  end
 end
