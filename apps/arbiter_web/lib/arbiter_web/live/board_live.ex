@@ -459,8 +459,8 @@ defmodule ArbiterWeb.BoardLive do
   # the operator with a board and a flash, not a dead LiveView.
   defp toggle_scheduler do
     if scheduler_paused?(),
-      do: Autopilot.resume(Autopilot),
-      else: Autopilot.pause(Autopilot)
+      do: Autopilot.resume(Autopilot, "dashboard"),
+      else: Autopilot.pause(Autopilot, "dashboard")
   rescue
     e -> {:error, e}
   catch

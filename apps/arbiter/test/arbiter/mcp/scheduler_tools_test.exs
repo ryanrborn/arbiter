@@ -53,7 +53,7 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
   end
 
   describe "scheduler_pause/2" do
-    test "pauses the autopilot", ctx do
+    test "pauses the autopilot and records who", ctx do
       # Ensure we start in resumed state
       :ok = Autopilot.resume()
 
@@ -62,6 +62,8 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       assert {:ok, data} = Tools.scheduler_pause(ctx.coordinator, %{})
 
       assert data.paused == true
+      assert data.changed_by == "mcp"
+      assert %DateTime{} = data.changed_at
       assert Autopilot.paused?() == true
     end
 
@@ -76,13 +78,15 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
   end
 
   describe "scheduler_resume/2" do
-    test "resumes the autopilot", ctx do
+    test "resumes the autopilot and records who", ctx do
       :ok = Autopilot.pause()
       assert true == Autopilot.paused?()
 
       assert {:ok, data} = Tools.scheduler_resume(ctx.coordinator, %{})
 
       assert data.paused == false
+      assert data.changed_by == "mcp"
+      assert %DateTime{} = data.changed_at
       assert Autopilot.paused?() == false
     end
 
@@ -111,6 +115,16 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
 
       assert data.paused == false
+    end
+
+    test "reports when and by what the state last changed", ctx do
+      :ok = Autopilot.resume(Autopilot)
+      :ok = Autopilot.pause(Autopilot, "mcp")
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.changed_by == "mcp"
+      assert %DateTime{} = data.changed_at
     end
   end
 end

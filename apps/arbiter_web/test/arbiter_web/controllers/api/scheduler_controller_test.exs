@@ -45,7 +45,10 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
       conn = post(conn, "/api/scheduler/pause")
 
-      assert json_response(conn, 200) == %{"paused" => true}
+      assert %{"paused" => true, "changed_by" => "api", "changed_at" => changed_at} =
+               json_response(conn, 200)
+
+      assert is_binary(changed_at)
       assert Autopilot.paused?() == true
     end
   end
@@ -57,7 +60,10 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
       conn = post(conn, "/api/scheduler/resume")
 
-      assert json_response(conn, 200) == %{"paused" => false}
+      assert %{"paused" => false, "changed_by" => "api", "changed_at" => changed_at} =
+               json_response(conn, 200)
+
+      assert is_binary(changed_at)
       assert Autopilot.paused?() == false
     end
   end
@@ -68,7 +74,7 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
       conn = get(conn, "/api/scheduler/status")
 
-      assert json_response(conn, 200) == %{"paused" => true}
+      assert %{"paused" => true} = json_response(conn, 200)
     end
 
     test "returns running state", %{conn: conn} do
@@ -76,7 +82,7 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
       conn = get(conn, "/api/scheduler/status")
 
-      assert json_response(conn, 200) == %{"paused" => false}
+      assert %{"paused" => false} = json_response(conn, 200)
     end
   end
 end

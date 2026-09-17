@@ -158,7 +158,10 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     wrote? =
       guarded(
         fn ->
-          if on?, do: Autopilot.pause(Autopilot), else: Autopilot.resume(Autopilot)
+          if on?,
+            do: Autopilot.pause(Autopilot, "dashboard"),
+            else: Autopilot.resume(Autopilot, "dashboard")
+
           true
         end,
         false
