@@ -99,6 +99,10 @@ defmodule Arbiter.Sessions.Provisioning do
     * `:mcp` — `false` to skip minting and `.mcp.json` entirely (a session with
       no Arbiter access at all). Defaults to `Arbiter.MCP.enabled?/0`.
     * `:extra_env` — extra **non-secret** pairs for the launch wrapper.
+    * `:refine` — presence renders the refine-session instructions variant
+      (`Arbiter.Sessions.Instructions.render/2`'s `:refine` option, bd-980x89)
+      into the session's **cwd** as both `CLAUDE.md` and `AGENTS.md`, instead
+      of the default coordinator `CLAUDE.md` at the session root.
   """
   @spec provision(Session.t(), keyword()) :: {:ok, provisioned()} | {:error, term()}
   def provision(%Session{} = session, opts \\ []) do
@@ -110,7 +114,7 @@ defmodule Arbiter.Sessions.Provisioning do
     with :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
-         :ok <- write_instructions(session, paths, opts),
+         :ok <- write_instructions(session, paths, cwd, opts),
          :ok <- mount_memory(session, opts),
          :ok <- seed_config_dir(session, config_dir, cwd, opts),
          :ok <- write_auth_env(session, paths, opts),
@@ -196,16 +200,36 @@ defmodule Arbiter.Sessions.Provisioning do
     end)
   end
 
-  defp write_instructions(session, paths, opts) do
+  # Non-refine sessions keep the §9.1 shape unchanged: one generated
+  # `CLAUDE.md` at the session root (an ancestor of the cwd, so Claude Code's
+  # directory walk still finds it). A refine session (`opts[:refine]` present,
+  # bd-980x89) instead renders into the **cwd itself**, as both `CLAUDE.md`
+  # and `AGENTS.md` — the latter for non-Claude providers, since a refine
+  # session's doctrine is not optional reading gated behind one CLI's
+  # conventions.
+  defp write_instructions(session, paths, cwd, opts) do
     content =
       Instructions.render(session,
         primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
-        mcp_server_name: MCP.server_name()
+        mcp_server_name: MCP.server_name(),
+        refine: Keyword.get(opts, :refine)
       )
 
-    case File.write(paths.instructions, content) do
+    case Keyword.get(opts, :refine) do
+      nil ->
+        write_file(paths.instructions, content)
+
+      _refine ->
+        with :ok <- write_file(Path.join(cwd, "CLAUDE.md"), content) do
+          write_file(Path.join(cwd, "AGENTS.md"), content)
+        end
+    end
+  end
+
+  defp write_file(path, content) do
+    case File.write(path, content) do
       :ok -> :ok
-      {:error, reason} -> {:error, {:write_failed, paths.instructions, reason}}
+      {:error, reason} -> {:error, {:write_failed, path, reason}}
     end
   end
 
