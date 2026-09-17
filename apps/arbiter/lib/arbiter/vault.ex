@@ -16,19 +16,34 @@ defmodule Arbiter.Vault do
 
   ## Key rotation
 
-  Rotation is Cloak's native two-cipher scheme, driven by a second,
-  **optional** env var: `ARBITER_CLOAK_KEY_OLD`.
+  Rotation is Cloak's native two-cipher scheme, driven by two **optional**
+  env vars: `ARBITER_CLOAK_KEY_OLD` and `ARBITER_CLOAK_KEY_GENERATION`.
 
-    * New ciphertext is always written with the `:default` cipher (tag
-      `"AES.GCM.V2"`, key from `ARBITER_CLOAK_KEY`).
-    * When `ARBITER_CLOAK_KEY_OLD` is set, a second cipher (tag
-      `"AES.GCM.V1"`) is registered **decrypt-only** so rows still encrypted
-      under the previous key keep working during the rotation window. Cloak
-      dispatches decryption by matching the tag embedded in the ciphertext,
-      not by key, so the two tags must differ.
-    * Once `Arbiter.Vault.Rotation.verify/0` confirms no rows remain tagged
-      `"AES.GCM.V1"`, remove `ARBITER_CLOAK_KEY_OLD` from the environment and
-      redeploy — the retired cipher then drops out of `init/1` automatically.
+  The `:default` cipher's tag is `"AES.GCM.V<generation>"`, where
+  `<generation>` defaults to `1` — so an install that has never rotated
+  needs neither env var, and keeps writing/reading the same tag
+  (`"AES.GCM.V1"`) it always has. **Only bump `ARBITER_CLOAK_KEY_GENERATION`
+  as a permanent step of actually completing a rotation** — bumping it
+  without also migrating the data (see below) makes existing ciphertext
+  (tagged with the previous generation) undecryptable, since nothing
+  registers a cipher for that tag anymore.
+
+  To rotate from generation N to N+1:
+
+    1. Set `ARBITER_CLOAK_KEY` to the new key, `ARBITER_CLOAK_KEY_OLD` to the
+       key that generation N used, and bump `ARBITER_CLOAK_KEY_GENERATION`
+       to N+1 — all three at once, in the same deploy. `init/1` now
+       registers `:default` (tag `V<N+1>`, the new key) and `:retired` (tag
+       `V<N>`, the old key, decrypt-only), so both old and new ciphertext
+       keep working through the window.
+    2. Run `Arbiter.Vault.Rotation.sweep!/0` (via `mix
+       arbiter.rotate_cloak_key --sweep`) to re-encrypt every row onto the
+       new cipher, and `verify/0` (`--verify`) to confirm zero rows remain
+       tagged `V<N>`.
+    3. Remove `ARBITER_CLOAK_KEY_OLD` and redeploy — leave
+       `ARBITER_CLOAK_KEY_GENERATION` at N+1 permanently. The retired cipher
+       drops out of `init/1`; the current generation's tag doesn't change,
+       so the now fully-migrated data keeps decrypting.
 
   See `docs/cloak-key-rotation.md` for the full runbook and
   `Arbiter.Vault.Rotation` for the sweep/verify task this drives.
@@ -36,33 +51,83 @@ defmodule Arbiter.Vault do
 
   use Cloak.Vault, otp_app: :arbiter
 
-  @current_tag "AES.GCM.V2"
-  @retired_tag "AES.GCM.V1"
-
   @impl GenServer
   def init(config) do
+    generation = generation!()
+
     ciphers =
-      [{:default, {Cloak.Ciphers.AES.GCM, tag: @current_tag, key: key!(), iv_length: 12}}] ++
-        retired_cipher()
+      [
+        {:default, {Cloak.Ciphers.AES.GCM, tag: tag_for(generation), key: key!(), iv_length: 12}}
+      ] ++ retired_cipher(generation)
 
     {:ok, Keyword.put(config, :ciphers, ciphers)}
   end
 
   @doc "Tag stamped on ciphertext written by the current (`:default`) cipher."
   @spec current_tag() :: String.t()
-  def current_tag, do: @current_tag
+  def current_tag, do: tag_for(generation!())
 
   @doc """
-  Tag stamped on ciphertext written by the retired, decrypt-only cipher —
-  only meaningful while `ARBITER_CLOAK_KEY_OLD` is configured.
+  Tag stamped on ciphertext written by the previous generation's cipher —
+  only meaningful (i.e. actually registered as `:retired`) while
+  `ARBITER_CLOAK_KEY_OLD` is configured.
   """
   @spec retired_tag() :: String.t()
-  def retired_tag, do: @retired_tag
+  def retired_tag, do: tag_for(generation!() - 1)
 
-  defp retired_cipher do
+  defp tag_for(generation), do: "AES.GCM.V#{generation}"
+
+  defp retired_cipher(generation) do
     case old_key() do
-      nil -> []
-      key -> [{:retired, {Cloak.Ciphers.AES.GCM, tag: @retired_tag, key: key, iv_length: 12}}]
+      nil ->
+        []
+
+      key ->
+        [
+          {:retired,
+           {Cloak.Ciphers.AES.GCM, tag: tag_for(generation - 1), key: key, iv_length: 12}}
+        ]
+    end
+  end
+
+  @doc """
+  Resolve the current key generation (`1` unless a rotation has bumped it),
+  raising a clear error when malformed.
+
+  Resolution order:
+
+    1. `ARBITER_CLOAK_KEY_GENERATION` environment variable (a positive integer).
+    2. `config :arbiter, Arbiter.Vault, key_generation: <integer>` — test-only
+       fallback.
+    3. `1`, when neither is set.
+  """
+  @spec generation!() :: pos_integer()
+  def generation! do
+    case raw_generation() do
+      nil ->
+        1
+
+      raw ->
+        case Integer.parse(raw) do
+          {n, ""} when n >= 1 ->
+            n
+
+          _ ->
+            raise "ARBITER_CLOAK_KEY_GENERATION must be a positive integer, got: #{inspect(raw)}"
+        end
+    end
+  end
+
+  defp raw_generation do
+    case System.get_env("ARBITER_CLOAK_KEY_GENERATION") do
+      v when is_binary(v) and v != "" ->
+        v
+
+      _ ->
+        case Application.get_env(:arbiter, __MODULE__)[:key_generation] do
+          nil -> nil
+          v -> to_string(v)
+        end
     end
   end
 

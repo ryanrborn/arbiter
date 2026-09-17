@@ -9,12 +9,14 @@ defmodule Mix.Tasks.Arbiter.RotateCloakKey do
       mix arbiter.rotate_cloak_key --verify   # count rows still on the retired cipher
       mix arbiter.rotate_cloak_key --sweep    # re-encrypt every row under the current cipher
 
-  Run `--verify` first (mid-rotation, both `ARBITER_CLOAK_KEY` and
-  `ARBITER_CLOAK_KEY_OLD` set) to see what's outstanding, then `--sweep` to do
-  the re-encryption. `--sweep` is safe to re-run — rows already on the
-  current cipher are left untouched. Run `--verify` again afterward; it must
-  report zero retired rows before `ARBITER_CLOAK_KEY_OLD` is removed from the
-  environment.
+  Run `--verify` first, mid-rotation (`ARBITER_CLOAK_KEY`,
+  `ARBITER_CLOAK_KEY_OLD`, and a bumped `ARBITER_CLOAK_KEY_GENERATION` all
+  set together — see `Arbiter.Vault`'s moduledoc), to see what's
+  outstanding, then `--sweep` to do the re-encryption. `--sweep` is safe to
+  re-run — rows already on the current cipher are left untouched. Run
+  `--verify` again afterward; it must report zero retired rows before
+  `ARBITER_CLOAK_KEY_OLD` is removed from the environment (keep
+  `ARBITER_CLOAK_KEY_GENERATION` at its bumped value permanently).
 
   Prints only counts and table/column names — never plaintext or ciphertext.
   """

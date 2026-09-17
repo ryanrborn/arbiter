@@ -9,6 +9,7 @@ defmodule Arbiter.VaultTest do
     # them don't leak into the running vault (or other tests).
     prev_env = System.get_env("ARBITER_CLOAK_KEY")
     prev_old_env = System.get_env("ARBITER_CLOAK_KEY_OLD")
+    prev_gen_env = System.get_env("ARBITER_CLOAK_KEY_GENERATION")
     prev_cfg = Application.get_env(:arbiter, Vault)
 
     on_exit(fn ->
@@ -19,6 +20,10 @@ defmodule Arbiter.VaultTest do
       if prev_old_env,
         do: System.put_env("ARBITER_CLOAK_KEY_OLD", prev_old_env),
         else: System.delete_env("ARBITER_CLOAK_KEY_OLD")
+
+      if prev_gen_env,
+        do: System.put_env("ARBITER_CLOAK_KEY_GENERATION", prev_gen_env),
+        else: System.delete_env("ARBITER_CLOAK_KEY_GENERATION")
 
       Application.put_env(:arbiter, Vault, prev_cfg)
     end)
@@ -105,46 +110,102 @@ defmodule Arbiter.VaultTest do
     end
   end
 
+  describe "generation!/0" do
+    test "defaults to 1 when ARBITER_CLOAK_KEY_GENERATION is unset" do
+      System.delete_env("ARBITER_CLOAK_KEY_GENERATION")
+      Application.delete_env(:arbiter, Vault)
+
+      assert Vault.generation!() == 1
+    end
+
+    test "reads a positive integer from ARBITER_CLOAK_KEY_GENERATION" do
+      System.put_env("ARBITER_CLOAK_KEY_GENERATION", "2")
+
+      assert Vault.generation!() == 2
+    end
+
+    test "raises on a non-integer or non-positive value" do
+      System.put_env("ARBITER_CLOAK_KEY_GENERATION", "not-a-number")
+
+      assert_raise RuntimeError,
+                   ~r/ARBITER_CLOAK_KEY_GENERATION must be a positive integer/,
+                   fn ->
+                     Vault.generation!()
+                   end
+
+      System.put_env("ARBITER_CLOAK_KEY_GENERATION", "0")
+
+      assert_raise RuntimeError,
+                   ~r/ARBITER_CLOAK_KEY_GENERATION must be a positive integer/,
+                   fn ->
+                     Vault.generation!()
+                   end
+    end
+  end
+
   describe "rotation: init/1 cipher set" do
-    test "registers only the current cipher when no old key is configured" do
+    test "generation 1, no old key (the pre-rotation / never-rotated state): only :default, tag V1" do
       System.put_env("ARBITER_CLOAK_KEY", Base.encode64(:crypto.strong_rand_bytes(32)))
       System.delete_env("ARBITER_CLOAK_KEY_OLD")
+      System.delete_env("ARBITER_CLOAK_KEY_GENERATION")
 
       {:ok, config} = Vault.init([])
 
       assert Keyword.keys(config[:ciphers]) == [:default]
+      {_mod, opts} = config[:ciphers][:default]
+      assert opts[:tag] == "AES.GCM.V1"
     end
 
-    test "registers both ciphers, default first, when an old key is configured" do
+    test "bumping the generation without an old key breaks previous-generation ciphertext" do
+      # This is deliberately what NOT to do mid-rotation (see the moduledoc):
+      # bumping ARBITER_CLOAK_KEY_GENERATION without ARBITER_CLOAK_KEY_OLD set
+      # leaves nothing registered for the previous generation's tag.
+      System.put_env("ARBITER_CLOAK_KEY", Base.encode64(:crypto.strong_rand_bytes(32)))
+      System.delete_env("ARBITER_CLOAK_KEY_OLD")
+      System.put_env("ARBITER_CLOAK_KEY_GENERATION", "2")
+
+      {:ok, config} = Vault.init([])
+
+      assert Keyword.keys(config[:ciphers]) == [:default]
+      {_mod, opts} = config[:ciphers][:default]
+      assert opts[:tag] == "AES.GCM.V2"
+    end
+
+    test "generation bumped + old key set (an in-progress rotation): both ciphers, distinct tags" do
       System.put_env("ARBITER_CLOAK_KEY", Base.encode64(:crypto.strong_rand_bytes(32)))
       System.put_env("ARBITER_CLOAK_KEY_OLD", Base.encode64(:crypto.strong_rand_bytes(32)))
+      System.put_env("ARBITER_CLOAK_KEY_GENERATION", "2")
 
       {:ok, config} = Vault.init([])
 
       assert Keyword.keys(config[:ciphers]) == [:default, :retired]
       {_mod, default_opts} = config[:ciphers][:default]
       {_mod, retired_opts} = config[:ciphers][:retired]
+      assert default_opts[:tag] == "AES.GCM.V2"
+      assert retired_opts[:tag] == "AES.GCM.V1"
       assert default_opts[:tag] == Vault.current_tag()
       assert retired_opts[:tag] == Vault.retired_tag()
-      assert default_opts[:tag] != retired_opts[:tag]
     end
 
-    test "mid-rotation: old-cipher ciphertext still decrypts, new writes use the new cipher" do
-      new_key = :crypto.strong_rand_bytes(32)
+    test "mid-rotation: pre-rotation ciphertext still decrypts, new writes use the new cipher" do
       old_key = :crypto.strong_rand_bytes(32)
+      new_key = :crypto.strong_rand_bytes(32)
       plaintext = "sct_rw_mid_rotation"
 
-      # Simulate a row written before rotation, under the old cipher/tag.
-      old_only_config = [
-        ciphers: [
-          default: {Cloak.Ciphers.AES.GCM, tag: Vault.retired_tag(), key: old_key, iv_length: 12}
-        ]
-      ]
+      # Simulate a row written before rotation: generation 1, no rotation env
+      # vars set, so this is exactly Vault.init([])'s baseline single-cipher
+      # config today.
+      System.put_env("ARBITER_CLOAK_KEY", Base.encode64(old_key))
+      System.delete_env("ARBITER_CLOAK_KEY_OLD")
+      System.delete_env("ARBITER_CLOAK_KEY_GENERATION")
+      {:ok, pre_rotation_config} = Vault.init([])
+      old_ciphertext = Cloak.Vault.encrypt!(pre_rotation_config, plaintext)
 
-      old_ciphertext = Cloak.Vault.encrypt!(old_only_config, plaintext)
-
+      # Deploy the rotation: new key as :default, old key registered
+      # decrypt-only, generation bumped — all three together, per the runbook.
       System.put_env("ARBITER_CLOAK_KEY", Base.encode64(new_key))
       System.put_env("ARBITER_CLOAK_KEY_OLD", Base.encode64(old_key))
+      System.put_env("ARBITER_CLOAK_KEY_GENERATION", "2")
       {:ok, rotating_config} = Vault.init([])
 
       # Old ciphertext still decrypts while the retired cipher is registered.
@@ -153,13 +214,16 @@ defmodule Arbiter.VaultTest do
       # New encryptions use the default (new) cipher/tag.
       new_ciphertext = Cloak.Vault.encrypt!(rotating_config, plaintext)
       assert %{tag: tag} = Cloak.Tags.Decoder.decode(new_ciphertext)
-      assert tag == Vault.current_tag()
+      assert tag == "AES.GCM.V2"
       assert {:ok, ^plaintext} = Cloak.Vault.decrypt(rotating_config, new_ciphertext)
 
-      # Once the retired cipher is dropped (old key removed post-rotation),
-      # the pre-rotation ciphertext can no longer be decrypted.
+      # Complete the rotation: drop the old key, keep the generation bumped.
+      # New (already-swept) ciphertext keeps decrypting; any *unswept*
+      # previous-generation ciphertext would not — which is exactly why the
+      # runbook requires Rotation.verify/0 to report zero before this step.
       System.delete_env("ARBITER_CLOAK_KEY_OLD")
       {:ok, post_rotation_config} = Vault.init([])
+      assert {:ok, ^plaintext} = Cloak.Vault.decrypt(post_rotation_config, new_ciphertext)
       assert {:error, _} = Cloak.Vault.decrypt(post_rotation_config, old_ciphertext)
     end
   end

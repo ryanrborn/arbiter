@@ -1,7 +1,8 @@
 defmodule Arbiter.Vault.RotationTest do
-  # async: false — temporarily registers a decrypt-only :retired cipher on
-  # the live, VM-global Arbiter.Vault singleton to simulate a mid-rotation
-  # window, and restores the original config on exit.
+  # async: false — mutates the ARBITER_CLOAK_KEY* env vars and temporarily
+  # pushes the resulting rotating cipher config onto the live, VM-global
+  # Arbiter.Vault singleton to simulate a mid-rotation deploy, restoring
+  # both on exit.
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Accounts.{ProviderAccount, ProviderCredential}
@@ -9,18 +10,29 @@ defmodule Arbiter.Vault.RotationTest do
   alias Arbiter.Vault
   alias Arbiter.Vault.Rotation
 
-  @old_tag "AES.GCM.V1"
   @config_table Module.concat(Vault, Config)
 
   setup do
-    old_key = :crypto.strong_rand_bytes(32)
     {:ok, live_config} = Cloak.Vault.read_config(@config_table)
+    {_mod, live_default_opts} = live_config[:ciphers][:default]
+    old_key = live_default_opts[:key]
 
-    rotating_config =
-      Keyword.update!(live_config, :ciphers, fn ciphers ->
-        ciphers ++
-          [{:retired, {Cloak.Ciphers.AES.GCM, tag: @old_tag, key: old_key, iv_length: 12}}]
-      end)
+    prev_key_env = System.get_env("ARBITER_CLOAK_KEY")
+    prev_old_env = System.get_env("ARBITER_CLOAK_KEY_OLD")
+    prev_gen_env = System.get_env("ARBITER_CLOAK_KEY_GENERATION")
+
+    # Drive the same env vars a real rotation deploy sets, so the tags this
+    # test exercises are exactly what Vault.current_tag/0 and
+    # Vault.retired_tag/0 (which Arbiter.Vault.Rotation itself compares
+    # against) independently compute — not hand-picked strings that happen
+    # to agree with them.
+    System.put_env("ARBITER_CLOAK_KEY", Base.encode64(:crypto.strong_rand_bytes(32)))
+    System.put_env("ARBITER_CLOAK_KEY_OLD", Base.encode64(old_key))
+    System.put_env("ARBITER_CLOAK_KEY_GENERATION", "2")
+
+    {:ok, rotating_config} = Vault.init([])
+    old_tag = Vault.retired_tag()
+    new_tag = Vault.current_tag()
 
     # The config ETS table is owned by the Arbiter.Vault GenServer
     # (protected access), so it can only be written to from inside that
@@ -28,9 +40,24 @@ defmodule Arbiter.Vault.RotationTest do
     # given function in the target process without touching its actual
     # GenServer state.
     save_vault_config(rotating_config)
-    on_exit(fn -> save_vault_config(live_config) end)
 
-    %{old_key: old_key}
+    on_exit(fn ->
+      save_vault_config(live_config)
+
+      if prev_key_env,
+        do: System.put_env("ARBITER_CLOAK_KEY", prev_key_env),
+        else: System.delete_env("ARBITER_CLOAK_KEY")
+
+      if prev_old_env,
+        do: System.put_env("ARBITER_CLOAK_KEY_OLD", prev_old_env),
+        else: System.delete_env("ARBITER_CLOAK_KEY_OLD")
+
+      if prev_gen_env,
+        do: System.put_env("ARBITER_CLOAK_KEY_GENERATION", prev_gen_env),
+        else: System.delete_env("ARBITER_CLOAK_KEY_GENERATION")
+    end)
+
+    %{old_key: old_key, old_tag: old_tag, new_tag: new_tag}
   end
 
   defp save_vault_config(config) do
@@ -40,10 +67,10 @@ defmodule Arbiter.Vault.RotationTest do
     end)
   end
 
-  defp encrypt_under_old_cipher(old_key, term) do
+  defp encrypt_under_old_cipher(old_key, old_tag, term) do
     {:ok, ciphertext} =
       Cloak.Ciphers.AES.GCM.encrypt(:erlang.term_to_binary(term),
-        tag: @old_tag,
+        tag: old_tag,
         key: old_key,
         iv_length: 12
       )
@@ -80,33 +107,40 @@ defmodule Arbiter.Vault.RotationTest do
   end
 
   describe "sweep!/0" do
-    test "re-encrypts a workspace row written under the retired cipher", %{old_key: old_key} do
+    test "re-encrypts a workspace row written under the retired cipher", %{
+      old_key: old_key,
+      old_tag: old_tag,
+      new_tag: new_tag
+    } do
       {:ok, ws} = Ash.create(Workspace, %{name: "rot-ws-#{System.unique_integer([:positive])}"})
 
-      old_ciphertext = encrypt_under_old_cipher(old_key, %{"tracker_token" => "sct_rw_old"})
+      old_ciphertext =
+        encrypt_under_old_cipher(old_key, old_tag, %{"tracker_token" => "sct_rw_old"})
+
       write_raw_column!("workspaces", "encrypted_secrets", ws.id, old_ciphertext)
-      assert tag_of(read_raw_column!("workspaces", "encrypted_secrets", ws.id)) == @old_tag
+      assert tag_of(read_raw_column!("workspaces", "encrypted_secrets", ws.id)) == old_tag
 
       reports = Rotation.sweep!()
       report = find_report(reports, "workspaces", "encrypted_secrets")
       assert report.rotated >= 1
 
       raw = read_raw_column!("workspaces", "encrypted_secrets", ws.id)
-      assert tag_of(raw) == Vault.current_tag()
+      assert tag_of(raw) == new_tag
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert Workspace.secrets_map(reloaded) == %{"tracker_token" => "sct_rw_old"}
     end
 
-    test "leaves an already-current row's ciphertext untouched (safe to re-run)" do
+    test "leaves an already-current row's ciphertext untouched (safe to re-run)", %{
+      new_tag: new_tag
+    } do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "rot-ws-current-#{System.unique_integer([:positive])}",
           secrets: %{"a" => "b"}
         })
 
-      assert tag_of(read_raw_column!("workspaces", "encrypted_secrets", ws.id)) ==
-               Vault.current_tag()
+      assert tag_of(read_raw_column!("workspaces", "encrypted_secrets", ws.id)) == new_tag
 
       report =
         Rotation.sweep!()
@@ -150,11 +184,14 @@ defmodule Arbiter.Vault.RotationTest do
   end
 
   describe "verify/0" do
-    test "reports a nonzero retired count until the row is swept", %{old_key: old_key} do
+    test "reports a nonzero retired count until the row is swept", %{
+      old_key: old_key,
+      old_tag: old_tag
+    } do
       {:ok, ws} =
         Ash.create(Workspace, %{name: "rot-verify-#{System.unique_integer([:positive])}"})
 
-      old_ciphertext = encrypt_under_old_cipher(old_key, %{"k" => "v"})
+      old_ciphertext = encrypt_under_old_cipher(old_key, old_tag, %{"k" => "v"})
       write_raw_column!("workspaces", "encrypted_secrets", ws.id, old_ciphertext)
 
       before = Rotation.verify() |> find_report("workspaces", "encrypted_secrets")
