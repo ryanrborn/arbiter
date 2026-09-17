@@ -45,20 +45,7 @@ defmodule ArbiterCli.Cmd.List do
       {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
       mode = if opts[:json], do: :json, else: :text
 
-      if opts[:labels] && mode == :text do
-        IO.puts(
-          :stderr,
-          "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
-        )
-      end
-
-      if opts[:assignee] && mode == :text do
-        IO.puts(
-          :stderr,
-          "arb: warning: --assignee is deprecated and ignored — Arbiter is a local " <>
-            "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
-        )
-      end
+      warn_deprecated_flags(opts, mode)
 
       params =
         []
@@ -78,6 +65,25 @@ defmodule ArbiterCli.Cmd.List do
         {:error, err} ->
           Output.die(err)
       end
+    end
+  end
+
+  defp warn_deprecated_flags(_opts, :json), do: :ok
+
+  defp warn_deprecated_flags(opts, :text) do
+    if opts[:labels] do
+      IO.puts(
+        :stderr,
+        "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
+      )
+    end
+
+    if opts[:assignee] do
+      IO.puts(
+        :stderr,
+        "arb: warning: --assignee is deprecated and ignored — Arbiter is a local " <>
+          "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
+      )
     end
   end
 
