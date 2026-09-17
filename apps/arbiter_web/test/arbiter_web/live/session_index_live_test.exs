@@ -282,13 +282,205 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
   end
 
-  describe "Remote Control gating in the launch form (§8.3)" do
-    test "mode B (the default) leaves the Remote Control checkbox enabled, no reason shown",
+  describe "workspace binding in the launch form (§9.5)" do
+    test "defaults to cross-workspace and lists workspaces to opt into", %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web", prefix: "aw"})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(view, "#launch-session-workspace-id")
+      assert render(view) =~ workspace.name
+
+      view |> form("#launch-session-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == nil
+    end
+
+    test "selecting a workspace binds the launched session to it", %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web2", prefix: "aw2"})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"workspace_id" => workspace.id})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+    end
+
+    test "switching auth mode does not silently discard a workspace pick or can_dispatch",
          %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web3", prefix: "aw3"})
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"workspace_id" => workspace.id, "can_dispatch" => "true"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      # auth_mode is the only field explicitly changed here — the workspace
+      # pick and can_dispatch check must survive this round trip rather than
+      # reverting to their server-rendered defaults (review finding, phase 11
+      # round 1: a form that re-renders `value=""` / no `checked` regardless
+      # of what the operator picked loses those choices the moment any other
+      # field triggers a diff).
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      assert has_element?(
+               view,
+               ~s(#launch-session-workspace-id option[value="#{workspace.id}"][selected])
+             )
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+      assert session.can_dispatch == true
+    end
+
+    test "a workspace id that does not exist falls back to cross-workspace rather than binding",
+         %{conn: conn} do
+      # The `<select>` only ever offers real ids, but nothing stops a crafted
+      # submit from sending one that doesn't — `launch_workspace_id/2` must
+      # refuse it rather than binding the session to a workspace that isn't
+      # there (review finding, phase 11 round 4).
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      # `form/3` refuses to build a submit with a `<select>` value outside
+      # its own `<option>` list, so this goes straight at the event — the
+      # same way a hand-crafted request would reach `handle_event/3`.
+      render_submit(view, "launch", %{"workspace_id" => "not-a-real-workspace-id"})
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == nil
+    end
+  end
+
+  describe "can_dispatch in the launch form (§10.1)" do
+    test "defaults off", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      refute has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      view |> form("#launch-session-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.can_dispatch == false
+    end
+
+    test "checking the box turns it on explicitly", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"can_dispatch" => "true"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.can_dispatch == true
+    end
+
+    test "a second launch from the same view does not inherit the prior can_dispatch choice",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      # `render_change` first, so `can_dispatch: true` is actually latched
+      # onto the server assign before the launch that must clear it —
+      # `render_submit` alone never fires `phx-change`, so a test that skips
+      # this step passes whether or not the reset fix exists (review
+      # finding, phase 11 round 3).
+      view
+      |> form("#launch-session-form", %{"name" => "first", "can_dispatch" => "true"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      view
+      |> form("#launch-session-form", %{"name" => "first", "can_dispatch" => "true"})
+      |> render_submit()
+
+      # The form re-renders after a successful launch; a fresh submit with
+      # only a name must not silently carry the prior can_dispatch: true
+      # forward (review finding, phase 11 round 2).
+      refute has_element?(view, "#launch-session-can-dispatch[checked]")
+
+      view
+      |> form("#launch-session-form", %{"name" => "second"})
+      |> render_submit()
+
+      assert [%{name: "second", can_dispatch: false}, %{name: "first", can_dispatch: true}] =
+               Sessions.list()
+    end
+
+    test "a second launch does not inherit the prior session name either", %{conn: conn} do
+      # Unlike the dock's launch panel, this page's form is never removed
+      # from the DOM after a launch — so if the name input isn't reset
+      # server-side, the browser's uncontrolled value survives and a second
+      # submit with no `name` param would silently reuse the first session's
+      # name (review finding, phase 11 round 4).
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"name" => "first"})
+      |> render_change()
+
+      view
+      |> form("#launch-session-form", %{"name" => "first"})
+      |> render_submit()
+
+      view
+      |> form("#launch-session-form", %{})
+      |> render_submit()
+
+      assert [%{name: nil}, %{name: "first"}] = Sessions.list()
+    end
+
+    test "switching to mode A un-checks a previously-checked Remote Control box",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"remote_control" => "true"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-remote-control[checked]")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      refute has_element?(view, "#launch-session-remote-control[checked]")
+    end
+  end
+
+  describe "Remote Control gating in the launch form (§8.3)" do
+    test "mode B (the default) leaves the Remote Control checkbox enabled and checked, no reason shown",
+         %{conn: conn} do
+      # §9.5's table: "on when mode B" — a fresh launch panel must arrive
+      # checked, not merely enabled (review finding, phase 11 round 4: this
+      # shipped off by default through round 3).
       {:ok, view, _html} = live(conn, ~p"/sessions")
 
       refute has_element?(view, "#launch-session-remote-control[disabled]")
       refute has_element?(view, "#launch-session-remote-control-reason")
+      assert has_element?(view, "#launch-session-remote-control[checked]")
+
+      view |> form("#launch-session-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.remote_control == true
     end
 
     test "selecting mode A disables the checkbox and shows the reason", %{conn: conn} do
@@ -318,6 +510,28 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       |> render_change()
 
       refute has_element?(view, "#launch-session-remote-control[disabled]")
+    end
+
+    test "switching back to mode B re-checks the box, even after it was un-latched by mode A",
+         %{conn: conn} do
+      # The checkbox is disabled (and so sends nothing) under mode A, so
+      # nothing in the mode-A params can tell "explicitly unchecked" apart
+      # from "never touched here". Coming back to mode B must re-arrive
+      # checked per §9.5, not carry the disabled box's blank state forward
+      # (review finding, phase 11 round 4).
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      refute has_element?(view, "#launch-session-remote-control[checked]")
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
+
+      assert has_element?(view, "#launch-session-remote-control[checked]")
     end
 
     test "launching under mode B with the box checked records remote_control: true",

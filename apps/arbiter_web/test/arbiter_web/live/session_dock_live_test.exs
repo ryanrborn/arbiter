@@ -270,6 +270,173 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert length(Regex.scan(~r/id="session-dock-window-/, render(dock))) == 8
     end
 
+    test "the roster's launch panel offers the same workspace binding option as the index (§9.5)",
+         %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock", prefix: "ad"})
+
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(dock, "#session-dock-launch-workspace-id")
+      assert render(dock) =~ workspace.name
+
+      dock
+      |> form("#session-dock-launch-form", %{"workspace_id" => workspace.id})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+    end
+
+    test "switching auth mode in the dock's panel does not discard a workspace pick or can_dispatch",
+         %{conn: conn} do
+      {:ok, workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock2", prefix: "ad2"})
+
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{
+        "workspace_id" => workspace.id,
+        "can_dispatch" => "true"
+      })
+      |> render_change()
+
+      dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      assert has_element?(dock, "#session-dock-launch-can-dispatch[checked]")
+
+      dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.workspace_id == workspace.id
+      assert session.can_dispatch == true
+    end
+
+    test "reopening the launch panel after a launch does not inherit the prior can_dispatch choice",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      # `render_change` first, so `can_dispatch: true` is actually latched
+      # onto the server assign before the launch that must clear it —
+      # `render_submit` alone never fires `phx-change`, so a test that skips
+      # this step passes whether or not the reset fix exists (review
+      # finding, phase 11 round 3).
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "first", "can_dispatch" => "true"})
+      |> render_change()
+
+      assert has_element?(dock, "#session-dock-launch-can-dispatch[checked]")
+
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "first", "can_dispatch" => "true"})
+      |> render_submit()
+
+      # `launch_open?` goes false on success, so the panel is removed from
+      # the DOM (`:if={@launch_open?}`) — reopening it must rebuild it clean,
+      # not with the prior can_dispatch echoed back (review finding, phase 11
+      # round 2).
+      render_click(element(dock, "#session-dock-new-session"))
+      refute has_element?(dock, "#session-dock-launch-can-dispatch[checked]")
+
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "second"})
+      |> render_submit()
+
+      assert [%{name: "second", can_dispatch: false}, %{name: "first", can_dispatch: true}] =
+               Sessions.list()
+    end
+
+    test "reopening the launch panel after a launch does not inherit the prior session name",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{"name" => "first"})
+      |> render_submit()
+
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{})
+      |> render_submit()
+
+      assert [%{name: nil}, %{name: "first"}] = Sessions.list()
+    end
+
+    test "the dock's panel also arrives with Remote Control checked under mode B (§9.5)",
+         %{conn: conn} do
+      # Same default as the index's copy of this form (review finding,
+      # phase 11 round 4) — the dock shares `assign_launch_params/2` and
+      # `reset_launch_params/1`, but its own mount had its own hardcoded
+      # `false` to fix too.
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(dock, "#session-dock-launch-remote-control[checked]")
+
+      dock |> form("#session-dock-launch-form") |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.remote_control == true
+    end
+
+    test "switching to mode A in the dock un-checks a previously-checked Remote Control box",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{"remote_control" => "true"})
+      |> render_change()
+
+      assert has_element?(dock, "#session-dock-launch-remote-control[checked]")
+
+      dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "oauth_token"})
+      |> render_change()
+
+      refute has_element?(dock, "#session-dock-launch-remote-control[checked]")
+    end
+
+    test "reopening the launch panel after a launch defaults Remote Control back to checked",
+         %{conn: conn} do
+      # The panel is removed from the DOM on a successful launch
+      # (`:if={@launch_open?}`) and rebuilt on reopen — it must rebuild from
+      # the §9.5 default, not a stale `false` left by the reset (review
+      # finding, phase 11 round 4).
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      dock |> form("#session-dock-launch-form") |> render_submit()
+
+      render_click(element(dock, "#session-dock-new-session"))
+      assert has_element?(dock, "#session-dock-launch-remote-control[checked]")
+    end
+
+    test "reopening the launch panel picks up a workspace created since the dock mounted",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+      refute render(dock) =~ "acme-dock3"
+
+      {:ok, _workspace} =
+        Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock3", prefix: "ad3"})
+
+      render_click(element(dock, "#session-dock-new-session"))
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert render(dock) =~ "acme-dock3"
+    end
+
     test "a failed launch is shown inline and opens no window", %{conn: conn} do
       put_env(:sessions_runner, Arbiter.Test.FailingSessionRunner)
       {_view, dock} = dock(conn)
