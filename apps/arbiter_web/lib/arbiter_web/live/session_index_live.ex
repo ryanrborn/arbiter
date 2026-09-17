@@ -220,7 +220,16 @@ defmodule ArbiterWeb.SessionIndexLive do
   # from phase 11 (see moduledoc). `:name` is the other option this page's
   # operator can already set (bd-o2vtsz) — an empty or missing field launches
   # with no name, same as before this option existed.
-  defp launch_defaults(params) do
+  #
+  # Public, and `launch_auth_mode_param/1` and `describe/1` below alongside
+  # it, so `ArbiterWeb.SessionDockLive`'s own `launch`/`validate_launch`
+  # handlers can call the exact same params-to-opts logic (see `launch_form/1`
+  # above) rather than a second copy that could drift from this one — the
+  # gating in particular (`remote_control` clamped to mode B here) is a rule,
+  # not styling, and a fork of it is the one thing bd-cdut29 was asked not to
+  # build.
+  @doc false
+  def launch_defaults(params) do
     auth_mode = launch_auth_mode_param(params)
 
     [
@@ -236,8 +245,9 @@ defmodule ArbiterWeb.SessionIndexLive do
     ]
   end
 
-  defp launch_auth_mode_param(%{"auth_mode" => "oauth_token"}), do: "oauth_token"
-  defp launch_auth_mode_param(_params), do: "seeded_credentials"
+  @doc false
+  def launch_auth_mode_param(%{"auth_mode" => "oauth_token"}), do: "oauth_token"
+  def launch_auth_mode_param(_params), do: "seeded_credentials"
 
   defp launch_auth_mode("oauth_token"), do: :oauth_token
   defp launch_auth_mode(_mode), do: :seeded_credentials
@@ -254,9 +264,10 @@ defmodule ArbiterWeb.SessionIndexLive do
 
   defp launch_name(_params), do: nil
 
-  defp describe({:provisioning_failed, reason}), do: "provisioning failed (#{inspect(reason)})"
-  defp describe({:launch_failed, status, _out}), do: "the launch command exited #{status}"
-  defp describe(reason), do: inspect(reason)
+  @doc false
+  def describe({:provisioning_failed, reason}), do: "provisioning failed (#{inspect(reason)})"
+  def describe({:launch_failed, status, _out}), do: "the launch command exited #{status}"
+  def describe(reason), do: inspect(reason)
 
   @impl true
   def render(assigns) do
@@ -278,62 +289,7 @@ defmodule ArbiterWeb.SessionIndexLive do
           subtitle="Coordinator sessions Arbiter hosts. They live in their own systemd scope, so they survive an arbiter restart."
         >
           <:actions>
-            <form
-              id="launch-session-form"
-              phx-submit="launch"
-              phx-change="validate_launch"
-              class="flex items-center gap-2"
-            >
-              <Forms.input
-                type="text"
-                name="name"
-                id="launch-session-name"
-                placeholder="Session name (optional)"
-                mono={false}
-                size="sm"
-              />
-              <Forms.select
-                name="auth_mode"
-                id="launch-session-auth-mode"
-                size="sm"
-                value={@launch_auth_mode}
-                options={[
-                  {"Mode B — seeded credentials", "seeded_credentials"},
-                  {"Mode A — workspace token", "oauth_token"}
-                ]}
-              />
-              <span class="flex items-center gap-1.5">
-                <Forms.checkbox
-                  name="remote_control"
-                  id="launch-session-remote-control"
-                  value="true"
-                  disabled={@launch_auth_mode != "seeded_credentials"}
-                  label="Remote Control"
-                />
-                <span
-                  :if={@launch_auth_mode != "seeded_credentials"}
-                  id="launch-session-remote-control-reason"
-                  class="text-[11px] text-[var(--text-label)]"
-                >
-                  needs mode B — a workspace token (mode A) never bridges (§8.3)
-                </span>
-              </span>
-              <%!-- Launching is slow (a systemd scope, a `claude` process) and
-                    since phase 3 it no longer redirects, so the button stays
-                    on screen and under the cursor throughout — without this a
-                    second click during the launch starts a second real
-                    session, whose dock window steals the expanded slot from
-                    the first (bd-a292yj review, finding 1). --%>
-              <Core.button
-                id="launch-session"
-                type="submit"
-                variant="primary"
-                phx-disable-with="Launching…"
-              >
-                <:icon><.icon name="hero-plus" class="size-4" /></:icon>
-                Launch session
-              </Core.button>
-            </form>
+            <.launch_form prefix="launch-session" launch_auth_mode={@launch_auth_mode} />
           </:actions>
         </Domain.index_header>
 
@@ -430,6 +386,100 @@ defmodule ArbiterWeb.SessionIndexLive do
 
       <.kill_modal session={@kill_candidate} />
     </Layouts.app>
+    """
+  end
+
+  @doc """
+  The launch options form, shared with `ArbiterWeb.SessionDockLive`'s roster
+  (bd-cdut29: launching without leaving whatever page the operator is on).
+
+  Its markup does not change between surfaces, but each embeds it in its own
+  way — this page inline in the index header, the dock as a small panel over
+  its roster — so this stays a function component rather than a
+  `Phoenix.LiveComponent`: no shared process, and `phx-submit="launch"` /
+  `phx-change="validate_launch"` reach whichever LiveView happens to have
+  rendered it. Both views implement `validate_launch` (to track
+  `launch_auth_mode` for the disabled-checkbox gating, §8.3) and `launch`
+  (calling `Sessions.launch(launch_defaults(params))`, and `describe/1` for
+  the failure message) themselves — see `launch_defaults/1` and `describe/1`
+  below, both public for the dock to call.
+
+  `prefix` keys every element's DOM id so two instances (this page's and the
+  dock's, which renders on `/sessions` too) can never collide. `error` is
+  `nil` here: this page reports a failed launch via flash. The dock cannot —
+  a nested LiveView's flash never reaches the host page (see
+  `SessionDockLive`'s `:error_message` assign) — so it renders its own
+  failure message inline through this attr instead.
+  """
+  attr :prefix, :string, required: true
+  attr :launch_auth_mode, :string, required: true
+  attr :error, :string, default: nil, doc: "an inline launch failure to show, or nil"
+
+  def launch_form(assigns) do
+    ~H"""
+    <form
+      id={"#{@prefix}-form"}
+      phx-submit="launch"
+      phx-change="validate_launch"
+      class="flex flex-wrap items-center gap-2"
+    >
+      <Forms.input
+        type="text"
+        name="name"
+        id={"#{@prefix}-name"}
+        placeholder="Session name (optional)"
+        mono={false}
+        size="sm"
+      />
+      <Forms.select
+        name="auth_mode"
+        id={"#{@prefix}-auth-mode"}
+        size="sm"
+        value={@launch_auth_mode}
+        options={[
+          {"Mode B — seeded credentials", "seeded_credentials"},
+          {"Mode A — workspace token", "oauth_token"}
+        ]}
+      />
+      <span class="flex items-center gap-1.5">
+        <Forms.checkbox
+          name="remote_control"
+          id={"#{@prefix}-remote-control"}
+          value="true"
+          disabled={@launch_auth_mode != "seeded_credentials"}
+          label="Remote Control"
+        />
+        <span
+          :if={@launch_auth_mode != "seeded_credentials"}
+          id={"#{@prefix}-remote-control-reason"}
+          class="text-[11px] text-[var(--text-label)]"
+        >
+          needs mode B — a workspace token (mode A) never bridges (§8.3)
+        </span>
+      </span>
+      <%!-- Launching is slow (a systemd scope, a `claude` process) and does
+            not redirect, so the button stays on screen and under the cursor
+            throughout — without this a second click during the launch
+            starts a second real session, whose window steals the expanded
+            slot from the first (bd-a292yj review, finding 1). --%>
+      <Core.button
+        id={@prefix}
+        type="submit"
+        variant="primary"
+        phx-disable-with="Launching…"
+      >
+        <:icon><.icon name="hero-plus" class="size-4" /></:icon>
+        Launch session
+      </Core.button>
+      <p
+        :if={@error}
+        id={"#{@prefix}-error"}
+        role="alert"
+        class="w-full text-[11px] text-[var(--arb-fail-text)]"
+      >
+        {@error}
+      </p>
+    </form>
     """
   end
 
