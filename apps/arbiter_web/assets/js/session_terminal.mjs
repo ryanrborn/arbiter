@@ -51,7 +51,9 @@ const RESET = "[0m"
  * Mount a terminal into `el` and attach it to `sessionId`.
  *
  * Callbacks, all optional: `onStatus(state)` with "connecting" | "live" |
- * "reconnecting" | "detached" | "ended", `onExit(payload)`, `onMeta(meta)`,
+ * "reconnecting" | "detached" | "ended", `onExit(payload)`,
+ * `onMeta(meta, {adopted, own})` — the pane's geometry, and whether it is this
+ * client's own or another client's it has adopted (bd-4tjw34) —
  * `onUsage(payload)` (§7.5, phase 7 — the live cost HUD feed), `onError(err)`.
  *
  * `socket` and `schedule` are test seams: `apps/arbiter_web/test/js/terminal_probe.mjs`
