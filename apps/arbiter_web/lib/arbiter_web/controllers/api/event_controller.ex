@@ -4,7 +4,12 @@ defmodule ArbiterWeb.Api.EventController do
 
   Route: GET /events?token=<coord_token>&subscribe=<comma-separated topics>&since=<cursor|timestamp>
 
-  Auth: coordinator-tier MCP token in the `token=` query parameter.
+  Auth: a coordinator-tier MCP token, either as `Authorization: Bearer <token>`
+  or in the `token=` query parameter (checked in that order). The header form
+  exists for a session's own event monitor (bd-aqafdr): a session's token
+  lives only in a mode-0600 `curl -K` config, never in argv, so it is sent as
+  a header rather than a query string. `token=` stays supported unchanged for
+  the `arb init` runbook's `curl -N` loop, which has no header to send.
 
   Topics (default: inbox,review_gate,worker_failed):
     * inbox          — a message arrived in the coordinator's mailbox
@@ -48,7 +53,7 @@ defmodule ArbiterWeb.Api.EventController do
   alias Arbiter.MCP.Scope
 
   @default_topics ~w(inbox review_gate worker_failed)
-  @keepalive_ms 30_000
+  @default_keepalive_ms 30_000
 
   @doc """
   Subscribe and stream events. Returns 401 for missing/invalid tokens,
@@ -56,7 +61,7 @@ defmodule ArbiterWeb.Api.EventController do
   body for valid requests.
   """
   def stream(conn, params) do
-    with {:ok, scope} <- authenticate(params),
+    with {:ok, scope} <- authenticate(conn, params),
          {:ok, topics} <- parse_topics(params),
          {:ok, since} <- parse_since(params) do
       # Subscribe BEFORE querying replay, so any event that lands in the gap
@@ -74,7 +79,7 @@ defmodule ArbiterWeb.Api.EventController do
       topic_set = MapSet.new(topics)
       {conn, last_cursor} = replay(conn, scope.workspace_id, topic_set, since)
 
-      event_loop(conn, topic_set, last_cursor)
+      event_loop(conn, topic_set, last_cursor, scope)
     else
       {:error, :unauthorized} ->
         conn
@@ -95,15 +100,33 @@ defmodule ArbiterWeb.Api.EventController do
 
   # ---- auth ---------------------------------------------------------------
 
-  defp authenticate(%{"token" => token}) when is_binary(token) and token != "" do
-    case Scope.from_token(token) do
-      {:ok, %Scope{tier: :coordinator} = scope} -> {:ok, scope}
-      {:ok, _worker_tier} -> {:error, :unauthorized}
-      {:error, _} -> {:error, :unauthorized}
+  # Header first (a session's own token lives only in a mode-0600 curl
+  # config, never in argv — Arbiter.Sessions.Provisioning's monitor.sh sends
+  # it as `Authorization: Bearer`), falling back to `token=` for the `arb
+  # init` runbook's `curl -N` loop, which has no header to send.
+  defp authenticate(conn, params) do
+    case bearer_token(conn) || query_token(params) do
+      token when is_binary(token) and token != "" ->
+        case Scope.from_token(token) do
+          {:ok, %Scope{tier: :coordinator} = scope} -> {:ok, scope}
+          {:ok, _worker_tier} -> {:error, :unauthorized}
+          {:error, _} -> {:error, :unauthorized}
+        end
+
+      _ ->
+        {:error, :unauthorized}
     end
   end
 
-  defp authenticate(_), do: {:error, :unauthorized}
+  defp bearer_token(conn) do
+    case Plug.Conn.get_req_header(conn, "authorization") do
+      ["Bearer " <> token] -> token
+      _ -> nil
+    end
+  end
+
+  defp query_token(%{"token" => token}) when is_binary(token) and token != "", do: token
+  defp query_token(_), do: nil
 
   # ---- topic parsing ------------------------------------------------------
 
@@ -241,26 +264,45 @@ defmodule ArbiterWeb.Api.EventController do
   # wrongly treated as already-delivered and silently dropped. An event with
   # no cursor (persist failed) is always sent — it was never a replay
   # candidate to begin with.
-  defp event_loop(conn, topics, watermark) do
+  defp event_loop(conn, topics, watermark, scope) do
     receive do
       {:event, event} ->
         if deliver?(event, topics, watermark) do
           json_line = Jason.encode!(stringify_keys(event)) <> "\n"
 
           case Plug.Conn.chunk(conn, json_line) do
-            {:ok, conn} -> event_loop(conn, topics, watermark)
+            {:ok, conn} -> event_loop(conn, topics, watermark, scope)
             {:error, _} -> conn
           end
         else
-          event_loop(conn, topics, watermark)
+          event_loop(conn, topics, watermark, scope)
         end
     after
-      @keepalive_ms ->
-        case Plug.Conn.chunk(conn, "\n") do
-          {:ok, conn} -> event_loop(conn, topics, watermark)
-          {:error, _} -> conn
+      keepalive_ms() ->
+        # Session tokens are revocable (Arbiter.MCP.Scope) but a long-lived
+        # chunked connection is only checked once, at authenticate/2 —
+        # re-check on every keepalive tick so ending or revoking a session
+        # closes its already-open stream within one tick, not just at the
+        # next reconnect. Plain coordinator/worker tokens carry no
+        # session_id and are never revocable, so this is a no-op for them.
+        if revoked?(scope) do
+          conn
+        else
+          case Plug.Conn.chunk(conn, "\n") do
+            {:ok, conn} -> event_loop(conn, topics, watermark, scope)
+            {:error, _} -> conn
+          end
         end
     end
+  end
+
+  defp revoked?(%Scope{session_id: nil}), do: false
+  defp revoked?(%Scope{session_id: id}), do: Arbiter.Sessions.mcp_token_revoked?(id)
+
+  defp keepalive_ms do
+    :arbiter_web
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:keepalive_ms, @default_keepalive_ms)
   end
 
   @doc false

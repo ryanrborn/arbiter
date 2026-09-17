@@ -86,6 +86,24 @@ defmodule Arbiter.Sessions.Layout do
   @spec mcp_token_path(String.t()) :: String.t()
   def mcp_token_path(id), do: Path.join(session_dir(id), "mcp_token")
 
+  @doc """
+  The mode-`0600` curl config carrying this session's own bearer token as an
+  `Authorization` header (bd-aqafdr). `curl -K` reads the header from here so
+  `monitor.sh` never puts the token on any process's argv — same discipline
+  as `auth_env_path/1`.
+  """
+  @spec monitor_curlrc_path(String.t()) :: String.t()
+  def monitor_curlrc_path(id), do: Path.join(session_dir(id), "monitor.curlrc")
+
+  @doc """
+  The session's own event-monitor script (bd-aqafdr): a `curl -K` loop over
+  `/events` that never calls `arb mcp token mint`. Armed via the
+  `SessionStart` hook (`Arbiter.Agents.Claude.ConfigDir.Interactive`), run by
+  the agent through the Monitor tool — never background Bash.
+  """
+  @spec monitor_script_path(String.t()) :: String.t()
+  def monitor_script_path(id), do: Path.join(session_dir(id), "monitor.sh")
+
   @doc "Memory mount root (§9.4)."
   @spec memory_dir(String.t()) :: String.t()
   def memory_dir(id), do: Path.join(session_dir(id), "memory")
@@ -162,7 +180,9 @@ defmodule Arbiter.Sessions.Layout do
       transcript: transcript_dir(id),
       auth_env: auth_env_path(id),
       launch_script: launch_script_path(id),
-      watchdog_script: watchdog_script_path(id)
+      watchdog_script: watchdog_script_path(id),
+      monitor_curlrc: monitor_curlrc_path(id),
+      monitor_script: monitor_script_path(id)
     }
   end
 

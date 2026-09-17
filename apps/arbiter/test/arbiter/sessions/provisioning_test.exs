@@ -351,6 +351,58 @@ defmodule Arbiter.Sessions.ProvisioningTest do
     end
   end
 
+  describe "the session's own event monitor (bd-aqafdr)" do
+    test "writes a mode-0600 curl config carrying the session's bearer token" do
+      session = launch!()
+      curlrc = Layout.monitor_curlrc_path(session.id)
+
+      contents = File.read!(curlrc)
+      assert contents =~ ~r/^header = "Authorization: Bearer /m
+
+      assert {:ok, %{mode: mode}} = File.stat(curlrc)
+      assert Bitwise.band(mode, 0o077) == 0
+
+      [_, token] = Regex.run(~r/Authorization: Bearer ([^\s"]+)/, contents)
+      assert {:ok, scope} = Arbiter.MCP.Scope.from_token(token)
+      assert scope.session_id == session.id
+    end
+
+    test "writes a mode-0700 monitor.sh that never calls arb mcp token mint and never puts the token in its own text" do
+      session = launch!()
+      script_path = Layout.monitor_script_path(session.id)
+
+      script = File.read!(script_path)
+      refute script =~ ~r/^[^#]*arb mcp token mint/m
+      refute script =~ ~r/^\s*arb\s/m
+
+      token =
+        session.id
+        |> Layout.mcp_token_path()
+        |> File.read!()
+        |> String.trim()
+
+      refute script =~ token
+
+      assert {:ok, %{mode: mode}} = File.stat(script_path)
+      assert Bitwise.band(mode, 0o077) == 0
+    end
+
+    test "monitor.sh references the curl config and the /events route, not a bare token" do
+      session = launch!()
+      script = session.id |> Layout.monitor_script_path() |> File.read!()
+
+      assert script =~ Layout.monitor_curlrc_path(session.id)
+      assert script =~ "/events"
+    end
+
+    test "no monitor files when :mcp is disabled" do
+      session = launch!(mcp: false)
+
+      refute File.exists?(Layout.monitor_curlrc_path(session.id))
+      refute File.exists?(Layout.monitor_script_path(session.id))
+    end
+  end
+
   describe "auth modes (§8.1–§8.2, AC 4)" do
     test "mode B is the default, is recorded, and seeds the operator's credentials", %{
       operator: operator

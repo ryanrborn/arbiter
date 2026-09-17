@@ -24,6 +24,7 @@ defmodule Arbiter.MCP do
         enabled: true,              # master switch (default true)
         inject_config: true,        # write a per-spawn .mcp.json into the worktree
         url: "http://127.0.0.1:4848/mcp",  # overrides the derived endpoint URL
+        events_url: "http://127.0.0.1:4848/events",  # overrides the derived /events URL
         secret: "…",                # overrides the endpoint secret_key_base for signing
         max_age: 86_400,            # coordinator token TTL in seconds (default 24h)
         worker_max_age: 14_400,     # worker token TTL in seconds (default 4h)
@@ -146,6 +147,17 @@ defmodule Arbiter.MCP do
   def server_url, do: config(:url) || default_server_url()
 
   @doc """
+  The `/events` endpoint URL for this installation — same host/port as
+  `server_url/0`, different route (`ArbiterWeb.Api.EventController`, not the
+  `/mcp` JSON-RPC transport). `Arbiter.Sessions.Provisioning` writes this into
+  a session's own event-monitor script rather than deriving it from
+  `server_url/0` by stripping a suffix, since an explicit `:url` override
+  there need not end in `/mcp`.
+  """
+  @spec events_url() :: String.t()
+  def events_url, do: config(:events_url) || default_events_url()
+
+  @doc """
   Sign `claims` (a map) into an opaque, expiring scope token. Used by
   `Arbiter.MCP.Scope` mint helpers; callers should prefer those.
   """
@@ -195,6 +207,8 @@ defmodule Arbiter.MCP do
   end
 
   defp default_server_url, do: "http://127.0.0.1:#{endpoint_port()}/mcp"
+
+  defp default_events_url, do: "http://127.0.0.1:#{endpoint_port()}/events"
 
   defp endpoint_port do
     :arbiter_web
