@@ -518,6 +518,33 @@ defmodule ArbiterWeb.SessionDockLive do
     {:noreply, socket |> freeze_pane(session_id) |> load_sessions()}
   end
 
+  # Another view — the issue detail page's Refine button, a board card's —
+  # asking for a session to be put on screen here (`Sessions.request_open/1`,
+  # bd-1lszsc). This is the only way into the dock from a process that is not
+  # the dock: it is a sticky nested LiveView, so the page that rendered it
+  # holds no handle on it.
+  #
+  # Treated exactly like a click on that session's roster row, which is what it
+  # is: re-read (the session may have been launched a millisecond ago and have
+  # no lifecycle broadcast of its own), validate the id against what exists,
+  # then open and expand. An id for a session that is gone is dropped in
+  # silence — the requester reports its own failures, and a dock that popped an
+  # error for a message it merely overheard would be wrong on every other tab.
+  def handle_info({:session_open_requested, session_id}, socket) do
+    socket = load_sessions(socket)
+
+    if Enum.any?(socket.assigns.sessions, &(&1.id == session_id)) do
+      {:noreply,
+       socket
+       |> assign(:open_ids, open_window_ids(socket.assigns.open_ids, session_id))
+       |> expand_window(session_id)
+       |> assign(:roster_open?, false)
+       |> persist()}
+    else
+      {:noreply, socket}
+    end
+  end
+
   # Nothing mounted a `.SessionTerminal` in time. The likeliest cause has no
   # other symptom: a tab still running the asset bundle it loaded before the
   # last deploy has no such hook at all, so the strip sits at "connecting…"

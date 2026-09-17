@@ -149,6 +149,7 @@ defmodule Arbiter.Sessions.SessionTest do
                {"ended_at", false, false},
                {"id", true, true},
                {"inserted_at", true, false},
+               {"issue_id", false, false},
                {"keep_alive", true, false},
                {"last_client_at", false, false},
                {"last_turn_at", false, false},
@@ -176,6 +177,22 @@ defmodule Arbiter.Sessions.SessionTest do
       assert {"sessions_provider_session_id_index", false} in indexes
       assert {"sessions_status_index", false} in indexes
       assert {"sessions_scope_unit_index", true} in indexes
+      # bd-1lszsc: the refine binding — the lookup index, and the partial
+      # unique one that holds "one live refine session per issue".
+      assert {"sessions_issue_id_index", false} in indexes
+      assert {"sessions_live_issue_binding_index", true} in indexes
+    end
+
+    test "the issue binding is unique only among live rows (bd-1lszsc)" do
+      issue_id = "bd-#{System.unique_integer([:positive])}"
+      live = create!(%{issue_id: issue_id})
+
+      assert {:error, %Ash.Error.Invalid{}} = Ash.create(Session, %{issue_id: issue_id})
+
+      # Ending it takes the row out of the partial index, so the issue can be
+      # refined again — the whole history stays on the table.
+      {:ok, _ended} = Ash.update(live, %{end_reason: "done"}, action: :mark_ended)
+      assert {:ok, %Session{}} = Ash.create(Session, %{issue_id: issue_id})
     end
 
     test "one row per scope is enforced by the database, not just by the id" do

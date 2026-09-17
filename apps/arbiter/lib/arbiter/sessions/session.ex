@@ -35,6 +35,10 @@ defmodule Arbiter.Sessions.Session do
       session, which is the coordinator's normal shape (decision 6: a
       workspace-agnostic coordinator token). A bound session is one deliberately
       scoped to one workspace.
+    * `issue_id` — the issue a **refine session** is bound to (bd-1lszsc);
+      `nil` for every other session. Set, it changes what token the session
+      gets (`:refine` tier, not `:coordinator`) and is held to one live row
+      per issue by a partial unique index. See the attribute's own docs.
     * `scope_unit` / `tmux_socket` — the OS handles, derived from `id` at create
       time and never accepted from a caller. Stored rather than only computed so
       a row remains self-describing if the naming scheme ever changes under it.
@@ -135,6 +139,15 @@ defmodule Arbiter.Sessions.Session do
       index [:status]
       # The ledger join (`usage_events/1`) and the rollover lookup.
       index [:provider_session_id]
+      # The refine binding (bd-1lszsc): the lookup "is there a live refine
+      # session for this issue", and — partial, on the same column — the rule
+      # that there can only ever be one.
+      index [:issue_id]
+
+      index [:issue_id],
+        unique: true,
+        name: "sessions_live_issue_binding_index",
+        where: "issue_id IS NOT NULL AND status != 'ended'"
     end
   end
 
@@ -147,6 +160,7 @@ defmodule Arbiter.Sessions.Session do
       accept [
         :provider,
         :workspace_id,
+        :issue_id,
         :config_dir,
         :cwd,
         :provider_session_id,
@@ -356,6 +370,25 @@ defmodule Arbiter.Sessions.Session do
       public? true
       constraints max_length: 255, trim?: true
       description "nil = cross-workspace (the coordinator's normal shape)."
+    end
+
+    attribute :issue_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description """
+      The issue this session is bound to — set only for **refine sessions**
+      (bd-1lszsc). `nil` for every other session, which is every session that
+      is not one issue's refinement.
+
+      It is not decoration: `Arbiter.Sessions.Provisioning.mint_token/2` mints
+      a `:refine`-tier token bound to this issue (and the row's workspace)
+      whenever it is set, so a bound row structurally cannot hold a
+      coordinator token. A partial unique index
+      (`sessions_live_issue_binding_index`, `WHERE status != 'ended'`) holds
+      the "at most one live refine session per issue" rule against a
+      concurrent double-click.
+      """
     end
 
     attribute :scope_unit, :string do
