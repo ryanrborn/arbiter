@@ -133,8 +133,10 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       Gemini.Config.put_active(config)
 
       assert Claude.Config.thinking_argv("high") == ["--effort", "max"]
-      # Gemini has no scoped override and its built-in default is empty.
-      assert Gemini.Config.thinking_argv("high") == []
+      # Gemini has no scoped override, so it keeps its own built-in default
+      # rather than picking up Claude's "max" override (bd-d2yut8: Gemini's
+      # default is now ["--effort", "high"], no longer empty).
+      assert Gemini.Config.thinking_argv("high") == ["--effort", "high"]
     end
   end
 

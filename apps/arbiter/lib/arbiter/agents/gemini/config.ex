@@ -30,27 +30,41 @@ defmodule Arbiter.Agents.Gemini.Config do
           raw: map()
         }
 
-  # Default tier → concrete Gemini model. Overridable per-workspace via
-  # `agent.config["tier_models"]` (string keys). The values are short
-  # model identifiers the agy / gemini CLI accept via `--model`.
+  # Default tier → concrete Gemini model, for the upstream `gemini` CLI.
+  # Overridable per-workspace via `agent.config["tier_models"]` (string keys).
   @default_tier_models %{
     "economy" => "gemini-2.5-flash-lite",
     "standard" => "gemini-2.5-flash",
     "premium" => "gemini-2.5-pro"
   }
 
-  # Default thinking → CLI argv tokens. Gemini's thinking knob varies per
-  # CLI fork (agy vs gemini), so the default leaves the argv empty and
-  # exposes the level via env var (`GEMINI_THINKING_LEVEL`) — workspaces
-  # can override per-level argv with `agent.config["thinking_argv"]` (e.g.
-  # `--thinking-budget 8192`) once they pin a CLI surface.
+  # Default tier → concrete model for the `agy` fork (bd-d2yut8). agy's model
+  # catalogue does not overlap the upstream `gemini` CLI's at all (bd-2fzwlc),
+  # so it gets its own map rather than sharing `@default_tier_models` — ids
+  # are Operator-selected (2026-09-17) and include a `flagship` tier routed to
+  # a Claude/GPT-bucket model. Also overridable via `agent.config["tier_models"]`.
+  @agy_tier_models %{
+    "economy" => "gemini-3.8-flash-low",
+    "standard" => "gemini-3.8-flash-medium",
+    "premium" => "gemini-3.1-pro-high",
+    "flagship" => "claude-opus-4-6-thinking"
+  }
+
+  # Default thinking → CLI argv tokens: agy/gemini accept reasoning effort via
+  # `--effort <level>`. `none` omits the flag entirely so the CLI's own
+  # default applies. Workspaces can override per-level argv with
+  # `agent.config["thinking_argv"]` (e.g. `--thinking-budget 8192`) if a CLI
+  # surface needs something else.
   @default_thinking_argv %{
     "none" => [],
-    "low" => [],
-    "medium" => [],
-    "high" => [],
-    "xhigh" => [],
-    "max" => []
+    "low" => ["--effort", "low"],
+    "medium" => ["--effort", "medium"],
+    "high" => ["--effort", "high"],
+    # #1519: routing emits `xhigh`/`max` at the top of the difficulty scale,
+    # but the effort ladder stops at "high" — clamp rather than silently
+    # dropping the flag (mirrors `thinking_env/1`'s clamp below).
+    "xhigh" => ["--effort", "high"],
+    "max" => ["--effort", "high"]
   }
 
   @doc """
@@ -141,28 +155,32 @@ defmodule Arbiter.Agents.Gemini.Config do
 
   @doc """
   Resolve an abstract `model_tier` (`"economy"` | `"standard"` |
-  `"premium"`) to a concrete Gemini model name. Returns `nil` for an
+  `"premium"` | `"flagship"`) to a concrete model name for the given
+  executable (`:gemini`, the default, or `:agy`). Returns `nil` for an
   unknown / nil tier — the adapter falls back to its CLI default.
 
   Workspace config can override the mapping under
-  `agent.config["tier_models"]`. Missing keys fall back to the built-in
-  default (`#{inspect(@default_tier_models)}`).
+  `agent.config["tier_models"]`, applied regardless of executable. Missing
+  keys fall back to the built-in per-executable default — see
+  `default_tier_models/1`.
   """
-  @spec model_for_tier(String.t() | nil) :: String.t() | nil
-  def model_for_tier(nil), do: nil
-  def model_for_tier(""), do: nil
+  @spec model_for_tier(String.t() | nil, :agy | :gemini) :: String.t() | nil
+  def model_for_tier(tier, executable \\ :gemini)
+  def model_for_tier(nil, _executable), do: nil
+  def model_for_tier("", _executable), do: nil
 
-  def model_for_tier(tier) when is_binary(tier) do
+  def model_for_tier(tier, executable) when is_binary(tier) do
     {:ok, cfg} = resolve()
     overrides = stringy_map(Map.get(cfg.raw, "tier_models"))
+    base = default_tier_models(executable)
 
-    case Map.get(overrides, tier) || Map.get(@default_tier_models, tier) do
+    case Map.get(overrides, tier) || Map.get(base, tier) do
       m when is_binary(m) and m != "" -> m
       _ -> nil
     end
   end
 
-  def model_for_tier(_), do: nil
+  def model_for_tier(_tier, _executable), do: nil
 
   @doc """
   Resolve an abstract `thinking` level to a list of CLI argv tokens to
@@ -214,8 +232,14 @@ defmodule Arbiter.Agents.Gemini.Config do
 
   def thinking_env(_), do: []
 
-  @doc "Built-in default tier → model map (testing / introspection)."
-  def default_tier_models, do: @default_tier_models
+  @doc """
+  Built-in default tier → model map for the given executable
+  (`:gemini`, the default, or `:agy`; testing / introspection).
+  """
+  @spec default_tier_models(:agy | :gemini) :: %{String.t() => String.t()}
+  def default_tier_models(executable \\ :gemini)
+  def default_tier_models(:agy), do: @agy_tier_models
+  def default_tier_models(_gemini), do: @default_tier_models
 
   @doc "Built-in default thinking → argv map (testing / introspection)."
   def default_thinking_argv, do: @default_thinking_argv

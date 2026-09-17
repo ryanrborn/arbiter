@@ -128,24 +128,26 @@ defmodule Arbiter.Agents.Gemini do
   # the gemini-cli), so recording that is accurate even though we pass no
   # `--model` flag in that case.
   #
-  # `agy` is the exception (bd-2fzwlc round 3): its model catalogue does not
-  # overlap the Gemini price table at all (confirmed live — every model this
-  # module knows about, tier-mapped or the `@default_model` fallback, is
-  # rejected by agy v1.1.11 as an unrecognized `--model`), and its stream
-  # events never name which model actually ran. Stamping any of our model ids
-  # on an agy row is a guess the row can't back up, so the ledger records the
-  # model as unknown rather than a name the session provably didn't run.
+  # bd-d2yut8: agy does accept `--model` (bd-2fzwlc's "agy has no overlapping
+  # model catalogue" read only applied to the *upstream-gemini* ids this
+  # module tried first; agy has its own catalogue, now covered by
+  # `Config.default_tier_models(:agy)`). So agy runs the same explicit →
+  # tier → workspace `active_model` chain as the gemini branch, just against
+  # its own tier map — no more forced-`nil` short-circuit. There is still no
+  # known agy-CLI default to fall back to when nothing resolves (unlike
+  # gemini-cli's documented `DEFAULT_GEMINI_MODEL`), so that terminal
+  # fallback stays gemini-only.
   @impl true
   def resolved_model(opts \\ []) do
     case resolve_executable() do
       {:ok, {:agy, _}} ->
-        nil
+        resolve_model(:agy, opts)
+
+      {:ok, {:gemini, _}} ->
+        resolve_model(:gemini, opts) || @default_model
 
       _ ->
-        # resolve_model/1 already chains explicit → tier → workspace
-        # active_model; @default_model is the terminal fallback (the
-        # gemini-cli's own default).
-        resolve_model(opts) || @default_model
+        resolve_model(:gemini, opts) || @default_model
     end
   end
 
@@ -187,21 +189,24 @@ defmodule Arbiter.Agents.Gemini do
   # equivalent) — see security_enforced?/0.
   defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
+      model_flag(:agy, opts) ++
       thinking_flag(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
   defp build_argv(:agy, exec, prompt, opts, _policy) do
     [exec, "-p", prompt] ++
+      model_flag(:agy, opts) ++
       thinking_flag(opts) ++ output_format_flag() ++ print_timeout_flag(opts)
   end
 
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--skip-trust", "-y"] ++
-      model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
+      model_flag(:gemini, opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:gemini, exec, prompt, opts, _policy) do
-    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
+    [exec, "-p", prompt] ++
+      model_flag(:gemini, opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
 
   # Both the upstream `gemini` CLI and the `agy` fork support
@@ -235,14 +240,14 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  defp model_flag(opts) do
-    case resolve_model(opts) do
+  defp model_flag(executable, opts) do
+    case resolve_model(executable, opts) do
       nil -> []
       model when is_binary(model) -> ["--model", model]
     end
   end
 
-  defp resolve_model(opts) do
+  defp resolve_model(executable, opts) do
     case Keyword.get(opts, :model) do
       m when is_binary(m) and m != "" ->
         m
@@ -250,7 +255,7 @@ defmodule Arbiter.Agents.Gemini do
       _ ->
         case Keyword.get(opts, :model_tier) do
           tier when is_binary(tier) and tier != "" ->
-            Config.model_for_tier(tier) || Config.active_model()
+            Config.model_for_tier(tier, executable) || Config.active_model()
 
           _ ->
             Config.active_model()
