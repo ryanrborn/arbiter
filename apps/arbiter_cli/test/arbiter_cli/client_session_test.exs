@@ -95,9 +95,10 @@ defmodule ArbiterCli.ClientSessionTest do
       assert hint =~ "ARB_SESSION_ID"
     end
 
-    test "falls back to the .mcp.json token in cwd when the session token file is missing" do
+    test "falls back to the session's own workspace/.mcp.json token when the token file is missing" do
       root = session_root!()
-      cwd = session_root!()
+      workspace = Path.join(root, "workspace")
+      File.mkdir_p!(workspace)
 
       mcp_json =
         Jason.encode!(%{
@@ -110,7 +111,51 @@ defmodule ArbiterCli.ClientSessionTest do
           }
         })
 
-      File.write!(Path.join(cwd, ".mcp.json"), mcp_json)
+      File.write!(Path.join(workspace, ".mcp.json"), mcp_json)
+
+      System.put_env("ARB_SESSION_ID", "sess-1")
+      System.put_env("ARB_SESSION_ROOT", root)
+      System.delete_env("ARB_TOKEN")
+
+      stub_routes([
+        {
+          {"get", "/api/test"},
+          fn conn ->
+            auth = Plug.Conn.get_req_header(conn, "authorization")
+
+            if auth == ["Bearer mcp-json-token"] do
+              conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"ok" => true})
+            else
+              conn |> Plug.Conn.put_status(400) |> Req.Test.json(%{"error" => "bad auth"})
+            end
+          end
+        }
+      ])
+
+      assert {:ok, %{"ok" => true}} = Client.get("/api/test")
+    end
+
+    test "ignores a cwd-local .mcp.json holding a different (foreign) token" do
+      root = session_root!()
+      workspace = Path.join(root, "workspace")
+      File.mkdir_p!(workspace)
+
+      # No .mcp.json under the session's own workspace or root — only the
+      # cwd has one, mimicking an `arb init` checkout's unrestricted token.
+      cwd = session_root!()
+
+      foreign_mcp_json =
+        Jason.encode!(%{
+          "mcpServers" => %{
+            "arbiter" => %{
+              "type" => "http",
+              "url" => "http://127.0.0.1:4848/mcp",
+              "headers" => %{"Authorization" => "Bearer foreign-unrestricted-token"}
+            }
+          }
+        })
+
+      File.write!(Path.join(cwd, ".mcp.json"), foreign_mcp_json)
 
       System.put_env("ARB_SESSION_ID", "sess-1")
       System.put_env("ARB_SESSION_ROOT", root)
@@ -119,6 +164,45 @@ defmodule ArbiterCli.ClientSessionTest do
       prior_cwd = File.cwd!()
       File.cd!(cwd)
       on_exit(fn -> File.cd!(prior_cwd) end)
+
+      stub_routes([
+        {
+          {"get", "/api/test"},
+          fn _conn ->
+            raise "the request must never reach the server with the foreign cwd token"
+          end
+        }
+      ])
+
+      assert {:error, %Client.Error{kind: :no_session_token}} = Client.get("/api/test")
+    end
+
+    test "picks the arbiter-named server entry, not an arbitrary map entry" do
+      root = session_root!()
+      workspace = Path.join(root, "workspace")
+      File.mkdir_p!(workspace)
+
+      mcp_json =
+        Jason.encode!(%{
+          "mcpServers" => %{
+            "some-other-tool" => %{
+              "type" => "http",
+              "url" => "http://example.com/mcp",
+              "headers" => %{"Authorization" => "Bearer third-party-token"}
+            },
+            "arbiter" => %{
+              "type" => "http",
+              "url" => "http://127.0.0.1:4848/mcp",
+              "headers" => %{"Authorization" => "Bearer mcp-json-token"}
+            }
+          }
+        })
+
+      File.write!(Path.join(workspace, ".mcp.json"), mcp_json)
+
+      System.put_env("ARB_SESSION_ID", "sess-1")
+      System.put_env("ARB_SESSION_ROOT", root)
+      System.delete_env("ARB_TOKEN")
 
       stub_routes([
         {

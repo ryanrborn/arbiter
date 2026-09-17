@@ -142,21 +142,62 @@ defmodule ArbiterCli.Client do
   end
 
   # Fallback for sessions provisioned before `$ARB_SESSION_ROOT/mcp_token` was
-  # written (bd-5b5hq7 round 2): every session still gets a `.mcp.json` in its
-  # cwd with the same scope token in a bearer header
-  # (`Arbiter.MCP.AgentConfig.Claude`), so read that instead of refusing
-  # outright. Without this, every `arb` invocation in an already-running
-  # session breaks the moment the coordinator restarts onto this deploy.
+  # written (bd-5b5hq7 round 2): every session still gets a `.mcp.json` under
+  # its workspace with the same scope token in a bearer header
+  # (`Arbiter.MCP.AgentConfig.Claude`, `Arbiter.Sessions.Layout.mcp_config_path/1`),
+  # so read that instead of refusing outright. Without this, every `arb`
+  # invocation in an already-running session breaks the moment the
+  # coordinator restarts onto this deploy.
+  #
+  # Resolved against `$ARB_SESSION_ROOT`, never the cwd: reading a cwd-local
+  # `.mcp.json` would let a session that `cd`s into an `arb init` checkout
+  # (which writes an unrestricted, unrevocable coordinator token) silently
+  # authenticate as that foreign token instead of its own.
   defp session_mcp_json_token do
-    with {:ok, cwd} <- File.cwd(),
-         {:ok, contents} <- File.read(Path.join(cwd, ".mcp.json")),
+    root = System.get_env("ARB_SESSION_ROOT")
+
+    with root when is_binary(root) and root != "" <- root,
+         :error <- read_mcp_json_token(Path.join([root, "workspace", ".mcp.json"])) do
+      read_mcp_json_token(Path.join(root, ".mcp.json"))
+    else
+      {:ok, token} -> {:ok, token}
+      _ -> :error
+    end
+  end
+
+  defp read_mcp_json_token(path) do
+    with {:ok, contents} <- File.read(path),
          {:ok, %{"mcpServers" => servers}} when is_map(servers) <- Jason.decode(contents),
-         [{_name, server} | _] <- Map.to_list(servers),
+         {:ok, server} <- arbiter_mcp_server(servers),
          %{"headers" => %{"Authorization" => "Bearer " <> token}} <- server,
          true <- token != "" do
       {:ok, token}
     else
       _ -> :error
+    end
+  end
+
+  # Selects the Arbiter entry by name (never "whichever key the map
+  # enumerates first") so a `.mcp.json` with other MCP servers configured
+  # can't leak a third-party server's bearer credential to the Arbiter host.
+  defp arbiter_mcp_server(servers) do
+    name = System.get_env("ARB_MCP_SERVER_NAME") || "arbiter"
+
+    case Map.fetch(servers, name) do
+      {:ok, server} ->
+        {:ok, server}
+
+      :error ->
+        servers
+        |> Map.values()
+        |> Enum.find(fn
+          %{"url" => url} when is_binary(url) -> String.starts_with?(url, base_url())
+          _ -> false
+        end)
+        |> case do
+          nil -> :error
+          server -> {:ok, server}
+        end
     end
   end
 
