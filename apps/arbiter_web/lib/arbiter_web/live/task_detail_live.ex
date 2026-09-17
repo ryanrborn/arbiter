@@ -473,6 +473,13 @@ defmodule ArbiterWeb.TaskDetailLive do
   # way to actually get past that refusal. Otherwise idempotent: a
   # double-click is harmless, and the button disappears on the re-render.
 
+  # bd-1lszsc. The whole action lives in `ArbiterWeb.RefineEntry` because the
+  # board card's Refine is the same act, and "launch or reopen the one session
+  # bound to this issue" must not have two implementations.
+  def handle_event("refine", _params, socket) do
+    {:noreply, ArbiterWeb.RefineEntry.open(socket, socket.assigns.task)}
+  end
+
   def handle_event("promote_to_ready", _params, socket) do
     case socket.assigns.task do
       %Issue{refined: true} ->
@@ -1828,6 +1835,15 @@ defmodule ArbiterWeb.TaskDetailLive do
           <%!-- Operator actions. A closed issue is terminal here: reopening
                it is `arb update` territory, not a dashboard button. --%>
           <div :if={@task && @task.status != :closed} class="flex items-center gap-2">
+            <%!-- Refine (bd-1lszsc). Offered on exactly the issues
+                  `Arbiter.Sessions.Refine.eligible?/1` accepts — Backlog,
+                  not running, not closed — and it sits *before* Move to
+                  Ready because that is the order the two are meant to
+                  happen in: shape the issue, then promote it. --%>
+            <ArbiterWeb.RefineEntry.refine_button
+              :if={ArbiterWeb.RefineEntry.eligible?(@task)}
+              id="task-refine"
+            />
             <%!-- The one door out of Backlog. Gone the moment it is used —
                   there is no un-refine here, and nothing to click twice. --%>
             <ArbiterWeb.CoreComponents.Core.button

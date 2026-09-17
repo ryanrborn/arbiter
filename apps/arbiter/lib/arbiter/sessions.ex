@@ -406,12 +406,41 @@ defmodule Arbiter.Sessions do
   end
 
   @doc """
-  The PubSub topic session lifecycle changes (currently just `mark_ended/2`)
-  are published on — the fleet-wide counterpart to `usage_topic/1`'s
-  per-session one (bd-bsdeb2).
+  The PubSub topic session lifecycle changes (`mark_ended/2`, and
+  `request_open/1`'s open request) are published on — the fleet-wide
+  counterpart to `usage_topic/1`'s per-session one (bd-bsdeb2).
   """
   @spec lifecycle_topic() :: String.t()
   def lifecycle_topic, do: "sessions:lifecycle"
+
+  @doc """
+  Ask whatever session docks are listening to open `session_id` and expand it
+  (bd-1lszsc).
+
+  The dock is a **sticky nested LiveView** with its own process, and the pages
+  that need to put something in it — the issue detail page's Refine button, the
+  board card's — are separate processes holding no reference to it. A page
+  cannot `send/2` the dock, and `send_update/2` is for LiveComponents, not
+  LiveViews. So the request goes over the same lifecycle topic the dock is
+  already subscribed to for its own reasons.
+
+  Broadcast rather than addressed: the dashboard is loopback-only and
+  single-operator (§10.4), so "every dock this operator has open" and "the dock
+  that asked" differ only if they have two tabs up — in which case both showing
+  the session they just asked for is the right answer, not a bug.
+
+  Advisory, not a command. `ArbiterWeb.SessionDockLive` re-validates the id
+  against the sessions that actually exist before opening anything, exactly as
+  it does with the `localStorage` payload a browser hands it.
+  """
+  @spec request_open(String.t()) :: :ok | {:error, term()}
+  def request_open(session_id) when is_binary(session_id) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      lifecycle_topic(),
+      {:session_open_requested, session_id}
+    )
+  end
 
   @doc "Mark a session's scope confirmed live (launch, or re-adoption)."
   @spec mark_running(Session.t()) :: {:ok, Session.t()} | {:error, term()}
