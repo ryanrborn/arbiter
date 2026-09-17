@@ -155,7 +155,20 @@ defmodule Arbiter.Agents.Gemini do
 
   defp tool_result_line?(_), do: false
 
-  defp resolve_executable do
+  @doc """
+  Which Gemini-family CLI this host will actually run, and where.
+
+  Returns `{:ok, {:agy, path}}` when the Antigravity fork is on `PATH` (it wins),
+  `{:ok, {:gemini, path}}` for the upstream CLI, or
+  `{:error, {:executable_not_found, "agy or gemini"}}` when neither is installed.
+
+  Public because the two CLIs do not share a config format: which one is on
+  `PATH` decides whether a worktree-local MCP config is even readable
+  (`Arbiter.MCP.AgentConfig.Gemini`, bd-m8geh4).
+  """
+  @spec resolve_executable() ::
+          {:ok, {:agy | :gemini, String.t()}} | {:error, {:executable_not_found, String.t()}}
+  def resolve_executable do
     case System.find_executable("agy") do
       path when is_binary(path) ->
         {:ok, {:agy, path}}

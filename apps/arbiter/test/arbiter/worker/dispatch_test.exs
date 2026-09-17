@@ -9,6 +9,8 @@ defmodule Arbiter.Worker.DispatchTest do
   alias Arbiter.Workers.Run
   require Ash.Query
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   # The most recent worker_run for a task — used by the resume tests to assert
   # run lineage (resumed_from_run_id) and terminal status.
   defp latest_run(task_id) do
@@ -1166,6 +1168,47 @@ defmodule Arbiter.Worker.DispatchTest do
         end)
 
       assert log =~ "Codex MCP connect check failed"
+    end
+
+    # bd-m8geh4: `.gemini/settings.json` is the UPSTREAM `gemini` CLI's config
+    # file — the `agy` fork never reads it, nor any other worktree-local path.
+    # With `agy` on PATH (it wins over `gemini` in
+    # `Arbiter.Agents.Gemini.resolve_executable/0`) the injection must refuse
+    # out loud instead of dropping a dead, token-bearing file in the worktree.
+    test "gemini dispatch on an agy host refuses MCP injection loudly (bd-m8geh4)",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      agy_file = Path.join(tmp, "agy-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", agy_file)
+
+      repo = seed_repo!(tmp, "agy-mcp-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "agy-mcp-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"agymcp/repo" => repo})
+      enable_mcp_injection!()
+
+      {:ok, task} = Ash.create(Issue, %{title: "agy mcp task", workspace_id: ws.id})
+
+      {result, log} =
+        with_log(fn ->
+          {:ok, result} =
+            Dispatch.dispatch(task.id,
+              repo: "agymcp/repo",
+              start_driver: false,
+              start_claude: true,
+              agent_type: :gemini,
+              preflight: false
+            )
+
+          _ = wait_for_argv!(agy_file)
+          result
+        end)
+
+      refute File.exists?(Path.join([result.worktree_path, ".gemini", "settings.json"])),
+             "agy never reads .gemini/settings.json — writing one is a silent no-op"
+
+      assert log =~ "MCP config injection is UNSUPPORTED"
+      assert log =~ "agy"
     end
 
     test ".mcp.json is not tracked after being untracked from git",

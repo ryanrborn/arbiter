@@ -398,7 +398,8 @@ token:
 | Agent | Where it lands | Shape |
 |---|---|---|
 | **Claude Code** (Phase 1) | `.mcp.json` in the worktree (or `--mcp-config <file>`) | `{"mcpServers":{"arbiter":{"type":"http","url":"…/mcp","headers":{"Authorization":"Bearer <token>"}}}}` |
-| **Gemini CLI** (Phase 3) | `.gemini/settings.json` or `gemini mcp add` | bonus: Gemini's `includeTools`/`excludeTools` allowlist (most-restrictive-wins) is a clean secondary per-worker scoping hook |
+| **Gemini CLI** — upstream `gemini` only (Phase 3) | `.gemini/settings.json` or `gemini mcp add` | bonus: Gemini's `includeTools`/`excludeTools` allowlist (most-restrictive-wins) is a clean secondary per-worker scoping hook |
+| **`agy`** (Antigravity fork of the Gemini CLI) | **nowhere in the worktree** — `$HOME/.gemini/config/mcp_config.json` or `$HOME/.gemini/config/plugins/<name>/mcp_config.json` only | **unsupported (bd-m8geh4):** agy does *not* read `.gemini/settings.json`, nor any worktree-local `.agents/plugins/**` path (probed live, agy v1.2.5 — see `Arbiter.MCP.AgentConfig.Gemini`'s moduledoc). Since `Arbiter.Agents.Gemini.resolve_executable/0` prefers `agy` over `gemini`, an Antigravity host gets `{:error, :unsupported}` and a loud dispatch-time log instead of a dead config file. Its schema differs too: `serverUrl` / `enabledTools`, not `httpUrl` / `includeTools` (`Gemini.agy_config_map/1`). Per-spawn injection needs a per-worker `$HOME` (agy exposes no config-dir env var) — tracked separately as the config-isolation spike |
 | **Codex** (Phase 3) | `.codex/config.toml` (`[mcp_servers.arbiter]`) | **caveat:** Codex MCP support is newer and has reports of silent connect failures — verify the session with a `/mcp`-equivalent check rather than trusting the spawn |
 
 ### 5.1 Where it cuts in the spawn path
