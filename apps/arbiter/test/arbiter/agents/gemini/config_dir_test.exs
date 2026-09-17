@@ -54,7 +54,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       File.rm_rf!(base)
     end)
 
-    {:ok, source: source, root: root, worktree: Path.join(base, "wt")}
+    {:ok, base: base, source: source, root: root, worktree: Path.join(base, "wt")}
   end
 
   describe "path/1" do
@@ -122,6 +122,45 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       assert {:ok, target} = File.read_link(Path.join(home, ".ssh"))
       assert target == Path.join(source, ".ssh")
       assert File.exists?(Path.join(home, ".cache/mix"))
+    end
+
+    test "never links the HOME root's own ancestor back into the worker HOME", %{
+      base: base,
+      source: source,
+      worktree: wt
+    } do
+      # Reproduce the production layout: the home root lives *under* the
+      # operator's HOME (`~/.cache/arbiter/worker-agy`). A flat passthrough
+      # would link `<home>/.cache -> <source>/.cache`, so
+      # `<home>/.cache/arbiter/worker-agy/<key>` would resolve back to `<home>`:
+      # an unbounded symlink cycle.
+      File.mkdir_p!(Path.join(source, ".cache/arbiter/worker-claude"))
+
+      Application.put_env(
+        :arbiter,
+        :worker_agy_home_root,
+        Path.join(source, ".cache/arbiter/worker-agy")
+      )
+
+      on_exit(fn ->
+        Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "worker-agy"))
+      end)
+
+      assert {:ok, home} = ConfigDir.ensure(worktree: wt)
+
+      # `.cache` is mirrored as a real directory, not a link back to the source.
+      assert {:ok, %{type: :directory}} = File.lstat(Path.join(home, ".cache"))
+      assert {:ok, %{type: :directory}} = File.lstat(Path.join(home, ".cache/arbiter"))
+      # The root itself is never linked — that is the cycle.
+      assert {:error, :enoent} = File.lstat(Path.join(home, ".cache/arbiter/worker-agy"))
+      # ...but the rest of the operator's cache still passes through.
+      assert {:ok, %{type: :symlink}} = File.lstat(Path.join(home, ".cache/mix"))
+
+      assert {:ok, %{type: :symlink}} =
+               File.lstat(Path.join(home, ".cache/arbiter/worker-claude"))
+
+      # No path under the worker HOME resolves back to the worker HOME.
+      refute File.exists?(Path.join(home, ".cache/arbiter/worker-agy/#{Path.basename(home)}"))
     end
 
     test "is idempotent — a second call does not fail or duplicate", %{worktree: wt} do

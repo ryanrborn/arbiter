@@ -66,10 +66,15 @@ defmodule Arbiter.Agents.Gemini.Security do
   `Bash(...)`/`Read(...)`/`Write(...)`. `SecurityPolicy`'s `safe_defaults`
   categories are expanded natively into that grammar, and the operator's own
   `allow`/`deny` strings are translated (a rule already written in agy's
-  grammar passes through untouched). A rule with no agy analogue — a bare
-  Claude tool name such as `Monitor` — is **dropped** rather than emitted
-  verbatim, since agy has no tool-name rule kind and an uninterpretable rule
-  in the file is worse than an absent one.
+  grammar passes through untouched). A *bare* Claude tool name (no `(...)`) is
+  mapped onto the equivalent whole-path rule where agy has one — `Write` /
+  `Edit` / `MultiEdit` / `NotebookEdit` → `write_file(**)`, `Read` →
+  `read_file(**)`, `WebFetch` / `WebSearch` → `url(*)` — which is what keeps
+  `Arbiter.Worker.Dispatch.review_security_policy/2`'s reviewer read-only
+  posture working for agy. A rule with no agy analogue at all — `Monitor`,
+  `ScheduleWakeup` — is **dropped** rather than emitted verbatim, since agy has
+  no tool-name rule kind and an uninterpretable rule in the file is worse than
+  an absent one.
   """
 
   alias Arbiter.Agents.SecurityPolicy
@@ -275,7 +280,26 @@ defmodule Arbiter.Agents.Gemini.Security do
 
   defp translate(_), do: nil
 
+  # A bare Claude tool name — no `(...)` argument — as emitted by
+  # `Arbiter.Worker.Dispatch.review_security_policy/2`, which merges
+  # `deny: ["Edit", "Write", "NotebookEdit"]` into *every* worktree-backed
+  # review dispatch so "you are not the author; do not modify the branch" is a
+  # property of the spawn rather than a prompt line. Those three DO have an agy
+  # analogue — agy's `write_to_file` / `replace_file_content` /
+  # `multi_replace_file_content` are all governed by `write_file(<glob>)` — so
+  # dropping them would hand an agy reviewer write access to the branch it is
+  # reviewing while the same policy blocks a Claude reviewer.
+  #
+  # `**` is agy's match-everything path glob (cf. the `write_file(/etc/**)`
+  # baseline above): a bare tool name in Claude's grammar means "this tool, for
+  # any argument", so the whole-path glob is the faithful translation in both
+  # directions (deny ⇒ never, allow ⇒ unrestricted).
   defp bare_tool_rule(rule) when rule in ["WebFetch", "WebSearch"], do: "url(*)"
+
+  defp bare_tool_rule(rule) when rule in ["Write", "Edit", "MultiEdit", "NotebookEdit"],
+    do: "write_file(**)"
+
+  defp bare_tool_rule("Read"), do: "read_file(**)"
   defp bare_tool_rule(_), do: nil
 
   # `rm -rf:*` (Claude's "command prefix up to `:`, then a glob") → `rm -rf`.

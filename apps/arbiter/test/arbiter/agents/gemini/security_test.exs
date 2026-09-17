@@ -102,6 +102,56 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       refute Map.has_key?(Security.settings(policy()), "trustedWorkspaces")
     end
 
+    test "a worktree-backed review spawn's read-only deny survives translation" do
+      # Arbiter.Worker.Dispatch.review_security_policy/2 merges these three bare
+      # Claude tool names into EVERY worktree-backed review dispatch. They are
+      # what makes "you are not the author; do not modify the branch" a property
+      # of the spawn; if they are dropped an agy reviewer can rewrite the branch
+      # it is reviewing while a Claude reviewer cannot.
+      review =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          "permissions" => %{"deny" => ["Edit", "Write", "NotebookEdit"]}
+        })
+
+      assert "write_file(**)" in Security.deny_rules(review)
+    end
+
+    test "the exact policy Dispatch.review_security_policy/2 produces denies writes" do
+      # Built through Dispatch itself, so a change to the reviewer posture that
+      # agy cannot express fails here rather than silently.
+      policy =
+        Arbiter.Worker.Dispatch.review_security_policy(
+          SecurityPolicy.base(),
+          review_checkout: %{path: "/tmp/some-review-checkout"}
+        )
+
+      assert "write_file(**)" in Security.deny_rules(policy)
+    end
+
+    test "bare Read / WebFetch tool names map onto agy's whole-path rules" do
+      deny =
+        Security.deny_rules(
+          SecurityPolicy.merge(SecurityPolicy.base(), %{
+            "permissions" => %{"deny" => ["Read", "WebFetch"]}
+          })
+        )
+
+      assert "read_file(**)" in deny
+      assert "url(*)" in deny
+    end
+
+    test "a bare tool name in `allow` translates too (load-bearing under :strict)" do
+      allow =
+        Security.allow_rules(
+          SecurityPolicy.merge(SecurityPolicy.base(), %{
+            "permissions" => %{"mode" => "strict", "allow" => ["Read", "Edit"]}
+          })
+        )
+
+      assert "read_file(**)" in allow
+      assert "write_file(**)" in allow
+    end
+
     test "rules with no agy analogue are dropped rather than emitted verbatim" do
       # Monitor / ScheduleWakeup are Claude tool names; agy's rule grammar has
       # only command()/read_file()/write_file()/url().

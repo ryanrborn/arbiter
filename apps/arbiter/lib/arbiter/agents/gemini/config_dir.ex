@@ -369,6 +369,44 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     target = Path.join(src, name)
     link = Path.join(dir, name)
 
+    cond do
+      # The entry *is* the home root (`<cache>/arbiter/worker-agy`): linking it
+      # would put the worker's own HOME inside itself. Drop it.
+      same_path?(target, root()) ->
+        :ok
+
+      # The entry *contains* the home root. The default root lives under
+      # `~/.cache`, i.e. inside the operator's HOME, so a flat link would make
+      # `<home>/.cache -> ~/.cache` and `<home>/.cache/arbiter/worker-agy/<key>`
+      # resolve straight back to `<home>` — an unbounded symlink cycle rooted in
+      # the worker's own HOME that any `du -L` / `rg --follow` / `cp -rL` the
+      # worker runs would walk until ELOOP. Mirror the directory instead and
+      # link its children, so `~/.cache/mix` & friends stay reachable.
+      root_under?(target) ->
+        descend(target, link)
+
+      true ->
+        do_link(target, link)
+    end
+  end
+
+  # Recreate `target` as a real directory under the worker HOME and pass its
+  # children through individually — recursing while the root is still below us,
+  # and never linking the root itself (see `link_one/3`).
+  defp descend(target, link) do
+    # A HOME seeded before this rule existed still carries the cycle as a plain
+    # symlink; replace it with a real directory.
+    if match?({:ok, %{type: :symlink}}, File.lstat(link)), do: File.rm(link)
+
+    with :ok <- File.mkdir_p(link),
+         {:ok, entries} <- File.ls(target) do
+      Enum.each(entries, &link_one(target, link, &1))
+    else
+      _ -> :ok
+    end
+  end
+
+  defp do_link(target, link) do
     case File.read_link(link) do
       {:ok, ^target} ->
         :ok
@@ -388,6 +426,11 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
         end
     end
   end
+
+  defp same_path?(a, b), do: Path.expand(a) == Path.expand(b)
+
+  defp root_under?(path),
+    do: String.starts_with?(Path.expand(root()), Path.expand(path) <> "/")
 
   # See the moduledoc: with a keyring there is nothing to seed, and seeding
   # anyway would hand the worker a refreshable copy of the operator's grant.
