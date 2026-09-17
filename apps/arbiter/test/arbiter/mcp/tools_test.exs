@@ -676,6 +676,31 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
     end
 
+    test "the minted-token path clears only the calling session's view", ctx do
+      # The production call path for a browser-hosted session: mint its token,
+      # decode it back to a scope, dispatch through the catalog. A hand-built
+      # %Scope{} would not catch a `session_id` claim lost in minting/decoding.
+      {:ok, session_a} = Ash.create(Session, %{cwd: "/tmp/mcp-clear", workspace_id: ctx.ws.id})
+      {:ok, session_b} = Ash.create(Session, %{cwd: "/tmp/mcp-clear", workspace_id: ctx.ws.id})
+
+      {:ok, scope_a} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_a))
+      {:ok, scope_b} = Scope.from_token(Arbiter.Sessions.Provisioning.mint_token(session_b))
+
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "e2e-clear"})
+
+      assert {:ok, %{cleared: [%{id: cleared_id}]}} =
+               Catalog.call(scope_a, "coordinator_inbox_clear", %{"ids" => [m.id]})
+
+      assert cleared_id == m.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+
+      assert {:ok, %{count: 0}} = Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      assert {:ok, %{count: 1, messages: [%{body: "e2e-clear"}]}} =
+               Catalog.call(scope_b, "coordinator_inbox", %{})
+    end
+
     test "requires ids and/or task_id", ctx do
       assert {:error, {:invalid_args, message}} =
                Tools.coordinator_inbox_clear(ctx.coordinator, %{})
