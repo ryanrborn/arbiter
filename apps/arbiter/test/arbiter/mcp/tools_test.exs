@@ -2376,6 +2376,21 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "queue_resume/2 (dispatch guardrail, bd-5b5hq7)" do
+    test "refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.queue_resume(no_dispatch, %{"task_id" => ctx.task.id})
+    end
+
+    test "a can_dispatch scope reaches Conductor lookup and 404s for a task in no running graph",
+         ctx do
+      assert {:error, {:not_found, _}} =
+               Tools.queue_resume(ctx.coordinator, %{"task_id" => ctx.task.id})
+    end
+  end
+
   describe "worker_resume/2 + worker_review/2 (dispatch-recursion guardrail, §4.3)" do
     test "resume refuses a coordinator scope without can_dispatch", ctx do
       no_dispatch = %{ctx.coordinator | can_dispatch: false}

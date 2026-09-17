@@ -102,6 +102,20 @@ defmodule ArbiterWeb.Api.FallbackController do
     })
   end
 
+  # A caller presented a valid, decoded token (`conn.assigns[:mcp_scope]`,
+  # `ArbiterWeb.Plugs.ApiAuth`) that this action refuses on its own merits —
+  # e.g. `can_dispatch: false` (bd-5b5hq7). Same shape the `:conflict` /
+  # `:busy` tuples use, kept out of Ash's own Forbidden clause because there's
+  # no Ash policy involved: this is a REST-layer check mirroring the MCP
+  # tool-layer `Arbiter.MCP.Tools.ensure_can_dispatch/1`.
+  def call(conn, {:error, {:unauthorized, message}}) when is_binary(message) do
+    conn
+    |> put_status(:forbidden)
+    |> json(%{
+      error: %{type: "unauthorized", message: message, details: %{}}
+    })
+  end
+
   # Tracker adapter errors share an identical normalised shape
   # (`%{kind, status, message, raw}`) across every backend. Render them all
   # through one helper so a Jira or Shortcut failure reports the same way a

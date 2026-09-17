@@ -15,6 +15,13 @@ Live-tail the Arbiter server's `/events` stream (worker done/failed, ReviewGate,
 
 Route is `/events` (NOT `/api/events`, which 404s). Served as `application/x-ndjson` from `<%= @host %>`.
 
+> [!note] Inside an Arbiter session, use the session's own monitor instead
+> This runbook is for the operator's own shell or a Claude Code session opened
+> against a plain `arb init` checkout — the zero-setup case with no Arbiter
+> session of its own. If you're running **inside** an Arbiter session
+> (`$ARB_SESSION_ID` is set), the session already has its own event monitor
+> (bd-aqafdr) — use that instead of this loop.
+
 > [!todo] Run the monitor — self-healing loop (re-mints a fresh token each cycle, streams directly)
 > ```bash
 > while true; do

@@ -71,6 +71,21 @@ defmodule Arbiter.Sessions.Layout do
   @spec mcp_config_path(String.t()) :: String.t()
   def mcp_config_path(id), do: Path.join(workspace_dir(id), ".mcp.json")
 
+  @doc """
+  The session's own MCP scope token, mode `0600`, at the session **root**
+  (not the cwd — this is for the session's own `arb` CLI, not Claude Code's
+  `.mcp.json` auto-load).
+
+  Written alongside `.mcp.json` with the exact same token
+  (`Arbiter.Sessions.Provisioning`). `ArbiterCli.Client` reads this file when
+  `ARB_SESSION_ID` is set and no `ARB_TOKEN` override is present, so `arb`
+  run from inside a session authenticates with the session's own —
+  deliberately limited, revocable — token instead of falling back to
+  unauthenticated loopback access and minting a full-power one (bd-5b5hq7).
+  """
+  @spec mcp_token_path(String.t()) :: String.t()
+  def mcp_token_path(id), do: Path.join(session_dir(id), "mcp_token")
+
   @doc "Memory mount root (§9.4)."
   @spec memory_dir(String.t()) :: String.t()
   def memory_dir(id), do: Path.join(session_dir(id), "memory")
@@ -140,6 +155,7 @@ defmodule Arbiter.Sessions.Layout do
       config: config_dir(id),
       instructions: instructions_path(id),
       mcp_config: mcp_config_path(id),
+      mcp_token: mcp_token_path(id),
       memory: memory_dir(id),
       memory_shared: memory_shared_dir(id),
       memory_candidates: memory_candidates_dir(id),

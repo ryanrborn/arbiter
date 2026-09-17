@@ -58,3 +58,17 @@ Once you're done accessing the dashboard and terminal, close port 4848 on the re
 ## Alternative: Remote Control (mode B)
 
 For persistent, multi-session access with full browser support and auditing, consider [Remote Control mode](/docs/browser-hosted-coordinator-sessions.md#8-remote-control-sessions-research-task-4) (launched with `--remote-control`). SSH tunneling is simpler for temporary or single-machine access.
+
+## Trust assumption: loopback means the same Unix user (bd-5b5hq7)
+
+"Loopback" here is a **convenience boundary, not a sandbox**. `ArbiterWeb.Plugs.ApiAuth` lets any request from `127.0.0.1` (or `::1`) reach the `/api` pipeline without a bearer token specifically so the local `arb` CLI and an `arb init` checkout's `.mcp.json` work with zero setup — no token to mint, copy, or rotate before the very first command.
+
+That convenience is only as safe as "loopback = trusted" actually holds, and on this host it holds because every process that can reach `127.0.0.1:4848` — the operator's own shell, `arb`, and every Arbiter session (including a browser-hosted one) — runs as the **same Unix user**. There is no sandbox, container, or separate user boundary between a browser session and the operator's own tooling; a session can read anything the operator's user can read, including `/proc/<pid>/environ` of sibling processes and any dotfile on disk. A real boundary would need a separate Unix user or a sandbox, and that is out of scope here.
+
+Given that, unauthenticated loopback minting (`POST /api/mcp/tokens` with no `Authorization` header, still returning a full-power coordinator token) is a **deliberate, retained trust assumption**, not an oversight — closing it would mean requiring an operator credential file even for same-user, same-box calls, which adds setup for the CLI and every non-Arbiter Claude Code session without producing a real boundary (the file is just as readable as anything else on that Unix user's account). What *is* addressed (bd-5b5hq7) is **casual or accidental** escalation from inside a session:
+
+  * a request that *does* present a bearer token — including a session's own `arb` calling over loopback with its own token — can never mint a token more powerful than itself (`ArbiterWeb.Api.McpController.mint_token/2` inherits the caller's `session_id`, workspace binding, and `can_dispatch` ceiling);
+  * inside a session, `arb` always authenticates with the session's own token rather than riding the anonymous-loopback path (`ArbiterCli.Client`, env var `ARB_SESSION_ID`);
+  * the session's generated `settings.json` denies `Bash(arb mcp token mint:*)` outright.
+
+None of this stops a session that goes out of its way to curl the API directly with no `Authorization` header — that path is unauthenticated by design, for the reason above. The guardrail is at the same level as the session's own `CLAUDE.md` rules: it stops the *accidental* path (following the `arb init` runbook, or reaching for `arb mcp token mint` out of habit), not a determined one. If Arbiter sessions ever run as a separate Unix user from the operator, this trust assumption should be revisited — at that point unauthenticated loopback access would cross an actual user boundary, not just a convenience one.
