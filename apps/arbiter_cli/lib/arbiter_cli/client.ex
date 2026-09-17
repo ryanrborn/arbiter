@@ -9,7 +9,21 @@ defmodule ArbiterCli.Client do
     * `ARB_HOST` env var overrides the base URL (default `http://127.0.0.1:4848`)
     * `ARB_TOKEN` env var sets a Bearer token for authentication. Required for
       remote access (ARB_HOST pointing to a different server). Not needed for
-      local loopback access.
+      local loopback access — unless `ARB_SESSION_ID` is set, see below.
+    * `ARB_SESSION_ID` — set by every Arbiter session's `launch.sh`
+      (`Arbiter.Sessions.Provisioning`), absent everywhere else (the
+      operator's own shell, a Claude Code session opened against a plain
+      `arb init` checkout). When set, this client is running **inside** an
+      Arbiter session, and never makes an unauthenticated call even over
+      loopback (bd-5b5hq7) — the session's own MCP token, read from a
+      mode-`0600` file at `$ARB_SESSION_ROOT/mcp_token`
+      (`Arbiter.Sessions.Layout.mcp_token_path/1`), is used instead. That
+      token is deliberately weaker than a bare loopback call would get for
+      free: `can_dispatch: false` by default, possibly workspace-bound, and
+      revoked the moment the session ends. An explicit `ARB_TOKEN` still
+      takes priority, matching the non-session behavior. If neither is
+      available, the request is refused with a clear error rather than
+      falling back to an unauthenticated call.
 
   Tests can override the Req adapter via `:req_options` in the process dict:
 
@@ -29,6 +43,11 @@ defmodule ArbiterCli.Client do
     """
     defstruct [:kind, :status, :body, :message, :hint]
 
+    # `:no_session_token` — inside an Arbiter session (`ARB_SESSION_ID` set)
+    # with no usable token: no `ARB_TOKEN` override and no readable
+    # `$ARB_SESSION_ROOT/mcp_token` file. The request is refused before it is
+    # ever sent (bd-5b5hq7) rather than going out unauthenticated.
+
     @type t :: %__MODULE__{
             kind: atom(),
             status: nil | integer(),
@@ -45,6 +64,12 @@ defmodule ArbiterCli.Client do
     System.get_env("ARB_HOST", @default_base)
   end
 
+  @doc """
+  The bearer token this client would send, or `nil` for none — outside a
+  session, an unset `ARB_TOKEN` legitimately means "send unauthenticated"
+  (loopback). Prefer `resolve_token/0` for making a request: it distinguishes
+  that from the in-session case where no token is a hard error.
+  """
   @spec token() :: String.t() | nil
   def token do
     System.get_env("ARB_TOKEN")
@@ -63,9 +88,58 @@ defmodule ArbiterCli.Client do
   def delete(path, params \\ []), do: request(:delete, path, params: params)
 
   defp request(method, path, opts) do
+    with {:ok, token} <- resolve_token() do
+      do_request(method, path, token, opts)
+    end
+  end
+
+  # Outside a session: `ARB_TOKEN` or nothing (unauthenticated — the loopback
+  # default). Inside a session (`ARB_SESSION_ID` set): `ARB_TOKEN` still wins
+  # if the operator set one, otherwise the session's own token file — and if
+  # neither exists, refuse rather than ever send the request unauthenticated
+  # (bd-5b5hq7). A session's `arb` is on PATH with `ARB_TOKEN` unset by
+  # default; without this, `arb mcp token mint --tier coordinator` run from
+  # inside a session would ride the same unauthenticated-loopback path the
+  # operator's own shell relies on and mint a token more powerful than the
+  # session's own.
+  defp resolve_token do
+    case System.get_env("ARB_SESSION_ID") do
+      session_id when is_binary(session_id) and session_id != "" ->
+        case token() do
+          t when is_binary(t) and t != "" -> {:ok, t}
+          _ -> session_token()
+        end
+
+      _ ->
+        {:ok, token()}
+    end
+  end
+
+  defp session_token do
+    root = System.get_env("ARB_SESSION_ROOT")
+    path = root && root != "" && Path.join(root, "mcp_token")
+
+    with path when is_binary(path) <- path,
+         {:ok, contents} <- File.read(path) do
+      {:ok, String.trim(contents)}
+    else
+      _ ->
+        {:error,
+         %Error{
+           kind: :no_session_token,
+           message: "no MCP token available for this session",
+           hint:
+             "ARB_SESSION_ID is set but no session token file was found — this session has " <>
+               "no usable Arbiter credential, so the request was refused rather than sent " <>
+               "unauthenticated. Set ARB_TOKEN explicitly to override."
+         }}
+    end
+  end
+
+  defp do_request(method, path, token, opts) do
     url = base_url() <> path
 
-    headers = auth_headers()
+    headers = auth_headers(token)
 
     req_opts =
       [
@@ -112,12 +186,8 @@ defmodule ArbiterCli.Client do
     end
   end
 
-  defp auth_headers do
-    case token() do
-      nil -> []
-      t -> [{"authorization", "Bearer #{t}"}]
-    end
-  end
+  defp auth_headers(nil), do: []
+  defp auth_headers(token), do: [{"authorization", "Bearer #{token}"}]
 
   defp http_error(401, %{"error" => %{"message" => msg} = err}) do
     %Error{

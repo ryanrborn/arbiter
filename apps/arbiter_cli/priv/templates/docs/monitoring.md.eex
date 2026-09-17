@@ -20,6 +20,11 @@ subscribe=inbox,review_gate,worker_failed,worker_done
 A **success-only filter makes a crash look like "still running."** Always
 include `worker_failed` and `review_gate`.
 
+> **Inside an Arbiter session** (`$ARB_SESSION_ID` set), skip this whole
+> runbook and use the session's own event monitor (bd-aqafdr) instead. This
+> doc is for the operator's own shell or a Claude Code session opened
+> against a plain `arb init` checkout, with no Arbiter session of its own.
+
 ## Minting a token
 
 ```bash

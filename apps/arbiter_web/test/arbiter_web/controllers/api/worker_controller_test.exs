@@ -244,6 +244,48 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       conn = post(conn, ~p"/api/workers/dispatch", %{})
       assert json_response(conn, 400)
     end
+
+    # bd-5b5hq7: this endpoint is loopback-exempt from auth, so a caller
+    # presenting no token at all (the operator's own `arb dispatch`) is
+    # unaffected — but a caller that DOES present a token (a session's own
+    # `arb`, which now always does) cannot use this REST route to dispatch a
+    # worker its token isn't allowed to dispatch. Without this, denying
+    # `can_dispatch` on a session's MCP token would be pure theater: curl the
+    # loopback REST route instead and it just works.
+    test "a bearer token with can_dispatch: false is refused, even over loopback",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no-dispatch-token", workspace_id: ws.id})
+      token = Arbiter.MCP.Scope.mint_coordinator(nil, can_dispatch: false)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true
+        })
+
+      body = json_response(conn, 403)
+      assert body["error"]["message"] =~ "can_dispatch"
+    end
+
+    test "a bearer token with can_dispatch: true is allowed", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "can-dispatch-token", workspace_id: ws.id})
+      token = Arbiter.MCP.Scope.mint_coordinator(nil, can_dispatch: true)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true
+        })
+
+      body = json_response(conn, 201)
+      assert body["task"]["id"] == task.id
+    end
   end
 
   describe "POST /api/workers/:task_id/resume" do

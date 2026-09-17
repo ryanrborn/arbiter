@@ -314,6 +314,28 @@ defmodule Arbiter.Sessions.ProvisioningTest do
              "a copy at the session root is a copy the agent never reads"
     end
 
+    test "also writes the session's own token to $ARB_SESSION_ROOT/mcp_token (bd-5b5hq7)" do
+      session = launch!()
+      token_path = Layout.mcp_token_path(session.id)
+
+      assert File.read!(token_path) |> String.trim() ==
+               session.id
+               |> Layout.mcp_config_path()
+               |> File.read!()
+               |> Jason.decode!()
+               |> get_in(["mcpServers", "arbiter", "headers", "Authorization"])
+               |> String.trim_leading("Bearer ")
+
+      assert {:ok, %{mode: mode}} = File.stat(token_path)
+      assert Bitwise.band(mode, 0o077) == 0
+    end
+
+    test "no mcp_token file when :mcp is disabled" do
+      session = launch!(mcp: false)
+
+      refute File.exists?(Layout.mcp_token_path(session.id))
+    end
+
     test "follows an overridden cwd", %{root: root} do
       cwd = Path.join(root, "elsewhere")
       File.mkdir_p!(cwd)
