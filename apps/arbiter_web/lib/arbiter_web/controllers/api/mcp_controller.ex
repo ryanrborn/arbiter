@@ -37,8 +37,11 @@ defmodule ArbiterWeb.Api.McpController do
 
   An anonymous loopback call (no `Authorization` header — the zero-setup
   `arb` / `arb init` path, `ArbiterWeb.Plugs.ApiAuth`) mints an unrestricted
-  token exactly as before: workspace-agnostic, `can_dispatch: true`, no
-  `session_id`.
+  token by default: workspace-agnostic, `can_dispatch: true`, no
+  `session_id`. It may still narrow itself via the `workspace_id` /
+  `can_dispatch` params below — narrowing is always safe with no caller to
+  compare against, only widening would be a problem, and there is no wider
+  place to widen from.
 
   A call that presents a bearer token (`conn.assigns[:mcp_scope]`, set by
   `ApiAuth` whenever one was given, loopback or not) can only mint a token
@@ -63,7 +66,12 @@ defmodule ArbiterWeb.Api.McpController do
 
     case conn.assigns[:mcp_scope] do
       nil ->
-        token = Scope.mint_coordinator(nil, max_age: ttl)
+        workspace_id = nilable_param(params, "workspace_id")
+        can_dispatch = narrow_can_dispatch(true, Map.get(params, "can_dispatch"))
+
+        token =
+          Scope.mint_coordinator(workspace_id, can_dispatch: can_dispatch, max_age: ttl)
+
         respond_token(conn, token, ttl)
 
       %Scope{tier: :worker} ->
@@ -114,7 +122,9 @@ defmodule ArbiterWeb.Api.McpController do
   defp narrow_can_dispatch(caller_can_dispatch, requested) do
     requested_bool =
       case requested do
-        b when is_boolean(b) -> b
+        b when b in [false, "false"] -> false
+        b when b in [true, "true"] -> true
+        nil -> true
         _ -> true
       end
 

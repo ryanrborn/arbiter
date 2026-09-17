@@ -27,6 +27,27 @@ defmodule ArbiterWeb.Api.McpControllerTest do
       assert scope.session_id == nil
       assert scope.can_dispatch == true
     end
+
+    test "may still narrow itself via workspace_id / can_dispatch params", %{conn: conn} do
+      resp =
+        conn
+        |> post("/api/mcp/tokens", %{"workspace_id" => "ws-1", "can_dispatch" => false})
+        |> json_response(200)
+
+      assert {:ok, scope} = Scope.from_token(resp["token"])
+      assert scope.workspace_id == "ws-1"
+      assert scope.can_dispatch == false
+    end
+
+    test "a form-encoded can_dispatch=\"false\" string narrows, not upgrades", %{conn: conn} do
+      resp =
+        conn
+        |> post("/api/mcp/tokens", %{"can_dispatch" => "false"})
+        |> json_response(200)
+
+      assert {:ok, scope} = Scope.from_token(resp["token"])
+      assert scope.can_dispatch == false
+    end
   end
 
   describe "session-token caller" do

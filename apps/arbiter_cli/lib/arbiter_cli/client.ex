@@ -116,6 +116,20 @@ defmodule ArbiterCli.Client do
   end
 
   defp session_token do
+    with :error <- session_token_file(), :error <- session_mcp_json_token() do
+      {:error,
+       %Error{
+         kind: :no_session_token,
+         message: "no MCP token available for this session",
+         hint:
+           "ARB_SESSION_ID is set but no session token file was found — this session has " <>
+             "no usable Arbiter credential, so the request was refused rather than sent " <>
+             "unauthenticated. Set ARB_TOKEN explicitly to override."
+       }}
+    end
+  end
+
+  defp session_token_file do
     root = System.get_env("ARB_SESSION_ROOT")
     path = root && root != "" && Path.join(root, "mcp_token")
 
@@ -123,16 +137,26 @@ defmodule ArbiterCli.Client do
          {:ok, contents} <- File.read(path) do
       {:ok, String.trim(contents)}
     else
-      _ ->
-        {:error,
-         %Error{
-           kind: :no_session_token,
-           message: "no MCP token available for this session",
-           hint:
-             "ARB_SESSION_ID is set but no session token file was found — this session has " <>
-               "no usable Arbiter credential, so the request was refused rather than sent " <>
-               "unauthenticated. Set ARB_TOKEN explicitly to override."
-         }}
+      _ -> :error
+    end
+  end
+
+  # Fallback for sessions provisioned before `$ARB_SESSION_ROOT/mcp_token` was
+  # written (bd-5b5hq7 round 2): every session still gets a `.mcp.json` in its
+  # cwd with the same scope token in a bearer header
+  # (`Arbiter.MCP.AgentConfig.Claude`), so read that instead of refusing
+  # outright. Without this, every `arb` invocation in an already-running
+  # session breaks the moment the coordinator restarts onto this deploy.
+  defp session_mcp_json_token do
+    with {:ok, cwd} <- File.cwd(),
+         {:ok, contents} <- File.read(Path.join(cwd, ".mcp.json")),
+         {:ok, %{"mcpServers" => servers}} when is_map(servers) <- Jason.decode(contents),
+         [{_name, server} | _] <- Map.to_list(servers),
+         %{"headers" => %{"Authorization" => "Bearer " <> token}} <- server,
+         true <- token != "" do
+      {:ok, token}
+    else
+      _ -> :error
     end
   end
 
