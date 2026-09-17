@@ -35,7 +35,9 @@ defmodule Arbiter.Sessions.Instructions do
   regenerated on every launch.
   """
 
+  alias Arbiter.MCP.RefinePolicy
   alias Arbiter.Sessions.Layout
+  alias Arbiter.Sessions.RefineDoctrine
   alias Arbiter.Sessions.Session
 
   @doc """
@@ -49,9 +51,24 @@ defmodule Arbiter.Sessions.Instructions do
     * `:mcp_server_name` — the `.mcp.json` server key, default `"arbiter"`.
     * `:can_dispatch` — overrides the session row's value, for rendering a
       preview before the row exists.
+    * `:refine` — presence switches this to the **refine variant** (bd-980x89):
+      a map carrying `:issue` (the bound issue, required), `:epic` (its parent,
+      or `nil`), `:edges` (a list of `%{type:, direction:, id:, title:}` maps,
+      default `[]`), `:repo_checkout` (the read-only checkout path, or `nil`)
+      and `:workspace` (an `Arbiter.Tasks.Workspace.t()` or `nil`, used both
+      for display and to resolve `Arbiter.Sessions.RefineDoctrine`'s
+      per-workspace override). Absent `:refine`, `render/2` produces exactly
+      the coordinator-session instructions above — the pre-refine behavior.
   """
   @spec render(Session.t(), keyword()) :: String.t()
   def render(%Session{} = session, opts \\ []) do
+    case Keyword.get(opts, :refine) do
+      nil -> render_coordinator(session, opts)
+      refine -> render_refine(session, refine, opts)
+    end
+  end
+
+  defp render_coordinator(%Session{} = session, opts) do
     id = session.id
     # The row's cwd wins where it is set — the agent is told where it actually
     # is, and where its `.mcp.json` actually sits (it lives in the cwd; see
@@ -147,6 +164,195 @@ defmodule Arbiter.Sessions.Instructions do
     every running worker just as easily. Capture an exact PID and kill that.
     """
   end
+
+  # ---- the refine variant (bd-980x89) --------------------------------------
+
+  defp render_refine(%Session{} = session, refine, _opts) do
+    issue = Map.fetch!(refine, :issue)
+    epic = Map.get(refine, :epic)
+    edges = Map.get(refine, :edges, [])
+    repo_checkout = Map.get(refine, :repo_checkout)
+    workspace = Map.get(refine, :workspace)
+
+    """
+    # Arbiter refine session `#{session.id}`
+
+    You are a **refine session**: a browser-hosted agent session bound to
+    **one Backlog issue**, launched so you and the operator can shape it
+    together into a properly specified, broken-down, promotable ticket. You
+    are not a dispatched worker: you never implement the issue, and you
+    cannot dispatch anyone else to.
+
+    This file is **generated on every launch** — edits to it are lost.
+
+    #{bound_issue_section(issue, epic)}
+
+    #{edges_section(edges)}
+
+    #{refine_workspace_section(workspace)}
+
+    #{repo_checkout_section(repo_checkout)}
+
+    #{permissions_section()}
+
+    ## This session ends when the bound issue is promoted
+
+    Once #{issue_ref(issue)} — and any children you filed under it — is
+    promoted, this session's job is done; there is nothing further for you to
+    do here. Write a short refinement summary to the issue **before**
+    promoting.
+
+    #{RefineDoctrine.content(workspace)}
+    """
+  end
+
+  defp bound_issue_section(issue, epic) do
+    """
+    ## The bound issue
+
+    * **id** — `#{field(issue, :id)}`
+    * **title** — #{field(issue, :title)}
+    * **type** — `#{field(issue, :issue_type)}`
+    * **priority** — #{format_field(field(issue, :priority))}
+    * **difficulty** — #{format_field(field(issue, :difficulty))}
+    * **repo** — #{format_field(field(issue, :repo))}
+    * **refined** — #{format_field(field(issue, :refined))}
+    * **tracker_ref** — #{format_field(field(issue, :tracker_ref))}
+
+    ### Current description
+
+    #{format_field(field(issue, :description))}
+
+    ### Current acceptance
+
+    #{format_field(field(issue, :acceptance))}
+
+    #{epic_section(epic)}
+    """
+    |> String.trim()
+  end
+
+  defp epic_section(nil) do
+    "### Parent epic\n\nNone — this issue has no parent epic."
+  end
+
+  defp epic_section(epic) do
+    """
+    ### Parent epic
+
+    * **id** — `#{field(epic, :id)}`
+    * **title** — #{field(epic, :title)}
+    """
+    |> String.trim()
+  end
+
+  defp edges_section([]) do
+    """
+    ## Edges
+
+    None yet.
+    """
+    |> String.trim()
+  end
+
+  defp edges_section(edges) do
+    lines =
+      Enum.map(edges, fn edge ->
+        "* `#{field(edge, :type)}` #{field(edge, :direction)} `#{field(edge, :id)}` — #{field(edge, :title)}"
+      end)
+
+    """
+    ## Edges
+
+    #{Enum.join(lines, "\n")}
+    """
+    |> String.trim()
+  end
+
+  defp refine_workspace_section(nil) do
+    """
+    ## Workspace
+
+    No workspace metadata was provided for this render.
+    """
+    |> String.trim()
+  end
+
+  defp refine_workspace_section(workspace) do
+    """
+    ## Workspace
+
+    * **id** — `#{field(workspace, :id)}`
+    * **name** — #{format_field(field(workspace, :name))}
+    * **prefix** — #{format_field(field(workspace, :prefix))}
+    """
+    |> String.trim()
+  end
+
+  defp repo_checkout_section(nil) do
+    """
+    ## Repository checkout
+
+    No read-only checkout was provided for this render. Ask the operator for
+    one before reading source for this issue.
+    """
+    |> String.trim()
+  end
+
+  defp repo_checkout_section(path) do
+    """
+    ## Repository checkout
+
+    `#{path}` is a **read-only** checkout of the issue's repo, for context.
+    Reading it is fine and is usually all refinement needs; there is no live
+    server behind it and nothing here writes to it.
+    """
+    |> String.trim()
+  end
+
+  defp permissions_section do
+    """
+    ## What you may and may not do
+
+    Your Arbiter MCP token is bound to this one workspace and this one issue
+    and cannot reach anything else.
+
+    **You may:**
+
+    * Read broadly for context: the bound issue, its epic, related issues,
+      edges, workspace config, skills, and the issue's repo via the read-only
+      checkout above.
+    * Edit the bound issue and any issue in its `parent_of` subtree — title,
+      description, acceptance, `issue_type`, difficulty, priority, repo,
+      `verify_after_deploy`.
+    * File child issues (`task_create`). They land in Backlog, auto-linked
+      `parent_of` from the bound issue.
+    * Add edges (`dep_add`/`dep_remove`) touching the bound issue or its
+      children.
+    * Promote the bound issue and its children (`task_promote`), once the
+      operator agrees in the conversation that they're ready, and only after
+      their edges are written.
+
+    Callable tools: `#{Enum.join(RefinePolicy.allowed(), "`, `")}`.
+
+    **You may never:**
+
+    * Dispatch, close, stop, or resume workers — `can_dispatch` is hard-wired
+      false on this session's token.
+    * Change installation or workspace configuration.
+    * Edit or promote an issue outside the bound issue's subtree.
+    """
+    |> String.trim()
+  end
+
+  defp issue_ref(issue), do: "`#{field(issue, :id)}`"
+
+  defp field(struct_or_map, key), do: Map.get(struct_or_map, key)
+
+  defp format_field(nil), do: "_(none)_"
+  defp format_field(""), do: "_(none)_"
+  defp format_field(value) when is_boolean(value), do: to_string(value)
+  defp format_field(value), do: to_string(value)
 
   defp workspace_section(%Session{workspace_id: nil}) do
     """
