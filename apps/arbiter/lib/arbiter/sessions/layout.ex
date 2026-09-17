@@ -7,6 +7,7 @@ defmodule Arbiter.Sessions.Layout do
         workspace/            # cwd for the agent; git worktrees created here
           .mcp.json           # per-session scope token (§9.3) — must sit in the cwd
         config/               # CLAUDE_CONFIG_DIR (isolated, per session)
+        repo/                 # refine sessions only: read-only detached worktree
         CLAUDE.md             # generated: role, workspace binding, guardrails
         memory/
           shared/             # read-only mounted layers, type-scoped (§9.4)
@@ -46,6 +47,19 @@ defmodule Arbiter.Sessions.Layout do
   @doc "The agent's working directory — never an existing checkout (§10.2 layer 1)."
   @spec workspace_dir(String.t()) :: String.t()
   def workspace_dir(id), do: Path.join(session_dir(id), "workspace")
+
+  @doc """
+  The read-only repo checkout a **refine** session greps for grounding
+  (bd-1lszsc): a detached `git worktree` of the bound issue's repo, with every
+  write bit stripped (`Arbiter.Sessions.RepoCheckout`).
+
+  Deliberately *not* in `directories/1`: `git worktree add` refuses a target
+  that already exists, and only a refine session with a resolvable repo gets
+  one at all. A session without a bound repo simply has no such directory, and
+  its instructions say so.
+  """
+  @spec repo_checkout_dir(String.t()) :: String.t()
+  def repo_checkout_dir(id), do: Path.join(session_dir(id), "repo")
 
   @doc "The session's isolated `CLAUDE_CONFIG_DIR`."
   @spec config_dir(String.t()) :: String.t()
@@ -178,6 +192,7 @@ defmodule Arbiter.Sessions.Layout do
     %{
       root: session_dir(id),
       workspace: workspace_dir(id),
+      repo_checkout: repo_checkout_dir(id),
       config: config_dir(id),
       instructions: instructions_path(id),
       mcp_config: mcp_config_path(id),

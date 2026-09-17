@@ -56,6 +56,7 @@ defmodule Arbiter.Sessions.Provisioning do
   revoked token would be worse than one that mints again.
   """
 
+  alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.ConfigDir.Interactive
   alias Arbiter.Config.Paths
@@ -65,6 +66,7 @@ defmodule Arbiter.Sessions.Provisioning do
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Memory
   alias Arbiter.Sessions.Naming
+  alias Arbiter.Sessions.RepoCheckout
   alias Arbiter.Sessions.Session
 
   require Logger
@@ -114,6 +116,7 @@ defmodule Arbiter.Sessions.Provisioning do
     with :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
+         {:ok, opts} <- provision_repo_checkout(session, opts),
          :ok <- write_instructions(session, paths, cwd, opts),
          :ok <- mount_memory(session, opts),
          :ok <- seed_config_dir(session, config_dir, cwd, opts),
@@ -140,12 +143,46 @@ defmodule Arbiter.Sessions.Provisioning do
   cross-workspace default, decision 6), and `can_dispatch` taken from the row —
   which defaults to **off** (§10.1).
 
+  **Unless the row is issue-bound** (bd-1lszsc): a session carrying an
+  `issue_id` is a refine session, and gets a `:refine`-tier token bound to that
+  issue and to its workspace instead. That decision is taken from the row, not
+  from a caller's option, so "a refine session can never hold a coordinator
+  token" is a property of the schema rather than of every call site
+  remembering to ask for the right tier. `:refine` requires a workspace, so a
+  bound row with no `workspace_id` is a bug worth crashing on rather than
+  quietly widening — it raises `ArgumentError` rather than falling through to
+  the coordinator clause.
+
   The token is returned, never stored: the only durable copy is the mode-`0600`
   `.mcp.json` inside the session's own directory. Its revocation handle is the
   row, not a stored copy.
   """
   @spec mint_token(Session.t(), keyword()) :: String.t()
-  def mint_token(%Session{} = session, opts \\ []) do
+  def mint_token(session, opts \\ [])
+
+  def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, opts)
+      when is_binary(issue_id) and issue_id != "" and is_binary(workspace_id) and
+             workspace_id != "" do
+    MCP.Scope.mint_refine(session.id, workspace_id, issue_id, opts)
+  end
+
+  # An issue-bound row with no workspace is not a coordinator session that
+  # happens to name an issue — it is a refine session whose second binding got
+  # lost. Falling through to the clause below would hand it a *coordinator*
+  # token, i.e. quietly widen the one scope this whole feature narrows. The
+  # only caller that can produce this shape is one that skipped
+  # `Arbiter.Sessions.Refine.open/2`'s `{:error, :no_workspace}` guard, so the
+  # bug is upstream and worth surfacing where it happened.
+  def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, _opts)
+      when is_binary(issue_id) and issue_id != "" and
+             (is_nil(workspace_id) or workspace_id == "") do
+    raise ArgumentError,
+          "session #{session.id} is issue-bound (#{issue_id}) but has no workspace_id; " <>
+            "a :refine token requires both bindings, and a coordinator token is not a " <>
+            "safe substitute"
+  end
+
+  def mint_token(%Session{} = session, opts) do
     MCP.Scope.mint_session(
       session.id,
       Keyword.merge(
@@ -166,6 +203,12 @@ defmodule Arbiter.Sessions.Provisioning do
   def destroy(%Session{id: id}), do: destroy(id)
 
   def destroy(id) when is_binary(id) do
+    # The refine checkout first, and not merely for tidiness: it is a
+    # read-only tree, and `File.rm_rf/1` cannot unlink entries from
+    # directories it has no write permission on — so going straight at the
+    # session directory would leave the checkout *and* everything under it
+    # behind (bd-1lszsc). A no-op for the sessions that never had one.
+    _ = RepoCheckout.teardown(id)
     _ = File.rm_rf(Layout.session_dir(id))
     :ok
   end
@@ -223,6 +266,48 @@ defmodule Arbiter.Sessions.Provisioning do
         with :ok <- write_file(Path.join(cwd, "CLAUDE.md"), content) do
           write_file(Path.join(cwd, "AGENTS.md"), content)
         end
+    end
+  end
+
+  # A refine session's read-only grounding checkout (bd-1lszsc), provisioned
+  # *before* the instructions so they can name the path — or say there is none.
+  #
+  # Deliberately not fatal. An issue with no repo, a repo the workspace never
+  # registered, a path that has stopped being a git repo: none of those are a
+  # reason to refuse the operator a refinement session. The refine instructions
+  # have a "no checkout was provided" branch precisely so this can fail softly
+  # and the agent still knows exactly where it stands.
+  defp provision_repo_checkout(%Session{} = session, opts) do
+    case Keyword.get(opts, :refine) do
+      refine when is_map(refine) ->
+        {:ok,
+         Keyword.put(
+           opts,
+           :refine,
+           Map.put(refine, :repo_checkout, checkout(session, refine, opts))
+         )}
+
+      _ ->
+        {:ok, opts}
+    end
+  end
+
+  defp checkout(session, refine, opts) do
+    case RepoCheckout.provision(
+           session,
+           Map.get(refine, :repo_path),
+           Map.get(refine, :repo_branch),
+           opts
+         ) do
+      {:ok, %{path: path}} ->
+        path
+
+      {:error, reason} ->
+        Logger.info(
+          "Sessions.Provisioning #{session.id}: no refine repo checkout (#{inspect(reason)})"
+        )
+
+        nil
     end
   end
 
@@ -572,14 +657,55 @@ defmodule Arbiter.Sessions.Provisioning do
   def agent_command(%Session{} = session, opts \\ []) do
     Keyword.get(opts, :agent_command) ||
       Application.get_env(:arbiter, :sessions_agent_command) ||
-      default_agent_command(session)
+      default_agent_command(session, opts)
   end
 
-  defp default_agent_command(%Session{} = session) do
+  defp default_agent_command(%Session{} = session, opts) do
     ["claude"]
     |> append_name(session)
+    |> append_model(opts)
+    |> append_effort(opts)
     |> append_remote_control(session)
     |> Enum.join(" ")
+  end
+
+  # `:model` / `:thinking` are how a *caller* pins a session's model tier and
+  # reasoning effort — today only `Arbiter.Sessions.Refine`, which pins premium
+  # and `high` (see its moduledoc for why those two, and why never flagship).
+  # Absent both, the command is a bare `claude` and the CLI picks, unchanged.
+  defp append_model(parts, opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" -> parts ++ ["--model", shell_token(model)]
+      _ -> parts
+    end
+  end
+
+  # `:thinking_argv` is already-resolved argv and is emitted verbatim. That is
+  # the path `Arbiter.Sessions.Refine` takes, and it exists because
+  # `ClaudeConfig.thinking_argv/1` reads a workspace's
+  # `agent.config["thinking_argv"]` remapping off the *active* config in the
+  # process dictionary — which provisioning never sets, and deliberately so
+  # (see `Refine.agent_selection/1`). Resolving the level here would therefore
+  # silently ignore that remapping; resolving it in the workspace-scoped task
+  # that already picks the model does not.
+  #
+  # A bare `:thinking` level from some other caller still resolves here, but
+  # against the built-in table only.
+  defp append_effort(parts, opts) do
+    case Keyword.get(opts, :thinking_argv) do
+      argv when is_list(argv) -> parts ++ Enum.map(argv, &shell_token/1)
+      _ -> append_effort_level(parts, opts)
+    end
+  end
+
+  defp append_effort_level(parts, opts) do
+    case Keyword.get(opts, :thinking) do
+      level when is_binary(level) and level != "" ->
+        parts ++ Enum.map(ClaudeConfig.thinking_argv(level), &shell_token/1)
+
+      _ ->
+        parts
+    end
   end
 
   defp append_name(parts, %Session{name: name}) when is_binary(name) do
@@ -674,6 +800,14 @@ defmodule Arbiter.Sessions.Provisioning do
   # Single-quote for /bin/sh, escaping embedded single quotes the only way sh
   # allows. Paths here are Arbiter-derived, but a session id or a configured
   # root is still data, and data does not belong unquoted in a generated script.
+  # Quote only what needs it. A model name or an effort flag is a plain token
+  # in every real config, and `--model 'opus'` in a generated script reads like
+  # the quoting is load-bearing when it is not. Anything outside this
+  # conservative set still goes through `shell_quote/1`.
+  defp shell_token(value) do
+    if Regex.match?(~r{\A[A-Za-z0-9_@%+=:,./-]+\z}, value), do: value, else: shell_quote(value)
+  end
+
   defp shell_quote(value) do
     "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
   end
