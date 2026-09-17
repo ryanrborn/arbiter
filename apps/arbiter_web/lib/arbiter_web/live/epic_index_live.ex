@@ -5,16 +5,22 @@ defmodule ArbiterWeb.EpicIndexLive do
   Epics no longer appear on the board (bd-2s901b §4 removed them from the one
   column they still leaked into), so this page is where they live. Each row is
   one epic with its child-progress rollup: `closed/total`, a stacked bar broken
-  into the five board buckets, the `auto_close` marker, age, and whatever stuck
-  signals its children raise.
+  into the five board buckets, the `auto_close` marker, age, and the
+  `needs_you` attention state (see below).
 
-  ## Stuck signals
+  ## The attention state: `needs_you`
 
-  Three, all derived — never stored — by `Arbiter.Tasks.EpicRollup`: a child
-  held by an open gating blocker, a child parked in `awaiting_verification`,
-  and zero running children while at least one child is Ready (queueable work
-  nobody picked up). They drive both the chips on a row and the default sort,
-  because "which epic needs me" is the question this page exists to answer.
+  bd-58z2tu: every open epic with a dependency chain has *some* blocked
+  child, so flagging on that alone made the attention state permanently on
+  — no signal. `Arbiter.Tasks.EpicRollup` now derives a single `needs_you`
+  boolean instead: true only when at least one child is parked in
+  `awaiting_verification`, a child's own live worker needs the operator
+  (shared with the board's `needs_you?`), or a child is blocked only by
+  something that itself needs the operator (parked, awaiting verification,
+  or unrefined). That drives the row's attention style, its reason chips,
+  and the default sort. `blocked_children` and `idle_with_ready_work` stay
+  on the row as neutral informational chips — the machine may still be on
+  either of those — rather than triggering the attention style.
 
   ## Filtering and sorting
 
@@ -72,12 +78,6 @@ defmodule ArbiterWeb.EpicIndexLive do
     {:closed, "closed", "var(--arb-ok)"}
   ]
 
-  @signal_labels %{
-    blocked_children: "blocked",
-    awaiting_verification: "awaiting verification",
-    idle_with_ready_work: "idle, ready work waiting"
-  }
-
   @default_filters %{status: :open, workspace: nil, blocked: false, sort: :stuck}
 
   @impl true
@@ -109,7 +109,8 @@ defmodule ArbiterWeb.EpicIndexLive do
   end
 
   # Any issue transition can move a row: a child's status changes its epic's
-  # breakdown and stuck chips, and an epic's own close moves it between tabs.
+  # breakdown and needs_you chips, and an epic's own close moves it between
+  # tabs.
   @impl true
   def handle_info({:task_lifecycle, _event, _issue}, socket), do: {:noreply, refresh(socket)}
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -192,8 +193,8 @@ defmodule ArbiterWeb.EpicIndexLive do
 
   defp sort_rows(rows, :title), do: Enum.sort_by(rows, &title_key/1)
 
-  defp stuck_rank(%{rollup: %{stuck: []}}), do: 1
-  defp stuck_rank(_row), do: 0
+  defp stuck_rank(%{rollup: %{needs_you: true}}), do: 0
+  defp stuck_rank(_row), do: 1
 
   defp activity_key(%{rollup: %{last_child_activity_at: %DateTime{} = at}}),
     do: -DateTime.to_unix(at, :microsecond)
@@ -393,7 +394,7 @@ defmodule ArbiterWeb.EpicIndexLive do
       <div class="min-w-0 flex-1 flex flex-col gap-1">
         <div class="flex flex-wrap items-center gap-2">
           <ArbiterWeb.CoreComponents.Core.icon
-            :if={@row.rollup.stuck != []}
+            :if={@row.rollup.needs_you}
             name="hero-exclamation-triangle-micro"
             color="var(--arb-attention)"
           />
@@ -441,16 +442,44 @@ defmodule ArbiterWeb.EpicIndexLive do
         </div>
 
         <div
-          :if={@row.rollup.stuck != []}
+          :if={@row.rollup.needs_you}
           class="flex flex-wrap items-center gap-1.5"
-          data-role="stuck-chips"
+          data-role="needs-you-chips"
         >
           <span
-            :for={signal <- @row.rollup.stuck}
-            id={"epic-#{@row.epic.id}-stuck-#{signal}"}
+            :for={{reason, index} <- Enum.with_index(visible_reasons(@row.rollup.needs_you_reasons))}
+            id={"epic-#{@row.epic.id}-needs-you-#{index}"}
             class="badge text-[9.5px] font-[family-name:var(--font-mono)] bg-[var(--arb-attention-wash)] border-[color:var(--arb-attention-edge)] text-[var(--arb-attention-ink)]"
           >
-            {stuck_label(signal, @row.rollup)}
+            {reason}
+          </span>
+          <span
+            :if={hidden_reason_count(@row.rollup.needs_you_reasons) > 0}
+            id={"epic-#{@row.epic.id}-needs-you-more"}
+            class="badge badge-ghost text-[9.5px] font-[family-name:var(--font-mono)]"
+          >
+            +{hidden_reason_count(@row.rollup.needs_you_reasons)} more
+          </span>
+        </div>
+
+        <div
+          :if={@row.rollup.blocked_children > 0 or @row.rollup.idle_with_ready_work}
+          class="flex flex-wrap items-center gap-1.5"
+          data-role="info-chips"
+        >
+          <span
+            :if={@row.rollup.blocked_children > 0}
+            id={"epic-#{@row.epic.id}-chip-blocked"}
+            class="badge badge-ghost text-[9.5px] font-[family-name:var(--font-mono)]"
+          >
+            {@row.rollup.blocked_children} blocked
+          </span>
+          <span
+            :if={@row.rollup.idle_with_ready_work}
+            id={"epic-#{@row.epic.id}-chip-idle"}
+            class="badge badge-ghost text-[9.5px] font-[family-name:var(--font-mono)]"
+          >
+            queued
           </span>
         </div>
       </div>
@@ -504,7 +533,7 @@ defmodule ArbiterWeb.EpicIndexLive do
       "flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 px-3 py-2.5",
       "rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)]",
       "hover:bg-[var(--arb-raised-hover)] transition-colors duration-[var(--dur-hover)]",
-      if(row.rollup.stuck != [],
+      if(row.rollup.needs_you,
         do: [
           "bg-[var(--arb-attention-wash)]",
           "border-l-[length:var(--border-accent-width)] border-l-[color:var(--arb-attention)]"
@@ -514,15 +543,6 @@ defmodule ArbiterWeb.EpicIndexLive do
       row.epic.status == :closed && "opacity-[0.62]"
     ]
   end
-
-  # Counted chips say how many; the idle signal is a statement about the epic
-  # as a whole, so it stays prose.
-  defp stuck_label(:blocked_children, rollup), do: "#{rollup.blocked_children} blocked"
-
-  defp stuck_label(:awaiting_verification, rollup),
-    do: "#{rollup.awaiting_verification} awaiting verification"
-
-  defp stuck_label(signal, _rollup), do: @signal_labels[signal]
 
   defp segment_pct(%{total: 0}, _key), do: 0
 
@@ -551,4 +571,10 @@ defmodule ArbiterWeb.EpicIndexLive do
   end
 
   defp money(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+
+  @max_needs_you_chips 3
+
+  defp visible_reasons(reasons), do: Enum.take(reasons, @max_needs_you_chips)
+
+  defp hidden_reason_count(reasons), do: max(length(reasons) - @max_needs_you_chips, 0)
 end

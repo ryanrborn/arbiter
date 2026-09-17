@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.EpicIndexLiveTest do
   @moduledoc """
-  bd-2wmxt5 — the `/epics` list: child-status breakdown, derived stuck chips,
+  bd-2wmxt5 — the `/epics` list: child-status breakdown, the derived needs_you attention state,
   independent filters, sort, and live updates off the "tasks" topic.
   """
   use ArbiterWeb.ConnCase, async: false
@@ -136,37 +136,64 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
     end
   end
 
-  describe "stuck chips" do
-    test "a child blocked by an open gating edge chips the epic as blocked",
+  describe "needs_you attention state" do
+    test "a child blocked by a Ready (refined) blocker chips the epic as blocked only",
          %{conn: conn, ws: ws} do
       e = epic(ws, "blocked-epic")
+      blocked = child(ws, e, "blocked-child", :ready)
+
+      {:ok, blocker} =
+        Ash.create(Issue, %{
+          title: "blocker",
+          workspace_id: ws.id,
+          issue_type: :task,
+          acceptance: "n/a"
+        })
+
+      Ash.update!(blocker, %{}, action: :promote_to_ready)
+      {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
+
+      quiet = epic(ws, "quiet-epic")
+      child(ws, quiet, "unblocked-child", :ready)
+
+      {:ok, view, _html} = live(conn, ~p"/epics")
+
+      assert has_element?(view, "#epic-#{e.id}-chip-blocked")
+      refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
+      refute has_element?(view, "#epic-#{quiet.id}-chip-blocked")
+    end
+
+    test "a child blocked by an unrefined blocker flags needs_you with a reason chip",
+         %{conn: conn, ws: ws} do
+      e = epic(ws, "unrefined-blocked-epic")
       blocked = child(ws, e, "blocked-child", :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
       quiet = epic(ws, "quiet-epic")
-      child(ws, quiet, "unblocked-child", :running)
+      child(ws, quiet, "unblocked-child", :ready)
 
       {:ok, view, _html} = live(conn, ~p"/epics")
 
-      assert has_element?(view, "#epic-#{e.id}-stuck-blocked_children")
-      refute has_element?(view, "#epic-#{quiet.id}-stuck-blocked_children")
+      assert has_element?(view, "#epic-#{e.id}-needs-you-0", "blocked by unrefined #{blocker.id}")
+      refute has_element?(view, "#epic-#{quiet.id} [data-role='needs-you-chips']")
     end
 
-    test "a child awaiting verification chips the epic", %{conn: conn, ws: ws} do
+    test "a child awaiting verification flags needs_you with a verify reason chip",
+         %{conn: conn, ws: ws} do
       e = epic(ws, "awaiting-epic")
-      child(ws, e, "w1", :waiting)
+      w = child(ws, e, "w1", :waiting)
 
       quiet = epic(ws, "quiet-epic")
-      child(ws, quiet, "run1", :running)
+      child(ws, quiet, "run1", :ready)
 
       {:ok, view, _html} = live(conn, ~p"/epics")
 
-      assert has_element?(view, "#epic-#{e.id}-stuck-awaiting_verification")
-      refute has_element?(view, "#epic-#{quiet.id}-stuck-awaiting_verification")
+      assert has_element?(view, "#epic-#{e.id}-needs-you-0", "verify #{w.id}")
+      refute has_element?(view, "#epic-#{quiet.id} [data-role='needs-you-chips']")
     end
 
-    test "zero running children with Ready work chips the epic as idle",
+    test "zero running children with Ready work chips the epic as idle, not needs_you",
          %{conn: conn, ws: ws} do
       e = epic(ws, "idle-epic")
       child(ws, e, "r1", :ready)
@@ -177,8 +204,9 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/epics")
 
-      assert has_element?(view, "#epic-#{e.id}-stuck-idle_with_ready_work")
-      refute has_element?(view, "#epic-#{busy.id}-stuck-idle_with_ready_work")
+      assert has_element?(view, "#epic-#{e.id}-chip-idle")
+      refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
+      refute has_element?(view, "#epic-#{busy.id}-chip-idle")
     end
   end
 
@@ -294,6 +322,8 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       html = render(view)
 
       assert position(html, "aaa-stuck-epic") < position(html, "zzz-calm-epic")
+      refute has_element?(view, "#epic-#{calm.id} [data-role='needs-you-chips']")
+      assert has_element?(view, "#epic-#{stuck.id} [data-role='needs-you-chips']")
     end
 
     test "unstuck epics fall back to latest child activity, then age",
@@ -309,6 +339,8 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       html = render(view)
 
       assert position(html, "newer-epic") < position(html, "older-epic")
+      refute has_element?(view, "#epic-#{older.id} [data-role='needs-you-chips']")
+      refute has_element?(view, "#epic-#{newer.id} [data-role='needs-you-chips']")
     end
 
     test "the sort dropdown offers age, % complete and title", %{conn: conn, ws: ws} do
@@ -375,17 +407,17 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       assert has_element?(view, "#epic-#{e.id}-progress", "1/1")
     end
 
-    test "a child moving into awaiting_verification raises the stuck chip live",
+    test "a child moving into awaiting_verification raises the needs-you chip live",
          %{conn: conn, ws: ws} do
       e = epic(ws, "live-chip-epic")
-      c = child(ws, e, "live-child", :running)
+      c = child(ws, e, "live-child", :ready)
 
       {:ok, view, _html} = live(conn, ~p"/epics")
-      refute has_element?(view, "#epic-#{e.id}-stuck-awaiting_verification")
+      refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
 
       Ash.update!(c, %{}, action: :await_verification)
 
-      assert has_element?(view, "#epic-#{e.id}-stuck-awaiting_verification")
+      assert has_element?(view, "#epic-#{e.id}-needs-you-0", "verify #{c.id}")
     end
 
     test "a newly created epic appears live", %{conn: conn, ws: ws} do

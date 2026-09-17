@@ -47,10 +47,11 @@ defmodule Arbiter.Tasks do
   require Ash.Query
 
   @doc """
-  Per-status child breakdown + stuck signals for `epics`, keyed by epic id.
+  Per-status child breakdown + the `needs_you` attention signal for `epics`,
+  keyed by epic id.
 
   The read model behind `/epics` (bd-2wmxt5). See `Arbiter.Tasks.EpicRollup`
-  for the bucket definitions and the three derived stuck signals.
+  for the bucket definitions and the `needs_you` rules (bd-58z2tu).
   """
   @spec epic_rollups([Arbiter.Tasks.Issue.t() | String.t()]) ::
           %{String.t() => Arbiter.Tasks.EpicRollup.t()}
