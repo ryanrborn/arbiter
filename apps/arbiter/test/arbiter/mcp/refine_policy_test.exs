@@ -36,7 +36,8 @@ defmodule Arbiter.MCP.RefinePolicyTest do
       catalog = MapSet.new(Catalog.all(), & &1.name)
       stale = Enum.reject(RefinePolicy.decided(), &MapSet.member?(catalog, &1))
 
-      assert stale == [], "RefinePolicy decides tools that are not in the catalog: #{inspect(stale)}"
+      assert stale == [],
+             "RefinePolicy decides tools that are not in the catalog: #{inspect(stale)}"
     end
 
     test "every decision is either :allow or a {:deny, reason} with a non-empty reason" do
@@ -120,10 +121,10 @@ defmodule Arbiter.MCP.RefinePolicyTest do
       coordinator = %Scope{tier: :coordinator}
 
       for %{name: name, tiers: tiers} <- Catalog.all() do
-        assert (name in Enum.map(Catalog.visible(worker), & &1.name)) == (:worker in tiers)
+        assert name in Enum.map(Catalog.visible(worker), & &1.name) == :worker in tiers
 
-        assert (name in Enum.map(Catalog.visible(coordinator), & &1.name)) ==
-                 (:coordinator in tiers)
+        assert name in Enum.map(Catalog.visible(coordinator), & &1.name) ==
+                 :coordinator in tiers
       end
     end
   end

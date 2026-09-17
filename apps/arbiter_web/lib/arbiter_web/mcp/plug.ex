@@ -123,6 +123,7 @@ defmodule ArbiterWeb.MCP.Plug do
 
           {:ok, %Scope{}} ->
             unauthorized(conn, :forbidden)
+
           {:error, reason} ->
             unauthorized(conn, reason)
         end

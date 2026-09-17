@@ -1501,8 +1501,11 @@ defmodule Arbiter.MCP.Tools do
     else
       {:error,
        {:unauthorized,
-        subtree_denial(scope, "neither #{from_id} nor #{to_id} is in it — an edge needs at " <>
-          "least one endpoint inside the subtree")}}
+        subtree_denial(
+          scope,
+          "neither #{from_id} nor #{to_id} is in it — an edge needs at " <>
+            "least one endpoint inside the subtree"
+        )}}
     end
   end
 
