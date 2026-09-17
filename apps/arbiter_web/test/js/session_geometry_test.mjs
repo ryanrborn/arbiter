@@ -104,13 +104,31 @@ test("interacting reclaims the pane at this client's own geometry", () => {
 test("a container that really did change reclaims the pane without being forced", () => {
   const geometry = new PaneGeometry()
   geometry.fit({ cols: 100, rows: 30 })
-  geometry.note({ cols: 120, rows: 40 })
 
   assert.deepEqual(geometry.fit({ cols: 90, rows: 24 }), {
     apply: { cols: 90, rows: 24 },
     announce: { cols: 90, rows: 24 }
   })
   assert.equal(geometry.adopted, false)
+})
+
+test("an adopted client's own box moving is remembered, never announced", () => {
+  const geometry = new PaneGeometry()
+  geometry.fit({ cols: 100, rows: 30 })
+  geometry.note({ cols: 120, rows: 40 })
+
+  // Adopting a geometry larger than the container is what puts a scrollbar on
+  // it, and the scrollbar takes a row back. Answering that with a push is a
+  // resize fight with a client that has done nothing (found in a real browser
+  // by `scripts/verify_session_dock_terminal.mjs`).
+  assert.deepEqual(geometry.fit({ cols: 100, rows: 29 }), { apply: null, announce: null })
+  assert.equal(geometry.adopted, true)
+
+  // ...but it *is* what the next reclaim asks for.
+  assert.deepEqual(geometry.fit({ cols: 100, rows: 29 }, { force: true }), {
+    apply: { cols: 100, rows: 29 },
+    announce: { cols: 100, rows: 29 }
+  })
 })
 
 test("a pane that answers with a geometry we did not ask for is adopted", () => {
@@ -266,6 +284,23 @@ test("a meta never makes a client push its own geometry back", async () => {
 
   assert.deepEqual(client.resizePushes, [{ cols: 100, rows: 30 }], "no answer to the meta")
   assert.deepEqual(client.term, { cols: 132, rows: 43 })
+})
+
+test("an adopted client whose own box moves still never pushes", async () => {
+  const pane = new FakePane()
+  const small = new FakeClient(pane, { cols: 100, rows: 30 }).mount()
+  await sleep(10)
+  const large = new FakeClient(pane, { cols: 120, rows: 40 }).mount()
+  await sleep(20)
+
+  // The scrollbar the adopted geometry put on the container.
+  small.own = { cols: 100, rows: 29 }
+  small.refit()
+  await sleep(20)
+
+  assert.deepEqual(small.resizePushes, [{ cols: 100, rows: 30 }], "still exactly one")
+  assert.deepEqual(small.term, { cols: 120, rows: 40 }, "and still rendering the pane's geometry")
+  assert.deepEqual(large.resizePushes, [{ cols: 120, rows: 40 }])
 })
 
 test("interacting with an adopted client reclaims the pane, and the other adopts", async () => {

@@ -369,6 +369,13 @@ export function createSessionTerminal(el, options = {}) {
 
   el.addEventListener("focusin", reclaim)
 
+  // A browser resize is an interaction, and the one the `ResizeObserver`
+  // cannot be trusted to report as one: it fires for the pane's own scrollbars
+  // too, including the ones adopting another client's larger geometry puts
+  // there. `window`'s own event has no such ambiguity.
+  const onWindowResize = () => reclaim()
+  if (typeof window !== "undefined") window.addEventListener("resize", onWindowResize)
+
   const observer =
     typeof ResizeObserver === "function" ? new ResizeObserver(() => scheduleFit()) : null
   if (observer) observer.observe(el)
@@ -540,6 +547,7 @@ export function createSessionTerminal(el, options = {}) {
       if (settleDeadline) clearTimeout(settleDeadline)
       if (fitTimer) clearTimeout(fitTimer)
       el.removeEventListener("focusin", reclaim)
+      if (typeof window !== "undefined") window.removeEventListener("resize", onWindowResize)
       if (observer) observer.disconnect()
       if (themeObserver) themeObserver.disconnect()
       if (colorScheme && colorScheme.removeEventListener) {

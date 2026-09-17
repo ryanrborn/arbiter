@@ -72,18 +72,27 @@ export class PaneGeometry {
    * often its `ResizeObserver` fires.
    *
    * `force` is "the operator interacted with this client": a keypress, focus,
-   * an expand, a preset. It re-asserts this client's own geometry even when
-   * nothing about the container moved, which is how an adopted pane is
-   * reclaimed.
+   * an expand, a preset, a browser resize. It re-asserts this client's own
+   * geometry even when nothing about the container moved, and it is the *only*
+   * thing that reclaims an adopted pane — because adopting is itself a layout
+   * change. A terminal resized to a geometry larger than its container puts a
+   * scrollbar on the container, the scrollbar takes a row or a column back,
+   * and an unforced refit would read that as the operator resizing something
+   * and push a new geometry at the pane. Two clients doing that in turn is the
+   * ping-pong this whole module exists to prevent, and a real browser found it
+   * (`scripts/verify_session_dock_terminal.mjs`). So while this client is
+   * adopted, a measurement is *remembered* and nothing else: it is what the
+   * next reclaim will ask for, not a reason to ask now.
    */
   fit(measured, { force = false } = {}) {
     const next = geometry(measured)
     if (!next) return { apply: null, announce: null }
 
+    const adopted = this.adopted
     const moved = !same(next, this._own)
     this._own = next
 
-    if (!moved && !force) return { apply: null, announce: null }
+    if (!force && (adopted || !moved)) return { apply: null, announce: null }
 
     // Optimistic: the push has not been acknowledged, but the pane applies it
     // outright and the `meta` that follows only confirms it. Waiting for that

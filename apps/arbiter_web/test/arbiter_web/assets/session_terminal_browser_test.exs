@@ -102,6 +102,7 @@ defmodule ArbiterWeb.SessionTerminalBrowserTest do
         assert output =~ "CHECK a-meta-is-never-answered-with-a-resize: PASS"
         assert output =~ "CHECK focus-reclaims-the-pane-at-this-clients-own-geometry: PASS"
         assert output =~ "CHECK reclaiming-puts-the-real-xterm-back-at-its-own-geometry: PASS"
+        assert output =~ "CHECK a-browser-resize-reclaims-an-adopted-pane: PASS"
 
         refute output =~ ": FAIL"
 

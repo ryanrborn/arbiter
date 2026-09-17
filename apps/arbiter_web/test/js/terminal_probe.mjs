@@ -631,6 +631,32 @@ async function adoptionChecks() {
     handle.term.cols === own.cols && handle.term.rows === own.rows
   )
 
+  // A browser resize reclaims too — and it is the one interaction the pane's
+  // own `ResizeObserver` cannot be trusted to report, because adopting a
+  // geometry bigger than the container puts a scrollbar on it and that fires
+  // the observer as well. While adopted, only `window`'s own resize counts.
+  socket.emit("meta", { ...theirs, attached_clients: 2 })
+  const beforeResize = socket.pushesFor("resize").length
+
+  pane.el.style.width = "560px"
+  pane.el.style.height = "300px"
+  window.dispatchEvent(new Event("resize"))
+
+  const shrank = await until(() => socket.pushesFor("resize").length > beforeResize)
+  const afterResize = socket.pushesFor("resize").at(-1)
+
+  check(
+    "a-browser-resize-reclaims-an-adopted-pane",
+    afterResize
+      ? `${JSON.stringify(afterResize.payload)} term ${handle.term.cols}x${handle.term.rows}`
+      : "no resize",
+    shrank &&
+      afterResize.payload.cols < theirs.cols &&
+      afterResize.payload.rows < theirs.rows &&
+      afterResize.payload.cols === handle.term.cols &&
+      afterResize.payload.rows === handle.term.rows
+  )
+
   handle.dispose()
   pane.parent.remove()
 }
