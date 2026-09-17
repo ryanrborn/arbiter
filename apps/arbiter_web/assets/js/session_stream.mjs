@@ -134,6 +134,9 @@ export class SessionStream {
     this._status = null
     this._stdinSeq = 0
     this._pendingResize = null
+    // The pane's geometry as far as this client knows — what it last pushed,
+    // or what a `meta` last reported (`noteGeometry`). A resize matching it is
+    // a no-op on the wire.
     this._pushedGeometry = null
     this._resizeTimer = null
   }
@@ -233,6 +236,25 @@ export class SessionStream {
       this._resizeTimer = null
       this._flushResize()
     }, this.resizeDebounceMs)
+  }
+
+  /**
+   * Note the geometry the pane actually has, without pushing anything
+   * (bd-4tjw34).
+   *
+   * `resize` dedupes against the last geometry this client sent, which is only
+   * a safe stand-in for the pane's real size while this client is the only one
+   * attached. It is not: another client's resize moves the pane out from under
+   * that cache, and a client that later reclaims the pane at the size it
+   * itself last pushed would have its push swallowed as a no-op — the pane
+   * would stay at the other client's geometry and the reclaim would silently
+   * do nothing. `session_terminal.mjs` calls this for every `meta`, so the
+   * cache tracks the pane rather than this client's history with it.
+   */
+  noteGeometry(cols, rows) {
+    if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return
+
+    this._pushedGeometry = { cols, rows }
   }
 
   /**

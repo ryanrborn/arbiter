@@ -7,7 +7,8 @@ defmodule ArbiterWeb.SessionStreamNodeTest do
   depends on — the `last_seq` rejoin closure, duplicate suppression after a
   reconnect, binary stdin framing, the debounced resize — and `session_fit.mjs`
   and `session_keys.mjs` own the pane's geometry and its copy/paste policy
-  (bd-3r2otb). A JS test suite that
+  (bd-3r2otb), and `session_geometry.mjs` owns which of two browser clients
+  attached to one pane gets to resize it (bd-4tjw34). A JS test suite that
   only runs when somebody remembers to type `node --test` is a suite that
   stops running, so this shells out to it and fails the Elixir build with its
   transcript attached.
@@ -22,11 +23,14 @@ defmodule ArbiterWeb.SessionStreamNodeTest do
   @root Path.expand("../../../../..", __DIR__)
 
   # Named one by one rather than by directory: `node --test <dir>` treats every
-  # file under a path containing `test/` as a suite, and `terminal_probe.mjs`
-  # is a browser probe that imports xterm and would die on `document`.
+  # file under a path containing `test/` as a suite, and neither
+  # `terminal_probe.mjs` (a browser probe that imports xterm and would die on
+  # `document`) nor `support/phoenix_fake.mjs` (shared fakes, no tests of its
+  # own) is one.
   @suites [
     "apps/arbiter_web/test/js/session_stream_test.mjs",
     "apps/arbiter_web/test/js/session_fit_test.mjs",
+    "apps/arbiter_web/test/js/session_geometry_test.mjs",
     "apps/arbiter_web/test/js/session_keys_test.mjs",
     "apps/arbiter_web/test/js/session_dock_test.mjs"
   ]
