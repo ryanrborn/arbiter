@@ -215,9 +215,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir.Interactive do
     root = String.trim_trailing(checkout, "/")
 
     [
-      "Write(#{root}/**)",
-      "Edit(#{root}/**)",
-      "NotebookEdit(#{root}/**)"
+      "Edit(#{root}/**)"
     ]
   end
 

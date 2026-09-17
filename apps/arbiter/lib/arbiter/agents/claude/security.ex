@@ -166,13 +166,11 @@ defmodule Arbiter.Agents.Claude.Security do
   # the explicit floor for the highest-value targets.
   defp expand_category(:no_outside_writes) do
     [
-      "Write(/etc/**)",
       "Edit(/etc/**)",
-      "Write(/usr/**)",
-      "Write(~/.ssh/**)",
+      "Edit(/usr/**)",
       "Edit(~/.ssh/**)",
-      "Write(~/.claude/**)",
-      "Write(~/.config/**)"
+      "Edit(~/.claude/**)",
+      "Edit(~/.config/**)"
     ]
   end
 
