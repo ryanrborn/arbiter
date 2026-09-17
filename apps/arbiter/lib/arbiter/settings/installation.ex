@@ -122,7 +122,7 @@ defmodule Arbiter.Settings.Installation do
       public? true
       allow_nil? true
 
-      description "Who/what last changed board_autopilot_paused, where known (e.g. \"mcp\", \"api\", \"dashboard\")."
+      description ~s[Who/what last changed board_autopilot_paused, where known (e.g. "mcp", "api", "dashboard").]
     end
 
     create_timestamp :created_at
