@@ -207,6 +207,48 @@ test("a viewport too narrow for a side panel is reported once, not every frame",
   assert.deepEqual(reported, [true])
 })
 
+// The other half of that guard, and the one the first round got wrong: a
+// `set` is not a frame of a drag, it is the answer to a question the server
+// has just asked. The server clears `size_fallback?` on every `set_size`,
+// `expand_window/2` and `collapse_window/1` and then re-asks over
+// `session-dock:size` — so if a re-asked size that did not change were
+// swallowed here, the server would sit at `false` forever and render a side
+// panel on a viewport that cannot fit it, un-inset and unlabelled.
+test("a re-asked size reports the fallback again even though it did not change", () => {
+  const doc = fakeDoc()
+  const { subject, reported } = controller(doc, { viewportWidth: 1000 })
+
+  subject.set("side")
+  assert.deepEqual(reported, [true])
+
+  // Clicking the already-pressed Side button, or expanding another window
+  // whose stored size is also Side: same size, same answer, still said.
+  subject.set("side")
+  assert.deepEqual(reported, [true, true])
+
+  subject.set("side")
+  assert.equal(doc.documentElement.dataset.dockSize, "max")
+  assert.deepEqual(reported, [true, true, true])
+
+  // A resize in between is still only reported when it changes something.
+  subject.refresh()
+  assert.deepEqual(reported, [true, true, true])
+})
+
+// The same path on a viewport that *does* fit: re-asking has to re-confirm
+// `false` too, since a rejoin re-mounts the server at `false` while this hook
+// instance survives holding `true`.
+test("a re-asked size that fits re-confirms that there is no fallback", () => {
+  const doc = fakeDoc()
+  const { subject, reported } = controller(doc, { viewportWidth: 1920 })
+
+  subject.set("side")
+  subject.set("side")
+
+  assert.equal(doc.documentElement.dataset.dockSize, "side")
+  assert.deepEqual(reported, [false, false])
+})
+
 test("a window that grows back into a side panel takes the fallback back", () => {
   const doc = fakeDoc()
   let width = 1000

@@ -835,13 +835,6 @@ defmodule ArbiterWeb.SessionDockLive do
     end
   end
 
-  # The geometry of one window, by preset. Collapsed windows are a strip of
-  # title bars and have no size of their own.
-  #
-  # Side panel and Maximized leave the dock's flex row entirely (`fixed`), so
-  # the strip below keeps the roster and every other window's title bar —
-  # acceptance 6 — while the expanded window's own title bar travels with the
-  # panel it controls. Both stop at the strip rather than covering it.
   # The title-bar control's three options, in the order they widen.
   defp size_presets do
     [
@@ -851,6 +844,19 @@ defmodule ArbiterWeb.SessionDockLive do
     ]
   end
 
+  # The geometry of one window, by preset. Collapsed windows are a strip of
+  # title bars and have no size of their own.
+  #
+  # Side panel and Maximized leave the dock's flex row entirely (`fixed`), so
+  # the strip below keeps the roster and every other window's title bar —
+  # acceptance 6 — while the expanded window's own title bar travels with the
+  # panel it controls. Both stop at the strip rather than covering it.
+  #
+  # "Stops at the strip" is about *space*, not about paint order: a `fixed`
+  # window has no z-index of its own but is still a positioned descendant, so
+  # inside `#session-dock-root`'s stacking context it paints over anything
+  # in-flow below it. The roster's panels open upward into exactly the band a
+  # Maximized window covers, which is why `roster/1` carries `relative z-40`.
   defp window_size_class(false, _size), do: "basis-[11rem] max-w-[11rem] min-w-[5rem]"
 
   defp window_size_class(true, "compact"), do: "basis-[44rem] max-w-[44rem] min-w-[16rem]"
@@ -1228,7 +1234,17 @@ defmodule ArbiterWeb.SessionDockLive do
 
   defp roster(assigns) do
     ~H"""
-    <div class="pointer-events-auto flex flex-col justify-end shrink basis-[268px] min-w-[8.5rem] max-w-[268px]">
+    <%!-- `relative z-40` so the roster and launch panels, which open upward
+          from the strip, paint *above* a Maximized window (bd-covojz).
+          `window_size_class(true, "max")` is `fixed` with no z-index of its
+          own, which still puts it ahead of this column's in-flow content
+          inside the root's `z-30` stacking context — and its frame is opaque,
+          so without this the toggle would look like it did nothing.
+          Acceptance 6: the roster stays reachable in every size. --%>
+    <div
+      id="session-dock-roster-column"
+      class="pointer-events-auto relative z-40 flex flex-col justify-end shrink basis-[268px] min-w-[8.5rem] max-w-[268px]"
+    >
       <%!-- New session (bd-cdut29): the exact same options `/sessions`
             launches with, opened without navigating away from wherever the
             operator is. See `SessionIndexLive.launch_form/1`. --%>

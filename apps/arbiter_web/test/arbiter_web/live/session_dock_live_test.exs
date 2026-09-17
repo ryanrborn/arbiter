@@ -1628,6 +1628,53 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       refute has_element?(dock, "#session-dock-size-fallback-#{session.id}")
     end
 
+    # The server clears `size_fallback?` on every size change and re-asks the
+    # client, which is the only half of the loop it can run. The failure mode
+    # that cost round 1 was the *client* swallowing a re-asked answer that had
+    # not changed, leaving the server at `false` and a side panel rendered on a
+    # viewport that cannot fit it. Both re-ask paths are checked here — the
+    # already-pressed button and expanding another window — and the client's
+    # now-unconditional answer to each puts the note back.
+    test "a re-asked size is re-asked on the wire, and the note comes back with the answer",
+         %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+      {_view, dock} = dock(conn)
+      open!(dock, a)
+
+      render_click(element(dock, "#session-dock-size-side-#{a.id}"))
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+      assert has_element?(dock, "#session-dock-size-fallback-#{a.id}")
+
+      # Clicking the already-pressed Side button. The claim was about the size
+      # that *was* rendering, so it is dropped — and re-asked in the same
+      # breath.
+      render_click(element(dock, "#session-dock-size-side-#{a.id}"))
+      refute has_element?(dock, "#session-dock-size-fallback-#{a.id}")
+      assert_push_event(dock, "session-dock:size", %{id: _, size: "side"})
+
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+      assert has_element?(dock, ~s(#session-dock-window-#{a.id}[data-size="max"]))
+      assert has_element?(dock, "#session-dock-size-fallback-#{a.id}")
+
+      # And expanding a second window whose stored size is also Side: the
+      # requested size never changed, so only an unconditional answer gets the
+      # note onto the new window.
+      render_hook(dock, "restore", %{
+        "open" => [a.id, b.id],
+        "expanded" => b.id,
+        "sizes" => %{a.id => "side", b.id => "side"}
+      })
+
+      refute has_element?(dock, "#session-dock-size-fallback-#{b.id}")
+      assert_push_event(dock, "session-dock:size", %{id: _, size: "side"})
+
+      render_hook(dock, "size_fallback", %{"fallback" => true})
+
+      assert has_element?(dock, ~s(#session-dock-window-#{b.id}[data-size="max"]))
+      assert has_element?(dock, "#session-dock-size-fallback-#{b.id}")
+    end
+
     test "a fallback claim never turns a Compact window into a Maximized one",
          %{conn: conn} do
       session = launch!()
@@ -1661,6 +1708,17 @@ defmodule ArbiterWeb.SessionDockLiveTest do
         html = render(dock)
         assert length(Regex.scan(~r/id="session-dock-terminal-/, html)) == 1
       end
+
+      # "Reachable" is not "present in the HTML". A Maximized window is
+      # `fixed`, so inside the dock root's stacking context it paints over the
+      # roster's in-flow column unless that column is lifted above it — and its
+      # frame is opaque, so the toggle would look like it did nothing.
+      render_click(element(dock, "#session-dock-size-max-#{a.id}"))
+      render_click(element(dock, "#session-dock-roster-toggle"))
+
+      assert has_element?(dock, "#session-dock-roster-panel")
+      assert has_element?(dock, ~s(#session-dock-roster-column[class*="relative"]))
+      assert has_element?(dock, ~s(#session-dock-roster-column[class*="z-40"]))
 
       # And expanding the other one still collapses this one, side panel or not.
       render_click(element(dock, "#session-dock-size-side-#{a.id}"))

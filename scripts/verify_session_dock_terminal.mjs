@@ -610,10 +610,28 @@ async function run(page) {
       `overflow=${maximized.paneOverflow}px`
   )
 
+  // "Reachable" has to mean *clickable*, not "has a rectangle": a Maximized
+  // window is `fixed` and opaque, and the roster's panel opens upward into
+  // exactly the band it covers. So this opens the roster and hit-tests it —
+  // `elementFromPoint` at the panel's centre has to land inside the panel, not
+  // on the window painted over it.
+  const rosterHit = await rosterHitTest(page)
+
   check(
     "maximized-keeps-the-roster-reachable",
-    maxLayout.rosterVisible,
-    `the roster toggle is ${maxLayout.rosterVisible ? "" : "not "}on screen`
+    maxLayout.rosterVisible && rosterHit.panelOnTop && rosterHit.toggleOnTop,
+    `toggle ${maxLayout.rosterVisible ? "" : "off-screen, "}hit ` +
+      `#${rosterHit.atPanelCentre || "nothing"} at the panel's centre and ` +
+      `#${rosterHit.atToggleCentre || "nothing"} on the toggle`
+  )
+
+  await screenshot("maximized-roster")
+
+  // Back to just the window for the screenshot and for what follows.
+  await page.eval(`document.getElementById("session-dock-roster-toggle").click()`)
+  await page.poll(
+    `!document.getElementById("session-dock-roster-panel")`,
+    "the roster never closed again"
   )
 
   await screenshot("maximized")
@@ -719,6 +737,45 @@ function layout(page, id) {
       viewportHeight: window.innerHeight,
       cols: xterm ? xterm.cols : null,
       rows: xterm ? xterm.rows : null
+    }
+  })()`)
+}
+
+// Acceptance 6's other half: with a Maximized window on screen, does clicking
+// the roster toggle actually show a roster? The window is `fixed` with no
+// z-index of its own, which still paints it over anything in-flow in the dock
+// root — so the answer is a hit test at the panel's centre rather than a
+// bounding box, which an element painted *behind* another one still has.
+async function rosterHitTest(page) {
+  await page.eval(`(() => {
+    if (!document.getElementById("session-dock-roster-panel")) {
+      document.getElementById("session-dock-roster-toggle").click()
+    }
+  })()`)
+  await page.poll(
+    `!!document.getElementById("session-dock-roster-panel")`,
+    "the roster never opened under a Maximized window"
+  )
+
+  return page.json(`(() => {
+    const topmost = (rect) => {
+      const el = document.elementFromPoint(
+        Math.round(rect.left + rect.width / 2),
+        Math.round(rect.top + rect.height / 2)
+      )
+      return el ? el.closest("[id]") : null
+    }
+
+    const panel = document.getElementById("session-dock-roster-panel")
+    const toggle = document.getElementById("session-dock-roster-toggle")
+    const atPanel = panel ? topmost(panel.getBoundingClientRect()) : null
+    const atToggle = toggle ? topmost(toggle.getBoundingClientRect()) : null
+
+    return {
+      atPanelCentre: atPanel ? atPanel.id : null,
+      atToggleCentre: atToggle ? atToggle.id : null,
+      panelOnTop: !!atPanel && !!panel && (atPanel === panel || panel.contains(atPanel)),
+      toggleOnTop: !!atToggle && !!toggle && (atToggle === toggle || toggle.contains(atToggle))
     }
   })()`)
 }

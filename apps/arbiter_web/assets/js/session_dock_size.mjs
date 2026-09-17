@@ -175,16 +175,27 @@ export function applyColumnFloor(doc, cellWidth) {
  *
  * `set` is the server's word (a preset was picked, a window was expanded or
  * collapsed); `refresh` is the browser's (the viewport moved, the font
- * landed). Both go through the same decision, and `onFallback` fires only when
- * the answer *changes* — a resize drag must not put a message on the wire per
- * frame.
+ * landed). Both go through the same decision, but they do not report it the
+ * same way:
+ *
+ *   * `refresh` reports only a **change**, because a resize drag is hundreds
+ *     of these and a message per frame is what the debounce and this guard
+ *     exist to prevent;
+ *   * `set` reports **always**, because it is the answer to a question the
+ *     server has just asked. The server clears `size_fallback?` whenever the
+ *     expanded window changes (`set_size`, `expand_window/2`,
+ *     `collapse_window/1`) and then re-asks over `session-dock:size` — so a
+ *     change-only answer to a size that did not change would be swallowed
+ *     here and leave the server at `false` forever, rendering a side panel on
+ *     a viewport that cannot fit it, un-inset and unlabelled. One discrete
+ *     event, one answer.
  */
 export function createDockSizeController({ doc, viewportWidth, columnWidth, onFallback }) {
   let requested = "compact"
   let fallback = false
   let size = "compact"
 
-  const decide = () => {
+  const decide = ({ always = false } = {}) => {
     const resolved = resolveDockSize(requested, {
       viewportWidth: viewportWidth(),
       minColumnsWidth: minColumnsWidth(columnWidth())
@@ -195,18 +206,18 @@ export function createDockSizeController({ doc, viewportWidth, columnWidth, onFa
     const root = documentRoot(doc)
     if (root) root.dataset.dockSize = size
 
-    if (resolved.fallback !== fallback) {
-      fallback = resolved.fallback
-      if (onFallback) onFallback(fallback)
-    }
+    const changed = resolved.fallback !== fallback
+    fallback = resolved.fallback
+
+    if ((changed || always) && onFallback) onFallback(fallback)
   }
 
   return {
     set(next) {
       requested = normalizeDockSize(next)
-      decide()
+      decide({ always: true })
     },
-    refresh: decide,
+    refresh: () => decide(),
     get size() {
       return size
     },
