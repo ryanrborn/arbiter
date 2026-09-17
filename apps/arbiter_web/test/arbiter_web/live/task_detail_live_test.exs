@@ -2425,6 +2425,53 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#epic-cost-rollup-breakdown", "1 upcoming")
     end
 
+    test "shows blocked, in-flight, and sub-epic children — none as excluded", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})
+
+      {:ok, blocked} =
+        Ash.create(Issue, %{title: "blocked child", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, blocked} = Ash.update(blocked, %{}, action: :promote_to_ready)
+      link_parent_of(epic, blocked)
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: blocked.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      {:ok, running_child} =
+        Ash.create(Issue, %{
+          title: "running child",
+          workspace_id: ws.id,
+          acceptance: "- works"
+        })
+
+      {:ok, running_child} = Ash.update(running_child, %{}, action: :promote_to_ready)
+      {:ok, running_child} = Ash.update(running_child, %{status: :in_progress})
+      link_parent_of(epic, running_child)
+
+      {:ok, sub_epic} =
+        Ash.create(Issue, %{title: "sub-epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, sub_epic} = Ash.update(sub_epic, %{}, action: :promote_to_ready)
+      link_parent_of(epic, sub_epic)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#epic-cost-rollup-breakdown", "1 blocked")
+      assert has_element?(view, "#epic-cost-rollup-breakdown", "1 in flight")
+      assert has_element?(view, "#epic-cost-rollup-breakdown", "1 sub-epic")
+      refute has_element?(view, "#epic-cost-rollup-breakdown", "excluded")
+    end
+
     test "a non-epic issue does not render the cost rollup panel", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
 

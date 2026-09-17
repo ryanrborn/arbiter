@@ -2591,10 +2591,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
-              <%!-- Design bd-9jj5lf §4 (bd-18vl9q): the epic cost rollup —
+              <%!-- Design bd-9jj5lf §4 (bd-8h5iyc): the epic cost rollup —
                    "$X spent · ~$Y-Z to go" over closed children's actual
-                   spend plus the summed p25-p75 estimates of open,
-                   dispatchable children. Worker spend only, per §7. --%>
+                   spend plus a defensible remaining estimate across every
+                   open, promoted child (dispatchable, blocked, in flight, or
+                   itself a sub-epic — none of those change a child's cost
+                   basis, only when it runs). Worker spend only, per §7. --%>
               <.panel
                 :if={@epic_cost_rollup}
                 id="panel-epic-cost-rollup"
@@ -2618,13 +2620,28 @@ defmodule ArbiterWeb.TaskDetailLive do
                     <span>{@epic_cost_rollup.closed_count} closed</span>
                     <span>{@epic_cost_rollup.dispatchable_count} dispatchable</span>
                     <span
-                      :if={@epic_cost_rollup.dispatchable_unestimated_count > 0}
-                      title="Dispatchable children the estimator has no history for"
+                      :if={@epic_cost_rollup.blocked_count > 0}
+                      title="Blocked children — full estimate, since being blocked doesn't change cost"
                     >
-                      ({@epic_cost_rollup.dispatchable_unestimated_count} no estimate)
+                      {@epic_cost_rollup.blocked_count} blocked
                     </span>
-                    <span title="Blocked, parked, or non-dispatchable epic sub-children">
-                      {@epic_cost_rollup.excluded_count} excluded
+                    <span
+                      :if={@epic_cost_rollup.in_flight_count > 0}
+                      title="Running or awaiting verification — estimate minus spend so far"
+                    >
+                      {@epic_cost_rollup.in_flight_count} in flight
+                    </span>
+                    <span
+                      :if={@epic_cost_rollup.sub_epic_count > 0}
+                      title="Sub-epics — their own rollup's remaining estimate"
+                    >
+                      {@epic_cost_rollup.sub_epic_count} sub-epic
+                    </span>
+                    <span
+                      :if={@epic_cost_rollup.unestimated_count > 0}
+                      title="Children the estimator has no history for"
+                    >
+                      ({@epic_cost_rollup.unestimated_count} no estimate)
                     </span>
                     <span title="Unpromoted Backlog children — not committed work yet">
                       {@epic_cost_rollup.upcoming_count} upcoming

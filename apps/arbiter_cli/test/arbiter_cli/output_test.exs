@@ -93,7 +93,9 @@ defmodule ArbiterCli.OutputTest do
           "to_go_high" => 16.0,
           "closed_count" => 2,
           "dispatchable_count" => 2,
-          "excluded_count" => 1,
+          "blocked_count" => 1,
+          "in_flight_count" => 1,
+          "sub_epic_count" => 1,
           "upcoming_count" => 3
         }
       }
@@ -104,7 +106,9 @@ defmodule ArbiterCli.OutputTest do
       assert out =~ "~$6.00–$16.00 to go"
       assert out =~ "closed=2"
       assert out =~ "dispatchable=2"
-      assert out =~ "excluded=1"
+      assert out =~ "blocked=1"
+      assert out =~ "in_flight=1"
+      assert out =~ "sub_epic=1"
       assert out =~ "upcoming=3"
     end
 
