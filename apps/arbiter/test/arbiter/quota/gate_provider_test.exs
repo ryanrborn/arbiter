@@ -41,6 +41,26 @@ defmodule Arbiter.Quota.GateProviderTest do
     |> struct(attrs)
   end
 
+  # A synthetic Antigravity row with a persisted per-bucket `models` list, in
+  # the same shape `Arbiter.Quota.CloudCode.antigravity/1` writes (bd-7qj58o).
+  defp antigravity_quota(models) do
+    %GoogleQuota{
+      workspace_id: "ws-x",
+      provider: "antigravity",
+      captured_at: now(),
+      reset_at: ahead(3600),
+      snapshot: %{"models" => models}
+    }
+  end
+
+  defp agy_bucket(group, window, remaining_percentage, reset_at) do
+    %{
+      "model_id" => "#{group}_#{window}",
+      "remaining_percentage" => remaining_percentage,
+      "reset_at" => reset_at && DateTime.to_iso8601(reset_at)
+    }
+  end
+
   describe "Gate.Snapshot.normalize/1" do
     test "nil normalizes to nil (fail-open)" do
       assert Snapshot.normalize(nil) == nil
@@ -198,6 +218,106 @@ defmodule Arbiter.Quota.GateProviderTest do
     end
   end
 
+  describe "Gate.Throttle.check/4 — Antigravity sub-buckets (bd-7qj58o AC3/AC4)" do
+    test "holds when the 5h bucket is at/over cap" do
+      quota =
+        antigravity_quota([
+          agy_bucket("gemini_models", "5h", 3.0, ahead(3600)),
+          agy_bucket("gemini_models", "weekly", 50.0, ahead(86_400)),
+          agy_bucket("claude_and_gpt_models", "5h", 90.0, ahead(3600)),
+          agy_bucket("claude_and_gpt_models", "weekly", 90.0, ahead(86_400))
+        ])
+
+      assert {:hold, reason} = Gate.Throttle.check(nil, quota, ws(), [])
+      assert reason.window == "5h"
+      assert reason.provider == "antigravity"
+    end
+
+    test "holds on the weekly bucket per the existing long-window rule, even with 5h headroom" do
+      quota =
+        antigravity_quota([
+          agy_bucket("gemini_models", "5h", 90.0, ahead(3600)),
+          agy_bucket("gemini_models", "weekly", 5.0, ahead(86_400)),
+          agy_bucket("claude_and_gpt_models", "5h", 90.0, ahead(3600)),
+          agy_bucket("claude_and_gpt_models", "weekly", 90.0, ahead(86_400))
+        ])
+
+      assert {:hold, reason} = Gate.Throttle.check(nil, quota, ws(), [])
+      assert reason.window == "weekly"
+    end
+
+    test "allows when every bucket has headroom" do
+      quota =
+        antigravity_quota([
+          agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
+          agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
+          agy_bucket("claude_and_gpt_models", "5h", 80.0, ahead(3600)),
+          agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
+        ])
+
+      assert Gate.Throttle.check(nil, quota, ws(), []) == :allow
+    end
+
+    test "a claude-*/gpt-* model gates on the \"Claude and GPT models\" bucket, not Gemini's" do
+      quota =
+        antigravity_quota([
+          agy_bucket("gemini_models", "5h", 3.0, ahead(3600)),
+          agy_bucket("gemini_models", "weekly", 3.0, ahead(86_400)),
+          agy_bucket("claude_and_gpt_models", "5h", 80.0, ahead(3600)),
+          agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
+        ])
+
+      # The Gemini Models bucket is blown, but this dispatch is routed to a
+      # claude-* model — it must read the healthy Claude/GPT bucket, not the
+      # unrelated Gemini one.
+      assert Gate.Throttle.check(nil, quota, ws(), model: "claude-opus-4-6-thinking") == :allow
+    end
+
+    test "a gpt-* model also gates on the \"Claude and GPT models\" bucket" do
+      quota =
+        antigravity_quota([
+          agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
+          agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
+          agy_bucket("claude_and_gpt_models", "5h", 3.0, ahead(3600)),
+          agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
+        ])
+
+      assert {:hold, reason} = Gate.Throttle.check(nil, quota, ws(), model: "gpt-5.1")
+      assert reason.window == "5h"
+    end
+
+    test "a gemini-* model gates on the \"Gemini Models\" bucket, not Claude/GPT's" do
+      quota =
+        antigravity_quota([
+          agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
+          agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
+          agy_bucket("claude_and_gpt_models", "5h", 3.0, ahead(3600)),
+          agy_bucket("claude_and_gpt_models", "weekly", 3.0, ahead(86_400))
+        ])
+
+      assert Gate.Throttle.check(nil, quota, ws(), model: "gemini-3.8-flash-medium") == :allow
+    end
+
+    test "with no model hint, gates conservatively on the worst of both groups" do
+      quota =
+        antigravity_quota([
+          agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
+          agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
+          agy_bucket("claude_and_gpt_models", "5h", 3.0, ahead(3600)),
+          agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
+        ])
+
+      assert {:hold, _} = Gate.Throttle.check(nil, quota, ws(), [])
+    end
+
+    test "a snapshot with no parseable buckets falls back to the representative figure" do
+      quota = antigravity_quota([]) |> struct(used_percent: 97.0, reset_at: ahead(3600))
+
+      assert {:hold, reason} = Gate.Throttle.check(nil, quota, ws(), [])
+      assert reason.window == "used"
+    end
+  end
+
   describe "Gate.Continue.check/4 — non-Anthropic providers" do
     test "tags overage when Codex is past its cap" do
       assert {:overage, spend} =
@@ -247,9 +367,15 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
+      # `:gemini` resolves dynamically (bd-7qj58o) to whichever quota code
+      # matches the executable that would actually run on this host — seed
+      # that code so the test doesn't depend on whether `agy` happens to be
+      # on PATH.
+      gemini_code = Quota.provider_code(:gemini)
+
       Ash.create!(GoogleQuota, %{
         workspace_id: workspace.id,
-        provider: "gemini_cli",
+        provider: gemini_code,
         used_percent: 77.0,
         captured_at: now()
       })
@@ -262,7 +388,8 @@ defmodule Arbiter.Quota.GateProviderTest do
       assert %GoogleQuota{used_percent: 77.0} =
                Quota.latest_for_provider(workspace.id, :gemini)
 
-      assert Quota.latest_for_provider(workspace.id, :antigravity) == nil
+      other_code = if gemini_code == "gemini_cli", do: :antigravity, else: :gemini_cli
+      assert Quota.latest_for_provider(workspace.id, other_code) == nil
       assert Quota.latest_for_provider(workspace.id, :nonesuch) == nil
     end
   end
@@ -378,7 +505,7 @@ defmodule Arbiter.Quota.GateProviderTest do
 
       Ash.create!(GoogleQuota, %{
         workspace_id: workspace.id,
-        provider: "gemini_cli",
+        provider: Quota.provider_code(:gemini),
         used_percent: 99.0,
         reset_at: ahead(3600),
         captured_at: now()

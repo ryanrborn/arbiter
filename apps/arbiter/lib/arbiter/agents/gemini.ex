@@ -155,7 +155,15 @@ defmodule Arbiter.Agents.Gemini do
 
   defp tool_result_line?(_), do: false
 
-  defp resolve_executable do
+  @doc """
+  Resolve which CLI binary a Gemini-provider dispatch will actually run —
+  `agy` (preferred) falling back to the upstream `gemini` CLI. Public so
+  `Arbiter.Quota.provider_code/1` (bd-7qj58o) can key the quota-gate lookup
+  off the same PATH probe instead of duplicating it and risking drift.
+  """
+  @spec resolve_executable() ::
+          {:ok, {:agy | :gemini, String.t()}} | {:error, {:executable_not_found, String.t()}}
+  def resolve_executable do
     case System.find_executable("agy") do
       path when is_binary(path) ->
         {:ok, {:agy, path}}

@@ -47,6 +47,14 @@ defmodule Arbiter.Quota.Gate.Snapshot do
   alias Arbiter.Quota.CodexQuota
   alias Arbiter.Quota.GoogleQuota
 
+  # Antigravity's `/usage` groups slug to these prefixes (see
+  # `Arbiter.Quota.CloudCode`'s `agy_bucket_id/2`): "Gemini Models" ->
+  # "gemini_models", "Claude and GPT models" -> "claude_and_gpt_models", each
+  # combined with a `_5h` / `_weekly` window suffix into the model id
+  # persisted in `GoogleQuota.snapshot["models"]`.
+  @antigravity_gemini_group "gemini_models"
+  @antigravity_claude_gpt_group "claude_and_gpt_models"
+
   @type t :: %__MODULE__{
           provider: String.t() | nil,
           utilization: float() | nil,
@@ -81,13 +89,46 @@ defmodule Arbiter.Quota.Gate.Snapshot do
   Accepts `AnthropicQuota` / `CodexQuota` / `GoogleQuota` rows, an already
   normalized `#{inspect(__MODULE__)}`, or `nil`. Anything else → `nil`
   (fail open).
+
+  `opts[:model]` is consulted only for an `"antigravity"` `GoogleQuota` row
+  (bd-7qj58o AC4): it picks which of the four Antigravity sub-buckets
+  ("Gemini Models" / "Claude and GPT models", each with a `5h` and a
+  `weekly` window) the primary/secondary windows are read from — a
+  `claude-*` / `gpt-*` model routes to "Claude and GPT models", anything
+  else (including `nil`, unresolved) to "Gemini Models". See
+  `antigravity_windows/2`.
   """
-  @spec normalize(term()) :: t() | nil
-  def normalize(nil), do: nil
+  @spec normalize(term(), keyword()) :: t() | nil
+  def normalize(quota, opts \\ [])
 
-  def normalize(%__MODULE__{} = snapshot), do: snapshot
+  def normalize(nil, _opts), do: nil
 
-  def normalize(%AnthropicQuota{} = q) do
+  def normalize(%__MODULE__{} = snapshot, _opts), do: snapshot
+
+  def normalize(%GoogleQuota{provider: "antigravity"} = q, opts) do
+    case antigravity_windows(q, Keyword.get(opts, :model)) do
+      {primary, secondary} ->
+        %__MODULE__{
+          provider: q.provider,
+          utilization: primary.utilization,
+          status: nil,
+          reset_at: primary.reset_at,
+          captured_at: q.captured_at,
+          window_label: "5h",
+          secondary_utilization: secondary.utilization,
+          secondary_status: nil,
+          secondary_reset_at: secondary.reset_at,
+          secondary_window_label: "weekly"
+        }
+
+      nil ->
+        normalize_google(q)
+    end
+  end
+
+  def normalize(%GoogleQuota{} = q, _opts), do: normalize_google(q)
+
+  def normalize(%AnthropicQuota{} = q, _opts) do
     %__MODULE__{
       provider: q.provider,
       utilization: q.utilization_5h,
@@ -104,7 +145,7 @@ defmodule Arbiter.Quota.Gate.Snapshot do
     }
   end
 
-  def normalize(%CodexQuota{} = q) do
+  def normalize(%CodexQuota{} = q, _opts) do
     %__MODULE__{
       provider: q.provider,
       utilization: fraction(q.session_used_percent),
@@ -122,7 +163,15 @@ defmodule Arbiter.Quota.Gate.Snapshot do
     }
   end
 
-  def normalize(%GoogleQuota{} = q) do
+  def normalize(_other, _opts), do: nil
+
+  # The pre-bd-7qj58o representative-used-percent projection: a single
+  # collapsed "worst of everything" figure with no secondary window. Still
+  # used for `"gemini_cli"` rows (Gemini CLI reports one representative
+  # model, no explicit windows) and as the fallback for an `"antigravity"`
+  # row whose stored snapshot carries no parseable per-bucket models (stale
+  # schema, transient fetch error preserved via `preserve_last_good/3`, etc).
+  defp normalize_google(%GoogleQuota{} = q) do
     %__MODULE__{
       provider: q.provider,
       utilization: fraction(q.used_percent),
@@ -135,7 +184,77 @@ defmodule Arbiter.Quota.Gate.Snapshot do
     }
   end
 
-  def normalize(_other), do: nil
+  # Resolve the Antigravity 5h + weekly readings to gate on, from the
+  # per-bucket `models` list persisted in `GoogleQuota.snapshot` (bd-7qj58o
+  # AC3/AC4). Returns `{primary, secondary}` — each `%{utilization:, reset_at:}`
+  # — or `nil` when the snapshot carries no matching buckets (falls back to
+  # `normalize_google/1`'s single collapsed figure).
+  #
+  # `model` picks the sub-bucket group: `claude-*` / `gpt-*` gates on "Claude
+  # and GPT models" (AC4), anything else (a `gemini-*` model, or `nil` when
+  # the caller doesn't know the model yet) gates on "Gemini Models" — the
+  # worst reading across *both* groups for that window when the group-exact
+  # bucket isn't found, so an unclassified dispatch still holds rather than
+  # silently reading an empty/headroom bucket.
+  defp antigravity_windows(%GoogleQuota{snapshot: snapshot}, model) do
+    models = models_from(snapshot)
+    group = bucket_group(model)
+
+    with [_ | _] <- models,
+         %{} = primary <- bucket_reading(models, group, "5h"),
+         %{} = secondary <- bucket_reading(models, group, "weekly") do
+      {primary, secondary}
+    else
+      _ -> nil
+    end
+  end
+
+  defp bucket_group(model) when is_binary(model) do
+    if String.starts_with?(model, "claude-") or String.starts_with?(model, "gpt-") do
+      @antigravity_claude_gpt_group
+    else
+      @antigravity_gemini_group
+    end
+  end
+
+  defp bucket_group(_model), do: nil
+
+  defp bucket_reading(models, group, window) do
+    exact = Enum.filter(models, &(Map.get(&1, "model_id") == "#{group}_#{window}"))
+    candidates = if exact != [], do: exact, else: window_candidates(models, window)
+
+    case Enum.max_by(candidates, &used_percent/1, fn -> nil end) do
+      nil ->
+        nil
+
+      worst ->
+        %{utilization: fraction(used_percent(worst)), reset_at: parse_reset(worst["reset_at"])}
+    end
+  end
+
+  defp window_candidates(models, window) do
+    Enum.filter(models, fn m ->
+      case Map.get(m, "model_id") do
+        id when is_binary(id) -> String.ends_with?(id, "_#{window}")
+        _ -> false
+      end
+    end)
+  end
+
+  defp used_percent(%{"remaining_percentage" => rp}) when is_number(rp), do: 100.0 - rp
+  defp used_percent(_), do: 100.0
+
+  defp models_from(%{"models" => models}) when is_list(models), do: models
+  defp models_from(_), do: []
+
+  defp parse_reset(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _} -> dt
+      _ -> nil
+    end
+  end
+
+  defp parse_reset(_), do: nil
 
   # Codex and Google report 0-100 used-percents; the gate threshold is a 0-1
   # fraction (Anthropic's native unit).

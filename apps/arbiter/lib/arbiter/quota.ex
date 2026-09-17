@@ -128,12 +128,17 @@ defmodule Arbiter.Quota do
   # Quota-provider code for each dispatchable agent type / provider alias. The
   # gate resolves the provider a dispatch will actually run on and reads that
   # provider's snapshot table through `latest_for_provider/2` (bd-2mpo3f).
+  #
+  # `"gemini"` (the agent-type alias, as opposed to the concrete `"gemini_cli"`
+  # / `"antigravity"` codes) is deliberately absent here — it is resolved
+  # dynamically in `provider_code/1` via `Arbiter.Agents.Gemini.resolve_executable/0`
+  # (bd-7qj58o) rather than pinned to a static code, so the gate always reads
+  # the quota table matching the CLI that will actually run.
   @provider_codes %{
     "claude" => "claude",
     "anthropic" => "claude",
     "codex" => "codex",
     "openai" => "codex",
-    "gemini" => "gemini_cli",
     "gemini_cli" => "gemini_cli",
     "antigravity" => "antigravity"
   }
@@ -168,13 +173,30 @@ defmodule Arbiter.Quota do
   Canonical quota provider code for an agent type / provider alias, or `nil`
   when the provider has no tracked quota. `:gemini` and `:antigravity` both
   resolve into the Google Cloud Code table under distinct codes.
+
+  `"gemini"` is resolved dynamically (bd-7qj58o): it reuses
+  `Arbiter.Agents.Gemini.resolve_executable/0` — the same PATH probe the
+  adapter itself uses to pick a CLI to spawn — to return `"antigravity"` when
+  `agy` is what will actually run, or `"gemini_cli"` when the upstream CLI (or
+  neither, matching the adapter's historical dispatch-fails default) would.
+  A caller that already names the concrete code (`"gemini_cli"` /
+  `"antigravity"`) gets it back verbatim — only the ambiguous agent-type alias
+  is resolved live.
   """
   @spec provider_code(atom() | String.t() | nil) :: String.t() | nil
   def provider_code(provider) when is_atom(provider) and not is_nil(provider),
     do: provider_code(Atom.to_string(provider))
 
+  def provider_code("gemini"), do: gemini_provider_code()
   def provider_code(provider) when is_binary(provider), do: Map.get(@provider_codes, provider)
   def provider_code(_), do: nil
+
+  defp gemini_provider_code do
+    case Arbiter.Agents.Gemini.resolve_executable() do
+      {:ok, {:agy, _path}} -> "antigravity"
+      _ -> "gemini_cli"
+    end
+  end
 
   @doc """
   Best-effort resolution of the quota provider a workspace's dispatches run
