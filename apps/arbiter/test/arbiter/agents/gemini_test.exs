@@ -488,4 +488,98 @@ defmodule Arbiter.Agents.GeminiTest do
       assert {"GEMINI_THINKING_LEVEL", "high"} in env
     end
   end
+
+  describe "splice_prompt/2 — resume (bd-b7e33c)" do
+    test "agy branch: translates --resume into --conversation <id> and preserves --print-timeout/--model/--effort" do
+      argv = [
+        "sh",
+        "-c",
+        ~s(exec "$@" < /dev/null),
+        "sh",
+        "/usr/local/bin/agy",
+        "-p",
+        "ORIGINAL TASK PROMPT",
+        "--dangerously-skip-permissions",
+        "--model",
+        "gemini-3.1-pro",
+        "--effort",
+        "high",
+        "--output-format",
+        "stream-json",
+        "--print-timeout",
+        "300s"
+      ]
+
+      assert {:ok, out} =
+               Gemini.splice_prompt(argv, ["--resume", "sess-abc", "CONTINUE PROMPT"])
+
+      idx = Enum.find_index(out, &(&1 == "-p"))
+      assert Enum.slice(out, idx, 2) == ["-p", "CONTINUE PROMPT"]
+      refute "ORIGINAL TASK PROMPT" in out
+
+      assert chunk_after(out, "--conversation") == "sess-abc"
+      assert chunk_after(out, "--model") == "gemini-3.1-pro"
+      assert chunk_after(out, "--effort") == "high"
+      assert chunk_after(out, "--print-timeout") == "300s"
+      assert "--dangerously-skip-permissions" in out
+      assert "--output-format" in out and "stream-json" in out
+    end
+
+    test "upstream gemini branch: --resume is rejected with an explicit error, not a bogus invocation" do
+      argv = [
+        "sh",
+        "-c",
+        ~s(exec "$@" < /dev/null),
+        "sh",
+        "/usr/local/bin/gemini",
+        "-p",
+        "ORIGINAL TASK PROMPT",
+        "--skip-trust",
+        "-y",
+        "--model",
+        "gemini-2.5-pro",
+        "--output-format",
+        "stream-json"
+      ]
+
+      assert {:error, :resume_unsupported} =
+               Gemini.splice_prompt(argv, ["--resume", "sess-abc", "CONTINUE PROMPT"])
+    end
+
+    test "nudge: swaps only the prompt, leaving every flag (agy or upstream) untouched" do
+      argv = [
+        "sh",
+        "-c",
+        ~s(exec "$@" < /dev/null),
+        "sh",
+        "/usr/local/bin/agy",
+        "-p",
+        "ORIGINAL TASK PROMPT",
+        "--model",
+        "gemini-3.1-pro",
+        "--output-format",
+        "stream-json"
+      ]
+
+      assert {:ok, out} = Gemini.splice_prompt(argv, ["nudge prompt"])
+
+      idx = Enum.find_index(out, &(&1 == "-p"))
+      assert Enum.slice(out, idx, 2) == ["-p", "nudge prompt"]
+      refute "ORIGINAL TASK PROMPT" in out
+      refute "--conversation" in out
+      assert chunk_after(out, "--model") == "gemini-3.1-pro"
+    end
+
+    test "errors when there is no -p slot (custom command / fixture)" do
+      assert {:error, :no_print_slot} =
+               Gemini.splice_prompt(["sh", "-c", "echo hi; exit 0"], ["nudge"])
+
+      assert {:error, :no_print_slot} =
+               Gemini.splice_prompt(["sh", "-c", "echo hi; exit 0"], [
+                 "--resume",
+                 "sid",
+                 "prompt"
+               ])
+    end
+  end
 end
