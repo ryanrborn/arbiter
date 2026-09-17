@@ -345,6 +345,50 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert cleared_at
     end
 
+    # bd-8akewg: the drawer is the sessionless coordinator reader. A browser
+    # session polling `coordinator_inbox` used to consume the operator's mail
+    # out from under it (and vice versa) because read/cleared state lived on the
+    # shared row.
+    test "a session's reads and clears leave the drawer's figures alone",
+         %{conn: conn, ws: ws} do
+      {:ok, msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          to_ref: "admiral",
+          body: "shared-escalation"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      assert render(view) =~ "1 unread"
+
+      # A browser session reads it and then clears its whole view.
+      session = Message.session_reader("sess-drawer")
+      {:ok, _} = Message.mark_read(msg, reader: session)
+      {:ok, _, _, _} = Message.clear_all(Message.coordinator_ref(), reader: session)
+
+      # The drawer still owes it — nothing about the operator's view moved.
+      {:ok, view, _html} = live(conn, "/")
+      html = render(view)
+      assert html =~ "1 unread"
+      assert html =~ "0 outstanding"
+      assert html =~ "shared-escalation"
+
+      # …and the drawer's own clear — which does stamp the shared row, because
+      # the sessionless reader mirrors onto it — still leaves a session that has
+      # not triaged the message owing it.
+      {:ok, _} = Message.mark_read(msg, reader: Message.coordinator_reader())
+      view |> element(~s(button[phx-click="coordinator_clear"])) |> render_click()
+      assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, msg.id)
+
+      other = Message.session_reader("sess-drawer-other")
+
+      assert [%{id: id}] =
+               Message.inbox(Message.coordinator_ref(), workspace_id: ws.id, reader: other)
+
+      assert id == msg.id
+    end
+
     test "a page with no catch-all handle_info survives a coordinator mail broadcast",
          %{conn: conn, ws: ws} do
       # Regression (bd-3kgb0e review finding 2): the global :coordinator_inbox
