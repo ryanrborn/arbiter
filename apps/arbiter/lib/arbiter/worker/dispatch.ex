@@ -55,6 +55,7 @@ defmodule Arbiter.Worker.Dispatch do
   """
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
@@ -857,6 +858,52 @@ defmodule Arbiter.Worker.Dispatch do
       :ok
   end
 
+  # Antigravity's dispatch gate reads one of four sub-buckets keyed by model
+  # family (bd-7qj58o AC4) — "Claude and GPT models" vs "Gemini Models" — but
+  # the gate runs before `start_agent/4`'s own model tiering, so it doesn't
+  # otherwise know the model. Best-effort hint: an explicit `opts[:model]`
+  # override wins as-is; otherwise resolve the same routing choice the real
+  # dispatch will use and mirror `Gemini.resolve_model/2`'s own precedence —
+  # an explicit `config["model"]` pin wins over `model_tier` (routing
+  # policies such as `ByPriority`/`ByBudget` routinely set `"model"`
+  # directly). An unresolvable hint leaves `opts` untouched — the gate then
+  # falls back to its conservative worst-of-both-groups reading rather than
+  # holding on the wrong bucket.
+  defp maybe_add_gemini_model_hint(:gemini, task, workspace, opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" ->
+        opts
+
+      _ ->
+        case gemini_model_tier_hint(task, workspace) do
+          model when is_binary(model) and model != "" -> Keyword.put(opts, :model, model)
+          _ -> opts
+        end
+    end
+  end
+
+  defp maybe_add_gemini_model_hint(_provider, _task, _workspace, opts), do: opts
+
+  defp gemini_model_tier_hint(task, workspace) do
+    config = Routing.choose(task, workspace, %{}).config
+
+    case config["model"] do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        overrides =
+          ((workspace && workspace.config["agent"]["config"]) || %{})
+          |> Arbiter.Agents.ProviderConfig.apply_overrides("gemini")
+          |> Map.get("tier_models", %{})
+
+        base = GeminiConfig.default_tier_models(:agy)
+        Map.get(overrides, config["model_tier"]) || Map.get(base, config["model_tier"])
+    end
+  rescue
+    _ -> nil
+  end
+
   # Which provider this dispatch will run on. Mirrors `start_agent/4`'s
   # resolution order so the gate reads the same provider the worker is spawned
   # with: the `:agent_adapter` test seam, then an explicit `:agent_type`
@@ -880,8 +927,14 @@ defmodule Arbiter.Worker.Dispatch do
   defp apply_quota_gate(%Issue{} = task, workspace, provider, ws_id, opts) do
     gate = Arbiter.Quota.gate_for_workspace(workspace)
     quota = safe_quota_latest(ws_id, provider)
+    # The model hint (bd-7qj58o AC4) is scoped to this `gate.check/4` call
+    # only — `opts` itself (used below for `DispatchQueue.hold/5`, replayed
+    # verbatim on drain) must stay exactly what the caller passed, or a
+    # best-effort Antigravity bucket guess would silently override the real
+    # dispatch's model resolution later.
+    gate_opts = maybe_add_gemini_model_hint(provider, task, workspace, opts)
 
-    case gate.check(task, quota, workspace, opts) do
+    case gate.check(task, quota, workspace, gate_opts) do
       :allow ->
         :ok
 

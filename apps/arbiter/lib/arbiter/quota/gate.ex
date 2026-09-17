@@ -412,8 +412,16 @@ defmodule Arbiter.Quota.Gate do
   the remainder of the week. A genuine long-window reject always holds (rule 2).
   """
   @spec gating_window(quota_source(), Workspace.t() | nil) :: binding_window() | nil
-  def gating_window(quota, workspace) do
-    case Snapshot.normalize(quota) do
+  def gating_window(quota, workspace), do: gating_window(quota, workspace, [])
+
+  @doc """
+  Same as `gating_window/2`, but forwards `opts` to `Snapshot.normalize/2` —
+  in particular `opts[:model]`, which picks the correct Antigravity sub-bucket
+  (bd-7qj58o AC4) when `quota` is an `"antigravity"` `GoogleQuota` row.
+  """
+  @spec gating_window(quota_source(), Workspace.t() | nil, keyword()) :: binding_window() | nil
+  def gating_window(quota, workspace, opts) do
+    case Snapshot.normalize(quota, opts) do
       nil ->
         nil
 
@@ -528,8 +536,12 @@ defmodule Arbiter.Quota.Gate do
       blocked — 7d quota allowed_warning (weekly_warning_policy: hold)
   """
   @spec hold_phrase(quota_source(), Workspace.t() | nil) :: String.t() | nil
-  def hold_phrase(quota, workspace) do
-    quota |> gating_window(workspace) |> phrase()
+  def hold_phrase(quota, workspace), do: hold_phrase(quota, workspace, [])
+
+  @doc "Same as `hold_phrase/2`, but forwards `opts` to `gating_window/3` (bd-7qj58o)."
+  @spec hold_phrase(quota_source(), Workspace.t() | nil, keyword()) :: String.t() | nil
+  def hold_phrase(quota, workspace, opts) do
+    quota |> gating_window(workspace, opts) |> phrase()
   end
 
   defp phrase(nil), do: nil

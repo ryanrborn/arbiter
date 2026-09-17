@@ -212,7 +212,9 @@ defmodule Arbiter.Agents.Gemini do
 
   Public because the two CLIs do not share a config format: which one is on
   `PATH` decides whether a worktree-local MCP config is even readable
-  (`Arbiter.MCP.AgentConfig.Gemini`, bd-m8geh4).
+  (`Arbiter.MCP.AgentConfig.Gemini`, bd-m8geh4). Also public so
+  `Arbiter.Quota.provider_code/1` (bd-7qj58o) can key the quota-gate lookup
+  off the same PATH probe instead of duplicating it and risking drift.
   """
   @spec resolve_executable() ::
           {:ok, {:agy | :gemini, String.t()}} | {:error, {:executable_not_found, String.t()}}
