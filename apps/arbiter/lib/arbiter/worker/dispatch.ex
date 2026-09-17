@@ -60,6 +60,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.CircuitBreaker
   alias Arbiter.MCP.AgentConfig.Codex
+  alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiMCP
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Reviews.Checkout
@@ -2180,7 +2181,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   # Best-effort detail for the log line above: which concrete binary the
   # provider resolved to, when the adapter can tell us.
-  defp mcp_cli_flavour(:gemini), do: Arbiter.MCP.AgentConfig.Gemini.cli_flavour()
+  defp mcp_cli_flavour(:gemini), do: GeminiMCP.cli_flavour()
   defp mcp_cli_flavour(provider), do: provider
 
   # Codex MCP support has reports of *silent* connect failures (its own
