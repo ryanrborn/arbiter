@@ -750,6 +750,9 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp number(n) when is_float(n), do: n
   defp number(_), do: nil
 
+  defp agy_duration_ms(seconds) when is_number(seconds), do: round(seconds * 1000)
+  defp agy_duration_ms(_), do: nil
+
   # ---- typed step capture (bd-7xftps / bd-apwfmy Phase 1) ---------------
   #
   # Promote tool_use/tool_result block pairs out of rendered transcript prose
@@ -764,14 +767,57 @@ defmodule Arbiter.Worker.ClaudeSession do
   # session was killed mid-call — leaves its pending entry stranded and never
   # writes a row: absent, not garbage.
   #
-  # Deliberately Claude-only: Gemini/Codex speak different stream-json
-  # shapes (see their own `Stream.format_event/1` modules) and are routed
-  # around here explicitly rather than relying on the shape match to miss,
-  # so the "rows absent for non-Claude runs" property is asserted, not
+  # Deliberately a Codex-only no-op: Codex speaks a different stream-json
+  # shape entirely (see its own `Stream.format_event/1` module) and is routed
+  # around here explicitly rather than relying on the shape match to miss, so
+  # the "rows absent for non-Claude/agy runs" property is asserted, not
   # accidental.
-  defp capture_steps(%{provider: provider} = session, _event)
-       when provider in ["gemini", "codex"],
-       do: session
+  defp capture_steps(%{provider: "codex"} = session, _event), do: session
+
+  # agy's `step_type: "tool"` step (bd-7y3mm9) carries everything a row needs
+  # on its own DONE event — `tool_info.parameters`/`tool_info.output` plus a
+  # `duration_seconds` already measured by agy itself — unlike Claude's
+  # `tool_use`/`tool_result` pair, there's no ACTIVE-side state to stash and
+  # correlate later. `step_index` stands in for Claude's `tool_use_id`
+  # correlation key (the column is `allow_nil? false`); it's scoped to the
+  # step, not globally unique, but that mirrors how Claude's `tool_use_id` is
+  # only unique within its own run too.
+  #
+  # `is_error` is hardcoded `false`: only the DONE state (success) is matched
+  # here, so a tool step that ends in some other state (agy's wire carries at
+  # least `CANCELLED`) falls through to the catch-all clause below and writes
+  # no row at all — the failure/cancellation wire shape was never captured
+  # live, only its existence as an enum literal. `Gemini.Stream.format_event/1`
+  # surfaces those states as a schema-drift warning in the transcript so they
+  # aren't silently invisible, but no `worker_run_steps` row backs them yet.
+  defp capture_steps(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "tool", "state" => "DONE"} = step
+       }) do
+    input =
+      Arbiter.Agents.Gemini.Stream.agy_tool_params(
+        step["tool_name"],
+        get_in(step, ["tool_info", "parameters"])
+      )
+
+    write_step(session, %{
+      run_id: Map.get(session, :run_id),
+      task_id: Map.get(session, :task_id),
+      tool_use_id: to_string(step["step_index"]),
+      name: step["tool_name"],
+      is_error: false,
+      duration_ms: agy_duration_ms(step["duration_seconds"]),
+      input_digest: StepSummary.input_digest(input, redact_values(session)),
+      input_summary: StepSummary.input_summary(input, redact_values(session)),
+      output_summary:
+        StepSummary.output_summary(get_in(step, ["tool_info", "output"]), redact_values(session)),
+      occurred_at: DateTime.utc_now()
+    })
+
+    session
+  end
+
+  defp capture_steps(%{provider: "gemini"} = session, _event), do: session
 
   defp capture_steps(session, %{"type" => "assistant", "message" => %{"content" => content}})
        when is_list(content) do
