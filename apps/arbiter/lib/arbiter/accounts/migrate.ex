@@ -267,7 +267,9 @@ defmodule Arbiter.Accounts.Migrate do
   end
 
   defp parse_account(account),
-    do: {:error, "each plan account needs a string \"slug\" and \"provider\" (got #{keys(account)})"}
+    do:
+      {:error,
+       "each plan account needs a string \"slug\" and \"provider\" (got #{keys(account)})"}
 
   defp parse_provider(provider, slug) do
     case Map.fetch(@providers, provider) do
@@ -402,7 +404,8 @@ defmodule Arbiter.Accounts.Migrate do
         check_workspace_provider_conflicts(accounts)
 
       slugs ->
-        {:error, "plan has more than one account with the same (provider, slug): #{Enum.join(slugs, ", ")}"}
+        {:error,
+         "plan has more than one account with the same (provider, slug): #{Enum.join(slugs, ", ")}"}
     end
   end
 
@@ -441,8 +444,11 @@ defmodule Arbiter.Accounts.Migrate do
     found = Workspace |> Ash.read!() |> Map.new(&{&1.id, &1})
 
     case Enum.reject(wanted, &Map.has_key?(found, &1)) do
-      [] -> {:ok, Map.take(found, wanted)}
-      missing -> {:error, "plan references workspace(s) that no longer exist: #{Enum.join(missing, ", ")}"}
+      [] ->
+        {:ok, Map.take(found, wanted)}
+
+      missing ->
+        {:error, "plan references workspace(s) that no longer exist: #{Enum.join(missing, ", ")}"}
     end
   end
 
@@ -472,7 +478,10 @@ defmodule Arbiter.Accounts.Migrate do
       # row is already there — needs no material, and must not be resolved:
       # after a successful run the key it came from is gone from `worker_env`,
       # and re-running the same plan has to stay a clean no-op.
-      if MapSet.member?(already_written, {credential.kind, credential.env_var, credential.fingerprint}) do
+      if MapSet.member?(
+           already_written,
+           {credential.kind, credential.env_var, credential.fingerprint}
+         ) do
         {:cont, {:ok, [credential | acc]}}
       else
         case resolve_secret(credential, account, workspaces) do
@@ -578,7 +587,8 @@ defmodule Arbiter.Accounts.Migrate do
           spec = Map.get(allowlist, workspace.env_key),
           is_map(spec),
           Map.fetch!(@providers, spec.provider) != account.provider,
-          do: "#{workspace.env_key} is a #{spec.provider} key but #{account.slug} is #{account.provider}"
+          do:
+            "#{workspace.env_key} is a #{spec.provider} key but #{account.slug} is #{account.provider}"
 
     cond do
       offenders != [] ->
@@ -946,44 +956,47 @@ defmodule Arbiter.Accounts.Migrate do
     all_keys? = Keyword.get(opts, :all_keys?, false)
     workspaces = Map.new(Ash.read!(Workspace), &{&1.id, &1})
 
-    Enum.reduce(backups, %{restored: 0, skipped: 0, keys_restored: 0, lines: [], dry_run?: dry_run?}, fn backup,
-                                                                                                        acc ->
-      workspace = Map.get(workspaces, backup.workspace_id)
-      name = (workspace && workspace.name) || backup.workspace_id
+    Enum.reduce(
+      backups,
+      %{restored: 0, skipped: 0, keys_restored: 0, lines: [], dry_run?: dry_run?},
+      fn backup, acc ->
+        workspace = Map.get(workspaces, backup.workspace_id)
+        name = (workspace && workspace.name) || backup.workspace_id
 
-      cond do
-        backup.restored_at ->
-          %{
-            acc
-            | skipped: acc.skipped + 1,
-              lines: acc.lines ++ ["  #{name}: already restored at #{backup.restored_at}"]
-          }
+        cond do
+          backup.restored_at ->
+            %{
+              acc
+              | skipped: acc.skipped + 1,
+                lines: acc.lines ++ ["  #{name}: already restored at #{backup.restored_at}"]
+            }
 
-        is_nil(workspace) ->
-          %{
-            acc
-            | skipped: acc.skipped + 1,
-              lines: acc.lines ++ ["  #{name}: workspace no longer exists"]
-          }
+          is_nil(workspace) ->
+            %{
+              acc
+              | skipped: acc.skipped + 1,
+                lines: acc.lines ++ ["  #{name}: workspace no longer exists"]
+            }
 
-        true ->
-          patch = restore_patch(backup, all_keys?)
+          true ->
+            patch = restore_patch(backup, all_keys?)
 
-          unless dry_run? do
-            Ash.update!(workspace, %{worker_env: patch})
-            Ash.update!(backup, %{}, action: :mark_restored)
-          end
+            unless dry_run? do
+              Ash.update!(workspace, %{worker_env: patch})
+              Ash.update!(backup, %{}, action: :mark_restored)
+            end
 
-          %{
-            acc
-            | restored: acc.restored + 1,
-              keys_restored: acc.keys_restored + map_size(patch),
-              lines:
-                acc.lines ++
-                  ["  #{name}: restored #{Enum.join(Enum.sort(Map.keys(patch)), ", ")}"]
-          }
+            %{
+              acc
+              | restored: acc.restored + 1,
+                keys_restored: acc.keys_restored + map_size(patch),
+                lines:
+                  acc.lines ++
+                    ["  #{name}: restored #{Enum.join(Enum.sort(Map.keys(patch)), ", ")}"]
+            }
+        end
       end
-    end)
+    )
   end
 
   # A merge patch of just the keys the migration took (or the whole snapshot
