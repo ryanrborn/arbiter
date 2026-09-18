@@ -167,6 +167,39 @@ defmodule ArbiterWeb.UsageLiveTest do
     refute html =~ "$5.00"
   end
 
+  # bd-481sz7 round 2, finding 4: agy rows carry `cost_usd: nil` (subscription,
+  # not a priced API) — before this fix the dashboard folded that nil to 0.0
+  # and rendered "$0.00" (Total spend, By task, By model), contradicting the
+  # CLI/API's "n/a" for the same all-agy window.
+  test "an all-agy window (unpriced rows) never renders $0.00 for spend", %{conn: conn, ws: ws} do
+    task = new_issue!(ws, "agy-only task")
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      model: "gemini-3.8-flash-low",
+      cost_usd: nil,
+      tokens_in: 4_000,
+      tokens_out: 250
+    })
+
+    {:ok, view, html} = live(conn, ~p"/usage")
+
+    [_, total_spend_value] =
+      Regex.run(~r/Total spend\s*<\/span><span[^>]*>\s*([^<]+?)\s*<\/span>/s, html)
+
+    assert total_spend_value == "—"
+
+    by_model_html =
+      view
+      |> element("button[phx-value-tab=by_model]")
+      |> render_click()
+
+    [_, model_bar_segment] = Regex.run(~r/(Flash.{0,700})/s, by_model_html)
+    refute model_bar_segment =~ "$0.00"
+    assert model_bar_segment =~ "—"
+  end
+
   test "shows an empty state when there is no usage yet", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/usage")
     assert html =~ "Usage"

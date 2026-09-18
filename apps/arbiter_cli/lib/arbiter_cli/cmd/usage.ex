@@ -341,9 +341,10 @@ defmodule ArbiterCli.Cmd.Usage do
     end)
 
     totals = totals(rollups)
+    total_cost_str = if totals.cost_known, do: "$#{format_cost(totals.cost)}", else: "n/a"
 
     IO.puts(
-      "  -- total: $#{format_cost(totals.cost)} · #{format_int(totals.tokens_in)} in / #{format_int(totals.tokens_out)} out · #{length(rollups)} groups · #{totals.rows} sessions"
+      "  -- total: #{total_cost_str} · #{format_int(totals.tokens_in)} in / #{format_int(totals.tokens_out)} out · #{length(rollups)} groups · #{totals.rows} sessions"
     )
   end
 
@@ -441,13 +442,21 @@ defmodule ArbiterCli.Cmd.Usage do
   end
 
   defp totals(rollups) do
-    Enum.reduce(rollups, %{cost: 0.0, tokens_in: 0, tokens_out: 0, rows: 0}, fn r, acc ->
-      %{
-        cost: acc.cost + (r["total_cost_usd"] || 0.0),
-        tokens_in: acc.tokens_in + (r["tokens_in"] || 0),
-        tokens_out: acc.tokens_out + (r["tokens_out"] || 0),
-        rows: acc.rows + (r["rows"] || 0)
-      }
-    end)
+    Enum.reduce(
+      rollups,
+      %{cost: 0.0, cost_known: false, tokens_in: 0, tokens_out: 0, rows: 0},
+      fn r, acc ->
+        %{
+          cost: acc.cost + (r["total_cost_usd"] || 0.0),
+          # At least one group had a priced cost — an all-agy rollup (every
+          # group's total_cost_usd nil) must render "n/a", not "$0.0000",
+          # which reads as "this window was free" (see format_cost/1).
+          cost_known: acc.cost_known or is_number(r["total_cost_usd"]),
+          tokens_in: acc.tokens_in + (r["tokens_in"] || 0),
+          tokens_out: acc.tokens_out + (r["tokens_out"] || 0),
+          rows: acc.rows + (r["rows"] || 0)
+        }
+      end
+    )
   end
 end
