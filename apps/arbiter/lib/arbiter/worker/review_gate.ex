@@ -153,6 +153,7 @@ defmodule Arbiter.Worker.ReviewGate do
   require Logger
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
@@ -780,7 +781,22 @@ defmodule Arbiter.Worker.ReviewGate do
       # this path is false, and would bias the reviewer into dispositioning its
       # own open findings `[ADDRESSED]` against a diff that never targeted them
       # (the bd-6r8caj property).
-      restarted_on_remote_head: nil
+      restarted_on_remote_head: nil,
+      # bd-3hb4ih: the provider this round's reviewer passes are PINNED to,
+      # once a print-timeout has rotated off the workspace's own first choice.
+      # nil on every ordinary pass, which leaves provider resolution exactly
+      # where it was (`Agents.reviewer_for_workspace/1`, health-aware via
+      # `ProviderPool.pick/1`) — the rotation is the only thing that pins.
+      reviewer_provider: nil,
+      # bd-3hb4ih: every provider that has hit its own hard print-timeout wall
+      # in the CURRENT round, oldest-first:
+      # `%{provider:, round:, pass_id:, summary:}`. This is the "remaining
+      # provider list" the acceptance criteria ask for, carried by subtraction:
+      # the next pass takes the first pool entry NOT in here, so a provider that
+      # timed out is never retried inside the round. Reset per round by
+      # `dispatch_next_review/2` — a fresh diff is a fresh chance for a provider
+      # that timed out on the previous one.
+      reviewer_timeouts: []
     }
 
     Process.monitor(author)
@@ -1279,6 +1295,13 @@ defmodule Arbiter.Worker.ReviewGate do
     case verdict do
       :no_verdict ->
         case classify_stop(status, state.lines) do
+          # bd-3hb4ih: a print-timeout is the one infra failure a DIFFERENT
+          # provider can still answer — the wall belongs to the CLI, not to the
+          # account or the gateway. Rotate through `review_agent.type` before
+          # conceding. Must precede the generic infra arm below, which parks.
+          %StopReason{category: :agent_print_timeout} = reason ->
+            handle_reviewer_print_timeout(state, reason)
+
           %StopReason{category: category} = reason when category in @infra_failure_categories ->
             Logger.warning(
               "ReviewGate: reviewer for task=#{state.task_id} died of an infrastructure " <>
@@ -1772,6 +1795,11 @@ defmodule Arbiter.Worker.ReviewGate do
         attempt: 0,
         verdict_scan: nil,
         verdict_scans: [],
+        # bd-3hb4ih: the reviewer provider pin and the round's timed-out
+        # providers are per-ROUND state. A new round reviews a different diff,
+        # so a provider that timed out on the previous one starts even again.
+        reviewer_provider: nil,
+        reviewer_timeouts: [],
         restarted_on_remote_head: Keyword.get(opts, :restarted_on_remote_head)
     }
 
@@ -2094,6 +2122,255 @@ defmodule Arbiter.Worker.ReviewGate do
   defp infra_failure_message(%StopReason{} = reason) do
     "Reviewer subprocess failed: #{reason.summary}. #{reason.remediation}"
   end
+
+  # ---- reviewer print-timeout rotation (bd-3hb4ih) -----------------------
+
+  # A reviewer pass ended as `:agent_print_timeout` — the reviewer CLI's OWN
+  # internal print-mode wall fired mid-review (bd-1xss5z: agy hard-codes one,
+  # and reports the cut-short turn alongside a clean exit and a terminal
+  # "SUCCESS" event). Unlike every other entry in
+  # `@infra_failure_categories`, this failure belongs to the *CLI*, not to the
+  # account, the credentials or the gateway — so a DIFFERENT provider can still
+  # answer the same question about the same diff, where re-prompting the one
+  # that just timed out hits the identical wall deterministically.
+  #
+  # Three outcomes, in order:
+  #
+  #   1. Fewer than two providers configured for the reviewer role (the
+  #      overwhelmingly common case, and every workspace-less ad-hoc gate):
+  #      there is nothing to rotate to, so this keeps TODAY'S behaviour exactly
+  #      — park `:reviewer_timeout` with the real reason, no re-prompt, no
+  #      extra round row, nothing recorded about a pool that doesn't exist.
+  #   2. A provider in the pool has not been tried this round: rotate to it and
+  #      re-run the SAME pass (same prompt, same diff, same round).
+  #   3. Every provider in the pool has now timed out: stop rotating and
+  #      escalate ONCE, with each provider's timeout named.
+  defp handle_reviewer_print_timeout(state, %StopReason{} = reason) do
+    pool = reviewer_pool(state)
+
+    if length(pool) < 2 do
+      Logger.warning(
+        "ReviewGate: reviewer for task=#{state.task_id} hit its own print-timeout " <>
+          "(#{reason.category}); no multi-provider reviewer pool to rotate into, escalating"
+      )
+
+      {:done, finish(state, {:parked, :reviewer_timeout, infra_failure_message(reason)})}
+    else
+      state = record_reviewer_timeout(state, reason)
+
+      case next_reviewer_provider(state, pool) do
+        nil -> {:done, escalate_pool_exhausted(state, pool)}
+        next -> rotate_reviewer(state, next, pool)
+      end
+    end
+  end
+
+  # The reviewer role's configured provider pool for this workspace, in
+  # configured order. `[]` without a workspace (an ad-hoc gate) or when the
+  # workspace can't be read — both of which fall through to today's park.
+  defp reviewer_pool(state) do
+    case load_workspace(state.workspace_id) do
+      %Workspace{} = ws -> Agents.reviewer_pool(ws)
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  # Append the timed-out provider to this round's list. Recorded under the
+  # provider that ACTUALLY ran the pass (`reviewer_provider_for/1`), not under
+  # the pool head — with a provider in circuit-breaker cooldown the workspace's
+  # own resolution may have started somewhere else entirely, and subtracting the
+  # wrong entry would retry the provider that just timed out.
+  defp record_reviewer_timeout(state, %StopReason{} = reason) do
+    entry = %{
+      provider: reviewer_provider_for(state),
+      round: state.round,
+      pass_id: state.current_id,
+      summary: reason.summary
+    }
+
+    %{state | reviewer_timeouts: state.reviewer_timeouts ++ [entry]}
+  end
+
+  # The next provider to try: the first pool entry that has not already timed
+  # out this round, preferring a healthy one exactly as ordinary resolution does
+  # (`ProviderPool.pick/1` falls back to the first candidate when none is
+  # healthy, so a pool in cooldown still gets tried rather than stalling).
+  #
+  # The `length/1` comparison is a hard bound, not a nicety: it guarantees at
+  # most one pass per pool entry per round even if `reviewer_provider_for/1`
+  # could not name the provider that ran (it returns nil on a fixture-argv gate)
+  # and so nothing could be subtracted.
+  defp next_reviewer_provider(state, pool) do
+    if length(state.reviewer_timeouts) >= length(pool) do
+      nil
+    else
+      tried = Enum.map(state.reviewer_timeouts, & &1.provider)
+
+      pool
+      |> Enum.reject(&(&1 in tried))
+      |> ProviderPool.pick()
+    end
+  end
+
+  # Re-run the current round's reviewer pass against the next provider. This is
+  # NOT a revision and NOT a verdict re-prompt: the round, the round cap and the
+  # verdict re-prompt budget are all untouched, and the pass is handed the
+  # IDENTICAL prompt (`state.current_prompt`) so the rotated reviewer judges the
+  # same diff the timed-out one was asked about.
+  defp rotate_reviewer(state, next, pool) when is_binary(state.current_prompt) do
+    stop_worker(state)
+
+    prior = reviewer_provider_for(state)
+    note = rotation_note(state, prior, next, pool)
+
+    # Queryable evidence of the rotation, attributed to the provider that timed
+    # out — recorded BEFORE the pin moves, so `record_round/5` reads `prior`.
+    record_round(state, :review, :timed_out, note, converged: false)
+
+    state =
+      record_thread(
+        state,
+        :system,
+        "Round #{state.round} reviewer (#{provider_label(prior)}) timed out — " <>
+          "rotating to #{provider_label(next)}",
+        note
+      )
+
+    rotated = %{state | reviewer_provider: next}
+    id = provider_rotation_id(rotated, next)
+
+    case launch_worker(rotated, id, :reviewer, state.current_prompt, state.command) do
+      {:ok, rotated} ->
+        Logger.warning(
+          "ReviewGate: reviewer #{provider_label(prior)} for task=#{state.task_id} hit its own " <>
+            "print-timeout on round #{state.round}; rotating to #{provider_label(next)} " <>
+            "(pool #{Enum.map_join(pool, ",", &provider_label/1)})"
+        )
+
+        {:reprompt, rotated}
+
+      {:error, spawn_reason} ->
+        Logger.warning(
+          "ReviewGate: rotated reviewer (#{provider_label(next)}) failed to spawn for " <>
+            "task=#{state.task_id}: #{inspect(spawn_reason)}"
+        )
+
+        {:done, escalate_pool_exhausted(state, pool)}
+    end
+  end
+
+  # No prompt to replay (nothing has been launched yet) — there is no "same
+  # diff" to hand a second provider, so concede rather than invent one.
+  defp rotate_reviewer(state, _next, pool), do: {:done, escalate_pool_exhausted(state, pool)}
+
+  # Every provider in the pool has hit its own print-timeout on this round.
+  # Stop rotating and page the coordinator ONCE (class C: a liveness failure of
+  # the review, never of the work — see `escalate_timeout/1`), naming each
+  # provider's timeout so the remediation is obvious. Deliberately NOT an
+  # inconclusive/no-verdict verdict: no reviewer said anything, so there is
+  # nothing for an implementer to fix and a re-dispatch would time out again.
+  defp escalate_pool_exhausted(state, pool) do
+    msg = pool_exhausted_message(state, pool)
+    payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
+
+    record_round(state, :review, :timed_out, payload, converged: false)
+    report(state, {:parked, :reviewer_timeout, payload})
+    %{state | reported?: true}
+  end
+
+  defp rotation_note(state, prior, next, pool) do
+    """
+    The round #{state.round} reviewer pass on `#{provider_label(prior)}` hit that CLI's own
+    internal print-mode timeout and returned partial output with no VERDICT line.
+
+    This is a property of the reviewer CLI, not of the diff or the account, so
+    re-prompting `#{provider_label(prior)}` would hit the same wall deterministically. The
+    gate is rotating to the next provider in this workspace's `review_agent.type`
+    pool instead: `#{provider_label(next)}`.
+
+    Reviewer pool (configured order): #{Enum.map_join(pool, ", ", &provider_label/1)}
+    Already timed out this round: #{tried_label(state)}
+
+    No round was consumed and no verdict re-prompt was spent: the rotated pass
+    reviews the SAME diff, in the SAME round.
+    """
+    |> String.trim()
+  end
+
+  defp pool_exhausted_message(state, pool) do
+    """
+    ReviewGate: every provider in this workspace's reviewer pool hit its own internal
+    print-mode timeout on round #{state.round}. The gate stopped rotating rather than
+    looping over providers that have each already failed the same way.
+
+    Providers tried, in configured order:
+    #{timeout_roster(state)}
+
+    This is an INFRASTRUCTURE/BUDGET failure, not a review finding: no reviewer verdict
+    was produced, so there is nothing for an implementer to fix and re-dispatching the
+    task unchanged will simply time out again.
+
+    Remediation: raise `review_gate.timeout_ms` for this workspace (the last pass ran
+    under #{state.timeout_ms}ms, which is also what each provider's CLI was given as its
+    own print-timeout), reduce what the review has to do (a smaller diff, fewer rounds
+    of context), or add a provider to `review_agent.type` whose CLI has no fixed
+    print-mode wall. The reviewer pool as configured is: #{Enum.map_join(pool, ", ", &provider_label/1)}.
+    """
+    |> String.trim()
+  end
+
+  defp timeout_roster(%{reviewer_timeouts: []}), do: "  (none recorded)"
+
+  defp timeout_roster(%{reviewer_timeouts: timeouts}) do
+    Enum.map_join(timeouts, "\n", fn entry ->
+      "  - #{provider_label(entry.provider)}: #{entry.summary} (pass #{entry.pass_id || "unknown"})"
+    end)
+  end
+
+  defp tried_label(%{reviewer_timeouts: []}), do: "(none)"
+
+  defp tried_label(%{reviewer_timeouts: timeouts}),
+    do: Enum.map_join(timeouts, ", ", &provider_label(&1.provider))
+
+  defp provider_label(nil), do: "unknown"
+  defp provider_label(provider) when is_atom(provider), do: Atom.to_string(provider)
+
+  # Which provider actually ran (or is about to run) the current reviewer pass.
+  # The rotation pin wins; otherwise this re-derives the same answer the spawn
+  # path itself resolved, so a `:review` round row can name the provider behind
+  # its verdict without threading it through every launch. A fixture-argv gate
+  # (`command:` — tests only) reports its declared `command_provider`, or nil:
+  # claiming the workspace's configured reviewer for an argv that bypassed the
+  # adapter entirely would be a lie.
+  defp reviewer_provider_for(%{reviewer_provider: provider})
+       when is_atom(provider) and not is_nil(provider),
+       do: provider
+
+  defp reviewer_provider_for(%{command: command} = state) when is_list(command),
+    do: provider_atom(Map.get(state, :command_provider))
+
+  defp reviewer_provider_for(state) do
+    case load_workspace(state.workspace_id) do
+      %Workspace{} = ws -> adapter_provider(Agents.reviewer_for_workspace(ws))
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Reverse-map an adapter module to its pool atom via the registry, so no new
+  # atom is ever created from a provider string.
+  defp adapter_provider(adapter) do
+    Enum.find_value(Agents.adapters(), fn {type, mod} -> if mod == adapter, do: type end)
+  end
+
+  defp provider_atom(provider) when is_binary(provider) do
+    Enum.find(Map.keys(Agents.adapters()), &(Atom.to_string(&1) == provider))
+  end
+
+  defp provider_atom(_provider), do: nil
 
   # ---- verdict re-prompt (bd-8v8ays) -------------------------------------
 
@@ -2734,6 +3011,15 @@ defmodule Arbiter.Worker.ReviewGate do
     # quality change.
     reviewer_tier = if role == :review, do: reviewer_tier_for(state), else: nil
 
+    # bd-3hb4ih: which provider ran this pass. Only for `:review` rows, and only
+    # once a pass has actually been launched (`current_id` is nil on the
+    # pre-review escalation paths, where no provider was ever reached and naming
+    # one would be a guess).
+    reviewer_provider =
+      if role == :review and is_binary(state.current_id) do
+        state |> reviewer_provider_for() |> provider_string()
+      end
+
     attrs =
       %{
         task_id: state.task_id,
@@ -2744,6 +3030,7 @@ defmodule Arbiter.Worker.ReviewGate do
         findings: findings,
         reviewer_model: reviewer_model,
         reviewer_tier: reviewer_tier,
+        reviewer_provider: reviewer_provider,
         cost_usd: cost_usd,
         converged: converged,
         commit_gate: commit_gate
@@ -2824,6 +3111,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # so re-deriving it here (rather than threading it through `state`) can't
   # drift from what actually spawned. Best-effort: nil on a missing/unloadable
   # workspace (e.g. a workspace-less ad-hoc ReviewGate run).
+  defp provider_string(nil), do: nil
+  defp provider_string(provider) when is_atom(provider), do: Atom.to_string(provider)
+
   defp reviewer_tier_for(state) do
     case load_workspace(state.workspace_id) do
       %Workspace{config: config} -> reviewer_model_tier(config, state.task_id)
@@ -3520,7 +3810,7 @@ defmodule Arbiter.Worker.ReviewGate do
         {:ok, base ++ [prompt: prompt]}
 
       %Workspace{} = ws ->
-        {adapter, role_atom} = adapter_for(ws, role)
+        {adapter, role_atom} = adapter_for(state, ws, role)
         :ok = Agents.prepare(ws, role_atom)
 
         # The reviewer/implementer worker gets the same per-domain security
@@ -3583,10 +3873,21 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp adapter_for(%Workspace{} = ws, :reviewer),
+  # bd-3hb4ih: a reviewer pass that the print-timeout rotation has pinned to a
+  # specific provider uses THAT adapter, bypassing the workspace's own
+  # first-choice resolution — which would hand back the provider that just
+  # timed out. Every unpinned pass (`reviewer_provider: nil`, the default and
+  # the only state a single-provider workspace ever reaches) resolves exactly
+  # as before.
+  defp adapter_for(%{reviewer_provider: provider}, %Workspace{}, :reviewer)
+       when is_atom(provider) and not is_nil(provider),
+       do: {Agents.for_type(provider), :review_agent}
+
+  defp adapter_for(_state, %Workspace{} = ws, :reviewer),
     do: {Agents.reviewer_for_workspace(ws), :review_agent}
 
-  defp adapter_for(%Workspace{} = ws, :implementer), do: {Agents.for_workspace(ws), :agent}
+  defp adapter_for(_state, %Workspace{} = ws, :implementer),
+    do: {Agents.for_workspace(ws), :agent}
 
   # bd-dzz6ly: the reviewer slot is configured directly (`review_agent.config`)
   # and never goes through `Arbiter.Agents.Routing` — record that plainly
@@ -3737,6 +4038,22 @@ defmodule Arbiter.Worker.ReviewGate do
   # (now-stopped) hung pass. bd-78vg4v.
   defp timeout_retry_id(current_id, attempt), do: "#{current_id}#t#{attempt + 1}"
 
+  # bd-3hb4ih: the synthetic id for a reviewer pass respawned against the NEXT
+  # provider in the pool after a print-timeout. Keyed off the round's own review
+  # id (not the pass that just died) so rotating twice in one round can't chain
+  # an ever-growing id, and tagged with the provider so the run row says at a
+  # glance which pool entry it was.
+  defp provider_rotation_id(state, provider) do
+    review_id =
+      if state.round > 1 do
+        reviewer_round_id(state.review_id, state.round)
+      else
+        state.review_id
+      end
+
+    "#{review_id}#p#{state.attempt + 1}-#{provider}"
+  end
+
   # bd-2eyf9y: the id for the one-shot commit-gate resume of a round's
   # implementer — distinct from `implementer_task_id/2`'s original pass so it
   # registers its own worker / run row.
@@ -3816,7 +4133,12 @@ defmodule Arbiter.Worker.ReviewGate do
       phase: state.phase,
       round: state.round,
       max_rounds: state.max_rounds,
-      reviewer_alive: is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid)
+      reviewer_alive: is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid),
+      # bd-3hb4ih: the reviewer provider this round is pinned to (nil = the
+      # workspace's own first choice) and the providers that have already timed
+      # out in it, so a rotation in progress is visible without reading logs.
+      reviewer_provider: state.reviewer_provider,
+      reviewer_timed_out: Enum.map(state.reviewer_timeouts, & &1.provider)
     }
   end
 

@@ -288,6 +288,36 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "counted twice here."
     },
     %{
+      id: :reviewer_print_timeout_rotation,
+      doc_ref: "G19",
+      class: :c,
+      class_source: :inferred,
+      class_note:
+        "§5.3 lists G5–G13 under class C and does not place G19 (it postdates the " <>
+          "table). A pool-wide print-timeout produces no verdict at all and parks " <>
+          "without faulting the work, which is exactly class C's liveness half — it " <>
+          "is classed with G3/G4, the rest of the reviewer-timeout family.",
+      bound: {:attempts, {:config, :review_agent}},
+      episode: {:task, :review_id, :round},
+      terminal: :parked,
+      sites: [
+        {ReviewGate, :handle_reviewer_print_timeout, 2},
+        {ReviewGate, :escalate_pool_exhausted, 2}
+      ],
+      anchors: ["review_agent", "reviewer_timeouts", "next_reviewer_provider"],
+      summary:
+        "a reviewer print-timeout rotates to the next review_agent.type provider, " <>
+          "at most one pass per pool entry per round",
+      policy_note:
+        "bd-3hb4ih. The bound is the CONFIGURED POOL SIZE, not a retry count: each " <>
+          "provider gets at most one pass per round, because a provider that timed " <>
+          "out is subtracted from the candidates (`reviewer_timeouts`) and the " <>
+          "rotation refuses outright once as many timeouts are recorded as the pool " <>
+          "has entries. A pool of one never rotates and keeps G3/G4's terminal " <>
+          "unchanged. The list resets per ROUND: a new round reviews a different " <>
+          "diff, so a provider that timed out on the previous one starts even again."
+    },
+    %{
       id: :verdict_parse,
       doc_ref: "G5",
       class: :c,

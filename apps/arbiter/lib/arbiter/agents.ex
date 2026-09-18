@@ -72,6 +72,35 @@ defmodule Arbiter.Agents do
   end
 
   @doc """
+  Returns the reviewer role's configured provider pool, in **configured order**.
+
+  `review_agent.type` may be a single string or a list of strings; a workspace
+  with no `review_agent` block falls back to the worker `agent` block (mirroring
+  `reviewer_for_workspace/1`), and a workspace with neither yields the `:claude`
+  default. Unrecognized type strings are dropped.
+
+  Unlike `reviewer_for_workspace/1` this deliberately does NOT consult
+  `Arbiter.Agents.ProviderPool` — a caller that rotates THROUGH the pool (the
+  ReviewGate's reviewer print-timeout rotation, bd-3hb4ih) needs the full
+  configured order, not just the first healthy entry.
+  """
+  @spec reviewer_pool(Workspace.t() | nil) :: [atom()]
+  def reviewer_pool(nil), do: [:claude]
+
+  def reviewer_pool(%Workspace{config: config}) do
+    case configured_types(config, :review_agent) do
+      [] ->
+        case configured_types(config, :agent) do
+          [] -> [:claude]
+          types -> types
+        end
+
+      types ->
+        types
+    end
+  end
+
+  @doc """
   Returns the adapter module for a task.
 
   Today there's no per-task override (no `Issue.agent_type` column yet —
@@ -166,6 +195,31 @@ defmodule Arbiter.Agents do
       _ ->
         nil
     end
+  end
+
+  # The type strings configured for `role`, mapped to adapter atoms in the order
+  # they were written, with unrecognized entries dropped. A single string is a
+  # one-entry pool. Shared by `reviewer_pool/1`; `agent_type/2` above keeps its
+  # own (health-aware, single-answer) resolution.
+  #
+  # `safe_type_atom/1` is NOT sufficient on its own here: it only proves the
+  # atom exists somewhere in the VM, not that it names an adapter, so a typo'd
+  # `"nope"` can survive it whenever anything else in the system has ever used
+  # that atom. Every entry is checked against the adapter registry, because a
+  # pool entry is handed straight to `for_type/1`, which raises on an
+  # unregistered type.
+  defp configured_types(config, role) do
+    case get_in(config || %{}, [Atom.to_string(role), "type"]) do
+      type when is_binary(type) -> registered_types([type])
+      types when is_list(types) -> registered_types(types)
+      _ -> []
+    end
+  end
+
+  defp registered_types(types) do
+    types
+    |> Enum.map(&safe_type_atom/1)
+    |> Enum.filter(&Map.has_key?(@adapters, &1))
   end
 
   defp safe_type_atom(t) when is_binary(t) do

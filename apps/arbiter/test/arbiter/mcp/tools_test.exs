@@ -4749,6 +4749,7 @@ defmodule Arbiter.MCP.ToolsTest do
           finding_count: 1,
           reviewer_model: "claude-sonnet-5",
           reviewer_tier: "standard",
+          reviewer_provider: "gemini",
           cost_usd: 0.12,
           converged: false
         })
@@ -4776,6 +4777,10 @@ defmodule Arbiter.MCP.ToolsTest do
       # bd-3xultf: the resolved reviewer tier is exposed alongside
       # reviewer_model so analysis can control for the judge.
       assert round1.reviewer_tier == "standard"
+      # bd-3hb4ih: and the provider that actually ran it, so a reviewer that
+      # rotated off a print-timeout is readable without the transcript.
+      assert round1.reviewer_provider == "gemini"
+      assert round2.reviewer_provider == nil
       assert round2.round == 2
       assert round2.verdict == :approve
       assert round2.converged == true
