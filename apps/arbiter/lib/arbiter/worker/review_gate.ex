@@ -1162,7 +1162,6 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-
   def handle_info({:worker_exited, id, _status}, %{current_id: id, phase: :revising} = state) do
     case finish_revise(state) do
       {:done, state} -> {:stop, :normal, state}

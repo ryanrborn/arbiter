@@ -497,9 +497,20 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {ReviewGate, :escalate_unpushed_head, 3},
         {ReviewGate, :escalate_pre_review_park, 2},
         {ReviewGate, :pushed_head, 1},
-        {ReviewGate, :fallback_head, 1}
+        {ReviewGate, :fallback_head, 1},
+        # bd-bq8c8a: the same question one step earlier in the round — has the
+        # remote moved PAST the head this round just reviewed, before a fix
+        # round is allowed to build on it?
+        {ReviewGate, :remote_advance, 1},
+        {ReviewGate, :restart_on_remote_head, 3}
       ],
-      anchors: ["push_gate", "escalate_unpushed_head", "pushed_head", ":head_not_pushed"],
+      anchors: [
+        "push_gate",
+        "escalate_unpushed_head",
+        "pushed_head",
+        ":head_not_pushed",
+        "remote_advance"
+      ],
       summary:
         "the head a round reviews (and the head a stamp/coverage row names) must be on the remote branch",
       policy_note:
@@ -507,7 +518,12 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "rejected push PARKS `:head_not_pushed` rather than force-pushing or " <>
           "reviewing a head the MR does not carry. Undeterminable push state (no " <>
           "`origin`, no worktree, git unavailable) fails OPEN — class B's posture, " <>
-          "and the reason an ad-hoc checkout is not an incident."
+          "and the reason an ad-hoc checkout is not an incident. " <>
+          "bd-bq8c8a added the pre-fix-round half: one fetch before the implementer " <>
+          "is dispatched, and a remote that STRICTLY advanced skips the fix round " <>
+          "and re-reviews the new head instead of producing an orphan commit that " <>
+          "could only park here. It has no terminal of its own — every shape other " <>
+          "than a clean fast-forward falls through to `push_gate/1` unchanged."
     }
   ]
 

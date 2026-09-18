@@ -201,8 +201,12 @@ defmodule Arbiter.Worker.ReviewGatePatrolCollisionTest do
 
           m = Regex.run(~r/(\w+):\s*pullRequest\(number:\s*(\d+)\)/, line) ->
             [_, palias, num] = m
-            {update_in(data, [cur], &Map.put(&1 || %{}, palias, by_number[String.to_integer(num)])),
-             cur}
+
+            {update_in(
+               data,
+               [cur],
+               &Map.put(&1 || %{}, palias, by_number[String.to_integer(num)])
+             ), cur}
 
           true ->
             {data, cur}

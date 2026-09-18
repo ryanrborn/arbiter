@@ -66,6 +66,19 @@ defmodule Arbiter.Workflows.PRPatrol do
   failure count hits it, PRPatrol gives up on that PR permanently — no more
   follow-ups are filed for it until the patrol restarts (bd-7rxwzc).
 
+  ## The ReviewGate hold (bd-bq8c8a)
+
+  A PR whose authoring task is still inside the `Arbiter.Worker.ReviewGate` is
+  **held**: no follow-up is filed and no fix worker is dispatched, however
+  actionable its signals look. While the gate is running it is the authority on
+  the diff, and a second actor pushing to the branch behind it invalidates the
+  round in progress — see `Arbiter.Reviews.GateActivity` for the incident and
+  for what counts as "inside the gate".
+
+  The hold consumes nothing: the threads stay unresolved and no state is
+  written, so the first tick after the gate converges files exactly the
+  follow-up the held tick declined to.
+
   ## Lifecycle
 
   Not in `Application.children`. Started manually per-workspace:
